@@ -202,7 +202,10 @@ pub fn on_login(
         }
         Login::Codex { home } => homed(cli, agent, home)?,
     };
-    drop(session);
+    let cli = match session {
+        Some(session) => cli.with_session(session),
+        None => cli,
+    };
     Ok(Resolved {
         backend: LlmBackend::cli(agent, prepared(config, agent, cli)),
         login: Some(identity(chosen)),
@@ -941,6 +944,46 @@ mod tests {
             );
             assert_eq!(settings.sign_in, SignIn::Organization);
             assert_defaults(agent, &settings);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_login_resuming_a_session_hands_it_to_the_cli() {
+        let fixture = Fixture::new(PROVIDER_CLAUDE_CODE).await;
+        let config = fixture.config();
+        let state = fixture.state(config.clone());
+        let claude = fixture.sign_in_claude(&state, TimeDelta::hours(8)).await;
+        let codex = fixture.sign_in_codex().await;
+        let session = Session {
+            id: "resumed-session".to_string(),
+            resume: true,
+        };
+
+        let mut resolved = Vec::new();
+        for login in [claude, codex] {
+            let chosen = fixture.chosen(&state, login).await;
+            resolved.push((
+                on_login(
+                    &config,
+                    fixture.organization,
+                    &chosen,
+                    Some(session.clone()),
+                )
+                .expect("a resumed backend"),
+                on_login(&config, fixture.organization, &chosen, None).expect("a fresh backend"),
+            ));
+        }
+        fixture.remove().await;
+
+        for (resumed, fresh) in resolved {
+            let (agent, settings) = cli(Ok(resumed.backend));
+            assert_eq!(
+                settings.session.as_ref(),
+                Some(&session),
+                "{agent} resumes the session it was handed"
+            );
+            let (agent, settings) = cli(Ok(fresh.backend));
+            assert_eq!(settings.session, None, "{agent} starts a fresh session");
         }
     }
 
