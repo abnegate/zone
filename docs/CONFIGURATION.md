@@ -781,10 +781,10 @@ Codex, signing out runs `codex logout` in the account's home, which asks OpenAI
 to revoke the login and deletes `auth.json`; signing out of the whole agent also
 stops a sign-in in progress. Zone then removes the signed-out account's home
 with the session files in it, as it does for a Claude sign-in that names no
-account when another such sign-in replaces it. A chat that ran on a signed-out
-account starts its next turn on another, with the whole transcript. The panel asks
-before it signs out, since the sign-out applies to every workspace of the
-organization. Sign-ins and sign-outs are recorded in the organization's audit
+account when another such sign-in replaces it. A chat that ran on a
+signed-out account starts its next turn on another, with the whole transcript.
+The panel asks before it signs out, since the sign-out applies to every
+workspace of the organization. Sign-ins and sign-outs are recorded in the organization's audit
 log as `agent.signed_in` and `agent.signed_out`, the sign-in even when the
 browser that finished it went away before Claude answered. Deleting the
 organization deletes its Claude tokens with it, drops every Claude sign-in still
@@ -897,9 +897,10 @@ An account is exhausted once a turn on it hits a usage limit: until the
 limit's own reset, else until its spent window resets by its last reading,
 else until its spent window resets by a read made there and then (a codex
 limit names no reset of its own), else for five minutes. One whose last
-reading has no headroom left is exhausted until that window resets. A turn refused for want of usage credits
-does not exhaust its account: the refusal says nothing about the subscription,
-so other chats still start there, and only that turn leaves it.
+reading has no headroom left is exhausted until that window resets. A turn
+refused for want of usage credits does not exhaust its account: the refusal
+says nothing about the subscription, so other chats still start there, and
+only that turn leaves it.
 
 When every account is exhausted, the chat or task gets "Every sign-in of this
 organization has reached its usage limit; the earliest resets at <time>.", and
@@ -984,9 +985,9 @@ reached its usage limit; resets in 2h 5m", naming the agent only when
 as a new turn starts, the turn moves before the CLI starts: the `handover`
 frame, with `at` 0, follows `message_start`, and no `status` frame comes
 first. The assistant message's metadata keeps every switch, `from_agent`
-included, under `handovers`, so the dividers survive a
-reload, and, for an answer that switched, the tokens all its accounts spent
-together under `usage`.
+included, under `handovers`, so the dividers survive a reload, and, for an
+answer that switched, the tokens all its accounts spent together under
+`usage`.
 
 When no account is left, a turn stopped by a subscription limit ends with the
 organization's limit and its earliest reset, as above. One stopped by a
@@ -1336,8 +1337,9 @@ What stands in the way:
   path outside the session folders. Zone looks the file up without following
   a link at any level below the home, opens it refusing a link, writes the
   copy with mode 0600 under a temporary name in directories it creates with
-  mode 0700, refusing one that is a link, and renames it into place, so the CLI never reads half a file and nothing outside the
-  organization's own state is read or written.
+  mode 0700, refusing one that is a link, and renames it into place, so the
+  CLI never reads half a file and nothing outside the organization's own state
+  is read or written.
 - Usage reads go only to `ZONE_CLAUDE_API_URL` and `ZONE_CODEX_API_URL`, and
   the Claude profile read only to the former. Each carries the token of the
   account it reads and no other, follows no redirect, and gives up after five
