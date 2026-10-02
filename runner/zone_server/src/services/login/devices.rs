@@ -735,6 +735,7 @@ mod tests {
     use crate::services::login::claude::{Redirect, Scope};
     use crate::services::login::codex::testing::{PROMPT, capture, script};
     use crate::services::login::console::Console;
+    use crate::services::login::credential;
 
     const EMAIL: &str = "admin@example.com";
     const CALLBACK_PORT: u16 = 54_545;
@@ -1445,6 +1446,32 @@ esac"#
             scene.lines(LOGOUTS).is_empty(),
             "the second sign-in logged the first out"
         );
+        scene.sign_out().await;
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_codex_turn_runs_each_login_in_the_home_its_sign_in_wrote() {
+        let scene = Scene::new(PROMPT).await;
+        let (first, second) = (auth(ONE, "first"), auth(TWO, "second"));
+        scene.sign_in(&first).await;
+        scene.sign_in(&second).await;
+
+        let mut resolved = Vec::new();
+        for login in scene.logins().await {
+            match credential::resolve(&scene.state, &login)
+                .await
+                .expect("a signed-in codex login resolves")
+            {
+                credential::Login::Codex { home } => {
+                    assert_eq!(home, scene.login_home(login.id));
+                    resolved.push(saved(&home));
+                }
+                other => panic!("expected a codex home, got {other:?}"),
+            }
+        }
+
+        assert_eq!(resolved, [Some(first), Some(second)]);
         scene.sign_out().await;
         scene.remove().await;
     }
