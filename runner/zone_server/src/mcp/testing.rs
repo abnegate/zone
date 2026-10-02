@@ -40,6 +40,7 @@ pub(crate) async fn tools(chat: Uuid) -> Arc<ChatTools> {
             workspace_id: Uuid::new_v4(),
             chat_id: Some(chat),
             user_id: Uuid::new_v4(),
+            offline: false,
         })
         .await,
     )

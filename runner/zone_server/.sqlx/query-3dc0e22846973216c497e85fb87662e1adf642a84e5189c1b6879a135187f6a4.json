@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at\n                FROM chats\n                WHERE workspace_id = $1 AND archived = $2\n                ORDER BY updated_at DESC\n                ",
+  "query": "\n        INSERT INTO chats (workspace_id, title, model_name, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,17 @@
       },
       {
         "ordinal": 9,
+        "name": "offline",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "chats",
+            "name": "offline"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "updated_at",
         "type_info": "Timestamp",
         "origin": {
@@ -128,6 +139,12 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Bool",
+        "Bool",
+        "Text",
         "Bool"
       ]
     },
@@ -141,9 +158,10 @@
       false,
       false,
       false,
+      false,
       true,
       true
     ]
   },
-  "hash": "7da884691c79f0e08dfa71e8f34ef5bf28693f408472e378d2f8226de71c06c4"
+  "hash": "3dc0e22846973216c497e85fb87662e1adf642a84e5189c1b6879a135187f6a4"
 }

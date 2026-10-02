@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at\n                FROM chats\n                WHERE archived = $1\n                ORDER BY updated_at DESC\n                ",
+  "query": "\n                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at\n                FROM chats\n                WHERE archived = $1\n                ORDER BY updated_at DESC\n                ",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,17 @@
       },
       {
         "ordinal": 9,
+        "name": "offline",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "chats",
+            "name": "offline"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "updated_at",
         "type_info": "Timestamp",
         "origin": {
@@ -140,9 +151,10 @@
       false,
       false,
       false,
+      false,
       true,
       true
     ]
   },
-  "hash": "8e9bceae98f533720733b25bdc5908e2dcfbd8b5a0b0de68bc4b40ac4fd2d1df"
+  "hash": "abe45ae75d86dc616b622a1ad14269baafe788d772c99ab42e7e0f79af63a762"
 }

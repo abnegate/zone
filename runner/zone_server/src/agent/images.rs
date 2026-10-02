@@ -283,6 +283,7 @@ mod tests {
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
+            offline: false,
         }
     }
 

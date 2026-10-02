@@ -130,6 +130,7 @@ pub fn context(conflict: &Conflict, environment: HashMap<String, String>) -> Too
         unrestricted: false,
         denied: Vec::new(),
         session: Session::Detached,
+        offline: false,
     }
 }
 
@@ -182,6 +183,7 @@ mod tests {
             unrestricted: false,
             denied: Vec::new(),
             session: Session::Detached,
+            offline: false,
         };
 
         for name in ["read_file", "write_file"] {

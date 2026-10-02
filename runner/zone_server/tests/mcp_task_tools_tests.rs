@@ -79,6 +79,7 @@ async fn a_task_run_is_handed_the_attached_mcp_tools() {
         workspace_id: workspace,
         user_id: user,
         chat_id: Some(Uuid::new_v4()),
+        offline: false,
     })
     .await;
     assert!(chat.has("stub_delegate"));

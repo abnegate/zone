@@ -567,6 +567,7 @@ mod tests {
                 workspace_id: Uuid::new_v4(),
                 chat_id: chat,
                 user_id: Uuid::new_v4(),
+                offline: false,
             },
             operation: Operation::Read,
         }
@@ -984,6 +985,7 @@ mod tests {
             workspace_id: workspace.id,
             chat_id: Some(Uuid::new_v4()),
             user_id: user.id,
+            offline: false,
         };
         let mut registry = ToolRegistry::new();
         register(&mut registry, &scope);

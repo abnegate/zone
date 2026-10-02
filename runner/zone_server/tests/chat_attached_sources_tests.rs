@@ -195,6 +195,7 @@ async fn an_attachment_confines_what_the_chat_tool_searches() {
         workspace_id,
         chat_id: Some(chat_id),
         user_id,
+        offline: false,
     })
     .await;
     let arguments = json!({"query": "harbour bridge"}).to_string();

@@ -291,8 +291,10 @@ impl Waiting for RunCommandTool {
                 params.command
             )));
         }
-        if PUBLIC_WEB_COMMANDS.contains(&params.command.as_str()) && !crate::vpn::allows_public() {
-            return Err(ToolError::Execution(crate::vpn::OFFLINE.to_string()));
+        if PUBLIC_WEB_COMMANDS.contains(&params.command.as_str())
+            && let Some(message) = crate::vpn::refusal(context.offline)
+        {
+            return Err(ToolError::Execution(message.to_string()));
         }
 
         // Additional security: Check for shell metacharacters in arguments
@@ -710,6 +712,7 @@ mod tests {
             unrestricted: false,
             denied: Vec::new(),
             session: Session::Detached,
+            offline: false,
         }
     }
 
@@ -957,6 +960,27 @@ mod tests {
                 .expect_err(command);
             assert!(
                 matches!(&error, ToolError::Execution(message) if message == crate::vpn::OFFLINE),
+                "{command}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn curl_and_wget_stay_offline_when_the_chat_is_offline() {
+        let _vpn = crate::vpn::Hold::on();
+        let tool = RunCommandTool;
+        let mut context = create_test_context();
+        context.offline = true;
+        for command in ["curl", "wget"] {
+            let error = tool
+                .execute(
+                    serde_json::json!({"command": command, "args": ["https://example.com"]}),
+                    &context,
+                )
+                .await
+                .expect_err(command);
+            assert!(
+                matches!(&error, ToolError::Execution(message) if message == crate::vpn::CHAT_OFFLINE),
                 "{command}: {error}"
             );
         }

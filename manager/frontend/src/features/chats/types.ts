@@ -302,6 +302,11 @@ export interface Chat {
    * Older servers omit this; treat those chats as requiring approval.
    */
   auto_approve?: boolean;
+  /**
+   * When true, this chat never uses public web search, page fetch, or curl/wget.
+   * Older servers omit this; treat those chats as online.
+   */
+  offline?: boolean;
   /** Whether the installed model advertised thinking / extended reasoning. */
   reasoning?: boolean | null;
   /**
@@ -343,6 +348,7 @@ export interface CreateChatRequest {
   agent_enabled?: boolean;
   agent_sandboxed?: boolean;
   auto_approve?: boolean;
+  offline?: boolean;
   reasoning_effort?: ReasoningEffort;
   character?: ChatCharacter;
   project_id?: string;

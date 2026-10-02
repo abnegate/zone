@@ -2371,8 +2371,6 @@ async fn handle_send_message(
                         request.cancelled(stream).await;
             return Ok(());
         }
-        let web_search_requested = state.config().web_search.requested_for(content, metadata.as_ref());
-
         // Once persistence begins, finish the commit and acknowledgement
         // before honouring Stop. Dropping an INSERT future cannot roll it back.
         let mut message=LlmMessage::user(content);message.images=session::images(metadata.as_ref());
@@ -2453,6 +2451,11 @@ async fn handle_send_message(
                 if unattended {
                     chat.auto_approve = false;
                 }
+                let web_search_requested = !chat.offline
+                    && state
+                        .config()
+                        .web_search
+                        .requested_for(content, metadata.as_ref());
                 let preparation = tokio::select! {
                     biased;
                     _ = request.cancel.recv() => {
@@ -2668,7 +2671,11 @@ async fn load_web_search(
     chat_id: Uuid,
     content: &str,
     web_search_requested: bool,
+    offline: bool,
 ) -> SearchContext {
+    if offline {
+        return SearchContext::Disabled;
+    }
     let search = SearchContext::new(&state.config().web_search);
     if !web_search_requested || matches!(search, SearchContext::Disabled) {
         return search;
@@ -2774,7 +2781,7 @@ async fn prepare_chat(
         endpoint,
     )
     .await?;
-    let search = load_web_search(state, chat_id, content, web_search_requested).await;
+    let search = load_web_search(state, chat_id, content, web_search_requested, chat.offline).await;
     let agentic = preparation.agentic;
     let character = chat.character.as_ref();
     let mut prompt = session::system_prompt(
@@ -2943,6 +2950,7 @@ async fn handle_chat_generation(
         memory: _,
         skills: _,
     } = preparation;
+    let offline = tools.offline();
     let model_name = model.as_str();
     let mut replay = context.clone();
     let definitions = agentic.then(|| tools.definitions().to_vec());
@@ -3418,6 +3426,7 @@ async fn handle_chat_generation(
             workspace_id,
             chat_id: Some(chat_id),
             user_id,
+            offline,
         })
         .await;
         // A planner chat keeps its two closing calls across a rebuilt
@@ -3784,6 +3793,7 @@ mod tests {
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
+            offline: false,
         })
         .await;
         let character = ChatCharacter {
@@ -3862,7 +3872,23 @@ mod tests {
     async fn blank_web_search_requests_do_not_create_a_client() {
         let state = AppState::for_tests();
         assert!(matches!(
-            load_web_search(&state, Uuid::new_v4(), " \n\t ", true).await,
+            load_web_search(&state, Uuid::new_v4(), " \n\t ", true, false).await,
+            SearchContext::Disabled
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_does_not_search_the_web() {
+        let state = AppState::for_tests();
+        assert!(matches!(
+            load_web_search(
+                &state,
+                Uuid::new_v4(),
+                "What is the latest news on OpenAI?",
+                true,
+                true
+            )
+            .await,
             SearchContext::Disabled
         ));
     }
@@ -3875,7 +3901,8 @@ mod tests {
                 &state,
                 Uuid::new_v4(),
                 "What is the latest news on OpenAI?",
-                true
+                true,
+                false
             )
             .await,
             SearchContext::Disabled

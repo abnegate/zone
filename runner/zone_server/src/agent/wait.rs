@@ -1036,6 +1036,7 @@ mod tests {
                 workspace_id: workspace,
                 chat_id: Some(Uuid::new_v4()),
                 user_id: user,
+                offline: false,
             }),
         }
     }

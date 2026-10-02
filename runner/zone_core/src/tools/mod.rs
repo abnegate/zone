@@ -285,6 +285,8 @@ pub struct ToolContext {
     pub denied: Vec<std::path::PathBuf>,
     /// Which chat or task run this tool call belongs to.
     pub session: Session,
+    /// This chat opted out of public web (search, page fetch, curl/wget).
+    pub offline: bool,
 }
 
 impl Default for ToolContext {
@@ -297,6 +299,7 @@ impl Default for ToolContext {
             unrestricted: false,
             denied: Vec::new(),
             session: Session::Detached,
+            offline: false,
         }
     }
 }

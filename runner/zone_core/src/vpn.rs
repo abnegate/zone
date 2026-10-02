@@ -13,6 +13,20 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// Why a public fetch refused to leave.
 pub const OFFLINE: &str = "Public web access is offline until the VPN is enabled.";
 
+/// Why a public fetch refused to leave this chat.
+pub const CHAT_OFFLINE: &str = "This chat is offline and does not use the public web.";
+
+/// Why public web must not leave, if it must not.
+pub fn refusal(chat_offline: bool) -> Option<&'static str> {
+    if chat_offline {
+        Some(CHAT_OFFLINE)
+    } else if !allows_public() {
+        Some(OFFLINE)
+    } else {
+        None
+    }
+}
+
 const VPN: &str = "ZONE_VPN";
 const REQUIRED: &str = "ZONE_VPN_REQUIRED";
 const WIREGUARD: &str = "VPN_WIREGUARD_PRIVATE_KEY";
@@ -219,5 +233,19 @@ mod tests {
         assert!(configured());
         assert!(!required());
         assert!(allows_public());
+    }
+
+    #[test]
+    fn an_offline_chat_refuses_public_web_even_when_the_tunnel_is_on() {
+        let _vpn = Hold::on();
+        assert_eq!(refusal(true), Some(CHAT_OFFLINE));
+        assert_eq!(refusal(false), None);
+    }
+
+    #[test]
+    fn a_live_chat_still_follows_the_vpn_gate() {
+        let _vpn = Hold::required_off();
+        assert_eq!(refusal(false), Some(OFFLINE));
+        assert_eq!(refusal(true), Some(CHAT_OFFLINE));
     }
 }

@@ -124,6 +124,7 @@ pub struct ChatResponse {
     /// also keeps its own file and shell tools, which zone never sees.
     agent_sandboxed: bool,
     auto_approve: bool,
+    offline: bool,
     reasoning_effort: zone_core::llm::ReasoningEffort,
     #[serde(skip_serializing_if = "Option::is_none")]
     character: Option<ChatCharacter>,
@@ -154,6 +155,7 @@ impl From<chats::ChatRow> for ChatResponse {
             agent_enabled: row.agent_enabled,
             agent_sandboxed: row.agent_sandboxed,
             auto_approve: row.auto_approve,
+            offline: row.offline,
             reasoning_effort: row.reasoning_effort,
             character: row.character,
             tools: None,
@@ -368,6 +370,8 @@ pub struct CreateChatRequest {
     #[serde(default)]
     auto_approve: bool,
     #[serde(default)]
+    offline: bool,
+    #[serde(default)]
     reasoning_effort: Option<zone_core::llm::ReasoningEffort>,
     #[serde(default)]
     character: Option<ChatCharacter>,
@@ -510,6 +514,7 @@ pub async fn create(
         req.auto_approve,
         req.reasoning_effort.unwrap_or_default(),
         req.project_id,
+        req.offline,
     )
     .await
     {
