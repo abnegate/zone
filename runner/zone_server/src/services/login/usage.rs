@@ -31,11 +31,13 @@ use flight::Flight;
 /// The longest a reading of a login's usage may take before routing goes on without it.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+/// The client every read of an agent's service for a login goes through: its usage, and the
+/// profile naming a Claude sign-in's account.
+pub(super) static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .expect("the usage client builds")
+        .expect("the agent service client builds")
 });
 
 static FLIGHTS: LazyLock<DashMap<Uuid, Flight>> = LazyLock::new(DashMap::new);

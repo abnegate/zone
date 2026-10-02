@@ -1,7 +1,6 @@
 //! An organization's Claude sign-in, from its authorize link to the sealed tokens Zone keeps.
 
 use std::future::Future;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use abnegate_secret::redact;
@@ -18,7 +17,7 @@ use super::claude::{self, Authorization, Client, Code, Flow, Redirect, Reply, Sc
 use super::console::Console;
 use super::error::Error;
 use super::pending::{self, Pending, WINDOW};
-use super::{audit, devices, receipts};
+use super::{audit, devices, receipts, usage};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow, Insert};
 use crate::db::ai_settings::{self, AccessError};
@@ -49,14 +48,6 @@ const RETURNED_ELSEWHERE: &str = "This sign-in came back to someone else, or to 
                                   browser.";
 const STOPPED: &str = "The Claude sign-in stopped before it finished";
 const PROFILE_TIMEOUT: Duration = Duration::from_secs(5);
-
-static PROFILES: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(PROFILE_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("the Claude profile client builds")
-});
 
 /// A Claude sign-in waiting for claude.com to hand back its code.
 #[derive(Debug)]
@@ -303,7 +294,15 @@ async fn grant(state: &AppState, pending: &Pending, code: &Code) -> Result<Token
 /// does not say: a sign-in granted without the profile scope is refused it.
 async fn profile(config: &Config, organization: Uuid, tokens: &Tokens) -> Option<Profile> {
     let base = &config.agents.claude_api_url;
-    match profile_at(&PROFILES, base, tokens.access.expose()).await {
+    let read = profile_at(&usage::HTTP, base, tokens.access.expose());
+    let Ok(answered) = tokio::time::timeout(PROFILE_TIMEOUT, read).await else {
+        tracing::warn!(
+            %organization,
+            "Claude did not name the account behind a Claude sign-in in time; it is named by its plan"
+        );
+        return None;
+    };
+    match answered {
         Ok(profile) => Some(profile),
         Err(error) if is_signed_out(&error) => {
             tracing::info!(
@@ -491,7 +490,7 @@ mod tests {
             agents: AgentConfig {
                 callback,
                 consoles: consoles.iter().map(|console| console.to_string()).collect(),
-                ..AgentConfig::default()
+                ..crate::state::test_agents()
             },
             ..crate::state::test_config()
         }
