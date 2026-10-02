@@ -79,7 +79,7 @@ async fn static_search_supplement_has_identical_preview_and_send_costs() {
             &chat,
             Uuid::new_v4(),
             None,
-            Mode::Generation(backend),
+            Mode::Generation(session::Generation::unrouted(backend)),
             route.into_endpoint().expect("a usable route"),
         )
         .await
@@ -163,7 +163,7 @@ async fn retrieved_search_replaces_the_protected_user_supplement_without_trust_e
         &chat,
         Uuid::new_v4(),
         None,
-        Mode::Generation(backend),
+        Mode::Generation(session::Generation::unrouted(backend)),
         route.into_endpoint().expect("a usable route"),
     )
     .await

@@ -3093,6 +3093,7 @@ async fn run_task_loop(
             | AgentEvent::Context(_)
             | AgentEvent::Usage(_)
             | AgentEvent::Window(_)
+            | AgentEvent::Session(_)
             | AgentEvent::Image(_)
             | AgentEvent::Reasoning(_)
             | AgentEvent::ToolApprovalRequired { .. } => {}
