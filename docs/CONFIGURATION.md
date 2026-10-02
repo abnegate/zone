@@ -901,9 +901,9 @@ reading has no headroom left is exhausted until that window resets. A turn
 refused for want of usage credits does not exhaust its account: the refusal
 says nothing about the subscription and refuses only the model the turn ran,
 so chats and task runs on other models still start there. For an hour after
-the refusal, which each new refusal starts again, chats on that model rank
-the account after every other, of either agent, and run on it only when no
-other account can. This memory lives in the server process, so a restart
+the refusal, which each new refusal starts again, chats and task runs on that
+model rank the account after every other, of either agent, even the one they
+already run on, and run on it only when no other account can. This memory lives in the server process, so a restart
 forgets it.
 
 When every account is exhausted, the chat or task gets "Every sign-in of this

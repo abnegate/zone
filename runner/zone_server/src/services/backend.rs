@@ -547,7 +547,7 @@ mod tests {
         async fn route(&self, state: &AppState) -> Result<Resolved, Error> {
             Route::for_workspace(state, self.workspace)
                 .await
-                .resolve(state, &[], None)
+                .resolve(state, &[], None, None)
                 .await
         }
 
@@ -1030,7 +1030,7 @@ mod tests {
         let on_codex = fixture.chosen(&state, codex).await;
         let route = Route::for_workspace(&state, fixture.workspace).await;
         let chatted = route.chat(&state, &[], Some(&previous), None).await;
-        let between = route.resolve(&state, &[], None).await;
+        let between = route.resolve(&state, &[], None, None).await;
         fixture.remove().await;
 
         let chat = Continuation::Chat(Some(&previous));
@@ -1141,7 +1141,7 @@ mod tests {
         let reviewed = Venue::for_workspace(&state, fixture.workspace).await;
         let classified = route.backend_for(&state, Some(login)).await;
         let untouched = fixture.last_used_at(login).await;
-        let started = route.resolve(&state, &[], None).await;
+        let started = route.resolve(&state, &[], None, None).await;
         let touched = fixture.last_used_at(login).await;
         fixture.remove().await;
 

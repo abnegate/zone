@@ -1138,7 +1138,8 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let plan_approval = task.require_plan_approval && !unattended;
     let workspace_id = task.workspace_id;
     let route = Route::for_workspace(state, workspace_id).await;
-    let resolved = route.resolve(state, &[], None).await;
+    let running = running(state, &task, &route);
+    let resolved = route.resolve(state, &[], None, running.as_deref()).await;
     let prepared = match prepare(state, &task, route.clone(), resolved, plan_approval).await {
         Ok(prepared) => prepared,
         Err(unprepared) => {
@@ -1247,7 +1248,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     let policy = RetryPolicy::default();
     let pool = state.db();
     let workspace = workspace_path.as_path();
-    let seat = tokio::sync::Mutex::new(Seat::new(route, &prepared));
+    let seat = tokio::sync::Mutex::new(Seat::new(route, &prepared, running));
     let seat = &seat;
     let task = &task;
     let endpoint = &prepared.endpoint;
@@ -1481,18 +1482,22 @@ async fn prepare(
 ///
 /// A run on no login of the organization's -- an endpoint, the instance's
 /// agent or the host's sign-in -- reads nothing and runs where it began.
+///
+/// `running` is the model the run runs on its configured agent, which a login
+/// that lately refused it runs only when no other can.
 async fn routed(
     state: &AppState,
     route: &Route,
     prepared: &LlmBackend,
     login: Option<&LoginIdentity>,
     tried: &[Uuid],
+    running: Option<&str>,
 ) -> Result<Resolved, Fault> {
     let Some(login) = login else {
         return Ok(Resolved::unrouted(prepared.clone()));
     };
     route
-        .resolve(state, tried, Some(login.id))
+        .resolve(state, tried, Some(login.id), running)
         .await
         .map_err(Fault::backend)
 }
@@ -1517,14 +1522,7 @@ async fn resolve_model(
     preferences: &stages::Preferences,
 ) -> Result<String, String> {
     let catalog = endpoint.catalog(&state.config().ollama_host, backend).await;
-    let model = stages::chat_model(
-        task.model_name.as_deref().unwrap_or(stages::AUTO),
-        preferences,
-        &catalog,
-        &format!("{}\n\n{}", task.title, task.description),
-        false,
-        true,
-    );
+    let model = chosen_model(task, preferences, &catalog);
     if catalog.chooses() {
         return Ok(model);
     }
@@ -1533,6 +1531,35 @@ async fn resolve_model(
         return Err(NO_MODEL.to_string());
     }
     Ok(model)
+}
+
+/// The model `task` runs on under `route`'s configured agent, chosen as the
+/// run's model is, before any login is picked, so the router can pass over
+/// a login that lately refused it. `None` when the route names no agent.
+fn running(state: &AppState, task: &tasks::TaskRow, route: &Route) -> Option<String> {
+    let agent = route.settings()?.agent()?;
+    let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    Some(chosen_model(
+        task,
+        &preferences,
+        &stages::Catalog::agent(agent),
+    ))
+}
+
+/// The model `task` runs on out of `catalog`, as `preferences` choose it.
+fn chosen_model(
+    task: &tasks::TaskRow,
+    preferences: &stages::Preferences,
+    catalog: &stages::Catalog,
+) -> String {
+    stages::chat_model(
+        task.model_name.as_deref().unwrap_or(stages::AUTO),
+        preferences,
+        catalog,
+        &format!("{}\n\n{}", task.title, task.description),
+        false,
+        true,
+    )
 }
 
 /// What a run appends after `prompt::task`, once each source has been read.
@@ -7729,6 +7756,7 @@ mod cli_tests {
             &signed_in("first-access"),
             Some(&login),
             &[],
+            None,
         )
         .await
         .expect_err("an unreadable login is no sign-in to keep");
@@ -7759,10 +7787,11 @@ mod cli_tests {
             &signed_in("first-access"),
             Some(&login),
             &[],
+            None,
         )
         .await
         .expect("a workspace that left its agent keeps the run's login");
-        let unrouted = routed(&state, &route, &signed_in("first-access"), None, &[])
+        let unrouted = routed(&state, &route, &signed_in("first-access"), None, &[], None)
             .await
             .expect("a run on no login keeps its sign-in");
         fixture.remove().await;
@@ -8203,6 +8232,8 @@ mod cli_tests {
     const SESSION_LIMIT: &str = "You've hit your session limit · resets 5pm";
     const FABLE_REFUSAL: &str =
         "Fable 5.1 requires usage credits. Switch to another model to continue.";
+    /// The model the fixture's task runs on.
+    const REFUSED_MODEL: &str = "sonnet";
 
     /// An instance whose agent is the stand-in, in homes under `agents`, with
     /// no host sign-in to fall back on and its usage read from `provider`.
@@ -8555,6 +8586,46 @@ mod cli_tests {
         assert_eq!(agent.lines(TOKENS), ["first-access", "second-access"]);
         assert_eq!(outcomes(&logs), ["reroute", "terminal"]);
         assert_eq!(rested, [None, None]);
+    }
+
+    /// A run on a model a login lately refused for want of usage credits
+    /// starts on another login, rather than spending its first attempt on a
+    /// refusal it was already given.
+    #[tokio::test]
+    async fn a_run_on_a_model_a_login_refused_starts_on_another_login() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::limited();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(routing(&agent, &provider, &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        let refused = fixture.add(&state, "first-access", "a@example.com").await;
+        fixture.add(&state, "second-access", "b@example.com").await;
+        router::unfunded::record(refused.id, REFUSED_MODEL, Utc::now());
+        agent.refuse("first-access", &unfunded());
+
+        execute(&state, &fixture).await;
+
+        let finished = fixture.finished().await;
+        let logs = fixture.attempts().await;
+        let model = tasks::run_mode(&fixture.pool, fixture.run)
+            .await
+            .unwrap()
+            .and_then(|mode| mode.model);
+        fixture.remove().await;
+        assert_eq!(
+            finished.status, RUN_COMPLETED,
+            "{:?}",
+            finished.error_message
+        );
+        assert_eq!(model.as_deref(), Some(REFUSED_MODEL));
+        assert_eq!(
+            agent.lines(TOKENS),
+            ["second-access"],
+            "the run started on the login that refused its model"
+        );
+        assert_eq!(outcomes(&logs), Vec::<String>::new());
     }
 
     /// A login a limit refused, whose limit resets while the run is on

@@ -41,7 +41,7 @@ const REST: TimeDelta = TimeDelta::minutes(5);
 ///
 /// A login that refused `model`, the one the session runs on `preferred`, for want of usage
 /// credits within [`unfunded::COOL_DOWN`] cannot run the session: it ranks after every other
-/// login, and is picked only when no other can be.
+/// login, and is picked only when no other can be, even as `sticky`.
 pub async fn pick(
     state: &AppState,
     organization: Uuid,
@@ -132,7 +132,7 @@ pub async fn pick(
     let kept = match ranked.first() {
         Some((_, best)) if best.agent != preferred => ranked
             .iter()
-            .position(|(_, chosen)| Some(chosen.login.id) == sticky)
+            .position(|entry| Some(entry.1.login.id) == sticky && !cooled(entry))
             .unwrap_or(0),
         _ => 0,
     };
@@ -847,6 +847,31 @@ mod tests {
         );
         assert_eq!(returns, refused, "the cool-down passed");
         assert_eq!(stored.exhausted_until, None);
+    }
+
+    #[tokio::test]
+    async fn a_chat_on_a_login_that_refused_its_model_moves_to_another_agent_that_can_run_it() {
+        let scene = Scene::new().await;
+        let refused = scene.login(AgentKind::Claude, "refused", Some(80.0)).await;
+        mark_limited(&scene.state, refused, &limit(true, None), MODEL).await;
+
+        let alone = scene
+            .running(MODEL, AgentKind::Claude, &[], Some(refused))
+            .await;
+        let fallback = scene.login(AgentKind::Codex, "fallback", None).await;
+        let moves = scene
+            .running(MODEL, AgentKind::Claude, &[], Some(refused))
+            .await;
+        scene.remove().await;
+
+        assert_eq!(
+            moves, fallback,
+            "the chat stayed on the login that refused its model while another agent could run it"
+        );
+        assert_eq!(
+            alone, refused,
+            "a login that refused the model still keeps the chat when no other can run it"
+        );
     }
 
     #[tokio::test]

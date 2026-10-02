@@ -171,13 +171,15 @@ impl Route {
     }
 
     /// The backend these settings choose for a session or run starting now, on the login the
-    /// router picks: `sticky` while it can still run, never one in `exclude`. The login picked
-    /// is recorded as used. An unusable route has none.
+    /// router picks: `sticky` while it can still run, never one in `exclude`, and one that lately
+    /// refused `model`, what the session runs on the configured agent, only when no other can
+    /// run it. The login picked is recorded as used. An unusable route has none.
     pub async fn resolve(
         &self,
         state: &AppState,
         exclude: &[Uuid],
         sticky: Option<Uuid>,
+        model: Option<&str>,
     ) -> Result<Resolved, backend::Error> {
         self.routed(
             state,
@@ -185,6 +187,7 @@ impl Route {
                 exclude,
                 sticky,
                 touch: true,
+                model,
                 ..Routing::default()
             },
         )

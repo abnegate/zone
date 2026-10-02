@@ -26,6 +26,9 @@ pub(super) struct Seat {
     spent: Vec<Uuid>,
     /// Logins refused for want of usage credits, which no wait restores.
     unfunded: Vec<Uuid>,
+    /// The model the run runs on its configured agent, which a login that
+    /// lately refused it runs only when no other can.
+    running: Option<String>,
 }
 
 /// What one attempt runs on.
@@ -36,8 +39,9 @@ pub(super) struct Seated {
 }
 
 impl Seat {
-    /// A run that starts on what `route` prepared it on.
-    pub(super) fn new(route: Route, prepared: &Prepared) -> Self {
+    /// A run that starts on what `route` prepared it on, running `running` on
+    /// its configured agent.
+    pub(super) fn new(route: Route, prepared: &Prepared, running: Option<String>) -> Self {
         Self {
             route,
             backend: prepared.backend.clone(),
@@ -46,6 +50,7 @@ impl Seat {
             next: None,
             spent: Vec::new(),
             unfunded: Vec::new(),
+            running,
         }
     }
 
@@ -69,6 +74,7 @@ impl Seat {
                     &self.backend,
                     self.login.as_ref(),
                     &self.tried(),
+                    self.running.as_deref(),
                 )
                 .await?
             }
@@ -114,7 +120,11 @@ impl Seat {
         } else {
             self.spent.push(refused);
         }
-        match self.route.resolve(state, &self.tried(), None).await {
+        match self
+            .route
+            .resolve(state, &self.tried(), None, self.running.as_deref())
+            .await
+        {
             Ok(Resolved {
                 backend,
                 login: Some(to),
@@ -159,7 +169,11 @@ impl Seat {
         if !out.contains(&refused) {
             out.push(refused);
         }
-        match self.route.resolve(state, &out, None).await {
+        match self
+            .route
+            .resolve(state, &out, None, self.running.as_deref())
+            .await
+        {
             Ok(resolved) if resolved.login.is_some() => {
                 self.next = Some(resolved);
                 fault.undelayed()
