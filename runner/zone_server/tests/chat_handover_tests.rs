@@ -305,15 +305,14 @@ impl Invocation {
             .unwrap_or_else(|| panic!("a new session is pinned: {:?}", self.arguments))
     }
 
-    /// Asserts the prompt is only the instruction to carry on, which is all a
-    /// session that already holds the partial answer needs.
+    /// Asserts the prompt is only the user's instruction to carry on, which is
+    /// all a session that already holds the partial answer needs.
     fn assert_continues(&self) {
         let blocks = transcript::blocks(&self.prompt);
         assert!(
             matches!(
                 blocks.as_slice(),
-                [only] if only.content == CONTINUE
-                    && matches!(only.speaker, Speaker::System | Speaker::User)
+                [only] if only.content == CONTINUE && only.speaker == Speaker::User
             ),
             "a carried session is told only to continue: {}",
             self.prompt
@@ -327,14 +326,16 @@ impl Invocation {
     }
 
     /// Asserts the prompt replays the conversation so far, the partial answer
-    /// as the assistant's, followed by the instruction to carry on.
+    /// as the assistant's, followed by the user's instruction to carry on. It is
+    /// the user's because system entries are hoisted above the conversation,
+    /// where it would precede the answer it asks to continue.
     fn assert_replays_with_the_partial(&self) {
         transcript::assert_replays(
             &self.prompt,
             &[
                 (Speaker::User, QUESTION),
                 (Speaker::Assistant, PARTIAL.trim()),
-                (Speaker::System, CONTINUE),
+                (Speaker::User, CONTINUE),
             ],
         );
     }
