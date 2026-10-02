@@ -1,7 +1,12 @@
 //! An organization's Claude sign-in, from its authorize link to the sealed tokens Zone keeps.
 
 use std::future::Future;
+use std::sync::LazyLock;
+use std::time::Duration;
 
+use abnegate_secret::redact;
+use aiusg::provider::claude::{Profile, profile_at};
+use aiusg::provider::is_signed_out;
 use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -43,6 +48,15 @@ const RETURNED_ELSEWHERE: &str = "This sign-in came back to someone else, or to 
                                   so Zone did not finish it. Start again, and approve it in this \
                                   browser.";
 const STOPPED: &str = "The Claude sign-in stopped before it finished";
+const PROFILE_TIMEOUT: Duration = Duration::from_secs(5);
+
+static PROFILES: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(PROFILE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("the Claude profile client builds")
+});
 
 /// A Claude sign-in waiting for claude.com to hand back its code.
 #[derive(Debug)]
@@ -229,12 +243,16 @@ async fn park(reply: Reply) -> Result<String, Error> {
 /// not ended failed is kept for its panel.
 async fn complete(state: AppState, pending: Pending, code: Code) -> Result<(), Error> {
     let granted = grant(&state, &pending, &code).await;
+    let profile = match &granted {
+        Ok(tokens) => profile(state.config(), pending.organization, tokens).await,
+        Err(_) => None,
+    };
     let _guard = devices::lock(pending.organization).await;
     if !attempts::live(pending.attempt) {
         return Err(Error::Invalid(ENDED));
     }
     let recorded = match granted {
-        Ok(tokens) => record(&state, &pending, &tokens).await,
+        Ok(tokens) => record(&state, &pending, &tokens, profile.as_ref()).await,
         Err(error) => Err(error),
     };
     match recorded {
@@ -281,34 +299,82 @@ async fn grant(state: &AppState, pending: &Pending, code: &Code) -> Result<Token
         })
 }
 
-/// Seals `tokens` as the organization's Claude login, checking again, in the transaction that
-/// records it, that whoever started the sign-in may finish it.
+/// The Claude account `tokens` were granted for, as its profile names it, or `None` when Claude
+/// does not say: a sign-in granted without the profile scope is refused it.
+async fn profile(config: &Config, organization: Uuid, tokens: &Tokens) -> Option<Profile> {
+    let base = &config.agents.claude_api_url;
+    match profile_at(&PROFILES, base, tokens.access.expose()).await {
+        Ok(profile) => Some(profile),
+        Err(error) if is_signed_out(&error) => {
+            tracing::info!(
+                %organization,
+                "Claude did not share the account behind a Claude sign-in; it is named by its plan"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                %organization,
+                error = %redact(&format!("{error:#}")),
+                "Could not read the account behind a Claude sign-in; it is named by its plan"
+            );
+            None
+        }
+    }
+}
+
+/// What tells the account `profile` names apart from every other: its id, else its email.
+fn account(profile: &Profile) -> Option<&str> {
+    let account = profile.account.as_ref()?;
+    [&account.uuid, &account.email]
+        .into_iter()
+        .filter_map(Option::as_deref)
+        .find(|key| !key.is_empty())
+}
+
+/// What a Claude login is shown as: the account its `profile` names, by email first, else the
+/// plan `tokens` were granted on.
+fn label(tokens: &Tokens, profile: Option<&Profile>) -> Option<String> {
+    profile
+        .and_then(Profile::label)
+        .map(str::to_string)
+        .or_else(|| tokens.label())
+}
+
+/// Seals `tokens` as one of the organization's Claude logins, checking again, in the transaction
+/// that records it, that whoever started the sign-in may finish it. A sign-in to an account the
+/// organization already holds replaces that account's login, and one to another account adds a
+/// login beside it. A sign-in whose account `profile` does not name replaces the login no account
+/// names, if there is one, and leaves every named one.
 async fn record(
     state: &AppState,
     pending: &Pending,
     tokens: &Tokens,
+    profile: Option<&Profile>,
 ) -> Result<AgentLoginRow, Error> {
     let sealed = tokens
         .seal(state.encryption_key())
         .map_err(|error| Error::Internal(error.to_string()))?;
-    let label = tokens.label();
+    let account = profile.and_then(account);
+    let label = label(tokens, profile);
+    let agent = AgentKind::Claude.as_str();
     let mut transaction = state.db().begin().await?;
     if !organizations::hold(&mut transaction, pending.organization).await? {
         return Err(Error::Deleted);
     }
     authorize(state, &mut transaction, pending).await?;
-    agent_logins::delete_all(
-        &mut *transaction,
-        pending.organization,
-        AgentKind::Claude.as_str(),
-    )
-    .await?;
+    if account.is_none() {
+        let held = agent_logins::list_for(&mut *transaction, pending.organization, agent).await?;
+        for login in held.iter().filter(|login| login.account.is_none()) {
+            agent_logins::delete(&mut *transaction, pending.organization, login.id).await?;
+        }
+    }
     let login = agent_logins::insert(
         &mut *transaction,
         &Insert {
             organization_id: pending.organization,
-            agent: AgentKind::Claude.as_str(),
-            account: None,
+            agent,
+            account,
             credential: Some(&sealed),
             label: label.as_deref(),
             expires_at: Some(tokens.expires_at),
@@ -394,6 +460,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use abnegate_secret::SecretValue;
+    use aiusg::provider::claude::{ProfileAccount, ProfileOrganization};
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use reqwest::Url;
@@ -489,11 +556,76 @@ mod tests {
         }
     }
 
+    fn tokens(subscription: Option<&str>) -> Tokens {
+        Tokens {
+            access: SecretValue::new("fake-access-token"),
+            refresh: None,
+            expires_at: Utc::now(),
+            issued_at: None,
+            scope: "user:inference user:profile".to_string(),
+            subscription: subscription.map(str::to_string),
+        }
+    }
+
+    fn profile(uuid: Option<&str>, email: Option<&str>) -> Profile {
+        let mut account = ProfileAccount::default();
+        account.uuid = uuid.map(str::to_string);
+        account.email = email.map(str::to_string);
+        let mut organization = ProfileOrganization::default();
+        organization.organization_type = Some("claude_max".to_string());
+        let mut profile = Profile::default();
+        profile.account = Some(account);
+        profile.organization = Some(organization);
+        profile
+    }
+
     fn invalid(error: Error) -> &'static str {
         match error {
             Error::Invalid(message) => message,
             error => panic!("{error:?}"),
         }
+    }
+
+    #[test]
+    fn a_login_is_known_by_its_accounts_id_else_by_its_email() {
+        for (uuid, email, expected) in [
+            (Some("abc12345-ffff"), Some(EMAIL), Some("abc12345-ffff")),
+            (None, Some(EMAIL), Some(EMAIL)),
+            (Some(""), Some(EMAIL), Some(EMAIL)),
+            (None, None, None),
+            (Some(""), Some(""), None),
+        ] {
+            assert_eq!(
+                account(&profile(uuid, email)),
+                expected,
+                "{uuid:?} {email:?}"
+            );
+        }
+        assert_eq!(
+            account(&Profile::default()),
+            None,
+            "a profile naming no account named one"
+        );
+    }
+
+    #[test]
+    fn a_login_is_labelled_with_its_email_else_with_its_plan() {
+        let max = tokens(Some("max"));
+        let jake = profile(Some("abc12345-ffff"), Some(EMAIL));
+
+        assert_eq!(label(&max, Some(&jake)).as_deref(), Some(EMAIL));
+        assert_eq!(label(&max, None).as_deref(), Some("Claude Max"));
+        assert_eq!(
+            label(&max, Some(&Profile::default())).as_deref(),
+            Some("Claude Max"),
+            "a profile that names no account hid the plan"
+        );
+        assert_eq!(
+            label(&tokens(None), Some(&profile(Some("abc12345-ffff"), None))).as_deref(),
+            Some("abc12345"),
+            "an account with no email is named by its id, as aiusg names it"
+        );
+        assert_eq!(label(&tokens(None), None), None);
     }
 
     #[test]

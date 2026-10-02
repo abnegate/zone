@@ -18,7 +18,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
 use nix::errno::Errno;
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tempfile::TempDir;
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::llm::AgentKind;
 use zone_server::config::{AgentConfig, Callback, Config, ModelBackend};
@@ -39,6 +39,13 @@ use common::{TestClient, test_email, test_password};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/login");
 const TOKEN_PATH: &str = "/v1/oauth/token";
+const PROFILE_PATH: &str = "/api/oauth/profile";
+const USAGE_PATH: &str = "/api/oauth/usage";
+const JAKE: &str = "jake@example.com";
+const JAKE_ID: &str = "4a1c7e52-9b3d-4f60-8e21-6d5f0c9a7b13";
+const ADA: &str = "ada@example.com";
+const ADA_ID: &str = "8d2e4f61-0a7b-4c95-b3e8-1f6a2c4d9e07";
+const PROFILE_REFUSED: u16 = 403;
 const ACCESS: &str = "fake-access-token-for-agent-login-tests";
 const REFRESH: &str = "fake-refresh-token-for-agent-login-tests";
 const CODE: &str = "fake-authorization-code";
@@ -302,11 +309,15 @@ fn settle(executable: &Path) {
     }
 }
 
-/// One test's server. Host login is always off, so no test asks the host's own CLIs.
+/// One test's server. Host login is always off, so no test asks the host's own CLIs, and the
+/// agents' usage and profile endpoints are stand-ins, so no test asks the real services.
 struct Stage {
     client: TestClient,
     /// The agent state root, kept for as long as the test runs.
     _state: Option<TempDir>,
+    /// The stand-in for the agents' usage and profile endpoints, for a server whose Claude
+    /// stand-in does not serve them.
+    _api: Option<MockServer>,
     /// The port of the callback listener, for a server that has one.
     callback: Option<u16>,
 }
@@ -324,6 +335,7 @@ impl Stage {
         Self {
             client: TestClient::with_config(Self::claude_config(claude, None, &[CONSOLE])).await,
             _state: None,
+            _api: None,
             callback: None,
         }
     }
@@ -354,6 +366,7 @@ impl Stage {
         Self {
             client,
             _state: None,
+            _api: None,
             callback: Some(port),
         }
     }
@@ -364,6 +377,8 @@ impl Stage {
             agents: AgentConfig {
                 host_login: false,
                 claude_token_url: format!("{}{TOKEN_PATH}", claude.uri()),
+                claude_api_url: claude.uri(),
+                codex_api_url: claude.uri(),
                 callback,
                 consoles: consoles.iter().map(|console| console.to_string()).collect(),
                 ..AgentConfig::default()
@@ -443,11 +458,14 @@ impl Stage {
     /// Codex runs from `executable`, with its homes under a private state root.
     async fn codex(executable: &Path) -> Self {
         let state = TempDir::new().expect("an agent state root");
+        let api = MockServer::start().await;
         let config = Config {
             model_backend: codex_at(executable.to_path_buf()),
             agents: AgentConfig {
                 state: state.path().join("agents"),
                 host_login: false,
+                claude_api_url: api.uri(),
+                codex_api_url: api.uri(),
                 ..AgentConfig::default()
             },
             ..common::test_config()
@@ -455,6 +473,7 @@ impl Stage {
         Self {
             client: TestClient::with_config(config).await,
             _state: Some(state),
+            _api: Some(api),
             callback: None,
         }
     }
@@ -605,6 +624,17 @@ impl Stage {
             .await
     }
 
+    /// Signs Claude in by pasting the code, and returns the status the sign-in answers with.
+    async fn sign_in_claude(&self, organization: Uuid, person: &Person) -> Value {
+        let started = self.start(organization, "claude", json!({}), person).await;
+        let (state, _) = begun(&started);
+        let response = self
+            .submit(organization, &format!("{CODE}#{state}"), person)
+            .await;
+        response.assert_status(StatusCode::OK);
+        response.json_value()
+    }
+
     async fn sign_out(&self, organization: Uuid, agent: &str, person: &Person) {
         self.client
             .delete_auth(&login_path(organization, agent), &person.token)
@@ -741,14 +771,60 @@ fn granted() -> Value {
     })
 }
 
+/// What Zone sent `server`'s token endpoint, leaving out what it asked the usage and profile
+/// endpoints beside it.
 async fn exchanges(server: &MockServer) -> Vec<Value> {
     server
         .received_requests()
         .await
         .expect("the stub records requests")
         .iter()
+        .filter(|request| request.url.path() == TOKEN_PATH)
         .map(|request| request.body_json().expect("a JSON exchange"))
         .collect()
+}
+
+/// The access tokens Zone asked `server`'s endpoint at `endpoint` with.
+async fn bearers(server: &MockServer, endpoint: &str) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .expect("the stub records requests")
+        .iter()
+        .filter(|request| request.url.path() == endpoint)
+        .filter_map(|request| request.headers.get("authorization"))
+        .filter_map(|value| value.to_str().ok())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The profile Claude answers for the account `id` whose email is `email`.
+fn profile(id: &str, email: &str) -> Value {
+    json!({
+        "account": { "uuid": id, "email": email, "display_name": "Someone", "has_claude_max": true },
+        "organization": {
+            "uuid": "org-1",
+            "organization_type": "claude_max",
+            "billing_type": "stripe_subscription",
+            "rate_limit_tier": "default_claude_max_20x",
+        },
+    })
+}
+
+/// Has `server` grant `granted` at its token endpoint and answer its profile endpoint with
+/// `status` and `body` from now on, forgetting what it answered before.
+async fn answering(server: &MockServer, granted: Value, status: u16, body: Value) {
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path(TOKEN_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(granted))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(PROFILE_PATH))
+        .respond_with(ResponseTemplate::new(status).set_body_json(body))
+        .mount(server)
+        .await;
 }
 
 struct Person {
@@ -3451,4 +3527,317 @@ async fn cancelling_a_codex_device_sign_in_keeps_the_logins_already_held() {
         json!([login_status(held.id, "ChatGPT", None, "signed_in", None)])
     );
     stage.sign_out(organization, "codex", &owner).await;
+}
+
+/// The usage Zone last read for the login `id` in `status`.
+fn usage_of(status: &Value, id: Uuid) -> Value {
+    status["logins"]
+        .as_array()
+        .and_then(|logins| logins.iter().find(|login| login["id"] == json!(id)))
+        .map(|login| login["usage"].clone())
+        .unwrap_or_else(|| panic!("{status} lists no login {id}"))
+}
+
+fn used_percent(usage: &Value, window: &str) -> Option<f64> {
+    usage["windows"]
+        .as_array()?
+        .iter()
+        .find(|candidate| candidate["name"] == window)?["used_percent"]
+        .as_f64()
+}
+
+#[tokio::test]
+async fn a_sign_in_is_labelled_with_its_email_when_the_profile_answers() {
+    let claude = MockServer::start().await;
+    answering(&claude, granted(), 200, profile(JAKE_ID, JAKE)).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+
+    let status = stage.sign_in_claude(organization, &owner).await;
+
+    let login = stage
+        .login_row(organization, "claude")
+        .await
+        .expect("a stored login");
+    assert_eq!(
+        (login.account.as_deref(), login.label.as_deref()),
+        (Some(JAKE_ID), Some(JAKE))
+    );
+    assert_eq!(status["label"], JAKE, "{status}");
+    assert_eq!(
+        status["logins"],
+        json!([login_status(
+            login.id,
+            JAKE,
+            Some("Claude Max"),
+            "signed_in",
+            None
+        )])
+    );
+    let asked = bearers(&claude, PROFILE_PATH).await;
+    assert!(
+        !asked.is_empty()
+            && asked
+                .iter()
+                .all(|bearer| *bearer == format!("Bearer {ACCESS}")),
+        "the profile was not asked for with the granted token: {asked:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_sign_in_without_the_profile_scope_is_labelled_with_its_plan() {
+    let claude = MockServer::start().await;
+    let mut inference = granted();
+    inference["scope"] = json!("user:inference");
+    let refusal = json!({
+        "type": "error",
+        "error": {
+            "type": "permission_error",
+            "message": "OAuth token does not meet scope requirement user:profile",
+        },
+    });
+    answering(&claude, inference, PROFILE_REFUSED, refusal).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+
+    let status = stage.sign_in_claude(organization, &owner).await;
+
+    let login = stage
+        .login_row(organization, "claude")
+        .await
+        .expect("a stored login");
+    assert_eq!(
+        (login.account.as_deref(), login.label.as_deref()),
+        (None, Some("Claude Max"))
+    );
+    assert_eq!(status["state"], "signed_in", "{status}");
+    assert_eq!(status["label"], "Claude Max");
+    assert_eq!(
+        status["logins"],
+        json!([login_status(
+            login.id,
+            "Claude Max",
+            Some("Claude Max"),
+            "signed_in",
+            None
+        )])
+    );
+    assert!(
+        !bearers(&claude, PROFILE_PATH).await.is_empty(),
+        "Zone never asked who signed in"
+    );
+}
+
+#[tokio::test]
+async fn signing_the_same_claude_account_in_again_replaces_its_login() {
+    let claude = MockServer::start().await;
+    answering(&claude, granted(), 200, profile(JAKE_ID, JAKE)).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.sign_in_claude(organization, &owner).await;
+    let first = stage
+        .login_row(organization, "claude")
+        .await
+        .expect("a stored login");
+
+    let status = stage.sign_in_claude(organization, &owner).await;
+
+    let logins = stage.login_rows(organization, "claude").await;
+    let ids: Vec<Uuid> = logins.iter().map(|login| login.id).collect();
+    assert_eq!(ids, [first.id], "the same account became a second login");
+    assert_ne!(
+        logins[0].credential, first.credential,
+        "the login kept the tokens of the sign-in it replaced"
+    );
+    assert_eq!(
+        status["logins"],
+        json!([login_status(
+            first.id,
+            JAKE,
+            Some("Claude Max"),
+            "signed_in",
+            None
+        )])
+    );
+    assert_eq!(
+        stage.audited(organization).await.len(),
+        2,
+        "each sign-in is audited"
+    );
+}
+
+#[tokio::test]
+async fn signing_another_claude_account_in_adds_a_second_login() {
+    let claude = MockServer::start().await;
+    answering(&claude, granted(), 200, profile(JAKE_ID, JAKE)).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.sign_in_claude(organization, &owner).await;
+    answering(&claude, granted(), 200, profile(ADA_ID, ADA)).await;
+
+    let status = stage.sign_in_claude(organization, &owner).await;
+
+    let logins = stage.login_rows(organization, "claude").await;
+    let named: Vec<(Option<&str>, Option<&str>)> = logins
+        .iter()
+        .map(|login| (login.account.as_deref(), login.label.as_deref()))
+        .collect();
+    assert_eq!(
+        named,
+        [(Some(JAKE_ID), Some(JAKE)), (Some(ADA_ID), Some(ADA))]
+    );
+    assert_eq!(status["state"], "signed_in");
+    assert_eq!(
+        status["logins"],
+        json!(
+            logins
+                .iter()
+                .zip([JAKE, ADA])
+                .map(|(login, label)| {
+                    login_status(login.id, label, Some("Claude Max"), "signed_in", None)
+                })
+                .collect::<Vec<_>>()
+        )
+    );
+    stage.sign_out(organization, "claude", &owner).await;
+    assert!(stage.login_rows(organization, "claude").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_sign_in_the_profile_cannot_name_replaces_only_the_unnamed_login() {
+    let claude = MockServer::start().await;
+    answering(&claude, granted(), 200, profile(JAKE_ID, JAKE)).await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.sign_in_claude(organization, &owner).await;
+    let jake = stage
+        .login_row(organization, "claude")
+        .await
+        .expect("jake's login");
+    answering(&claude, granted(), PROFILE_REFUSED, json!({})).await;
+    stage.sign_in_claude(organization, &owner).await;
+    let unnamed = stage.login_rows(organization, "claude").await;
+
+    stage.sign_in_claude(organization, &owner).await;
+
+    let logins = stage.login_rows(organization, "claude").await;
+    let named: Vec<(Option<&str>, Option<&str>)> = logins
+        .iter()
+        .map(|login| (login.account.as_deref(), login.label.as_deref()))
+        .collect();
+    assert_eq!(
+        named,
+        [(Some(JAKE_ID), Some(JAKE)), (None, Some("Claude Max"))],
+        "a sign-in Claude would not name dropped a named login, or became a second unnamed one"
+    );
+    assert_eq!(logins[0].id, jake.id);
+    assert_eq!(unnamed.len(), 2);
+    assert_ne!(
+        logins[1].id, unnamed[1].id,
+        "the unnamed login was not replaced"
+    );
+}
+
+#[tokio::test]
+async fn a_status_refreshes_a_stale_snapshot_and_keeps_a_fresh_one() {
+    const STALE: &str = "fake-access-token-of-a-stale-login";
+    const FRESH: &str = "fake-access-token-of-a-fresh-login";
+    let claude = token_endpoint(200, granted()).await;
+    let now = Utc::now();
+    let resets = (now + TimeDelta::hours(3))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    Mock::given(method("GET"))
+        .and(path(USAGE_PATH))
+        .and(header("authorization", format!("Bearer {STALE}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "five_hour": { "utilization": 40.0, "resets_at": resets },
+            "seven_day": { "utilization": 10.0, "resets_at": resets },
+        })))
+        .mount(&claude)
+        .await;
+    let stage = Stage::claude(&claude).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    let key = *stage.client.state().encryption_key();
+    let stored = |access: &str, used: f64, fetched_at: DateTime<Utc>| {
+        let tokens = Tokens {
+            access: SecretValue::new(access),
+            refresh: Some(SecretValue::new(REFRESH)),
+            expires_at: now + TimeDelta::seconds(YEAR),
+            issued_at: None,
+            scope: INFERENCE_SCOPE.to_string(),
+            subscription: Some("max".to_string()),
+        };
+        let windows = json!([{
+            "name": "5h",
+            "used_percent": used,
+            "used": null,
+            "limit": null,
+            "resets_at": resets,
+        }]);
+        (
+            tokens.seal(&key).expect("sealed tokens"),
+            tokens.expires_at,
+            windows,
+            100.0 - used,
+            fetched_at,
+        )
+    };
+    let mut ids = Vec::new();
+    let fetched = [
+        (now - TimeDelta::hours(2)).trunc_subsecs(0),
+        now.trunc_subsecs(0),
+    ];
+    for (account, (credential, expires_at, windows, headroom, fetched_at)) in [
+        (JAKE, stored(STALE, 90.0, fetched[0])),
+        (ADA, stored(FRESH, 20.0, fetched[1])),
+    ] {
+        let (id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO agent_logins (organization_id, agent, account, credential, label, \
+             expires_at, windows, headroom, usage_fetched_at) \
+             VALUES ($1, 'claude', $2, $3, $2, $4, $5, $6, $7) RETURNING id",
+        )
+        .bind(organization)
+        .bind(account)
+        .bind(credential)
+        .bind(expires_at)
+        .bind(windows)
+        .bind(headroom)
+        .bind(fetched_at)
+        .fetch_one(stage.pool())
+        .await
+        .expect("a stored login with its usage");
+        ids.push(id);
+    }
+
+    let status = stage.status(organization, "claude", &owner).await;
+
+    let stale = usage_of(&status, ids[0]);
+    assert_eq!(
+        used_percent(&stale, "5h"),
+        Some(40.0),
+        "a snapshot older than the TTL was shown as stored: {stale}"
+    );
+    assert!(
+        timestamp(&stale["fetched_at"]) > fetched[0],
+        "the refreshed snapshot kept its old fetch time: {stale}"
+    );
+    let fresh = usage_of(&status, ids[1]);
+    assert_eq!(used_percent(&fresh, "5h"), Some(20.0), "{fresh}");
+    assert_eq!(timestamp(&fresh["fetched_at"]), fetched[1], "{fresh}");
+    let asked = bearers(&claude, USAGE_PATH).await;
+    assert!(
+        !asked.contains(&format!("Bearer {FRESH}")),
+        "a snapshot younger than the TTL was read again: {asked:?}"
+    );
+    assert!(
+        asked.contains(&format!("Bearer {STALE}")),
+        "the stale login's usage was never asked for: {asked:?}"
+    );
 }
