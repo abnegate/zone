@@ -1,3 +1,4 @@
+use zone_chat::history::NewEntry;
 use zone_core::llm::{LlmBackend, Session};
 
 use super::{Generation, RunContext};
@@ -14,7 +15,8 @@ const REFUSALS: [&str; 2] = ["no conversation found", "not found"];
 #[derive(Debug, Clone)]
 pub struct Pinned {
     login: LoginIdentity,
-    /// The session the chat's turns ran in before this one.
+    /// The session the chat's turns ran in before this one, or the one carried to another login
+    /// during it.
     previous: Option<ChatSession>,
     /// The session the agent is given.
     session: Option<Session>,
@@ -24,7 +26,8 @@ pub struct Pinned {
     prompt: Option<String>,
     /// The latest `chat_entries.position` the session has seen once this turn is sent.
     entry: i64,
-    /// The whole transcript, kept for a resume the agent refuses.
+    /// The whole transcript, kept for a resume the agent refuses and for a handover that
+    /// replays it on another login.
     replay: Option<RunContext>,
 }
 
@@ -70,6 +73,40 @@ impl Pinned {
         self.replay = Some(replay);
     }
 
+    /// The whole transcript this turn would replay, with what it has written since.
+    pub fn transcript(&self) -> Option<&RunContext> {
+        self.replay.as_ref()
+    }
+
+    /// Adds `entry`, written this turn, to the whole transcript kept for a replay.
+    pub fn extend(&mut self, entry: &NewEntry) {
+        if let Some(replay) = self.replay.as_mut() {
+            replay.append(entry);
+        }
+    }
+
+    /// The id the session is resumed by: the one the agent announced, else the one it was given.
+    pub fn id(&self) -> Option<&str> {
+        self.announced
+            .as_deref()
+            .or_else(|| self.session.as_ref().map(|session| session.id.as_str()))
+    }
+
+    /// Moves the session onto `login`, in `session`, the one its backend was given there: the
+    /// same session resumed when it was carried to that login's home, or a fresh one that will
+    /// be sent the whole transcript. The prompt the session has seen is unchanged by either,
+    /// since a replay sends it this turn's prompt whole.
+    pub fn switch(&mut self, login: LoginIdentity, session: Option<Session>) {
+        self.login = login;
+        self.session = session;
+        self.announced = None;
+        self.previous = self
+            .session
+            .as_ref()
+            .filter(|session| session.resume)
+            .and_then(|_| self.record(self.entry));
+    }
+
     pub fn announced(&mut self, id: String) {
         self.announced = Some(id);
     }
@@ -77,13 +114,9 @@ impl Pinned {
     /// What the chat records of this session once the agent has seen the chat up to `entry`:
     /// nothing until there is an id to resume it by.
     pub fn record(&self, entry: i64) -> Option<ChatSession> {
-        let id = self
-            .announced
-            .clone()
-            .or_else(|| self.session.as_ref().map(|session| session.id.clone()))?;
         Some(ChatSession {
             login: Some(self.login.id),
-            id,
+            id: self.id()?.to_string(),
             agent: self.login.agent,
             entry,
             prompt: self.prompt.clone(),
@@ -103,7 +136,8 @@ impl Pinned {
     /// The whole transcript a refused resume is replayed with instead, once, and `backend` on
     /// a fresh session for it.
     pub fn restart(&mut self, backend: LlmBackend) -> Option<(RunContext, LlmBackend)> {
-        let replay = self.replay.take()?;
+        self.resumed()?;
+        let replay = self.replay.clone()?;
         Some((replay, self.renew(backend)))
     }
 

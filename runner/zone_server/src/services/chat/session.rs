@@ -23,6 +23,7 @@ use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::backend;
+use crate::services::chat::handover::Handover;
 use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
 use crate::state::AppState;
@@ -308,6 +309,9 @@ pub struct Preparation {
     pub skills: String,
     /// The coding agent session the turn runs in, on a login of the organization's.
     pub session: Option<Pinned>,
+    /// The logins the turn may move to when the one it runs on can no longer run it: none over
+    /// HTTP, or under the instance's or the host's sign-in.
+    pub handover: Option<Handover>,
 }
 
 /// Read-only common builder. It never classifies intent, executes tools, searches, or summarizes.
@@ -544,6 +548,7 @@ pub async fn build(
         memory,
         skills,
         session,
+        handover: None,
     })
 }
 

@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_comfy::MediaType;
-use zone_core::llm::{BuiltinTools, Limit, LlmBackend, Message as LlmMessage, Role as LlmRole};
+use zone_core::llm::{BuiltinTools, LlmBackend, Message as LlmMessage, Role as LlmRole, Usage};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -45,9 +45,11 @@ use crate::db::{
 };
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
+use crate::services::chat::handover::{self, Cause, Handover, Notice};
 use crate::services::chat::session::{self, Session};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
+use crate::services::login::router;
 use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
@@ -573,6 +575,12 @@ pub enum ServerMessage {
     Error { message: String },
     /// Non-fatal progress (e.g. web search in progress)
     Status { message: String },
+    /// The turn moved to another login and carries on in the same answer.
+    Handover {
+        message_id: Uuid,
+        #[serde(flatten)]
+        notice: Notice,
+    },
 }
 
 fn is_not_resumed(resumed: &bool) -> bool {
@@ -773,17 +781,25 @@ fn trace_started(
     (record, frame)
 }
 
-/// Fold the tool trace, citations, and write receipts into the image
-/// metadata, since one turn can produce all of them and they share the
-/// message's single metadata column.
+/// Fold the tool trace, citations, write receipts and the logins the answer
+/// moved across into the image metadata, since one turn can produce all of
+/// them and they share the message's single metadata column. `usage`, the
+/// tokens every login the turn ran on spent together, rides only with a move.
 fn merge_metadata(
     images: Option<serde_json::Value>,
     tool_calls: &[ToolCallRecord],
     citations: &[Citation],
     receipts: &[ActionReceipt],
     reasoning: Option<&str>,
+    handovers: &[Notice],
+    usage: Option<Usage>,
 ) -> Option<serde_json::Value> {
-    if tool_calls.is_empty() && citations.is_empty() && receipts.is_empty() && reasoning.is_none() {
+    if tool_calls.is_empty()
+        && citations.is_empty()
+        && receipts.is_empty()
+        && reasoning.is_none()
+        && handovers.is_empty()
+    {
         return images;
     }
 
@@ -809,8 +825,20 @@ fn merge_metadata(
     if let Some(reasoning) = reasoning {
         object.insert("reasoning".to_string(), serde_json::json!(reasoning));
     }
+    if !handovers.is_empty() {
+        object.insert(HANDOVERS_KEY.to_string(), serde_json::json!(handovers));
+        if let Some(usage) = usage {
+            object.insert(USAGE_KEY.to_string(), serde_json::json!(usage));
+        }
+    }
     Some(serde_json::Value::Object(object))
 }
+
+/// Where an answer that moved across logins keeps each move, as its `handover` frame said it.
+const HANDOVERS_KEY: &str = "handovers";
+
+/// Where an answer that moved across logins keeps the tokens they spent on it together.
+const USAGE_KEY: &str = "usage";
 
 const LIVE_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(300);
 
@@ -958,6 +986,8 @@ async fn publish_live_assistant(
     receipts: &[ActionReceipt],
     images: &[ChatImageAttachment],
     reasoning: &str,
+    handovers: &[Notice],
+    usage: Option<Usage>,
 ) -> Result<(), String> {
     if content.is_empty()
         && tool_calls.is_empty()
@@ -965,6 +995,7 @@ async fn publish_live_assistant(
         && receipts.is_empty()
         && images.is_empty()
         && reasoning.is_empty()
+        && handovers.is_empty()
     {
         return Ok(());
     }
@@ -980,6 +1011,8 @@ async fn publish_live_assistant(
                 citations,
                 receipts,
                 (!reasoning.is_empty()).then_some(reasoning),
+                handovers,
+                usage,
             ),
         )
         .await
@@ -2752,19 +2785,37 @@ async fn prepare_chat(
             None
         }
     };
-    let resolved = route.chat(state, &[], previous.as_ref()).await?;
+    let mut resolved = route.chat(state, &[], previous.as_ref()).await?;
+    let organization = route
+        .settings()
+        .and_then(|settings| settings.agent())
+        .and_then(|agent| route.organization_on(agent));
+    let opening = match organization {
+        Some(organization) => {
+            handover::opening(state, organization, previous.as_ref(), &mut resolved).await
+        }
+        None => None,
+    };
+    let current = resolved.login.clone();
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
     let endpoint = route.into_endpoint()?;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &resolved.backend)
         .await;
+    let model = handover::Model {
+        requested: chat.model_name.clone(),
+        preferences,
+        message: content.to_string(),
+        image: crate::services::media_source::has_image_attachment(metadata),
+        agentic: chat.agent_enabled,
+    };
     chat.model_name = crate::services::stages::chat_model(
-        &chat.model_name,
-        &preferences,
+        &model.requested,
+        &model.preferences,
         &catalog,
-        content,
-        crate::services::media_source::has_image_attachment(metadata),
-        chat.agent_enabled,
+        &model.message,
+        model.image,
+        model.agentic,
     );
     if web_search_requested && !sanitize_query(content).is_empty() {
         publish(
@@ -2782,11 +2833,21 @@ async fn prepare_chat(
         None,
         session::Mode::Generation(session::Generation {
             resolved,
-            session: previous,
+            session: previous.clone(),
         }),
         endpoint,
     )
     .await?;
+    preparation.handover = match (organization, current, &preparation.session) {
+        (Some(organization), Some(current), Some(_)) => Some(Handover::new(
+            organization,
+            current,
+            model,
+            previous.as_ref(),
+            opening,
+        )),
+        _ => None,
+    };
     let search = load_web_search(state, chat_id, content, web_search_requested).await;
     let agentic = preparation.agentic;
     let character = chat.character.as_ref();
@@ -2928,9 +2989,10 @@ async fn prepare_chat(
 }
 
 /// Settles the coding agent session `preparation` runs in, when it runs in one: a session the
-/// chat resumes is sent only what it has not seen, opened by one system note, and keeps the
-/// whole transcript for a resume the agent refuses. One with nothing left to answer, or whose
-/// place in the chat can't be read, starts afresh on the whole transcript.
+/// chat resumes is sent only what it has not seen, opened by one system note. One with nothing
+/// left to answer, or whose place in the chat can't be read, starts afresh on the whole
+/// transcript. Either keeps the whole transcript, for a resume the agent refuses and for a
+/// handover that replays it on another login.
 async fn pin(
     state: &AppState,
     chat_id: Uuid,
@@ -2950,6 +3012,7 @@ async fn pin(
         latest.as_ref().copied().unwrap_or_default(),
     );
     let Some(previous) = pinned.resumed().cloned() else {
+        pinned.keep(preparation.context.clone());
         return;
     };
     let unseen = match latest {
@@ -2969,6 +3032,7 @@ async fn pin(
         None => {
             let backend = pinned.renew(preparation.llm.config().backend.clone());
             preparation.llm = preparation.llm.clone().with_backend(backend);
+            pinned.keep(preparation.context.clone());
         }
     }
 }
@@ -2998,7 +3062,7 @@ async fn handle_chat_generation(
     jobs: &mut Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ChatPreparation {
-        model,
+        mut model,
         agentic,
         auto_approve,
         sandboxed,
@@ -3013,8 +3077,8 @@ async fn handle_chat_generation(
         memory: _,
         skills: _,
         session: mut pinned,
+        mut handover,
     } = preparation;
-    let model_name = model.as_str();
     let mut replay = context.clone();
     let definitions = agentic.then(|| tools.definitions().to_vec());
     // Bound for the whole turn on purpose. The token is revoked when the lease
@@ -3060,6 +3124,21 @@ async fn handle_chat_generation(
     .await;
     generation.started = true;
 
+    let mut handovers: Vec<Notice> = Vec::new();
+    let mut usage: Option<Usage> = None;
+    let mut logins: Vec<Uuid> = handover.iter().map(Handover::login).collect();
+    if let Some(notice) = handover.as_mut().and_then(Handover::opened) {
+        publish(
+            stream,
+            ServerMessage::Handover {
+                message_id: assistant_message_id,
+                notice: notice.clone(),
+            },
+        )
+        .await;
+        handovers.push(notice);
+    }
+
     let mut full_content = String::new();
     let mut pending_content = String::new();
     let mut round_reasoning = String::new();
@@ -3077,13 +3156,18 @@ async fn handle_chat_generation(
     let mut action_receipts: Vec<ActionReceipt> = Vec::new();
     let mut last_snapshot: Option<Instant> = None;
     let mut waits: Vec<String> = Vec::new();
+    // Whether the round is the answer going on from what another login wrote of it, which a
+    // refused resume replays with that part and the instruction to go on.
+    let mut continuing = false;
 
     loop {
         wait::set_ceiling(ToolSession::Chat(chat_id), stream_deadline);
+        let written = (full_content.len(), tool_calls.len());
+        let rerun = handover.is_some().then(|| context.clone());
         let round = agent::run_with_context(
             AgentRun {
                 llm: llm_client.clone(),
-                model: model_name.to_string(),
+                model: model.clone(),
                 tools,
                 messages: Vec::new(),
                 budget,
@@ -3102,6 +3186,7 @@ async fn handle_chat_generation(
             };
         let mut pending_wait: Option<(Waited, Spend)> = None;
         let mut refused = false;
+        let mut handing: Option<Cause> = None;
 
         loop {
             tokio::select! {
@@ -3167,8 +3252,16 @@ async fn handle_chat_generation(
                             if let Err(error)=session.store.assert_current(&session.lease).await {failure=Some(error.to_string());break;}
                             publish(stream,ServerMessage::Context {chat_id,message_id:Some(assistant_message_id),usage}).await;
                         }
-                        Some(AgentEvent::Usage(usage)) => {tracing::debug!(prompt_tokens=usage.prompt_tokens,completion_tokens=usage.completion_tokens,"Observed provider usage");}
-                        Some(AgentEvent::Window(window)) => {tracing::debug!(window=%window.name,used_percent=?window.used_percent,"Observed agent usage window");}
+                        Some(AgentEvent::Usage(observed)) => {
+                            tracing::debug!(prompt_tokens=observed.prompt_tokens,completion_tokens=observed.completion_tokens,"Observed provider usage");
+                            usage = Some(usage.map_or(observed, |spent| spent.plus(observed)));
+                        }
+                        Some(AgentEvent::Window(window)) => {
+                            tracing::debug!(window=%window.name,used_percent=?window.used_percent,"Observed agent usage window");
+                            if let Some(handover) = &handover {
+                                observe(state, handover.login(), window);
+                            }
+                        }
                         Some(AgentEvent::Session(id)) => {
                             if let Some(pinned) = pinned.as_mut() {
                                 pinned.announced(id);
@@ -3360,16 +3453,28 @@ async fn handle_chat_generation(
                             persist_now = true;
                             stop_stream = true;
                         }
-                        Some(AgentEvent::Failed(message) | AgentEvent::Limited(Limit { message, .. })) => {
-                            if full_content.is_empty()
-                                && tool_calls.is_empty()
+                        Some(AgentEvent::Limited(limit)) => {
+                            if handover.is_some() {
+                                handing = Some(Cause::limited(limit));
+                            } else {
+                                failure = Some(self::failure(&endpoint, &llm_client.config().backend, limit.message));
+                            }
+                            break;
+                        }
+                        Some(AgentEvent::Failed(message)) => {
+                            if (full_content.len(), tool_calls.len()) == written
                                 && pinned.as_ref().is_some_and(|pinned| pinned.refused(&message))
                             {
                                 tracing::info!(%chat_id, %message, "The agent has no session to resume; replaying the chat in a fresh one");
                                 refused = true;
                                 break;
                             }
-                            failure = Some(self::failure(&endpoint, &llm_client.config().backend, message));
+                            let remedied = crate::services::backend::remedied(&llm_client.config().backend, message);
+                            if remedied.signed_out && handover.is_some() {
+                                handing = Some(Cause::signed_out(remedied.message));
+                            } else {
+                                failure = Some(endpoint.scrub(&remedied.message));
+                            }
                             break;
                         }
                         None => {
@@ -3391,6 +3496,8 @@ async fn handle_chat_generation(
                             &action_receipts,
                             &generated_images,
                             &round_reasoning,
+                            &handovers,
+                            usage,
                         )
                         .await
                         {
@@ -3423,10 +3530,133 @@ async fn handle_chat_generation(
         {
             llm_client = llm_client.with_backend(backend);
             replay = whole.clone();
-            context = whole;
+            context = match continuing {
+                true => handover::replayed(&whole),
+                false => whole,
+            };
             // A coding agent reaches zone's tools over the turn's MCP lease, so
             // the round it refused ran on none of its own, as this one does.
             tools = ChatTools::empty();
+            continue;
+        }
+        if let Some(cause) = handing.take() {
+            let remaining = stream_deadline.saturating_duration_since(tokio::time::Instant::now());
+            let moved = match handover.as_mut() {
+                Some(handover) if !cancelled => {
+                    let session = pinned.as_ref().and_then(|pinned| pinned.id());
+                    handover.next(state, &cause, session, remaining).await
+                }
+                _ => Err(None),
+            };
+            let switch = match moved {
+                Ok(switch) => switch,
+                Err(ended) => {
+                    failure = Some(match ended {
+                        Some(error) => error.to_string(),
+                        None => {
+                            self::failure(&endpoint, &llm_client.config().backend, cause.message)
+                        }
+                    });
+                    break;
+                }
+            };
+            let leftover = token_filter.finish();
+            if !leftover.is_empty() {
+                pending_content.push_str(&leftover);
+                let _ = emit_chunk(
+                    stream,
+                    &mut full_content,
+                    &mut chunk_index,
+                    leftover,
+                    &mut response_truncated,
+                )
+                .await;
+            }
+            let wrote = (full_content.len(), tool_calls.len()) != written;
+            if let Some(entry) = handover::partial(&std::mem::take(&mut pending_content)) {
+                if let Err(error) = session
+                    .store
+                    .append(&session.lease, session.turn, std::slice::from_ref(&entry))
+                    .await
+                {
+                    failure = Some(error.to_string());
+                    break;
+                }
+                replay.append(&entry);
+                if let Some(pinned) = pinned.as_mut() {
+                    pinned.extend(&entry);
+                }
+            }
+            tracing::info!(%chat_id, from = %switch.from.id, to = %switch.to.id, carried = switch.carried, "Handing the turn over to another login");
+            let notice = switch.notice(full_content.chars().count());
+            publish(
+                stream,
+                ServerMessage::Status {
+                    message: format!("Switching to {}…", switch.to.label),
+                },
+            )
+            .await;
+            publish(
+                stream,
+                ServerMessage::Handover {
+                    message_id: assistant_message_id,
+                    notice: notice.clone(),
+                },
+            )
+            .await;
+            handovers.push(notice);
+            if !logins.contains(&switch.to.id) {
+                logins.push(switch.to.id);
+            }
+            let whole = pinned
+                .as_mut()
+                .and_then(|pinned| {
+                    pinned.switch(switch.to.clone(), switch.session());
+                    pinned.transcript().cloned()
+                })
+                .unwrap_or_else(|| replay.clone());
+            if let Some(pinned) = &pinned {
+                match switch.carried {
+                    true => remember(state, chat_id, pinned.record(pinned.entry())).await,
+                    false => forget(state, chat_id).await,
+                }
+            }
+            if let Some(repicked) = switch.model.clone() {
+                model = repicked;
+            }
+            llm_client = llm_client.with_backend(switch.backend.clone());
+            if let Some(served) = &agent_tools {
+                llm_client =
+                    llm_client.with_toolset(served.lease.toolset(), builtin_tools(sandboxed));
+            }
+            tools = ChatTools::empty();
+            continuing = wrote;
+            context = match (wrote, switch.carried) {
+                (true, true) => handover::carried(&whole),
+                (true, false) => handover::replayed(&whole),
+                (false, true) => rerun.unwrap_or(whole),
+                (false, false) => whole,
+            };
+            if let Err(error) = publish_live_assistant(
+                session,
+                &full_content,
+                &tool_calls,
+                &citations,
+                &action_receipts,
+                &generated_images,
+                &round_reasoning,
+                &handovers,
+                usage,
+            )
+            .await
+            {
+                tracing::warn!("Failed to persist the handover: {error}");
+                if error.contains("ownership") || error.contains("expired") {
+                    failure = Some(error);
+                    break;
+                }
+            }
+            last_snapshot = Some(Instant::now());
             continue;
         }
         if cancelled || failure.is_some() {
@@ -3501,6 +3731,8 @@ async fn handle_chat_generation(
             &action_receipts,
             &generated_images,
             &round_reasoning,
+            &handovers,
+            usage,
         )
         .await
         {
@@ -3534,6 +3766,10 @@ async fn handle_chat_generation(
         };
         context = replay.clone();
         budget = budget.less(spent);
+    }
+
+    for login in logins {
+        settle(state, login);
     }
 
     let leftover = token_filter.finish();
@@ -3570,7 +3806,7 @@ async fn handle_chat_generation(
             ServerMessage::Context {
                 chat_id,
                 message_id: Some(assistant_message_id),
-                usage: blocked.unwrap_or_else(|| replay.usage(model_name, definitions.as_deref())),
+                usage: blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref())),
             },
         )
         .await;
@@ -3612,6 +3848,8 @@ async fn handle_chat_generation(
         &citations,
         &action_receipts,
         (!round_reasoning.is_empty()).then_some(round_reasoning.as_str()),
+        &handovers,
+        usage,
     );
 
     let partial = if !pending_content.is_empty() || !pending_images.is_empty() {
@@ -3660,7 +3898,7 @@ async fn handle_chat_generation(
                 );
             replay.summary = history.summary.map(session::core_summary);
             replay.search(&SearchContext::new(&state.config().web_search));
-            let usage = blocked.unwrap_or_else(|| replay.usage(model_name, definitions.as_deref()));
+            let usage = blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref()));
             publish(
                 stream,
                 ServerMessage::Context {
@@ -3719,6 +3957,27 @@ async fn handle_chat_generation(
     }
 
     Ok(())
+}
+
+/// Forgets the agent session the chat's turns resumed, for a turn that moved to a fresh one the
+/// chat records once it has an id.
+async fn forget(state: &AppState, chat_id: Uuid) {
+    if let Err(error) = chats::set_session(state.db(), chat_id, None).await {
+        tracing::warn!(%chat_id, %error, "Could not forget the chat's agent session");
+    }
+}
+
+/// Records `window`, as the turn on `login` reported it, without holding the answer up for it.
+fn observe(state: &AppState, login: Uuid, window: zone_core::llm::Window) {
+    let state = state.clone();
+    tokio::spawn(async move { router::observe(&state, login, &window).await });
+}
+
+/// Brings what the organization knows of `login`'s usage up to date once a turn on it has
+/// ended, without holding the answer up for it.
+fn settle(state: &AppState, login: Uuid) {
+    let state = state.clone();
+    tokio::spawn(async move { router::settle(&state, login).await });
 }
 
 /// Records `session` as the agent session the chat's turns resume. One that can't be recorded
@@ -5145,6 +5404,99 @@ cat 'DIR/reply.jsonl'
         );
     }
 
+    fn moved(at: usize) -> Notice {
+        Notice {
+            from: "a@example.com".to_string(),
+            to: "c@example.com".to_string(),
+            agent: zone_core::llm::AgentKind::Codex,
+            reason: crate::services::chat::handover::Reason::Limit,
+            resets_at: chrono::DateTime::parse_from_rfc3339("2026-09-23T06:10:00Z")
+                .ok()
+                .map(|at| at.with_timezone(&chrono::Utc)),
+            carried: false,
+            at,
+        }
+    }
+
+    #[test]
+    fn a_handover_frame_reads_as_the_console_parses_it() {
+        let message_id = Uuid::new_v4();
+
+        let frame = serde_json::to_value(ServerMessage::Handover {
+            message_id,
+            notice: moved(12),
+        })
+        .expect("a frame");
+
+        assert_eq!(
+            frame,
+            serde_json::json!({
+                "type": "handover",
+                "message_id": message_id,
+                "from": "a@example.com",
+                "to": "c@example.com",
+                "agent": "codex",
+                "reason": "limit",
+                "resets_at": "2026-09-23T06:10:00Z",
+                "carried": false,
+                "at": 12,
+            })
+        );
+    }
+
+    #[test]
+    fn a_joining_connection_sees_the_handover_where_the_answer_moved() {
+        let message_id = Uuid::new_v4();
+        let mut turn = LiveTurn::default();
+        turn.record(&started(message_id));
+        turn.record(&chunk("The Nile, ", 0));
+        turn.record(&ServerMessage::Handover {
+            message_id,
+            notice: moved(10),
+        });
+        turn.record(&chunk("the Amazon", 1));
+
+        let replay = turn.replay();
+        assert_eq!(
+            frame_kinds(&replay),
+            vec!["message_start", "chunk", "handover", "chunk"],
+            "the divider stays between the two logins' text"
+        );
+    }
+
+    #[test]
+    fn an_answer_that_moved_keeps_each_move_and_what_every_login_spent() {
+        let spent = Usage {
+            prompt_tokens: 120,
+            completion_tokens: 30,
+            total_tokens: 150,
+        };
+
+        let merged = merge_metadata(None, &[], &[], &[], None, &[moved(10)], Some(spent))
+            .expect("a move produces metadata");
+        let unmoved = merge_metadata(None, &[], &[], &[], None, &[], Some(spent));
+
+        assert_eq!(
+            merged,
+            serde_json::json!({
+                "handovers": [{
+                    "from": "a@example.com",
+                    "to": "c@example.com",
+                    "agent": "codex",
+                    "reason": "limit",
+                    "resets_at": "2026-09-23T06:10:00Z",
+                    "carried": false,
+                    "at": 10,
+                }],
+                "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
+            })
+        );
+        assert_eq!(
+            unmoved, None,
+            "a turn on one login keeps its metadata as it was"
+        );
+    }
+
     #[test]
     fn adjacent_reasoning_frames_coalesce_and_an_error_ends_the_live_turn() {
         let mut turn = LiveTurn::default();
@@ -5990,8 +6342,8 @@ cat 'DIR/reply.jsonl'
             waiting: None,
         }];
 
-        let merged =
-            merge_metadata(images, &records, &[], &[], None).expect("both sides produce metadata");
+        let merged = merge_metadata(images, &records, &[], &[], None, &[], None)
+            .expect("both sides produce metadata");
         assert_eq!(merged["attachments"][0]["name"], "generated-image-1.png");
         assert_eq!(merged["tool_calls"][0]["name"], "run_shell");
         assert_eq!(
@@ -6018,8 +6370,8 @@ cat 'DIR/reply.jsonl'
             outcome: crate::agent::CitationOutcome::Incomplete,
             note: Some("Observed CI only".into()),
         }];
-        let merged =
-            merge_metadata(None, &[], &citations, &[], None).expect("citations produce metadata");
+        let merged = merge_metadata(None, &[], &citations, &[], None, &[], None)
+            .expect("citations produce metadata");
         assert_eq!(merged["citations"][0]["url"], citations[0].url);
         assert_eq!(
             merged["citations"][0]["revision"],
@@ -6046,15 +6398,15 @@ cat 'DIR/reply.jsonl'
             href: "/tasks?id=task-1".to_string(),
             reason: None,
         }];
-        let merged =
-            merge_metadata(None, &[], &[], &receipts, None).expect("receipts produce metadata");
+        let merged = merge_metadata(None, &[], &[], &receipts, None, &[], None)
+            .expect("receipts produce metadata");
         assert_eq!(merged["action_receipts"][0]["action"], "create_task");
         assert_eq!(merged["action_receipts"][0]["href"], "/tasks?id=task-1");
     }
 
     #[test]
     fn test_merge_metadata_is_none_when_the_turn_produced_neither() {
-        assert!(merge_metadata(None, &[], &[], &[], None).is_none());
+        assert!(merge_metadata(None, &[], &[], &[], None, &[], None).is_none());
     }
 
     /// The trace is workspace-readable and memory is one person's, so a memory
@@ -6166,7 +6518,8 @@ cat 'DIR/reply.jsonl'
             call(crate::agent::memory::MEMORY_READ, true),
         ];
 
-        let merged = merge_metadata(images, &records, &[], &[], None).expect("the turn had calls");
+        let merged = merge_metadata(images, &records, &[], &[], None, &[], None)
+            .expect("the turn had calls");
 
         assert_eq!(merged[MEMORY_USED_KEY], true);
         assert_eq!(merged["attachments"][0]["name"], "generated-image-1.png");
@@ -6185,6 +6538,8 @@ cat 'DIR/reply.jsonl'
             &[],
             &[],
             None,
+            &[],
+            None,
         )
         .expect("the turn had calls");
         assert!(failed.get(MEMORY_USED_KEY).is_none(), "{failed}");
@@ -6195,18 +6550,29 @@ cat 'DIR/reply.jsonl'
             &[],
             &[],
             None,
+            &[],
+            None,
         )
         .expect("the turn had calls");
         assert!(wrote.get(MEMORY_USED_KEY).is_none(), "{wrote}");
 
-        let quiet = merge_metadata(None, &[], &[], &[], Some("Thinking.")).expect("reasoning");
+        let quiet =
+            merge_metadata(None, &[], &[], &[], Some("Thinking."), &[], None).expect("reasoning");
         assert!(quiet.get(MEMORY_USED_KEY).is_none(), "{quiet}");
     }
 
     #[test]
     fn test_merge_metadata_keeps_reasoning() {
-        let merged =
-            merge_metadata(None, &[], &[], &[], Some("The capital is Paris.")).expect("reasoning");
+        let merged = merge_metadata(
+            None,
+            &[],
+            &[],
+            &[],
+            Some("The capital is Paris."),
+            &[],
+            None,
+        )
+        .expect("reasoning");
         assert_eq!(merged["reasoning"], "The capital is Paris.");
 
         let merged = merge_metadata(
@@ -6215,6 +6581,8 @@ cat 'DIR/reply.jsonl'
             &[],
             &[],
             Some("Recovered"),
+            &[],
+            None,
         )
         .expect("reasoning replaces malformed metadata");
         assert_eq!(merged, serde_json::json!({"reasoning":"Recovered"}));
