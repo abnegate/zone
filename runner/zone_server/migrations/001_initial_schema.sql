@@ -661,13 +661,13 @@ CREATE INDEX IF NOT EXISTS idx_gathering_events_gathering_created ON gathering_e
 CREATE TABLE IF NOT EXISTS workspace_themes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE UNIQUE,
-  primary_color_light TEXT DEFAULT '#0011d9',
-  secondary_color_light TEXT DEFAULT '#ecf9ff',
-  primary_color_dark TEXT DEFAULT '#00f3ff',
-  secondary_color_dark TEXT DEFAULT '#ecf9ff',
-  font_family TEXT DEFAULT 'nunito',
+  primary_color_light TEXT DEFAULT '#3b82f6',
+  secondary_color_light TEXT DEFAULT '#6366f1',
+  primary_color_dark TEXT DEFAULT '#3b82f6',
+  secondary_color_dark TEXT DEFAULT '#6366f1',
+  font_family TEXT DEFAULT 'system',
   font_size_base TEXT DEFAULT '16px',
-  border_radius TEXT DEFAULT 'large',
+  border_radius TEXT DEFAULT 'medium',
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
