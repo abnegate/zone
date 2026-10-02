@@ -130,10 +130,11 @@ Where chat turns and task runs get their completions, along with chat titles,
 pull request subjects, and auto-project reviews and summaries. The default is
 the OpenAI-compatible endpoint `LITELLM_HOST` names. An organization can instead
 save its own endpoint (see *Saved endpoints*), or choose a coding agent CLI as
-its provider, **Claude Code** or **Codex**, and sign it in with its own Claude
-or ChatGPT subscription. Zone then runs that CLI for the organization's
-completions and serves Zone's tools to it over MCP. The manager image ships
-both CLIs: claude 2.1.278 and codex 0.156.1.
+its provider, **Claude Code** or **Codex**, and sign it in with one or more of
+its own Claude or ChatGPT subscriptions. Zone then runs that CLI for the
+organization's completions, on whichever account has the most usage left (see
+*Which account runs a chat*), and serves Zone's tools to it over MCP. The
+manager image ships both CLIs: claude 2.1.278 and codex 0.156.1.
 
 ### Choosing a provider
 
@@ -143,7 +144,7 @@ Settings > AI Settings**, where *Claude Code (Claude subscription)* and *Codex
 Bedrock (`claude_code` and `codex` in the API). A workspace admin can choose
 one for a single workspace under **Workspace Settings > AI Settings**, with
 **Override organization AI settings** on; the workspace then runs on its
-organization's sign-in for that agent. Organizations and workspaces that choose
+organization's sign-ins for that agent. Organizations and workspaces that choose
 neither a CLI nor a saved endpoint follow `ZONE_LLM_BACKEND`, the instance-wide
 default.
 
@@ -320,7 +321,8 @@ passed (`window`), whose sign-in it runs under (`sign_in`) and the turn's
 working directory (`directory`). It never logs the token. `sign_in` names the
 account that pays:
 
-- `Organization`: the organization's own Claude sign-in.
+- `Organization`: one of the organization's own Claude sign-ins, the one the
+  turn runs on.
 - `Host`: the login of the user the server runs as, standing in for an
   organization that chose Claude Code but has not signed in, which
   `ZONE_AGENT_HOST_LOGIN` allows.
@@ -348,17 +350,17 @@ setting a monthly cap, at claude.ai/settings/usage.
 - **Note**: With `claude` or `codex`, `LITELLM_HOST` and `LITELLM_KEY` are no
   longer required at boot, so a host with no LiteLLM at all can start. The CLI
   then always uses the login of the user the server runs as, whatever
-  `ZONE_AGENT_HOST_LOGIN` says: Zone never refuses these turns as not signed
-  in. Without a login the CLI fails them in its own words, and Zone adds that
-  the server's operator has to sign in again on the host, since no
-  organization's sign-in is used here; a task run that fails that way stops
-  without spending its retries. claude still gets the variables and flags
-  under *How a turn runs*, and codex `ZONE_CODEX_SANDBOX`, but neither gets an
-  organization's home, and both run in the server's own working directory
-  rather than an organization's. In the manager image that directory is the
-  root-owned `/app`, so an agent given its own tools cannot write there. Zone
-  signs no one in for this path; in the compose stack, choose Claude Code or
-  Codex in AI settings instead.
+  `ZONE_AGENT_HOST_LOGIN` says: Zone never refuses these turns as not signed in.
+  Without a login the CLI fails them in its own words, and Zone adds that the
+  server's operator has to sign in again on the host, since no organization's
+  sign-in is used here; a task run that fails that way stops without spending
+  its retries. claude still gets the variables and flags under *How a turn
+  runs*, and codex `ZONE_CODEX_SANDBOX`, but neither gets an organization's
+  sign-in's home, and both run in the server's own working directory rather than
+  an organization's. In the manager image that directory is the root-owned
+  `/app`, so an agent given its own tools cannot write there. Zone signs no one
+  in for this path; in the compose stack, choose Claude Code or Codex in AI
+  settings instead.
 
 ### `ZONE_LLM_BACKEND_EXECUTABLE`
 - **Default**: unset, so the agent's own name is looked up on `PATH`
@@ -377,24 +379,36 @@ setting a monthly cap, at claude.ai/settings/usage.
   `$HOME/.local/state/zone/agents`
 - **Compose and Helm**: `/app/agent-state`, on the `zone_manager_agent_state`
   volume in compose
-- **Description**: Where each organization's CLI keeps its state.
-  `<dir>/<organization id>/claude` is claude's `CLAUDE_CONFIG_DIR` and
-  `<dir>/<organization id>/codex` is codex's `CODEX_HOME`. Each has a `work`
-  directory, where every turn of that agent for that organization runs. Zone
-  creates the organization's directories with mode 0700 and leaves the mode of
-  an existing root alone.
-- **Contents**: codex's login (`auth.json`, which codex renews itself) and both
-  CLIs' session transcripts. Zone keeps the Claude token in the database and
-  hands it to each turn in `CLAUDE_CODE_OAUTH_TOKEN`; it does not write it
-  here. Zone does not prune the transcripts. Deleting an organization stops
-  any codex sign-in it has in progress, runs `codex logout` in its codex home,
-  and removes `<dir>/<organization id>` with everything in it. The delete
-  request waits for any change to the organization's sign-ins already under
-  way, such as a sign-out, and for `codex logout`, which Zone stops after 30
-  seconds; the directory is then removed in the background. If a step fails,
-  the organization is still deleted and the server logs why. A
-  `<dir>/<organization id>` that is a link, or not a directory, is left in
-  place, and codex is not logged out.
+- **Description**: Where each organization's CLIs keep their state, one
+  directory per agent, `<dir>/<organization id>/claude` and
+  `<dir>/<organization id>/codex`. Inside each:
+
+  | Path | What it is |
+  |------|------------|
+  | `logins/<login id>` | One sign-in's home: its `CLAUDE_CONFIG_DIR` or `CODEX_HOME` |
+  | `work` | Where every turn of that agent for that organization runs, whichever sign-in it runs on |
+  | `.login/<attempt>` (codex only) | Where a codex sign-in in progress runs, until it succeeds and moves into a home |
+
+  Every sign-in of an agent shares its `work` directory, so a chat that moves to
+  another account finds the same files there, and its session file keeps the
+  same path inside the other account's home. Zone creates the organization's
+  directories with mode 0700 and leaves the mode of an existing root alone.
+- **Contents**: each codex sign-in's login (`auth.json` in its home, which
+  codex renews itself) and each sign-in's CLI session files: claude's under
+  `projects/`, codex's under `sessions/`. Zone keeps the Claude tokens in the
+  database and hands a turn its sign-in's token in `CLAUDE_CODE_OAUTH_TOKEN`;
+  it does not write them here. Zone does not prune the session files. A codex
+  login made before migration 055 sits at `codex/auth.json` until Zone first
+  needs it, and then moves into its sign-in's home; see
+  [OPERATIONS.md](OPERATIONS.md#upgrading-to-migration-055). Deleting an
+  organization stops any codex sign-in it has in progress, runs `codex logout`
+  in each of its codex homes, and removes `<dir>/<organization id>` with
+  everything in it. The delete request waits for any change to the
+  organization's sign-ins already under way, such as a sign-out, and for
+  `codex logout`, which Zone stops after 30 seconds; the directory is then
+  removed in the background. If a step fails, the organization is still
+  deleted and the server logs why. A `<dir>/<organization id>` that is a link,
+  or not a directory, is left in place, and codex is not logged out.
 - **Note**: Must be an absolute path. A relative one is refused at boot, and so
   is an unset one when neither `XDG_STATE_HOME` nor `HOME` is absolute.
 
@@ -416,6 +430,41 @@ setting a monthly cap, at claude.ai/settings/usage.
 - **Description**: Where Zone exchanges a Claude authorization code for tokens
   and renews them. Tests point it at a local mock. Compose passes it from
   `.env`, where an empty value keeps the default.
+- **Note**: Must be an absolute `http` or `https` URL with a host, carrying no
+  credentials, query or fragment. Anything else is refused at boot.
+
+### `ZONE_AGENT_USAGE_TTL_SECONDS`
+- **Default**: `60`. Compose passes `60` unless `.env` says otherwise, and the
+  Helm chart sets `"60"` in `server.env`.
+- **Description**: How long, in seconds, a reading of a sign-in's usage stays
+  fresh. Before Zone picks the account a chat or task run starts on, and when AI
+  Settings shows the accounts, it reads again the usage of every sign-in whose
+  last reading is older than this, and a chat turn's sign-in is read again once
+  the turn ends if its reading is that old. A reading that fails is kept for as
+  long as one that succeeds, so one usage read per sign-in reaches the agent's
+  service in each period, however many chats start. `0` reads usage every time,
+  while still sharing a reading already under way.
+- **Note**: Must be a whole number of seconds. Anything else, such as `1.5`,
+  `-1` or `1m`, is refused at boot; an empty value keeps the default.
+
+### `ZONE_CLAUDE_API_URL`
+- **Default**: `https://api.anthropic.com`. Compose passes it from `.env`
+  with that default; the Helm chart leaves it unset.
+- **Description**: Where Zone reads a Claude sign-in's usage
+  (`<url>/api/oauth/usage`) and, when it signs in, its profile
+  (`<url>/api/oauth/profile`), which names the account. Point it at a proxy
+  that forwards to Anthropic when the server cannot reach
+  `api.anthropic.com` directly. Each read carries that sign-in's own token.
+- **Note**: Must be an absolute `http` or `https` URL with a host, carrying no
+  credentials, query or fragment. Anything else is refused at boot.
+
+### `ZONE_CODEX_API_URL`
+- **Default**: `https://chatgpt.com`. Compose passes it from `.env` with that
+  default; the Helm chart leaves it unset.
+- **Description**: Where Zone reads a codex sign-in's usage
+  (`<url>/backend-api/wham/usage`), with the token codex keeps in that
+  sign-in's home. Point it at a proxy that forwards to ChatGPT when the
+  server cannot reach `chatgpt.com` directly.
 - **Note**: Must be an absolute `http` or `https` URL with a host, carrying no
   credentials, query or fragment. Anything else is refused at boot.
 
@@ -544,17 +593,39 @@ setting a monthly cap, at claude.ai/settings/usage.
   `read_file`, `run_shell` and the other host tools resolve against it, and
   background jobs keep their logs in its `.zone/jobs`. Every organization's
   chats share it. It is not where a CLI runs: on Claude Code or Codex, that is
-  the organization's `work` directory.
+  the organization's `work` directory for the agent.
 - **Note**: `/app` is root-owned in the manager image, so the tools need a
   directory the `zone` user can write, and `/app/workspace` is one.
 
 ### Signing in
 
-Each organization signs in to each agent once, in the panel that appears under
-the provider on **Organization Settings > AI Settings**; a workspace's AI
-override shows the same panel. Only organization admins and owners can sign in
-or out. Other members see the status, with "Ask an organization admin to sign
-in" while the agent is not signed in.
+An organization signs in to each agent in the panel that appears under the
+provider on **Organization Settings > AI Settings**; a workspace's AI override
+shows the same panel. It can sign in to several accounts per agent: once one
+is signed in, the panel lists each account with its plan, its state, and
+meters for its five-hour and weekly windows saying when each resets, and
+offers **Add another Claude account** or **Add another ChatGPT account** to
+sign in one more. While the panel is open and no sign-in is in progress, it
+reads the accounts' usage again every minute. Only organization admins and
+owners can sign in or out. Other members see the status, with "Ask an
+organization admin to sign in" while the agent is not signed in.
+
+**How sign-ins are told apart.** Each sign-in is one row, keyed by the account
+it signed in to, and signing in to an account the organization already holds
+replaces that account's sign-in rather than adding a second:
+
+- **Claude**: keyed by the account's id from its Claude profile, else its
+  email, and labelled with the email. When the profile cannot be read, because
+  the sign-in was granted without `user:profile`, Claude refused the token, or
+  Claude did not answer within five seconds, the sign-in is labelled with its
+  plan, such as Claude Max, and replaces only a sign-in that names no account,
+  leaving every named one.
+- **Codex**: keyed by the ChatGPT account and the person's email in it, from
+  the id token codex saves, and labelled with that email, else as codex
+  describes the login. The same person signing in to the same ChatGPT account
+  replaces their sign-in; a teammate in the same account, or the same person
+  in another account, is added beside it. A login whose id token names no
+  account replaces every other codex sign-in that names none.
 
 **Claude Code** uses the sign-in `claude setup-token` uses. How the code gets
 back to Zone depends on `ZONE_AGENT_CALLBACK` and on where the console is open.
@@ -594,9 +665,9 @@ shows until when, and drops the link once that time has passed. **Cancel**
 ends the sign-in on the server too, wherever its code is. Zone exchanges the
 code at `ZONE_CLAUDE_TOKEN_URL`, naming the same redirect the link named, and
 stores the tokens in the database, sealed with a key derived from
-`ENCRYPTION_KEY`. The panel shows the plan, such as Claude Team, when the token
-response names one. It shows an expiry date only for a sign-in Zone cannot
-renew, one whose token came without a refresh token.
+`ENCRYPTION_KEY`. The panel shows the sign-in's plan, such as Claude Team, when
+the token response names one. It shows an expiry date only for a sign-in Zone
+cannot renew, one whose token came without a refresh token.
 
 The callback request carries no Zone session, so the listener never exchanges
 a code itself. It takes a state only once, within its ten minutes, when Zone
@@ -627,12 +698,16 @@ at most one sign-in in flight per organization: starting another abandons the
 first. A sign-in that finishes after a **Cancel** or a sign-out records
 nothing.
 
-Zone asks for inference access only, with a one-year lifetime, as
-`claude setup-token` does. If claude.com refuses that on its page, **Try again
-with full access**, which the panel shows beside the code field, starts over
-with the wider set of scopes claude's own login asks for, without the one-year
-lifetime. The panel leaves that button out when the sign-in already asks for
-full access.
+Zone asks for `user:inference user:profile`, with a one-year lifetime:
+inference access, as `claude setup-token` asks for, plus the account's
+profile, which names the account a sign-in is keyed and labelled by and which
+Claude's usage endpoint needs. If claude.com refuses that on its page, **Try
+again with full access**, which the panel shows beside the code field, starts
+over with the wider set of scopes claude's own login asks for, without the
+one-year lifetime. The panel leaves that button out when the sign-in already
+asks for full access. A sign-in made before Zone asked for `user:profile` has
+inference access alone: it names no account, and its usage reads as unknown,
+until an admin signs in to that account again.
 
 A paste Zone cannot read, such as a code with its `#state` cut off, leaves the
 sign-in open, so you can paste again. So does a pasted callback saying
@@ -667,54 +742,67 @@ changes, so a port published from a container cannot reach it; a second one
 on the same machine cancels the first, which would let organizations cancel
 each other's; and it opens a browser on the server itself.
 
-The one-time code is shown only to organization admins and owners and to
-whoever started the sign-in. codex signs in inside a staging directory, and
-its new `auth.json` replaces the organization's only when the sign-in
-succeeds, so a refused or expired attempt leaves an existing login as it was.
-**Cancel** stops the sign-in by signing the organization out of codex. If
-OpenAI refuses to issue a code, the panel shows codex's error, such as
-`device code request failed with status 403 Forbidden`: codex reports the HTTP
-status OpenAI answered with, not the body of the answer. A sign-in that fails
-on the server's own disk, such as a state directory it cannot write, shows
-only an internal error, or, once codex has signed in, "Codex signed in, but
-Zone could not record the sign-in. Start again."; the server's log has the
-details.
+The one-time code is shown only to organization admins and owners and to whoever
+started the sign-in. One codex sign-in runs per organization at a time. codex
+signs in inside a staging directory, `codex/.login/<attempt>`, and its new
+`auth.json` moves into a sign-in's home only when the sign-in succeeds: the home
+of the sign-in it replaces, or a new one beside the others. So a refused or
+expired attempt leaves every existing login as it was. **Cancel** stops the
+sign-in in progress and keeps every login the organization already holds; a
+login codex saved just before is logged out again, so it never outlives the
+attempt. If OpenAI refuses to issue a code, the panel shows codex's error, such
+as `device code request failed with status 403 Forbidden`: codex reports the
+HTTP status OpenAI answered with, not the body of the answer. A sign-in that
+fails on the server's own disk, such as a state directory it cannot write, shows
+only an internal error, or, once codex has signed in, "Codex signed in, but Zone
+could not record the sign-in. Start again."; the server's log has the details.
 
 **Signed in means the credentials are there.** Neither CLI checks a login when
 asked for its status: `claude auth status` reports one for any token it finds,
-and `codex login status` reads `auth.json` without calling OpenAI. Zone does
-not check either. Claude Code shows Signed in while Zone holds a token that it
-can open with the current `ENCRYPTION_KEY` and that has not expired or can be
+and `codex login status` reads `auth.json` without calling OpenAI. Zone does not
+check either. Claude Code shows Signed in while Zone holds a token that it can
+open with the current `ENCRYPTION_KEY` and that has not expired or can be
 renewed; a token sealed under another key shows as expired. Codex shows Signed
-in while the organization's `auth.json` exists. A login revoked upstream, or
-one codex can no longer renew, shows up on the next turn instead: the turn
-fails in the CLI's own words, followed by "Sign in again under Organization
-Settings > AI Settings." A task run that fails that way stops without spending
-its retries, since a retry signs no one in.
+in while the sign-in's home holds its `auth.json`. Each account in the panel
+shows its own state; the agent's shows that of its best account, the one a new
+chat would start on. A login revoked upstream, or one codex can no longer renew,
+shows up on the next turn instead: the turn fails in the CLI's own words,
+followed by "Sign in again under Organization Settings > AI Settings." A task
+run that fails that way stops without spending its retries, since a retry signs
+no one in.
 
-**Signing out** deletes the organization's Claude tokens from Zone; it does not
-revoke them with Anthropic. For Claude it also ends every sign-in to the
-organization still in flight, and forgets why any failed. For Codex it stops a
-sign-in in progress and runs `codex logout`, which asks OpenAI to revoke the
-login and deletes `auth.json`. The panel asks before it signs out, since the
-sign-out applies to every workspace of the organization. Sign-ins and
-sign-outs are recorded in the organization's audit log as `agent.signed_in`
-and `agent.signed_out`, the sign-in even when the browser that finished it
-went away before Claude answered. Deleting the organization deletes its Claude
-tokens with it, drops every Claude sign-in still in flight, and signs it out of
-codex the same way.
+**Signing out** works per account or for the whole agent. **Sign out** beside an
+account signs out that account alone and leaves the others, and any sign-in in
+progress, as they are. Signing out of the agent signs out every account. For
+Claude, signing out deletes the account's tokens from Zone; it does not revoke
+them with Anthropic. Signing out of the whole agent also ends every Claude
+sign-in to the organization still in flight, and forgets why any failed. For
+Codex, signing out runs `codex logout` in the account's home, which asks OpenAI
+to revoke the login and deletes `auth.json`; signing out of the whole agent also
+stops a sign-in in progress. Zone then removes the signed-out account's home
+with the session files in it, except that signing out of all of Claude at once
+leaves the Claude homes where they are. A chat that ran on a signed-out account
+starts its next turn on another, with the whole transcript. The panel asks
+before it signs out, since the sign-out applies to every workspace of the
+organization. Sign-ins and sign-outs are recorded in the organization's audit
+log as `agent.signed_in` and `agent.signed_out`, the sign-in even when the
+browser that finished it went away before Claude answered. Deleting the
+organization deletes its Claude tokens with it, drops every Claude sign-in still
+in flight, and signs it out of codex the same way.
 
 The panel uses these routes, where `{agent}` is `claude` or `codex`:
 
 | Route | Who | What |
 |-------|-----|------|
-| `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models |
-| `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status. With `?attempt={attempt}`, a Claude status's `error` says why that sign-in failed, to the admin who started it |
+| `GET /api/organizations/{org_id}/agents` | Any member | Both agents' status and models. Each status's `logins` lists every sign-in of the agent, oldest first, with its `id`, `label`, `plan`, `state`, `expires_at`, `last_used_at` and `usage` (its `windows`, `headroom`, `fetched_at` and `exhausted_until`), read again first when older than `ZONE_AGENT_USAGE_TTL_SECONDS`; the agent's own `state` and `label` are its best sign-in's |
+| `GET /api/organizations/{org_id}/agents/{agent}` | Any member | One agent's status, with its `logins` as above. With `?attempt={attempt}`, a Claude status's `error` says why that sign-in failed, to the admin who started it |
 | `POST /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Start a sign-in; `{"scope":"full"}` asks claude for full access, and `{"flow":"paste"}` asks for a code to paste even with a callback. A claude answer's `flow` says how its code comes back, `loopback` or `paste`, and its `attempt` names the sign-in. The callback is used only when the request's `Origin` is a localhost address `ZONE_CONSOLE_ORIGINS` lists; `{"flow":"loopback"}` from anywhere else is refused |
 | `POST /api/organizations/{org_id}/agents/claude/login/code` | The admin who started | Finish a Claude sign-in with `{"code":"..."}`; a code that fails carries a `kind`, `invalid_code` (paste again) or `start_again` |
 | `POST /api/organizations/{org_id}/agents/claude/login/receipt` | The admin who started, in the session that started it | Finish a Claude sign-in claude.com sent back to the callback, with `{"receipt":"..."}` from the fragment of the address the callback sent the browser to. Anyone else's spends the receipt and discards the code |
 | `DELETE /api/organizations/{org_id}/agents/claude/login/attempt` | Any member, for their own | End the caller's Claude sign-in, wherever its code is |
-| `DELETE /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Sign out |
+| `DELETE /api/organizations/{org_id}/agents/codex/login/attempt` | Admins and owners | Stop the organization's codex sign-in in progress, keeping every login it already holds. This used to answer `400` |
+| `DELETE /api/organizations/{org_id}/agents/{agent}/logins/{login_id}` | Admins and owners | Sign out of that one account, leaving the agent's others signed in. `204`, or `404` "The organization holds no such sign-in" |
+| `DELETE /api/organizations/{org_id}/agents/{agent}/login` | Admins and owners | Sign out of every account of the agent |
 
 The callback, `GET /callback`, is served by the callback listener on the port
 `ZONE_AGENT_CALLBACK` names, not by the API. It answers an approved sign-in
@@ -730,10 +818,12 @@ started, or after its code began to be exchanged.
 For an organization on Claude Code or Codex, each chat turn, task run, title,
 review or summary starts the CLI where the server runs:
 
-- in the organization's `work` directory under `ZONE_AGENT_STATE_DIR`;
+- in the organization's `work` directory for the agent under
+  `ZONE_AGENT_STATE_DIR`, which every account of the agent shares;
 - with the environment described under `ZONE_AGENT_ENV_PASSTHROUGH`, plus the
-  organization's home (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`) and, for claude,
-  the token in `CLAUDE_CODE_OAUTH_TOKEN`;
+  home of the account it runs on (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`, see
+  *Which account runs a chat*) and, for claude, that account's token in
+  `CLAUDE_CODE_OAUTH_TOKEN`;
 - for claude, with `DISABLE_AUTOUPDATER=1` and
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (no updates, telemetry or error
   reports), `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (Zone keeps its own memory),
@@ -747,10 +837,11 @@ review or summary starts the CLI where the server runs:
   turn, 30 minutes by default, and what is left of its hour for a task
   attempt. A task attempt whose CLI runs out of time fails without a retry.
 
-An organization that chose Claude Code or Codex without signing in, where the
-host-login fallback is off, gets "The claude CLI is not signed in for this
-organization. An organization admin can sign in under Organization Settings >
-AI Settings." (or the same for codex) instead of an answer.
+An organization that chose Claude Code or Codex without signing in to either
+agent, where the host-login fallback is off, gets "The claude CLI is not
+signed in for this organization. An organization admin can sign in under
+Organization Settings > AI Settings." (or the same for codex) instead of an
+answer.
 
 The manager image pins both CLIs by SHA-256 in `/usr/local/bin`, along with
 two programs codex runs: its bubblewrap, at
@@ -762,6 +853,136 @@ those models fails. Unlike bubblewrap, the host starts under Docker's default
 seccomp profile, so those models call tools in the compose stack too. All of
 these are root-owned, so a turn cannot replace them, and claude's
 auto-updater is off.
+
+### Which account runs a chat
+
+An organization signed in to several accounts runs each chat and task run on
+one of them. Zone picks the account when a chat's first turn or a task run
+starts, and keeps the chat or run there until that account can no longer run
+it. Headroom elsewhere never moves a running chat.
+
+**Picking an account.** Zone ranks every account the organization has signed
+in, of both agents:
+
+- the accounts of the agent the workspace or organization chose come first,
+  then the other agent's, so a chat moves to the other agent only once every
+  account of the chosen one is spent or unusable;
+- within an agent, the account with the most headroom left in its most used
+  window comes first, then accounts whose usage is unknown, then the one used
+  longest ago;
+- an account is passed over while it is exhausted, once a turn has already
+  tried it, and while Zone cannot use its sign-in, such as a Claude token that
+  has expired and cannot be renewed.
+
+Usage comes from each agent's own service, read through aiusg (see
+[DEPENDENCIES.md](DEPENDENCIES.md#aiusg)) at `ZONE_CLAUDE_API_URL` or
+`ZONE_CODEX_API_URL`, whenever the account's last reading is older than
+`ZONE_AGENT_USAGE_TTL_SECONDS`. A read has five seconds; routing goes on
+without one that takes longer or fails, on what was last read. One read per
+account runs at a time, and its result, whether it read anything or not, is
+shared until the TTL has passed. An account whose usage endpoint refuses its
+token, or a codex account whose home holds no login to read with, stays a
+candidate on its last reading. The usage windows claude reports while a turn
+runs, and the windows a task run observes, update the account's reading
+without another read.
+
+An account is exhausted once a turn on it hits a usage limit: until the
+limit's own reset, else until its spent window resets by its last reading,
+else for five minutes. One whose last reading has no headroom left is
+exhausted until that window resets. A turn refused for want of usage credits
+does not exhaust its account: the refusal says nothing about the subscription,
+so other chats still start there, and only that turn leaves it.
+
+When every account is exhausted, the chat or task gets "Every sign-in of this
+organization has reached its usage limit; the earliest resets at <time>.", and
+a task run backs off until then. Zone never falls back to the host's own
+sign-in then: `ZONE_AGENT_HOST_LOGIN` applies only to an organization with no
+sign-in at all.
+
+Only chat turns and task runs count as using an account. Chat titles, pull
+request subjects, reviews and summaries run on the account ranked first
+without marking it used, and the image-intent check runs on the account the
+chat is on.
+
+**Staying on it.** The chat records the account its turn ran on, and its next
+turn starts there again while that account is signed in and not exhausted,
+however much more headroom another account has. A task run keeps its account
+across its attempts the same way. When the chat's account has run out by the
+time a new turn starts, the turn starts on the next account in the ranking
+and says so before it answers (see *Handing over in a chat*).
+
+**Session resume.** A chat keeps a CLI session on the account and agent it
+runs on, so later turns send only what is new. Its first turn pins the
+session: claude's with `--session-id`, codex's by the thread id codex
+announces. Later turns resume it, claude with `--resume` and codex with
+`codex exec resume`, which takes no `--sandbox`, so Zone passes
+`-c sandbox_mode=<mode>` instead. A resumed turn sends one system note, then
+the chat's entries the session has not seen. The note is the whole system
+prompt when it differs from the one the session last saw, compared by a hash
+that leaves out the clock line and workspace retrieval; otherwise it is the
+clock line alone. Either way it then carries this turn's workspace retrieval
+and, when a web lookup ran, its outcome. On a resumed session the CLI's own
+compaction decides how much of the earlier conversation the model still sees.
+
+A resume the CLI refuses before it announces a session, such as claude's "No
+conversation found", replays the turn once, whole, under a fresh session. A
+turn that lands on another account starts a fresh session there with the
+whole transcript, unless a handover carried the session file across (below).
+Turns over HTTP, under the host's sign-in, or on the instance's own CLI keep
+no session and send the whole transcript every time. Task attempts keep no
+session either: each sends the whole transcript.
+
+**Handing over in a chat.** When a turn hits a usage limit, a usage-credits
+refusal or a sign-in failure, it carries on in the same answer on the next
+account it has not tried, the same agent's first. Zone marks the account it
+left exhausted when a subscription limit stopped it, keeps what the turn
+already wrote as an assistant entry of its own, and then:
+
+- when the next account runs the same agent and the session's file is in the
+  old account's home, copies that file into the new account's home and
+  resumes the same session there, sending only an instruction, from the user,
+  to continue the answer from where it stopped without repeating it. If the
+  CLI refuses that resume, the turn replays as below;
+- otherwise starts a fresh session there, sent the whole transcript, then
+  `Assistant: <the answer so far>`, then the same instruction. On the other
+  agent the turn runs in that agent's `work` directory with the new account's
+  home, on a model picked again from that agent's models.
+
+The turn keeps its Zone tools, its approval cards and its `ZONE_MCP_TOKEN`
+across the switch, and every switch counts against the turn's own
+`ZONE_CHAT_TIMEOUT_SECONDS`. The chat receives a `status` frame,
+"Switching to <account>…", then a `handover` frame:
+
+```json
+{"type":"handover","message_id":"…","from":"jake@example.com","to":"team@example.com","agent":"claude","reason":"limit","resets_at":"2026-10-02T18:00:00Z","carried":true,"at":1834}
+```
+
+`from` and `to` are the accounts' labels; `reason` is `limit`, `credits` or
+`signed_out`; `resets_at` is when the limit resets, when it said; `carried`
+says whether the session file moved with the turn; and `at` is how many
+characters of the answer were written before the switch. The console draws a
+divider there, such as "Switched to team@example.com — jake@example.com
+reached its usage limit; resets in 2h 5m", naming the agent only when it
+changed. When the chat's account is already spent as a new turn starts, the
+turn moves before the CLI starts: the `handover` frame, with `at` 0, follows
+`message_start`, and no `status` frame comes first. The assistant message's
+metadata keeps every switch under `handovers`, so the dividers survive a
+reload, and, for an answer that switched, the tokens all its accounts spent
+together under `usage`.
+
+When no account is left, a turn stopped by a subscription limit ends with the
+organization's limit and its earliest reset, as above. One stopped by a
+credits refusal or a sign-in failure ends with that failure's own message.
+
+**Handing over a task run.** An attempt a usage limit refuses marks its
+account limited and runs again at once on the next account, as the same
+attempt, without backing off. The run's log records it with outcome
+`reroute`, the `from` and `to` accounts, the `agent` the run moved to and
+`resets_at`. The run backs off only when no account is left, until the
+earliest reset. An attempt refused for want of usage credits ends the run
+when no other account can take it. An account whose limit has reset while the
+run was elsewhere takes the run back, at the cost of one attempt, so a limit
+that is never recorded cannot pass a run back and forth for ever.
 
 ### What the agent can reach
 
@@ -1009,8 +1230,9 @@ Every organization's CLI runs as the same operating-system user as the server:
 Nothing at the OS level separates one organization's agent state from
 another's, so any process running as that user can:
 
-- read every organization's agent state: codex's `auth.json`, which is a
-  working ChatGPT login, and both CLIs' session transcripts;
+- read every organization's agent state: each codex account's `auth.json`,
+  which is a working ChatGPT login, and both CLIs' session transcripts in
+  every account's home;
 - read the `/proc/<pid>/environ` of any CLI running at the time, which holds
   that turn's `CLAUDE_CODE_OAUTH_TOKEN` and, when Zone serves it tools, its
   `ZONE_MCP_TOKEN`. The second lets its holder call that turn's Zone tools, as
@@ -1019,7 +1241,8 @@ another's, so any process running as that user can:
   write tools without anyone approving, and what they write lands in that
   run's pull request;
 - write into any organization's agent state: replace or delete its codex
-  login, or plant files for its CLI to read; and into the shared home
+  logins, plant files for its CLI to read, or plant a session file for a
+  handover to carry into another account's home; and into the shared home
   `/home/zone`, whose `.profile` codex's shell loads before the commands it
   runs for any organization;
 - reach whatever the server can reach on the network. In the compose stack
@@ -1089,6 +1312,18 @@ What stands in the way:
 - The flags under *The agent's own tools*, so no operator configuration,
   ChatGPT app or plugin adds tools beside Zone's. codex still exports its own
   metrics to `ab.chatgpt.com`, and nothing in Zone turns that off.
+- A handover copies a session file only between two homes of the same
+  organization and agent, and only for a session id made of ASCII letters,
+  digits and hyphens, as the UUIDs both CLIs use are, so an id cannot name a
+  path outside the session folders. Zone looks the file up without following
+  a link, opens it refusing a link, writes the copy with mode 0600 under a
+  temporary name in directories it creates with mode 0700, and renames it
+  into place, so the CLI never reads half a file and nothing outside the
+  organization's own state is read or written.
+- Usage reads go only to `ZONE_CLAUDE_API_URL` and `ZONE_CODEX_API_URL`, and
+  the Claude profile read only to the former. Each carries the token of the
+  account it reads and no other, follows no redirect, and gives up after five
+  seconds. A codex read takes its token from that account's own `auth.json`.
 
 These providers suit an instance whose organizations trust each other, such
 as a personal or single-team compose stack. On an instance shared by
@@ -1113,8 +1348,11 @@ once approved, and its file tools read whatever else the server's user can.
   `127.0.0.1:${ZONE_AGENT_CALLBACK_PORT}:54545`. `ZONE_AGENT_CALLBACK_PORT` in
   `.env` drives both, 54545 by default; empty, it turns the callback off and
   leaves the port free. Admins whose browsers run elsewhere paste codes either
-  way. The image's entrypoint hands `/app/agent-state` to `zone` with mode
-  0700, then runs the server as `zone`.
+  way. It also passes `ZONE_AGENT_USAGE_TTL_SECONDS` (default `60`),
+  `ZONE_CLAUDE_API_URL` (default `https://api.anthropic.com`) and
+  `ZONE_CODEX_API_URL` (default `https://chatgpt.com`). The image's
+  entrypoint hands `/app/agent-state` to `zone` with mode 0700, then runs the
+  server as `zone`.
   The `dev` profile's image, `manager/Dockerfile.dev`, does not include the
   CLIs.
 - **Helm.** Agent providers need `server.replicaCount: 1` and
@@ -1127,13 +1365,20 @@ once approved, and its file tools read whatever else the server's user can.
   `kubectl port-forward` of both the callback port and the console to its own
   machine, with the forwarded console listed in `ZONE_CONSOLE_ORIGINS` as the
   browser opens it, such as `http://127.0.0.1:3001`; the install notes say how
-  when the callback is set.
+  when the callback is set. Agent state, every account's home and the session
+  files in it, lives in the pod, so carrying a session to another account's
+  home works only within that one pod. With `networkPolicy.enabled`, the
+  usage reads need egress to `api.anthropic.com` and `chatgpt.com`, or the
+  hosts `ZONE_CLAUDE_API_URL` and `ZONE_CODEX_API_URL` name; without it every
+  account's usage reads as unknown.
 - **Backups.** `make backup` and `make restore` include
   `zone_manager_agent_state`, and with it every organization's codex login; see
   [OPERATIONS.md](OPERATIONS.md).
-- **Upgrading.** This version adds migration 048, after which an older image
-  refuses to start against the database with `VersionMissing(48)`. Back up
-  first; see [OPERATIONS.md](OPERATIONS.md).
+- **Upgrading.** Coding agent sign-ins added migration 048, after which an
+  older image refuses to start against the database with
+  `VersionMissing(48)`. Several accounts per agent add migrations 055 and
+  056, after which an older image stops with `VersionMissing(55)`. Back up
+  first; see [OPERATIONS.md](OPERATIONS.md#upgrading-to-migration-055).
 - **Refused at boot**: a relative `ZONE_AGENT_STATE_DIR`, or none when neither
   `XDG_STATE_HOME` nor `HOME` is absolute; a `ZONE_AGENT_HOST_LOGIN` that is not
   one of the spellings above; a `ZONE_CLAUDE_TOKEN_URL` that is not an absolute
@@ -1143,10 +1388,13 @@ once approved, and its file tools read whatever else the server's user can.
   `http://localhost:<port>` or a port, or whose port the server cannot listen
   on; a `ZONE_AGENT_CALLBACK_BIND` that is not an IP address, or an IP address
   and port; a `ZONE_CONSOLE_ORIGINS` entry that is not an `http` or `https`
-  origin, or that carries credentials, a path, a query or a fragment. Nothing
-  is created in the state directory at boot, so one the server cannot write
-  shows up when a turn first needs it, as "Could not prepare the claude CLI's
-  state directory: …".
+  origin, or that carries credentials, a path, a query or a fragment; a
+  `ZONE_AGENT_USAGE_TTL_SECONDS` that is not a whole number of seconds; a
+  `ZONE_CLAUDE_API_URL` or `ZONE_CODEX_API_URL` that is not an absolute `http`
+  or `https` URL with a host, or that carries credentials, a query or a
+  fragment. Nothing is created in the state directory at boot, so one the server
+  cannot write shows up when a turn first needs it, as "Could not prepare the
+  claude CLI's state directory: …".
 
 ### Known gaps
 
@@ -1154,6 +1402,29 @@ once approved, and its file tools read whatever else the server's user can.
   cannot give a chat `opus` or `gpt-6-sol`; set the Fast and Reasoning models
   in AI settings instead. Whether a chat offers Agent mode also follows those
   installed models.
+- The spike that runs both CLIs across two homes
+  (`agent_session_resume_tests`, ignored by default) has not been run, so
+  cross-home resume is unverified; handover falls back to transcript replay if the CLI refuses.
+  Zone reproduces how Claude Code 2.1.285 names a working directory's project
+  folder, which a later claude may change; a session file Zone cannot find
+  replays the same way.
+- The usage endpoints are the ones each agent's own apps read, not documented
+  APIs, so either may change without notice. A usage endpoint that refuses an
+  account's token, with a 401 or 403, does not take the account out of
+  routing: it stays a candidate on its last reading until a turn on it fails
+  to sign in.
+- A failed usage read is kept for the TTL like a successful one, so after an
+  admin signs in to an account again, a stale refusal can last up to
+  `ZONE_AGENT_USAGE_TTL_SECONDS`.
+- Claude's profile does not name the organization, so one person in two
+  Claude organizations counts as one account, and signing in to the second
+  replaces the first.
+- A Claude sign-in made before migration 055 names no account, so signing in
+  to the same account again adds a second sign-in beside it rather than
+  replacing it. Sign the old one out under AI Settings.
+- Agent state lives in each pod under Helm, so a session moves between
+  accounts' homes only within one pod. The chart runs agent providers on one
+  replica.
 
 ---
 
@@ -1430,7 +1701,7 @@ Inside Docker the manager image does not include magents. Install it on the host
 
 An auto project runs itself: every agentic task in it is executed unattended, its pull request waits for checks, is reviewed by a model other than the one that wrote it and by the review bots already installed on the repository (CodeRabbit, Greptile), is fixed until nothing raised is left open, is merged — with administrator privileges when branch protection would otherwise refuse — and is reported with a high-level and a low-level summary. Start one from **Projects → Auto project**, which opens a planner chat that interviews you and creates the project and its tasks, or turn **Auto** on for an existing project. All settings are optional.
 
-On Claude Code, an auto project's runs, reviews and summaries run with no one watching, on the organization's Claude sign-in or, when the organization has not signed in and `ZONE_AGENT_HOST_LOGIN` is on, on the login of the user the server runs as. When that account has usage credits turned on, they keep going on those credits past the plan's limits, through the night, up to the account's monthly cap; Zone logs each such turn, and whose account it ran on, as *Usage credits* under Model Backend describes. The account's owner stops it by turning usage credits off, or bounds it with a monthly cap, at claude.ai/settings/usage. A review whose model, or context, claude says the account cannot spend usage credits on pauses its task with claude's words rather than asking again every tick.
+On Claude Code, an auto project's runs, reviews and summaries run with no one watching, on one of the organization's Claude sign-ins or, when the organization has not signed in and `ZONE_AGENT_HOST_LOGIN` is on, on the login of the user the server runs as. When that account has usage credits turned on, they keep going on those credits past the plan's limits, through the night, up to the account's monthly cap; Zone logs each such turn, and whose account it ran on, as *Usage credits* under Model Backend describes. The account's owner stops it by turning usage credits off, or bounds it with a monthly cap, at claude.ai/settings/usage. A review whose model, or context, claude says the account cannot spend usage credits on pauses its task with claude's words rather than asking again every tick.
 
 ### `ZONE_AUTO_ENABLED`
 - **Default**: `true`
@@ -1714,7 +1985,8 @@ Need to find a specific config? Quick lookup:
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED
 - **Model backend and coding agents**: ZONE_LLM_BACKEND,
   ZONE_LLM_BACKEND_EXECUTABLE, ZONE_AGENT_STATE_DIR, ZONE_AGENT_HOST_LOGIN,
-  ZONE_CLAUDE_TOKEN_URL, ZONE_AGENT_CALLBACK, ZONE_AGENT_CALLBACK_BIND,
+  ZONE_CLAUDE_TOKEN_URL, ZONE_AGENT_USAGE_TTL_SECONDS, ZONE_CLAUDE_API_URL,
+  ZONE_CODEX_API_URL, ZONE_AGENT_CALLBACK, ZONE_AGENT_CALLBACK_BIND,
   ZONE_AGENT_CALLBACK_PORT, ZONE_CONSOLE_ORIGINS, ZONE_CODEX_SANDBOX,
   ZONE_AGENT_ENV_PASSTHROUGH, ZONE_CHAT_AGENT_CWD
 - **Image, video, and audio generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
