@@ -11,11 +11,39 @@ pub enum Availability {
     Unknown,
 }
 
+impl From<aiusg::model::Availability> for Availability {
+    fn from(availability: aiusg::model::Availability) -> Self {
+        match availability {
+            aiusg::model::Availability::Now => Self::Now,
+            aiusg::model::Availability::At(at) => Self::At(at),
+            aiusg::model::Availability::Unknown => Self::Unknown,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeDelta;
 
     use super::*;
+
+    #[test]
+    fn aiusgs_availability_keeps_its_meaning() {
+        let at = Utc::now();
+
+        assert_eq!(
+            Availability::from(aiusg::model::Availability::Now),
+            Availability::Now
+        );
+        assert_eq!(
+            Availability::from(aiusg::model::Availability::At(at)),
+            Availability::At(at)
+        );
+        assert_eq!(
+            Availability::from(aiusg::model::Availability::Unknown),
+            Availability::Unknown
+        );
+    }
 
     #[test]
     fn availability_orders_now_then_by_time_then_unknown() {
