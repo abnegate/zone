@@ -23,18 +23,24 @@ use crate::state::AppState;
 ///
 /// Takes the organization's sign-in lock for a codex login, so it must never be called holding it.
 pub async fn adopt(state: &AppState, login: &AgentLoginRow) -> Result<PathBuf, Error> {
-    let agent = AgentKind::named(&login.agent)
-        .ok_or_else(|| Error::Internal(format!("{} is not an agent Zone drives", login.agent)))?;
-    let organization = login.organization_id;
-    let agents = &state.config().agents;
-    let home = agents
-        .create_login_home(organization, agent, login.id)
-        .map_err(|error| Error::Internal(format!("Could not prepare the login's home: {error}")))?;
+    let agent = agent(login)?;
+    if agent != AgentKind::Codex {
+        return create(state, login, agent);
+    }
+    let _guard = devices::lock(login.organization_id).await;
+    adopt_held(state, login).await
+}
+
+/// [`adopt`], for a caller that already holds the organization's sign-in lock.
+pub(super) async fn adopt_held(state: &AppState, login: &AgentLoginRow) -> Result<PathBuf, Error> {
+    let agent = agent(login)?;
+    let home = create(state, login, agent)?;
     if agent != AgentKind::Codex {
         return Ok(home);
     }
 
-    let _guard = devices::lock(organization).await;
+    let organization = login.organization_id;
+    let agents = &state.config().agents;
     let root = agents.home(organization, agent);
     if !codex::signed_in(&root) || codex::signed_in(&home) {
         return Ok(home);
@@ -50,6 +56,19 @@ pub async fn adopt(state: &AppState, login: &AgentLoginRow) -> Result<PathBuf, E
             "Could not move the organization's codex login into its home: {error}"
         ))),
     }
+}
+
+fn agent(login: &AgentLoginRow) -> Result<AgentKind, Error> {
+    AgentKind::named(&login.agent)
+        .ok_or_else(|| Error::Internal(format!("{} is not an agent Zone drives", login.agent)))
+}
+
+fn create(state: &AppState, login: &AgentLoginRow, agent: AgentKind) -> Result<PathBuf, Error> {
+    state
+        .config()
+        .agents
+        .create_login_home(login.organization_id, agent, login.id)
+        .map_err(|error| Error::Internal(format!("Could not prepare the login's home: {error}")))
 }
 
 #[cfg(test)]

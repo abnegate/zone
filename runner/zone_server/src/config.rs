@@ -359,6 +359,12 @@ impl AgentConfig {
         Ok(self.home(organization, agent))
     }
 
+    /// `<state>/<organization>/<agent>/logins`: where every login home of the
+    /// agent lives.
+    pub fn logins(&self, organization: Uuid, agent: AgentKind) -> PathBuf {
+        agent_home(&self.state, organization, agent).join(LOGINS)
+    }
+
     /// `<state>/<organization>/<agent>/logins/<login>`: one login's own home,
     /// beside the agent's shared working directory.
     pub fn login_home(&self, organization: Uuid, agent: AgentKind, login: Uuid) -> PathBuf {

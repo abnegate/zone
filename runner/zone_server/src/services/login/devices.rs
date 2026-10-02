@@ -3,14 +3,18 @@
 //!
 //! A sign-in finishes on its own, long after the request that started it. The task that records
 //! it takes the organization's lock and acts only while its attempt is still the current one, and
-//! a sign-out takes the same lock and ends the attempt first, so a sign-in that finishes around a
-//! sign-out can never record a login after it.
+//! a sign-out or a cancel takes the same lock and ends the attempt first, so a sign-in that
+//! finishes around one can never record a login after it.
+//!
+//! Every codex login lives in a home of its own. A finished sign-in waits in a staging directory
+//! until Zone knows which login it is: the same person in the same ChatGPT account signing in again
+//! replaces that login and the file in its home, and anyone else adds a login beside it.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use abnegate_secret::redact;
 use chrono::{DateTime, SubsecRound, Utc};
@@ -22,10 +26,10 @@ use uuid::Uuid;
 use zone_core::llm::AgentKind;
 use zone_core::llm::provider::environment;
 
-use super::codex::{self, CREDENTIALS, Device, Prompt};
+use super::codex::{self, Account, CREDENTIALS, Device, Prompt, Staging};
 use super::error::Error;
 use super::locks::{Guard, Locks};
-use super::{audit, oauth, probe};
+use super::{audit, homes, oauth, probe};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow, Insert};
 use crate::db::organizations;
@@ -36,8 +40,8 @@ const UNSAVED: &str = "Codex signed in, but Zone could not record the sign-in. S
 
 static DEVICES: LazyLock<Devices> = LazyLock::new(Devices::default);
 
-/// How a pending sign-in ends: `Err` carries why it failed, in codex's own words.
-type Outcome = Shared<BoxFuture<'static, Result<(), String>>>;
+/// How a pending sign-in ends: the login codex saved, or why it failed, in codex's own words.
+type Outcome = Shared<BoxFuture<'static, Result<Arc<Staging>, String>>>;
 
 /// Resolves once how an attempt ended has been recorded.
 type Completion = Shared<BoxFuture<'static, ()>>;
@@ -71,9 +75,9 @@ pub async fn start(
     Ok(prompt)
 }
 
-/// Signs the organization out of `agent`, and records who did. Every Claude sign-in in flight is
-/// ended first; for codex, a pending sign-in is stopped, and codex then logs out of the
-/// organization's home.
+/// Signs the organization out of every login of `agent`, and records who did. Every Claude
+/// sign-in in flight is ended first; for codex, a pending sign-in is stopped, and codex then logs
+/// out of each login's home.
 pub async fn sign_out(
     state: &AppState,
     organization: Uuid,
@@ -86,15 +90,37 @@ pub async fn sign_out(
         .await
 }
 
+/// Signs the organization out of its `agent` login `login` alone, and records who did: for codex,
+/// codex logs out of that login's home, which is then removed. Its other logins, and any sign-in
+/// in flight, stay as they are. `false` when the organization holds no such login.
+pub async fn sign_out_login(
+    state: &AppState,
+    organization: Uuid,
+    agent: AgentKind,
+    login: Uuid,
+    user: Uuid,
+    email: &str,
+) -> Result<bool, Error> {
+    DEVICES
+        .sign_out_login(state, organization, agent, login, user, email)
+        .await
+}
+
+/// Stops the organization's pending codex sign-in, keeping every login it already holds. A login
+/// codex saved just before is logged out again, so it never outlives the attempt.
+pub async fn cancel(state: &AppState, organization: Uuid) {
+    DEVICES.cancel(state.config(), organization).await;
+}
+
 /// The lock that orders every change to the organization's agent sign-ins, until it is dropped.
 pub(super) async fn lock(organization: Uuid) -> Guard<'static> {
     DEVICES.locks.lock(organization).await
 }
 
 /// Forgets everything this server keeps for a deleted organization's coding agents: its Claude
-/// sign-ins in flight are dropped, a pending codex sign-in is stopped and codex logs out of the
-/// organization's home before it returns, and the organization's agent state is then removed in
-/// the background, which logs a removal that fails. It runs to the end even when its caller stops
+/// sign-ins in flight are dropped, a pending codex sign-in is stopped and codex logs out of every
+/// login home before it returns, and the organization's agent state is then removed in the
+/// background, which logs a removal that fails. It runs to the end even when its caller stops
 /// waiting for it.
 pub async fn forget(state: &AppState, organization: Uuid) -> Result<(), Error> {
     forget_with(state, organization, |directory: &Path| {
@@ -197,7 +223,7 @@ impl Devices {
         self.failures.remove(&organization);
 
         let config = state.config();
-        let home = config
+        let root = config
             .agents
             .create_home(organization, AgentKind::Codex)
             .map_err(|error| {
@@ -206,7 +232,8 @@ impl Devices {
                 ))
             })?;
         let executable = config.agent_executable(AgentKind::Codex);
-        let device = codex::device(&executable, &home, &variables(AgentKind::Codex)).await;
+        let id = Uuid::new_v4();
+        let device = codex::device(&executable, &root, id, &variables(AgentKind::Codex)).await;
         let Device {
             prompt,
             outcome,
@@ -221,7 +248,6 @@ impl Devices {
             }
         };
 
-        let id = Uuid::new_v4();
         let outcome = ending(organization, outcome);
         let prompt = Prompt {
             expires_at: prompt.expires_at.trunc_subsecs(0),
@@ -247,12 +273,16 @@ impl Devices {
         Ok((prompt, Some(completion)))
     }
 
-    /// Records how attempt `id` ended, unless it is no longer the organization's current one.
+    /// Records how attempt `id` ended, unless it is no longer the organization's current one. Who
+    /// codex signed in as is read before the lock is taken, since asking codex takes a while.
     async fn complete(&self, state: AppState, organization: Uuid, id: Uuid, outcome: Outcome) {
-        let ended = outcome.await;
-        let label = match ended {
-            Ok(()) => describe(state.config(), organization).await,
-            Err(_) => None,
+        let ended = match outcome.await {
+            Ok(staging) => {
+                let account = codex::signed_in_as(staging.path());
+                let described = describe(state.config(), organization, staging.path()).await;
+                Ok((staging, account, described))
+            }
+            Err(reason) => Err(reason),
         };
 
         let _guard = self.locks.lock(organization).await;
@@ -265,18 +295,22 @@ impl Devices {
             return;
         };
         match ended {
-            Ok(()) => {
-                let login = Insert {
-                    organization_id: organization,
-                    agent: AgentKind::Codex.as_str(),
-                    account: None,
-                    credential: None,
-                    label: label.as_deref(),
-                    expires_at: None,
-                };
-                match replace(&state, &login).await {
+            Ok((staging, account, described)) => {
+                let label = account
+                    .as_ref()
+                    .and_then(|account| account.email.clone())
+                    .or(described);
+                let recorded = record(
+                    &state,
+                    organization,
+                    &staging,
+                    account.as_ref(),
+                    label.as_deref(),
+                )
+                .await;
+                self.attempts.remove(&organization);
+                match recorded {
                     Ok(login) => {
-                        self.attempts.remove(&organization);
                         audit::signed_in(state.db(), organization, initiator, &email, &login).await;
                     }
                     Err(error) => {
@@ -285,7 +319,7 @@ impl Devices {
                             %error,
                             "could not record a finished codex sign-in; logging codex out"
                         );
-                        if let Err(error) = log_out(state.config(), organization).await {
+                        if let Err(error) = log_out(state.config(), staging.path()).await {
                             tracing::error!(
                                 %organization,
                                 %error,
@@ -293,7 +327,6 @@ impl Devices {
                             );
                         }
                         self.failures.insert(organization, UNSAVED.to_string());
-                        self.attempts.remove(&organization);
                     }
                 }
             }
@@ -314,20 +347,61 @@ impl Devices {
     ) -> Result<(), Error> {
         let _guard = self.locks.lock(organization).await;
         match agent {
-            AgentKind::Claude => oauth::forget(organization),
-            AgentKind::Codex => {
-                self.stop(organization).await;
-                log_out(state.config(), organization).await?;
+            AgentKind::Claude => {
+                oauth::forget(organization);
+                for login in
+                    agent_logins::delete_all(state.db(), organization, agent.as_str()).await?
+                {
+                    audit::signed_out(state.db(), organization, user, email, &login).await;
+                }
             }
-        }
-        for login in agent_logins::delete_all(state.db(), organization, agent.as_str()).await? {
-            audit::signed_out(state.db(), organization, user, email, &login).await;
+            AgentKind::Codex => {
+                let config = state.config();
+                self.stop(config, organization).await;
+                for login in
+                    agent_logins::list_for(state.db(), organization, agent.as_str()).await?
+                {
+                    let home = config.agents.login_home(organization, agent, login.id);
+                    log_out(config, &home).await?;
+                    remove(state, organization, &login, user, email).await?;
+                }
+                log_out(config, &config.agents.home(organization, agent)).await?;
+            }
         }
         Ok(())
     }
 
-    /// Returns once codex has logged out. The organization's agent state is then removed off the
-    /// async runtime, still under the organization's lock.
+    async fn sign_out_login(
+        &self,
+        state: &AppState,
+        organization: Uuid,
+        agent: AgentKind,
+        id: Uuid,
+        user: Uuid,
+        email: &str,
+    ) -> Result<bool, Error> {
+        let _guard = self.locks.lock(organization).await;
+        let logins = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
+        let Some(login) = logins.iter().find(|login| login.id == id) else {
+            return Ok(false);
+        };
+        if agent == AgentKind::Codex {
+            let config = state.config();
+            log_out(config, &config.agents.login_home(organization, agent, id)).await?;
+            if logins.len() == 1 {
+                log_out(config, &config.agents.home(organization, agent)).await?;
+            }
+        }
+        remove(state, organization, login, user, email).await
+    }
+
+    async fn cancel(&self, config: &Config, organization: Uuid) {
+        let _guard = self.locks.lock(organization).await;
+        self.stop(config, organization).await;
+    }
+
+    /// Returns once codex has logged out of every home. The organization's agent state is then
+    /// removed off the async runtime, still under the organization's lock.
     async fn forget(
         &'static self,
         state: &AppState,
@@ -336,14 +410,21 @@ impl Devices {
     ) -> Result<(), Error> {
         let guard = self.locks.lock(organization).await;
         oauth::forget(organization);
-        self.stop(organization).await;
-        self.failures.remove(&organization);
         let config = state.config();
+        self.stop(config, organization).await;
+        self.failures.remove(&organization);
         let Some(directory) = agent_state(config, organization).await? else {
             return Ok(());
         };
-        if let Err(error) = log_out(config, organization).await {
-            tracing::warn!(%organization, %error, "codex could not log a deleted organization out");
+        for home in all_homes(config, organization).await {
+            if let Err(error) = log_out(config, &home).await {
+                tracing::warn!(
+                    %organization,
+                    %error,
+                    home = %home.display(),
+                    "codex could not log a deleted organization out"
+                );
+            }
         }
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
@@ -359,27 +440,145 @@ impl Devices {
         Ok(())
     }
 
-    /// Ends the organization's pending sign-in and waits for codex to exit, so a login codex
-    /// saved just before is already in place when codex logs out.
-    async fn stop(&self, organization: Uuid) {
+    /// Ends the organization's pending sign-in and waits for codex to exit. A login codex saved
+    /// just before is logged out of its staging directory, so a sign-in that finished around a
+    /// sign-out or a cancel never stays signed in upstream.
+    async fn stop(&self, config: &Config, organization: Uuid) {
         let Some((_, attempt)) = self.attempts.remove(&organization) else {
             return;
         };
         if let Some(cancel) = attempt.cancel {
             let _ = cancel.send(());
         }
-        let _ = attempt.outcome.await;
+        if let Ok(staging) = attempt.outcome.await
+            && let Err(error) = log_out(config, staging.path()).await
+        {
+            tracing::warn!(
+                %organization,
+                %error,
+                "could not log codex out of a sign-in that ended unrecorded"
+            );
+        }
     }
 }
 
-/// Records `login` in place of every login the organization held of its agent, in one transaction,
-/// so a sign-in without an account replaces the one before it.
-async fn replace(state: &AppState, login: &Insert<'_>) -> Result<AgentLoginRow, sqlx::Error> {
+/// Records the login codex saved in `staging` and moves it into its home, in one transaction: the
+/// account's own login when the organization already holds one, a new login beside the others
+/// when it does not. A login that names no account cannot be told apart from the organization's
+/// other such logins, so it replaces them, and codex logs out of their homes.
+///
+/// When it fails, the new login is still in `staging`, unless it reached a home nothing records,
+/// which is then logged out and removed here.
+async fn record(
+    state: &AppState,
+    organization: Uuid,
+    staging: &Staging,
+    account: Option<&Account>,
+    label: Option<&str>,
+) -> Result<AgentLoginRow, Error> {
+    let config = state.config();
+    let agent = AgentKind::Codex;
+    let held = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
+    if let [only] = held.as_slice()
+        && let Err(error) = homes::adopt_held(state, only).await
+    {
+        tracing::warn!(%organization, %error, "could not move a legacy codex login into its home");
+    }
+    let key = account.map(Account::key);
+
     let mut transaction = state.db().begin().await?;
-    agent_logins::delete_all(&mut *transaction, login.organization_id, login.agent).await?;
-    let stored = agent_logins::insert(&mut *transaction, login).await?;
-    transaction.commit().await?;
-    Ok(stored)
+    if !organizations::hold(&mut transaction, organization).await? {
+        return Err(Error::Deleted);
+    }
+    let mut replaced = Vec::new();
+    if key.is_none() {
+        for login in held.iter().filter(|login| login.account.is_none()) {
+            replaced.extend(agent_logins::delete(&mut *transaction, organization, login.id).await?);
+        }
+    }
+    let login = agent_logins::insert(
+        &mut *transaction,
+        &Insert {
+            organization_id: organization,
+            agent: agent.as_str(),
+            account: key.as_deref(),
+            credential: None,
+            label,
+            expires_at: None,
+        },
+    )
+    .await?;
+    let home = config
+        .agents
+        .create_login_home(organization, agent, login.id)
+        .map_err(|error| Error::Internal(format!("Could not prepare the login's home: {error}")))?;
+    staging
+        .promote(&home)
+        .map_err(|error| Error::Internal(error.to_string()))?;
+    if let Err(error) = transaction.commit().await {
+        if !held.iter().any(|existing| existing.id == login.id) {
+            discard(config, organization, &home).await;
+        }
+        return Err(error.into());
+    }
+
+    for gone in replaced {
+        discard(
+            config,
+            organization,
+            &config.agents.login_home(organization, agent, gone.id),
+        )
+        .await;
+    }
+    Ok(login)
+}
+
+/// Deletes `login`, which codex has logged out of when it is a codex login, then its home, and
+/// records who signed it out. `false` when it was already gone.
+async fn remove(
+    state: &AppState,
+    organization: Uuid,
+    login: &AgentLoginRow,
+    user: Uuid,
+    email: &str,
+) -> Result<bool, Error> {
+    let Some(deleted) = agent_logins::delete(state.db(), organization, login.id).await? else {
+        return Ok(false);
+    };
+    if let Some(agent) = AgentKind::named(&deleted.agent) {
+        clear(
+            organization,
+            &state
+                .config()
+                .agents
+                .login_home(organization, agent, deleted.id),
+        );
+    }
+    audit::signed_out(state.db(), organization, user, email, &deleted).await;
+    Ok(true)
+}
+
+/// Logs codex out of `home` and removes it, logging whatever fails: nothing records the login in
+/// it any more.
+async fn discard(config: &Config, organization: Uuid, home: &Path) {
+    if let Err(error) = log_out(config, home).await {
+        tracing::warn!(%organization, %error, "could not log codex out of a login Zone dropped");
+    }
+    clear(organization, home);
+}
+
+/// Removes a login's home, which no longer holds a login, logging a removal that fails.
+fn clear(organization: Uuid, home: &Path) {
+    match fs::remove_dir_all(home) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            %organization,
+            %error,
+            home = %home.display(),
+            "could not remove a signed-out login's home"
+        ),
+    }
 }
 
 /// `<state>/<organization>`, which holds every agent home of the organization, when it is a real
@@ -414,18 +613,49 @@ fn inspect(directory: PathBuf) -> Result<Option<PathBuf>, Error> {
     }
 }
 
-/// Runs `codex logout` in the organization's codex home, when it has one. Codex revokes its login
-/// upstream and deletes it; when it cannot, the login is deleted here, so the sign-out holds.
-async fn log_out(config: &Config, organization: Uuid) -> Result<(), Error> {
-    let home = config.agents.home(organization, AgentKind::Codex);
-    if !home.is_dir() {
+/// Every codex home of the organization that is a real directory: its codex root, which held its
+/// one login before logins had homes, then each login's home, inspected off the async runtime.
+async fn all_homes(config: &Config, organization: Uuid) -> Vec<PathBuf> {
+    let root = config.agents.home(organization, AgentKind::Codex);
+    let logins = config.agents.logins(organization, AgentKind::Codex);
+    tokio::task::spawn_blocking(move || {
+        let mut homes: Vec<PathBuf> = fs::read_dir(&logins)
+            .into_iter()
+            .filter(|_| directory(&logins))
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|home| directory(home))
+            .collect();
+        homes.sort();
+        if directory(&root) {
+            homes.insert(0, root);
+        }
+        homes
+    })
+    .await
+    .unwrap_or_default()
+}
+
+fn directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// Runs `codex logout` in `home` when it holds a login. Codex revokes the login upstream and
+/// deletes it; when it cannot, the login is deleted here, so the sign-out holds.
+async fn log_out(config: &Config, home: &Path) -> Result<(), Error> {
+    if !codex::signed_in(home) {
         return Ok(());
     }
     let executable = config.agent_executable(AgentKind::Codex);
-    let Err(error) = codex::logout(&executable, &home, &variables(AgentKind::Codex)).await else {
+    let Err(error) = codex::logout(&executable, home, &variables(AgentKind::Codex)).await else {
         return Ok(());
     };
-    tracing::warn!(%organization, error = %said(&error), "codex could not log out; deleting its login");
+    tracing::warn!(
+        home = %home.display(),
+        error = %said(&error),
+        "codex could not log out; deleting its login"
+    );
     match fs::remove_file(home.join(CREDENTIALS)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -435,9 +665,8 @@ async fn log_out(config: &Config, organization: Uuid) -> Result<(), Error> {
     }
 }
 
-/// How codex describes the login it saved in the organization's home, such as "ChatGPT".
-async fn describe(config: &Config, organization: Uuid) -> Option<String> {
-    let home = config.agents.home(organization, AgentKind::Codex);
+/// How codex describes the login it saved in `home`, such as "ChatGPT".
+async fn describe(config: &Config, organization: Uuid, home: &Path) -> Option<String> {
     let mut variables = variables(AgentKind::Codex);
     variables.insert(
         AgentKind::Codex.home().to_string(),
@@ -455,10 +684,10 @@ async fn describe(config: &Config, organization: Uuid) -> Option<String> {
 
 /// How the organization's attempt ends, as its status shows it. Zone's own failure to save the
 /// login is logged, and shows as [`UNSAVED`].
-fn ending(organization: Uuid, outcome: JoinHandle<Result<(), codex::Error>>) -> Outcome {
+fn ending(organization: Uuid, outcome: JoinHandle<Result<Staging, codex::Error>>) -> Outcome {
     outcome
         .map(move |finished| match finished {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(staging)) => Ok(Arc::new(staging)),
             Ok(Err(codex::Error::Filesystem(message))) => {
                 tracing::error!(%organization, %message, "could not save codex's new login");
                 Err(UNSAVED.to_string())
@@ -519,11 +748,15 @@ mod tests {
     const RELEASE: &str = "release";
     const STARTED: &str = "started";
     const LOGOUTS: &str = "logouts";
+    const SAVES: &str = "saves";
+    const ONE: &str = "00000000-0000-4000-8000-000000000001";
+    const TWO: &str = "00000000-0000-4000-8000-000000000002";
     const LASTING: &str = "expires in 15 minutes";
     const LAPSED: &str = "expires in 0 minutes";
 
     /// Codex as far as a sign-in needs it. `login --device-auth` counts itself in `started`,
-    /// prints the recorded prompt and saves a login once `approve` appears, consuming it;
+    /// prints the recorded prompt and saves a login once `approve` appears, consuming it: the
+    /// contents of `saves` when it exists, and an `auth.json` naming no account otherwise;
     /// `login status` marks `probing` and holds while `hold` is there without `release`; `logout`
     /// adds the home it logged out of to `logouts`.
     fn stand_in(control: &Path, prompt: &str) -> String {
@@ -541,7 +774,11 @@ mod tests {
         waited=$((waited + 1))
     done
     rm '{control}/{APPROVE}' || exit 1
-    printf '{{}}' > "$CODEX_HOME/{CREDENTIALS}"
+    if [ -f '{control}/{SAVES}' ]; then
+        cp '{control}/{SAVES}' "$CODEX_HOME/{CREDENTIALS}"
+    else
+        printf '{{}}' > "$CODEX_HOME/{CREDENTIALS}"
+    fi
     exit 0
     ;;
 'login status')
@@ -655,6 +892,40 @@ esac"#
                 .home(self.organization, AgentKind::Codex)
         }
 
+        fn login_home(&self, login: Uuid) -> PathBuf {
+            self.state
+                .config()
+                .agents
+                .login_home(self.organization, AgentKind::Codex, login)
+        }
+
+        /// Has the stand-in save `auth` as the next login it signs in.
+        fn saves(&self, auth: &str) {
+            std::fs::write(self.control(SAVES), auth).expect("the login codex saves next");
+        }
+
+        /// Signs codex in, saving `auth`, and waits until how it ended is recorded.
+        async fn sign_in(&self, auth: &str) {
+            self.saves(auth);
+            let (_, completion) = self.start().await;
+            self.touch(APPROVE);
+            finished(completion).await;
+            assert_eq!(failure(self.organization), None);
+        }
+
+        async fn sign_out_login(&self, login: Uuid) -> bool {
+            sign_out_login(
+                &self.state,
+                self.organization,
+                AgentKind::Codex,
+                login,
+                self.user,
+                EMAIL,
+            )
+            .await
+            .expect("the sign-out")
+        }
+
         async fn start(&self) -> (Prompt, Option<Completion>) {
             DEVICES
                 .start(&self.state, self.organization, self.user, EMAIL)
@@ -712,6 +983,17 @@ esac"#
                 .await
                 .expect("the admin can be deleted");
         }
+    }
+
+    /// Codex's `auth.json` for a login to the ChatGPT account `account`, its tokens named `tokens`.
+    fn auth(account: &str, tokens: &str) -> String {
+        format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"id_token":"{tokens}","access_token":"{tokens}","account_id":"{account}"}}}}"#
+        )
+    }
+
+    fn saved(home: &Path) -> Option<String> {
+        std::fs::read_to_string(home.join(CREDENTIALS)).ok()
     }
 
     async fn appeared(path: &Path) -> bool {
@@ -844,16 +1126,23 @@ esac"#
     async fn a_finished_sign_in_that_cannot_be_recorded_is_logged_out() {
         let scene = Scene::new(PROMPT).await;
         let (_, completion) = scene.start().await;
+        let staging = scene
+            .home()
+            .join(".login")
+            .join(scene.attempt().expect("a sign-in in flight").to_string());
 
         scene.delete_organization().await;
         scene.touch(APPROVE);
         finished(completion).await;
 
-        assert!(
-            !scene.home().join(CREDENTIALS).exists(),
+        assert_eq!(
+            scene.lines(LOGOUTS),
+            [staging.display().to_string()],
             "codex's login outlived a sign-in Zone could not record"
         );
-        assert_eq!(scene.lines(LOGOUTS), [scene.home().display().to_string()]);
+        assert!(gone(&staging).await, "the staging directory was left");
+        assert!(!scene.home().join(CREDENTIALS).exists());
+        assert!(scene.logins().await.is_empty());
         assert_eq!(failure(scene.organization).as_deref(), Some(UNSAVED));
         assert!(pending(scene.organization).is_none());
         scene.remove().await;
@@ -974,7 +1263,10 @@ esac"#
             .expect("the organization to be forgotten");
         finished(completion).await;
 
-        assert_eq!(scene.lines(LOGOUTS), [scene.home().display().to_string()]);
+        assert!(
+            scene.lines(LOGOUTS).is_empty(),
+            "codex logged out of a home that held no login"
+        );
         assert!(
             gone(&organization_state).await,
             "the deleted organization's agent state was left"
@@ -998,7 +1290,8 @@ esac"#
         let (_, completion) = scene.start().await;
         scene.touch(APPROVE);
         finished(completion).await;
-        assert!(scene.login().await.is_some(), "codex never signed in");
+        let login = scene.login().await.expect("codex signed in");
+        let login_home = scene.login_home(login.id);
         let organization_state = scene
             .home()
             .parent()
@@ -1020,9 +1313,9 @@ esac"#
             organization_state.exists(),
             "forgetting the organization waited for its agent state to be removed"
         );
-        assert_eq!(scene.lines(LOGOUTS), [scene.home().display().to_string()]);
+        assert_eq!(scene.lines(LOGOUTS), [login_home.display().to_string()]);
         assert!(
-            !codex::signed_in(&scene.home()),
+            !codex::signed_in(&login_home),
             "the agent state being removed still holds a codex login"
         );
         assert!(
@@ -1112,6 +1405,158 @@ esac"#
         assert!(
             scene.lines(LOGOUTS).is_empty(),
             "codex logged out of a home behind a link"
+        );
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_second_codex_sign_in_gets_its_own_home_beside_the_first() {
+        let scene = Scene::new(PROMPT).await;
+        let (first, second) = (auth(ONE, "first"), auth(TWO, "second"));
+
+        scene.sign_in(&first).await;
+        scene.sign_in(&second).await;
+
+        let logins = scene.logins().await;
+        let accounts: Vec<Option<&str>> = logins
+            .iter()
+            .map(|login| login.account.as_deref())
+            .collect();
+        assert_eq!(accounts, [Some(ONE), Some(TWO)]);
+        let homes: Vec<PathBuf> = logins
+            .iter()
+            .map(|login| scene.login_home(login.id))
+            .collect();
+        assert_eq!(saved(&homes[0]).as_deref(), Some(first.as_str()));
+        assert_eq!(saved(&homes[1]).as_deref(), Some(second.as_str()));
+        let parent = scene
+            .state
+            .config()
+            .agents
+            .logins(scene.organization, AgentKind::Codex);
+        for home in &homes {
+            assert_eq!(home.parent(), Some(parent.as_path()));
+        }
+        assert!(
+            !scene.home().join(CREDENTIALS).exists(),
+            "a login landed in the codex root"
+        );
+        assert!(
+            scene.lines(LOGOUTS).is_empty(),
+            "the second sign-in logged the first out"
+        );
+        scene.sign_out().await;
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_codex_re_sign_in_of_the_same_account_replaces_its_login_and_home() {
+        let scene = Scene::new(PROMPT).await;
+        scene.sign_in(&auth(ONE, "first")).await;
+        let first = scene.login().await.expect("the first sign-in was recorded");
+        agent_logins::exhaust(
+            &scene.pool,
+            first.id,
+            Utc::now() + chrono::TimeDelta::hours(1),
+        )
+        .await
+        .expect("the login at its limit");
+        let again = auth(ONE, "again");
+
+        scene.sign_in(&again).await;
+
+        let logins = scene.logins().await;
+        let [login] = logins.as_slice() else {
+            panic!("one login, got {logins:?}");
+        };
+        assert_eq!(login.id, first.id, "the same account became a second login");
+        assert_eq!(
+            login.exhausted_until, None,
+            "a fresh sign-in kept the old exhaustion"
+        );
+        assert_eq!(
+            saved(&scene.login_home(first.id)).as_deref(),
+            Some(again.as_str())
+        );
+        let homes = std::fs::read_dir(
+            scene
+                .state
+                .config()
+                .agents
+                .logins(scene.organization, AgentKind::Codex),
+        )
+        .expect("the login homes")
+        .count();
+        assert_eq!(homes, 1, "the re-sign-in left a second home");
+        scene.sign_out().await;
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn signing_out_one_codex_login_logs_out_that_home_alone() {
+        let scene = Scene::new(PROMPT).await;
+        let second = auth(TWO, "second");
+        scene.sign_in(&auth(ONE, "first")).await;
+        scene.sign_in(&second).await;
+        let logins = scene.logins().await;
+        let (leaving, staying) = (&logins[0], &logins[1]);
+
+        assert!(scene.sign_out_login(leaving.id).await);
+
+        assert_eq!(
+            scene.lines(LOGOUTS),
+            [scene.login_home(leaving.id).display().to_string()]
+        );
+        assert!(
+            !scene.login_home(leaving.id).exists(),
+            "the signed-out login's home was left"
+        );
+        assert_eq!(
+            saved(&scene.login_home(staying.id)).as_deref(),
+            Some(second.as_str())
+        );
+        let ids: Vec<Uuid> = scene.logins().await.iter().map(|login| login.id).collect();
+        assert_eq!(ids, [staying.id]);
+        assert!(
+            !scene.sign_out_login(leaving.id).await,
+            "a login already signed out was found"
+        );
+        scene.sign_out().await;
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn forgetting_an_organization_logs_out_every_login_home() {
+        let scene = Scene::new(PROMPT).await;
+        scene.sign_in(&auth(ONE, "first")).await;
+        scene.sign_in(&auth(TWO, "second")).await;
+        std::fs::write(scene.home().join(CREDENTIALS), b"{}")
+            .expect("a login from before login homes");
+        let mut homes: Vec<String> = scene
+            .logins()
+            .await
+            .iter()
+            .map(|login| scene.login_home(login.id).display().to_string())
+            .collect();
+        homes.push(scene.home().display().to_string());
+        homes.sort();
+        let organization_state = scene
+            .home()
+            .parent()
+            .expect("the codex home is inside the organization's state")
+            .to_path_buf();
+        scene.delete_organization().await;
+
+        forget(&scene.state, scene.organization)
+            .await
+            .expect("the organization to be forgotten");
+
+        let mut logouts = scene.lines(LOGOUTS);
+        logouts.sort();
+        assert_eq!(logouts, homes);
+        assert!(
+            gone(&organization_state).await,
+            "the deleted organization's agent state was left"
         );
         scene.remove().await;
     }
