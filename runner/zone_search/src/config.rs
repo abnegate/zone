@@ -39,9 +39,9 @@ impl Default for WebSearchConfig {
 }
 
 impl WebSearchConfig {
-    /// Load from `SEARCH_*` environment variables. Missing values use defaults
-    /// that match docker-compose (`SEARCH_ENABLE_WEB_SEARCH=true`
-    /// and the Gluetun SearXNG URL).
+    /// Load from `SEARCH_*` and `ZONE_VPN`. Missing values use the Compose
+    /// defaults (`SEARCH_ENABLE_WEB_SEARCH=true`, the Gluetun SearXNG URL).
+    /// Lookups stay off unless the VPN tunnel is on.
     pub fn from_env() -> Self {
         let result_count = env::var("SEARCH_RESULT_COUNT")
             .ok()
@@ -54,7 +54,7 @@ impl WebSearchConfig {
             .unwrap_or(15)
             .clamp(1, 60);
         Self {
-            enabled: env_truthy("SEARCH_ENABLE_WEB_SEARCH", true),
+            enabled: env_truthy("SEARCH_ENABLE_WEB_SEARCH", true) && env_truthy("ZONE_VPN", false),
             query_url: env::var("SEARCH_SEARXNG_QUERY_URL")
                 .unwrap_or_else(|_| DEFAULT_SEARXNG_QUERY_URL.to_string()),
             result_count,
@@ -75,5 +75,117 @@ impl WebSearchConfig {
             Some(v) if v.is_boolean() => v.as_bool() == Some(true),
             _ => crate::client::needs_web_search(content),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::SearchContext;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    static ENVIRONMENT: Mutex<()> = Mutex::new(());
+
+    fn lock() -> MutexGuard<'static, ()> {
+        ENVIRONMENT.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    struct Isolated(Vec<(&'static str, Option<OsString>)>);
+
+    impl Isolated {
+        fn new(names: &[&'static str]) -> Self {
+            let saved = names
+                .iter()
+                .map(|name| (*name, env::var_os(name)))
+                .collect();
+            for name in names {
+                // SAFETY: every environment-mutating test in this module holds
+                // ENVIRONMENT for the guard's lifetime.
+                unsafe { env::remove_var(name) };
+            }
+            Self(saved)
+        }
+
+        fn set(name: &str, value: &str) {
+            // SAFETY: the caller still holds ENVIRONMENT.
+            unsafe { env::set_var(name, value) };
+        }
+    }
+
+    impl Drop for Isolated {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                // SAFETY: the caller still holds ENVIRONMENT while the saved
+                // process environment is restored.
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(name, value),
+                        None => env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    const NAMES: &[&str] = &[
+        "SEARCH_ENABLE_WEB_SEARCH",
+        "SEARCH_SEARXNG_QUERY_URL",
+        "SEARCH_RESULT_COUNT",
+        "SEARCH_TIMEOUT_SECS",
+        "ZONE_VPN",
+    ];
+
+    fn recency() -> &'static str {
+        "What is the latest news on OpenAI?"
+    }
+
+    fn force_on() -> serde_json::Value {
+        serde_json::json!({ "web_search": true })
+    }
+
+    #[test]
+    fn from_env_stays_off_when_the_vpn_is_not_on() {
+        let _lock = lock();
+        let _environment = Isolated::new(NAMES);
+        let config = WebSearchConfig::from_env();
+        assert!(!config.enabled);
+        assert!(!config.requested_for(recency(), None));
+        assert!(!config.requested_for("anything", Some(&force_on())));
+        assert_eq!(SearchContext::new(&config), SearchContext::Disabled);
+    }
+
+    #[test]
+    fn from_env_turns_on_when_the_vpn_is_on() {
+        let _lock = lock();
+        let _environment = Isolated::new(NAMES);
+        Isolated::set("ZONE_VPN", "1");
+        let config = WebSearchConfig::from_env();
+        assert!(config.enabled);
+        assert!(config.requested_for(recency(), None));
+        assert_eq!(SearchContext::new(&config), SearchContext::NotRequested);
+    }
+
+    #[test]
+    fn from_env_stays_off_when_search_is_disabled_even_with_vpn() {
+        let _lock = lock();
+        let _environment = Isolated::new(NAMES);
+        Isolated::set("ZONE_VPN", "1");
+        Isolated::set("SEARCH_ENABLE_WEB_SEARCH", "false");
+        let config = WebSearchConfig::from_env();
+        assert!(!config.enabled);
+        assert!(!config.requested_for(recency(), Some(&force_on())));
+        assert_eq!(SearchContext::new(&config), SearchContext::Disabled);
+    }
+
+    #[test]
+    fn from_env_treats_empty_and_zero_vpn_as_off() {
+        let _lock = lock();
+        let _environment = Isolated::new(NAMES);
+        Isolated::set("SEARCH_ENABLE_WEB_SEARCH", "true");
+        Isolated::set("ZONE_VPN", "");
+        assert!(!WebSearchConfig::from_env().enabled);
+        Isolated::set("ZONE_VPN", "0");
+        assert!(!WebSearchConfig::from_env().enabled);
     }
 }

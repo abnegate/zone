@@ -101,6 +101,7 @@ services:
       gluetun:
         condition: service_healthy
     environment:
+      ZONE_VPN: "1"
       LITELLM_HOST: http://127.0.0.1:4000
       SEARCH_SEARXNG_QUERY_URL: http://127.0.0.1:8080/search?q=<query>&format=json
       MONITORING_GRAFANA_URL: http://127.0.0.1:3000

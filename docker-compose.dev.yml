@@ -62,6 +62,7 @@ services:
       - RUST_LOG=zone_server=debug,zone_core=debug,zone_context=debug
       - RUST_BACKTRACE=1
       - SEARCH_ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
+      - ZONE_VPN=${ZONE_VPN:-}
       - "SEARCH_SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL:-http://gluetun:8080/search?q=<query>&format=json}"
       - SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT:-5}
       - MODEL_SEARCH_PROXY_URL=${MODEL_SEARCH_PROXY_URL:-}

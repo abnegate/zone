@@ -350,21 +350,26 @@ mod tests {
     /// How long a connection the registry already holds may take to surface.
     const ACCEPT_TIMEOUT: Duration = Duration::from_millis(250);
 
-    fn tool(chat: Option<Uuid>, search: WebSearchConfig, registry: u16) -> WebSearchTool {
+    fn scoped(search: WebSearchConfig, registry: u16, chat: Option<Uuid>) -> WorkspaceScope {
         let mut config = test_config();
         config.web_search = search;
         let database = PgPoolOptions::new()
             .acquire_timeout(REGISTRY_TIMEOUT)
             .connect_lazy(&format!("postgres://127.0.0.1:{registry}/zone"))
             .expect("a lazy pool needs no server");
+        WorkspaceScope {
+            state: AppState::new(config, database, None),
+            workspace_id: Uuid::new_v4(),
+            chat_id: chat,
+            user_id: Uuid::new_v4(),
+        }
+    }
+
+    fn tool(chat: Option<Uuid>, search: WebSearchConfig, registry: u16) -> WebSearchTool {
+        let scope = scoped(search, registry, chat);
         WebSearchTool {
-            config: config.web_search.clone(),
-            scope: WorkspaceScope {
-                state: AppState::new(config, database, None),
-                workspace_id: Uuid::new_v4(),
-                chat_id: chat,
-                user_id: Uuid::new_v4(),
-            },
+            config: scope.state.config().web_search.clone(),
+            scope,
         }
     }
 
@@ -397,6 +402,35 @@ mod tests {
             first_observed_at: observed,
             last_observed_at: observed,
         }
+    }
+
+    #[tokio::test]
+    async fn web_tools_stay_offline_when_search_is_disabled() {
+        let mut registry = ToolRegistry::new();
+        register(
+            &mut registry,
+            &scoped(WebSearchConfig::default(), NO_REGISTRY, None),
+        );
+        assert!(registry.get("web_search").is_none());
+        assert!(registry.get("fetch_url").is_none());
+    }
+
+    #[tokio::test]
+    async fn web_tools_register_together_when_search_is_enabled() {
+        let mut registry = ToolRegistry::new();
+        register(
+            &mut registry,
+            &scoped(
+                WebSearchConfig {
+                    enabled: true,
+                    ..WebSearchConfig::default()
+                },
+                NO_REGISTRY,
+                None,
+            ),
+        );
+        assert!(registry.get("web_search").is_some());
+        assert!(registry.get("fetch_url").is_some());
     }
 
     /// The prompt tells the model to re-search "narrowed to a day, week or
