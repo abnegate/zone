@@ -10,6 +10,7 @@
 mod common;
 
 use common::context::{finish, next, send, successful};
+use common::transcript::{self, Speaker};
 use common::{
     TestClient, context_database_url, create_test_router, create_test_state, test_config,
     test_email, test_password,
@@ -45,9 +46,6 @@ const SESSION_ID: &str = "--session-id";
 const RESUME: &str = "--resume";
 const CODEX_RESUME: &str = "resume";
 const CODEX_PROMPT: &str = "-";
-const NOW: &str = "- Now: ";
-const SEARCH_OPEN: &str = "<web_search_context>";
-const SEARCH_CLOSE: &str = "</web_search_context>";
 
 /// Claude's words for a session it does not hold, before it starts a turn.
 const UNKNOWN_SESSION: &str = "No conversation found with session ID:";
@@ -62,40 +60,6 @@ const CODEX_CREDENTIALS: &str = r#"{"tokens":{"access_token":"fake-codex-access-
 enum Resumption {
     Accepted,
     Refused,
-}
-
-/// Who a block of a rendered transcript is from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Speaker {
-    System,
-    User,
-    Assistant,
-    Tool,
-}
-
-impl Speaker {
-    const ALL: [Self; 4] = [Self::System, Self::User, Self::Assistant, Self::Tool];
-
-    fn heading(self) -> &'static str {
-        match self {
-            Self::System => "System:",
-            Self::User => "User:",
-            Self::Assistant => "Assistant:",
-            Self::Tool => "Tool result:",
-        }
-    }
-
-    fn opening(line: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|speaker| speaker.heading() == line)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Block {
-    speaker: Speaker,
-    content: String,
 }
 
 /// One run of a stand-in agent: its argument list, and the prompt it read on stdin.
@@ -119,147 +83,17 @@ impl Invocation {
         self.arguments.iter().any(|argument| argument == flag)
     }
 
-    /// The prompt split back into the blocks the transcript renders: a heading
-    /// line that opens the prompt or follows a blank line starts the next one.
-    fn blocks(&self) -> Vec<Block> {
-        let mut blocks: Vec<Block> = Vec::new();
-        let mut lines: Vec<&str> = Vec::new();
-        let mut speaker = None;
-        let mut previous = "";
-        for (index, line) in self.prompt.lines().enumerate() {
-            match Speaker::opening(line).filter(|_| index == 0 || previous.is_empty()) {
-                Some(opened) => {
-                    if let Some(speaker) = speaker {
-                        blocks.push(Block {
-                            speaker,
-                            content: lines.join("\n").trim().to_string(),
-                        });
-                    }
-                    speaker = Some(opened);
-                    lines.clear();
-                }
-                None => {
-                    assert!(
-                        speaker.is_some(),
-                        "the prompt must open with a speaker: {}",
-                        self.prompt
-                    );
-                    lines.push(line);
-                }
-            }
-            previous = line;
-        }
-        if let Some(speaker) = speaker {
-            blocks.push(Block {
-                speaker,
-                content: lines.join("\n").trim().to_string(),
-            });
-        }
-        blocks
-    }
-
     /// Asserts the prompt is the whole conversation: the instructions, then
     /// exactly `exchanges` in order, beside this turn's search state.
     fn assert_replays(&self, exchanges: &[(Speaker, &str)]) {
-        let blocks = self.blocks();
-        let Some((instructions, conversation)) = blocks.split_first() else {
-            panic!("an empty prompt replays nothing");
-        };
-        assert_eq!(
-            instructions.speaker,
-            Speaker::System,
-            "a replay opens with the instructions: {}",
-            self.prompt
-        );
-        assert!(
-            instructions.content.contains(NOW) && instructions.content.lines().count() > 1,
-            "a replay carries the whole system prompt, not a note: {}",
-            self.prompt
-        );
-        let (searches, conversation): (Vec<&Block>, Vec<&Block>) =
-            conversation.iter().partition(|block| block.searched());
-        assert!(
-            searches.len() <= 1,
-            "a turn carries its own search state once: {}",
-            self.prompt
-        );
-        let conversation: Vec<(Speaker, &str)> = conversation
-            .iter()
-            .map(|block| (block.speaker, block.content.as_str()))
-            .collect();
-        assert_eq!(
-            conversation, exchanges,
-            "a replay carries every exchange, in order: {}",
-            self.prompt
-        );
+        transcript::assert_replays(&self.prompt, exchanges);
     }
 
     /// Asserts the prompt is only what a resumed session has not yet seen: an
     /// optional note holding this turn's clock, then `message`. This turn's
     /// search state may ride in the note or follow the message, once.
     fn assert_resumes_with(&self, message: &str) {
-        let blocks = self.blocks();
-        let (note, rest) = match blocks.split_first() {
-            Some((first, rest)) if first.speaker == Speaker::System => (Some(first), rest),
-            _ => (None, blocks.as_slice()),
-        };
-        let mut searches = 0;
-        if let Some(note) = note {
-            let (clock, searched) = unsearched(&note.content);
-            searches += usize::from(searched);
-            let lines: Vec<&str> = clock
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .collect();
-            assert!(
-                matches!(lines.as_slice(), [only] if only.starts_with(NOW)),
-                "an unchanged prompt is not sent again; the note holds the clock alone: {}",
-                self.prompt
-            );
-        }
-        let rest = match rest {
-            [message, search] if search.searched() => {
-                searches += 1;
-                std::slice::from_ref(message)
-            }
-            rest => rest,
-        };
-        assert!(
-            searches <= 1,
-            "a turn carries its own search state once: {}",
-            self.prompt
-        );
-        assert_eq!(
-            rest,
-            [Block {
-                speaker: Speaker::User,
-                content: message.to_string(),
-            }],
-            "a resumed turn sends only the new message: {}",
-            self.prompt
-        );
-    }
-}
-
-impl Block {
-    /// Whether the block is the search state the server hands each turn.
-    fn searched(&self) -> bool {
-        self.speaker == Speaker::User
-            && self.content.starts_with(SEARCH_OPEN)
-            && self.content.ends_with(SEARCH_CLOSE)
-    }
-}
-
-/// `content` without the search state it carries, and whether it carried one.
-fn unsearched(content: &str) -> (String, bool) {
-    match content.split_once(SEARCH_OPEN) {
-        Some((before, after)) => {
-            let (_, after) = after
-                .split_once(SEARCH_CLOSE)
-                .unwrap_or_else(|| panic!("an unterminated search state: {content}"));
-            (format!("{before}{after}"), true)
-        }
-        None => (content.to_string(), false),
+        transcript::assert_resumes_with(&self.prompt, message);
     }
 }
 

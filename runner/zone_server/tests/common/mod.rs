@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod context;
+pub mod transcript;
 
 use axum::Router;
 use axum::body::Body;
