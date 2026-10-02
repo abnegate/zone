@@ -28,7 +28,7 @@ pub use viewer::Viewer;
 
 use super::claude::Tokens;
 use super::probe::{self, Probe};
-use super::usage::Snapshot;
+use super::usage::{Availability, Snapshot};
 use super::{codex, devices, oauth};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
@@ -158,10 +158,7 @@ fn read(state: &AppState, login: &AgentLoginRow, held: usize, now: DateTime<Utc>
         None => (State::Expired, None, None),
     };
     let snapshot = login.snapshot();
-    let spent_until = snapshot
-        .as_ref()
-        .and_then(Snapshot::usable_at)
-        .max(login.exhausted_until);
+    let availability = availability(snapshot.as_ref(), login.exhausted_until);
     Reading {
         login: LoginStatus {
             id: login.id,
@@ -177,8 +174,19 @@ fn read(state: &AppState, login: &AgentLoginRow, held: usize, now: DateTime<Utc>
             }),
             last_used_at: login.last_used_at,
         },
-        spent_until,
+        availability,
     }
+}
+
+/// When a login can take a turn again, from its last `snapshot` and when it was marked exhausted
+/// until: the later of the two, and unknown when a spent window gives no reset time.
+fn availability(
+    snapshot: Option<&Snapshot>,
+    exhausted_until: Option<DateTime<Utc>>,
+) -> Availability {
+    snapshot
+        .map_or(Availability::Now, Snapshot::availability)
+        .max(exhausted_until.map_or(Availability::Now, Availability::At))
 }
 
 fn opened(key: &[u8; 32], login: &AgentLoginRow) -> Option<Tokens> {
@@ -400,6 +408,34 @@ mod tests {
             },
             ..crate::state::test_config()
         }
+    }
+
+    #[test]
+    fn a_login_is_available_once_both_its_snapshot_and_its_exhaustion_allow() {
+        let now = at(1_790_000_000);
+        let fresh = snapshot(20.0, now);
+        let spent = snapshot(100.0, now);
+        let resets = spent.windows[0].resets_at.expect("a reset time");
+        let later = resets + TimeDelta::hours(1);
+        let mut unknown = snapshot(100.0, now);
+        unknown.windows[0].resets_at = None;
+
+        assert_eq!(availability(None, None), Availability::Now);
+        assert_eq!(availability(Some(&fresh), None), Availability::Now);
+        assert_eq!(availability(Some(&spent), None), Availability::At(resets));
+        assert_eq!(
+            availability(Some(&spent), Some(later)),
+            Availability::At(later)
+        );
+        assert_eq!(
+            availability(Some(&fresh), Some(later)),
+            Availability::At(later)
+        );
+        assert_eq!(
+            availability(Some(&unknown), Some(later)),
+            Availability::Unknown,
+            "a spent window with no reset time leaves the login spent with no known end"
+        );
     }
 
     #[test]

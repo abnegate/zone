@@ -6,12 +6,13 @@ use chrono::{DateTime, Utc};
 
 use super::login::LoginStatus;
 use super::state::State;
+use crate::services::login::usage::Availability;
 
 pub(super) struct Reading {
     pub(super) login: LoginStatus,
-    /// Until when the login cannot take a turn: the later of when it was marked exhausted until
-    /// and when its last snapshot says its spent windows reset.
-    pub(super) spent_until: Option<DateTime<Utc>>,
+    /// When the login can take a turn again: the later of when it was marked exhausted until and
+    /// when its last snapshot says its spent windows reset, never when one of them gives no time.
+    pub(super) availability: Availability,
 }
 
 impl Reading {
@@ -35,7 +36,11 @@ impl Reading {
     }
 
     fn available(&self, now: DateTime<Utc>) -> bool {
-        self.spent_until.is_none_or(|until| until <= now)
+        match self.availability {
+            Availability::Now => true,
+            Availability::At(until) => until <= now,
+            Availability::Unknown => false,
+        }
     }
 
     fn headroom(&self) -> Option<f64> {
@@ -71,7 +76,7 @@ mod tests {
                 }),
                 last_used_at: None,
             },
-            spent_until: None,
+            availability: Availability::Now,
         }
     }
 
@@ -105,7 +110,7 @@ mod tests {
     fn a_login_at_its_usage_limit_ranks_after_one_that_is_not_until_it_resets() {
         let now = at(1_790_000_000);
         let mut spent = reading("spent", State::SignedIn, Some(95.0));
-        spent.spent_until = Some(now + TimeDelta::hours(2));
+        spent.availability = Availability::At(now + TimeDelta::hours(2));
         let readings = [spent, reading("fresh", State::SignedIn, Some(5.0))];
 
         assert_eq!(best(&readings, now), Some("fresh"));
@@ -113,6 +118,21 @@ mod tests {
             best(&readings, now + TimeDelta::hours(3)),
             Some("spent"),
             "a login whose limit has reset still ranked as spent"
+        );
+    }
+
+    #[test]
+    fn a_login_whose_spent_window_never_says_when_it_resets_ranks_as_unavailable() {
+        let now = at(1_790_000_000);
+        let mut spent = reading("spent", State::SignedIn, Some(95.0));
+        spent.availability = Availability::Unknown;
+        let readings = [spent, reading("fresh", State::SignedIn, Some(5.0))];
+
+        assert_eq!(best(&readings, now), Some("fresh"));
+        assert_eq!(
+            best(&readings, now + TimeDelta::days(30)),
+            Some("fresh"),
+            "a login with no known reset ranked as available"
         );
     }
 
