@@ -14,6 +14,16 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// A reading of `windows` taken at `fetched_at`, with the headroom left in the most used
+    /// window, or none when no window carries a reading.
+    pub fn new(windows: Vec<Window>, fetched_at: DateTime<Utc>) -> Self {
+        Self {
+            headroom: headroom(&windows),
+            windows,
+            fetched_at,
+        }
+    }
+
     /// When the login can take work again: now when no window is spent, otherwise when the last
     /// spent window resets, or unknown when a spent window never says when it resets.
     pub fn availability(&self) -> Availability {
@@ -41,16 +51,19 @@ impl Snapshot {
             Some(current) => *current = window,
             None => self.windows.push(window),
         }
-        if let Some(used) = self
-            .windows
-            .iter()
-            .filter_map(|window| window.used_percent)
-            .max_by(f64::total_cmp)
-        {
-            self.headroom = Some(EXHAUSTED_PERCENT - used);
+        if let Some(headroom) = headroom(&self.windows) {
+            self.headroom = Some(headroom);
         }
         self
     }
+}
+
+fn headroom(windows: &[Window]) -> Option<f64> {
+    windows
+        .iter()
+        .filter_map(|window| window.used_percent)
+        .max_by(f64::total_cmp)
+        .map(|used| EXHAUSTED_PERCENT - used)
 }
 
 fn exhausted(window: &Window) -> bool {
@@ -156,6 +169,24 @@ mod tests {
         );
         assert_eq!(after.headroom, Some(10.0));
         assert_eq!(after.fetched_at, before.fetched_at);
+    }
+
+    #[test]
+    fn a_new_reading_has_the_headroom_of_its_most_used_window_or_none_without_a_reading() {
+        let read = Snapshot::new(
+            vec![
+                window("5h", Some(62.0), Some(1_790_010_000)),
+                window("7d", Some(31.0), Some(1_790_400_000)),
+                window("Extra usage", None, None),
+            ],
+            at(1_790_000_000),
+        );
+        let unread = Snapshot::new(vec![window("5h", None, None)], at(1_790_000_000));
+
+        assert_eq!(read.headroom, Some(38.0));
+        assert_eq!(read.windows.len(), 3);
+        assert_eq!(read.fetched_at, at(1_790_000_000));
+        assert_eq!(unread.headroom, None);
     }
 
     #[test]

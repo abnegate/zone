@@ -35,10 +35,10 @@ pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 pub const DEFAULT_CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 
 /// Where a Claude login's usage and profile are read.
-pub const DEFAULT_CLAUDE_API_URL: &str = "https://api.anthropic.com";
+pub const DEFAULT_CLAUDE_API_URL: &str = aiusg::provider::claude::BASE;
 
 /// Where a Codex login's usage is read.
-pub const DEFAULT_CODEX_API_URL: &str = "https://chatgpt.com";
+pub const DEFAULT_CODEX_API_URL: &str = aiusg::provider::codex::BASE;
 
 /// Server configuration loaded from environment variables
 #[derive(Clone)]

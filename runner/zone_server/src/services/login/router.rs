@@ -155,18 +155,41 @@ pub async fn observe(state: &AppState, login: Uuid, window: &Window) {
     }
 }
 
-/// Brings `login`'s usage up to date once a turn on it has ended.
+/// Brings `login`'s usage up to date once a turn on it has ended, as [`usage::refresh`] does: read
+/// again from the agent when the stored snapshot is older than the TTL, and kept as it is when it
+/// cannot be read.
 ///
-/// Stub until usage is read from each agent's service: the stored snapshot is read again.
+/// A codex login is resolved into its own home first, which takes the organization's device lock.
 pub async fn settle(state: &AppState, login: Uuid) {
-    match agent_logins::get(state.db(), login).await {
-        Ok(row) => tracing::debug!(
-            %login,
-            snapshot = ?row.and_then(|row| row.snapshot()),
-            "Settled the login's usage"
-        ),
-        Err(error) => tracing::warn!(%login, %error, "Could not read the login's usage"),
-    }
+    let row = match agent_logins::get(state.db(), login).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%login, %error, "Could not read the login to settle its usage");
+            return;
+        }
+    };
+    let Some(agent) = AgentKind::named(&row.agent) else {
+        return;
+    };
+    let resolved = match credential::resolve(state, &row).await {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(%login, %agent, %error, "Could not settle the login's usage");
+            return;
+        }
+    };
+    let snapshot = row.snapshot();
+    usage::refresh(
+        state,
+        &mut [Chosen {
+            login: row,
+            agent,
+            resolved,
+            snapshot,
+        }],
+    )
+    .await;
 }
 
 async fn observed(
@@ -288,10 +311,12 @@ impl Failure {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use abnegate_secret::SecretValue;
     use sqlx::PgPool;
     use tempfile::TempDir;
-    use wiremock::matchers::any;
+    use wiremock::matchers::{any, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -303,6 +328,9 @@ mod tests {
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";
     const FIVE_HOURS: &str = "5h";
     const SEVEN_DAYS: &str = "7d";
+    const CLAUDE_USAGE: &str = "/api/oauth/usage";
+    const READING: &str = r#"{"five_hour":{"utilization":62.0,"resets_at":"2026-09-23T06:10:00Z"},"seven_day":{"utilization":31.0,"resets_at":"2026-09-28T04:00:00Z"}}"#;
+    const READ_HEADROOM: f64 = 38.0;
 
     struct Scene {
         pool: PgPool,
@@ -403,10 +431,21 @@ mod tests {
         /// Stores a reading of `login`'s usage with `headroom` percent left of its five-hour
         /// window, which resets at `resets_at`.
         async fn read(&self, login: Uuid, headroom: f64, resets_at: DateTime<Utc>) {
+            self.read_at(login, headroom, resets_at, Utc::now()).await;
+        }
+
+        /// [`Scene::read`], as read at `fetched_at`.
+        async fn read_at(
+            &self,
+            login: Uuid,
+            headroom: f64,
+            resets_at: DateTime<Utc>,
+            fetched_at: DateTime<Utc>,
+        ) {
             let snapshot = Snapshot {
                 windows: vec![window(FIVE_HOURS, 100.0 - headroom, Some(resets_at))],
                 headroom: Some(headroom),
-                fetched_at: Utc::now(),
+                fetched_at,
             };
             agent_logins::observe(&self.pool, login, &snapshot)
                 .await
@@ -760,6 +799,193 @@ mod tests {
         );
         assert_eq!(unread.headroom, Some(88.0));
         assert_eq!(picked.agent, AgentKind::Claude);
+        usage.verify().await;
+    }
+
+    /// A usage endpoint that answers every reading with [`READING`], once `delay` has passed.
+    async fn answering(delay: Duration) -> MockServer {
+        let usage = MockServer::start().await;
+        Mock::given(path(CLAUDE_USAGE))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(READING)
+                    .set_delay(delay),
+            )
+            .named("the Claude usage endpoint")
+            .mount(&usage)
+            .await;
+        usage
+    }
+
+    async fn readings(usage: &MockServer) -> usize {
+        usage
+            .received_requests()
+            .await
+            .expect("the requests to be recorded")
+            .iter()
+            .filter(|request| request.url.path() == CLAUDE_USAGE)
+            .count()
+    }
+
+    fn headroom(chosen: &Result<Chosen, Error>) -> Option<f64> {
+        match chosen {
+            Ok(chosen) => chosen
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.headroom),
+            Err(error) => panic!("expected a login, got {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_usage_token_leaves_the_snapshot_unknown_and_the_login_a_candidate() {
+        let usage = MockServer::start().await;
+        Mock::given(path(CLAUDE_USAGE))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&usage)
+            .await;
+        let scene = Scene::reading(usage.uri()).await;
+        let refused = scene.login(AgentKind::Claude, "refused", None).await;
+
+        let chosen = scene.pick(AgentKind::Claude, &[], None).await;
+        let stored = scene.stored(refused).await;
+        scene.remove().await;
+
+        let chosen = chosen.expect("the refused login to stay a candidate");
+        assert_eq!(chosen.login.id, refused);
+        assert_eq!(chosen.snapshot, None);
+        assert_eq!(stored.snapshot(), None);
+        usage.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_slow_usage_endpoint_keeps_the_stored_snapshot() {
+        let usage = answering(Duration::from_secs(30)).await;
+        let scene = Scene::reading(usage.uri()).await;
+        let slow = scene.login(AgentKind::Claude, "slow", None).await;
+        let read_at = Utc::now() - TimeDelta::hours(1);
+        scene
+            .read_at(slow, 70.0, Utc::now() + TimeDelta::hours(2), read_at)
+            .await;
+        let started = Instant::now();
+
+        let chosen = scene.pick(AgentKind::Claude, &[], None).await;
+        let waited = started.elapsed();
+        let stored = scene.stored(slow).await.snapshot().expect("a snapshot");
+        scene.remove().await;
+
+        assert_eq!(headroom(&chosen), Some(70.0));
+        assert_eq!(
+            stored.fetched_at.timestamp_micros(),
+            read_at.timestamp_micros()
+        );
+        assert!(waited < Duration::from_secs(15), "waited {waited:?}");
+        assert_eq!(readings(&usage).await, 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_of_one_login_fetch_once() {
+        let usage = answering(Duration::from_millis(300)).await;
+        let scene = Scene::reading(usage.uri()).await;
+        let shared = scene.login(AgentKind::Claude, "shared", None).await;
+
+        let (first, second) = tokio::join!(
+            scene.pick(AgentKind::Claude, &[], None),
+            scene.pick(AgentKind::Claude, &[], None)
+        );
+        let third = scene.pick(AgentKind::Claude, &[], None).await;
+        let stored = scene.stored(shared).await.snapshot();
+        scene.remove().await;
+
+        for chosen in [&first, &second, &third] {
+            assert_eq!(headroom(chosen), Some(READ_HEADROOM));
+        }
+        assert_eq!(
+            stored.and_then(|snapshot| snapshot.headroom),
+            Some(READ_HEADROOM)
+        );
+        assert_eq!(readings(&usage).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_snapshot_is_not_fetched_again_and_a_stale_one_is() {
+        let usage = answering(Duration::ZERO).await;
+        let scene = Scene::reading(usage.uri()).await;
+        let fresh = scene.login(AgentKind::Claude, "fresh", Some(70.0)).await;
+        let stale = scene.login(AgentKind::Claude, "stale", None).await;
+        scene
+            .read_at(
+                stale,
+                90.0,
+                Utc::now() + TimeDelta::hours(2),
+                Utc::now() - TimeDelta::hours(1),
+            )
+            .await;
+        let before = Utc::now();
+
+        let picked = scene.picked(AgentKind::Claude, &[], None).await;
+        let kept = scene.stored(fresh).await.snapshot().expect("a snapshot");
+        let reread = scene.stored(stale).await.snapshot().expect("a snapshot");
+        scene.remove().await;
+
+        assert_eq!(kept.headroom, Some(70.0));
+        assert!(kept.fetched_at < before);
+        assert_eq!(reread.headroom, Some(READ_HEADROOM));
+        assert!(reread.fetched_at >= before);
+        assert_eq!(
+            picked, fresh,
+            "the stale login was ranked on its new reading"
+        );
+        assert_eq!(readings(&usage).await, 1);
+    }
+
+    #[tokio::test]
+    async fn settling_a_turn_reads_a_stale_logins_usage_and_leaves_a_fresh_one() {
+        let usage = answering(Duration::ZERO).await;
+        let scene = Scene::reading(usage.uri()).await;
+        let fresh = scene.login(AgentKind::Claude, "fresh", Some(70.0)).await;
+        let stale = scene.login(AgentKind::Claude, "stale", None).await;
+        scene
+            .read_at(
+                stale,
+                90.0,
+                Utc::now() + TimeDelta::hours(2),
+                Utc::now() - TimeDelta::hours(1),
+            )
+            .await;
+
+        settle(&scene.state, stale).await;
+        settle(&scene.state, fresh).await;
+        settle(&scene.state, Uuid::new_v4()).await;
+        let fresh = scene.stored(fresh).await.snapshot().expect("a snapshot");
+        let stale = scene.stored(stale).await.snapshot().expect("a snapshot");
+        scene.remove().await;
+
+        assert_eq!(fresh.headroom, Some(70.0));
+        assert_eq!(stale.headroom, Some(READ_HEADROOM));
+        assert_eq!(readings(&usage).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_usage_endpoint_that_fails_is_not_asked_again_within_the_ttl() {
+        let usage = MockServer::start().await;
+        Mock::given(path(CLAUDE_USAGE))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&usage)
+            .await;
+        let scene = Scene::reading(usage.uri()).await;
+        let failing = scene.login(AgentKind::Claude, "failing", None).await;
+
+        let first = scene.pick(AgentKind::Claude, &[], None).await;
+        let second = scene.pick(AgentKind::Claude, &[], None).await;
+        scene.remove().await;
+
+        for chosen in [first, second] {
+            let chosen = chosen.expect("the login to stay a candidate");
+            assert_eq!((chosen.login.id, chosen.snapshot), (failing, None));
+        }
         usage.verify().await;
     }
 
