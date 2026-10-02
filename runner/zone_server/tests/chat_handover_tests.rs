@@ -1002,6 +1002,7 @@ async fn a_turn_limited_before_it_writes_sends_its_prompt_again_on_the_carried_s
         &Expected {
             from: ALICE.label,
             to: BOB.label,
+            from_agent: AgentKind::Claude,
             agent: AgentKind::Claude,
             reason: LIMIT,
             carried: true,
