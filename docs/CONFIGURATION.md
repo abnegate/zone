@@ -1309,7 +1309,7 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ### `SEARCH_ENABLE_WEB_SEARCH`
 - **Default**: `true`
-- **Description**: Extra switch for Zone chat web search through SearXNG. Manager also requires `ZONE_VPN` to be on; with the VPN off, search stays offline even when this is `true`.
+- **Description**: Extra switch for Zone chat web search through SearXNG. Manager also requires `ZONE_VPN` to be on; with the VPN off, search and public page fetch stay offline even when this is `true`.
 - **Note**: Requires the VPN profile (`ZONE_VPN=1`)
 
 ### `SEARCH_RESULT_COUNT`
@@ -1352,8 +1352,9 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: Set to `1` when the `vpn` Compose profile is active. Kept in
   sync with `COMPOSE_PROFILES` so internet-facing services attach to Gluetun's
   network namespace and all of their traffic uses the tunnel. Manager reads
-  this as the web-search gate: SearXNG lookups and the `web_search` /
-  `fetch_url` tools stay off until it is truthy.
+  this as the public-web gate: SearXNG lookups, the `web_search` /
+  `fetch_url` tools, knowledge URL ingest and refresh, web sources, and
+  `curl` / `wget` from `run_command` stay off until it is truthy.
 - **VPN value**: `1`
 
 ### `COMPOSE_PROFILES`
@@ -1382,7 +1383,7 @@ service names bypass the proxy.
 
 ### Manager / zone-server chat
 
-Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). Web search is online only when `SEARCH_ENABLE_WEB_SEARCH` is true **and** `ZONE_VPN` is on. Then Manager chat queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. With `ZONE_VPN` off, the server does not attempt a lookup and does not offer `web_search` or `fetch_url`, even if a message sets `metadata.web_search`. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. When `ZONE_VPN=1`, Manager, LiteLLM, Grafana, and bundled engines share that stack too. Remote model catalog searches also use Gluetun's HTTP proxy when `MODEL_SEARCH_PROXY_URL` is configured. A message can force search on or off with `metadata.web_search` only while search is online.
+Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). Web search is online only when `SEARCH_ENABLE_WEB_SEARCH` is true **and** `ZONE_VPN` is on. Then Manager chat queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. With `ZONE_VPN` off, the server does not attempt a lookup and does not offer `web_search` or `fetch_url`, even if a message sets `metadata.web_search`. Knowledge URL ingest and refresh, web sources, and `curl` / `wget` from `run_command` stay offline the same way. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. When `ZONE_VPN=1`, Manager, LiteLLM, Grafana, and bundled engines share that stack too. Remote model catalog searches also use Gluetun's HTTP proxy when `MODEL_SEARCH_PROXY_URL` is configured. A message can force search on or off with `metadata.web_search` only while search is online.
 
 ---
 

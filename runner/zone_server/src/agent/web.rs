@@ -116,6 +116,9 @@ impl Tool for WebSearchTool {
     }
 
     async fn execute(&self, params: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
+        if !zone_core::vpn::enabled() {
+            return Ok(ToolResult::error(zone_core::vpn::OFFLINE.to_string()));
+        }
         let query = match params.get("query").and_then(Value::as_str) {
             Some(query) if !query.trim().is_empty() => sanitize_query(query),
             _ => {
@@ -205,6 +208,9 @@ impl Tool for FetchUrlTool {
 }
 
 async fn fetch_public_url(raw: &str) -> ToolResult {
+    if !zone_core::vpn::enabled() {
+        return ToolResult::error(zone_core::vpn::OFFLINE.to_string());
+    }
     let url = match validate_public_url(raw) {
         Ok(url) => url,
         Err(error) => return ToolResult::error(error.to_string()),
@@ -405,6 +411,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_search_stays_offline_until_the_vpn_is_on() {
+        let _vpn = zone_core::vpn::Hold::off();
+        let searxng = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
+            .expect(0)
+            .mount(&searxng)
+            .await;
+
+        let result = tool(None, searching(&searxng), NO_REGISTRY)
+            .execute(json!({"query": "rust"}), &ToolContext::default())
+            .await
+            .expect("the search tool answers");
+        assert!(!result.success, "{result:?}");
+        assert_eq!(result.error.as_deref(), Some(zone_core::vpn::OFFLINE));
+    }
+
+    #[tokio::test]
+    async fn fetch_url_stays_offline_until_the_vpn_is_on() {
+        let _vpn = zone_core::vpn::Hold::off();
+        let result = FetchUrlTool
+            .execute(
+                json!({"url": "https://example.com"}),
+                &ToolContext::default(),
+            )
+            .await
+            .expect("the tool answers");
+        assert!(!result.success, "{result:?}");
+        assert_eq!(result.error.as_deref(), Some(zone_core::vpn::OFFLINE));
+    }
+
+    #[tokio::test]
     async fn web_tools_stay_offline_when_search_is_disabled() {
         let mut registry = ToolRegistry::new();
         register(
@@ -552,6 +590,7 @@ mod tests {
             .await;
         let port = registry.local_addr().expect("a bound port").port();
 
+        let _vpn = zone_core::vpn::Hold::on();
         let result = tool(Some(Uuid::new_v4()), searching(&searxng), port)
             .execute(json!({"query": "rust"}), &ToolContext::default())
             .await

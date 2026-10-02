@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod session;
 pub mod tools;
 pub mod types;
+pub mod vpn;
 
 // Re-export commonly used types
 pub use agent::{

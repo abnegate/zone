@@ -28,6 +28,8 @@ pub enum SearchError {
     Http(#[from] reqwest::Error),
     #[error("Search returned HTTP {0}")]
     Status(u16),
+    #[error("Public web access is offline until the VPN is enabled.")]
+    Offline,
 }
 
 /// One result row to inject into the model prompt.
@@ -162,6 +164,9 @@ impl SearxngClient {
         query: &str,
         range: Option<TimeRange>,
     ) -> Result<Vec<SearchHit>, SearchError> {
+        if !self.config.enabled {
+            return Err(SearchError::Offline);
+        }
         let started = std::time::Instant::now();
         let query = sanitize_query(query);
         if query.is_empty() {
@@ -833,6 +838,29 @@ mod tests {
         assert!(prompt.contains("Current forecast."));
         assert!(prompt.starts_with("<web_search_context>\n"));
         assert!(prompt.ends_with("\n</web_search_context>"));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_client_does_not_query_the_engine() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = SearxngClient::new(WebSearchConfig {
+            enabled: false,
+            query_url: format!("{}/search?q=<query>&format=json", server.uri()),
+            result_count: 5,
+            timeout_secs: 5,
+        })
+        .expect("client");
+        let error = client
+            .search("open source", None)
+            .await
+            .expect_err("offline");
+        assert!(matches!(error, SearchError::Offline));
     }
 
     fn test_client(query_url: String, result_count: usize) -> SearxngClient {

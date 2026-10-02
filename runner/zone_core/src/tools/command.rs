@@ -32,6 +32,8 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "true", "false", "test", "curl", "wget", "jq", "yq", "docker",
 ];
 
+const PUBLIC_WEB_COMMANDS: &[&str] = &["curl", "wget"];
+
 /// Run a shell command
 pub struct RunCommandTool;
 
@@ -288,6 +290,9 @@ impl Waiting for RunCommandTool {
                 "Command '{}' is not in the allowed list. Name a program, not a path: cargo, npm, git, python, etc.",
                 params.command
             )));
+        }
+        if PUBLIC_WEB_COMMANDS.contains(&params.command.as_str()) && !crate::vpn::enabled() {
+            return Err(ToolError::Execution(crate::vpn::OFFLINE.to_string()));
         }
 
         // Additional security: Check for shell metacharacters in arguments
@@ -933,6 +938,26 @@ mod tests {
             assert!(
                 !error.to_string().contains(MARKER),
                 "{command} ran: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn curl_and_wget_stay_offline_when_the_vpn_is_off() {
+        let _vpn = crate::vpn::Hold::off();
+        let tool = RunCommandTool;
+        let context = create_test_context();
+        for command in ["curl", "wget"] {
+            let error = tool
+                .execute(
+                    serde_json::json!({"command": command, "args": ["https://example.com"]}),
+                    &context,
+                )
+                .await
+                .expect_err(command);
+            assert!(
+                matches!(&error, ToolError::Execution(message) if message == crate::vpn::OFFLINE),
+                "{command}: {error}"
             );
         }
     }

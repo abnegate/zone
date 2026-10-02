@@ -15,11 +15,13 @@ make up
 ./scripts/compose.sh --replace-profiles= up -d
 ```
 
-**What works**: Everything except web search
+**What works**: Everything except public web fetch and search
 - ✅ Chat with local models
 - ✅ Semantic routing (auto/fast/reason)
 - ✅ All core functionality
 - ❌ Web search (SearXNG not available — Zone chat)
+- ❌ Page fetch (`fetch_url`, knowledge URLs, web sources)
+- ❌ `curl` / `wget` from `run_command`
 
 ## Running With VPN
 

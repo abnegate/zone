@@ -167,6 +167,28 @@ async fn test_create_knowledge_url_validation() {
 }
 
 #[tokio::test]
+async fn creating_a_url_entry_stays_offline_when_the_vpn_is_off() {
+    let _vpn = zone_core::vpn::Hold::off();
+    let client = TestClient::with_db().await;
+    let (token, workspace_id) = setup_user_and_workspace(&client).await;
+
+    let response = client
+        .post_json_auth(
+            "/api/knowledge",
+            &json!({
+                "workspace_id": workspace_id,
+                "title": "A public page",
+                "source_url": "https://example.com"
+            }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+    let error = response.json_value()["error"].as_str().unwrap().to_string();
+    assert!(error.contains(zone_core::vpn::OFFLINE), "{error}");
+}
+
+#[tokio::test]
 async fn test_create_knowledge_refresh_interval_validation() {
     let client = TestClient::with_db().await;
     let (token, workspace_id) = setup_user_and_workspace(&client).await;
@@ -548,6 +570,7 @@ async fn refreshing_a_text_entry_is_refused_by_name() {
 /// it on the row, where the card's error state reads it.
 #[tokio::test]
 async fn refreshing_a_url_entry_refetches_and_records_the_outcome() {
+    let _vpn = zone_core::vpn::Hold::off();
     let client = TestClient::with_db().await;
     let (token, workspace_id) = setup_user_and_workspace(&client).await;
     let pool = client.state().db().clone();
@@ -581,6 +604,7 @@ async fn refreshing_a_url_entry_refetches_and_records_the_outcome() {
     response.assert_status(StatusCode::BAD_GATEWAY);
     let error = response.json_value()["error"].as_str().unwrap().to_string();
     assert!(error.starts_with("Failed to fetch URL:"), "{error}");
+    assert!(error.contains(zone_core::vpn::OFFLINE), "{error}");
 
     let entry = client
         .get_auth(&format!("/api/knowledge/{id}"), &token)
@@ -588,10 +612,9 @@ async fn refreshing_a_url_entry_refetches_and_records_the_outcome() {
     entry.assert_status(StatusCode::OK);
     let body = entry.json_value();
     assert_eq!(body["source_url"], "https://unreachable.invalid/page");
-    assert!(
-        body["last_fetch_error"]
-            .as_str()
-            .is_some_and(|e| !e.is_empty()),
+    assert_eq!(
+        body["last_fetch_error"].as_str(),
+        Some(zone_core::vpn::OFFLINE),
         "the failure is recorded on the row: {body}"
     );
     assert_eq!(
