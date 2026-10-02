@@ -1,868 +1,42 @@
--- Zone Manager Initial Schema (Squashed)
--- All migrations combined into single initial schema
+-- Zone initial schema.
+-- Fresh installs apply this single migration. sqlx owns the transaction.
 
-BEGIN;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
--- =============================================================================
--- Extensions
--- =============================================================================
-CREATE EXTENSION IF NOT EXISTS vector;
 
--- =============================================================================
--- Migration Tracking
--- =============================================================================
-CREATE TABLE IF NOT EXISTS schema_migrations (
-  version INTEGER PRIMARY KEY,
-  applied_at TIMESTAMP DEFAULT NOW()
-);
+--
+-- Name: check_organization_membership(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
 
--- =============================================================================
--- Organizations & Workspaces
--- =============================================================================
-CREATE TABLE IF NOT EXISTS organizations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL,
-  slug TEXT NOT NULL UNIQUE,
-  description TEXT,
-  is_active BOOLEAN DEFAULT TRUE,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
+CREATE FUNCTION public.check_organization_membership(p_user_id uuid, p_organization_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RETURN EXISTS(SELECT 1 FROM organization_members WHERE user_id = p_user_id AND organization_id = p_organization_id AND is_active = TRUE);
+END;
+$$;
 
--- REMOVED: idx_organizations_slug (UNIQUE constraint creates implicit index)
-CREATE INDEX IF NOT EXISTS idx_organizations_active ON organizations(is_active) WHERE is_active = TRUE;
 
-CREATE TABLE IF NOT EXISTS workspaces (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  slug TEXT NOT NULL,
-  description TEXT,
-  is_active BOOLEAN DEFAULT TRUE,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(organization_id, slug)
-);
+--
+-- Name: check_workspace_membership(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
 
-CREATE INDEX IF NOT EXISTS idx_workspaces_org_id ON workspaces(organization_id);
-CREATE INDEX IF NOT EXISTS idx_workspaces_slug ON workspaces(slug);
-CREATE INDEX IF NOT EXISTS idx_workspaces_active ON workspaces(is_active) WHERE is_active = TRUE;
+CREATE FUNCTION public.check_workspace_membership(p_user_id uuid, p_workspace_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RETURN EXISTS(SELECT 1 FROM workspace_members WHERE user_id = p_user_id AND workspace_id = p_workspace_id AND is_active = TRUE);
+END;
+$$;
 
--- =============================================================================
--- Users & Authentication
--- =============================================================================
-CREATE TABLE IF NOT EXISTS users (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  display_name TEXT,
-  is_active BOOLEAN DEFAULT TRUE,
-  is_admin BOOLEAN DEFAULT FALSE,
-  email_verified BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  last_login_at TIMESTAMP
-);
 
--- REMOVED: idx_users_email (UNIQUE constraint creates implicit index)
-CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active);
+--
+-- Name: claim_next_task(text); Type: FUNCTION; Schema: public; Owner: -
+--
 
-CREATE TABLE IF NOT EXISTS refresh_tokens (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  token_hash TEXT NOT NULL UNIQUE,
-  expires_at TIMESTAMP NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW(),
-  revoked_at TIMESTAMP,
-  user_agent TEXT,
-  ip_address TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
--- REMOVED: idx_refresh_tokens_token_hash (UNIQUE constraint creates implicit index)
-CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at ON refresh_tokens(expires_at);
-
-CREATE TABLE IF NOT EXISTS sessions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  refresh_token_hash VARCHAR(255) NOT NULL UNIQUE,
-  ip_address INET,
-  user_agent TEXT,
-  device_info JSONB,
-  last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  expires_at TIMESTAMPTZ NOT NULL,
-  revoked_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- REMOVED: idx_sessions_token (UNIQUE constraint creates implicit index)
--- ADDED: Composite partial index for active session queries (WHERE revoked_at IS NULL)
-CREATE INDEX IF NOT EXISTS idx_sessions_user_active ON sessions(user_id, last_active_at DESC) WHERE revoked_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
-
-CREATE TABLE IF NOT EXISTS email_verification_tokens (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  token_hash VARCHAR(255) NOT NULL UNIQUE,
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_email_verification_tokens_user ON email_verification_tokens(user_id);
--- REMOVED: idx_email_verification_tokens_token_hash (UNIQUE constraint creates implicit index)
-
-CREATE TABLE IF NOT EXISTS password_reset_tokens (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  token_hash VARCHAR(255) NOT NULL UNIQUE,
-  expires_at TIMESTAMPTZ NOT NULL,
-  used_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user ON password_reset_tokens(user_id);
--- REMOVED: idx_password_reset_tokens_token_hash (UNIQUE constraint creates implicit index)
-
--- =============================================================================
--- Permissions & Roles (RBAC)
--- =============================================================================
-CREATE TABLE IF NOT EXISTS permissions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL UNIQUE,
-  description TEXT,
-  resource TEXT NOT NULL,
-  action TEXT NOT NULL CHECK (action IN ('create', 'read', 'update', 'delete')),
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_permissions_resource ON permissions(resource);
-
-CREATE TABLE IF NOT EXISTS roles (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL UNIQUE,
-  description TEXT,
-  is_system BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS role_permissions (
-  role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-  permission_id UUID NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
-  PRIMARY KEY (role_id, permission_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_role_permissions_role_id ON role_permissions(role_id);
-
-CREATE TABLE IF NOT EXISTS user_roles (
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-  assigned_at TIMESTAMP DEFAULT NOW(),
-  assigned_by UUID REFERENCES users(id),
-  PRIMARY KEY (user_id, role_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_user_roles_user_id ON user_roles(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_roles_role_id ON user_roles(role_id);
-
--- =============================================================================
--- Organization & Workspace Membership
--- =============================================================================
-CREATE TABLE IF NOT EXISTS organization_members (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member')),
-  is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  invited_by UUID REFERENCES users(id) ON DELETE SET NULL,
-  invited_at TIMESTAMP,
-  accepted_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(organization_id, user_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_org_members_org ON organization_members(organization_id);
--- ADDED: Partial index for active member queries (WHERE is_active = TRUE)
-CREATE INDEX IF NOT EXISTS idx_org_members_user_active ON organization_members(user_id) WHERE is_active = TRUE;
-CREATE INDEX IF NOT EXISTS idx_org_members_active ON organization_members(organization_id, is_active) WHERE is_active = TRUE;
-
-CREATE TABLE IF NOT EXISTS workspace_members (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
-  is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  invited_by UUID REFERENCES users(id) ON DELETE SET NULL,
-  invited_at TIMESTAMP,
-  accepted_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(workspace_id, user_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_workspace_members_workspace ON workspace_members(workspace_id);
--- ADDED: Partial index for active member queries (WHERE is_active = TRUE)
-CREATE INDEX IF NOT EXISTS idx_workspace_members_user_active ON workspace_members(user_id) WHERE is_active = TRUE;
-CREATE INDEX IF NOT EXISTS idx_workspace_members_active ON workspace_members(workspace_id, is_active) WHERE is_active = TRUE;
-
-CREATE TABLE IF NOT EXISTS invitations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email VARCHAR(255) NOT NULL,
-  organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  workspace_ids UUID[] DEFAULT '{}',
-  org_role VARCHAR(50) NOT NULL DEFAULT 'member',
-  workspace_role VARCHAR(50) NOT NULL DEFAULT 'member',
-  token_hash VARCHAR(255) NOT NULL UNIQUE,
-  invited_by UUID NOT NULL REFERENCES users(id),
-  expires_at TIMESTAMPTZ NOT NULL,
-  accepted_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(email, organization_id)
-);
-
--- ADDED: Partial composite index for pending invitation queries (WHERE accepted_at IS NULL)
-CREATE INDEX IF NOT EXISTS idx_invitations_pending ON invitations(email, organization_id, expires_at) WHERE accepted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token_hash);
-CREATE INDEX IF NOT EXISTS idx_invitations_org ON invitations(organization_id);
-
--- =============================================================================
--- Sources
--- =============================================================================
-CREATE TABLE IF NOT EXISTS source_types (
-  name TEXT PRIMARY KEY,
-  category TEXT NOT NULL DEFAULT 'file',
-  description TEXT NOT NULL,
-  config_schema JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_source_types_category ON source_types(category);
-
-CREATE TABLE IF NOT EXISTS sources (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID REFERENCES workspaces(id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  source_type TEXT NOT NULL REFERENCES source_types(name),
-  config JSONB NOT NULL DEFAULT '{}'::jsonb,
-  credentials_encrypted TEXT,
-  description TEXT,
-  url TEXT,
-  is_active BOOLEAN DEFAULT TRUE,
-  last_verified_at TIMESTAMP,
-  last_error TEXT,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(name, source_type)
-);
-
--- ADDED: Composite index for filtered source queries (workspace_id, source_type, is_active, created_at DESC)
-CREATE INDEX IF NOT EXISTS idx_sources_workspace_filters ON sources(workspace_id, source_type, is_active, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_sources_active ON sources(is_active) WHERE is_active = TRUE;
-
-CREATE TABLE IF NOT EXISTS source_sync_state (
-  source_id UUID PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
-  last_sync_at TIMESTAMP,
-  cursor TEXT,
-  etag TEXT,
-  version TEXT,
-  extra JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_sync_state_last_sync ON source_sync_state(last_sync_at);
-
--- =============================================================================
--- Projects
--- =============================================================================
-CREATE TABLE IF NOT EXISTS projects (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID REFERENCES workspaces(id) ON DELETE CASCADE,
-  source_id UUID REFERENCES sources(id) ON DELETE SET NULL,
-  name TEXT NOT NULL,
-  description TEXT,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'on_hold', 'cancelled')),
-  github_repo_url TEXT,
-  github_access_token TEXT,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
--- ADDED: Composite index for filtered project queries (workspace_id, status, created_at DESC)
-CREATE INDEX IF NOT EXISTS idx_projects_workspace_status ON projects(workspace_id, status, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
-
--- =============================================================================
--- Tasks (workspace-scoped, many-to-many with projects)
--- =============================================================================
-CREATE TABLE IF NOT EXISTS tasks (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  title TEXT NOT NULL,
-  description TEXT NOT NULL,
-  acceptance_criteria TEXT,
-  status TEXT NOT NULL DEFAULT 'created' CHECK (status IN
-    ('created', 'queued', 'in_progress', 'review', 'complete', 'blocked')),
-  priority INTEGER CHECK (priority >= 1 AND priority <= 5),
-  model_name TEXT,
-  dependencies JSONB DEFAULT '[]'::jsonb,
-  is_agentic BOOLEAN NOT NULL DEFAULT FALSE,
-  github_repo_url TEXT,
-  source_id UUID REFERENCES sources(id) ON DELETE SET NULL,
-  source_ids UUID[] DEFAULT '{}',
-  worker_id TEXT,
-  queued_at TIMESTAMP,
-  started_at TIMESTAMP,
-  completed_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  pr_url TEXT,
-  branch_name TEXT,
-  pr_status TEXT,
-  pr_created_at TIMESTAMP
-);
-
--- ADDED: Composite index for filtered task queries (workspace_id, status, created_at DESC)
-CREATE INDEX IF NOT EXISTS idx_tasks_workspace_status ON tasks(workspace_id, status, created_at DESC);
--- ADDED: Composite index for workspace task queries (workspace_id, created_at DESC)
-CREATE INDEX IF NOT EXISTS idx_tasks_workspace_created ON tasks(workspace_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_queued_at ON tasks(queued_at) WHERE queued_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_tasks_worker_id ON tasks(worker_id) WHERE worker_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_tasks_source_ids ON tasks USING GIN(source_ids);
-CREATE INDEX IF NOT EXISTS idx_tasks_pr_status ON tasks(pr_status) WHERE pr_status IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_tasks_branch_name ON tasks(branch_name) WHERE branch_name IS NOT NULL;
-
--- Task-Project many-to-many relationship
-CREATE TABLE IF NOT EXISTS task_projects (
-  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  created_at TIMESTAMP DEFAULT NOW(),
-  PRIMARY KEY (task_id, project_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_task_projects_task_id ON task_projects(task_id);
-CREATE INDEX IF NOT EXISTS idx_task_projects_project_id ON task_projects(project_id);
-
--- Task Queue
-CREATE TABLE IF NOT EXISTS task_queue (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  priority INTEGER NOT NULL DEFAULT 3,
-  queued_at TIMESTAMP DEFAULT NOW(),
-  started_at TIMESTAMP,
-  worker_id TEXT,
-  attempts INTEGER DEFAULT 0,
-  max_attempts INTEGER DEFAULT 3,
-  last_error TEXT,
-  UNIQUE(task_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_task_queue_priority ON task_queue(priority DESC, queued_at ASC);
-CREATE INDEX IF NOT EXISTS idx_task_queue_worker ON task_queue(worker_id) WHERE worker_id IS NOT NULL;
-
--- Task Runs
-CREATE TABLE IF NOT EXISTS task_runs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
-  current_phase TEXT,
-  progress_percent INTEGER DEFAULT 0 CHECK (progress_percent >= 0 AND progress_percent <= 100),
-  started_at TIMESTAMP DEFAULT NOW(),
-  completed_at TIMESTAMP,
-  error_message TEXT,
-  artifacts JSONB DEFAULT '{}'::jsonb,
-  result_summary TEXT,
-  modified_files JSONB
-);
-
--- REPLACED: idx_task_runs_task_id with composite index including sort order
-CREATE INDEX IF NOT EXISTS idx_task_runs_task_started ON task_runs(task_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status);
-
-CREATE TABLE IF NOT EXISTS task_run_logs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  task_run_id UUID NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
-  phase TEXT NOT NULL,
-  agent_type TEXT NOT NULL,
-  log_level TEXT NOT NULL CHECK (log_level IN ('debug', 'info', 'warning', 'error')),
-  message TEXT NOT NULL,
-  metadata JSONB DEFAULT '{}'::jsonb,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
--- REPLACED: idx_task_run_logs_run_id with composite index including sort order
-CREATE INDEX IF NOT EXISTS idx_task_run_logs_run_created ON task_run_logs(task_run_id, created_at ASC);
-
-CREATE TABLE IF NOT EXISTS task_tool_calls (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  task_run_id UUID NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
-  tool_name TEXT NOT NULL,
-  tool_input JSONB NOT NULL,
-  tool_output JSONB,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed')),
-  error_message TEXT,
-  started_at TIMESTAMP DEFAULT NOW(),
-  completed_at TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_task_tool_calls_run_id ON task_tool_calls(task_run_id);
-CREATE INDEX IF NOT EXISTS idx_task_tool_calls_status ON task_tool_calls(status);
-
-CREATE TABLE IF NOT EXISTS task_file_changes (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  task_run_id UUID NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
-  file_path TEXT NOT NULL,
-  change_type TEXT NOT NULL CHECK (change_type IN ('create', 'modify', 'delete')),
-  original_content TEXT,
-  new_content TEXT,
-  diff TEXT,
-  applied BOOLEAN DEFAULT FALSE,
-  applied_at TIMESTAMP,
-  reverted BOOLEAN DEFAULT FALSE,
-  reverted_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_task_file_changes_run_id ON task_file_changes(task_run_id);
-CREATE INDEX IF NOT EXISTS idx_task_file_changes_applied ON task_file_changes(applied);
-
--- =============================================================================
--- Chats
--- =============================================================================
-CREATE TABLE IF NOT EXISTS chats (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID REFERENCES workspaces(id) ON DELETE CASCADE,
-  title TEXT NOT NULL,
-  model_name TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  archived BOOLEAN DEFAULT FALSE
-);
-
--- ADDED: Composite index for filtered chat queries (workspace_id, archived, updated_at DESC)
-CREATE INDEX IF NOT EXISTS idx_chats_workspace_archived ON chats(workspace_id, archived, updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS messages (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
-  content TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW(),
-  metadata JSONB DEFAULT '{}'::jsonb
-);
-
--- REPLACED: idx_messages_chat_id with composite index including sort order
-CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages(chat_id, created_at ASC);
-
--- =============================================================================
--- Wiki
--- =============================================================================
-CREATE TABLE IF NOT EXISTS wiki_entries (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  title TEXT NOT NULL,
-  content TEXT NOT NULL,
-  source_type TEXT NOT NULL CHECK (source_type IN
-    ('chat', 'manual', 'url', 'task', 'github')),
-  source_id UUID,
-  source_url TEXT,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  metadata JSONB DEFAULT '{}'::jsonb
-);
-
-CREATE INDEX IF NOT EXISTS idx_wiki_entries_source_type ON wiki_entries(source_type);
-
-CREATE TABLE IF NOT EXISTS wiki_chunks (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  wiki_entry_id UUID NOT NULL REFERENCES wiki_entries(id) ON DELETE CASCADE,
-  chunk_index INTEGER NOT NULL,
-  content TEXT NOT NULL,
-  embedding vector(1024),
-  token_count INTEGER,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_wiki_chunks_entry_id ON wiki_chunks(wiki_entry_id);
-CREATE INDEX IF NOT EXISTS idx_wiki_chunks_embedding ON wiki_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-
--- =============================================================================
--- Context & Embeddings
--- =============================================================================
-CREATE TABLE IF NOT EXISTS content_items (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  source_id UUID NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-  workspace_id UUID REFERENCES workspaces(id) ON DELETE CASCADE,
-  category TEXT NOT NULL,
-  uri TEXT NOT NULL,
-  title TEXT NOT NULL,
-  content TEXT,
-  content_type TEXT NOT NULL DEFAULT 'text/plain',
-  token_count INTEGER NOT NULL DEFAULT 0,
-  metadata_only BOOLEAN NOT NULL DEFAULT FALSE,
-  content_hash TEXT NOT NULL,
-  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-  search_vector tsvector,
-  modified_at TIMESTAMP,
-  fetched_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(source_id, uri)
-);
-
-CREATE INDEX IF NOT EXISTS idx_content_items_source ON content_items(source_id);
-CREATE INDEX IF NOT EXISTS idx_content_items_workspace ON content_items(workspace_id);
-CREATE INDEX IF NOT EXISTS idx_content_items_category ON content_items(category);
-CREATE INDEX IF NOT EXISTS idx_content_items_hash ON content_items(content_hash);
-CREATE INDEX IF NOT EXISTS idx_content_items_fetched ON content_items(fetched_at);
-CREATE INDEX IF NOT EXISTS idx_content_items_metadata ON content_items USING GIN(metadata);
-CREATE INDEX IF NOT EXISTS idx_content_items_search ON content_items USING GIN(search_vector);
-
-CREATE TABLE IF NOT EXISTS content_chunks (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  content_item_id UUID NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
-  chunk_index INTEGER NOT NULL,
-  text TEXT NOT NULL,
-  token_count INTEGER NOT NULL,
-  start_offset INTEGER NOT NULL,
-  end_offset INTEGER NOT NULL,
-  search_vector tsvector,
-  created_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(content_item_id, chunk_index)
-);
-
-CREATE INDEX IF NOT EXISTS idx_content_chunks_item ON content_chunks(content_item_id);
-CREATE INDEX IF NOT EXISTS idx_content_chunks_search ON content_chunks USING GIN(search_vector);
-
-CREATE TABLE IF NOT EXISTS embeddings (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  chunk_id UUID NOT NULL REFERENCES content_chunks(id) ON DELETE CASCADE UNIQUE,
-  content_item_id UUID NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
-  source_id UUID NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-  workspace_id UUID REFERENCES workspaces(id) ON DELETE CASCADE,
-  vector vector(1536) NOT NULL,
-  model TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON embeddings USING hnsw (vector vector_cosine_ops) WITH (m = 16, ef_construction = 64);
-CREATE INDEX IF NOT EXISTS idx_embeddings_source ON embeddings(source_id);
-CREATE INDEX IF NOT EXISTS idx_embeddings_content_item ON embeddings(content_item_id);
-CREATE INDEX IF NOT EXISTS idx_embeddings_workspace ON embeddings(workspace_id);
-
-CREATE TABLE IF NOT EXISTS heuristic_analysis (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  content_item_id UUID NOT NULL REFERENCES content_items(id) ON DELETE CASCADE UNIQUE,
-  entities JSONB NOT NULL DEFAULT '{}'::jsonb,
-  categorization JSONB NOT NULL DEFAULT '{}'::jsonb,
-  quality JSONB NOT NULL DEFAULT '{}'::jsonb,
-  analyzed_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_heuristic_analysis_item ON heuristic_analysis(content_item_id);
-CREATE INDEX IF NOT EXISTS idx_heuristic_analysis_entities ON heuristic_analysis USING GIN(entities);
-CREATE INDEX IF NOT EXISTS idx_heuristic_analysis_categorization ON heuristic_analysis USING GIN(categorization);
-
-CREATE TABLE IF NOT EXISTS message_embeddings (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE UNIQUE,
-  chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-  vector vector(1536) NOT NULL,
-  model TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_message_embeddings_vector ON message_embeddings USING hnsw (vector vector_cosine_ops) WITH (m = 16, ef_construction = 64);
-CREATE INDEX IF NOT EXISTS idx_message_embeddings_chat ON message_embeddings(chat_id);
-
--- =============================================================================
--- Knowledge Base
--- =============================================================================
-CREATE TABLE IF NOT EXISTS knowledge_entries (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  title TEXT NOT NULL,
-  content TEXT NOT NULL,
-  category TEXT,
-  tags TEXT[] DEFAULT '{}',
-  token_count INTEGER NOT NULL DEFAULT 0,
-  is_active BOOLEAN DEFAULT TRUE,
-  source_url TEXT,
-  last_fetched_at TIMESTAMP,
-  content_hash TEXT,
-  refresh_interval_minutes INTEGER,
-  last_fetch_error TEXT,
-  created_by UUID REFERENCES users(id) ON DELETE SET NULL,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
--- ADDED: Partial composite index for filtered knowledge queries (workspace_id, category, created_at DESC) WHERE is_active = TRUE
-CREATE INDEX IF NOT EXISTS idx_knowledge_workspace_category ON knowledge_entries(workspace_id, category, created_at DESC) WHERE is_active = TRUE;
-CREATE INDEX IF NOT EXISTS idx_knowledge_entries_tags ON knowledge_entries USING GIN(tags);
-CREATE INDEX IF NOT EXISTS idx_knowledge_refresh_due ON knowledge_entries(workspace_id, source_url) WHERE source_url IS NOT NULL AND is_active = TRUE;
-CREATE INDEX IF NOT EXISTS idx_knowledge_source_url ON knowledge_entries(workspace_id, source_url) WHERE source_url IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS knowledge_embeddings (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  knowledge_entry_id UUID NOT NULL REFERENCES knowledge_entries(id) ON DELETE CASCADE UNIQUE,
-  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  vector vector(1536) NOT NULL,
-  model TEXT NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_vector ON knowledge_embeddings USING hnsw (vector vector_cosine_ops) WITH (m = 16, ef_construction = 64);
-CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_workspace ON knowledge_embeddings(workspace_id);
-
--- =============================================================================
--- Context Gathering
--- =============================================================================
-CREATE TABLE IF NOT EXISTS context_gatherings (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID REFERENCES workspaces(id) ON DELETE SET NULL,
-  task_id UUID REFERENCES tasks(id) ON DELETE SET NULL,
-  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed')),
-  source_ids UUID[] NOT NULL DEFAULT '{}',
-  config JSONB NOT NULL DEFAULT '{}'::jsonb,
-  stats JSONB,
-  error_message TEXT,
-  started_at TIMESTAMP,
-  completed_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_context_gatherings_workspace ON context_gatherings(workspace_id);
-CREATE INDEX IF NOT EXISTS idx_context_gatherings_task ON context_gatherings(task_id);
-CREATE INDEX IF NOT EXISTS idx_context_gatherings_user ON context_gatherings(user_id);
-CREATE INDEX IF NOT EXISTS idx_context_gatherings_status ON context_gatherings(status);
--- ADDED: GIN index for source_ids array queries (for ANY() operations)
-CREATE INDEX IF NOT EXISTS idx_context_gatherings_source_ids ON context_gatherings USING GIN(source_ids);
-
-CREATE TABLE IF NOT EXISTS gathering_events (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  gathering_id UUID NOT NULL REFERENCES context_gatherings(id) ON DELETE CASCADE,
-  event_type TEXT NOT NULL,
-  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_gathering_events_gathering ON gathering_events(gathering_id);
-CREATE INDEX IF NOT EXISTS idx_gathering_events_created ON gathering_events(created_at);
-CREATE INDEX IF NOT EXISTS idx_gathering_events_gathering_created ON gathering_events(gathering_id, created_at);
-
--- =============================================================================
--- Workspace Settings
--- =============================================================================
-CREATE TABLE IF NOT EXISTS workspace_themes (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE UNIQUE,
-  primary_color_light TEXT DEFAULT '#3b82f6',
-  secondary_color_light TEXT DEFAULT '#6366f1',
-  primary_color_dark TEXT DEFAULT '#3b82f6',
-  secondary_color_dark TEXT DEFAULT '#6366f1',
-  font_family TEXT DEFAULT 'system',
-  font_size_base TEXT DEFAULT '16px',
-  border_radius TEXT DEFAULT 'medium',
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_workspace_themes_workspace_id ON workspace_themes(workspace_id);
-
--- =============================================================================
--- AI Provider Settings
--- =============================================================================
-CREATE TABLE IF NOT EXISTS organization_ai_settings (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE UNIQUE,
-  provider TEXT NOT NULL DEFAULT 'self_hosted' CHECK (provider IN ('self_hosted', 'openai', 'anthropic', 'bedrock')),
-  litellm_host TEXT,
-  litellm_key TEXT,
-  openai_api_key TEXT,
-  openai_base_url TEXT,
-  anthropic_api_key TEXT,
-  anthropic_base_url TEXT,
-  bedrock_region TEXT,
-  bedrock_access_key TEXT,
-  bedrock_secret_key TEXT,
-  bedrock_use_iam_role BOOLEAN DEFAULT FALSE,
-  model_fast TEXT,
-  model_reasoning TEXT,
-  model_embedding TEXT,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_org_ai_settings_org_id ON organization_ai_settings(organization_id);
-
-CREATE TABLE IF NOT EXISTS workspace_ai_settings (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE UNIQUE,
-  provider TEXT CHECK (provider IS NULL OR provider IN ('self_hosted', 'openai', 'anthropic', 'bedrock')),
-  litellm_host TEXT,
-  litellm_key TEXT,
-  openai_api_key TEXT,
-  openai_base_url TEXT,
-  anthropic_api_key TEXT,
-  anthropic_base_url TEXT,
-  bedrock_region TEXT,
-  bedrock_access_key TEXT,
-  bedrock_secret_key TEXT,
-  bedrock_use_iam_role BOOLEAN,
-  model_fast TEXT,
-  model_reasoning TEXT,
-  model_embedding TEXT,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_ws_ai_settings_ws_id ON workspace_ai_settings(workspace_id);
-
--- =============================================================================
--- Billing & Subscriptions
--- =============================================================================
-CREATE TABLE IF NOT EXISTS plans (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name VARCHAR(100) NOT NULL,
-  slug VARCHAR(50) NOT NULL UNIQUE,
-  description TEXT,
-  price_monthly_cents INTEGER NOT NULL,
-  price_yearly_cents INTEGER NOT NULL,
-  is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  is_public BOOLEAN NOT NULL DEFAULT TRUE,
-  features JSONB NOT NULL DEFAULT '{}',
-  limits JSONB NOT NULL DEFAULT '{}',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS subscriptions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  plan_id UUID NOT NULL REFERENCES plans(id),
-  status VARCHAR(50) NOT NULL,
-  current_period_start TIMESTAMPTZ NOT NULL,
-  current_period_end TIMESTAMPTZ NOT NULL,
-  cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
-  canceled_at TIMESTAMPTZ,
-  trial_start TIMESTAMPTZ,
-  trial_end TIMESTAMPTZ,
-  stripe_subscription_id VARCHAR(255),
-  stripe_customer_id VARCHAR(255),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(organization_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
-CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe ON subscriptions(stripe_subscription_id);
-
-CREATE TABLE IF NOT EXISTS usage_events (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  workspace_id UUID REFERENCES workspaces(id) ON DELETE SET NULL,
-  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-  event_type VARCHAR(50) NOT NULL,
-  quantity BIGINT NOT NULL DEFAULT 1,
-  metadata JSONB DEFAULT '{}',
-  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_usage_events_org_time ON usage_events(organization_id, recorded_at);
-CREATE INDEX IF NOT EXISTS idx_usage_events_type ON usage_events(event_type);
-CREATE INDEX IF NOT EXISTS idx_usage_events_org_type_time ON usage_events(organization_id, event_type, recorded_at);
-
--- =============================================================================
--- Audit Logs
--- =============================================================================
-CREATE TABLE IF NOT EXISTS audit_logs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id UUID REFERENCES organizations(id) ON DELETE SET NULL,
-  workspace_id UUID REFERENCES workspaces(id) ON DELETE SET NULL,
-  actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
-  actor_email VARCHAR(255),
-  action VARCHAR(100) NOT NULL,
-  resource_type VARCHAR(50) NOT NULL,
-  resource_id UUID,
-  old_values JSONB,
-  new_values JSONB,
-  ip_address INET,
-  user_agent TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_audit_logs_org ON audit_logs(organization_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs(resource_type, resource_id);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
-
--- =============================================================================
--- External Sync
--- =============================================================================
-CREATE TABLE IF NOT EXISTS sync_configs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  provider TEXT NOT NULL CHECK (provider IN ('github', 'linear')),
-  enabled BOOLEAN NOT NULL DEFAULT true,
-  config JSONB NOT NULL DEFAULT '{}'::jsonb,
-  webhook_secret_encrypted TEXT,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(project_id, provider)
-);
-
-CREATE INDEX IF NOT EXISTS idx_sync_configs_project_id ON sync_configs(project_id);
-CREATE INDEX IF NOT EXISTS idx_sync_configs_provider ON sync_configs(provider);
-CREATE INDEX IF NOT EXISTS idx_sync_configs_enabled ON sync_configs(enabled) WHERE enabled = true;
-
-CREATE TABLE IF NOT EXISTS synced_items (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  sync_config_id UUID NOT NULL REFERENCES sync_configs(id) ON DELETE CASCADE,
-  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  external_id TEXT NOT NULL,
-  external_url TEXT,
-  last_synced_at TIMESTAMP DEFAULT NOW(),
-  sync_direction TEXT NOT NULL DEFAULT 'bidirectional' CHECK (sync_direction IN ('outbound', 'inbound', 'bidirectional')),
-  last_external_state JSONB,
-  created_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(sync_config_id, task_id),
-  UNIQUE(sync_config_id, external_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_synced_items_sync_config_id ON synced_items(sync_config_id);
-CREATE INDEX IF NOT EXISTS idx_synced_items_task_id ON synced_items(task_id);
-CREATE INDEX IF NOT EXISTS idx_synced_items_external_id ON synced_items(sync_config_id, external_id);
-CREATE INDEX IF NOT EXISTS idx_synced_items_last_synced ON synced_items(last_synced_at);
-
-CREATE TABLE IF NOT EXISTS sync_events (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  sync_config_id UUID NOT NULL REFERENCES sync_configs(id) ON DELETE CASCADE,
-  synced_item_id UUID REFERENCES synced_items(id) ON DELETE SET NULL,
-  event_type TEXT NOT NULL CHECK (event_type IN ('create', 'update', 'close', 'webhook_received', 'sync_error')),
-  direction TEXT NOT NULL CHECK (direction IN ('outbound', 'inbound')),
-  payload JSONB,
-  error_message TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_sync_events_sync_config_id ON sync_events(sync_config_id);
-CREATE INDEX IF NOT EXISTS idx_sync_events_synced_item_id ON sync_events(synced_item_id);
-CREATE INDEX IF NOT EXISTS idx_sync_events_event_type ON sync_events(event_type);
-CREATE INDEX IF NOT EXISTS idx_sync_events_created_at ON sync_events(created_at DESC);
-
--- =============================================================================
--- Functions & Triggers
--- =============================================================================
-
--- Task Queue Functions
-CREATE OR REPLACE FUNCTION claim_next_task(p_worker_id TEXT)
-RETURNS TABLE(task_id UUID, queue_id UUID) AS $$
+CREATE FUNCTION public.claim_next_task(p_worker_id text) RETURNS TABLE(task_id uuid, queue_id uuid)
+    LANGUAGE plpgsql
+    AS $$
 DECLARE
   v_queue_id UUID;
   v_task_id UUID;
@@ -890,21 +64,16 @@ BEGIN
   END IF;
   RETURN;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
-CREATE OR REPLACE FUNCTION release_task(p_task_id UUID, p_error TEXT DEFAULT NULL)
-RETURNS VOID AS $$
-BEGIN
-  UPDATE task_queue SET worker_id = NULL, started_at = NULL, last_error = COALESCE(p_error, last_error)
-  WHERE task_id = p_task_id;
 
-  UPDATE tasks SET status = 'queued', worker_id = NULL, updated_at = NOW()
-  WHERE id = p_task_id;
-END;
-$$ LANGUAGE plpgsql;
+--
+-- Name: complete_task_in_queue(uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
 
-CREATE OR REPLACE FUNCTION complete_task_in_queue(p_task_id UUID, p_success BOOLEAN)
-RETURNS VOID AS $$
+CREATE FUNCTION public.complete_task_in_queue(p_task_id uuid, p_success boolean) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
   DELETE FROM task_queue WHERE task_id = p_task_id;
 
@@ -915,34 +84,31 @@ BEGIN
       updated_at = NOW()
   WHERE id = p_task_id;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
-CREATE OR REPLACE FUNCTION recover_orphaned_tasks()
-RETURNS INTEGER AS $$
-DECLARE
-  v_count INTEGER;
+
+--
+-- Name: get_organization_role(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.get_organization_role(p_user_id uuid, p_organization_id uuid) RETURNS text
+    LANGUAGE plpgsql
+    AS $$
+DECLARE v_role TEXT;
 BEGIN
-  WITH orphaned AS (
-    SELECT t.id FROM tasks t
-    JOIN task_queue tq ON tq.task_id = t.id
-    WHERE tq.worker_id IS NOT NULL AND t.status = 'in_progress' AND t.updated_at < NOW() - INTERVAL '10 minutes'
-  )
-  UPDATE task_queue tq
-  SET worker_id = NULL, started_at = NULL, last_error = 'Worker timeout - task recovered'
-  FROM orphaned o WHERE tq.task_id = o.id;
-
-  GET DIAGNOSTICS v_count = ROW_COUNT;
-
-  UPDATE tasks SET status = 'queued', worker_id = NULL, updated_at = NOW()
-  WHERE id IN (SELECT task_id FROM task_queue WHERE worker_id IS NULL) AND status = 'in_progress';
-
-  RETURN v_count;
+  SELECT role INTO v_role FROM organization_members WHERE user_id = p_user_id AND organization_id = p_organization_id AND is_active = TRUE;
+  RETURN v_role;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
--- Task Source Functions
-CREATE OR REPLACE FUNCTION get_task_source(p_task_id UUID)
-RETURNS TABLE(source_id UUID, source_type TEXT, config JSONB, credentials TEXT) AS $$
+
+--
+-- Name: get_task_source(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.get_task_source(p_task_id uuid) RETURNS TABLE(source_id uuid, source_type text, config jsonb, credentials text)
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
   RETURN QUERY
   SELECT t.source_id, s.source_type, s.config, s.credentials_encrypted
@@ -950,10 +116,16 @@ BEGIN
   LEFT JOIN sources s ON s.id = t.source_id
   WHERE t.id = p_task_id AND s.is_active = TRUE;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
-CREATE OR REPLACE FUNCTION get_task_sources(p_task_id UUID)
-RETURNS TABLE(source_id UUID, source_type TEXT, category TEXT, config JSONB, credentials TEXT) AS $$
+
+--
+-- Name: get_task_sources(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.get_task_sources(p_task_id uuid) RETURNS TABLE(source_id uuid, source_type text, category text, config jsonb, credentials text)
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
   RETURN QUERY
   SELECT s.id as source_id, s.source_type, st.category, s.config, s.credentials_encrypted
@@ -973,162 +145,4013 @@ BEGIN
   JOIN source_types st ON st.name = s.source_type
   WHERE t.id = p_task_id AND s.is_active = TRUE AND (t.source_ids IS NULL OR t.source_ids = '{}');
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
-CREATE OR REPLACE FUNCTION get_task_sources_by_category(p_task_id UUID, p_category TEXT)
-RETURNS TABLE(source_id UUID, source_type TEXT, config JSONB, credentials TEXT) AS $$
+
+--
+-- Name: get_task_sources_by_category(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.get_task_sources_by_category(p_task_id uuid, p_category text) RETURNS TABLE(source_id uuid, source_type text, config jsonb, credentials text)
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
   RETURN QUERY
   SELECT ts.source_id, ts.source_type, ts.config, ts.credentials
   FROM get_task_sources(p_task_id) ts WHERE ts.category = p_category;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
--- Search Functions
-CREATE OR REPLACE FUNCTION search_content_embeddings(
-  query_vector vector(1536),
-  p_limit INTEGER DEFAULT 10,
-  p_threshold FLOAT DEFAULT 0.7,
-  p_source_ids UUID[] DEFAULT NULL,
-  p_workspace_id UUID DEFAULT NULL,
-  p_categories TEXT[] DEFAULT NULL
-)
-RETURNS TABLE(chunk_id UUID, content_item_id UUID, source_id UUID, similarity FLOAT, chunk_text TEXT, item_uri TEXT, item_title TEXT, item_metadata JSONB) AS $$
-BEGIN
-  RETURN QUERY
-  SELECT e.chunk_id, e.content_item_id, e.source_id,
-         (1 - (e.vector <=> query_vector))::FLOAT as similarity,
-         cc.text as chunk_text, ci.uri as item_uri, ci.title as item_title, ci.metadata as item_metadata
-  FROM embeddings e
-  JOIN content_chunks cc ON cc.id = e.chunk_id
-  JOIN content_items ci ON ci.id = e.content_item_id
-  WHERE (1 - (e.vector <=> query_vector)) >= p_threshold
-    AND (p_source_ids IS NULL OR e.source_id = ANY(p_source_ids))
-    AND (p_workspace_id IS NULL OR e.workspace_id = p_workspace_id)
-    AND (p_categories IS NULL OR ci.category = ANY(p_categories))
-  ORDER BY e.vector <=> query_vector
-  LIMIT p_limit;
-END;
-$$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION search_knowledge(
-  query_vector vector(1536),
-  p_workspace_id UUID,
-  p_limit INTEGER DEFAULT 10,
-  p_threshold FLOAT DEFAULT 0.7
-)
-RETURNS TABLE(entry_id UUID, similarity FLOAT, title TEXT, content TEXT, category TEXT, tags TEXT[]) AS $$
-BEGIN
-  RETURN QUERY
-  SELECT ke.id as entry_id, (1 - (ke_embed.vector <=> query_vector))::FLOAT as similarity,
-         ke.title, ke.content, ke.category, ke.tags
-  FROM knowledge_entries ke
-  JOIN knowledge_embeddings ke_embed ON ke_embed.knowledge_entry_id = ke.id
-  WHERE ke.workspace_id = p_workspace_id AND ke.is_active = TRUE
-    AND (1 - (ke_embed.vector <=> query_vector)) >= p_threshold
-  ORDER BY ke_embed.vector <=> query_vector
-  LIMIT p_limit;
-END;
-$$ LANGUAGE plpgsql;
+--
+-- Name: get_workspace_role(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
 
-CREATE OR REPLACE FUNCTION search_chat_history(
-  query_vector vector(1536),
-  p_chat_id UUID,
-  p_limit INTEGER DEFAULT 10,
-  p_threshold FLOAT DEFAULT 0.7
-)
-RETURNS TABLE(message_id UUID, similarity FLOAT, role TEXT, content TEXT, created_at TIMESTAMP) AS $$
-BEGIN
-  RETURN QUERY
-  SELECT m.id as message_id, (1 - (me.vector <=> query_vector))::FLOAT as similarity,
-         m.role, m.content, m.created_at
-  FROM message_embeddings me
-  JOIN messages m ON m.id = me.message_id
-  WHERE me.chat_id = p_chat_id AND (1 - (me.vector <=> query_vector)) >= p_threshold
-  ORDER BY me.vector <=> query_vector
-  LIMIT p_limit;
-END;
-$$ LANGUAGE plpgsql;
-
--- Membership Helper Functions
-CREATE OR REPLACE FUNCTION check_workspace_membership(p_user_id UUID, p_workspace_id UUID)
-RETURNS BOOLEAN AS $$
-BEGIN
-  RETURN EXISTS(SELECT 1 FROM workspace_members WHERE user_id = p_user_id AND workspace_id = p_workspace_id AND is_active = TRUE);
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE OR REPLACE FUNCTION get_workspace_role(p_user_id UUID, p_workspace_id UUID)
-RETURNS TEXT AS $$
+CREATE FUNCTION public.get_workspace_role(p_user_id uuid, p_workspace_id uuid) RETURNS text
+    LANGUAGE plpgsql
+    AS $$
 DECLARE v_role TEXT;
 BEGIN
   SELECT role INTO v_role FROM workspace_members WHERE user_id = p_user_id AND workspace_id = p_workspace_id AND is_active = TRUE;
   RETURN v_role;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
-CREATE OR REPLACE FUNCTION check_organization_membership(p_user_id UUID, p_organization_id UUID)
-RETURNS BOOLEAN AS $$
+
+--
+-- Name: recover_orphaned_tasks(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.recover_orphaned_tasks() RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  v_count INTEGER;
 BEGIN
-  RETURN EXISTS(SELECT 1 FROM organization_members WHERE user_id = p_user_id AND organization_id = p_organization_id AND is_active = TRUE);
-END;
-$$ LANGUAGE plpgsql;
+  WITH orphaned AS (
+    SELECT t.id FROM tasks t
+    JOIN task_queue tq ON tq.task_id = t.id
+    WHERE tq.worker_id IS NOT NULL AND t.status = 'in_progress' AND t.updated_at < NOW() - INTERVAL '10 minutes'
+  )
+  UPDATE task_queue tq
+  SET worker_id = NULL, started_at = NULL, last_error = 'Worker timeout - task recovered'
+  FROM orphaned o WHERE tq.task_id = o.id;
 
-CREATE OR REPLACE FUNCTION get_organization_role(p_user_id UUID, p_organization_id UUID)
-RETURNS TEXT AS $$
-DECLARE v_role TEXT;
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+
+  UPDATE tasks SET status = 'queued', worker_id = NULL, updated_at = NOW()
+  WHERE id IN (SELECT task_id FROM task_queue WHERE worker_id IS NULL) AND status = 'in_progress';
+
+  RETURN v_count;
+END;
+$$;
+
+
+--
+-- Name: release_task(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.release_task(p_task_id uuid, p_error text DEFAULT NULL::text) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
-  SELECT role INTO v_role FROM organization_members WHERE user_id = p_user_id AND organization_id = p_organization_id AND is_active = TRUE;
-  RETURN v_role;
-END;
-$$ LANGUAGE plpgsql;
+  UPDATE task_queue SET worker_id = NULL, started_at = NULL, last_error = COALESCE(p_error, last_error)
+  WHERE task_id = p_task_id;
 
--- Full-text Search Triggers
-CREATE OR REPLACE FUNCTION update_chunk_search_vector()
-RETURNS TRIGGER AS $$
+  UPDATE tasks SET status = 'queued', worker_id = NULL, updated_at = NOW()
+  WHERE id = p_task_id;
+END;
+$$;
+
+
+--
+-- Name: search_chat_history(public.vector, uuid, integer, double precision); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.search_chat_history(query_vector public.vector, p_chat_id uuid, p_limit integer DEFAULT 10, p_threshold double precision DEFAULT 0.7) RETURNS TABLE(message_id uuid, similarity double precision, role text, content text, created_at timestamp without time zone)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RETURN QUERY
+  WITH ann AS (
+    SELECT me.message_id, me.vector
+    FROM message_embeddings me
+    WHERE me.chat_id = p_chat_id
+    ORDER BY me.vector_bit <~> binary_quantize(query_vector)::bit(1024)
+    LIMIT GREATEST(p_limit * 8, 32)
+  )
+  SELECT m.id as message_id, (1 - (ann.vector <=> query_vector))::FLOAT as similarity,
+         m.role, m.content, m.created_at
+  FROM ann
+  JOIN messages m ON m.id = ann.message_id
+  WHERE (1 - (ann.vector <=> query_vector)) >= p_threshold
+  ORDER BY ann.vector <=> query_vector
+  LIMIT p_limit;
+END;
+$$;
+
+
+--
+-- Name: search_content_embeddings(public.vector, integer, double precision, uuid[], uuid, text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.search_content_embeddings(query_vector public.vector, p_limit integer DEFAULT 10, p_threshold double precision DEFAULT 0.7, p_source_ids uuid[] DEFAULT NULL::uuid[], p_workspace_id uuid DEFAULT NULL::uuid, p_categories text[] DEFAULT NULL::text[]) RETURNS TABLE(chunk_id uuid, content_item_id uuid, source_id uuid, similarity double precision, chunk_text text, item_uri text, item_title text, item_metadata jsonb)
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RETURN QUERY
+  WITH ann AS (
+    SELECT e.chunk_id, e.content_item_id, e.source_id, e.vector
+    FROM embeddings e
+    WHERE (p_workspace_id IS NULL OR e.workspace_id = p_workspace_id)
+      AND (p_source_ids IS NULL OR e.source_id = ANY(p_source_ids))
+    ORDER BY e.vector_bit <~> binary_quantize(query_vector)::bit(1024)
+    LIMIT GREATEST(p_limit * 8, 32)
+  )
+  SELECT ann.chunk_id, ann.content_item_id, ann.source_id,
+         (1 - (ann.vector <=> query_vector))::FLOAT as similarity,
+         cc.text as chunk_text, ci.uri as item_uri, ci.title as item_title, ci.metadata as item_metadata
+  FROM ann
+  JOIN content_chunks cc ON cc.id = ann.chunk_id
+  JOIN content_items ci ON ci.id = ann.content_item_id
+  WHERE (1 - (ann.vector <=> query_vector)) >= p_threshold
+    AND (p_categories IS NULL OR ci.category = ANY(p_categories))
+  ORDER BY ann.vector <=> query_vector
+  LIMIT p_limit;
+END;
+$$;
+
+
+--
+-- Name: search_knowledge(public.vector, uuid, integer, double precision); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.search_knowledge(query_vector public.vector, p_workspace_id uuid, p_limit integer DEFAULT 10, p_threshold double precision DEFAULT 0.7) RETURNS TABLE(entry_id uuid, similarity double precision, title text, content text, category text, tags text[])
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  RETURN QUERY
+  WITH ann AS (
+    SELECT ke_embed.knowledge_entry_id, ke_embed.vector
+    FROM knowledge_embeddings ke_embed
+    WHERE ke_embed.workspace_id = p_workspace_id
+    ORDER BY ke_embed.vector_bit <~> binary_quantize(query_vector)::bit(1024)
+    LIMIT GREATEST(p_limit * 8, 32)
+  )
+  SELECT ke.id as entry_id, (1 - (ann.vector <=> query_vector))::FLOAT as similarity,
+         ke.title, ke.content, ke.category, ke.tags
+  FROM ann
+  JOIN knowledge_entries ke ON ke.id = ann.knowledge_entry_id
+  WHERE ke.is_active = TRUE
+    AND (1 - (ann.vector <=> query_vector)) >= p_threshold
+  ORDER BY ann.vector <=> query_vector
+  LIMIT p_limit;
+END;
+$$;
+
+
+--
+-- Name: update_chunk_search_vector(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_chunk_search_vector() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
   NEW.search_vector := to_tsvector('english', COALESCE(NEW.text, ''));
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
-DROP TRIGGER IF EXISTS chunk_search_vector_trigger ON content_chunks;
-CREATE TRIGGER chunk_search_vector_trigger
-  BEFORE INSERT OR UPDATE OF text ON content_chunks
-  FOR EACH ROW EXECUTE FUNCTION update_chunk_search_vector();
 
-CREATE OR REPLACE FUNCTION update_item_search_vector()
-RETURNS TRIGGER AS $$
+--
+-- Name: update_item_search_vector(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_item_search_vector() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
   NEW.search_vector := setweight(to_tsvector('english', COALESCE(NEW.title, '')), 'A') ||
                        setweight(to_tsvector('english', COALESCE(NEW.content, '')), 'B');
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
-DROP TRIGGER IF EXISTS item_search_vector_trigger ON content_items;
-CREATE TRIGGER item_search_vector_trigger
-  BEFORE INSERT OR UPDATE OF title, content ON content_items
-  FOR EACH ROW EXECUTE FUNCTION update_item_search_vector();
 
-CREATE OR REPLACE FUNCTION update_sync_configs_updated_at()
-RETURNS TRIGGER AS $$
+--
+-- Name: update_knowledge_search_vector(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_knowledge_search_vector() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  NEW.search_vector := to_tsvector('english', COALESCE(NEW.title, '') || ' ' || COALESCE(NEW.content, ''));
+  RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: update_message_search_vector(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_message_search_vector() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  NEW.search_vector := to_tsvector('english', COALESCE(NEW.content, ''));
+  RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: update_sync_configs_updated_at(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_sync_configs_updated_at() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
   NEW.updated_at = NOW();
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
-DROP TRIGGER IF EXISTS sync_configs_updated_at ON sync_configs;
-CREATE TRIGGER sync_configs_updated_at
-  BEFORE UPDATE ON sync_configs
-  FOR EACH ROW EXECUTE FUNCTION update_sync_configs_updated_at();
 
--- =============================================================================
--- Seed Data
--- =============================================================================
+--
+-- Name: agent_logins; Type: TABLE; Schema: public; Owner: -
+--
 
--- Source Types
+CREATE TABLE public.agent_logins (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    agent text NOT NULL,
+    credential text,
+    label text,
+    expires_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT agent_logins_agent_check CHECK ((agent = ANY (ARRAY['claude'::text, 'codex'::text])))
+);
+
+
+--
+-- Name: audit_logs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.audit_logs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid,
+    workspace_id uuid,
+    actor_id uuid,
+    actor_email character varying(255),
+    action character varying(100) NOT NULL,
+    resource_type character varying(50) NOT NULL,
+    resource_id uuid,
+    old_values jsonb,
+    new_values jsonb,
+    ip_address inet,
+    user_agent text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: chat_attached_sources; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chat_attached_sources (
+    chat_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    attached_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: chat_calls; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chat_calls (
+    chat_id uuid NOT NULL,
+    id text NOT NULL,
+    turn_id uuid NOT NULL,
+    envelope_id text NOT NULL,
+    result_id text,
+    mutating boolean NOT NULL
+);
+
+
+--
+-- Name: chat_checkpoints; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chat_checkpoints (
+    chat_id uuid NOT NULL,
+    revision bigint NOT NULL,
+    content text NOT NULL,
+    entries jsonb NOT NULL,
+    fingerprint text NOT NULL,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT chat_checkpoints_content_check CHECK ((length(TRIM(BOTH FROM content)) > 0)),
+    CONSTRAINT chat_checkpoints_entries_check CHECK ((jsonb_typeof(entries) = 'array'::text)),
+    CONSTRAINT chat_checkpoints_revision_check CHECK ((revision > 0))
+);
+
+
+--
+-- Name: chat_entries; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chat_entries (
+    chat_id uuid NOT NULL,
+    id text NOT NULL,
+    "position" bigint NOT NULL,
+    turn_id uuid,
+    message jsonb NOT NULL,
+    consumed boolean DEFAULT false NOT NULL,
+    legacy boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT chat_entries_message_check CHECK (((message ->> 'version'::text) = '1'::text)),
+    CONSTRAINT chat_entries_message_check1 CHECK (((message ->> 'role'::text) = ANY (ARRAY['system'::text, 'user'::text, 'assistant'::text, 'tool'::text])))
+);
+
+
+--
+-- Name: chat_entries_position_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.chat_entries ALTER COLUMN "position" ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.chat_entries_position_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: chat_leases; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chat_leases (
+    chat_id uuid NOT NULL,
+    owner uuid NOT NULL,
+    fence bigint NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT chat_leases_fence_check CHECK ((fence > 0))
+);
+
+
+--
+-- Name: chat_sources; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chat_sources (
+    chat_id uuid NOT NULL,
+    identifier text NOT NULL,
+    kind text NOT NULL,
+    key text NOT NULL,
+    uri text NOT NULL,
+    title text NOT NULL,
+    first_observed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    last_observed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT chat_sources_kind_check CHECK ((kind = ANY (ARRAY['web'::text, 'doc'::text, 'kb'::text, 'chat'::text])))
+);
+
+
+--
+-- Name: chat_turns; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chat_turns (
+    id uuid NOT NULL,
+    chat_id uuid NOT NULL,
+    user_message_id uuid NOT NULL,
+    fence bigint NOT NULL,
+    version smallint DEFAULT 1 NOT NULL,
+    status text DEFAULT 'running'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT chat_turns_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'interrupted'::text]))),
+    CONSTRAINT chat_turns_version_check CHECK ((version = 1))
+);
+
+
+--
+-- Name: chats; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chats (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid,
+    title text NOT NULL,
+    model_name text NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    archived boolean DEFAULT false,
+    agent_enabled boolean DEFAULT false NOT NULL,
+    agent_sandboxed boolean DEFAULT true NOT NULL,
+    automatic_title boolean DEFAULT false NOT NULL,
+    title_message_id uuid,
+    auto_approve boolean DEFAULT false NOT NULL,
+    "character" jsonb,
+    reasoning_effort text DEFAULT 'auto'::text NOT NULL,
+    purpose text DEFAULT 'assistant'::text NOT NULL,
+    project_id uuid,
+    CONSTRAINT chats_purpose_check CHECK ((purpose = ANY (ARRAY['assistant'::text, 'project_planner'::text, 'project_updates'::text]))),
+    CONSTRAINT chats_reasoning_effort_check CHECK ((reasoning_effort = ANY (ARRAY['auto'::text, 'off'::text, 'low'::text, 'medium'::text, 'high'::text])))
+);
+
+
+--
+-- Name: content_chunks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.content_chunks (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    content_item_id uuid NOT NULL,
+    chunk_index integer NOT NULL,
+    text text NOT NULL,
+    token_count integer NOT NULL,
+    start_offset integer NOT NULL,
+    end_offset integer NOT NULL,
+    search_vector tsvector,
+    created_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: content_items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.content_items (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    source_id uuid NOT NULL,
+    workspace_id uuid,
+    category text NOT NULL,
+    uri text NOT NULL,
+    title text NOT NULL,
+    content text,
+    content_type text DEFAULT 'text/plain'::text NOT NULL,
+    token_count integer DEFAULT 0 NOT NULL,
+    metadata_only boolean DEFAULT false NOT NULL,
+    content_hash text NOT NULL,
+    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    search_vector tsvector,
+    modified_at timestamp without time zone,
+    fetched_at timestamp without time zone DEFAULT now() NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: context_gatherings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.context_gatherings (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid,
+    task_id uuid,
+    user_id uuid,
+    status text DEFAULT 'pending'::text NOT NULL,
+    source_ids uuid[] DEFAULT '{}'::uuid[] NOT NULL,
+    config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    stats jsonb,
+    error_message text,
+    started_at timestamp without time zone,
+    completed_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT context_gatherings_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'running'::text, 'completed'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: email_verification_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.email_verification_tokens (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    token_hash character varying(255) NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    used_at timestamp with time zone
+);
+
+
+--
+-- Name: embeddings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.embeddings (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    chunk_id uuid NOT NULL,
+    content_item_id uuid NOT NULL,
+    source_id uuid NOT NULL,
+    workspace_id uuid,
+    vector public.vector(1024) NOT NULL,
+    model text NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    vector_bit bit(1024) GENERATED ALWAYS AS ((public.binary_quantize(vector))::bit(1024)) STORED
+);
+
+
+--
+-- Name: gathering_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.gathering_events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    gathering_id uuid NOT NULL,
+    event_type text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: heuristic_analysis; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.heuristic_analysis (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    content_item_id uuid NOT NULL,
+    entities jsonb DEFAULT '{}'::jsonb NOT NULL,
+    categorization jsonb DEFAULT '{}'::jsonb NOT NULL,
+    quality jsonb DEFAULT '{}'::jsonb NOT NULL,
+    analyzed_at timestamp without time zone DEFAULT now() NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: invitations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.invitations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    email character varying(255) NOT NULL,
+    organization_id uuid NOT NULL,
+    workspace_ids uuid[] DEFAULT '{}'::uuid[],
+    org_role character varying(50) DEFAULT 'member'::character varying NOT NULL,
+    workspace_role character varying(50) DEFAULT 'member'::character varying NOT NULL,
+    token_hash character varying(255) NOT NULL,
+    invited_by uuid NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    accepted_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: knowledge_embeddings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.knowledge_embeddings (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    knowledge_entry_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    vector public.vector(1024) NOT NULL,
+    model text NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    vector_bit bit(1024) GENERATED ALWAYS AS ((public.binary_quantize(vector))::bit(1024)) STORED
+);
+
+
+--
+-- Name: knowledge_entries; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.knowledge_entries (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    title text NOT NULL,
+    content text NOT NULL,
+    category text,
+    tags text[] DEFAULT '{}'::text[],
+    token_count integer DEFAULT 0 NOT NULL,
+    is_active boolean DEFAULT true,
+    source_url text,
+    last_fetched_at timestamp without time zone,
+    content_hash text,
+    refresh_interval_minutes integer,
+    last_fetch_error text,
+    created_by uuid,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    search_vector tsvector,
+    version bigint DEFAULT 0 NOT NULL,
+    description text
+);
+
+
+--
+-- Name: message_embeddings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.message_embeddings (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    message_id uuid NOT NULL,
+    chat_id uuid NOT NULL,
+    vector public.vector(1024) NOT NULL,
+    model text NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    vector_bit bit(1024) GENERATED ALWAYS AS ((public.binary_quantize(vector))::bit(1024)) STORED,
+    workspace_id uuid
+);
+
+
+--
+-- Name: messages; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.messages (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    chat_id uuid NOT NULL,
+    role text NOT NULL,
+    content text NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    metadata jsonb DEFAULT '{}'::jsonb,
+    search_vector tsvector,
+    CONSTRAINT messages_role_check CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text, 'system'::text])))
+);
+
+
+--
+-- Name: organization_ai_settings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.organization_ai_settings (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    provider text DEFAULT 'self_hosted'::text NOT NULL,
+    litellm_host text,
+    litellm_key text,
+    openai_api_key text,
+    openai_base_url text,
+    anthropic_api_key text,
+    anthropic_base_url text,
+    bedrock_region text,
+    bedrock_access_key text,
+    bedrock_secret_key text,
+    bedrock_use_iam_role boolean DEFAULT false,
+    model_fast text,
+    model_reasoning text,
+    model_embedding text,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    model_image text,
+    model_video text,
+    model_audio text,
+    completions_routed boolean DEFAULT false NOT NULL,
+    CONSTRAINT organization_ai_settings_provider_check CHECK ((provider = ANY (ARRAY['self_hosted'::text, 'openai'::text, 'anthropic'::text, 'bedrock'::text, 'claude_code'::text, 'codex'::text])))
+);
+
+
+--
+-- Name: organization_members; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.organization_members (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    role text DEFAULT 'member'::text NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    invited_by uuid,
+    invited_at timestamp without time zone,
+    accepted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT organization_members_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text])))
+);
+
+
+--
+-- Name: organizations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.organizations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text NOT NULL,
+    slug text NOT NULL,
+    description text,
+    is_active boolean DEFAULT true,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: password_reset_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.password_reset_tokens (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    token_hash character varying(255) NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    used_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: permissions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.permissions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text NOT NULL,
+    description text,
+    resource text NOT NULL,
+    action text NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT permissions_action_check CHECK ((action = ANY (ARRAY['create'::text, 'read'::text, 'update'::text, 'delete'::text])))
+);
+
+
+--
+-- Name: plans; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.plans (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name character varying(100) NOT NULL,
+    slug character varying(50) NOT NULL,
+    description text,
+    price_monthly_cents integer NOT NULL,
+    price_yearly_cents integer NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    is_public boolean DEFAULT true NOT NULL,
+    features jsonb DEFAULT '{}'::jsonb NOT NULL,
+    limits jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: projects; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.projects (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid,
+    source_id uuid,
+    name text NOT NULL,
+    description text,
+    status text DEFAULT 'active'::text NOT NULL,
+    github_repo_url text,
+    github_access_token text,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    auto boolean DEFAULT false NOT NULL,
+    auto_actor_id uuid,
+    brief jsonb,
+    auto_paused_reason text,
+    auto_claimed_at timestamp with time zone,
+    auto_completed_at timestamp with time zone,
+    CONSTRAINT projects_status_check CHECK ((status = ANY (ARRAY['active'::text, 'on_hold'::text, 'cancelled'::text])))
+);
+
+
+--
+-- Name: refresh_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.refresh_tokens (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    token_hash text NOT NULL,
+    expires_at timestamp without time zone NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    revoked_at timestamp without time zone,
+    user_agent text,
+    ip_address text
+);
+
+
+--
+-- Name: reminder_turns; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.reminder_turns (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    reminder_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    chat_id uuid NOT NULL,
+    created_by uuid NOT NULL,
+    prompt text NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    claimed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT reminder_turns_prompt_check CHECK ((length(TRIM(BOTH FROM prompt)) > 0))
+);
+
+
+--
+-- Name: reminders; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.reminders (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    chat_id uuid NOT NULL,
+    created_by uuid NOT NULL,
+    content text NOT NULL,
+    due_at timestamp with time zone NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    message_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    rrule text,
+    prompt text,
+    timing_mode text DEFAULT 'exact_schedule'::text NOT NULL,
+    anchor_at timestamp with time zone,
+    expires_at timestamp with time zone,
+    fired_count integer DEFAULT 0 NOT NULL,
+    last_fired_at timestamp with time zone,
+    last_observation text,
+    CONSTRAINT reminders_content_check CHECK ((length(TRIM(BOTH FROM content)) > 0)),
+    CONSTRAINT reminders_last_observation_check CHECK (((last_observation IS NULL) OR (length(last_observation) <= 4000))),
+    CONSTRAINT reminders_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'delivered'::text, 'cancelled'::text, 'expired'::text]))),
+    CONSTRAINT reminders_timing_mode_check CHECK ((timing_mode = ANY (ARRAY['exact_schedule'::text, 'condition_watch'::text]))),
+    CONSTRAINT reminders_watch_compares_check CHECK (((timing_mode <> 'condition_watch'::text) OR ((COALESCE(rrule, ''::text) ~ '[^[:space:]]'::text) AND (COALESCE(prompt, ''::text) ~ '[^[:space:]]'::text))))
+);
+
+
+--
+-- Name: role_permissions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.role_permissions (
+    role_id uuid NOT NULL,
+    permission_id uuid NOT NULL
+);
+
+
+--
+-- Name: roles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.roles (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text NOT NULL,
+    description text,
+    is_system boolean DEFAULT false,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: sessions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sessions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    refresh_token_hash character varying(255) NOT NULL,
+    ip_address inet,
+    user_agent text,
+    device_info jsonb,
+    last_active_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    revoked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: source_sync_state; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.source_sync_state (
+    source_id uuid NOT NULL,
+    last_sync_at timestamp without time zone,
+    cursor text,
+    etag text,
+    version text,
+    extra jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: source_types; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.source_types (
+    name text NOT NULL,
+    category text DEFAULT 'file'::text NOT NULL,
+    description text NOT NULL,
+    config_schema jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: sources; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sources (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid,
+    name text NOT NULL,
+    source_type text NOT NULL,
+    config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    credentials_encrypted text,
+    description text,
+    url text,
+    is_active boolean DEFAULT true,
+    last_verified_at timestamp without time zone,
+    last_error text,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: subscriptions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.subscriptions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    plan_id uuid NOT NULL,
+    status character varying(50) NOT NULL,
+    current_period_start timestamp with time zone NOT NULL,
+    current_period_end timestamp with time zone NOT NULL,
+    cancel_at_period_end boolean DEFAULT false NOT NULL,
+    canceled_at timestamp with time zone,
+    trial_start timestamp with time zone,
+    trial_end timestamp with time zone,
+    stripe_subscription_id character varying(255),
+    stripe_customer_id character varying(255),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: sync_configs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sync_configs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    project_id uuid NOT NULL,
+    provider text NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    webhook_secret_encrypted text,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT sync_configs_provider_check CHECK ((provider = ANY (ARRAY['github'::text, 'linear'::text])))
+);
+
+
+--
+-- Name: sync_deliveries; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sync_deliveries (
+    sync_config_id uuid NOT NULL,
+    delivery_id text NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: sync_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sync_events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sync_config_id uuid NOT NULL,
+    synced_item_id uuid,
+    event_type text NOT NULL,
+    direction text NOT NULL,
+    payload jsonb,
+    error_message text,
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT sync_events_direction_check CHECK ((direction = ANY (ARRAY['outbound'::text, 'inbound'::text]))),
+    CONSTRAINT sync_events_event_type_check CHECK ((event_type = ANY (ARRAY['create'::text, 'update'::text, 'close'::text, 'unlink'::text, 'webhook_received'::text, 'sync_error'::text])))
+);
+
+
+--
+-- Name: sync_unlinked_items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sync_unlinked_items (
+    sync_config_id uuid NOT NULL,
+    external_id text NOT NULL,
+    unlinked_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: synced_items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.synced_items (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sync_config_id uuid NOT NULL,
+    task_id uuid NOT NULL,
+    external_id text NOT NULL,
+    external_url text,
+    last_synced_at timestamp without time zone DEFAULT now(),
+    sync_direction text DEFAULT 'bidirectional'::text NOT NULL,
+    last_external_state jsonb,
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT synced_items_sync_direction_check CHECK ((sync_direction = ANY (ARRAY['outbound'::text, 'inbound'::text, 'bidirectional'::text])))
+);
+
+
+--
+-- Name: task_automation; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.task_automation (
+    task_id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    kind text,
+    stage text DEFAULT 'idle'::text NOT NULL,
+    reason text,
+    runs integer DEFAULT 0 NOT NULL,
+    review_rounds integer DEFAULT 0 NOT NULL,
+    head text,
+    checks text,
+    checks_since timestamp with time zone,
+    bot_trigger_head text,
+    merge_sha text,
+    auto_created boolean DEFAULT false NOT NULL,
+    last_run_id uuid,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT task_automation_kind_check CHECK ((kind = ANY (ARRAY['scaffold'::text, 'ci'::text, 'tests'::text, 'feature'::text, 'deployment'::text, 'docs'::text, 'fix'::text]))),
+    CONSTRAINT task_automation_stage_check CHECK ((stage = ANY (ARRAY['idle'::text, 'running'::text, 'no_changes'::text, 'awaiting_checks'::text, 'awaiting_reviews'::text, 'fixing'::text, 'merging'::text, 'post_merge'::text, 'merged'::text, 'paused'::text])))
+);
+
+
+--
+-- Name: task_file_changes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.task_file_changes (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    task_run_id uuid NOT NULL,
+    file_path text NOT NULL,
+    change_type text NOT NULL,
+    original_content text,
+    new_content text,
+    diff text,
+    applied boolean DEFAULT false,
+    applied_at timestamp without time zone,
+    reverted boolean DEFAULT false,
+    reverted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT task_file_changes_change_type_check CHECK ((change_type = ANY (ARRAY['create'::text, 'modify'::text, 'delete'::text])))
+);
+
+
+--
+-- Name: task_projects; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.task_projects (
+    task_id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    created_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: task_queue; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.task_queue (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    task_id uuid NOT NULL,
+    priority integer DEFAULT 3 NOT NULL,
+    queued_at timestamp without time zone DEFAULT now(),
+    started_at timestamp without time zone,
+    worker_id text,
+    attempts integer DEFAULT 0,
+    max_attempts integer DEFAULT 3,
+    last_error text
+);
+
+
+--
+-- Name: task_reviews; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.task_reviews (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    task_id uuid NOT NULL,
+    run_id uuid,
+    round integer NOT NULL,
+    head text NOT NULL,
+    reviewer_kind text DEFAULT 'model'::text NOT NULL,
+    reviewer text NOT NULL,
+    author_model text,
+    same_model boolean DEFAULT false NOT NULL,
+    verdict text NOT NULL,
+    summary text DEFAULT ''::text NOT NULL,
+    findings jsonb DEFAULT '[]'::jsonb NOT NULL,
+    addressed jsonb DEFAULT '[]'::jsonb NOT NULL,
+    external_id text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT task_reviews_reviewer_kind_check CHECK ((reviewer_kind = ANY (ARRAY['model'::text, 'bot'::text]))),
+    CONSTRAINT task_reviews_verdict_check CHECK ((verdict = ANY (ARRAY['approve'::text, 'request_changes'::text, 'unparseable'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: task_run_checkouts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.task_run_checkouts (
+    run_id uuid NOT NULL,
+    head text NOT NULL,
+    published text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: task_run_logs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.task_run_logs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    task_run_id uuid NOT NULL,
+    phase text NOT NULL,
+    agent_type text NOT NULL,
+    log_level text NOT NULL,
+    message text NOT NULL,
+    metadata jsonb DEFAULT '{}'::jsonb,
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT task_run_logs_log_level_check CHECK ((log_level = ANY (ARRAY['debug'::text, 'info'::text, 'warning'::text, 'error'::text])))
+);
+
+
+--
+-- Name: task_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.task_runs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    task_id uuid NOT NULL,
+    status text NOT NULL,
+    current_phase text,
+    progress_percent integer DEFAULT 0,
+    started_at timestamp without time zone DEFAULT now(),
+    completed_at timestamp without time zone,
+    error_message text,
+    artifacts jsonb DEFAULT '{}'::jsonb,
+    result_summary text,
+    modified_files jsonb,
+    heartbeat_at timestamp with time zone DEFAULT now() NOT NULL,
+    owner uuid,
+    triggered_by uuid,
+    pending_question jsonb,
+    pending_wait jsonb,
+    plan text,
+    model text,
+    unattended boolean DEFAULT false NOT NULL,
+    CONSTRAINT task_runs_progress_percent_check CHECK (((progress_percent >= 0) AND (progress_percent <= 100))),
+    CONSTRAINT task_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'waiting'::text, 'completed'::text, 'failed'::text, 'cancelled'::text])))
+);
+
+
+--
+-- Name: task_tool_calls; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.task_tool_calls (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    task_run_id uuid NOT NULL,
+    tool_name text NOT NULL,
+    tool_input jsonb NOT NULL,
+    tool_output jsonb,
+    status text DEFAULT 'pending'::text NOT NULL,
+    error_message text,
+    started_at timestamp without time zone DEFAULT now(),
+    completed_at timestamp without time zone,
+    CONSTRAINT task_tool_calls_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'running'::text, 'completed'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tasks (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    title text NOT NULL,
+    description text NOT NULL,
+    acceptance_criteria text,
+    status text DEFAULT 'created'::text NOT NULL,
+    priority integer,
+    model_name text,
+    dependencies jsonb DEFAULT '[]'::jsonb,
+    is_agentic boolean DEFAULT false NOT NULL,
+    github_repo_url text,
+    source_id uuid,
+    source_ids uuid[] DEFAULT '{}'::uuid[],
+    worker_id text,
+    queued_at timestamp without time zone,
+    started_at timestamp without time zone,
+    completed_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    pr_url text,
+    branch_name text,
+    pr_status text,
+    pr_created_at timestamp without time zone,
+    assignee_id uuid,
+    created_by uuid,
+    active_run_id uuid,
+    require_plan_approval boolean DEFAULT false NOT NULL,
+    CONSTRAINT tasks_priority_check CHECK (((priority >= 1) AND (priority <= 5))),
+    CONSTRAINT tasks_status_check CHECK ((status = ANY (ARRAY['created'::text, 'queued'::text, 'in_progress'::text, 'review'::text, 'complete'::text, 'blocked'::text])))
+);
+
+
+--
+-- Name: usage_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.usage_events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    workspace_id uuid,
+    user_id uuid,
+    event_type character varying(50) NOT NULL,
+    quantity bigint DEFAULT 1 NOT NULL,
+    metadata jsonb DEFAULT '{}'::jsonb,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: user_roles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_roles (
+    user_id uuid NOT NULL,
+    role_id uuid NOT NULL,
+    assigned_at timestamp without time zone DEFAULT now(),
+    assigned_by uuid
+);
+
+
+--
+-- Name: users; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.users (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    email text NOT NULL,
+    password_hash text NOT NULL,
+    display_name text,
+    is_active boolean DEFAULT true,
+    is_admin boolean DEFAULT false,
+    email_verified boolean DEFAULT false NOT NULL,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    last_login_at timestamp without time zone
+);
+
+
+--
+-- Name: wiki_chunks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.wiki_chunks (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    wiki_entry_id uuid NOT NULL,
+    chunk_index integer NOT NULL,
+    content text NOT NULL,
+    embedding public.vector(1024),
+    token_count integer,
+    created_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: wiki_entries; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.wiki_entries (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    title text NOT NULL,
+    content text NOT NULL,
+    source_type text NOT NULL,
+    source_id uuid,
+    source_url text,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    metadata jsonb DEFAULT '{}'::jsonb,
+    CONSTRAINT wiki_entries_source_type_check CHECK ((source_type = ANY (ARRAY['chat'::text, 'manual'::text, 'url'::text, 'task'::text, 'github'::text])))
+);
+
+
+--
+-- Name: workspace_ai_settings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.workspace_ai_settings (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    provider text,
+    litellm_host text,
+    litellm_key text,
+    openai_api_key text,
+    openai_base_url text,
+    anthropic_api_key text,
+    anthropic_base_url text,
+    bedrock_region text,
+    bedrock_access_key text,
+    bedrock_secret_key text,
+    bedrock_use_iam_role boolean,
+    model_fast text,
+    model_reasoning text,
+    model_embedding text,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    model_image text,
+    model_video text,
+    model_audio text,
+    completions_routed boolean DEFAULT false NOT NULL,
+    CONSTRAINT workspace_ai_settings_provider_check CHECK (((provider IS NULL) OR (provider = ANY (ARRAY['self_hosted'::text, 'openai'::text, 'anthropic'::text, 'bedrock'::text, 'claude_code'::text, 'codex'::text]))))
+);
+
+
+--
+-- Name: workspace_members; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.workspace_members (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    role text DEFAULT 'member'::text NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    invited_by uuid,
+    invited_at timestamp without time zone,
+    accepted_at timestamp without time zone,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT workspace_members_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text, 'viewer'::text])))
+);
+
+
+--
+-- Name: workspace_themes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.workspace_themes (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    primary_color_light text DEFAULT '#0011d9'::text,
+    secondary_color_light text DEFAULT '#ecf9ff'::text,
+    primary_color_dark text DEFAULT '#00f3ff'::text,
+    secondary_color_dark text DEFAULT '#ecf9ff'::text,
+    font_family text DEFAULT 'nunito'::text,
+    font_size_base text DEFAULT '16px'::text,
+    border_radius text DEFAULT 'large'::text,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: workspaces; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.workspaces (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    name text NOT NULL,
+    slug text NOT NULL,
+    description text,
+    is_active boolean DEFAULT true,
+    created_at timestamp without time zone DEFAULT now(),
+    updated_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: agent_logins agent_logins_organization_id_agent_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_logins
+    ADD CONSTRAINT agent_logins_organization_id_agent_key UNIQUE (organization_id, agent);
+
+
+--
+-- Name: agent_logins agent_logins_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_logins
+    ADD CONSTRAINT agent_logins_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: audit_logs audit_logs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_logs
+    ADD CONSTRAINT audit_logs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: chat_attached_sources chat_attached_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_attached_sources
+    ADD CONSTRAINT chat_attached_sources_pkey PRIMARY KEY (chat_id, source_id);
+
+
+--
+-- Name: chat_calls chat_calls_chat_id_result_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_calls
+    ADD CONSTRAINT chat_calls_chat_id_result_id_key UNIQUE (chat_id, result_id);
+
+
+--
+-- Name: chat_calls chat_calls_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_calls
+    ADD CONSTRAINT chat_calls_pkey PRIMARY KEY (chat_id, id);
+
+
+--
+-- Name: chat_checkpoints chat_checkpoints_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_checkpoints
+    ADD CONSTRAINT chat_checkpoints_pkey PRIMARY KEY (chat_id);
+
+
+--
+-- Name: chat_entries chat_entries_chat_id_position_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_entries
+    ADD CONSTRAINT chat_entries_chat_id_position_key UNIQUE (chat_id, "position");
+
+
+--
+-- Name: chat_entries chat_entries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_entries
+    ADD CONSTRAINT chat_entries_pkey PRIMARY KEY (chat_id, id);
+
+
+--
+-- Name: chat_leases chat_leases_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_leases
+    ADD CONSTRAINT chat_leases_pkey PRIMARY KEY (chat_id);
+
+
+--
+-- Name: chat_sources chat_sources_identity; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_sources
+    ADD CONSTRAINT chat_sources_identity UNIQUE (chat_id, kind, key);
+
+
+--
+-- Name: chat_sources chat_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_sources
+    ADD CONSTRAINT chat_sources_pkey PRIMARY KEY (chat_id, identifier);
+
+
+--
+-- Name: chat_turns chat_turns_chat_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_turns
+    ADD CONSTRAINT chat_turns_chat_id_id_key UNIQUE (chat_id, id);
+
+
+--
+-- Name: chat_turns chat_turns_chat_id_user_message_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_turns
+    ADD CONSTRAINT chat_turns_chat_id_user_message_id_key UNIQUE (chat_id, user_message_id);
+
+
+--
+-- Name: chat_turns chat_turns_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_turns
+    ADD CONSTRAINT chat_turns_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: chats chats_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chats
+    ADD CONSTRAINT chats_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: content_chunks content_chunks_content_item_id_chunk_index_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.content_chunks
+    ADD CONSTRAINT content_chunks_content_item_id_chunk_index_key UNIQUE (content_item_id, chunk_index);
+
+
+--
+-- Name: content_chunks content_chunks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.content_chunks
+    ADD CONSTRAINT content_chunks_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: content_items content_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.content_items
+    ADD CONSTRAINT content_items_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: content_items content_items_source_id_uri_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.content_items
+    ADD CONSTRAINT content_items_source_id_uri_key UNIQUE (source_id, uri);
+
+
+--
+-- Name: context_gatherings context_gatherings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.context_gatherings
+    ADD CONSTRAINT context_gatherings_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: email_verification_tokens email_verification_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.email_verification_tokens
+    ADD CONSTRAINT email_verification_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: email_verification_tokens email_verification_tokens_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.email_verification_tokens
+    ADD CONSTRAINT email_verification_tokens_token_hash_key UNIQUE (token_hash);
+
+
+--
+-- Name: embeddings embeddings_chunk_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.embeddings
+    ADD CONSTRAINT embeddings_chunk_id_key UNIQUE (chunk_id);
+
+
+--
+-- Name: embeddings embeddings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.embeddings
+    ADD CONSTRAINT embeddings_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: gathering_events gathering_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gathering_events
+    ADD CONSTRAINT gathering_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: heuristic_analysis heuristic_analysis_content_item_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.heuristic_analysis
+    ADD CONSTRAINT heuristic_analysis_content_item_id_key UNIQUE (content_item_id);
+
+
+--
+-- Name: heuristic_analysis heuristic_analysis_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.heuristic_analysis
+    ADD CONSTRAINT heuristic_analysis_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: invitations invitations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT invitations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: invitations invitations_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT invitations_token_hash_key UNIQUE (token_hash);
+
+
+--
+-- Name: knowledge_embeddings knowledge_embeddings_knowledge_entry_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.knowledge_embeddings
+    ADD CONSTRAINT knowledge_embeddings_knowledge_entry_id_key UNIQUE (knowledge_entry_id);
+
+
+--
+-- Name: knowledge_embeddings knowledge_embeddings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.knowledge_embeddings
+    ADD CONSTRAINT knowledge_embeddings_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: knowledge_entries knowledge_entries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.knowledge_entries
+    ADD CONSTRAINT knowledge_entries_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: message_embeddings message_embeddings_message_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_embeddings
+    ADD CONSTRAINT message_embeddings_message_id_key UNIQUE (message_id);
+
+
+--
+-- Name: message_embeddings message_embeddings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_embeddings
+    ADD CONSTRAINT message_embeddings_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: messages messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: organization_ai_settings organization_ai_settings_organization_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organization_ai_settings
+    ADD CONSTRAINT organization_ai_settings_organization_id_key UNIQUE (organization_id);
+
+
+--
+-- Name: organization_ai_settings organization_ai_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organization_ai_settings
+    ADD CONSTRAINT organization_ai_settings_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: organization_members organization_members_organization_id_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organization_members
+    ADD CONSTRAINT organization_members_organization_id_user_id_key UNIQUE (organization_id, user_id);
+
+
+--
+-- Name: organization_members organization_members_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organization_members
+    ADD CONSTRAINT organization_members_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: organizations organizations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT organizations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: organizations organizations_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT organizations_slug_key UNIQUE (slug);
+
+
+--
+-- Name: password_reset_tokens password_reset_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.password_reset_tokens
+    ADD CONSTRAINT password_reset_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: password_reset_tokens password_reset_tokens_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.password_reset_tokens
+    ADD CONSTRAINT password_reset_tokens_token_hash_key UNIQUE (token_hash);
+
+
+--
+-- Name: permissions permissions_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.permissions
+    ADD CONSTRAINT permissions_name_key UNIQUE (name);
+
+
+--
+-- Name: permissions permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.permissions
+    ADD CONSTRAINT permissions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: plans plans_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.plans
+    ADD CONSTRAINT plans_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: plans plans_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.plans
+    ADD CONSTRAINT plans_slug_key UNIQUE (slug);
+
+
+--
+-- Name: projects projects_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.projects
+    ADD CONSTRAINT projects_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: refresh_tokens refresh_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: refresh_tokens refresh_tokens_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_token_hash_key UNIQUE (token_hash);
+
+
+--
+-- Name: reminder_turns reminder_turns_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminder_turns
+    ADD CONSTRAINT reminder_turns_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: reminders reminders_message_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminders
+    ADD CONSTRAINT reminders_message_id_key UNIQUE (message_id);
+
+
+--
+-- Name: reminders reminders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminders
+    ADD CONSTRAINT reminders_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: role_permissions role_permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_pkey PRIMARY KEY (role_id, permission_id);
+
+
+--
+-- Name: roles roles_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_name_key UNIQUE (name);
+
+
+--
+-- Name: roles roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sessions sessions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sessions sessions_refresh_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_refresh_token_hash_key UNIQUE (refresh_token_hash);
+
+
+--
+-- Name: source_sync_state source_sync_state_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.source_sync_state
+    ADD CONSTRAINT source_sync_state_pkey PRIMARY KEY (source_id);
+
+
+--
+-- Name: source_types source_types_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.source_types
+    ADD CONSTRAINT source_types_pkey PRIMARY KEY (name);
+
+
+--
+-- Name: sources sources_name_source_type_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sources
+    ADD CONSTRAINT sources_name_source_type_key UNIQUE (name, source_type);
+
+
+--
+-- Name: sources sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sources
+    ADD CONSTRAINT sources_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: subscriptions subscriptions_organization_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscriptions
+    ADD CONSTRAINT subscriptions_organization_id_key UNIQUE (organization_id);
+
+
+--
+-- Name: subscriptions subscriptions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscriptions
+    ADD CONSTRAINT subscriptions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sync_configs sync_configs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sync_configs
+    ADD CONSTRAINT sync_configs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sync_configs sync_configs_project_id_provider_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sync_configs
+    ADD CONSTRAINT sync_configs_project_id_provider_key UNIQUE (project_id, provider);
+
+
+--
+-- Name: sync_deliveries sync_deliveries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sync_deliveries
+    ADD CONSTRAINT sync_deliveries_pkey PRIMARY KEY (sync_config_id, delivery_id);
+
+
+--
+-- Name: sync_events sync_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sync_events
+    ADD CONSTRAINT sync_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sync_unlinked_items sync_unlinked_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sync_unlinked_items
+    ADD CONSTRAINT sync_unlinked_items_pkey PRIMARY KEY (sync_config_id, external_id);
+
+
+--
+-- Name: synced_items synced_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.synced_items
+    ADD CONSTRAINT synced_items_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: synced_items synced_items_sync_config_id_external_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.synced_items
+    ADD CONSTRAINT synced_items_sync_config_id_external_id_key UNIQUE (sync_config_id, external_id);
+
+
+--
+-- Name: synced_items synced_items_sync_config_id_task_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.synced_items
+    ADD CONSTRAINT synced_items_sync_config_id_task_id_key UNIQUE (sync_config_id, task_id);
+
+
+--
+-- Name: task_automation task_automation_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_automation
+    ADD CONSTRAINT task_automation_pkey PRIMARY KEY (task_id);
+
+
+--
+-- Name: task_file_changes task_file_changes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_file_changes
+    ADD CONSTRAINT task_file_changes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: task_projects task_projects_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_projects
+    ADD CONSTRAINT task_projects_pkey PRIMARY KEY (task_id, project_id);
+
+
+--
+-- Name: task_queue task_queue_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_queue
+    ADD CONSTRAINT task_queue_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: task_queue task_queue_task_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_queue
+    ADD CONSTRAINT task_queue_task_id_key UNIQUE (task_id);
+
+
+--
+-- Name: task_reviews task_reviews_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_reviews
+    ADD CONSTRAINT task_reviews_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: task_reviews task_reviews_task_id_round_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_reviews
+    ADD CONSTRAINT task_reviews_task_id_round_key UNIQUE (task_id, round);
+
+
+--
+-- Name: task_run_checkouts task_run_checkouts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_run_checkouts
+    ADD CONSTRAINT task_run_checkouts_pkey PRIMARY KEY (run_id);
+
+
+--
+-- Name: task_run_logs task_run_logs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_run_logs
+    ADD CONSTRAINT task_run_logs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: task_runs task_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_runs
+    ADD CONSTRAINT task_runs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: task_tool_calls task_tool_calls_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_tool_calls
+    ADD CONSTRAINT task_tool_calls_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tasks tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tasks
+    ADD CONSTRAINT tasks_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: usage_events usage_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usage_events
+    ADD CONSTRAINT usage_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: user_roles user_roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_pkey PRIMARY KEY (user_id, role_id);
+
+
+--
+-- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_email_key UNIQUE (email);
+
+
+--
+-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: wiki_chunks wiki_chunks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.wiki_chunks
+    ADD CONSTRAINT wiki_chunks_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: wiki_entries wiki_entries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.wiki_entries
+    ADD CONSTRAINT wiki_entries_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: workspace_ai_settings workspace_ai_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_ai_settings
+    ADD CONSTRAINT workspace_ai_settings_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: workspace_ai_settings workspace_ai_settings_workspace_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_ai_settings
+    ADD CONSTRAINT workspace_ai_settings_workspace_id_key UNIQUE (workspace_id);
+
+
+--
+-- Name: workspace_members workspace_members_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_members
+    ADD CONSTRAINT workspace_members_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: workspace_members workspace_members_workspace_id_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_members
+    ADD CONSTRAINT workspace_members_workspace_id_user_id_key UNIQUE (workspace_id, user_id);
+
+
+--
+-- Name: workspace_themes workspace_themes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_themes
+    ADD CONSTRAINT workspace_themes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: workspace_themes workspace_themes_workspace_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_themes
+    ADD CONSTRAINT workspace_themes_workspace_id_key UNIQUE (workspace_id);
+
+
+--
+-- Name: workspaces workspaces_organization_id_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspaces
+    ADD CONSTRAINT workspaces_organization_id_slug_key UNIQUE (organization_id, slug);
+
+
+--
+-- Name: workspaces workspaces_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspaces
+    ADD CONSTRAINT workspaces_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: chat_calls_pending; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX chat_calls_pending ON public.chat_calls USING btree (chat_id, turn_id) WHERE (result_id IS NULL);
+
+
+--
+-- Name: chat_turns_running; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX chat_turns_running ON public.chat_turns USING btree (chat_id) WHERE (status = 'running'::text);
+
+
+--
+-- Name: idx_audit_logs_action; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_audit_logs_action ON public.audit_logs USING btree (action);
+
+
+--
+-- Name: idx_audit_logs_actor; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_audit_logs_actor ON public.audit_logs USING btree (actor_id);
+
+
+--
+-- Name: idx_audit_logs_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_audit_logs_created ON public.audit_logs USING btree (created_at DESC);
+
+
+--
+-- Name: idx_audit_logs_org; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_audit_logs_org ON public.audit_logs USING btree (organization_id, created_at DESC);
+
+
+--
+-- Name: idx_audit_logs_resource; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_audit_logs_resource ON public.audit_logs USING btree (resource_type, resource_id);
+
+
+--
+-- Name: idx_chat_attached_sources_source; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chat_attached_sources_source ON public.chat_attached_sources USING btree (source_id);
+
+
+--
+-- Name: idx_chats_project; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chats_project ON public.chats USING btree (project_id) WHERE (project_id IS NOT NULL);
+
+
+--
+-- Name: idx_chats_workspace_archived; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chats_workspace_archived ON public.chats USING btree (workspace_id, archived, updated_at DESC);
+
+
+--
+-- Name: idx_content_chunks_item; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_content_chunks_item ON public.content_chunks USING btree (content_item_id);
+
+
+--
+-- Name: idx_content_chunks_search; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_content_chunks_search ON public.content_chunks USING gin (search_vector);
+
+
+--
+-- Name: idx_content_documents_search; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_content_documents_search ON public.content_items USING gin (to_tsvector('english'::regconfig, ((title || ' '::text) || COALESCE(
+CASE
+    WHEN metadata_only THEN NULL::text
+    ELSE content
+END, ''::text))));
+
+
+--
+-- Name: idx_content_items_category; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_content_items_category ON public.content_items USING btree (category);
+
+
+--
+-- Name: idx_content_items_fetched; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_content_items_fetched ON public.content_items USING btree (fetched_at);
+
+
+--
+-- Name: idx_content_items_hash; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_content_items_hash ON public.content_items USING btree (content_hash);
+
+
+--
+-- Name: idx_content_items_metadata; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_content_items_metadata ON public.content_items USING gin (metadata);
+
+
+--
+-- Name: idx_content_items_search; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_content_items_search ON public.content_items USING gin (search_vector);
+
+
+--
+-- Name: idx_content_items_source; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_content_items_source ON public.content_items USING btree (source_id);
+
+
+--
+-- Name: idx_content_items_workspace; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_content_items_workspace ON public.content_items USING btree (workspace_id);
+
+
+--
+-- Name: idx_context_gatherings_source_ids; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_context_gatherings_source_ids ON public.context_gatherings USING gin (source_ids);
+
+
+--
+-- Name: idx_context_gatherings_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_context_gatherings_status ON public.context_gatherings USING btree (status);
+
+
+--
+-- Name: idx_context_gatherings_task; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_context_gatherings_task ON public.context_gatherings USING btree (task_id);
+
+
+--
+-- Name: idx_context_gatherings_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_context_gatherings_user ON public.context_gatherings USING btree (user_id);
+
+
+--
+-- Name: idx_context_gatherings_workspace; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_context_gatherings_workspace ON public.context_gatherings USING btree (workspace_id);
+
+
+--
+-- Name: idx_email_verification_tokens_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_email_verification_tokens_user ON public.email_verification_tokens USING btree (user_id);
+
+
+--
+-- Name: idx_embeddings_content_item; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_embeddings_content_item ON public.embeddings USING btree (content_item_id);
+
+
+--
+-- Name: idx_embeddings_source; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_embeddings_source ON public.embeddings USING btree (source_id);
+
+
+--
+-- Name: idx_embeddings_vector; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_embeddings_vector ON public.embeddings USING hnsw (vector public.vector_cosine_ops) WITH (m='16', ef_construction='64');
+
+
+--
+-- Name: idx_embeddings_vector_bit; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_embeddings_vector_bit ON public.embeddings USING hnsw (vector_bit public.bit_hamming_ops) WITH (m='16', ef_construction='64');
+
+
+--
+-- Name: idx_embeddings_workspace; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_embeddings_workspace ON public.embeddings USING btree (workspace_id);
+
+
+--
+-- Name: idx_embeddings_workspace_source; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_embeddings_workspace_source ON public.embeddings USING btree (workspace_id, source_id);
+
+
+--
+-- Name: idx_gathering_events_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_gathering_events_created ON public.gathering_events USING btree (created_at);
+
+
+--
+-- Name: idx_gathering_events_gathering; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_gathering_events_gathering ON public.gathering_events USING btree (gathering_id);
+
+
+--
+-- Name: idx_gathering_events_gathering_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_gathering_events_gathering_created ON public.gathering_events USING btree (gathering_id, created_at);
+
+
+--
+-- Name: idx_heuristic_analysis_categorization; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_heuristic_analysis_categorization ON public.heuristic_analysis USING gin (categorization);
+
+
+--
+-- Name: idx_heuristic_analysis_entities; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_heuristic_analysis_entities ON public.heuristic_analysis USING gin (entities);
+
+
+--
+-- Name: idx_heuristic_analysis_item; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_heuristic_analysis_item ON public.heuristic_analysis USING btree (content_item_id);
+
+
+--
+-- Name: idx_invitations_org; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_invitations_org ON public.invitations USING btree (organization_id);
+
+
+--
+-- Name: idx_invitations_pending; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_invitations_pending ON public.invitations USING btree (email, organization_id, expires_at) WHERE (accepted_at IS NULL);
+
+
+--
+-- Name: idx_invitations_token; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_invitations_token ON public.invitations USING btree (token_hash);
+
+
+--
+-- Name: idx_knowledge_documents_search; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_knowledge_documents_search ON public.knowledge_entries USING gin (to_tsvector('english'::regconfig, ((title || ' '::text) || COALESCE(content, ''::text)))) WHERE (is_active = true);
+
+
+--
+-- Name: idx_knowledge_embeddings_vector; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_knowledge_embeddings_vector ON public.knowledge_embeddings USING hnsw (vector public.vector_cosine_ops) WITH (m='16', ef_construction='64');
+
+
+--
+-- Name: idx_knowledge_embeddings_vector_bit; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_knowledge_embeddings_vector_bit ON public.knowledge_embeddings USING hnsw (vector_bit public.bit_hamming_ops) WITH (m='16', ef_construction='64');
+
+
+--
+-- Name: idx_knowledge_embeddings_workspace; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_knowledge_embeddings_workspace ON public.knowledge_embeddings USING btree (workspace_id);
+
+
+--
+-- Name: idx_knowledge_entries_search_vector; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_knowledge_entries_search_vector ON public.knowledge_entries USING gin (search_vector) WHERE (is_active = true);
+
+
+--
+-- Name: idx_knowledge_entries_tags; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_knowledge_entries_tags ON public.knowledge_entries USING gin (tags);
+
+
+--
+-- Name: idx_knowledge_memory_entry; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_knowledge_memory_entry ON public.knowledge_entries USING btree (workspace_id, created_by, category, title) WHERE ((is_active = true) AND (category ~~ 'memory-%'::text));
+
+
+--
+-- Name: idx_knowledge_refresh_due; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_knowledge_refresh_due ON public.knowledge_entries USING btree (workspace_id, source_url) WHERE ((source_url IS NOT NULL) AND (is_active = true));
+
+
+--
+-- Name: idx_knowledge_source_url; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_knowledge_source_url ON public.knowledge_entries USING btree (workspace_id, source_url) WHERE (source_url IS NOT NULL);
+
+
+--
+-- Name: idx_knowledge_workspace_category; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_knowledge_workspace_category ON public.knowledge_entries USING btree (workspace_id, category, created_at DESC) WHERE (is_active = true);
+
+
+--
+-- Name: idx_message_embeddings_chat; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_message_embeddings_chat ON public.message_embeddings USING btree (chat_id);
+
+
+--
+-- Name: idx_message_embeddings_vector; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_message_embeddings_vector ON public.message_embeddings USING hnsw (vector public.vector_cosine_ops) WITH (m='16', ef_construction='64');
+
+
+--
+-- Name: idx_message_embeddings_vector_bit; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_message_embeddings_vector_bit ON public.message_embeddings USING hnsw (vector_bit public.bit_hamming_ops) WITH (m='16', ef_construction='64');
+
+
+--
+-- Name: idx_message_embeddings_workspace_chat; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_message_embeddings_workspace_chat ON public.message_embeddings USING btree (workspace_id, chat_id);
+
+
+--
+-- Name: idx_messages_chat_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_messages_chat_created ON public.messages USING btree (chat_id, created_at);
+
+
+--
+-- Name: idx_messages_search_vector; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_messages_search_vector ON public.messages USING gin (search_vector);
+
+
+--
+-- Name: idx_org_ai_settings_org_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_org_ai_settings_org_id ON public.organization_ai_settings USING btree (organization_id);
+
+
+--
+-- Name: idx_org_members_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_org_members_active ON public.organization_members USING btree (organization_id, is_active) WHERE (is_active = true);
+
+
+--
+-- Name: idx_org_members_org; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_org_members_org ON public.organization_members USING btree (organization_id);
+
+
+--
+-- Name: idx_org_members_user_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_org_members_user_active ON public.organization_members USING btree (user_id) WHERE (is_active = true);
+
+
+--
+-- Name: idx_organizations_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_organizations_active ON public.organizations USING btree (is_active) WHERE (is_active = true);
+
+
+--
+-- Name: idx_password_reset_tokens_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_password_reset_tokens_user ON public.password_reset_tokens USING btree (user_id);
+
+
+--
+-- Name: idx_permissions_resource; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_permissions_resource ON public.permissions USING btree (resource);
+
+
+--
+-- Name: idx_projects_auto; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_projects_auto ON public.projects USING btree (id) WHERE auto;
+
+
+--
+-- Name: idx_projects_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_projects_status ON public.projects USING btree (status);
+
+
+--
+-- Name: idx_projects_workspace_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_projects_workspace_status ON public.projects USING btree (workspace_id, status, created_at DESC);
+
+
+--
+-- Name: idx_refresh_tokens_expires_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_refresh_tokens_expires_at ON public.refresh_tokens USING btree (expires_at);
+
+
+--
+-- Name: idx_refresh_tokens_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_refresh_tokens_user_id ON public.refresh_tokens USING btree (user_id);
+
+
+--
+-- Name: idx_role_permissions_role_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_role_permissions_role_id ON public.role_permissions USING btree (role_id);
+
+
+--
+-- Name: idx_sessions_expires; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sessions_expires ON public.sessions USING btree (expires_at);
+
+
+--
+-- Name: idx_sessions_user_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sessions_user_active ON public.sessions USING btree (user_id, last_active_at DESC) WHERE (revoked_at IS NULL);
+
+
+--
+-- Name: idx_source_types_category; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_source_types_category ON public.source_types USING btree (category);
+
+
+--
+-- Name: idx_sources_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sources_active ON public.sources USING btree (is_active) WHERE (is_active = true);
+
+
+--
+-- Name: idx_sources_workspace_filters; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sources_workspace_filters ON public.sources USING btree (workspace_id, source_type, is_active, created_at DESC);
+
+
+--
+-- Name: idx_subscriptions_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_subscriptions_status ON public.subscriptions USING btree (status);
+
+
+--
+-- Name: idx_subscriptions_stripe; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_subscriptions_stripe ON public.subscriptions USING btree (stripe_subscription_id);
+
+
+--
+-- Name: idx_sync_configs_enabled; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sync_configs_enabled ON public.sync_configs USING btree (enabled) WHERE (enabled = true);
+
+
+--
+-- Name: idx_sync_configs_project_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sync_configs_project_id ON public.sync_configs USING btree (project_id);
+
+
+--
+-- Name: idx_sync_configs_provider; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sync_configs_provider ON public.sync_configs USING btree (provider);
+
+
+--
+-- Name: idx_sync_events_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sync_events_created_at ON public.sync_events USING btree (created_at DESC);
+
+
+--
+-- Name: idx_sync_events_event_type; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sync_events_event_type ON public.sync_events USING btree (event_type);
+
+
+--
+-- Name: idx_sync_events_sync_config_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sync_events_sync_config_id ON public.sync_events USING btree (sync_config_id);
+
+
+--
+-- Name: idx_sync_events_synced_item_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sync_events_synced_item_id ON public.sync_events USING btree (synced_item_id);
+
+
+--
+-- Name: idx_sync_state_last_sync; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sync_state_last_sync ON public.source_sync_state USING btree (last_sync_at);
+
+
+--
+-- Name: idx_synced_items_external_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_synced_items_external_id ON public.synced_items USING btree (sync_config_id, external_id);
+
+
+--
+-- Name: idx_synced_items_last_synced; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_synced_items_last_synced ON public.synced_items USING btree (last_synced_at);
+
+
+--
+-- Name: idx_synced_items_sync_config_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_synced_items_sync_config_id ON public.synced_items USING btree (sync_config_id);
+
+
+--
+-- Name: idx_synced_items_task_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_synced_items_task_id ON public.synced_items USING btree (task_id);
+
+
+--
+-- Name: idx_task_automation_project_stage; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_automation_project_stage ON public.task_automation USING btree (project_id, stage);
+
+
+--
+-- Name: idx_task_file_changes_applied; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_file_changes_applied ON public.task_file_changes USING btree (applied);
+
+
+--
+-- Name: idx_task_file_changes_run_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_file_changes_run_id ON public.task_file_changes USING btree (task_run_id);
+
+
+--
+-- Name: idx_task_projects_project_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_projects_project_id ON public.task_projects USING btree (project_id);
+
+
+--
+-- Name: idx_task_projects_task_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_projects_task_id ON public.task_projects USING btree (task_id);
+
+
+--
+-- Name: idx_task_queue_priority; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_queue_priority ON public.task_queue USING btree (priority DESC, queued_at);
+
+
+--
+-- Name: idx_task_queue_worker; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_queue_worker ON public.task_queue USING btree (worker_id) WHERE (worker_id IS NOT NULL);
+
+
+--
+-- Name: idx_task_run_logs_run_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_run_logs_run_created ON public.task_run_logs USING btree (task_run_id, created_at);
+
+
+--
+-- Name: idx_task_runs_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_runs_status ON public.task_runs USING btree (status);
+
+
+--
+-- Name: idx_task_runs_task_started; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_runs_task_started ON public.task_runs USING btree (task_id, started_at DESC);
+
+
+--
+-- Name: idx_task_tool_calls_run_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_tool_calls_run_id ON public.task_tool_calls USING btree (task_run_id);
+
+
+--
+-- Name: idx_task_tool_calls_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_tool_calls_status ON public.task_tool_calls USING btree (status);
+
+
+--
+-- Name: idx_tasks_branch_name; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tasks_branch_name ON public.tasks USING btree (branch_name) WHERE (branch_name IS NOT NULL);
+
+
+--
+-- Name: idx_tasks_pr_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tasks_pr_status ON public.tasks USING btree (pr_status) WHERE (pr_status IS NOT NULL);
+
+
+--
+-- Name: idx_tasks_queued_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tasks_queued_at ON public.tasks USING btree (queued_at) WHERE (queued_at IS NOT NULL);
+
+
+--
+-- Name: idx_tasks_source_ids; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tasks_source_ids ON public.tasks USING gin (source_ids);
+
+
+--
+-- Name: idx_tasks_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tasks_status ON public.tasks USING btree (status);
+
+
+--
+-- Name: idx_tasks_worker_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tasks_worker_id ON public.tasks USING btree (worker_id) WHERE (worker_id IS NOT NULL);
+
+
+--
+-- Name: idx_tasks_workspace_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tasks_workspace_created ON public.tasks USING btree (workspace_id, created_at DESC);
+
+
+--
+-- Name: idx_tasks_workspace_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_tasks_workspace_status ON public.tasks USING btree (workspace_id, status, created_at DESC);
+
+
+--
+-- Name: idx_usage_events_org_time; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_usage_events_org_time ON public.usage_events USING btree (organization_id, recorded_at);
+
+
+--
+-- Name: idx_usage_events_org_type_time; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_usage_events_org_type_time ON public.usage_events USING btree (organization_id, event_type, recorded_at);
+
+
+--
+-- Name: idx_usage_events_type; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_usage_events_type ON public.usage_events USING btree (event_type);
+
+
+--
+-- Name: idx_user_roles_role_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_roles_role_id ON public.user_roles USING btree (role_id);
+
+
+--
+-- Name: idx_user_roles_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_roles_user_id ON public.user_roles USING btree (user_id);
+
+
+--
+-- Name: idx_users_is_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_users_is_active ON public.users USING btree (is_active);
+
+
+--
+-- Name: idx_wiki_chunks_embedding; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_wiki_chunks_embedding ON public.wiki_chunks USING ivfflat (embedding public.vector_cosine_ops) WITH (lists='100');
+
+
+--
+-- Name: idx_wiki_chunks_entry_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_wiki_chunks_entry_id ON public.wiki_chunks USING btree (wiki_entry_id);
+
+
+--
+-- Name: idx_wiki_entries_source_type; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_wiki_entries_source_type ON public.wiki_entries USING btree (source_type);
+
+
+--
+-- Name: idx_workspace_members_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_workspace_members_active ON public.workspace_members USING btree (workspace_id, is_active) WHERE (is_active = true);
+
+
+--
+-- Name: idx_workspace_members_user_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_workspace_members_user_active ON public.workspace_members USING btree (user_id) WHERE (is_active = true);
+
+
+--
+-- Name: idx_workspace_members_workspace; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_workspace_members_workspace ON public.workspace_members USING btree (workspace_id);
+
+
+--
+-- Name: idx_workspace_themes_workspace_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_workspace_themes_workspace_id ON public.workspace_themes USING btree (workspace_id);
+
+
+--
+-- Name: idx_workspaces_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_workspaces_active ON public.workspaces USING btree (is_active) WHERE (is_active = true);
+
+
+--
+-- Name: idx_workspaces_org_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_workspaces_org_id ON public.workspaces USING btree (organization_id);
+
+
+--
+-- Name: idx_workspaces_slug; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_workspaces_slug ON public.workspaces USING btree (slug);
+
+
+--
+-- Name: idx_ws_ai_settings_ws_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ws_ai_settings_ws_id ON public.workspace_ai_settings USING btree (workspace_id);
+
+
+--
+-- Name: invitations_pending_unique; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX invitations_pending_unique ON public.invitations USING btree (email, organization_id) WHERE (accepted_at IS NULL);
+
+
+--
+-- Name: reminder_turns_queue; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX reminder_turns_queue ON public.reminder_turns USING btree (created_at, id);
+
+
+--
+-- Name: reminder_turns_reminder; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX reminder_turns_reminder ON public.reminder_turns USING btree (reminder_id);
+
+
+--
+-- Name: reminders_due; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX reminders_due ON public.reminders USING btree (due_at) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: task_runs_active_waiting; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX task_runs_active_waiting ON public.task_runs USING btree (task_id) WHERE (status = ANY (ARRAY['running'::text, 'waiting'::text]));
+
+
+--
+-- Name: task_runs_heartbeat_waiting; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX task_runs_heartbeat_waiting ON public.task_runs USING btree (heartbeat_at) WHERE (status = ANY (ARRAY['running'::text, 'waiting'::text]));
+
+
+--
+-- Name: content_chunks chunk_search_vector_trigger; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER chunk_search_vector_trigger BEFORE INSERT OR UPDATE OF text ON public.content_chunks FOR EACH ROW EXECUTE FUNCTION public.update_chunk_search_vector();
+
+
+--
+-- Name: content_items item_search_vector_trigger; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER item_search_vector_trigger BEFORE INSERT OR UPDATE OF title, content ON public.content_items FOR EACH ROW EXECUTE FUNCTION public.update_item_search_vector();
+
+
+--
+-- Name: knowledge_entries knowledge_search_vector_trigger; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER knowledge_search_vector_trigger BEFORE INSERT OR UPDATE OF title, content ON public.knowledge_entries FOR EACH ROW EXECUTE FUNCTION public.update_knowledge_search_vector();
+
+
+--
+-- Name: messages message_search_vector_trigger; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER message_search_vector_trigger BEFORE INSERT OR UPDATE OF content ON public.messages FOR EACH ROW EXECUTE FUNCTION public.update_message_search_vector();
+
+
+--
+-- Name: sync_configs sync_configs_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER sync_configs_updated_at BEFORE UPDATE ON public.sync_configs FOR EACH ROW EXECUTE FUNCTION public.update_sync_configs_updated_at();
+
+
+--
+-- Name: agent_logins agent_logins_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_logins
+    ADD CONSTRAINT agent_logins_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: audit_logs audit_logs_actor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_logs
+    ADD CONSTRAINT audit_logs_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: audit_logs audit_logs_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_logs
+    ADD CONSTRAINT audit_logs_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE SET NULL;
+
+
+--
+-- Name: audit_logs audit_logs_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_logs
+    ADD CONSTRAINT audit_logs_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE SET NULL;
+
+
+--
+-- Name: chat_attached_sources chat_attached_sources_chat_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_attached_sources
+    ADD CONSTRAINT chat_attached_sources_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_attached_sources chat_attached_sources_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_attached_sources
+    ADD CONSTRAINT chat_attached_sources_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.sources(id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_calls chat_calls_chat_id_envelope_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_calls
+    ADD CONSTRAINT chat_calls_chat_id_envelope_id_fkey FOREIGN KEY (chat_id, envelope_id) REFERENCES public.chat_entries(chat_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_calls chat_calls_chat_id_result_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_calls
+    ADD CONSTRAINT chat_calls_chat_id_result_id_fkey FOREIGN KEY (chat_id, result_id) REFERENCES public.chat_entries(chat_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_calls chat_calls_chat_id_turn_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_calls
+    ADD CONSTRAINT chat_calls_chat_id_turn_id_fkey FOREIGN KEY (chat_id, turn_id) REFERENCES public.chat_turns(chat_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_checkpoints chat_checkpoints_chat_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_checkpoints
+    ADD CONSTRAINT chat_checkpoints_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_entries chat_entries_chat_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_entries
+    ADD CONSTRAINT chat_entries_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_entries chat_entries_chat_id_turn_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_entries
+    ADD CONSTRAINT chat_entries_chat_id_turn_id_fkey FOREIGN KEY (chat_id, turn_id) REFERENCES public.chat_turns(chat_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_leases chat_leases_chat_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_leases
+    ADD CONSTRAINT chat_leases_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_sources chat_sources_chat_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_sources
+    ADD CONSTRAINT chat_sources_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_turns chat_turns_chat_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_turns
+    ADD CONSTRAINT chat_turns_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE;
+
+
+--
+-- Name: chat_turns chat_turns_user_message_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_turns
+    ADD CONSTRAINT chat_turns_user_message_id_fkey FOREIGN KEY (user_message_id) REFERENCES public.messages(id) ON DELETE CASCADE;
+
+
+--
+-- Name: chats chats_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chats
+    ADD CONSTRAINT chats_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE SET NULL;
+
+
+--
+-- Name: chats chats_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chats
+    ADD CONSTRAINT chats_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: content_chunks content_chunks_content_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.content_chunks
+    ADD CONSTRAINT content_chunks_content_item_id_fkey FOREIGN KEY (content_item_id) REFERENCES public.content_items(id) ON DELETE CASCADE;
+
+
+--
+-- Name: content_items content_items_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.content_items
+    ADD CONSTRAINT content_items_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.sources(id) ON DELETE CASCADE;
+
+
+--
+-- Name: content_items content_items_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.content_items
+    ADD CONSTRAINT content_items_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: context_gatherings context_gatherings_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.context_gatherings
+    ADD CONSTRAINT context_gatherings_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE SET NULL;
+
+
+--
+-- Name: context_gatherings context_gatherings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.context_gatherings
+    ADD CONSTRAINT context_gatherings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: context_gatherings context_gatherings_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.context_gatherings
+    ADD CONSTRAINT context_gatherings_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE SET NULL;
+
+
+--
+-- Name: email_verification_tokens email_verification_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.email_verification_tokens
+    ADD CONSTRAINT email_verification_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: embeddings embeddings_chunk_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.embeddings
+    ADD CONSTRAINT embeddings_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.content_chunks(id) ON DELETE CASCADE;
+
+
+--
+-- Name: embeddings embeddings_content_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.embeddings
+    ADD CONSTRAINT embeddings_content_item_id_fkey FOREIGN KEY (content_item_id) REFERENCES public.content_items(id) ON DELETE CASCADE;
+
+
+--
+-- Name: embeddings embeddings_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.embeddings
+    ADD CONSTRAINT embeddings_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.sources(id) ON DELETE CASCADE;
+
+
+--
+-- Name: embeddings embeddings_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.embeddings
+    ADD CONSTRAINT embeddings_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: gathering_events gathering_events_gathering_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.gathering_events
+    ADD CONSTRAINT gathering_events_gathering_id_fkey FOREIGN KEY (gathering_id) REFERENCES public.context_gatherings(id) ON DELETE CASCADE;
+
+
+--
+-- Name: heuristic_analysis heuristic_analysis_content_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.heuristic_analysis
+    ADD CONSTRAINT heuristic_analysis_content_item_id_fkey FOREIGN KEY (content_item_id) REFERENCES public.content_items(id) ON DELETE CASCADE;
+
+
+--
+-- Name: invitations invitations_invited_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT invitations_invited_by_fkey FOREIGN KEY (invited_by) REFERENCES public.users(id);
+
+
+--
+-- Name: invitations invitations_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT invitations_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: knowledge_embeddings knowledge_embeddings_knowledge_entry_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.knowledge_embeddings
+    ADD CONSTRAINT knowledge_embeddings_knowledge_entry_id_fkey FOREIGN KEY (knowledge_entry_id) REFERENCES public.knowledge_entries(id) ON DELETE CASCADE;
+
+
+--
+-- Name: knowledge_embeddings knowledge_embeddings_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.knowledge_embeddings
+    ADD CONSTRAINT knowledge_embeddings_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: knowledge_entries knowledge_entries_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.knowledge_entries
+    ADD CONSTRAINT knowledge_entries_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: knowledge_entries knowledge_entries_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.knowledge_entries
+    ADD CONSTRAINT knowledge_entries_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: message_embeddings message_embeddings_chat_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_embeddings
+    ADD CONSTRAINT message_embeddings_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE;
+
+
+--
+-- Name: message_embeddings message_embeddings_message_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_embeddings
+    ADD CONSTRAINT message_embeddings_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.messages(id) ON DELETE CASCADE;
+
+
+--
+-- Name: message_embeddings message_embeddings_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.message_embeddings
+    ADD CONSTRAINT message_embeddings_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: messages messages_chat_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE;
+
+
+--
+-- Name: organization_ai_settings organization_ai_settings_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organization_ai_settings
+    ADD CONSTRAINT organization_ai_settings_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: organization_members organization_members_invited_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organization_members
+    ADD CONSTRAINT organization_members_invited_by_fkey FOREIGN KEY (invited_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: organization_members organization_members_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organization_members
+    ADD CONSTRAINT organization_members_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: organization_members organization_members_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organization_members
+    ADD CONSTRAINT organization_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: password_reset_tokens password_reset_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.password_reset_tokens
+    ADD CONSTRAINT password_reset_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: projects projects_auto_actor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.projects
+    ADD CONSTRAINT projects_auto_actor_id_fkey FOREIGN KEY (auto_actor_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: projects projects_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.projects
+    ADD CONSTRAINT projects_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.sources(id) ON DELETE SET NULL;
+
+
+--
+-- Name: projects projects_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.projects
+    ADD CONSTRAINT projects_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: refresh_tokens refresh_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: reminder_turns reminder_turns_chat_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminder_turns
+    ADD CONSTRAINT reminder_turns_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE;
+
+
+--
+-- Name: reminder_turns reminder_turns_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminder_turns
+    ADD CONSTRAINT reminder_turns_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: reminder_turns reminder_turns_reminder_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminder_turns
+    ADD CONSTRAINT reminder_turns_reminder_id_fkey FOREIGN KEY (reminder_id) REFERENCES public.reminders(id) ON DELETE CASCADE;
+
+
+--
+-- Name: reminder_turns reminder_turns_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminder_turns
+    ADD CONSTRAINT reminder_turns_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: reminders reminders_chat_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminders
+    ADD CONSTRAINT reminders_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE;
+
+
+--
+-- Name: reminders reminders_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminders
+    ADD CONSTRAINT reminders_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: reminders reminders_message_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminders
+    ADD CONSTRAINT reminders_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.messages(id) ON DELETE SET NULL;
+
+
+--
+-- Name: reminders reminders_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminders
+    ADD CONSTRAINT reminders_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: role_permissions role_permissions_permission_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_permission_id_fkey FOREIGN KEY (permission_id) REFERENCES public.permissions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: role_permissions role_permissions_role_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_role_id_fkey FOREIGN KEY (role_id) REFERENCES public.roles(id) ON DELETE CASCADE;
+
+
+--
+-- Name: sessions sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: source_sync_state source_sync_state_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.source_sync_state
+    ADD CONSTRAINT source_sync_state_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.sources(id) ON DELETE CASCADE;
+
+
+--
+-- Name: sources sources_source_type_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sources
+    ADD CONSTRAINT sources_source_type_fkey FOREIGN KEY (source_type) REFERENCES public.source_types(name);
+
+
+--
+-- Name: sources sources_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sources
+    ADD CONSTRAINT sources_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: subscriptions subscriptions_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscriptions
+    ADD CONSTRAINT subscriptions_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: subscriptions subscriptions_plan_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.subscriptions
+    ADD CONSTRAINT subscriptions_plan_id_fkey FOREIGN KEY (plan_id) REFERENCES public.plans(id);
+
+
+--
+-- Name: sync_configs sync_configs_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sync_configs
+    ADD CONSTRAINT sync_configs_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE;
+
+
+--
+-- Name: sync_deliveries sync_deliveries_sync_config_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sync_deliveries
+    ADD CONSTRAINT sync_deliveries_sync_config_id_fkey FOREIGN KEY (sync_config_id) REFERENCES public.sync_configs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: sync_events sync_events_sync_config_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sync_events
+    ADD CONSTRAINT sync_events_sync_config_id_fkey FOREIGN KEY (sync_config_id) REFERENCES public.sync_configs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: sync_events sync_events_synced_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sync_events
+    ADD CONSTRAINT sync_events_synced_item_id_fkey FOREIGN KEY (synced_item_id) REFERENCES public.synced_items(id) ON DELETE SET NULL;
+
+
+--
+-- Name: sync_unlinked_items sync_unlinked_items_sync_config_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sync_unlinked_items
+    ADD CONSTRAINT sync_unlinked_items_sync_config_id_fkey FOREIGN KEY (sync_config_id) REFERENCES public.sync_configs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: synced_items synced_items_sync_config_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.synced_items
+    ADD CONSTRAINT synced_items_sync_config_id_fkey FOREIGN KEY (sync_config_id) REFERENCES public.sync_configs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: synced_items synced_items_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.synced_items
+    ADD CONSTRAINT synced_items_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_automation task_automation_last_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_automation
+    ADD CONSTRAINT task_automation_last_run_id_fkey FOREIGN KEY (last_run_id) REFERENCES public.task_runs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: task_automation task_automation_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_automation
+    ADD CONSTRAINT task_automation_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_automation task_automation_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_automation
+    ADD CONSTRAINT task_automation_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_file_changes task_file_changes_task_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_file_changes
+    ADD CONSTRAINT task_file_changes_task_run_id_fkey FOREIGN KEY (task_run_id) REFERENCES public.task_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_projects task_projects_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_projects
+    ADD CONSTRAINT task_projects_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_projects task_projects_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_projects
+    ADD CONSTRAINT task_projects_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_queue task_queue_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_queue
+    ADD CONSTRAINT task_queue_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_reviews task_reviews_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_reviews
+    ADD CONSTRAINT task_reviews_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.task_runs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: task_reviews task_reviews_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_reviews
+    ADD CONSTRAINT task_reviews_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_run_checkouts task_run_checkouts_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_run_checkouts
+    ADD CONSTRAINT task_run_checkouts_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.task_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_run_logs task_run_logs_task_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_run_logs
+    ADD CONSTRAINT task_run_logs_task_run_id_fkey FOREIGN KEY (task_run_id) REFERENCES public.task_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_runs task_runs_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_runs
+    ADD CONSTRAINT task_runs_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_runs task_runs_triggered_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_runs
+    ADD CONSTRAINT task_runs_triggered_by_fkey FOREIGN KEY (triggered_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: task_tool_calls task_tool_calls_task_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_tool_calls
+    ADD CONSTRAINT task_tool_calls_task_run_id_fkey FOREIGN KEY (task_run_id) REFERENCES public.task_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: tasks tasks_active_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tasks
+    ADD CONSTRAINT tasks_active_run_id_fkey FOREIGN KEY (active_run_id) REFERENCES public.task_runs(id) ON DELETE SET NULL;
+
+
+--
+-- Name: tasks tasks_assignee_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tasks
+    ADD CONSTRAINT tasks_assignee_id_fkey FOREIGN KEY (assignee_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: tasks tasks_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tasks
+    ADD CONSTRAINT tasks_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: tasks tasks_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tasks
+    ADD CONSTRAINT tasks_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.sources(id) ON DELETE SET NULL;
+
+
+--
+-- Name: tasks tasks_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tasks
+    ADD CONSTRAINT tasks_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: usage_events usage_events_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usage_events
+    ADD CONSTRAINT usage_events_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: usage_events usage_events_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usage_events
+    ADD CONSTRAINT usage_events_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: usage_events usage_events_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usage_events
+    ADD CONSTRAINT usage_events_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE SET NULL;
+
+
+--
+-- Name: user_roles user_roles_assigned_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_assigned_by_fkey FOREIGN KEY (assigned_by) REFERENCES public.users(id);
+
+
+--
+-- Name: user_roles user_roles_role_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_role_id_fkey FOREIGN KEY (role_id) REFERENCES public.roles(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_roles user_roles_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: wiki_chunks wiki_chunks_wiki_entry_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.wiki_chunks
+    ADD CONSTRAINT wiki_chunks_wiki_entry_id_fkey FOREIGN KEY (wiki_entry_id) REFERENCES public.wiki_entries(id) ON DELETE CASCADE;
+
+
+--
+-- Name: workspace_ai_settings workspace_ai_settings_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_ai_settings
+    ADD CONSTRAINT workspace_ai_settings_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: workspace_members workspace_members_invited_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_members
+    ADD CONSTRAINT workspace_members_invited_by_fkey FOREIGN KEY (invited_by) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: workspace_members workspace_members_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_members
+    ADD CONSTRAINT workspace_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: workspace_members workspace_members_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_members
+    ADD CONSTRAINT workspace_members_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: workspace_themes workspace_themes_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_themes
+    ADD CONSTRAINT workspace_themes_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: workspaces workspaces_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspaces
+    ADD CONSTRAINT workspaces_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
+--
+
+-- Seed data. Idempotent so a replay after a crash window is a no-op.
+
 INSERT INTO source_types (name, category, description, config_schema) VALUES
   ('github', 'file', 'GitHub repository', '{"type":"object","required":["owner","repo"],"properties":{"owner":{"type":"string"},"repo":{"type":"string"},"branch":{"type":"string","default":"main"},"base_path":{"type":"string","default":""}}}'),
   ('gitlab', 'file', 'GitLab repository', '{"type":"object","required":["project_id"],"properties":{"project_id":{"type":"string"},"host":{"type":"string","default":"https://gitlab.com"},"branch":{"type":"string","default":"main"},"base_path":{"type":"string","default":""}}}'),
@@ -1141,7 +4164,6 @@ INSERT INTO source_types (name, category, description, config_schema) VALUES
   ('text', 'text', 'Raw text/string content', '{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"label":{"type":"string"}}}')
 ON CONFLICT (name) DO NOTHING;
 
--- Permissions
 INSERT INTO permissions (name, description, resource, action) VALUES
   ('projects:create', 'Create new projects', 'projects', 'create'),
   ('projects:read', 'View projects', 'projects', 'read'),
@@ -1170,17 +4192,23 @@ INSERT INTO permissions (name, description, resource, action) VALUES
   ('users:create', 'Create new users', 'users', 'create'),
   ('users:read', 'View users', 'users', 'read'),
   ('users:update', 'Update users', 'users', 'update'),
-  ('users:delete', 'Delete users', 'users', 'delete')
+  ('users:delete', 'Delete users', 'users', 'delete'),
+  ('organizations:create', 'Create new organizations', 'organizations', 'create'),
+  ('organizations:read', 'View organizations', 'organizations', 'read'),
+  ('organizations:update', 'Update organization settings', 'organizations', 'update'),
+  ('organizations:delete', 'Delete organizations', 'organizations', 'delete'),
+  ('workspaces:create', 'Create new workspaces', 'workspaces', 'create'),
+  ('workspaces:read', 'View workspaces', 'workspaces', 'read'),
+  ('workspaces:update', 'Update workspace settings', 'workspaces', 'update'),
+  ('workspaces:delete', 'Delete workspaces', 'workspaces', 'delete')
 ON CONFLICT (name) DO NOTHING;
 
--- Roles
 INSERT INTO roles (id, name, description, is_system) VALUES
   ('00000000-0000-0000-0000-000000000001', 'admin', 'Full system access', TRUE),
   ('00000000-0000-0000-0000-000000000002', 'user', 'Standard user access', TRUE),
   ('00000000-0000-0000-0000-000000000003', 'viewer', 'Read-only access', TRUE)
 ON CONFLICT (id) DO NOTHING;
 
--- Role Permissions
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT '00000000-0000-0000-0000-000000000001', id FROM permissions
 ON CONFLICT DO NOTHING;
@@ -1191,7 +4219,9 @@ WHERE name IN (
   'projects:create', 'projects:read', 'projects:update', 'projects:delete',
   'tasks:create', 'tasks:read', 'tasks:update', 'tasks:delete',
   'chats:create', 'chats:read', 'chats:update', 'chats:delete',
-  'sources:read', 'models:read', 'wiki:read', 'wiki:create', 'wiki:update'
+  'sources:read', 'models:read', 'wiki:read', 'wiki:create', 'wiki:update',
+  'organizations:create', 'organizations:read', 'organizations:update',
+  'workspaces:create', 'workspaces:read', 'workspaces:update'
 )
 ON CONFLICT DO NOTHING;
 
@@ -1199,7 +4229,6 @@ INSERT INTO role_permissions (role_id, permission_id)
 SELECT '00000000-0000-0000-0000-000000000003', id FROM permissions WHERE action = 'read'
 ON CONFLICT DO NOTHING;
 
--- Default Organization & Workspace
 INSERT INTO organizations (id, name, slug, description, is_active) VALUES
   ('00000000-0000-0000-0000-000000000001', 'Default Organization', 'default', 'Default organization for self-hosted installation', true)
 ON CONFLICT (id) DO NOTHING;
@@ -1208,14 +4237,8 @@ INSERT INTO workspaces (id, organization_id, name, slug, description, is_active)
   ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000001', 'Default Workspace', 'default', 'Default workspace for self-hosted installation', true)
 ON CONFLICT (id) DO NOTHING;
 
--- Plans
 INSERT INTO plans (name, slug, description, price_monthly_cents, price_yearly_cents, features, limits) VALUES
   ('Free', 'free', 'For individuals and small teams', 0, 0, '{"api_access": true}'::jsonb, '{"max_workspaces": 1, "max_members": 3, "max_chats_per_month": 100}'::jsonb),
   ('Pro', 'pro', 'For growing teams', 2900, 29000, '{"api_access": true, "priority_support": true}'::jsonb, '{"max_workspaces": 10, "max_members": 25, "max_chats_per_month": 5000}'::jsonb),
   ('Enterprise', 'enterprise', 'For large organizations', 9900, 99000, '{"api_access": true, "priority_support": true, "sso": true, "audit_log": true}'::jsonb, '{"max_workspaces": -1, "max_members": -1, "max_chats_per_month": -1}'::jsonb)
 ON CONFLICT (slug) DO NOTHING;
-
--- Record migration
-INSERT INTO schema_migrations (version) VALUES (1) ON CONFLICT DO NOTHING;
-
-COMMIT;

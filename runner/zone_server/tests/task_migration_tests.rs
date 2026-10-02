@@ -46,13 +46,6 @@ impl Database {
         }
     }
 
-    async fn through(&self, version: i64) {
-        sqlx::migrate!("./migrations")
-            .run_to(version, &self.pool)
-            .await
-            .unwrap();
-    }
-
     async fn task(&self) -> Uuid {
         let organization = Uuid::new_v4();
         let workspace = Uuid::new_v4();
@@ -115,290 +108,32 @@ impl Database {
 }
 
 #[tokio::test]
-async fn task_migration_metadata_defers_scans_and_fences_only_admissions() {
+async fn a_dirty_ledger_refuses_to_migrate() {
     let database = Database::new().await;
-    database.through(16).await;
-    let task = database.task().await;
-    let run = Uuid::new_v4();
-    sqlx::query("INSERT INTO task_runs(id,task_id,status) VALUES($1,$2,'running')")
-        .bind(run)
-        .bind(task)
-        .execute(&database.pool)
-        .await
-        .unwrap();
-    database.through(17).await;
-    let unvalidated: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_constraint WHERE conname IN ('task_runs_triggered_by_fkey','tasks_active_run_id_fkey') AND NOT convalidated").fetch_one(&database.pool).await.unwrap();
-    assert_eq!(
-        unvalidated, 2,
-        "metadata migration must not scan either foreign key"
-    );
-    let rejected = sqlx::query("INSERT INTO task_runs(task_id,status) VALUES($1,'running')")
-        .bind(task)
-        .execute(&database.pool)
-        .await
-        .unwrap_err();
-    assert_eq!(
-        rejected.as_database_error().unwrap().code().as_deref(),
-        Some("55000")
-    );
-    sqlx::query("UPDATE tasks SET title='Concurrent edit' WHERE id=$1")
-        .bind(task)
-        .execute(&database.pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE task_runs SET status='completed' WHERE id=$1")
-        .bind(run)
-        .execute(&database.pool)
-        .await
-        .unwrap();
     migrations::run(&database.pool).await.unwrap();
-    let validated: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_constraint WHERE conname IN ('task_runs_triggered_by_fkey','tasks_active_run_id_fkey') AND convalidated").fetch_one(&database.pool).await.unwrap();
-    assert_eq!(validated, 2);
-    sqlx::query("INSERT INTO task_runs(task_id,status) VALUES($1,'running')")
-        .bind(task)
-        .execute(&database.pool)
-        .await
-        .unwrap();
-    migrations::run(&database.pool).await.unwrap();
-    database.cleanup().await;
-}
-
-#[tokio::test]
-async fn task_migration_repairs_cancelled_concurrent_build_with_live_writes() {
-    let database = Database::new().await;
-    database.through(16).await;
-    let task = database.task().await;
-    sqlx::query(
-        "INSERT INTO task_runs(task_id,status) SELECT $1,'completed' FROM generate_series(1,20000)",
-    )
-    .bind(task)
-    .execute(&database.pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO task_runs(task_id,status) VALUES($1,'running'),($1,'running')")
-        .bind(task)
-        .execute(&database.pool)
-        .await
-        .unwrap();
-    database.through(18).await;
-    let active: i64 = sqlx::query_scalar("SELECT count(*) FROM task_runs WHERE status='running'")
-        .fetch_one(&database.pool)
-        .await
-        .unwrap();
-    assert_eq!(active, 1);
-    let mut blocker = database.pool.acquire().await.unwrap();
-    sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    sqlx::query("SELECT count(*) FROM task_runs")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    let pool = database.pool.clone();
-    let migrating = tokio::spawn(async move { migrations::run(&pool).await });
-    let process: i32 = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let process: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_progress_create_index WHERE relid='task_runs'::regclass AND index_relid=to_regclass('task_runs_active')").fetch_optional(&database.pool).await.unwrap();
-            if let Some(process) = process { break process; }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await.unwrap();
-    // Concurrent index construction permits ordinary writes while an older
-    // reader deliberately holds up completion. The admission fence still holds.
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        sqlx::query("UPDATE tasks SET title='Still writable' WHERE id=$1")
-            .bind(task)
-            .execute(&database.pool),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let rejected = sqlx::query("INSERT INTO task_runs(task_id,status) VALUES($1,'running')")
-        .bind(task)
-        .execute(&database.pool)
-        .await
-        .unwrap_err();
-    assert_eq!(
-        rejected.as_database_error().unwrap().code().as_deref(),
-        Some("55000")
-    );
-    migrating.abort();
-    assert!(migrating.await.unwrap_err().is_cancelled());
-    // Keep the old snapshot open: disconnect detection must terminate the query
-    // and release the advisory lock without help from that blocking reader.
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let alive: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)")
-                    .bind(process)
-                    .fetch_one(&database.pool)
-                    .await
-                    .unwrap();
-            if !alive {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("aborted migration retained its backend and advisory lock");
-    sqlx::query("ROLLBACK")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    drop(blocker);
-    let invalid: bool = sqlx::query_scalar(
-        "SELECT NOT indisvalid FROM pg_index WHERE indexrelid='task_runs_active'::regclass",
-    )
-    .fetch_one(&database.pool)
-    .await
-    .unwrap();
-    assert!(
-        invalid,
-        "cancelled build must leave actual invalid-index recovery work"
-    );
-    let recorded: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=19)")
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-    assert!(!recorded);
-    // Fail-closed checksum validation must happen before touching that index.
-    for version in [19_i64, 20, 21] {
-        sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES($1,'drift',true,$2,0)").bind(version).bind(vec![0_u8]).execute(&database.pool).await.unwrap();
-        assert!(
-            matches!(migrations::run(&database.pool).await, Err(MigrateError::VersionMismatch(found)) if found==version)
-        );
-        let invalid: bool = sqlx::query_scalar(
-            "SELECT NOT indisvalid FROM pg_index WHERE indexrelid='task_runs_active'::regclass",
-        )
-        .fetch_one(&database.pool)
-        .await
-        .unwrap();
-        assert!(invalid);
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version=$1")
-            .bind(version)
-            .execute(&database.pool)
-            .await
-            .unwrap();
-    }
-    let (first, second) = tokio::join!(
-        migrations::run(&database.pool),
-        migrations::run(&database.pool)
-    );
-    first.unwrap();
-    second.unwrap();
-    // 030 and 031 retire the 'running'-only indexes once their supersets exist.
-    let valid: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_index WHERE indexrelid IN ('task_runs_active_waiting'::regclass,'task_runs_heartbeat_waiting'::regclass) AND indisvalid").fetch_one(&database.pool).await.unwrap();
-    assert_eq!(valid, 2);
-    let fenced: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='task_runs_migration_admission')",
-    )
-    .fetch_one(&database.pool)
-    .await
-    .unwrap();
-    assert!(!fenced);
-    database.cleanup().await;
-}
-
-#[tokio::test]
-async fn task_migration_observes_completion_after_reconciliation_lock_wait() {
-    let database = Database::new().await;
-    database.through(16).await;
-    let task = database.task().await;
-    let first = Uuid::new_v4();
-    let latest = Uuid::new_v4();
-    sqlx::query("INSERT INTO task_runs(id,task_id,status,started_at) VALUES($1,$3,'running',NOW()-INTERVAL '1 minute'),($2,$3,'running',NOW())")
-        .bind(first).bind(latest).bind(task).execute(&database.pool).await.unwrap();
-    database.through(17).await;
-    let mut completing = database.pool.begin().await.unwrap();
-    // This is the old worker's exact terminal mutation shape: task_runs only.
-    sqlx::query("UPDATE task_runs SET status='completed',completed_at=NOW() WHERE id=$1")
-        .bind(latest)
-        .execute(&mut *completing)
-        .await
-        .unwrap();
-    let pool = database.pool.clone();
-    let migrating =
-        tokio::spawn(async move { sqlx::migrate!("./migrations").run_to(18, &pool).await });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%Lock live runs%')")
-                .fetch_one(&database.pool).await.unwrap();
-            if waiting { break; }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await.unwrap();
-    completing.commit().await.unwrap();
-    migrating.await.unwrap().unwrap();
-    let status: String = sqlx::query_scalar("SELECT status FROM task_runs WHERE id=$1")
-        .bind(latest)
-        .fetch_one(&database.pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        status, "completed",
-        "reconciliation overwrote a committed legacy completion"
-    );
-    let active: Option<Uuid> = sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id=$1")
-        .bind(task)
-        .fetch_one(&database.pool)
-        .await
-        .unwrap();
-    assert_eq!(active, Some(first));
-    migrations::run(&database.pool).await.unwrap();
-    // Legacy completion after final validation must not leave a terminal active pointer.
-    sqlx::query("UPDATE task_runs SET status='completed',completed_at=NOW() WHERE id=$1")
-        .bind(first)
-        .execute(&database.pool)
-        .await
-        .unwrap();
-    zone_server::db::recovery::reconcile(&database.pool)
-        .await
-        .unwrap();
-    let task: (String, Option<Uuid>) =
-        sqlx::query_as("SELECT status,active_run_id FROM tasks WHERE id=$1")
-            .bind(task)
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-    assert_eq!(task, ("review".to_string(), None));
-    database.cleanup().await;
-}
-
-#[tokio::test]
-async fn task_migration_rejects_unexpected_indexes_and_dirty_ledger() {
-    let database = Database::new().await;
-    database.through(18).await;
-    sqlx::query("CREATE INDEX task_runs_active ON task_runs(id)")
-        .execute(&database.pool)
-        .await
-        .unwrap();
-    let before: i64 = sqlx::query_scalar("SELECT 'task_runs_active'::regclass::oid::bigint")
-        .fetch_one(&database.pool)
-        .await
-        .unwrap();
-    assert!(migrations::run(&database.pool).await.is_err());
-    let after: i64 = sqlx::query_scalar("SELECT 'task_runs_active'::regclass::oid::bigint")
-        .fetch_one(&database.pool)
-        .await
-        .unwrap();
-    assert_eq!(before, after);
-    sqlx::query("UPDATE _sqlx_migrations SET success=false WHERE version=18")
+    sqlx::query("UPDATE _sqlx_migrations SET success=false WHERE version=1")
         .execute(&database.pool)
         .await
         .unwrap();
     assert!(matches!(
         migrations::run(&database.pool).await,
-        Err(MigrateError::Dirty(18))
+        Err(MigrateError::Dirty(1))
     ));
-    let after: i64 = sqlx::query_scalar("SELECT 'task_runs_active'::regclass::oid::bigint")
-        .fetch_one(&database.pool)
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_checksum_mismatch_refuses_to_migrate() {
+    let database = Database::new().await;
+    migrations::run(&database.pool).await.unwrap();
+    sqlx::query("UPDATE _sqlx_migrations SET checksum='\\x00'::bytea WHERE version=1")
+        .execute(&database.pool)
         .await
         .unwrap();
-    assert_eq!(before, after);
+    assert!(matches!(
+        migrations::run(&database.pool).await,
+        Err(MigrateError::VersionMismatch(1))
+    ));
     database.cleanup().await;
 }
 
@@ -474,7 +209,7 @@ async fn migration_command_needs_only_database_and_propagates_failures() {
     let url = database.pool.connect_options().to_url_lossy().to_string();
     for expected in [true, false] {
         if !expected {
-            sqlx::query("UPDATE _sqlx_migrations SET checksum='\\x00'::bytea WHERE version=21")
+            sqlx::query("UPDATE _sqlx_migrations SET checksum='\\x00'::bytea WHERE version=1")
                 .execute(&database.pool)
                 .await
                 .unwrap();
@@ -837,200 +572,169 @@ async fn the_sweeper_orphans_a_parked_run_whose_worker_died() {
     database.cleanup().await;
 }
 
-/// An interrupted `CREATE INDEX CONCURRENTLY` leaves the 027 name taken by an
-/// invalid index. `IF NOT EXISTS` adopts it, records 027 over it, and 029 then
-/// raises forever on an index no migration is left to rebuild.
 #[tokio::test]
-async fn task_migration_repairs_a_cancelled_waiting_index_build() {
+async fn agent_providers_and_logins_are_accepted() {
+    const CHECK_VIOLATION: &str = "23514";
+    const AGENT_PROVIDERS: [&str; 2] = ["claude_code", "codex"];
+    const ORGANIZATION_PROVIDER: &str =
+        "UPDATE organization_ai_settings SET provider=$2 WHERE organization_id=$1";
+    const WORKSPACE_PROVIDER: &str =
+        "UPDATE workspace_ai_settings SET provider=$2 WHERE workspace_id=$1";
     let database = Database::new().await;
-    database.through(26).await;
-    let task = database.task().await;
+    migrations::run(&database.pool).await.unwrap();
+    let (workspace, _) = database.workspace().await;
+    let organization: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id=$1")
+            .bind(workspace)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
     sqlx::query(
-        "INSERT INTO task_runs(task_id,status) SELECT $1,'completed' FROM generate_series(1,20000)",
+        "INSERT INTO organization_ai_settings(organization_id,provider) VALUES($1,'bedrock')",
     )
-    .bind(task)
+    .bind(organization)
     .execute(&database.pool)
     .await
     .unwrap();
+    sqlx::query("INSERT INTO workspace_ai_settings(workspace_id) VALUES($1)")
+        .bind(workspace)
+        .execute(&database.pool)
+        .await
+        .unwrap();
 
-    let mut blocker = database.pool.acquire().await.unwrap();
-    sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    sqlx::query("SELECT count(*) FROM task_runs")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    let pool = database.pool.clone();
-    let migrating = tokio::spawn(async move { migrations::run(&pool).await });
-    let process: i32 = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let process: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_progress_create_index WHERE relid='task_runs'::regclass AND index_relid=to_regclass('task_runs_active_waiting')").fetch_optional(&database.pool).await.unwrap();
-            if let Some(process) = process {
-                break process;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    for (statement, target) in [
+        (ORGANIZATION_PROVIDER, organization),
+        (WORKSPACE_PROVIDER, workspace),
+    ] {
+        for provider in AGENT_PROVIDERS {
+            sqlx::query(statement)
+                .bind(target)
+                .bind(provider)
+                .execute(&database.pool)
+                .await
+                .unwrap_or_else(|error| panic!("{statement} must take {provider}: {error}"));
         }
-    })
-    .await
-    .unwrap();
-    migrating.abort();
-    assert!(migrating.await.unwrap_err().is_cancelled());
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let alive: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)")
-                    .bind(process)
-                    .fetch_one(&database.pool)
-                    .await
-                    .unwrap();
-            if !alive {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("aborted migration retained its backend and advisory lock");
-    sqlx::query("ROLLBACK")
-        .execute(&mut *blocker)
+        let refused = sqlx::query(statement)
+            .bind(target)
+            .bind("gemini")
+            .execute(&database.pool)
+            .await
+            .expect_err("the provider check must remain a closed set");
+        assert_eq!(
+            refused.as_database_error().unwrap().code().as_deref(),
+            Some(CHECK_VIOLATION)
+        );
+    }
+    sqlx::query("INSERT INTO agent_logins(organization_id,agent) VALUES($1,'codex')")
+        .bind(organization)
+        .execute(&database.pool)
         .await
-        .unwrap();
-    drop(blocker);
-
-    let invalid: bool = sqlx::query_scalar(
-        "SELECT NOT indisvalid FROM pg_index WHERE indexrelid='task_runs_active_waiting'::regclass",
-    )
-    .fetch_one(&database.pool)
-    .await
-    .unwrap();
-    assert!(
-        invalid,
-        "cancelled build must leave actual invalid-index recovery work"
-    );
-    let recorded: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=27)")
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-    assert!(!recorded);
-
-    migrations::run(&database.pool).await.unwrap();
-
-    let valid: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_index WHERE indexrelid IN ('task_runs_active_waiting'::regclass,'task_runs_heartbeat_waiting'::regclass) AND indisvalid").fetch_one(&database.pool).await.unwrap();
-    assert_eq!(
-        valid, 2,
-        "the adopted leftover was recorded instead of rebuilt"
-    );
-    let validated: bool = sqlx::query_scalar(
-        "SELECT convalidated FROM pg_constraint WHERE conname='task_runs_status_check'",
-    )
-    .fetch_one(&database.pool)
-    .await
-    .unwrap();
-    assert!(validated, "029 never got past its own guard");
-    let recorded: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=29)")
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-    assert!(recorded);
+        .expect("an organization's sign-in is kept in agent_logins");
     database.cleanup().await;
 }
 
-/// 034's build is adopted the same way, and the rule it exists to enforce is
-/// the one a checked create cannot: with the leftover recorded over, two first
-/// writes that overlap both insert, a read picks whichever row streams first,
-/// and a forget leaves the twin answering in its place.
 #[tokio::test]
-async fn task_migration_repairs_a_cancelled_memory_index_build() {
-    const NAME: &str = "Deploy window";
+async fn failed_review_verdicts_and_unlink_events_are_accepted() {
     let database = Database::new().await;
-    database.through(33).await;
-    let (workspace, owner) = database.workspace().await;
-    sqlx::query("INSERT INTO knowledge_entries(workspace_id,created_by,title,content) SELECT $1,$2,'Entry '||entry,'Body' FROM generate_series(1,20000) entry").bind(workspace).bind(owner).execute(&database.pool).await.unwrap();
+    migrations::run(&database.pool).await.unwrap();
 
-    let mut blocker = database.pool.acquire().await.unwrap();
-    sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    sqlx::query("SELECT count(*) FROM knowledge_entries")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    let pool = database.pool.clone();
-    let migrating = tokio::spawn(async move { migrations::run(&pool).await });
-    let process: i32 = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let process: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_progress_create_index WHERE relid='knowledge_entries'::regclass AND index_relid=to_regclass('idx_knowledge_memory_entry')").fetch_optional(&database.pool).await.unwrap();
-            if let Some(process) = process {
-                break process;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+    let verdict: bool = sqlx::query_scalar(
+        "SELECT convalidated FROM pg_constraint \
+         WHERE conrelid = 'task_reviews'::regclass AND conname = 'task_reviews_verdict_check'",
+    )
+    .fetch_one(&database.pool)
     .await
     .unwrap();
-    migrating.abort();
-    assert!(migrating.await.unwrap_err().is_cancelled());
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let alive: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)")
-                    .bind(process)
-                    .fetch_one(&database.pool)
-                    .await
-                    .unwrap();
-            if !alive {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("aborted migration retained its backend and advisory lock");
-    sqlx::query("ROLLBACK")
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    drop(blocker);
+    assert!(verdict, "task_reviews_verdict_check must be validated");
 
-    let invalid: bool = sqlx::query_scalar(
-        "SELECT NOT indisvalid FROM pg_index WHERE indexrelid='idx_knowledge_memory_entry'::regclass",
+    let event_type: bool = sqlx::query_scalar(
+        "SELECT convalidated FROM pg_constraint \
+         WHERE conrelid = 'sync_events'::regclass AND conname = 'sync_events_event_type_check'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(event_type, "sync_events_event_type_check must be validated");
+
+    let definition: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='task_reviews_verdict_check'",
     )
     .fetch_one(&database.pool)
     .await
     .unwrap();
     assert!(
-        invalid,
-        "cancelled build must leave actual invalid-index recovery work"
+        definition.contains("failed"),
+        "verdict check must admit failed: {definition}"
     );
-    let recorded: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=34)")
+
+    let definition: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='sync_events_event_type_check'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(
+        definition.contains("unlink"),
+        "event type check must admit unlink: {definition}"
+    );
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn ai_settings_default_to_unrouted_completions() {
+    let database = Database::new().await;
+    migrations::run(&database.pool).await.unwrap();
+    let (workspace, _) = database.workspace().await;
+    let organization: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id=$1")
+            .bind(workspace)
             .fetch_one(&database.pool)
             .await
             .unwrap();
-    assert!(!recorded);
-
-    migrations::run(&database.pool).await.unwrap();
-
-    let (valid, unique): (bool, bool) = sqlx::query_as(
-        "SELECT indisvalid, indisunique FROM pg_index WHERE indexrelid='idx_knowledge_memory_entry'::regclass",
+    sqlx::query(
+        "INSERT INTO organization_ai_settings(organization_id,provider,openai_api_key) \
+         VALUES($1,'openai','sk-saved-long-ago')",
     )
+    .bind(organization)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workspace_ai_settings(workspace_id,litellm_host) \
+         VALUES($1,'http://localhost:11434')",
+    )
+    .bind(workspace)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let routed: (bool, bool) = sqlx::query_as(
+        "SELECT o.completions_routed, w.completions_routed \
+         FROM organization_ai_settings o, workspace_ai_settings w \
+         WHERE o.organization_id=$1 AND w.workspace_id=$2",
+    )
+    .bind(organization)
+    .bind(workspace)
     .fetch_one(&database.pool)
     .await
     .unwrap();
+    assert_eq!(routed, (false, false));
+    let settings = ai_settings::get_effective_ai_settings(&database.pool, organization, workspace)
+        .await
+        .unwrap();
+    assert_eq!(settings.provider, "openai");
     assert!(
-        valid,
-        "the adopted leftover was recorded instead of rebuilt"
+        settings.openai_api_key.is_none() && settings.litellm_host.is_none(),
+        "an unrouted row must not lend its endpoint to completions"
     );
-    assert!(
-        unique,
-        "a rebuilt index that reserves nothing reserves no name"
-    );
+    database.cleanup().await;
+}
 
+#[tokio::test]
+async fn a_memory_entry_name_is_unique_per_person() {
+    const NAME: &str = "Deploy window";
+    let database = Database::new().await;
+    migrations::run(&database.pool).await.unwrap();
+    let (workspace, owner) = database.workspace().await;
     let entry = "INSERT INTO knowledge_entries(workspace_id,created_by,category,title,content) VALUES($1,$2,$3,$4,'Body')";
     sqlx::query(entry)
         .bind(workspace)
@@ -1057,235 +761,47 @@ async fn task_migration_repairs_a_cancelled_memory_index_build() {
 }
 
 #[tokio::test]
-async fn agent_providers_are_refused_before_048_and_stored_after_it() {
-    const CHECK_VIOLATION: &str = "23514";
-    const AGENT_PROVIDERS: [&str; 2] = ["claude_code", "codex"];
-    const ORGANIZATION_PROVIDER: &str =
-        "UPDATE organization_ai_settings SET provider=$2 WHERE organization_id=$1";
-    const WORKSPACE_PROVIDER: &str =
-        "UPDATE workspace_ai_settings SET provider=$2 WHERE workspace_id=$1";
+async fn workspace_theme_defaults_match_the_product() {
     let database = Database::new().await;
-    database.through(47).await;
+    migrations::run(&database.pool).await.unwrap();
     let (workspace, _) = database.workspace().await;
-    let organization: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id=$1")
-            .bind(workspace)
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-    sqlx::query(
-        "INSERT INTO organization_ai_settings(organization_id,provider) VALUES($1,'bedrock')",
-    )
-    .bind(organization)
-    .execute(&database.pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO workspace_ai_settings(workspace_id) VALUES($1)")
+    sqlx::query("INSERT INTO workspace_themes(workspace_id) VALUES($1)")
         .bind(workspace)
         .execute(&database.pool)
         .await
         .unwrap();
-
-    let refused = sqlx::query(ORGANIZATION_PROVIDER)
-        .bind(organization)
-        .bind("codex")
-        .execute(&database.pool)
-        .await
-        .expect_err("047 knows only the four API providers");
-    let refused = refused.as_database_error().unwrap();
-    assert_eq!(refused.code().as_deref(), Some(CHECK_VIOLATION));
-    assert_eq!(
-        refused.constraint(),
-        Some("organization_ai_settings_provider_check"),
-        "048 drops the check by this name; under any other it would stay and keep refusing"
-    );
-
-    migrations::run(&database.pool).await.unwrap();
-
-    let kept: (String, Option<String>) = sqlx::query_as(
-        "SELECT o.provider, w.provider FROM organization_ai_settings o, workspace_ai_settings w WHERE o.organization_id=$1 AND w.workspace_id=$2",
+    let theme: (String, String, String, String, String, String) = sqlx::query_as(
+        "SELECT primary_color_light, secondary_color_light, primary_color_dark, \
+         secondary_color_dark, font_family, border_radius \
+         FROM workspace_themes WHERE workspace_id=$1",
     )
-    .bind(organization)
     .bind(workspace)
     .fetch_one(&database.pool)
     .await
     .unwrap();
     assert_eq!(
-        kept,
-        ("bedrock".to_string(), None),
-        "048 must keep the settings saved before it"
-    );
-    for (statement, target) in [
-        (ORGANIZATION_PROVIDER, organization),
-        (WORKSPACE_PROVIDER, workspace),
-    ] {
-        for provider in AGENT_PROVIDERS {
-            sqlx::query(statement)
-                .bind(target)
-                .bind(provider)
-                .execute(&database.pool)
-                .await
-                .unwrap_or_else(|error| panic!("{statement} must take {provider}: {error}"));
-        }
-        let refused = sqlx::query(statement)
-            .bind(target)
-            .bind("gemini")
-            .execute(&database.pool)
-            .await
-            .expect_err("048 widens the check; it must not remove it");
-        assert_eq!(
-            refused.as_database_error().unwrap().code().as_deref(),
-            Some(CHECK_VIOLATION)
-        );
-    }
-    sqlx::query("INSERT INTO agent_logins(organization_id,agent) VALUES($1,'codex')")
-        .bind(organization)
-        .execute(&database.pool)
-        .await
-        .expect("048 creates the table an organization's sign-in is kept in");
-    database.cleanup().await;
-}
-
-/// 049 swaps the verdict check under the brief lock of an unvalidated
-/// constraint, and 050 proves the rows while reviews stay writable.
-#[tokio::test]
-async fn the_failed_verdict_check_is_added_unvalidated_and_proven_after() {
-    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
-         WHERE conrelid = 'task_reviews'::regclass AND conname = 'task_reviews_verdict_check'";
-    let database = Database::new().await;
-
-    database.through(49).await;
-    let added: bool = sqlx::query_scalar(VALIDATED)
-        .fetch_one(&database.pool)
-        .await
-        .expect("049 leaves the verdict check in place");
-    database.through(50).await;
-    let proven: bool = sqlx::query_scalar(VALIDATED)
-        .fetch_one(&database.pool)
-        .await
-        .expect("050 keeps the verdict check");
-
-    assert!(
-        !added,
-        "049 must not scan task_reviews under its exclusive lock"
-    );
-    assert!(proven, "050 validates what 049 added");
-    database.cleanup().await;
-}
-
-/// 051 swaps the sync event type check under the brief lock of an unvalidated
-/// constraint, and 052 proves the rows while sync events stay writable.
-#[tokio::test]
-async fn the_unlink_event_check_is_added_unvalidated_and_proven_after() {
-    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
-         WHERE conrelid = 'sync_events'::regclass AND conname = 'sync_events_event_type_check'";
-    let database = Database::new().await;
-
-    database.through(51).await;
-    let added: bool = sqlx::query_scalar(VALIDATED)
-        .fetch_one(&database.pool)
-        .await
-        .expect("051 leaves the event type check in place");
-    database.through(52).await;
-    let proven: bool = sqlx::query_scalar(VALIDATED)
-        .fetch_one(&database.pool)
-        .await
-        .expect("052 keeps the event type check");
-
-    assert!(
-        !added,
-        "051 must not scan sync_events under its exclusive lock"
-    );
-    assert!(proven, "052 validates what 051 added");
-    database.cleanup().await;
-}
-
-/// 054 leaves every AI settings row saved before it unrouted, in place: a
-/// constant default rewrites neither table.
-#[tokio::test]
-async fn ai_settings_saved_before_054_stay_unrouted_without_a_rewrite() {
-    const TABLES: [&str; 2] = ["organization_ai_settings", "workspace_ai_settings"];
-    const FILENODE: &str = "SELECT pg_relation_filenode($1::regclass)::bigint";
-    let database = Database::new().await;
-    database.through(53).await;
-    let (workspace, _) = database.workspace().await;
-    let organization: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id=$1")
-            .bind(workspace)
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-    sqlx::query(
-        "INSERT INTO organization_ai_settings(organization_id,provider,openai_api_key) \
-         VALUES($1,'openai','sk-saved-long-ago')",
-    )
-    .bind(organization)
-    .execute(&database.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO workspace_ai_settings(workspace_id,litellm_host) \
-         VALUES($1,'http://localhost:11434')",
-    )
-    .bind(workspace)
-    .execute(&database.pool)
-    .await
-    .unwrap();
-    let mut before = Vec::new();
-    for table in TABLES {
-        let filenode: i64 = sqlx::query_scalar(FILENODE)
-            .bind(table)
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-        before.push(filenode);
-    }
-
-    database.through(54).await;
-
-    for (table, filenode) in TABLES.into_iter().zip(before) {
-        let after: i64 = sqlx::query_scalar(FILENODE)
-            .bind(table)
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-        assert_eq!(after, filenode, "054 rewrote {table}");
-    }
-    let routed: (bool, bool) = sqlx::query_as(
-        "SELECT o.completions_routed, w.completions_routed \
-         FROM organization_ai_settings o, workspace_ai_settings w \
-         WHERE o.organization_id=$1 AND w.workspace_id=$2",
-    )
-    .bind(organization)
-    .bind(workspace)
-    .fetch_one(&database.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        routed,
-        (false, false),
-        "054 routed a row nobody saved since"
-    );
-    let settings = ai_settings::get_effective_ai_settings(&database.pool, organization, workspace)
-        .await
-        .unwrap();
-    assert_eq!(settings.provider, "openai");
-    assert!(
-        settings.openai_api_key.is_none() && settings.litellm_host.is_none(),
-        "a row saved before 054 lent its endpoint to completions"
+        theme,
+        (
+            "#0011d9".into(),
+            "#ecf9ff".into(),
+            "#00f3ff".into(),
+            "#ecf9ff".into(),
+            "nunito".into(),
+            "large".into()
+        )
     );
     database.cleanup().await;
 }
 
-/// Every lock these take on `task_runs` is one ordinary traffic already holds,
-/// and the boot holds sqlx's advisory lock while it queues for them: an
-/// unbounded wait wedges every other instance instead of failing with 55P03.
+/// Every lock a later migration takes on a live table is one ordinary traffic
+/// already holds, and the boot holds sqlx's advisory lock while it queues for
+/// them: an unbounded wait wedges every other instance instead of failing with
+/// 55P03. The initial schema creates an empty database, so it is exempt.
 #[test]
-fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
-    const FIRST: i64 = 21;
+fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait() {
+    const FIRST: i64 = 2;
     const BOUND: &str = "SET LOCAL lock_timeout = '5s';";
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    let mut bounded: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&directory).expect("migrations directory is readable") {
         let path = entry.expect("migration entry is readable").path();
         if !path.extension().is_some_and(|extension| extension == "sql") {
@@ -1319,35 +835,7 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
             "{name} alters a table inside sqlx's transaction without opening on `{BOUND}`, so it \
              queues behind any conflicting lock while the boot holds the migration advisory lock"
         );
-        bounded.push(name);
     }
-    bounded.sort();
-    assert_eq!(
-        bounded,
-        [
-            "021_task_validation.sql",
-            "025_task_run_pending_question.sql",
-            "026_task_run_waiting_status.sql",
-            "029_task_run_waiting_validation.sql",
-            "032_task_run_pending_wait.sql",
-            "033_knowledge_memory.sql",
-            "035_reminder_automations.sql",
-            "036_reminder_automation_validation.sql",
-            "038_reminder_condition_watch.sql",
-            "039_reminder_condition_watch_validation.sql",
-            "040_task_plan_approval.sql",
-            "042_auto_projects.sql",
-            "043_auto_projects_validation.sql",
-            "046_invitations_pending_unique.sql",
-            "048_agent_logins.sql",
-            "049_task_reviews_failed_verdict.sql",
-            "050_task_reviews_failed_verdict_validation.sql",
-            "051_sync_deliveries.sql",
-            "052_sync_events_unlink_validation.sql",
-            "054_ai_settings_completions_routed.sql",
-        ],
-        "the set of table-altering migrations changed; a new one needs its own lock bound"
-    );
 }
 
 /// sqlx hands a `-- no-transaction` file to the server as one simple query, and
@@ -1359,7 +847,6 @@ fn each_table_altering_migration_since_the_validation_bounds_its_lock_wait() {
 fn each_no_transaction_migration_holds_one_concurrent_statement() {
     const MARKER: &str = "-- no-transaction";
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    let mut checked: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&directory).expect("migrations directory is readable") {
         let path = entry.expect("migration entry is readable").path();
         if !path.extension().is_some_and(|extension| extension == "sql") {
@@ -1393,10 +880,5 @@ fn each_no_transaction_migration_holds_one_concurrent_statement() {
             "{name} gives up sqlx's transaction without the CONCURRENTLY that is the only reason \
              to, so an interrupted run leaves it applied but unrecorded"
         );
-        checked.push(name);
     }
-    assert!(
-        !checked.is_empty(),
-        "no migration opens on `{MARKER}`; the walk stopped matching the files it guards"
-    );
 }
