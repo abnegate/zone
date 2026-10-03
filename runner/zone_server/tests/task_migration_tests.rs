@@ -860,10 +860,13 @@ async fn the_chat_login_key_is_added_unvalidated_and_proven_after() {
 /// Every lock a later migration takes on a live table is one ordinary traffic
 /// already holds, and the boot holds sqlx's advisory lock while it queues for
 /// them: an unbounded wait wedges every other instance instead of failing with
-/// 55P03. The initial schema creates an empty database, so it is exempt.
+/// 55P03. The initial schema creates an empty database, so it is exempt. So is
+/// a migration released without the bound: every database that ran it records
+/// its checksum, and adding the bound now would stop each of them at boot.
 #[test]
 fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait() {
     const FIRST: i64 = 2;
+    const RELEASED: [&str; 1] = ["002_chat_offline.sql"];
     const BOUND: &str = "SET LOCAL lock_timeout = '5s';";
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let mut bounded: Vec<String> = Vec::new();
@@ -885,6 +888,7 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             .expect("a migration name opens with its version");
         let sql = std::fs::read_to_string(&path).expect("migration is readable");
         if version < FIRST
+            || RELEASED.contains(&name.as_str())
             || sql.lines().any(|line| line.trim() == "-- no-transaction")
             || !sql.to_ascii_uppercase().contains("ALTER TABLE")
         {
