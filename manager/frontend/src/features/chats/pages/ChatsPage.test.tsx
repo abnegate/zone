@@ -3107,7 +3107,11 @@ describe('ChatsPage', () => {
       expect(screen.getByRole('status')).toHaveTextContent('Switching to b@example.com…');
       const answer = note.closest('.message-content');
       expect(answer?.closest('.message-assistant')).not.toBeNull();
-      expect(answer?.textContent).toMatch(/^Before the switch\..*Switched to.*After the switch\.$/);
+      await waitFor(() =>
+        expect(answer?.textContent).toMatch(
+          /^Before the switch\..*Switched to.*After the switch\.$/
+        )
+      );
 
       act(() =>
         socket.emit({
