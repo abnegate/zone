@@ -1062,6 +1062,7 @@ describe('ChatsPage', () => {
           model_name: 'llama2',
           agent_enabled: false,
           auto_approve: false,
+          context_tokens: 32768,
         });
       });
     });
@@ -1138,6 +1139,81 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
       await waitFor(() => {
         expect(mockClient.createChat.mock.calls[0][0].offline).toBeUndefined();
+        expect(mockClient.createChat.mock.calls[0][0].context_tokens).toBeUndefined();
+      });
+    });
+
+    it('hides context size until a local model is selected', async () => {
+      renderChatsPage();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+      });
+      expect(screen.queryByLabelText('Context')).not.toBeInTheDocument();
+
+      const selectTrigger = screen.getByLabelText('Select Model');
+      fireEvent.mouseDown(selectTrigger);
+      fireEvent.mouseUp(selectTrigger);
+      fireEvent.click(selectTrigger);
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole('option', { name: 'llama2' }));
+      expect(screen.getByLabelText('Context')).toBeInTheDocument();
+    });
+
+    it('hides context size for a cloud model', async () => {
+      listedModels = [{ name: 'gpt-4o-mini', size: 0, modified_at: '2026-01-01T00:00:00Z' }];
+      renderChatsPage();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+      });
+      const selectTrigger = screen.getByLabelText('Select Model');
+      fireEvent.mouseDown(selectTrigger);
+      fireEvent.mouseUp(selectTrigger);
+      fireEvent.click(selectTrigger);
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'gpt-4o-mini' })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole('option', { name: 'gpt-4o-mini' }));
+      expect(screen.queryByLabelText('Context')).not.toBeInTheDocument();
+    });
+
+    it('sends a smaller chosen window for a local chat', async () => {
+      mockCreateChat.mockResolvedValueOnce({
+        id: 'chat-8k',
+        title: 'Chat with llama2',
+        model_name: 'llama2',
+        archived: false,
+        agent_enabled: false,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+        context_tokens: 8192,
+      });
+      renderChatsPage();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+      });
+      const modelTrigger = screen.getByLabelText('Select Model');
+      fireEvent.mouseDown(modelTrigger);
+      fireEvent.mouseUp(modelTrigger);
+      fireEvent.click(modelTrigger);
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole('option', { name: 'llama2' }));
+      const contextTrigger = screen.getByLabelText('Context');
+      fireEvent.mouseDown(contextTrigger);
+      fireEvent.mouseUp(contextTrigger);
+      fireEvent.click(contextTrigger);
+      fireEvent.click(await screen.findByRole('option', { name: '8K tokens' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
+      await waitFor(() => {
+        expect(mockClient.createChat).toHaveBeenCalledWith(
+          expect.objectContaining({ model_name: 'llama2', context_tokens: 8192 })
+        );
       });
     });
 
@@ -2359,6 +2435,37 @@ describe('ChatsPage', () => {
     fireEvent.click(screen.getByText('Chat 1'));
     await waitFor(() => expect(screen.getByText('Hi there!')).toBeInTheDocument());
     expect(screen.queryByTestId('reasoning-effort')).not.toBeInTheDocument();
+  });
+
+  it('lets the reader pick context size when the chat uses a local model', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      context_tokens: 32768,
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      context_tokens: 8192,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('context-tokens')).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId('context-tokens'), { target: { value: '8192' } });
+    await waitFor(() => {
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 8192 });
+    });
+  });
+
+  it('hides context size for an Automatic chat', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      model_name: 'auto',
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByText('Hi there!')).toBeInTheDocument());
+    expect(screen.queryByTestId('context-tokens')).not.toBeInTheDocument();
   });
 
   it('shows auto-approve only while agent mode is on', async () => {

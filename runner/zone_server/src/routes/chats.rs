@@ -125,6 +125,8 @@ pub struct ChatResponse {
     agent_sandboxed: bool,
     auto_approve: bool,
     offline: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_tokens: Option<i64>,
     reasoning_effort: zone_core::llm::ReasoningEffort,
     #[serde(skip_serializing_if = "Option::is_none")]
     character: Option<ChatCharacter>,
@@ -156,6 +158,7 @@ impl From<chats::ChatRow> for ChatResponse {
             agent_sandboxed: row.agent_sandboxed,
             auto_approve: row.auto_approve,
             offline: row.offline,
+            context_tokens: row.context_tokens,
             reasoning_effort: row.reasoning_effort,
             character: row.character,
             tools: None,
@@ -372,6 +375,8 @@ pub struct CreateChatRequest {
     #[serde(default)]
     offline: bool,
     #[serde(default)]
+    context_tokens: Option<i64>,
+    #[serde(default)]
     reasoning_effort: Option<zone_core::llm::ReasoningEffort>,
     #[serde(default)]
     character: Option<ChatCharacter>,
@@ -383,6 +388,14 @@ const fn sandboxed_by_default() -> bool {
     true
 }
 
+fn parse_context_tokens(value: Option<i64>) -> Result<Option<i64>, &'static str> {
+    match value {
+        None => Ok(None),
+        Some(tokens) if tokens > 0 => Ok(Some(tokens)),
+        Some(_) => Err("Context size must be a positive token count"),
+    }
+}
+
 /// Update chat request
 #[derive(Debug, Deserialize)]
 pub struct UpdateChatRequest {
@@ -391,6 +404,7 @@ pub struct UpdateChatRequest {
     agent_sandboxed: Option<bool>,
     auto_approve: Option<bool>,
     reasoning_effort: Option<zone_core::llm::ReasoningEffort>,
+    context_tokens: Option<i64>,
     #[serde(default)]
     character: Option<ChatCharacter>,
     #[serde(default)]
@@ -504,6 +518,13 @@ pub async fn create(
         }
     }
 
+    let context_tokens = match parse_context_tokens(req.context_tokens) {
+        Ok(tokens) => tokens,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response();
+        }
+    };
+
     match chats::create_chat_with_title(
         state.db(),
         Some(req.workspace_id),
@@ -515,6 +536,7 @@ pub async fn create(
         req.reasoning_effort.unwrap_or_default(),
         req.project_id,
         req.offline,
+        context_tokens,
     )
     .await
     {
@@ -587,6 +609,12 @@ pub async fn update(
         )
             .into_response();
     }
+    let context_tokens = match parse_context_tokens(req.context_tokens) {
+        Ok(tokens) => tokens,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response();
+        }
+    };
     match chats::update_chat(
         state.db(),
         id,
@@ -595,6 +623,7 @@ pub async fn update(
         req.agent_sandboxed,
         req.auto_approve,
         req.reasoning_effort,
+        context_tokens,
     )
     .await
     {

@@ -35,6 +35,7 @@ async fn automatic_title_fallback_is_persisted_once() {
             zone_core::llm::ReasoningEffort::Auto,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -88,6 +89,7 @@ async fn automatic_title_claim_is_first_user_only_and_concurrent_safe() {
         zone_core::llm::ReasoningEffort::Auto,
         None,
         false,
+        None,
     )
     .await
     .unwrap();
@@ -135,6 +137,7 @@ async fn manual_title_even_unchanged_wins_pending_generation() {
             zone_core::llm::ReasoningEffort::Auto,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -142,7 +145,7 @@ async fn manual_title_even_unchanged_wins_pending_generation() {
             .await
             .unwrap();
         assert!(message.title_claimed);
-        chats::update_chat(&pool, chat.id, Some(title), None, None, None, None)
+        chats::update_chat(&pool, chat.id, Some(title), None, None, None, None, None)
             .await
             .unwrap();
         assert!(
@@ -177,11 +180,12 @@ async fn custom_titles_and_renamed_empty_chats_are_not_claimed() {
             zone_core::llm::ReasoningEffort::Auto,
             None,
             false,
+            None,
         )
         .await
         .unwrap();
         if automatic {
-            chats::update_chat(&pool, chat.id, Some("Custom"), None, None, None, None)
+            chats::update_chat(&pool, chat.id, Some("Custom"), None, None, None, None, None)
                 .await
                 .unwrap();
         }

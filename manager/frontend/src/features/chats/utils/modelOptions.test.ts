@@ -3,9 +3,13 @@ import {
   chatShowsAgent,
   chatShowsCharacter,
   chatShowsReasoning,
+  contextTokenOptions,
+  defaultContextTokens,
   findInstalledModel,
   offersAgent,
+  offersLocalContext,
   sameModelName,
+  selectedContextTokens,
 } from './modelOptions';
 
 describe('sameModelName', () => {
@@ -55,6 +59,49 @@ describe('chatShowsReasoning', () => {
     expect(chatShowsReasoning({}, { capabilities: ['completion'] })).toBe(false);
     expect(chatShowsReasoning({ reasoning: false })).toBe(false);
     expect(chatShowsReasoning({})).toBe(false);
+  });
+});
+
+describe('offersLocalContext', () => {
+  it('offers a context picker for an installed local weight', () => {
+    expect(offersLocalContext({ size: 17_741_860_762 })).toBe(true);
+    expect(offersLocalContext({ details: { context_length: 262144 } })).toBe(true);
+    expect(offersLocalContext({ size: 0 })).toBe(false);
+    expect(offersLocalContext({})).toBe(false);
+    expect(offersLocalContext(undefined)).toBe(false);
+  });
+});
+
+describe('contextTokenOptions', () => {
+  it('lists windows up to the native length and includes an odd native size', () => {
+    expect(contextTokenOptions(32768).map((option) => option.value)).toEqual([
+      '2048',
+      '4096',
+      '8192',
+      '16384',
+      '32768',
+    ]);
+    expect(contextTokenOptions(128000).map((option) => option.value)).toContain('128000');
+    expect(contextTokenOptions(128000).at(-1)).toEqual({
+      value: '128000',
+      label: '128K tokens',
+    });
+  });
+});
+
+describe('defaultContextTokens', () => {
+  it('defaults to 32k when the native window is larger', () => {
+    expect(defaultContextTokens(262144)).toBe(32768);
+    expect(defaultContextTokens(8192)).toBe(8192);
+    expect(defaultContextTokens(null)).toBe(32768);
+  });
+});
+
+describe('selectedContextTokens', () => {
+  it('keeps an existing choice and otherwise shows the native window', () => {
+    expect(selectedContextTokens(8192, 262144)).toBe(8192);
+    expect(selectedContextTokens(null, 262144)).toBe(262144);
+    expect(selectedContextTokens(undefined, null)).toBe(32768);
   });
 });
 

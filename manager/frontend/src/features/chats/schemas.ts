@@ -246,6 +246,8 @@ export const ChatSchema = z.object({
   auto_approve: z.boolean().default(false),
   // Servers predating per-chat offline omit this; treat those chats as online.
   offline: z.boolean().default(false),
+  // Servers predating a chosen window omit this; those chats use native capacity.
+  context_tokens: z.number().int().positive().nullish(),
   reasoning: z.boolean().nullish(),
   reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high']).default('auto'),
   character: ChatCharacterSchema.nullish(),
@@ -299,6 +301,7 @@ export const CreateChatRequestSchema = z.object({
   agent_sandboxed: z.boolean().optional(),
   auto_approve: z.boolean().optional(),
   offline: z.boolean().optional(),
+  context_tokens: z.number().int().positive().optional(),
   reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high']).optional(),
   project_id: z.string().min(1).optional(),
 });

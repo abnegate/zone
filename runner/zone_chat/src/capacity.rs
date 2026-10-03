@@ -62,6 +62,35 @@ impl Capacity {
             identity: model.into(),
         }
     }
+
+    /// Operator-chosen window for this chat. Never larger than the resolved
+    /// native or runtime bound. Third-party endpoints still never receive
+    /// `num_ctx`.
+    pub fn with_request(self, requested: Option<u64>) -> Self {
+        let Some(requested) = requested.filter(|value| *value > 0) else {
+            return self;
+        };
+        let Some(ceiling) = self.limit else {
+            return Self {
+                limit: Some(requested),
+                source: Source::Configured,
+                ollama: self.ollama.map(|_| requested),
+                reason: None,
+                ..self
+            };
+        };
+        let limit = requested.min(ceiling);
+        Self {
+            limit: Some(limit),
+            source: Source::Configured,
+            ollama: self.ollama.map(|_| limit),
+            reason: (limit < requested).then(|| {
+                "The requested context allocation is bounded by the model's reported native capacity."
+                    .into()
+            }),
+            ..self
+        }
+    }
 }
 
 /// Refreshed per preparation: no stale cross-provider or unloaded-runtime cache.
@@ -875,5 +904,58 @@ mod tests {
         assert!(provider_reasoning(&json!({
             "supported_openai_params": ["temperature", "reasoning_effort"]
         })));
+    }
+
+    fn local(limit: u64) -> Capacity {
+        Capacity {
+            limit: Some(limit),
+            source: Source::Provider,
+            ollama: Some(limit),
+            reasoning: false,
+            vision: None,
+            reason: None,
+            identity: "qwen".into(),
+        }
+    }
+
+    #[test]
+    fn a_chosen_window_caps_ollama_below_native() {
+        let capacity = local(262_144).with_request(Some(32_768));
+        assert_eq!(capacity.limit, Some(32_768));
+        assert_eq!(capacity.ollama, Some(32_768));
+        assert_eq!(capacity.source, Source::Configured);
+        assert!(capacity.reason.is_none());
+    }
+
+    #[test]
+    fn a_chosen_window_never_exceeds_native() {
+        let capacity = local(32_768).with_request(Some(262_144));
+        assert_eq!(capacity.limit, Some(32_768));
+        assert_eq!(capacity.ollama, Some(32_768));
+        assert!(capacity.reason.is_some());
+    }
+
+    #[test]
+    fn a_chosen_window_does_not_invent_ollama_options_for_a_third_party() {
+        let capacity = Capacity {
+            limit: Some(128_000),
+            source: Source::Provider,
+            ollama: None,
+            reasoning: false,
+            vision: None,
+            reason: None,
+            identity: "gpt".into(),
+        }
+        .with_request(Some(8_192));
+        assert_eq!(capacity.limit, Some(8_192));
+        assert_eq!(capacity.ollama, None);
+    }
+
+    #[test]
+    fn omitting_a_choice_leaves_resolved_capacity() {
+        let capacity = local(262_144).with_request(None);
+        assert_eq!(capacity.limit, Some(262_144));
+        assert_eq!(capacity.ollama, Some(262_144));
+        assert_eq!(capacity.source, Source::Provider);
     }
 }

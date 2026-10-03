@@ -504,11 +504,12 @@ fn chat_row() -> ChatRow {
         agent_enabled: true,
         agent_sandboxed: false,
         auto_approve: false,
+        offline: false,
+        context_tokens: None,
         reasoning_effort: ReasoningEffort::Auto,
         character: None,
         created_at: None,
         updated_at: None,
-        offline: false,
     }
 }
 

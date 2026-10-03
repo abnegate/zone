@@ -410,7 +410,8 @@
   color: var(--ui-accent);
 }
 
-.reasoning-effort {
+.reasoning-effort,
+.context-tokens {
   display: inline-flex;
   align-items: center;
   gap: var(--ui-space-1);
@@ -423,7 +424,8 @@
   font-weight: 500;
 }
 
-.reasoning-effort select {
+.reasoning-effort select,
+.context-tokens select {
   height: auto;
   width: auto;
   padding: 0 var(--ui-space-4) 0 var(--ui-space-1);
@@ -437,7 +439,8 @@
   cursor: pointer;
 }
 
-.reasoning-effort select:focus {
+.reasoning-effort select:focus,
+.context-tokens select:focus {
   box-shadow: none;
 }
 

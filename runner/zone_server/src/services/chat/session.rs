@@ -327,8 +327,17 @@ pub async fn build(
         }
     };
     let resolver = endpoint.capacity(state.config());
-    let (history, capacity, tools) =
-        tokio::join!(store.load(), resolver.resolve(&chat.model_name), catalog);
+    let requested = chat
+        .context_tokens
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value > 0);
+    let capacity = async {
+        resolver
+            .resolve(&chat.model_name)
+            .await
+            .with_request(requested)
+    };
+    let (history, capacity, tools) = tokio::join!(store.load(), capacity, catalog);
     if matches!(mode, Mode::Generation(_)) {
         endpoint
             .model(&chat.model_name)
@@ -604,11 +613,12 @@ pub(crate) fn chat_row(
         agent_enabled,
         agent_sandboxed: false,
         auto_approve,
+        offline: false,
+        context_tokens: None,
         reasoning_effort: zone_core::llm::ReasoningEffort::default(),
         character,
         created_at: None,
         updated_at: None,
-        offline: false,
     }
 }
 

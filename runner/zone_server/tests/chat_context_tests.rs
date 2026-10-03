@@ -96,6 +96,23 @@ async fn preview_is_authorized_read_only_and_reserves_usable_output_at_4096_cont
 }
 
 #[tokio::test]
+async fn a_chat_context_choice_caps_ollama_below_native() {
+    let harness = Harness::new(Some(262144), false, vec![answer("Done")]).await;
+    sqlx::query("UPDATE chats SET context_tokens = $2 WHERE id = $1")
+        .bind(harness.chat)
+        .bind(8192_i64)
+        .execute(&harness.pool)
+        .await
+        .expect("the chat keeps its chosen window");
+    let frames = harness.turn("Hello").await;
+    successful(&frames);
+    let requests = harness.requests().await;
+    let inference = ordinary(&requests);
+    assert_eq!(inference.len(), 1);
+    assert_eq!(inference[0]["num_ctx"], 8192);
+}
+
+#[tokio::test]
 async fn cold_text_history_compacts_before_inference_with_bounded_batched_summaries() {
     let harness = Harness::new(Some(4096), false, vec![answer("Done")]).await;
     let mut originals = Vec::new();

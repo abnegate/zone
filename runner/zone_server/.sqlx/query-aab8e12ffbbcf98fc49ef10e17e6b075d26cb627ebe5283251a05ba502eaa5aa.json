@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at\n        FROM chats\n        WHERE id = $1\n        ",
+  "query": "\n                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at\n                FROM chats\n                ORDER BY updated_at DESC\n                ",
   "describe": {
     "columns": [
       {
@@ -115,6 +115,17 @@
       },
       {
         "ordinal": 10,
+        "name": "context_tokens",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "chats",
+            "name": "context_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamp",
         "origin": {
@@ -137,9 +148,7 @@
       }
     ],
     "parameters": {
-      "Left": [
-        "Uuid"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -153,8 +162,9 @@
       false,
       false,
       true,
+      true,
       true
     ]
   },
-  "hash": "0002af013f0363fd3e642fdcdd349b57bfc56f5bf4982e29dd664cd16b1958bd"
+  "hash": "aab8e12ffbbcf98fc49ef10e17e6b075d26cb627ebe5283251a05ba502eaa5aa"
 }

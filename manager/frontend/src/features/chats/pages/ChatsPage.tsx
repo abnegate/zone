@@ -51,6 +51,8 @@ import {
   chatShowsAgent,
   chatShowsCharacter,
   chatShowsReasoning,
+  contextTokenOptions,
+  defaultContextTokens,
   findInstalledModel,
   formatBytes,
   formatDate,
@@ -61,11 +63,13 @@ import {
   isStartingImage,
   modelLabel,
   offersAgent,
+  offersLocalContext,
   parseCharacterFile,
   parseCharacterText,
   readAttachment,
   readChatGroupBy,
   readChatSort,
+  selectedContextTokens,
   sourceAttachment,
   toPlainText,
   videoAttachments,
@@ -93,6 +97,7 @@ export default function ChatsPage() {
   const [newChatReasoning, setNewChatReasoning] = useState<ReasoningEffort>('auto');
   const [newChatProject, setNewChatProject] = useState(NO_PROJECT);
   const [newChatOffline, setNewChatOffline] = useState(false);
+  const [newChatContext, setNewChatContext] = useState(String(defaultContextTokens()));
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -161,6 +166,7 @@ export default function ChatsPage() {
     setAutoApprove: setAutoApproveFn,
     setAgentSandboxed: setAgentSandboxedFn,
     setReasoningEffort: setReasoningEffortFn,
+    setContextTokens: setContextTokensFn,
     setCharacter: setCharacterFn,
     clearCharacter: clearCharacterFn,
     updateTitle,
@@ -220,6 +226,15 @@ export default function ChatsPage() {
     : selectedNewModel
       ? chatShowsReasoning({}, selectedNewModel)
       : false;
+  const showNewChatContext = !autoNewChat && offersLocalContext(selectedNewModel);
+  const newChatNative = selectedNewModel?.details?.context_length;
+  const installedLocal = displayedChat
+    ? findInstalledModel(models, displayedChat.model_name)
+    : undefined;
+  const showChatContext = Boolean(
+    displayedChat && displayedChat.model_name !== AUTO_MODEL && offersLocalContext(installedLocal)
+  );
+  const chatNative = installedLocal?.details?.context_length;
 
   const scrollToBottom = useCallback(() => {
     if (!stickToBottom.current) {
@@ -315,6 +330,7 @@ export default function ChatsPage() {
           showNewChatReasoning && newChatReasoning !== 'auto' ? newChatReasoning : undefined,
         ...(newChatProject !== NO_PROJECT ? { project_id: newChatProject } : {}),
         ...(newChatOffline ? { offline: true } : {}),
+        ...(showNewChatContext ? { context_tokens: Number(newChatContext) } : {}),
       });
       setShowNewChatModal(false);
       setNewChatModel(AUTO_MODEL);
@@ -323,6 +339,7 @@ export default function ChatsPage() {
       setNewChatReasoning('auto');
       setNewChatProject(NO_PROJECT);
       setNewChatOffline(false);
+      setNewChatContext(String(defaultContextTokens()));
       selectChat(chat.id);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to create chat');
@@ -367,6 +384,16 @@ export default function ChatsPage() {
       await setReasoningEffortFn(effort);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to change reasoning');
+    }
+  };
+
+  const handleContextTokens = async (tokens: number) => {
+    if (!isAuthenticated || !displayedChat) return;
+    setOperationError(null);
+    try {
+      await setContextTokensFn(tokens);
+    } catch (err) {
+      setOperationError(err instanceof Error ? err.message : 'Failed to change context size');
     }
   };
 
@@ -976,6 +1003,28 @@ export default function ChatsPage() {
                 )}
               </div>
               <div className="chat-header-actions">
+                {showChatContext && (
+                  <label className="context-tokens">
+                    <span>Context</span>
+                    <select
+                      aria-label="Context size"
+                      data-testid="context-tokens"
+                      value={String(
+                        selectedContextTokens(displayedChat.context_tokens, chatNative)
+                      )}
+                      title="How much context this local model loads. Larger windows use more RAM."
+                      onChange={(event) => {
+                        void handleContextTokens(Number(event.target.value));
+                      }}
+                    >
+                      {contextTokenOptions(chatNative).map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {showReasoning && (
                   <label className="reasoning-effort">
                     <span>Reasoning</span>
@@ -1424,6 +1473,7 @@ export default function ChatsPage() {
               if (!automatic && !chatShowsReasoning({}, installed)) {
                 setNewChatReasoning('auto');
               }
+              setNewChatContext(String(defaultContextTokens(installed?.details?.context_length)));
             }}
             helpText="Automatic picks a chat, image, video or audio model from the message."
             error={modelsError ?? undefined}
@@ -1446,6 +1496,21 @@ export default function ChatsPage() {
                 { value: NO_PROJECT, label: 'No project' },
                 ...projects.map((project) => ({ value: project.id, label: project.name })),
               ]}
+            />
+          )}
+          {showNewChatContext && (
+            <Select
+              label="Context"
+              value={newChatContext}
+              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                setNewChatContext(event.target.value);
+              }}
+              helpText={
+                newChatNative
+                  ? `Larger windows use more RAM. This model supports up to ${contextTokenOptions(newChatNative).at(-1)?.label ?? 'its native size'}.`
+                  : 'Larger windows use more RAM on this machine.'
+              }
+              options={contextTokenOptions(newChatNative)}
             />
           )}
           <Checkbox

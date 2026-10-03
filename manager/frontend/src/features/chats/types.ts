@@ -307,6 +307,11 @@ export interface Chat {
    * Older servers omit this; treat those chats as online.
    */
   offline?: boolean;
+  /**
+   * Operator-chosen context window in tokens for a local model. Absent on
+   * older chats and on remote models; those use the deployment's native size.
+   */
+  context_tokens?: number | null;
   /** Whether the installed model advertised thinking / extended reasoning. */
   reasoning?: boolean | null;
   /**
@@ -349,6 +354,7 @@ export interface CreateChatRequest {
   agent_sandboxed?: boolean;
   auto_approve?: boolean;
   offline?: boolean;
+  context_tokens?: number;
   reasoning_effort?: ReasoningEffort;
   character?: ChatCharacter;
   project_id?: string;
@@ -360,6 +366,7 @@ export interface UpdateChatRequest {
   agent_sandboxed?: boolean;
   auto_approve?: boolean;
   reasoning_effort?: ReasoningEffort;
+  context_tokens?: number;
   character?: ChatCharacter | null;
   clear_character?: boolean;
 }

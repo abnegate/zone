@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE chats\n        SET archived = true,\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at\n        ",
+  "query": "\n                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at\n                FROM chats\n                WHERE archived = $1\n                ORDER BY updated_at DESC\n                ",
   "describe": {
     "columns": [
       {
@@ -115,6 +115,17 @@
       },
       {
         "ordinal": 10,
+        "name": "context_tokens",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "chats",
+            "name": "context_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamp",
         "origin": {
@@ -138,7 +149,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Bool"
       ]
     },
     "nullable": [
@@ -153,8 +164,9 @@
       false,
       false,
       true,
+      true,
       true
     ]
   },
-  "hash": "9b1c3dfc69cb2c5bf9329326a4ff37ddecc00de0a18da3a48ff0b6c28c6a7bac"
+  "hash": "4d84416823882f9b9368c6093931fbf04195b6600b1eb37b716c7aa2892b9867"
 }
