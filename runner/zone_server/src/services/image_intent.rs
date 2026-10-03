@@ -265,15 +265,7 @@ impl ImageIntentClassifier {
             return fallback;
         }
         let client = self.client(0.2, 160);
-        let prompt = format!(
-            "Rewrite the user's request as a positive prompt for an image model that starts from \
-             the attached photo. Describe the finished photograph, not the editing instruction. \
-             Keep the same main subject, identity, and pose unless the user asked to change them. \
-             If they asked to remove something, describe the scene without it and with that area \
-             filled in naturally; do not name the removed thing. If they asked to change the \
-             environment or background, describe the same subject in that new setting. \
-             No quotes, labels, or preamble. One or two sentences.\nUser: {content}"
-        );
+        let prompt = format!("{EDIT_SCENE_REWRITE}\nUser: {content}");
         let messages = [Message::user(prompt)];
         let result = tokio::time::timeout(
             Duration::from_secs(self.config.classifier_timeout_secs),
@@ -1025,30 +1017,43 @@ fn is_environment_change(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> boo
         || has_phrase(&["into", "a"])
 }
 
+/// CLIP cannot see the attached photo. Keep the user's change and lock everything
+/// else, because a freshly invented scene description is what makes img2img
+/// redraw the subject as a generic illustration.
+const EDIT_SCENE_REWRITE: &str = "Rewrite the user's request as a positive prompt for an image \
+     model that starts from an attached photograph the model cannot see. Do not invent a new \
+     scene, person, clothing, or props. Describe the same photograph with only the requested \
+     change. Photorealistic photograph, natural skin texture, sharp photographic detail. Keep \
+     clothes, printed text, logos, background, lighting, pose, and camera. If they asked to \
+     remove something, describe the scene without it and with that area filled in naturally; \
+     do not name the removed thing. If they asked to change the environment or background, \
+     describe the same subject in that new setting, still keeping clothes and identity. No \
+     quotes, labels, or preamble. One or two sentences.";
+
+const EDIT_PRESERVE: &str = "keep identity, clothes, printed text, logos, background, lighting, \
+     pose, and camera, photorealistic photograph, natural skin texture";
+
 /// CLIP text for img2img when the classifier model cannot rewrite the request.
 pub fn heuristic_edit_prompt(content: &str) -> String {
     let tokens = tokenize(content);
     let has_phrase = |phrase: &[&str]| phrase_in(&tokens, phrase);
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        return "the same subject, edited as requested, photorealistic".to_string();
+        return format!("the same photograph, edited as requested, {EDIT_PRESERVE}");
     }
     if is_removal_request(&tokens, &has_phrase) {
         format!(
             "the same photograph with the requested object gone, that area filled in naturally \
-             to match the surrounding scene, no leftover object or hole, photorealistic. {trimmed}"
+             to match the surrounding scene, no leftover object or hole, {EDIT_PRESERVE}. {trimmed}"
         )
     } else if is_environment_change(&tokens, &has_phrase) {
         format!(
-            "the same subject in the new environment described, keep the subject's identity, \
-             pose, and appearance, only change the setting, matching lighting, photorealistic. \
-             {trimmed}"
+            "the same photograph in the new environment described, keep the subject's identity, \
+             clothes, pose, and appearance, only change the setting, matching lighting, \
+             photorealistic photograph, natural skin texture. {trimmed}"
         )
     } else {
-        format!(
-            "the same subject with the requested edits applied, keep identity and composition \
-             unless asked to change them, photorealistic. {trimmed}"
-        )
+        format!("the same photograph with only the requested change, {EDIT_PRESERVE}. {trimmed}")
     }
 }
 
@@ -1068,7 +1073,7 @@ fn sanitize_rewritten_prompt(answer: &str, original: &str) -> Option<String> {
     if text.eq_ignore_ascii_case(original.trim()) {
         return Some(heuristic_edit_prompt(original));
     }
-    Some(format!("{text} {}", original.trim()))
+    Some(format!("{text} {EDIT_PRESERVE}. {}", original.trim()))
 }
 
 #[cfg(test)]
@@ -2026,8 +2031,14 @@ mod tests {
         assert!(removal.contains("Remove this object from an image"));
 
         let style = heuristic_edit_prompt("Make this a watercolor");
-        assert!(style.contains("requested edits"));
+        assert!(style.contains("only the requested change"));
         assert!(style.contains("Make this a watercolor"));
+
+        let appearance = heuristic_edit_prompt("Edit jerry to be fat");
+        assert!(appearance.contains("same photograph"));
+        assert!(appearance.contains("clothes"));
+        assert!(appearance.contains("natural skin"));
+        assert!(appearance.contains("Edit jerry to be fat"));
     }
 
     #[test]
@@ -2038,6 +2049,7 @@ mod tests {
         )
         .unwrap();
         assert!(rewritten.contains("wooden chair on a misty forest path"));
+        assert!(rewritten.contains("natural skin"));
         assert!(rewritten.contains("Put this object in a different environment"));
 
         assert!(sanitize_rewritten_prompt("IMAGE", "remove the chair").is_none());

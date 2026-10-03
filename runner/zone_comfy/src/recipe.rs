@@ -793,8 +793,8 @@ mod tests {
             assert_eq!(workflow["14"]["class_type"], "FluxGuidance");
             assert_eq!(workflow["3"]["inputs"]["positive"], json!(["14", 0]));
             assert_eq!(workflow["3"]["inputs"]["latent_image"], json!(["12", 0]));
-            assert_eq!(workflow["3"]["inputs"]["steps"], 20);
-            assert_eq!(workflow["3"]["inputs"]["denoise"], 0.75);
+            assert_eq!(workflow["3"]["inputs"]["steps"], 28);
+            assert_eq!(workflow["3"]["inputs"]["denoise"], 0.5);
             if id == "flux-dev-adapter" {
                 assert_eq!(workflow["13"]["class_type"], "LoraLoaderModelOnly");
                 assert_eq!(workflow["3"]["inputs"]["model"], json!(["13", 0]));
@@ -803,6 +803,34 @@ mod tests {
                     "identity.safetensors"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn flux_schnell_source_graph_keeps_more_of_the_photograph() {
+        let catalog = catalog();
+        for (id, selected) in [
+            ("flux-schnell", "flux1-schnell-fp8.safetensors"),
+            ("flux-schnell-adapter", "identity.safetensors"),
+        ] {
+            let recipe = catalog.get(id).unwrap();
+            let weights = recipe.weight_map(selected).unwrap();
+            let owned: HashMap<&str, &str> = weights
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
+            let workflow = recipe
+                .apply(Fill {
+                    prompt: "make the frog fat",
+                    seed: 7,
+                    weights: owned,
+                    source: Some("zone-img2img-source.png"),
+                })
+                .unwrap();
+            assert_eq!(workflow["3"]["inputs"]["steps"], 4);
+            assert_eq!(workflow["3"]["inputs"]["denoise"], 0.6);
+            assert_eq!(workflow["11"]["class_type"], "ImageScale");
+            assert_eq!(workflow["12"]["inputs"]["pixels"], json!(["11", 0]));
         }
     }
 

@@ -1368,7 +1368,7 @@ mod tests {
         );
         assert_eq!(workflow["6"]["inputs"]["text"], "make it dusk");
         assert_eq!(workflow["3"]["inputs"]["seed"], 42);
-        assert_eq!(workflow["3"]["inputs"]["denoise"], 0.75);
+        assert_eq!(workflow["3"]["inputs"]["denoise"], 0.6);
         assert_eq!(workflow["3"]["inputs"]["steps"], 4);
         assert_eq!(workflow["10"]["inputs"]["image"], "zone-img2img-source.png");
         assert_eq!(workflow["11"]["inputs"]["width"], 1024);
