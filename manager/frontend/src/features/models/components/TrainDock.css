@@ -1,21 +1,18 @@
 .train-dock {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-2);
-  width: min(22rem, calc(100vw - 2rem));
+  gap: var(--ui-space-1);
+  width: auto;
+  margin: 0;
   padding: var(--ui-space-2) var(--ui-space-3) var(--ui-space-3);
-  background: var(--ui-bg-elevated);
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-xl);
-  box-shadow: var(--ui-shadow-lg, 0 18px 40px rgba(0, 0, 0, 0.28));
 }
 
 .train-dock-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--ui-space-3);
-  height: var(--ui-control-height-sm);
+  gap: var(--ui-space-2);
+  min-height: var(--ui-control-height-sm);
 }
 
 .train-dock-header h2 {
@@ -25,14 +22,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--ui-font-body);
-  font-size: var(--ui-text-md);
+  font-size: var(--ui-text-sm);
   font-weight: 600;
 }
 
 .train-dock-action {
   flex-shrink: 0;
   height: var(--ui-control-height-sm);
-  padding: 0 var(--ui-space-2);
+  padding: 0 var(--ui-space-1);
   border: none;
   border-radius: var(--ui-radius-md);
   background: none;
@@ -47,44 +44,20 @@
   background: var(--ui-accent-muted);
 }
 
-.train-dock--minimized {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--ui-space-2);
-  width: auto;
-  max-width: calc(100vw - 2rem);
-  height: var(--ui-control-height);
-  padding: 0 var(--ui-space-3);
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-full);
-  background: var(--ui-bg-elevated);
+.train-dock-collapsed-percent {
+  display: none;
+  text-align: center;
+  font-size: var(--ui-text-2xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   color: var(--ui-text-primary);
-  font-size: var(--ui-text-sm);
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.train-dock--minimized:hover {
-  border-color: var(--ui-border-strong);
-}
-
-.train-dock-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: var(--ui-text-muted);
-}
-
-.train-dock-dot[data-active='true'] {
-  background: var(--ui-accent);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-accent) 20%, transparent);
 }
 
 .train-dock-error {
   margin: 0;
   max-height: 6rem;
   overflow: auto;
-  font-size: var(--ui-text-xs);
+  font-size: var(--ui-text-2xs);
   line-height: var(--ui-leading-normal);
   color: var(--ui-error-600);
   overflow-wrap: anywhere;
@@ -92,4 +65,24 @@
 
 :root[data-theme='dark'] .train-dock-error {
   color: var(--ui-error-400);
+}
+
+.sidebar.collapsed .train-dock {
+  padding: var(--ui-space-2) var(--ui-space-1);
+  align-items: stretch;
+}
+
+.sidebar.collapsed .train-dock-header,
+.sidebar.collapsed .train-meter-copy,
+.sidebar.collapsed .train-meter-eta,
+.sidebar.collapsed .train-dock-error {
+  display: none;
+}
+
+.sidebar.collapsed .train-dock-collapsed-percent {
+  display: block;
+}
+
+.sidebar.collapsed .train-dock .progress-bar {
+  width: 100%;
 }

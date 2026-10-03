@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import { useTheme } from '../../context/ThemeContext';
@@ -51,7 +51,7 @@ const navItems = [
   },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ dock }: { dock?: ReactNode }) {
   const { logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const { pathname } = useLocation();
@@ -176,6 +176,8 @@ export default function Sidebar() {
             </NavLink>
           ))}
         </nav>
+
+        <div className="sidebar-dock">{dock}</div>
 
         <div className="sidebar-footer">
           <button

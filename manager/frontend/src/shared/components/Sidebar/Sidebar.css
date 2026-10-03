@@ -148,6 +148,15 @@
   display: none;
 }
 
+.sidebar-dock {
+  flex-shrink: 0;
+  border-top: 1px solid var(--ui-border);
+}
+
+.sidebar-dock:empty {
+  display: none;
+}
+
 .sidebar-footer {
   display: flex;
   align-items: center;

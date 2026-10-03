@@ -17,8 +17,6 @@ const SUCCESS_DISMISS_MS = 12_000;
 
 export interface TrainApi {
   job: TrainJob | null;
-  minimized: boolean;
-  setMinimized: (minimized: boolean) => void;
   dismiss: () => void;
 }
 
@@ -27,7 +25,6 @@ const TrainContext = createContext<TrainApi | null>(null);
 export function useTrainState(): TrainApi {
   const { isAuthenticated } = useAuth();
   const [job, setJob] = useState<TrainJob | null>(null);
-  const [minimized, setMinimized] = useState(false);
   const [dismissedId, setDismissedId] = useState<string | null>(null);
   const dismissTimer = useRef<number | null>(null);
 
@@ -91,11 +88,9 @@ export function useTrainState(): TrainApi {
   return useMemo(
     () => ({
       job: visible,
-      minimized,
-      setMinimized,
       dismiss,
     }),
-    [dismiss, minimized, visible]
+    [dismiss, visible]
   );
 }
 

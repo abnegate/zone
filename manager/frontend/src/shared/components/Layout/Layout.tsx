@@ -6,13 +6,12 @@ import './Layout.css';
 export default function Layout() {
   return (
     <div className="layout">
-      <Sidebar />
+      <Sidebar dock={<TrainDock />} />
       <main className="main-content">
         <Outlet />
       </main>
       <div className="layout-docks">
         <DownloadDock />
-        <TrainDock />
       </div>
     </div>
   );

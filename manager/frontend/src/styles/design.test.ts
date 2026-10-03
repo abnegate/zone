@@ -205,16 +205,25 @@ describe('page chrome', () => {
     expect(rule(css, '.context-label')).not.toContain('gap');
   });
 
-  it('pins the train overlay in front of the page at the bottom right', () => {
-    const layout = read(join(app, 'shared', 'components', 'Layout', 'Layout.css'));
-    expect(rule(layout, '.layout-docks')).toContain('position: fixed');
-    expect(rule(layout, '.layout-docks')).toContain('z-index: 1200');
-    expect(rule(layout, '.layout-docks')).toContain('right: var(--ui-space-6)');
-    expect(rule(layout, '.layout-docks')).toContain('bottom: var(--ui-space-6)');
+  it('seats train progress in the sidebar above the footer', () => {
+    const sidebar = read(join(app, 'shared', 'components', 'Sidebar', 'Sidebar.css'));
+    expect(rule(sidebar, '.sidebar-dock')).toContain('flex-shrink: 0');
+    expect(rule(sidebar, '.sidebar-dock')).toContain('border-top: 1px solid var(--ui-border)');
+    expect(rule(sidebar, '.sidebar-dock:empty')).toContain('display: none');
+    expect(rule(sidebar, '.sidebar')).toContain('left: 0');
+    expect(rule(sidebar, '.sidebar-footer')).toContain('border-top: 1px solid var(--ui-border)');
 
     const dock = read(join(app, 'features', 'models', 'components', 'TrainDock.css'));
-    expect(rule(dock, '.train-dock')).toContain('width: min(22rem, calc(100vw - 2rem))');
-    expect(rule(dock, '.train-dock')).toContain('border-radius: var(--ui-radius-xl)');
+    expect(rule(dock, '.train-dock')).toContain(
+      'padding: var(--ui-space-2) var(--ui-space-3) var(--ui-space-3)'
+    );
+    expect(rule(dock, '.train-dock')).not.toContain('position: fixed');
+    expect(
+      rule(
+        dock,
+        '.sidebar.collapsed .train-dock-header,\n.sidebar.collapsed .train-meter-copy,\n.sidebar.collapsed .train-meter-eta,\n.sidebar.collapsed .train-dock-error'
+      )
+    ).toContain('display: none');
   });
 
   it('replaces the Train file pickers with 96px dashed drop zones and right-aligns Train', () => {

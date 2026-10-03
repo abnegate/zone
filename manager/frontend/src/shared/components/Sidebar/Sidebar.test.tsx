@@ -286,6 +286,22 @@ describe('Sidebar', () => {
       expect(screen.getByText('Logout')).toBeInTheDocument();
     });
 
+    it('seats a dock above the footer row', () => {
+      const Wrapper = createWrapper();
+      render(
+        <Wrapper>
+          <Sidebar dock={<div data-testid="train-dock">Training jerry</div>} />
+        </Wrapper>
+      );
+      const sidebar = document.querySelector('.sidebar');
+      const dock = screen.getByTestId('train-dock').closest('.sidebar-dock');
+      const footer = document.querySelector('.sidebar-footer');
+      expect(sidebar?.contains(dock)).toBe(true);
+      const kids = [...(sidebar?.children ?? [])];
+      expect(kids.indexOf(dock as Element)).toBeGreaterThan(-1);
+      expect(kids.indexOf(dock as Element)).toBeLessThan(kids.indexOf(footer as Element));
+    });
+
     it('renders collapse button', () => {
       renderSidebar();
       expect(screen.getByLabelText('Collapse sidebar')).toBeInTheDocument();

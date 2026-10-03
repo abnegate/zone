@@ -4,8 +4,6 @@ import type { TrainJob } from '../../../api/models';
 
 const trainState = {
   job: null as TrainJob | null,
-  minimized: false,
-  setMinimized: mock(),
   dismiss: mock(),
 };
 
@@ -25,7 +23,6 @@ afterAll(() => {
 
 describe('TrainDock', () => {
   beforeAll(() => {
-    trainState.setMinimized.mockReset();
     trainState.dismiss.mockReset();
   });
 
@@ -35,7 +32,7 @@ describe('TrainDock', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('shows a progress bar and eta on every page', () => {
+  it('shows a progress bar and eta in the nav', () => {
     trainState.job = {
       id: 'job-1',
       name: 'jerry',
@@ -44,16 +41,14 @@ describe('TrainDock', () => {
       total: 400,
       eta_seconds: 180,
     };
-    trainState.minimized = false;
     render(<TrainDock />);
     expect(screen.getByRole('complementary', { name: 'LoRA training' })).toBeInTheDocument();
     expect(screen.getByText('Training jerry')).toBeInTheDocument();
     expect(screen.getByText('Step 40 of 400')).toBeInTheDocument();
-    expect(screen.getByText('10%')).toBeInTheDocument();
+    expect(screen.getAllByText('10%').length).toBeGreaterThan(0);
     expect(screen.getByText(/about 3 minutes left/)).toBeInTheDocument();
     expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '10');
-    fireEvent.click(screen.getByRole('button', { name: 'Minimize' }));
-    expect(trainState.setMinimized).toHaveBeenCalledWith(true);
+    expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument();
   });
 
   it('stays visible on the models screen', () => {
@@ -64,23 +59,21 @@ describe('TrainDock', () => {
       step: 0,
       total: 400,
     };
-    trainState.minimized = false;
     render(<TrainDock />);
     expect(screen.getByText('Starting training')).toBeInTheDocument();
     expect(screen.getByRole('complementary', { name: 'LoRA training' })).toBeInTheDocument();
   });
 
-  it('expands from the minimized pill', () => {
+  it('lets a finished failure be dismissed', () => {
     trainState.job = {
       id: 'job-1',
       name: 'jerry',
-      status: 'running',
-      step: 40,
-      total: 400,
+      status: 'failed',
+      error: 'training loss became NaN',
     };
-    trainState.minimized = true;
     render(<TrainDock />);
-    fireEvent.click(screen.getByRole('button', { name: /Expand training/ }));
-    expect(trainState.setMinimized).toHaveBeenCalledWith(false);
+    expect(screen.getByText('training loss became NaN')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(trainState.dismiss).toHaveBeenCalled();
   });
 });
