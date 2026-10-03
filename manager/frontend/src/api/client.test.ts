@@ -274,6 +274,7 @@ describe('Client', () => {
       ...chat,
       reasoning_effort: 'auto',
       agent_sandboxed: true,
+      offline: false,
     });
 
     it('getChats fetches all chats', async () => {
