@@ -619,6 +619,12 @@ Node `11` scales the source to 1024×1024 with a centered crop. Node `12`
 VAE-encodes it. Packaged denoise is `0.75` so Schnell's four Euler/simple
 steps still transform the source instead of ignoring it.
 
+`comfyui/workflows/flux1-dev-fp8-img2img-api.json` (and the adapter sibling)
+uses the same LoadImage → ImageScale → VAEEncode chain on nodes `10`–`12`.
+Dev still needs FluxGuidance on the sampler positive (node `14`, guidance
+`3.5`) over 20 Euler/normal steps. VAEEncode `pixels` is IMAGE, so guidance
+stays on `14`.
+
 When chat has a source image (an attachment or a reused thread image), it
 rewrites the user instruction into a positive CLIP prompt — a description of
 the finished photograph — before filling node `6`. Denoise stays at the

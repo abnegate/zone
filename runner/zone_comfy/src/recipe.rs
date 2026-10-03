@@ -567,6 +567,7 @@ fn validate_graph(workflow: &Value, slots: &RecipeSlots, with_source: bool) -> R
                 "source graph must load a source image",
             ));
         }
+        validate_source_encode(workflow)?;
     }
     let output_class = format!("/{}/class_type", slots.output_node);
     match slots.output {
@@ -586,6 +587,37 @@ fn source_class_pointer(source_slot: &str) -> String {
         Some((prefix, _)) => format!("{prefix}/class_type"),
         None => source_slot.to_string(),
     }
+}
+
+fn validate_source_encode(workflow: &Value) -> Result<(), Error> {
+    let nodes = workflow
+        .as_object()
+        .ok_or(Error::Configuration("workflow is not an object"))?;
+    for node in nodes.values() {
+        if node.get("class_type").and_then(Value::as_str) != Some("VAEEncode") {
+            continue;
+        }
+        let Some(source_id) = node
+            .pointer("/inputs/pixels")
+            .and_then(Value::as_array)
+            .and_then(|link| link.first())
+            .and_then(Value::as_str)
+        else {
+            return Err(Error::Configuration(
+                "VAEEncode pixels must come from an image node",
+            ));
+        };
+        let class = workflow
+            .get(source_id)
+            .and_then(|source| source.get("class_type"))
+            .and_then(Value::as_str);
+        if !matches!(class, Some("LoadImage") | Some("ImageScale")) {
+            return Err(Error::Configuration(
+                "VAEEncode pixels must come from LoadImage or ImageScale",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn require_pointer(workflow: &Value, pointer: &str) -> Result<(), Error> {
@@ -700,6 +732,8 @@ mod tests {
         let catalog = catalog();
         assert!(catalog.get("flux-schnell").is_some());
         assert!(catalog.get("flux-schnell-adapter").is_some());
+        assert!(catalog.get("flux-dev").is_some());
+        assert!(catalog.get("flux-dev-adapter").is_some());
         assert!(catalog.get("sd15").is_some());
         assert!(catalog.get("sdxl").is_some());
         assert!(catalog.get("qwen-image-edit").is_some());
@@ -713,6 +747,10 @@ mod tests {
             "sdxl-img2img-api.json",
             "flux1-schnell-fp8-adapter-api.json",
             "flux1-schnell-fp8-adapter-img2img-api.json",
+            "flux1-dev-fp8-api.json",
+            "flux1-dev-fp8-img2img-api.json",
+            "flux1-dev-fp8-adapter-api.json",
+            "flux1-dev-fp8-adapter-img2img-api.json",
             "qwen-image-edit-2511-api.json",
             "qwen-image-edit-2511-edit-api.json",
             "qwen-image-edit-2511-adapter-api.json",
@@ -720,6 +758,75 @@ mod tests {
         ] {
             assert!(packaged_workflow(name).is_some(), "{name}");
         }
+    }
+
+    /// Dev txt2img already uses node 11 for FluxGuidance. Copying that id into
+    /// the img2img graph left VAEEncode reading CONDITIONING, which ComfyUI
+    /// rejects while Schnell (no FluxGuidance) still works.
+    #[test]
+    fn flux_dev_source_graph_encodes_the_starting_image() {
+        let catalog = catalog();
+        for (id, selected) in [
+            ("flux-dev", "flux1-dev-fp8.safetensors"),
+            ("flux-dev-adapter", "identity.safetensors"),
+        ] {
+            let recipe = catalog.get(id).unwrap();
+            let weights = recipe.weight_map(selected).unwrap();
+            let owned: HashMap<&str, &str> = weights
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
+            let workflow = recipe
+                .apply(Fill {
+                    prompt: "make the frog fat",
+                    seed: 7,
+                    weights: owned,
+                    source: Some("zone-img2img-source.png"),
+                })
+                .unwrap();
+            assert_eq!(workflow["10"]["class_type"], "LoadImage");
+            assert_eq!(workflow["10"]["inputs"]["image"], "zone-img2img-source.png");
+            assert_eq!(workflow["11"]["class_type"], "ImageScale");
+            assert_eq!(workflow["11"]["inputs"]["image"], json!(["10", 0]));
+            assert_eq!(workflow["12"]["class_type"], "VAEEncode");
+            assert_eq!(workflow["12"]["inputs"]["pixels"], json!(["11", 0]));
+            assert_eq!(workflow["14"]["class_type"], "FluxGuidance");
+            assert_eq!(workflow["3"]["inputs"]["positive"], json!(["14", 0]));
+            assert_eq!(workflow["3"]["inputs"]["latent_image"], json!(["12", 0]));
+            assert_eq!(workflow["3"]["inputs"]["steps"], 20);
+            assert_eq!(workflow["3"]["inputs"]["denoise"], 0.75);
+            if id == "flux-dev-adapter" {
+                assert_eq!(workflow["13"]["class_type"], "LoraLoaderModelOnly");
+                assert_eq!(workflow["3"]["inputs"]["model"], json!(["13", 0]));
+                assert_eq!(
+                    workflow["13"]["inputs"]["lora_name"],
+                    "identity.safetensors"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_graph_rejects_conditioning_as_encode_pixels() {
+        let mut workflow: Value = serde_json::from_str(
+            packaged_workflow("flux1-dev-fp8-img2img-api.json").expect("packaged flux-dev img2img"),
+        )
+        .unwrap();
+        workflow["12"]["inputs"]["pixels"] = json!(["14", 0]);
+        let slots = RecipeSlots {
+            prompt: "/6/inputs/text".into(),
+            seed: "/3/inputs/seed".into(),
+            source: Some("/10/inputs/image".into()),
+            weights: HashMap::from([("checkpoint".into(), "/4/inputs/ckpt_name".into())]),
+            output_node: "9".into(),
+            output: RecipeOutput::PreviewImage,
+        };
+        assert!(
+            validate_graph(&workflow, &slots, true)
+                .unwrap_err()
+                .to_string()
+                .contains("VAEEncode")
+        );
     }
 
     #[test]
