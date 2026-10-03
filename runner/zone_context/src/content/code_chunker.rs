@@ -2044,15 +2044,16 @@ fn is_test_code(code: &str, language: CodeLanguage) -> bool {
     }
 }
 
-/// Check if content is likely generated or minified (Rule 15)
 fn is_likely_generated_or_minified(content: &str) -> bool {
-    // Check for extremely long lines (minified)
+    if abnegate_index::generated("", content) {
+        return true;
+    }
+
     let max_line_len = content.lines().map(|l| l.len()).max().unwrap_or(0);
     if max_line_len > 2000 {
         return true;
     }
 
-    // Check for generated file markers
     let markers = [
         "// Code generated",
         "// DO NOT EDIT",
@@ -2071,11 +2072,9 @@ fn is_likely_generated_or_minified(content: &str) -> bool {
         }
     }
 
-    // Check for very low identifier density (minified)
     let total_chars = content.len();
     let whitespace_chars = content.chars().filter(|c| c.is_whitespace()).count();
     if total_chars > 1000 && whitespace_chars * 10 < total_chars {
-        // Less than 10% whitespace
         return true;
     }
 
@@ -2094,11 +2093,9 @@ fn compute_hash(content: &str) -> String {
 
 fn is_generated_path(path: &str) -> bool {
     let lower = path.to_lowercase();
-    lower.contains("/generated/")
+    abnegate_index::generated(path, "")
         || lower.contains("\\generated\\")
         || lower.contains("/vendor/")
-        || lower.ends_with(".pb.go")
-        || lower.contains(".min.")
 }
 
 fn build_uncovered_chunks(
