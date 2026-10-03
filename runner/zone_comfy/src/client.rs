@@ -308,6 +308,42 @@ impl Client {
         self.catalog.image_recipe_for(selected)
     }
 
+    /// Schnell is the fast default for new pictures. Edits keep more identity on
+    /// Dev when those weights are installed; a Schnell LoRA stays on Schnell.
+    fn generation_plan(
+        &self,
+        has_source: bool,
+    ) -> Result<(&Recipe, HashMap<String, String>), Error> {
+        let recipe = self.image_recipe()?;
+        if has_source && let Some(plan) = self.dev_edit_plan(recipe) {
+            return Ok(plan);
+        }
+        Ok((recipe, recipe.weight_map(&self.config.checkpoint)?))
+    }
+
+    fn dev_edit_plan(&self, current: &Recipe) -> Option<(&Recipe, HashMap<String, String>)> {
+        if current.id != "flux-schnell" {
+            return None;
+        }
+        let dev = self.catalog.get("flux-dev")?;
+        if !self.recipe_is_ready(dev) {
+            return None;
+        }
+        let checkpoint = dev.defaults.get("checkpoint")?;
+        let weights = dev.weight_map(checkpoint).ok()?;
+        Some((dev, weights))
+    }
+
+    fn recipe_is_ready(&self, recipe: &Recipe) -> bool {
+        if !self.config.models_dir.is_dir() {
+            return false;
+        }
+        let items = crate::inventory::scan(&self.config.models_dir, &self.catalog);
+        recipe.required_files.iter().all(|file| {
+            crate::inventory::find(&items, &file.filename).is_some_and(|item| item.ready)
+        })
+    }
+
     fn video_workflows(&self) -> Result<(Value, Value), Error> {
         for (value, message) in [
             (
@@ -368,8 +404,7 @@ impl Client {
         } else {
             prompt
         };
-        let recipe = self.image_recipe()?;
-        let weights = recipe.weight_map(&self.config.checkpoint)?;
+        let (recipe, weights) = self.generation_plan(source.is_some())?;
         let fill_weights: HashMap<&str, &str> = weights
             .iter()
             .map(|(name, filename)| (name.as_str(), filename.as_str()))
@@ -1384,6 +1419,86 @@ mod tests {
         assert!(
             build_flux_schnell_img2img_workflow("fox", "ok.safetensors", 1, "nested/file.png")
                 .is_err()
+        );
+    }
+
+    fn models_with(files: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models");
+        for (directory, filename) in files {
+            let folder = models.join(directory);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(filename), filename.as_bytes()).unwrap();
+        }
+        (root, models)
+    }
+
+    #[test]
+    fn edits_prefer_installed_flux_dev_over_schnell() {
+        let (_root, models) = models_with(&[
+            ("checkpoints", "flux1-schnell-fp8.safetensors"),
+            ("checkpoints", "flux1-dev-fp8.safetensors"),
+        ]);
+        let client = Client::new(Config {
+            checkpoint: "flux1-schnell-fp8.safetensors".into(),
+            models_dir: models,
+            ..Default::default()
+        })
+        .unwrap();
+        let (recipe, weights) = client.generation_plan(true).unwrap();
+        assert_eq!(recipe.id, "flux-dev");
+        assert_eq!(
+            weights.get("checkpoint").map(String::as_str),
+            Some("flux1-dev-fp8.safetensors")
+        );
+        let (recipe, _) = client.generation_plan(false).unwrap();
+        assert_eq!(recipe.id, "flux-schnell");
+    }
+
+    #[test]
+    fn edits_stay_on_schnell_when_dev_is_missing() {
+        let (_root, models) = models_with(&[("checkpoints", "flux1-schnell-fp8.safetensors")]);
+        let client = Client::new(Config {
+            checkpoint: "flux1-schnell-fp8.safetensors".into(),
+            models_dir: models,
+            ..Default::default()
+        })
+        .unwrap();
+        let (recipe, weights) = client.generation_plan(true).unwrap();
+        assert_eq!(recipe.id, "flux-schnell");
+        assert_eq!(
+            weights.get("checkpoint").map(String::as_str),
+            Some("flux1-schnell-fp8.safetensors")
+        );
+    }
+
+    #[test]
+    fn a_schnell_lora_edit_does_not_switch_to_dev() {
+        let (_root, models) = models_with(&[
+            ("checkpoints", "flux1-schnell-fp8.safetensors"),
+            ("checkpoints", "flux1-dev-fp8.safetensors"),
+            ("loras", "identity.safetensors"),
+        ]);
+        crate::inventory::write_sidecar(
+            &models.join("loras/identity.safetensors"),
+            &crate::inventory::WeightSidecar {
+                recipe_id: "flux-schnell-adapter".into(),
+                hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                trigger: None,
+            },
+        )
+        .unwrap();
+        let client = Client::new(Config {
+            checkpoint: "identity.safetensors".into(),
+            models_dir: models,
+            ..Default::default()
+        })
+        .unwrap();
+        let (recipe, weights) = client.generation_plan(true).unwrap();
+        assert_eq!(recipe.id, "flux-schnell-adapter");
+        assert_eq!(
+            weights.get("lora").map(String::as_str),
+            Some("identity.safetensors")
         );
     }
 

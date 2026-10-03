@@ -261,7 +261,10 @@ filename. Zone resolves that name to a recipe in `comfyui/recipes/catalog.json`
 and runs the matching graph:
 
 - no attached image → the recipe's `bare` graph
-- attached or reused thread image → the recipe's `with_source` graph
+- attached or reused thread image → the recipe's `with_source` graph.
+  When the pin is FLUX Schnell and FLUX Dev is installed, the edit uses the
+  Dev graph so identity and photographic texture hold. A Schnell LoRA stays
+  on Schnell.
 
 Each recipe declares the only slots integration code may write: positive
 prompt, seed, checkpoint filename, and (for edits) the uploaded source
@@ -271,6 +274,8 @@ Shipped image recipes:
 
 - `flux-schnell` — FLUX.1 Schnell FP8 (default, including unknown filenames)
 - `flux-schnell-adapter` — the same graph with a LoRA slot
+- `flux-dev` — FLUX.1 Dev FP8 (optional image-dev bundle; preferred for edits)
+- `flux-dev-adapter` — the same graph with a LoRA slot
 - `qwen-image-edit` — Qwen Image Edit 2511, prompted as an edit instruction
 - `qwen-image-edit-adapter` — the same graph with a LoRA slot
 - `sd15` — Stable Diffusion 1.5 (512, 20 Euler steps)
@@ -623,8 +628,9 @@ and photographic texture.
 `comfyui/workflows/flux1-dev-fp8-img2img-api.json` (and the adapter sibling)
 uses the same LoadImage → ImageScale → VAEEncode chain on nodes `10`–`12`.
 Dev still needs FluxGuidance on the sampler positive (node `14`, guidance
-`3.5`) over 28 Euler/normal steps at denoise `0.5` (~14 sampled steps).
-VAEEncode `pixels` is IMAGE, so guidance stays on `14`.
+`3.5`) over 40 Euler/normal steps at denoise `0.5` (~20 sampled steps, the
+same budget as Dev text-to-image). VAEEncode `pixels` is IMAGE, so guidance
+stays on `14`.
 
 When chat has a source image (an attachment or a reused thread image), it
 rewrites the user instruction into a positive CLIP prompt before filling

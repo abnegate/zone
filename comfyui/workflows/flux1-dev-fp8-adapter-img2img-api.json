@@ -11,7 +11,7 @@
       "sampler_name": "euler",
       "scheduler": "normal",
       "seed": 0,
-      "steps": 28
+      "steps": 40
     },
     "_meta": {
       "title": "FLUX.1 Dev Adapter Image-to-Image Sampler"

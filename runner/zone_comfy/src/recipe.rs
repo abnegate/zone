@@ -793,7 +793,7 @@ mod tests {
             assert_eq!(workflow["14"]["class_type"], "FluxGuidance");
             assert_eq!(workflow["3"]["inputs"]["positive"], json!(["14", 0]));
             assert_eq!(workflow["3"]["inputs"]["latent_image"], json!(["12", 0]));
-            assert_eq!(workflow["3"]["inputs"]["steps"], 28);
+            assert_eq!(workflow["3"]["inputs"]["steps"], 40);
             assert_eq!(workflow["3"]["inputs"]["denoise"], 0.5);
             if id == "flux-dev-adapter" {
                 assert_eq!(workflow["13"]["class_type"], "LoraLoaderModelOnly");
