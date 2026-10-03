@@ -1693,7 +1693,7 @@ async fn handle_image_generation(
     workspace_id: Uuid,
     prompt: &str,
     metadata: Option<&serde_json::Value>,
-    image_config: crate::config::ComfyUiConfig,
+    mut image_config: crate::config::ComfyUiConfig,
     backend: LlmBackend,
     endpoint: Endpoint,
     generation: &mut Generation,
@@ -1704,6 +1704,7 @@ async fn handle_image_generation(
 
     let assistant_message_id = generation.message_id;
 
+    let identity = zone_comfy::bind_identity(&mut image_config, prompt);
     let client = match ComfyUiClient::new(image_config.clone()) {
         Ok(client) => client,
         Err(error) => {
@@ -1759,6 +1760,10 @@ async fn handle_image_generation(
         .await
     } else {
         prompt.to_string()
+    };
+    let generation_prompt = match identity.as_ref() {
+        Some(identity) => zone_comfy::identity_caption(&generation_prompt, &identity.trigger),
+        None => generation_prompt,
     };
     let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
         return Ok(());

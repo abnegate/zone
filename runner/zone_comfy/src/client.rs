@@ -1595,6 +1595,7 @@ mod tests {
             &crate::inventory::WeightSidecar {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+                trigger: None,
             },
         )
         .unwrap();
@@ -1605,6 +1606,7 @@ mod tests {
             &crate::inventory::WeightSidecar {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                trigger: None,
             },
         )
         .unwrap();
@@ -1794,6 +1796,7 @@ mod tests {
             &crate::inventory::WeightSidecar {
                 recipe_id: "qwen-image-edit-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+                trigger: None,
             },
         )
         .unwrap();

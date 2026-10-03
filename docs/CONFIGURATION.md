@@ -1194,7 +1194,10 @@ details, and native macOS / bundled NVIDIA instructions.
   Chat image generation uses the effective `model_image` setting when present.
   The filename may also be a LoRA in `models/loras/`; the matching adapter
   recipe is selected from its coherent `.zone.json` sidecar. A missing,
-  incomplete, or mismatched adapter sidecar fails closed.
+  incomplete, or mismatched adapter sidecar fails closed. When a generate or
+  edit prompt names the trigger word stored on a ready identity LoRA's sidecar,
+  that adapter is used instead of the pin, and the trigger is added to the
+  CLIP prompt if it is missing. An unmatched or ambiguous name keeps the pin.
 
 ### `COMFYUI_MODELS_DIR`
 - **Default**: `/app/comfyui/models`

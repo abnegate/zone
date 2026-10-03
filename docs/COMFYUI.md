@@ -314,6 +314,18 @@ Image Edit (`UNETLoader`, `CLIPLoader` with `qwen_image`, and `VAELoader`). A
 recipe without that metadata is rejected; recipe names, prompts, and the global
 `COMFYUI_CHECKPOINT` are never used to guess a trainer.
 
+### Using a trained identity
+
+Train writes the trigger word onto the adapter's `.zone.json` sidecar. Chat
+image generation still falls back to the org/workspace Image Model pin, but if
+the user message (or the agent's `generate_image` / `edit_image` prompt) names
+exactly one ready identity's trigger, that LoRA is loaded instead and the
+trigger is prefixed onto the CLIP prompt when it is missing. Two identities
+that share a trigger, a LoRA whose sidecar has no trigger, or a Qwen-edit
+adapter with an empty trigger stay on the pin. Retrain an older adapter to
+stamp the trigger; editing the sidecar by hand is enough only if the rest of
+the document stays coherent.
+
 For FLUX, put each target in `<train dir>/targets/NNNN.png` with its caption in
 `NNNN.txt`. For Qwen Image Edit, the target is the desired edited image and an
 additional same-index source image is required at

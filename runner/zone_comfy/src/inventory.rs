@@ -1,5 +1,6 @@
 //! Scan the ComfyUI models directory and join files to packaged recipes.
 
+use crate::config::Config;
 use crate::recipe::{MediaKind, Recipe, RecipeCatalog, RequiredFile, sanitize_weight_filename};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -21,6 +22,15 @@ pub struct WeightSidecar {
     pub recipe_id: String,
     #[serde(default)]
     pub hf_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+}
+
+/// A ready identity adapter whose trigger word can select it at generate time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub filename: String,
+    pub trigger: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,6 +54,8 @@ pub struct InventoryItem {
     pub required_files: Vec<String>,
     pub adapter: bool,
     pub prompt_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
 }
 
 pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
@@ -79,6 +91,7 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
                 .and_then(|meta| meta.modified().ok())
                 .and_then(rfc3339);
             let sidecar = read_sidecar(&path);
+            let trigger = sidecar.as_ref().and_then(document_trigger);
             let recipe = resolve_recipe(catalog, filename, kind, sidecar.as_ref());
             let Some(recipe) = recipe else {
                 continue;
@@ -114,6 +127,7 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
                     crate::recipe::PromptMode::ClipScene => "clip_scene".to_string(),
                     crate::recipe::PromptMode::EditInstruction => "edit_instruction".to_string(),
                 },
+                trigger,
             });
         }
     }
@@ -123,6 +137,118 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
 
 pub fn find<'a>(items: &'a [InventoryItem], filename: &str) -> Option<&'a InventoryItem> {
     items.iter().find(|item| item.filename == filename)
+}
+
+/// Ready identity adapters on disk, in filename order.
+pub fn identities(models_dir: &Path, workflow_path: &Path) -> Vec<Identity> {
+    let Some(catalog) = load_catalog(workflow_path) else {
+        return Vec::new();
+    };
+    identities_among(&scan(models_dir, &catalog))
+}
+
+/// If `haystack` names exactly one ready identity, pin that adapter as the
+/// image checkpoint so generate/edit load it.
+pub fn bind_identity(config: &mut Config, haystack: &str) -> Option<Identity> {
+    let catalog = load_catalog(&config.workflow_path)?;
+    let identity = identity_for_prompt(&config.models_dir, &catalog, haystack)?;
+    config.checkpoint = identity.filename.clone();
+    Some(identity)
+}
+
+pub fn identity_for_prompt(
+    models_dir: &Path,
+    catalog: &RecipeCatalog,
+    haystack: &str,
+) -> Option<Identity> {
+    identity_among(&scan(models_dir, catalog), haystack)
+}
+
+fn load_catalog(workflow_path: &Path) -> Option<RecipeCatalog> {
+    RecipeCatalog::load(Some(workflow_path))
+        .or_else(|_| RecipeCatalog::packaged())
+        .ok()
+}
+
+fn identities_among(items: &[InventoryItem]) -> Vec<Identity> {
+    items
+        .iter()
+        .filter(|item| item.adapter && item.ready)
+        .filter_map(|item| {
+            let trigger = item.trigger.as_deref()?.trim();
+            (!trigger.is_empty()).then(|| Identity {
+                filename: item.filename.clone(),
+                trigger: trigger.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn identity_among(items: &[InventoryItem], haystack: &str) -> Option<Identity> {
+    let mut matches: Vec<&InventoryItem> = items
+        .iter()
+        .filter(|item| {
+            item.adapter
+                && item.ready
+                && item.trigger.as_deref().is_some_and(|trigger| {
+                    let trigger = trigger.trim();
+                    !trigger.is_empty() && contains_phrase(haystack, trigger)
+                })
+        })
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    let longest = matches
+        .iter()
+        .filter_map(|item| item.trigger.as_deref())
+        .map(|trigger| trigger.trim().chars().count())
+        .max()
+        .unwrap_or(0);
+    matches.retain(|item| {
+        item.trigger
+            .as_deref()
+            .is_some_and(|trigger| trigger.trim().chars().count() == longest)
+    });
+    let item = (matches.len() == 1).then_some(matches[0])?;
+    Some(Identity {
+        filename: item.filename.clone(),
+        trigger: item
+            .trigger
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    })
+}
+
+/// Trigger matching is Unicode-lowercase and requires a boundary around the
+/// complete phrase. It never treats a trigger as a substring of another token.
+pub(crate) fn contains_phrase(text: &str, phrase: &str) -> bool {
+    let text = text.to_lowercase();
+    let phrase = phrase.to_lowercase();
+    if phrase.is_empty() {
+        return false;
+    }
+    text.match_indices(&phrase).any(|(start, matched)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + matched.len()..].chars().next();
+        !before.is_some_and(is_trigger_character) && !after.is_some_and(is_trigger_character)
+    })
+}
+
+fn is_trigger_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn document_trigger(document: &WeightDocument) -> Option<String> {
+    document
+        .sidecar
+        .trigger
+        .as_deref()
+        .map(str::trim)
+        .filter(|trigger| !trigger.is_empty())
+        .map(str::to_string)
 }
 
 pub fn write_sidecar(path: &Path, sidecar: &WeightSidecar) -> std::io::Result<()> {
@@ -283,6 +409,7 @@ mod tests {
             &WeightSidecar {
                 recipe_id: "qwen-image-edit-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+                trigger: None,
             },
         )
         .unwrap();
@@ -347,6 +474,7 @@ mod tests {
             &WeightSidecar {
                 recipe_id: "qwen-image-edit-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+                trigger: None,
             },
         )
         .unwrap();
@@ -372,6 +500,7 @@ mod tests {
             &WeightSidecar {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: None,
+                trigger: None,
             },
         )
         .unwrap();
@@ -380,6 +509,7 @@ mod tests {
             &WeightSidecar {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+                trigger: None,
             },
         )
         .unwrap();
@@ -388,6 +518,7 @@ mod tests {
             &WeightSidecar {
                 recipe_id: "missing-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+                trigger: None,
             },
         )
         .unwrap();
@@ -397,6 +528,7 @@ mod tests {
                 sidecar: WeightSidecar {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                    trigger: None,
                 },
                 generation: Some("not-a-generation".into()),
             })
@@ -464,6 +596,7 @@ mod tests {
                 sidecar: WeightSidecar {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                    trigger: None,
                 },
                 generation: Some(uuid::Uuid::new_v4().to_string()),
             })
@@ -475,6 +608,126 @@ mod tests {
         fs::write(marker, b"pending").unwrap();
 
         assert!(scan(&root, &RecipeCatalog::packaged().unwrap()).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn write_identity(root: &Path, filename: &str, trigger: &str) {
+        let lora = root.join("loras").join(filename);
+        fs::write(&lora, b"lora").unwrap();
+        write_sidecar(
+            &lora,
+            &WeightSidecar {
+                recipe_id: "flux-schnell-adapter".into(),
+                hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                trigger: Some(trigger.into()),
+            },
+        )
+        .unwrap();
+        let checkpoint = root.join("checkpoints/flux1-schnell-fp8.safetensors");
+        if !checkpoint.is_file() {
+            fs::write(checkpoint, b"ckpt").unwrap();
+        }
+    }
+
+    #[test]
+    fn a_sidecar_without_a_trigger_still_loads() {
+        let sidecar: WeightSidecar = serde_json::from_str(
+            r#"{"recipe_id":"flux-schnell-adapter","hf_base":"black-forest-labs/FLUX.1-schnell"}"#,
+        )
+        .unwrap();
+        assert_eq!(sidecar.trigger, None);
+    }
+
+    #[test]
+    fn scan_exposes_the_trigger_written_on_a_ready_adapter() {
+        let root = temp_models();
+        write_identity(&root, "jake.safetensors", "ohwx");
+        let items = scan(&root, &RecipeCatalog::packaged().unwrap());
+        let item = items
+            .iter()
+            .find(|item| item.filename == "jake.safetensors")
+            .unwrap();
+        assert_eq!(item.trigger.as_deref(), Some("ohwx"));
+        assert!(item.ready);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn identity_matching_picks_the_named_ready_adapter() {
+        let root = temp_models();
+        write_identity(&root, "jake.safetensors", "ohwx");
+        write_identity(&root, "teapot.safetensors", "zrkxyz");
+        let catalog = RecipeCatalog::packaged().unwrap();
+
+        let matched = identity_for_prompt(&root, &catalog, "draw ohwx at the beach").unwrap();
+        assert_eq!(matched.filename, "jake.safetensors");
+        assert_eq!(matched.trigger, "ohwx");
+
+        assert!(
+            identity_for_prompt(&root, &catalog, "a lighthouse at dusk").is_none(),
+            "a prompt that names no identity keeps the pin"
+        );
+        assert!(
+            identity_for_prompt(&root, &catalog, "she asks for a portrait").is_none(),
+            "a trigger must not match inside another word"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_longest_trigger_wins_and_a_tie_stays_on_the_pin() {
+        let root = temp_models();
+        write_identity(&root, "cat.safetensors", "cat");
+        write_identity(&root, "blue-cat.safetensors", "blue cat");
+        write_identity(&root, "other.safetensors", "ohwx");
+        let catalog = RecipeCatalog::packaged().unwrap();
+
+        let matched = identity_for_prompt(&root, &catalog, "a blue cat on a sofa").unwrap();
+        assert_eq!(matched.filename, "blue-cat.safetensors");
+
+        write_identity(&root, "twin.safetensors", "ohwx");
+        assert!(
+            identity_for_prompt(&root, &catalog, "ohwx waving").is_none(),
+            "two identities that share a trigger are ambiguous"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bind_identity_switches_the_checkpoint_only_when_named() {
+        let root = temp_models();
+        write_identity(&root, "jake.safetensors", "ohwx");
+        let mut config = Config {
+            models_dir: root.clone(),
+            checkpoint: "flux1-schnell-fp8.safetensors".into(),
+            ..Default::default()
+        };
+        let identity = bind_identity(&mut config, "portrait of ohwx").unwrap();
+        assert_eq!(identity.filename, "jake.safetensors");
+        assert_eq!(config.checkpoint, "jake.safetensors");
+
+        config.checkpoint = "flux1-schnell-fp8.safetensors".into();
+        assert!(bind_identity(&mut config, "a lighthouse").is_none());
+        assert_eq!(config.checkpoint, "flux1-schnell-fp8.safetensors");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_adapter_without_its_base_is_not_an_identity() {
+        let root = temp_models();
+        let lora = root.join("loras/jake.safetensors");
+        fs::write(&lora, b"lora").unwrap();
+        write_sidecar(
+            &lora,
+            &WeightSidecar {
+                recipe_id: "flux-schnell-adapter".into(),
+                hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                trigger: Some("ohwx".into()),
+            },
+        )
+        .unwrap();
+        let catalog = RecipeCatalog::packaged().unwrap();
+        assert!(identity_for_prompt(&root, &catalog, "ohwx").is_none());
         let _ = fs::remove_dir_all(root);
     }
 }

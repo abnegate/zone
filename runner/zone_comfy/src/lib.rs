@@ -81,9 +81,10 @@ pub use caption::{CaptionImage, CaptionRequest, Captioner, Draft, data_url};
 pub use client::{Client, Error, GeneratedImage, SourceImage, SourceVideo};
 pub use config::Config;
 pub use dataset::{Concern, Finding, inspect};
-pub use inventory::{InventoryItem, WeightSidecar, scan};
+pub use inventory::{Identity, InventoryItem, WeightSidecar, bind_identity, identities, scan};
 pub use lora::{
-    TrainBase, TrainError, TrainImage, TrainOutcome, TrainRequest, available_bases, train,
+    TrainBase, TrainError, TrainImage, TrainOutcome, TrainRequest, available_bases,
+    identity_caption, train,
 };
 pub use media::MediaType;
 pub use observe::{RequestObserver, observe_requests};

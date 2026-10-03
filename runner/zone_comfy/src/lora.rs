@@ -3,7 +3,9 @@
 use crate::caption::{Captioner, Draft};
 use crate::client::{Client, SourceImage};
 use crate::config::Config;
-use crate::inventory::{PUBLICATION_DIRECTORY, WeightDocument, WeightSidecar, publication_marker};
+use crate::inventory::{
+    PUBLICATION_DIRECTORY, WeightDocument, WeightSidecar, contains_phrase, publication_marker,
+};
 use crate::quality::Quality;
 use crate::recipe::{RecipeCatalog, TrainingModel, sanitize_weight_filename};
 use crate::subject::{CENTRE, Subject};
@@ -498,6 +500,7 @@ async fn train_with_pipeline(
         sidecar: WeightSidecar {
             recipe_id: adapter.recipe_id.clone(),
             hf_base: Some(adapter.hf_base.clone()),
+            trigger: (!trigger.is_empty()).then(|| trigger.to_string()),
         },
         generation: Some(attempt.id.clone()),
     })
@@ -680,29 +683,13 @@ fn finish_remediation(
         .collect()
 }
 
-fn identity_caption(caption: &str, trigger: &str) -> String {
+pub fn identity_caption(caption: &str, trigger: &str) -> String {
     match (!trigger.is_empty(), contains_phrase(caption, trigger)) {
         (true, false) => {
             format!("{trigger}, {}", caption.trim())
         }
         _ => caption.trim().to_string(),
     }
-}
-
-/// Trigger matching is Unicode-lowercase and requires a boundary around the
-/// complete phrase. It never treats a trigger as a substring of another token.
-fn contains_phrase(text: &str, phrase: &str) -> bool {
-    let text = text.to_lowercase();
-    let phrase = phrase.to_lowercase();
-    text.match_indices(&phrase).any(|(start, matched)| {
-        let before = text[..start].chars().next_back();
-        let after = text[start + matched.len()..].chars().next();
-        !before.is_some_and(is_trigger_character) && !after.is_some_and(is_trigger_character)
-    })
-}
-
-fn is_trigger_character(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
 }
 
 fn decode_base64(base64: &str) -> Result<Vec<u8>, TrainError> {
@@ -1524,6 +1511,7 @@ mod tests {
                 sidecar: WeightSidecar {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                    trigger: None,
                 },
                 generation: Some(generation.to_string()),
             })
@@ -1979,6 +1967,18 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, TrainError::Invalid(_)));
         assert!(training_entries(&config).is_empty());
+    }
+
+    #[tokio::test]
+    async fn train_writes_the_trigger_on_the_sidecar() {
+        let (_root, config) = harness("printf lora > \"$ZONE_TRAIN_OUTPUT\"");
+        let outcome = train(&config, String::new(), String::new(), identity("my-style"))
+            .await
+            .unwrap();
+        let sidecar = format!("{}.zone.json", outcome.path.display());
+        let document: WeightDocument = serde_json::from_slice(&fs::read(sidecar).unwrap()).unwrap();
+        assert_eq!(document.sidecar.trigger.as_deref(), Some("ohwx"));
+        assert_eq!(document.sidecar.recipe_id, "flux-schnell-adapter");
     }
 
     #[test]
@@ -2647,6 +2647,7 @@ mod tests {
                 sidecar: WeightSidecar {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                    trigger: None,
                 },
                 generation: Some(previous_generation.clone()),
             })
@@ -2714,6 +2715,7 @@ mod tests {
                 sidecar: WeightSidecar {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                    trigger: None,
                 },
                 generation: Some(previous_generation.clone()),
             })
@@ -2767,6 +2769,7 @@ mod tests {
                 sidecar: WeightSidecar {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                    trigger: None,
                 },
                 generation: Some(wrong_generation),
             })

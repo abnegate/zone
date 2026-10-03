@@ -11,7 +11,7 @@ use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
 use crate::config::ComfyUiConfig;
 use crate::db::{ai_settings, chats};
 use crate::services::{artifacts::ArtifactStore, media_source::resolve_source_image_from};
-use zone_comfy::{Client as ComfyUiClient, SourceImage};
+use zone_comfy::{Client as ComfyUiClient, Identity, SourceImage};
 
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
     if !scope.state.config().comfyui.enabled {
@@ -49,7 +49,10 @@ impl Tool for GenerateImageTool {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": format!("What to generate. {PROMPT_RULES}")
+                    "description": image_prompt_description(
+                        &trained_identities(&self.0.state.config().comfyui),
+                        false,
+                    )
                 }
             },
             "required": ["prompt"]
@@ -94,7 +97,10 @@ impl Tool for EditImageTool {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": format!("How to change the image. {PROMPT_RULES}")
+                    "description": image_prompt_description(
+                        &trained_identities(&self.0.state.config().comfyui),
+                        true,
+                    )
                 },
                 "image_url": {
                     "type": "string",
@@ -140,6 +146,46 @@ async fn effective_comfyui(scope: &WorkspaceScope) -> ComfyUiConfig {
     .await
 }
 
+fn trained_identities(config: &ComfyUiConfig) -> Vec<Identity> {
+    zone_comfy::identities(&config.models_dir, &config.workflow_path)
+}
+
+fn image_prompt_description(identities: &[Identity], edit: bool) -> String {
+    let action = if edit {
+        format!("How to change the image. {PROMPT_RULES}")
+    } else {
+        format!("What to generate. {PROMPT_RULES}")
+    };
+    if identities.is_empty() {
+        return action;
+    }
+    let listed = identities
+        .iter()
+        .map(|identity| format!("\"{}\"", identity.trigger))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{action} When the request names a trained identity, include that identity's trigger word in the prompt ({listed}) so the matching LoRA is used."
+    )
+}
+
+async fn image_haystack(scope: &WorkspaceScope, prompt: &str) -> String {
+    let Some(chat_id) = scope.chat_id else {
+        return prompt.to_string();
+    };
+    let Ok(messages) = chats::list_messages(scope.state.db(), chat_id).await else {
+        return prompt.to_string();
+    };
+    let Some(user) = messages.iter().rev().find(|message| message.role == "user") else {
+        return prompt.to_string();
+    };
+    if user.content.trim().is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{prompt}\n{}", user.content)
+    }
+}
+
 async fn run_image(
     scope: &WorkspaceScope,
     config: &ComfyUiConfig,
@@ -152,6 +198,13 @@ async fn run_image(
     let prompt = match string_arg(&params, "prompt") {
         Ok(prompt) => prompt.to_string(),
         Err(error) => return error,
+    };
+    let haystack = image_haystack(scope, &prompt).await;
+    let mut config = config.clone();
+    let identity = zone_comfy::bind_identity(&mut config, &haystack);
+    let prompt = match identity.as_ref() {
+        Some(identity) => zone_comfy::identity_caption(&prompt, &identity.trigger),
+        None => prompt,
     };
     let client = match ComfyUiClient::new(config.clone()) {
         Ok(client) => client,
@@ -455,6 +508,132 @@ mod tests {
             vec!["org-pinned-image.safetensors".to_string()],
             "the agent tool ignored the resolved image checkpoint"
         );
+    }
+
+    fn ready_identity(models: &std::path::Path, filename: &str, trigger: &str) {
+        std::fs::create_dir_all(models.join("loras")).unwrap();
+        std::fs::create_dir_all(models.join("checkpoints")).unwrap();
+        let weight = models.join("loras").join(filename);
+        std::fs::write(&weight, b"lora").unwrap();
+        zone_comfy::inventory::write_sidecar(
+            &weight,
+            &zone_comfy::WeightSidecar {
+                recipe_id: "flux-schnell-adapter".into(),
+                hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                trigger: Some(trigger.into()),
+            },
+        )
+        .unwrap();
+        let checkpoint = models.join("checkpoints/flux1-schnell-fp8.safetensors");
+        if !checkpoint.is_file() {
+            std::fs::write(checkpoint, b"ckpt").unwrap();
+        }
+    }
+
+    fn submitted_values(submitted: &Value, pointer: &str) -> Vec<String> {
+        submitted["prompt"]
+            .as_object()
+            .expect("a node map")
+            .values()
+            .filter_map(|node| node.pointer(pointer))
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_trained_identity_is_named_on_the_prompt_parameter() {
+        let identities = vec![Identity {
+            filename: "jake.safetensors".into(),
+            trigger: "ohwx".into(),
+        }];
+        let generate = image_prompt_description(&identities, false);
+        assert!(generate.starts_with("What to generate."));
+        assert!(generate.contains("\"ohwx\""));
+        assert!(generate.contains("matching LoRA"));
+        let edit = image_prompt_description(&identities, true);
+        assert!(edit.starts_with("How to change the image."));
+        assert!(edit.contains("\"ohwx\""));
+        assert_eq!(
+            image_prompt_description(&[], false),
+            format!("What to generate. {PROMPT_RULES}")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_named_identity_switches_the_lora_and_keeps_the_pin_otherwise() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let root = std::env::temp_dir().join(format!("zone-identity-{}", Uuid::new_v4()));
+        ready_identity(&root, "jake.safetensors", "ohwx");
+        ready_identity(&root, "teapot.safetensors", "zrkxyz");
+        let scope = scope();
+        let config = ComfyUiConfig {
+            base_url: server.uri(),
+            checkpoint: "flux1-schnell-fp8.safetensors".to_string(),
+            models_dir: root.clone(),
+            ..scope.state.config().comfyui.clone()
+        };
+
+        let named = run_image(
+            &scope,
+            &config,
+            json!({"prompt": "ohwx standing in a pine forest"}),
+            false,
+        )
+        .await;
+        assert!(!named.success);
+        let requests = server
+            .received_requests()
+            .await
+            .expect("the mock server records requests");
+        let submitted: Value =
+            serde_json::from_slice(&requests[0].body).expect("ComfyUI is submitted a JSON prompt");
+        assert_eq!(
+            submitted_values(&submitted, "/inputs/lora_name"),
+            vec!["jake.safetensors".to_string()]
+        );
+        assert!(
+            submitted_values(&submitted, "/inputs/text")
+                .iter()
+                .any(|text| text.contains("ohwx")),
+            "the trigger has to reach the CLIP prompt: {submitted}"
+        );
+
+        let unnamed = run_image(&scope, &config, json!({"prompt": "a lighthouse"}), false).await;
+        assert!(!unnamed.success);
+        let requests = server.received_requests().await.unwrap();
+        let submitted: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert!(
+            submitted_values(&submitted, "/inputs/lora_name").is_empty(),
+            "a prompt that names no identity must keep the pinned checkpoint"
+        );
+        assert_eq!(
+            submitted_values(&submitted, "/inputs/ckpt_name"),
+            vec!["flux1-schnell-fp8.safetensors".to_string()]
+        );
+
+        let switched = run_image(
+            &scope,
+            &config,
+            json!({"prompt": "zrkxyz on a table"}),
+            false,
+        )
+        .await;
+        assert!(!switched.success);
+        let requests = server.received_requests().await.unwrap();
+        let submitted: Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert_eq!(
+            submitted_values(&submitted, "/inputs/lora_name"),
+            vec!["teapot.safetensors".to_string()],
+            "a prompt that names a different identity must leave the pin"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
