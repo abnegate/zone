@@ -2681,17 +2681,15 @@ describe('ChatsPage', () => {
       });
     };
 
-    it('keeps the Sources chip, the attach button, the draft and Send on one composer row', async () => {
+    it('keeps the attach button, the draft and Send on one composer row and Sources under it', async () => {
       await openChat();
       const row = screen.getByPlaceholderText('Type a message, or drop a file...').parentElement;
       expect(row).toHaveClass('message-form-row');
-      expect(
-        screen
-          .getByRole('button', { name: 'Sources: whole workspace' })
-          .closest('.message-form-row')
-      ).toBe(row);
       expect(screen.getByRole('button', { name: 'Attach files' }).parentElement).toBe(row);
       expect(screen.getByRole('button', { name: 'Send' }).parentElement).toBe(row);
+      const sources = screen.getByRole('button', { name: 'Sources: whole workspace' });
+      expect(sources.closest('.message-form-row')).toBeNull();
+      expect(sources.closest('.chat-composer-footer')).toBeTruthy();
     });
 
     it('offers a Sources chip in the composer that reads whole-workspace when nothing is attached', async () => {

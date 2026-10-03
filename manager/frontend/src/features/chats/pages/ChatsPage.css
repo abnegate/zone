@@ -1264,10 +1264,21 @@
   gap: var(--ui-space-2);
 }
 
-.message-form-row .chat-sources-bar {
-  flex: 0 1 auto;
+.chat-composer-footer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ui-space-2);
   min-width: 0;
-  max-width: 40%;
+}
+
+.chat-composer-footer .chat-sources-bar {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-composer-footer .context-usage {
+  flex: 0 0 auto;
 }
 
 .message-attachments {

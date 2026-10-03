@@ -1345,13 +1345,6 @@ export default function ChatsPage() {
                 ) : null}
 
                 <div className="message-form-row">
-                  <ChatSources
-                    attached={attachedSources}
-                    available={workspaceSources}
-                    loading={attachedLoading}
-                    error={attachedError}
-                    onChange={setAttachedSources}
-                  />
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -1418,12 +1411,21 @@ export default function ChatsPage() {
                   )}
                 </div>
               </form>
-              <ContextUsage
-                usage={context ?? null}
-                error={contextError}
-                previewing={previewing}
-                capacity={meterCapacity}
-              />
+              <div className="chat-composer-footer">
+                <ChatSources
+                  attached={attachedSources}
+                  available={workspaceSources}
+                  loading={attachedLoading}
+                  error={attachedError}
+                  onChange={setAttachedSources}
+                />
+                <ContextUsage
+                  usage={context ?? null}
+                  error={contextError}
+                  previewing={previewing}
+                  capacity={meterCapacity}
+                />
+              </div>
             </div>
           </>
         ) : selectedChatId && chatError ? (

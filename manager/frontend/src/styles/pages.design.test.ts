@@ -145,6 +145,12 @@ describe('chats layout', () => {
     );
   });
 
+  it('puts attached sources under the composer, not in the draft row', () => {
+    expect(chats).not.toContain('.message-form-row .chat-sources-bar');
+    expect(rule(chats, '.chat-composer-footer')).toContain('display: flex');
+    expect(rule(chats, '.chat-composer-footer .chat-sources-bar')).toContain('flex: 1 1 auto');
+  });
+
   it('labels the reasoning of a turn once, on one activity block with one left rule', () => {
     expect(chats).not.toContain('.message-reasoning summary');
     expect(rule(chats, '.message-activity')).toContain('border-left: 2px solid var(--ui-border)');
