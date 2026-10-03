@@ -468,6 +468,7 @@ pub(crate) fn train_graph(
         TrainingModel::QwenEdit { unet, clip, vae } => {
             qwen_graph(unet, clip, vae, folder, manifest, artifact, settings, steps)
         }
+        TrainingModel::Sdxl { .. } => json!({}),
     }
 }
 
@@ -655,7 +656,7 @@ fn pairs(model: &TrainingModel, work: &Path) -> Result<Vec<Pair>, TrainError> {
             ));
         }
         let reference = match model {
-            TrainingModel::Flux { .. } => None,
+            TrainingModel::Flux { .. } | TrainingModel::Sdxl { .. } => None,
             TrainingModel::QwenEdit { .. } => {
                 let control = controls.get(index).ok_or(TrainError::Invalid(
                     "Qwen edit training needs one reference for every target",
@@ -724,7 +725,7 @@ async fn stage_remote(
     run: &Run,
 ) -> Result<(), TrainError> {
     for directory in ["targets", "control_1"] {
-        if directory == "control_1" && matches!(model, TrainingModel::Flux { .. }) {
+        if directory == "control_1" && !matches!(model, TrainingModel::QwenEdit { .. }) {
             continue;
         }
         for png in pngs(&work.join(directory))? {
@@ -1176,6 +1177,7 @@ pub(crate) fn architecture(model: &TrainingModel) -> &'static str {
     match model {
         TrainingModel::Flux { .. } => "flux",
         TrainingModel::QwenEdit { .. } => "qwen_edit",
+        TrainingModel::Sdxl { .. } => "sdxl",
     }
 }
 

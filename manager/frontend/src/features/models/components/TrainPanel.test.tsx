@@ -1,12 +1,18 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
-const mockTrainBases = mock(() =>
-  Promise.resolve([
+function fluxQwenBases() {
+  return [
     { id: 'qwen-image-edit', label: 'Qwen Image Edit', edit: true },
     { id: 'flux-schnell', label: 'FLUX.1 Schnell', edit: false },
-  ])
-);
+  ];
+}
+
+function peopleReadyBases() {
+  return [...fluxQwenBases(), { id: 'sdxl-people', label: 'SDXL people (RealVisXL)', edit: false }];
+}
+
+const mockTrainBases = mock(() => Promise.resolve(fluxQwenBases()));
 const mockCaptions = mock(() => Promise.resolve({ captions: ['generated caption'] }));
 const mockFrames = mock(() =>
   Promise.resolve({
@@ -61,6 +67,7 @@ beforeEach(() => {
   mockTrain.mockClear();
   mockTrainJob.mockClear();
   mockWaitTrain.mockClear();
+  mockTrainBases.mockImplementation(() => Promise.resolve(fluxQwenBases()));
   mockTrain.mockImplementation(() =>
     Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
   );
@@ -100,12 +107,24 @@ async function addReference(label: string, reference: File): Promise<void> {
   });
 }
 
-async function selectBase(label: string): Promise<void> {
-  fireEvent.click(screen.getByLabelText('Base'));
-  fireEvent.click(await screen.findByRole('option', { name: label }));
+async function selectOption(label: string, name: string): Promise<void> {
+  fireEvent.click(screen.getByLabelText(label));
+  fireEvent.click(await screen.findByRole('option', { name }));
   await waitFor(() => {
-    expect(screen.getByLabelText('Base')).toHaveTextContent(label);
+    expect(screen.getByLabelText(label)).toHaveTextContent(name);
   });
+}
+
+async function selectBase(label: string): Promise<void> {
+  await selectOption('Base', label);
+}
+
+async function selectSubject(label: string): Promise<void> {
+  await selectOption('Subject', label);
+}
+
+async function selectMethod(label: string): Promise<void> {
+  await selectOption('Method', label);
 }
 
 function fillIdentity(): void {
@@ -236,6 +255,11 @@ describe('TrainPanel', () => {
     expect(identity).not.toBeNull();
     expect(screen.getByLabelText('Trigger word').closest('.train-identity')).toBe(identity);
     expect(screen.getByLabelText('Base').closest('.train-identity')).toBeNull();
+    const kind = screen.getByLabelText('Subject').closest('.train-kind');
+    expect(kind).not.toBeNull();
+    expect(screen.getByLabelText('Method').closest('.train-kind')).toBe(kind);
+    expect(screen.getByLabelText('Name').closest('.train-kind')).toBeNull();
+    expect(screen.getByLabelText('Subject').closest('.train-identity')).toBeNull();
 
     const train = screen.getByRole('button', { name: 'Train' });
     expect(train.parentElement).toHaveClass('train-footer');
@@ -287,6 +311,11 @@ describe('TrainPanel', () => {
     }
     expect(screen.getByLabelText('Target images').getAttribute('type')).toBe('file');
     expect(screen.getByLabelText('Base').getAttribute('role')).toBe('combobox');
+    expect(screen.getByLabelText('Subject').getAttribute('role')).toBe('combobox');
+    expect(screen.getByLabelText('Method').getAttribute('role')).toBe('combobox');
+    expect(screen.getByLabelText('Subject')).toHaveTextContent('Other');
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+    expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
   });
 
   it('requires one reference and one instruction for every Qwen target', async () => {
@@ -740,6 +769,8 @@ describe('TrainPanel', () => {
     expect(form).toHaveAttribute('aria-busy', 'true');
     for (const control of [
       screen.getByLabelText('Name'),
+      screen.getByLabelText('Subject'),
+      screen.getByLabelText('Method'),
       screen.getByLabelText('Base'),
       screen.getByLabelText('Trigger word'),
       screen.getByLabelText('Target images'),
@@ -785,5 +816,123 @@ describe('TrainPanel', () => {
     response.resolve({ filename: 'jerry.safetensors', quality: null, dataset: [] });
     await screen.findByText('Training finished: jerry.safetensors');
     expect(trained).toHaveBeenCalled();
+  });
+
+  it('trains a person LoRA on the SDXL people base and hides Flux and Qwen', async () => {
+    mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Person');
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('SDXL people (RealVisXL)');
+    });
+    expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
+    expect(screen.getByText(/~100–200 MB adapter/)).toBeInTheDocument();
+    expect(screen.getByText(/1024 buckets, rank 64/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Video')).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Reference image/)).toBeNull();
+
+    fireEvent.click(screen.getByLabelText('Base'));
+    expect(screen.queryByRole('option', { name: 'FLUX.1 Schnell' })).toBeNull();
+    expect(screen.queryByRole('option', { name: 'Qwen Image Edit' })).toBeNull();
+    fireEvent.click(screen.getByRole('option', { name: 'SDXL people (RealVisXL)' }));
+
+    fireEvent.click(screen.getByLabelText('Method'));
+    expect(await screen.findByRole('option', { name: 'Fine-tune' })).not.toHaveAttribute(
+      'data-disabled'
+    );
+    fireEvent.click(screen.getByRole('option', { name: 'LoRA' }));
+
+    fillIdentity();
+    await addTargets(file('portrait.png', 'portrait'));
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    expect(mockTrain.mock.calls[0]?.[0]).toMatchObject({
+      name: 'zoneface',
+      base: 'sdxl-people',
+      trigger: 'zne person',
+      subject: 'person',
+      method: 'lora',
+    });
+  });
+
+  it('submits a person fine-tune and retitles the panel', async () => {
+    mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Person');
+    await selectMethod('Fine-tune');
+
+    expect(screen.getByRole('heading', { name: 'Fine-tune a person' })).toBeInTheDocument();
+    expect(screen.getByText(/~7 GB checkpoint/)).toBeInTheDocument();
+    expect(screen.getByText(/full UNet \+ CLIP-L/)).toBeInTheDocument();
+    expect(screen.getByText(/resumes after a refresh or restart/)).toBeInTheDocument();
+
+    fillIdentity();
+    await addTargets(file('portrait.png', 'portrait'));
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    expect(mockTrain.mock.calls[0]?.[0]).toMatchObject({
+      base: 'sdxl-people',
+      subject: 'person',
+      method: 'finetune',
+    });
+  });
+
+  it('keeps Fine-tune disabled while Subject is Other', async () => {
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    expect(screen.getByLabelText('Subject')).toHaveTextContent('Other');
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+
+    expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Method'));
+    const fineTune = await screen.findByRole('option', { name: 'Fine-tune' });
+    expect(fineTune).toHaveAttribute('data-disabled');
+    fireEvent.click(fineTune);
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+    fireEvent.click(screen.getByRole('option', { name: 'LoRA' }));
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+  });
+
+  it('disables Train when Person is chosen without the SDXL people bundle', async () => {
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Person');
+
+    expect(
+      screen.getByText(/The SDXL people bundle must be downloaded before training a person/)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/setup-comfyui-macos.sh --download-model --bundle image-people/)
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Base')).toBeDisabled();
+    fillIdentity();
+    await addTargets(file('portrait.png', 'portrait'));
+    expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
+    expect(mockTrain).not.toHaveBeenCalled();
+  });
+
+  it('restores a Flux or Qwen base and LoRA when switching Person back to Other', async () => {
+    mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectBase('FLUX.1 Schnell');
+    await selectSubject('Person');
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('SDXL people (RealVisXL)');
+    });
+    await selectMethod('Fine-tune');
+    expect(screen.getByRole('heading', { name: 'Fine-tune a person' })).toBeInTheDocument();
+
+    await selectSubject('Other');
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+    expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit');
+    fireEvent.click(screen.getByLabelText('Base'));
+    expect(screen.getByRole('option', { name: 'FLUX.1 Schnell' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'SDXL people (RealVisXL)' })).toBeNull();
+    fireEvent.click(screen.getByRole('option', { name: 'Qwen Image Edit' }));
   });
 });

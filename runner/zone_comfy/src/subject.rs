@@ -128,7 +128,17 @@ impl Subject {
     /// Renders one crop at an already-decided focus, so a pair of images that
     /// have to stay aligned can share one.
     pub fn render(&self, raster: &Raster, side: u32, focus: Point) -> Result<Rendered, Error> {
-        let target = Target::square(side);
+        self.render_target(raster, Target::square(side), focus)
+    }
+
+    /// Same autogravity focus, with a caller-chosen frame. Person training uses
+    /// this for 1024-area buckets instead of a square.
+    pub fn render_target(
+        &self,
+        raster: &Raster,
+        target: Target,
+        focus: Point,
+    ) -> Result<Rendered, Error> {
         let region = crop::plan(raster.oriented_size(), target, focus)?;
         Ok(crop::render(raster, region, target)?)
     }

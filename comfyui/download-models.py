@@ -17,7 +17,16 @@ CHUNK_SIZE = 8 * 1024 * 1024
 USER_AGENT = "zone-comfyui-model-setup/1"
 
 
-VALID_BUNDLES = {"audio", "image", "image-dev", "image-edit", "upscale", "video", "vision"}
+VALID_BUNDLES = {
+    "audio",
+    "image",
+    "image-dev",
+    "image-edit",
+    "image-people",
+    "upscale",
+    "video",
+    "vision",
+}
 
 
 def load_manifest(path: Path) -> list[dict[str, Any]]:

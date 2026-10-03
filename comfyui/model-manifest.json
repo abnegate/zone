@@ -110,6 +110,18 @@
       "license": "Apache-2.0"
     },
     {
+      "id": "realvisxl-v5-fp16",
+      "bundle": "image-people",
+      "filename": "RealVisXL_V5.0_fp16.safetensors",
+      "relative_path": "checkpoints/RealVisXL_V5.0_fp16.safetensors",
+      "source_repository": "SG161222/RealVisXL_V5.0",
+      "source_revision": "ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc",
+      "url": "https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc/RealVisXL_V5.0_fp16.safetensors",
+      "size_bytes": 6938065488,
+      "sha256": "6a35a7855770ae9820a3c931d4964c3817b6d9e3c6f9c4dabb5b3a94e5643b80",
+      "license": "CreativeML Open RAIL++-M"
+    },
+    {
       "id": "u2net",
       "bundle": "vision",
       "filename": "u2net.onnx",

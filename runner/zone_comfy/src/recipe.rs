@@ -28,6 +28,12 @@ fn packaged_workflow(name: &str) -> Option<&'static str> {
         "sdxl-img2img-api.json" => Some(include_str!(
             "../../../comfyui/workflows/sdxl-img2img-api.json"
         )),
+        "sdxl-adapter-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/sdxl-adapter-api.json"
+        )),
+        "sdxl-adapter-img2img-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/sdxl-adapter-img2img-api.json"
+        )),
         "flux1-schnell-fp8-adapter-api.json" => Some(include_str!(
             "../../../comfyui/workflows/flux1-schnell-fp8-adapter-api.json"
         )),
@@ -104,6 +110,9 @@ pub enum TrainingModel {
         clip: String,
         vae: String,
     },
+    Sdxl {
+        checkpoint: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +126,7 @@ pub struct TrainingAdapter {
 enum TrainingArchitecture {
     Flux,
     QwenEdit,
+    Sdxl,
 }
 
 #[derive(Debug, Clone)]
@@ -324,7 +334,7 @@ impl RecipeCatalog {
                 ));
             }
             let prompt_mode = match model {
-                TrainingModel::Flux { .. } => PromptMode::ClipScene,
+                TrainingModel::Flux { .. } | TrainingModel::Sdxl { .. } => PromptMode::ClipScene,
                 TrainingModel::QwenEdit { .. } => PromptMode::EditInstruction,
             };
             if recipe.prompt_mode != prompt_mode || adapter_recipe.prompt_mode != prompt_mode {
@@ -437,6 +447,9 @@ impl Recipe {
                 unet: self.training_weight("unet")?,
                 clip: self.training_weight("clip")?,
                 vae: self.training_weight("vae")?,
+            }),
+            TrainingArchitecture::Sdxl => Ok(TrainingModel::Sdxl {
+                checkpoint: self.training_weight("checkpoint")?,
             }),
         }
     }
@@ -736,6 +749,8 @@ mod tests {
         assert!(catalog.get("flux-dev-adapter").is_some());
         assert!(catalog.get("sd15").is_some());
         assert!(catalog.get("sdxl").is_some());
+        assert!(catalog.get("sdxl-people").is_some());
+        assert!(catalog.get("sdxl-adapter").is_some());
         assert!(catalog.get("qwen-image-edit").is_some());
         assert!(catalog.get("qwen-image-edit-adapter").is_some());
         for name in [
@@ -745,6 +760,8 @@ mod tests {
             "sd15-img2img-api.json",
             "sdxl-api.json",
             "sdxl-img2img-api.json",
+            "sdxl-adapter-api.json",
+            "sdxl-adapter-img2img-api.json",
             "flux1-schnell-fp8-adapter-api.json",
             "flux1-schnell-fp8-adapter-img2img-api.json",
             "flux1-dev-fp8-api.json",
@@ -889,6 +906,27 @@ mod tests {
                 hf_base: "Qwen/Qwen-Image-Edit-2511".into(),
             }
         );
+        assert_eq!(
+            catalog
+                .get("sdxl-people")
+                .unwrap()
+                .training_model()
+                .unwrap(),
+            TrainingModel::Sdxl {
+                checkpoint: "RealVisXL_V5.0_fp16.safetensors".into()
+            }
+        );
+        assert_eq!(
+            catalog
+                .get("sdxl-people")
+                .unwrap()
+                .training_adapter()
+                .unwrap(),
+            &TrainingAdapter {
+                recipe_id: "sdxl-adapter".into(),
+                hf_base: "SG161222/RealVisXL_V5.0".into(),
+            }
+        );
     }
 
     #[test]
@@ -902,6 +940,14 @@ mod tests {
                 .is_err()
         );
         assert!(catalog.get("sd15").unwrap().training_model().is_err());
+        assert!(catalog.get("sdxl").unwrap().training_model().is_err());
+        assert!(
+            catalog
+                .get("sdxl-adapter")
+                .unwrap()
+                .training_model()
+                .is_err()
+        );
     }
 
     #[test]
@@ -934,6 +980,13 @@ mod tests {
                 .unwrap()
                 .id,
             "sdxl"
+        );
+        assert_eq!(
+            catalog
+                .image_recipe_for("RealVisXL_V5.0_fp16.safetensors")
+                .unwrap()
+                .id,
+            "sdxl-people"
         );
         assert_eq!(
             catalog
@@ -1016,6 +1069,53 @@ mod tests {
             workflow["4"]["inputs"]["ckpt_name"],
             "juggernautXL.safetensors"
         );
+    }
+
+    #[test]
+    fn sdxl_people_lora_loads_clip_through_the_adapter() {
+        let catalog = catalog();
+        let recipe = catalog.get("sdxl-adapter").unwrap();
+        let weights = recipe.weight_map("jerry.safetensors").unwrap();
+        let owned: HashMap<&str, &str> = weights
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let workflow = recipe
+            .apply(Fill {
+                prompt: "ohwx person standing in a kitchen",
+                seed: 3,
+                weights: owned,
+                source: None,
+            })
+            .unwrap();
+        assert_eq!(workflow["13"]["class_type"], "LoraLoader");
+        assert_eq!(workflow["13"]["inputs"]["lora_name"], "jerry.safetensors");
+        assert_eq!(workflow["13"]["inputs"]["model"], json!(["4", 0]));
+        assert_eq!(workflow["13"]["inputs"]["clip"], json!(["4", 1]));
+        assert_eq!(workflow["6"]["inputs"]["clip"], json!(["13", 1]));
+        assert_eq!(workflow["7"]["inputs"]["clip"], json!(["13", 1]));
+        assert_eq!(workflow["3"]["inputs"]["model"], json!(["13", 0]));
+        assert_eq!(
+            workflow["4"]["inputs"]["ckpt_name"],
+            "RealVisXL_V5.0_fp16.safetensors"
+        );
+        let edit = recipe
+            .apply(Fill {
+                prompt: "ohwx person standing in a kitchen",
+                seed: 3,
+                weights: weights
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect(),
+                source: Some("zone-img2img-source.png"),
+            })
+            .unwrap();
+        assert_eq!(edit["10"]["class_type"], "LoadImage");
+        assert_eq!(edit["11"]["class_type"], "ImageScale");
+        assert_eq!(edit["12"]["class_type"], "VAEEncode");
+        assert_eq!(edit["13"]["class_type"], "LoraLoader");
+        assert_eq!(edit["3"]["inputs"]["latent_image"], json!(["12", 0]));
+        assert_eq!(edit["3"]["inputs"]["model"], json!(["13", 0]));
     }
 
     #[test]

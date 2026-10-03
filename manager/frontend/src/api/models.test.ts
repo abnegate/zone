@@ -202,6 +202,8 @@ describe('Namespaced model requests', () => {
         return Response.json({ sampled: 1, sampled_fps: 8, frames: [] });
       }
       expect(form.get('name')).toBe('portrait');
+      expect(form.get('subject')).toBe('other');
+      expect(form.get('method')).toBe('lora');
       expect(form.get('image_0')).toBeInstanceOf(Blob);
       return Response.json({
         id: 'job-1',
@@ -223,6 +225,38 @@ describe('Namespaced model requests', () => {
     });
     await modelsApi.frames({ filename: 'walk.mp4', blob: new Blob(['clip']), mirror: true });
     expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it('posts a person fine-tune as subject and method fields', async () => {
+    const request = mock(async (_input: RequestInfo, init?: RequestInit) => {
+      expect(init?.body).toBeInstanceOf(FormData);
+      const form = init?.body as FormData;
+      expect(form.get('name')).toBe('portrait');
+      expect(form.get('base')).toBe('sdxl-people');
+      expect(form.get('subject')).toBe('person');
+      expect(form.get('method')).toBe('finetune');
+      expect(form.get('trigger')).toBe('zne person');
+      return Response.json({
+        id: 'job-1',
+        name: 'portrait',
+        status: 'succeeded',
+        filename: 'portrait.safetensors',
+        quality: null,
+        dataset: [],
+        screening: null,
+      });
+    });
+    global.fetch = request as typeof fetch;
+
+    await modelsApi.train({
+      name: 'portrait',
+      base: 'sdxl-people',
+      trigger: 'zne person',
+      subject: 'person',
+      method: 'finetune',
+      images: [],
+    });
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it('encodes the complete model name when deleting it', async () => {

@@ -3,9 +3,12 @@
 use crate::caption::{Captioner, Draft};
 use crate::client::{Client, SourceImage};
 use crate::config::Config;
+use crate::dataset::Concern;
+use crate::host_train;
 use crate::inventory::{
     PUBLICATION_DIRECTORY, WeightDocument, WeightSidecar, contains_phrase, publication_marker,
 };
+use crate::person;
 use crate::quality::Quality;
 use crate::recipe::{RecipeCatalog, TrainingModel, sanitize_weight_filename};
 use crate::subject::{CENTRE, Subject};
@@ -34,12 +37,32 @@ pub enum TrainError {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainSubject {
+    #[default]
+    Other,
+    Person,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainMethod {
+    #[default]
+    Lora,
+    Finetune,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TrainRequest {
     pub name: String,
     pub base: String,
     #[serde(default)]
     pub trigger: Option<String>,
+    #[serde(default)]
+    pub subject: TrainSubject,
+    #[serde(default)]
+    pub method: TrainMethod,
     pub images: Vec<TrainImage>,
 }
 
@@ -147,7 +170,6 @@ pub struct TrainBase {
 }
 
 struct ScreenedImage {
-    original: usize,
     target: Vec<u8>,
     reference: Option<Vec<u8>>,
     text: String,
@@ -361,7 +383,31 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
         .map_err(|_| TrainError::Invalid("training base is not supported"))?;
     let edit = matches!(&model, TrainingModel::QwenEdit { .. });
     let trigger = request.trigger.as_deref().unwrap_or_default().trim();
-    if !edit && trigger.is_empty() {
+    if request.method == TrainMethod::Finetune && request.subject != TrainSubject::Person {
+        return Err(TrainError::Invalid(
+            "fine-tune is only available for a person",
+        ));
+    }
+    if request.subject == TrainSubject::Person {
+        if !matches!(model, TrainingModel::Sdxl { .. }) {
+            return Err(TrainError::Invalid(
+                "person training uses the SDXL people base",
+            ));
+        }
+        if trigger.is_empty() {
+            return Err(TrainError::Invalid(
+                "trigger word is required so the person run can retain identity",
+            ));
+        }
+        if let TrainingModel::Sdxl { checkpoint } = &model {
+            let path = config.models_dir.join("checkpoints").join(checkpoint);
+            if !path.is_file() {
+                return Err(TrainError::Invalid(
+                    "download the SDXL people bundle before training a person",
+                ));
+            }
+        }
+    } else if !edit && trigger.is_empty() {
         return Err(TrainError::Invalid(
             "trigger word is required so the LoRA can retain identity",
         ));
@@ -391,12 +437,17 @@ async fn train_with_pipeline(
         .map_err(|_| TrainError::Invalid("training base is not supported"))?;
     let edit = matches!(&model, TrainingModel::QwenEdit { .. });
     let trigger = request.trigger.as_deref().unwrap_or_default().trim();
+    let person = request.subject == TrainSubject::Person;
     let mut decoded = request
         .images
         .iter()
         .map(TrainImage::pixels)
         .collect::<Result<Vec<Vec<u8>>, TrainError>>()?;
-    let side = crate::train::packaged_config()?.resolution();
+    let side = if person {
+        1024
+    } else {
+        crate::train::packaged_config()?.resolution()
+    };
     let mut verdict = screening(&decoded, side);
     validate_verdict(&verdict, request.images.len())?;
     let mut attempts = Vec::new();
@@ -425,34 +476,45 @@ async fn train_with_pipeline(
     // describe a background the crop is about to remove.
     let subject = Subject::shared(config);
     let groups = shots(&request.images);
-    let mut survivors = request
-        .images
-        .iter()
-        .zip(&groups)
-        .enumerate()
-        .filter(|(index, _)| verdict.keep.binary_search(index).is_ok())
-        .map(|(original, (image, group))| {
-            let framed = frame_with_target(&subject, image, &decoded[original], side)?;
-            Ok(ScreenedImage {
-                original,
+    let mut survivors = Vec::new();
+    for (original, (image, group)) in request.images.iter().zip(&groups).enumerate() {
+        if verdict.keep.binary_search(&original).is_err() {
+            continue;
+        }
+        let frames = if person && !edit {
+            frame_person(&subject, image, &decoded[original])?
+        } else {
+            vec![frame_with_target(
+                &subject,
+                image,
+                &decoded[original],
+                side,
+            )?]
+        };
+        if frames.is_empty() {
+            return Err(TrainError::Failed(
+                "screening returned an invalid survivor index".to_string(),
+            ));
+        }
+        for framed in frames {
+            survivors.push(ScreenedImage {
                 encoded: (!edit).then(|| framed.encoded()),
                 target: framed.target,
                 reference: framed.control,
                 text: image.caption.clone(),
                 group: *group,
-            })
-        })
-        .collect::<Result<Vec<ScreenedImage>, TrainError>>()?;
-    if survivors.len() != verdict.keep.len() {
+            });
+        }
+    }
+    if survivors.is_empty() {
         return Err(TrainError::Failed(
             "screening returned an invalid survivor index".to_string(),
         ));
     }
-    let described = if edit {
+    if edit {
         for image in &mut survivors {
             image.text = image.text.trim().to_string();
         }
-        Vec::new()
     } else {
         let mut drafts = survivors
             .iter()
@@ -463,16 +525,28 @@ async fn train_with_pipeline(
                 Ok::<Draft, TrainError>(Draft::new(CROP, encoded, &image.text, image.group))
             })
             .collect::<Result<Vec<Draft>, TrainError>>()?;
-        let described = Captioner::new(config, litellm_host, litellm_key)
+        Captioner::new(config, litellm_host, litellm_key)
             .fill(&mut drafts, trigger)
             .await;
         for (image, draft) in survivors.iter_mut().zip(drafts) {
             image.text = draft.caption;
         }
-        described
-    };
-    let findings = crate::dataset::inspect(&described, survivors.len());
-    if let Some(progress) = &progress {
+    }
+    let findings = crate::dataset::inspect(
+        &survivors
+            .iter()
+            .map(|image| image.text.clone())
+            .collect::<Vec<_>>(),
+        survivors.len(),
+    );
+    if person
+        && let Some(finding) = findings
+            .iter()
+            .find(|finding| finding.concern == Concern::MixedSubjects)
+    {
+        return Err(TrainError::Failed(finding.detail.clone()));
+    }
+    if !person && let Some(progress) = &progress {
         let total = crate::train::packaged_config()?.steps(survivors.len());
         let _ = progress.send(TrainProgress { step: 0, total });
     }
@@ -486,7 +560,6 @@ async fn train_with_pipeline(
         .transpose()?;
     let mut captions = HashMap::with_capacity(survivors.len());
     for (index, image) in survivors.iter().enumerate() {
-        debug_assert_eq!(image.original, verdict.keep[index]);
         let stem = format!("{index:04}");
         write_new(
             &attempt.root,
@@ -495,6 +568,8 @@ async fn train_with_pipeline(
         )?;
         let text = if edit {
             image.text.clone()
+        } else if person {
+            person_caption(&image.text, trigger)
         } else {
             identity_caption(&image.text, trigger)
         };
@@ -551,7 +626,7 @@ async fn train_with_pipeline(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         match &model {
-            TrainingModel::Flux { checkpoint } => {
+            TrainingModel::Flux { checkpoint } | TrainingModel::Sdxl { checkpoint } => {
                 process.env("ZONE_TRAIN_CHECKPOINT", checkpoint);
             }
             TrainingModel::QwenEdit { unet, clip, vae } => {
@@ -576,6 +651,23 @@ async fn train_with_pipeline(
             )));
         }
         run
+    } else if matches!(model, TrainingModel::Sdxl { .. }) {
+        return publish_host_person(
+            config,
+            &model,
+            &request,
+            &filename,
+            trigger,
+            &attempt,
+            findings,
+            Screening {
+                kept: verdict.keep.len(),
+                dropped,
+                attempted,
+            },
+            progress,
+        )
+        .await;
     } else {
         crate::train::run_with_progress(
             config,
@@ -794,12 +886,100 @@ fn finish_remediation(
         .collect()
 }
 
+async fn publish_host_person(
+    config: &Config,
+    model: &TrainingModel,
+    request: &TrainRequest,
+    filename: &str,
+    trigger: &str,
+    attempt: &Attempt,
+    findings: Vec<crate::dataset::Finding>,
+    screening: Screening,
+    progress: Option<mpsc::UnboundedSender<TrainProgress>>,
+) -> Result<TrainOutcome, TrainError> {
+    let TrainingModel::Sdxl { checkpoint } = model else {
+        return Err(TrainError::Invalid(
+            "person training uses the SDXL people base",
+        ));
+    };
+    let method = match request.method {
+        TrainMethod::Lora => "lora",
+        TrainMethod::Finetune => "finetune",
+    };
+    let recipe_id = match request.method {
+        TrainMethod::Finetune => "sdxl",
+        TrainMethod::Lora => "sdxl-adapter",
+    };
+    let mut job = host_train::HostJob::create(&request.name, method, trigger, checkpoint);
+    job.filename = Some(filename.to_string());
+    job.recipe_id = recipe_id.to_string();
+    job.hf_base = "SG161222/RealVisXL_V5.0".into();
+    job.image_count = fs::read_dir(attempt.root.join("targets"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "png")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let dir = host_train::job_dir(&config.models_dir, job.id);
+    host_train::write_job(&dir, &job)?;
+    host_train::stage_dataset(&attempt.root, &dir)?;
+    let finished = host_train::wait(&dir, progress).await?;
+    let directory = match request.method {
+        TrainMethod::Finetune => "checkpoints",
+        TrainMethod::Lora => "loras",
+    };
+    let published = finished.filename.as_deref().unwrap_or(filename);
+    let path = config.models_dir.join(directory).join(published);
+    if require_regular_file(&config.models_dir.join(directory), &path).is_err() {
+        return Err(TrainError::Failed(
+            "host trainer did not write a regular weight file".to_string(),
+        ));
+    }
+    Ok(TrainOutcome {
+        path,
+        quality: None,
+        dataset: findings,
+        screening,
+    })
+}
+
 pub fn identity_caption(caption: &str, trigger: &str) -> String {
     match (!trigger.is_empty(), contains_phrase(caption, trigger)) {
         (true, false) => {
             format!("{trigger}, {}", caption.trim())
         }
         _ => caption.trim().to_string(),
+    }
+}
+
+/// Person runs bind identity to the trigger and the class token `person`.
+pub fn person_caption(caption: &str, trigger: &str) -> String {
+    let scene = identity_caption(caption, trigger);
+    if contains_phrase(&scene, "person") {
+        return scene;
+    }
+    if trigger.is_empty() {
+        return format!("person, {scene}");
+    }
+    if let Some(rest) = scene
+        .strip_prefix(trigger)
+        .and_then(|rest| rest.strip_prefix(',').or(Some(rest)))
+    {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            format!("{trigger} person")
+        } else {
+            format!("{trigger} person, {rest}")
+        }
+    } else {
+        format!("{trigger} person, {scene}")
     }
 }
 
@@ -1417,6 +1597,33 @@ fn frame_with_target(
     })
 }
 
+/// Autogravity still finds the subject. The target is a 1024-area bucket plus
+/// a head/shoulders square when that is a different frame.
+fn frame_person(
+    subject: &Subject,
+    _image: &TrainImage,
+    target: &[u8],
+) -> Result<Vec<Framed>, TrainError> {
+    let raster = decode_bytes(target)?;
+    let focus = subject.focus(&raster, CENTRE);
+    let body = person::render_body(subject, &raster, focus)
+        .map_err(|error| TrainError::Failed(error.to_string()))?;
+    let body_target = zone_vision::Target::new(body.width, body.height);
+    let mut frames = vec![Framed {
+        target: png(&body)?,
+        control: None,
+    }];
+    if let Some(head) = person::render_head(subject, &raster, focus, body_target)
+        .map_err(|error| TrainError::Failed(error.to_string()))?
+    {
+        frames.push(Framed {
+            target: png(&head)?,
+            control: None,
+        });
+    }
+    Ok(frames)
+}
+
 fn square(
     subject: &Subject,
     raster: &Raster,
@@ -1558,6 +1765,8 @@ mod tests {
             name: name.to_string(),
             base: "flux-schnell".to_string(),
             trigger: Some("ohwx".to_string()),
+            subject: TrainSubject::Other,
+            method: TrainMethod::Lora,
             images: vec![image("target", "a portrait", None)],
         }
     }
@@ -1567,6 +1776,8 @@ mod tests {
             name: "edit-style".to_string(),
             base: "qwen-image-edit".to_string(),
             trigger: None,
+            subject: TrainSubject::Other,
+            method: TrainMethod::Lora,
             images,
         }
     }
@@ -1726,6 +1937,8 @@ mod tests {
             name: name.into(),
             base: base.into(),
             trigger: trigger.map(str::to_string),
+            subject: TrainSubject::Other,
+            method: TrainMethod::Lora,
             images: vec![upload("a portrait", None)],
         }
     }
@@ -3055,6 +3268,175 @@ mod tests {
             bases.iter().all(|base| base.id != "sd15"),
             "a runnable generation graph is not automatically a trainable architecture"
         );
+        assert!(
+            bases
+                .iter()
+                .all(|base| base.id != "sdxl" && base.id != "sdxl-people"),
+            "sdxl-people is listed only when RealVis is on disk"
+        );
+
+        fs::write(
+            config
+                .models_dir
+                .join("checkpoints/RealVisXL_V5.0_fp16.safetensors"),
+            b"realvis",
+        )
+        .unwrap();
+        let bases = available_bases(&catalog, &config.models_dir);
+        assert!(
+            bases
+                .iter()
+                .any(|base| base.id == "sdxl-people" && !base.edit)
+        );
+        assert!(bases.iter().all(|base| base.id != "sdxl"));
+    }
+
+    #[test]
+    fn person_caption_binds_the_class_token() {
+        assert_eq!(
+            person_caption("standing in a kitchen", "ohwx"),
+            "ohwx person, standing in a kitchen"
+        );
+        assert_eq!(
+            person_caption("ohwx, standing in a kitchen", "ohwx"),
+            "ohwx person, standing in a kitchen"
+        );
+        assert_eq!(
+            person_caption("a person standing in a kitchen", "ohwx"),
+            "ohwx, a person standing in a kitchen"
+        );
+    }
+
+    #[test]
+    fn person_training_rejects_a_flux_base_and_fine_tune_on_other() {
+        let (_root, config) = harness("unused");
+        let mut flux = request("jerry", "flux-schnell", Some("ohwx"));
+        flux.subject = TrainSubject::Person;
+        assert!(matches!(
+            validate_request(&config, &flux),
+            Err(TrainError::Invalid(
+                "person training uses the SDXL people base"
+            ))
+        ));
+        let mut other = request("jerry", "flux-schnell", Some("ohwx"));
+        other.method = TrainMethod::Finetune;
+        assert!(matches!(
+            validate_request(&config, &other),
+            Err(TrainError::Invalid(
+                "fine-tune is only available for a person"
+            ))
+        ));
+        let mut person = request("jerry", "sdxl-people", Some("ohwx"));
+        person.subject = TrainSubject::Person;
+        assert!(matches!(
+            validate_request(&config, &person),
+            Err(TrainError::Invalid(
+                "download the SDXL people bundle before training a person"
+            ))
+        ));
+        fs::create_dir_all(config.models_dir.join("checkpoints")).unwrap();
+        fs::write(
+            config
+                .models_dir
+                .join("checkpoints/RealVisXL_V5.0_fp16.safetensors"),
+            b"realvis",
+        )
+        .unwrap();
+        validate_request(&config, &person).expect("people base on disk is enough to start");
+        person.trigger = None;
+        assert!(matches!(
+            validate_request(&config, &person),
+            Err(TrainError::Invalid(
+                "trigger word is required so the person run can retain identity"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn person_training_fails_closed_on_mixed_subjects() {
+        let (_root, config) = harness("printf lora > \"$ZONE_TRAIN_OUTPUT\"");
+        fs::create_dir_all(config.models_dir.join("checkpoints")).unwrap();
+        fs::write(
+            config
+                .models_dir
+                .join("checkpoints/RealVisXL_V5.0_fp16.safetensors"),
+            b"realvis",
+        )
+        .unwrap();
+        let captions = [
+            "a tabby cat curled on a radiator, close-up, warm indoor light",
+            "a red sports car on a mountain road, side view, golden hour",
+            "a glass office tower seen from below, wide angle, flat overcast sky",
+            "a plate of pasta on a marble counter, overhead shot, soft window light",
+            "snow covered peaks across a valley, panoramic framing, cold morning haze",
+            "a woman laughing at a dinner party, medium shot, candlelight",
+            "a bicycle leaning against a fence, three-quarter view, late evening sun",
+            "a bunch of sunflowers in a vase, close-up, bright daylight",
+        ];
+        let mut person = request("jerry", "sdxl-people", Some("ohwx"));
+        person.subject = TrainSubject::Person;
+        person.images = captions
+            .iter()
+            .enumerate()
+            .map(|(index, caption)| TrainImage {
+                filename: format!("{index}.png"),
+                caption: (*caption).into(),
+                bytes_base64: String::new(),
+                bytes: Some(
+                    png(&Rendered {
+                        width: 768,
+                        height: 1280,
+                        pixels: (0..768u32 * 1280)
+                            .flat_map(|pixel| {
+                                let value = ((pixel + index as u32 * 97) % 251) as u8;
+                                [value, index as u8, 90]
+                            })
+                            .collect(),
+                    })
+                    .unwrap(),
+                ),
+                before_base64: None,
+                before: None,
+                group: None,
+            })
+            .collect();
+        match rejected(&config, person).await {
+            TrainError::Failed(message) => {
+                assert!(
+                    message.contains("different subjects"),
+                    "person mixed subjects must fail the job: {message}"
+                );
+            }
+            other => panic!("expected mixed subjects, got {other}"),
+        }
+    }
+
+    #[test]
+    fn a_portrait_person_frame_keeps_body_and_adds_a_head_crop() {
+        let pixels: Vec<u8> = (0..768u32 * 1280 * 3)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let encoded = png(&Rendered {
+            width: 768,
+            height: 1280,
+            pixels,
+        })
+        .unwrap();
+        let image = TrainImage {
+            filename: "body.png".into(),
+            caption: "standing outside".into(),
+            bytes_base64: String::new(),
+            bytes: Some(encoded.clone()),
+            before_base64: None,
+            before: None,
+            group: None,
+        };
+        let frames = frame_person(&Subject::none(), &image, &encoded).unwrap();
+        assert_eq!(frames.len(), 2);
+        let body = decode::decode(&frames[0].target).unwrap();
+        let head = decode::decode(&frames[1].target).unwrap();
+        assert!(body.oriented_size().1 > body.oriented_size().0);
+        assert_eq!(head.oriented_size().0, head.oriented_size().1);
     }
 
     #[cfg(unix)]

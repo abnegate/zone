@@ -222,6 +222,77 @@
       ]
     },
     {
+      "id": "sdxl-people",
+      "kind": "image",
+      "label": "SDXL people (RealVisXL)",
+      "bare": "sdxl-api.json",
+      "with_source": "sdxl-img2img-api.json",
+      "output_node": "9",
+      "output": "preview_image",
+      "slots": {
+        "prompt": "/6/inputs/text",
+        "seed": "/3/inputs/seed",
+        "source": "/10/inputs/image",
+        "weights": {
+          "checkpoint": "/4/inputs/ckpt_name"
+        }
+      },
+      "defaults": {
+        "checkpoint": "RealVisXL_V5.0_fp16.safetensors"
+      },
+      "training": {
+        "architecture": "sdxl",
+        "adapter": "sdxl-adapter",
+        "hf_base": "SG161222/RealVisXL_V5.0"
+      },
+      "files": [
+        "RealVisXL_V5.0_fp16.safetensors"
+      ],
+      "required_files": [
+        {
+          "filename": "RealVisXL_V5.0_fp16.safetensors",
+          "directory": "checkpoints"
+        }
+      ],
+      "hf_bases": [
+        "SG161222/RealVisXL_V5.0"
+      ],
+      "filename_hints": [
+        "realvisxl"
+      ]
+    },
+    {
+      "id": "sdxl-adapter",
+      "kind": "image",
+      "label": "SDXL people + LoRA",
+      "adapter": true,
+      "bare": "sdxl-adapter-api.json",
+      "with_source": "sdxl-adapter-img2img-api.json",
+      "output_node": "9",
+      "output": "preview_image",
+      "slots": {
+        "prompt": "/6/inputs/text",
+        "seed": "/3/inputs/seed",
+        "source": "/10/inputs/image",
+        "weights": {
+          "checkpoint": "/4/inputs/ckpt_name",
+          "lora": "/13/inputs/lora_name"
+        }
+      },
+      "defaults": {
+        "checkpoint": "RealVisXL_V5.0_fp16.safetensors"
+      },
+      "required_files": [
+        {
+          "filename": "RealVisXL_V5.0_fp16.safetensors",
+          "directory": "checkpoints"
+        }
+      ],
+      "hf_bases": [
+        "SG161222/RealVisXL_V5.0"
+      ]
+    },
+    {
       "id": "qwen-image-edit",
       "kind": "image",
       "label": "Qwen Image Edit 2511",

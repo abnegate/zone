@@ -1104,10 +1104,64 @@ async fn train_is_a_background_job_that_survives_the_request() {
 
     let (status, conflict) = post_json(idle.clone(), &token, "/api/models/train", body).await;
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
-    assert_eq!(conflict["error"], "a LoRA is already training");
+    assert_eq!(conflict["error"], "a training job is already running");
 
     let job = wait_train_job(&idle, &token).await;
     assert_eq!(job["status"], "succeeded", "{job}");
     assert_eq!(job["filename"], "studio-style.safetensors");
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_status_reads_a_host_job_when_the_registry_is_empty() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let mut job =
+        zone_comfy::host_train::HostJob::create("jerry", "lora", "ohwx", "base.safetensors");
+    job.status = zone_comfy::host_train::HostStatus::Running;
+    job.step = Some(9);
+    job.total = Some(40);
+    let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
+    zone_comfy::host_train::write_job(&dir, &job).unwrap();
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (status, body) = get_json(router, &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "jerry");
+    assert_eq!(body["status"], "running");
+    assert_eq!(body["step"], 9);
+    assert_eq!(body["total"], 40);
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn a_busy_host_job_refuses_a_second_train() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let job =
+        zone_comfy::host_train::HostJob::create("jerry", "finetune", "ohwx", "base.safetensors");
+    let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
+    zone_comfy::host_train::write_job(&dir, &job).unwrap();
+    let (router, token) = router_with(
+        &ollama,
+        &catalog,
+        models_dir.clone(),
+        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+    )
+    .await;
+    let body = json!({
+        "name": "studio-style",
+        "base": "flux-schnell",
+        "trigger": "ohwx",
+        "images": [{
+            "filename": "a.png",
+            "caption": "a portrait",
+            "bytes_base64": TINY_PNG
+        }]
+    });
+    let (status, conflict) = post_json(router, &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["error"], "a training job is already running");
     let _ = fs::remove_dir_all(models_dir);
 }

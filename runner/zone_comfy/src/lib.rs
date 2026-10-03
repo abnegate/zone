@@ -66,10 +66,12 @@ pub mod caption;
 pub mod client;
 pub mod config;
 pub mod dataset;
+pub mod host_train;
 pub mod inventory;
 pub mod lora;
 pub mod media;
 pub mod observe;
+pub mod person;
 pub mod quality;
 pub mod recipe;
 pub mod screening;
@@ -83,8 +85,8 @@ pub use config::Config;
 pub use dataset::{Concern, Finding, inspect};
 pub use inventory::{Identity, InventoryItem, WeightSidecar, bind_identity, identities, scan};
 pub use lora::{
-    TrainBase, TrainError, TrainImage, TrainOutcome, TrainRequest, available_bases,
-    identity_caption, train, train_reporting, validate_request,
+    TrainBase, TrainError, TrainImage, TrainMethod, TrainOutcome, TrainRequest, TrainSubject,
+    available_bases, identity_caption, person_caption, train, train_reporting, validate_request,
 };
 pub use media::MediaType;
 pub use observe::{RequestObserver, observe_requests};

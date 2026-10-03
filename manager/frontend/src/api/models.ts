@@ -256,6 +256,8 @@ export const modelsApi = {
       name: string;
       base: string;
       trigger?: string;
+      subject?: 'person' | 'other';
+      method?: 'lora' | 'finetune';
       images: Array<{
         filename: string;
         caption: string;
@@ -270,6 +272,8 @@ export const modelsApi = {
     const form = new FormData();
     form.append('name', body.name);
     form.append('base', body.base);
+    form.append('subject', body.subject ?? 'other');
+    form.append('method', body.method ?? 'lora');
     if (body.trigger) form.append('trigger', body.trigger);
     form.append(
       'images',

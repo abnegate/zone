@@ -27,6 +27,29 @@ import TrainMeter from './TrainMeter';
 import './TrainPanel.css';
 
 type TrainBase = { id: string; label: string; edit: boolean };
+type TrainSubjectKind = 'person' | 'other';
+type TrainMethodKind = 'lora' | 'finetune';
+
+const PEOPLE_BASE = 'sdxl-people';
+const PEOPLE_BUNDLE_HELP =
+  'The SDXL people bundle must be downloaded before training a person: ./scripts/setup-comfyui-macos.sh --download-model --bundle image-people';
+
+function firstOtherBase(bases: TrainBase[]): string {
+  return bases.find((row) => row.id !== PEOPLE_BASE)?.id ?? '';
+}
+
+function trainingHelp(subject: TrainSubjectKind, method: TrainMethodKind, edit: boolean): string {
+  if (subject === 'person' && method === 'finetune') {
+    return 'Drop images, clips, or a folder, set a unique trigger word, and fine-tune the SDXL people checkpoint. A run takes days to weeks, writes a ~7 GB checkpoint (full UNet + CLIP-L, prior preservation), and resumes after a refresh or restart. Plan ~20 GB of disk during a run.';
+  }
+  if (subject === 'person') {
+    return 'Drop images, clips, or a folder, set a unique trigger word, and train an SDXL people adapter. A run takes hours and writes a ~100–200 MB adapter (1024 buckets, rank 64, text encoder trained). Body shots stay in frame; a tighter head crop is added so faces stay sharp.';
+  }
+  if (edit) {
+    return 'Add target images, then pair each one with the reference image and instruction that produced it.';
+  }
+  return 'Drop images, clips, or a folder, pick an installed base, and set a unique trigger word. Every image is cropped square on its subject, then Zone trains every transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that identity.';
+}
 
 type Reference = {
   key: string;
@@ -479,6 +502,8 @@ function TrainPairRow({
 
 export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [bases, setBases] = useState<TrainBase[]>([]);
+  const [subject, setSubject] = useState<TrainSubjectKind>('other');
+  const [method, setMethod] = useState<TrainMethodKind>('lora');
   const [name, setName] = useState('');
   const [base, setBase] = useState('');
   const [trigger, setTrigger] = useState('');
@@ -497,12 +522,22 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   useEffect(() => {
     modelsApi
       .trainBases()
-      .then((rows) => {
-        setBases(rows);
-        setBase((current) => current || rows[0]?.id || '');
-      })
+      .then(setBases)
       .catch(() => setBases([]));
   }, []);
+
+  useEffect(() => {
+    if (subject === 'person') {
+      setBase(bases.some((row) => row.id === PEOPLE_BASE) ? PEOPLE_BASE : '');
+      return;
+    }
+    setBase((current) => {
+      if (current && current !== PEOPLE_BASE && bases.some((row) => row.id === current)) {
+        return current;
+      }
+      return firstOtherBase(bases);
+    });
+  }, [bases, subject]);
 
   // Resume the process-wide job once. onTrained is the inventory refresh from
   // first mount; re-running this on a new callback would abort a live poll.
@@ -554,12 +589,18 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     setFocusRequested(false);
   }, [focusRequested, images]);
 
-  const selected = bases.find((row) => row.id === base);
-  const edit = Boolean(selected?.edit);
+  const visibleBases =
+    subject === 'person'
+      ? bases.filter((row) => row.id === PEOPLE_BASE)
+      : bases.filter((row) => row.id !== PEOPLE_BASE);
+  const peopleMissing = subject === 'person' && visibleBases.length === 0;
+  const selected = visibleBases.find((row) => row.id === base);
+  const edit = subject === 'other' && Boolean(selected?.edit);
   const pending = edit ? incomplete(images) : [];
   const ready =
     Boolean(name.trim() && base && (edit || trigger.trim()) && images.length > 0) &&
-    pending.length === 0;
+    pending.length === 0 &&
+    !peopleMissing;
 
   const handleTargets = (files: File[]) => {
     if (busy || files.length === 0) return;
@@ -592,9 +633,41 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     );
   };
 
+  const handleSubject = (value: string) => {
+    if (busy) return;
+    if (value === 'person') {
+      setSubject('person');
+      setBase(bases.some((row) => row.id === PEOPLE_BASE) ? PEOPLE_BASE : '');
+      if (edit) {
+        setImages((current) =>
+          current.map((image) => ({ ...image, instruction: '', reference: undefined }))
+        );
+      }
+      return;
+    }
+    setSubject('other');
+    setMethod('lora');
+    setBase(firstOtherBase(bases));
+  };
+
+  const handleMethod = (value: string) => {
+    if (busy) return;
+    if (value === 'finetune') {
+      if (subject !== 'person') return;
+      setMethod('finetune');
+      return;
+    }
+    setMethod('lora');
+  };
+
   const handleBase = (value: string) => {
     if (busy) return;
-    const nextEdit = Boolean(bases.find((row) => row.id === value)?.edit);
+    if (subject === 'person') {
+      if (value !== PEOPLE_BASE) return;
+      setBase(PEOPLE_BASE);
+      return;
+    }
+    const nextEdit = Boolean(visibleBases.find((row) => row.id === value)?.edit);
     setBase(value);
     if (!nextEdit) {
       setImages((current) =>
@@ -734,6 +807,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           name: name.trim(),
           base,
           trigger: trigger.trim() || undefined,
+          subject,
+          method,
           images: await Promise.all(
             images.map(async (image) => ({
               filename: image.filename,
@@ -813,12 +888,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
 
   return (
     <section className="card">
-      <h2>Train a LoRA</h2>
-      <p className="help-text">
-        {edit
-          ? 'Add target images, then pair each one with the reference image and instruction that produced it.'
-          : 'Drop images, clips, or a folder, pick an installed base, and set a unique trigger word. Every image is cropped square on its subject, then Zone trains every transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that identity.'}
-      </p>
+      <h2>{method === 'finetune' ? 'Fine-tune a person' : 'Train a LoRA'}</h2>
+      <p className="help-text">{trainingHelp(subject, method, edit)}</p>
       {error && <div className="error-placeholder">{error}</div>}
       {busy && (
         <div className="train-result" role="status">
@@ -840,6 +911,28 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         </div>
       )}
       <form className="ui-form train-form" aria-busy={busy} onSubmit={handleSubmit}>
+        <div className="train-kind">
+          <Select
+            label="Subject"
+            value={subject}
+            onValueChange={handleSubject}
+            options={[
+              { value: 'person', label: 'Person' },
+              { value: 'other', label: 'Other' },
+            ]}
+            disabled={busy}
+          />
+          <Select
+            label="Method"
+            value={method}
+            onValueChange={handleMethod}
+            options={[
+              { value: 'lora', label: 'LoRA' },
+              { value: 'finetune', label: 'Fine-tune', disabled: subject !== 'person' },
+            ]}
+            disabled={busy}
+          />
+        </div>
         <div className="train-identity">
           <Input
             label="Name"
@@ -865,9 +958,10 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           label="Base"
           value={base}
           onValueChange={handleBase}
-          options={bases.map((row) => ({ value: row.id, label: row.label }))}
+          options={visibleBases.map((row) => ({ value: row.id, label: row.label }))}
           placeholder="No trainable base installed"
-          disabled={busy || bases.length === 0}
+          disabled={busy || visibleBases.length === 0}
+          helpText={peopleMissing ? PEOPLE_BUNDLE_HELP : undefined}
         />
         <div className={`train-drops${edit ? ' train-drops--single' : ''}`}>
           <DropZone

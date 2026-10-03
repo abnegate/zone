@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_comfy::dataset::Finding;
+use zone_comfy::host_train::{HostJob, HostStatus};
 use zone_comfy::lora::{Screening, TrainError, TrainOutcome};
 use zone_comfy::quality::Quality;
 
@@ -179,6 +180,34 @@ impl Job {
     }
 }
 
+impl TrainJobView {
+    pub fn from_host(job: HostJob) -> Self {
+        let status = match job.status {
+            HostStatus::Queued | HostStatus::Running => TrainJobStatus::Running,
+            HostStatus::Succeeded => TrainJobStatus::Succeeded,
+            HostStatus::Failed => TrainJobStatus::Failed,
+        };
+        let elapsed = Utc::now()
+            .signed_duration_since(job.started_at)
+            .to_std()
+            .ok();
+        Self {
+            id: job.id,
+            name: job.name,
+            status,
+            filename: job.filename,
+            quality: None,
+            dataset: None,
+            screening: None,
+            error: job.error,
+            step: job.step,
+            total: job.total,
+            eta_seconds: eta_seconds(job.step, job.total, elapsed),
+            started_at: job.started_at,
+        }
+    }
+}
+
 fn eta_seconds(step: Option<u32>, total: Option<u32>, elapsed: Option<Duration>) -> Option<u64> {
     let step = step.filter(|step| *step > 0)?;
     let total = total.filter(|total| *total > step)?;
@@ -236,5 +265,22 @@ mod tests {
             eta_seconds(Some(20), Some(20), Some(Duration::from_secs(5))),
             None
         );
+    }
+
+    #[test]
+    fn a_queued_host_job_looks_running_to_the_client() {
+        let mut job = zone_comfy::host_train::HostJob::create(
+            "jerry",
+            "finetune",
+            "ohwx",
+            "RealVisXL_V5.0_fp16.safetensors",
+        );
+        job.step = Some(4);
+        job.total = Some(20);
+        let view = super::TrainJobView::from_host(job);
+        assert_eq!(view.name, "jerry");
+        assert_eq!(view.status, TrainJobStatus::Running);
+        assert_eq!(view.step, Some(4));
+        assert_eq!(view.total, Some(20));
     }
 }

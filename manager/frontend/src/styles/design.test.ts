@@ -235,10 +235,10 @@ describe('page chrome', () => {
     expect(rule(zone, '.drop-zone-hint')).toContain('var(--ui-text-2xs)');
 
     const train = read(join(app, 'features', 'models', 'components', 'TrainPanel.css'));
-    expect(rule(train, '.train-identity,\n.train-drops')).toContain(
+    expect(rule(train, '.train-kind,\n.train-identity,\n.train-drops')).toContain(
       'grid-template-columns: repeat(2, minmax(0, 1fr))'
     );
-    expect(rule(train, '.train-identity,\n.train-drops')).toContain(
+    expect(rule(train, '.train-kind,\n.train-identity,\n.train-drops')).toContain(
       'gap: var(--ui-space-3) var(--ui-space-4)'
     );
     expect(rule(train, '.train-footer')).toContain('justify-content: flex-end');

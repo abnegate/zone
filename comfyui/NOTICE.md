@@ -73,3 +73,14 @@ command.
 These weights are not included in Zone images or source distributions. They
 are downloaded only when the operator runs the explicit upscale model setup
 command.
+
+## RealVisXL V5.0 fp16
+
+- Packaged model: <https://huggingface.co/SG161222/RealVisXL_V5.0>
+- Original model: <https://huggingface.co/SG161222/RealVisXL_V5.0>
+- File: `RealVisXL_V5.0_fp16.safetensors`
+- License: CreativeML Open RAIL++-M
+- License text: <https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/LICENSE.md>
+
+These weights are not included in Zone images or source distributions. They
+are downloaded only when the operator runs `--bundle image-people`.

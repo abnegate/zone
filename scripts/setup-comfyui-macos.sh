@@ -14,6 +14,7 @@ MODEL_ACTION=none
 MODEL_BUNDLE=image
 MANIFEST_BUNDLES=
 APPLY_NODES_ONLY=0
+INSTALL_TRAINER=0
 
 require_python() {
     if ! command -v "$PYTHON" >/dev/null 2>&1; then
@@ -55,11 +56,14 @@ usage() {
     cat <<EOF
 Usage: $0 [--download-model | --verify-model] [--bundle NAME] [--force-model]
        $0 --apply-nodes
+       $0 --install-trainer
 
 Install the pinned native Apple Silicon ComfyUI runtime. Weights are downloaded
 only when --download-model is supplied, and only for the selected bundle.
 --apply-nodes copies the packaged Zone LoRA custom node onto an existing
-checkout without fetching ComfyUI again.
+checkout without fetching ComfyUI again. --install-trainer copies the host
+SDXL trainer onto an existing checkout, creates its venv, and loads the
+LaunchAgent; it does not reinstall ComfyUI.
 
 Options:
   --bundle NAME           Bundle to act on: $MANIFEST_BUNDLES
@@ -69,6 +73,7 @@ Options:
   --verify-video-model    Alias for --verify-model --bundle video
   --force-model           Replace an installed file that fails verification
   --apply-nodes           Copy the Zone LoRA node onto an existing checkout
+  --install-trainer       Install the host SDXL trainer LaunchAgent onto an existing checkout
 
 Bundles are selected left to right, so the last of --bundle and any bundle
 alias on the command line wins.
@@ -96,6 +101,7 @@ while [ "$#" -gt 0 ]; do
             shift
             ;;
         --apply-nodes) APPLY_NODES_ONLY=1 ;;
+        --install-trainer) INSTALL_TRAINER=1 ;;
         --force-model) MODEL_FORCE=1 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -126,12 +132,96 @@ apply_zone_nodes() {
     echo "Applied Zone LoRA nodes to $INSTALL_DIR/custom_nodes/zone_lora"
 }
 
-if [ "$APPLY_NODES_ONLY" = "1" ]; then
+escape_xml() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+install_trainer() {
     if [ ! -d "$INSTALL_DIR" ]; then
         echo "ComfyUI is not installed at $INSTALL_DIR" >&2
         exit 1
     fi
-    apply_zone_nodes
+    if [ ! -x "$INSTALL_DIR/.venv/bin/python" ]; then
+        echo "ComfyUI venv is missing at $INSTALL_DIR/.venv" >&2
+        exit 1
+    fi
+    cp "$PROJECT_DIR/comfyui/train_sdxl.py" "$INSTALL_DIR/train_sdxl.py"
+    cp "$PROJECT_DIR/comfyui/train_sdxl_config.json" "$INSTALL_DIR/train_sdxl_config.json"
+    if [ -f "$PROJECT_DIR/comfyui/sdxl_checkpoint.py" ]; then
+        cp "$PROJECT_DIR/comfyui/sdxl_checkpoint.py" "$INSTALL_DIR/sdxl_checkpoint.py"
+    fi
+    if [ ! -x "$INSTALL_DIR/.venv-train/bin/python" ]; then
+        "$INSTALL_DIR/.venv/bin/python" -m venv --system-site-packages "$INSTALL_DIR/.venv-train"
+    fi
+    TRAIN_PYTHON="$INSTALL_DIR/.venv-train/bin/python"
+    if ! "$TRAIN_PYTHON" -c "import torch" >/dev/null 2>&1; then
+        rm -rf "$INSTALL_DIR/.venv-train"
+        "$INSTALL_DIR/.venv/bin/python" -m venv --system-site-packages "$INSTALL_DIR/.venv-train"
+        TRAIN_PYTHON="$INSTALL_DIR/.venv-train/bin/python"
+    fi
+    if ! "$TRAIN_PYTHON" -c "import torch" >/dev/null 2>&1; then
+        echo "ComfyUI torch is not importable from $INSTALL_DIR/.venv-train" >&2
+        exit 1
+    fi
+    "$TRAIN_PYTHON" -m pip install --disable-pip-version-check \
+        diffusers peft accelerate transformers safetensors pillow
+    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+    PLIST="$HOME/Library/LaunchAgents/ai.zone.train.plist"
+    LOG="$HOME/Library/Logs/zone-train.log"
+    PYTHON_XML=$(escape_xml "$INSTALL_DIR/.venv-train/bin/python")
+    SCRIPT_XML=$(escape_xml "$INSTALL_DIR/train_sdxl.py")
+    MODELS_XML=$(escape_xml "$MODELS_DIR")
+    WORKDIR_XML=$(escape_xml "$INSTALL_DIR")
+    LOG_XML=$(escape_xml "$LOG")
+    cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.zone.train</string>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>$WORKDIR_XML</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$PYTHON_XML</string>
+        <string>$SCRIPT_XML</string>
+        <string>--models-dir</string>
+        <string>$MODELS_XML</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>$LOG_XML</string>
+    <key>StandardErrorPath</key>
+    <string>$LOG_XML</string>
+</dict>
+</plist>
+EOF
+    UID_VALUE=$(id -u)
+    launchctl bootout "gui/$UID_VALUE/ai.zone.train" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$UID_VALUE" "$PLIST"
+    echo "Installed host trainer LaunchAgent ai.zone.train"
+}
+
+if [ "$APPLY_NODES_ONLY" = "1" ] || [ "$INSTALL_TRAINER" = "1" ]; then
+    if [ ! -d "$INSTALL_DIR" ]; then
+        echo "ComfyUI is not installed at $INSTALL_DIR" >&2
+        exit 1
+    fi
+    if [ "$APPLY_NODES_ONLY" = "1" ]; then
+        apply_zone_nodes
+    fi
+    if [ "$INSTALL_TRAINER" = "1" ]; then
+        install_trainer
+    fi
     exit 0
 fi
 

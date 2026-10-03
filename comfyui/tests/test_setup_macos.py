@@ -133,6 +133,12 @@ class SetupMacosTest(unittest.TestCase):
             self.selected_bundle("--bundle", "image", "--verify-video-model"), "video"
         )
 
+    def test_install_trainer_is_a_known_flag(self) -> None:
+        result = self.script("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--install-trainer", result.stdout)
+        self.assertEqual(self.script("--install-trainer", "--help").returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

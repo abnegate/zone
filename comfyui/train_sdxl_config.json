@@ -1,0 +1,20 @@
+{
+  "rank": 64,
+  "alpha": 64,
+  "unet_lr": 0.0001,
+  "text_encoder_lr": 0.00001,
+  "finetune_lr": 0.000002,
+  "batch_size": 1,
+  "passes_per_image": 20,
+  "min_steps": 500,
+  "max_steps": 8000,
+  "resolution": 1024,
+  "bucket_snap": 64,
+  "checkpoint_every": 250,
+  "keep_snapshots": 2,
+  "prior_preservation": true,
+  "class_prompt": "a photo of a person",
+  "train_text_encoder": true,
+  "freeze_text_encoder_2": true,
+  "gradient_checkpointing": true
+}

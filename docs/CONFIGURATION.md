@@ -1254,7 +1254,8 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ### `COMFYUI_TRAIN_TIMEOUT_SECS`
 - **Default**: `3600`
-- **Description**: Wall-clock budget for a ComfyUI train job.
+- **Description**: Wall-clock budget for a ComfyUI `ZoneTrainLoRA` job
+  (FLUX/Qwen). Person SDXL jobs run on the host worker and ignore this.
 
 ### `COMFYUI_CLASSIFIER_MODEL`
 - **Default**: empty (`auto`)

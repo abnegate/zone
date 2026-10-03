@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use zone_comfy::caption::{CaptionImage, CaptionRequest};
-use zone_comfy::lora::{TrainImage, TrainRequest};
+use zone_comfy::lora::{TrainImage, TrainMethod, TrainRequest, TrainSubject};
 use zone_comfy::video::FrameRequest;
 
 use super::types::ErrorResponse;
@@ -150,6 +150,14 @@ async fn multipart_train(request: Request) -> Result<TrainRequest, UploadError> 
         name,
         base,
         trigger,
+        subject: match optional_text(&parts, "subject").unwrap_or("other") {
+            "person" => TrainSubject::Person,
+            _ => TrainSubject::Other,
+        },
+        method: match optional_text(&parts, "method").unwrap_or("lora") {
+            "finetune" => TrainMethod::Finetune,
+            _ => TrainMethod::Lora,
+        },
         images,
     })
 }

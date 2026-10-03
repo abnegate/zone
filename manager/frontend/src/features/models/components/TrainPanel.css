@@ -132,6 +132,7 @@
   white-space: nowrap;
 }
 
+.train-kind,
 .train-identity,
 .train-drops {
   display: grid;
@@ -313,6 +314,7 @@
 }
 
 @media (max-width: 640px) {
+  .train-kind,
   .train-identity,
   .train-drops {
     grid-template-columns: minmax(0, 1fr);

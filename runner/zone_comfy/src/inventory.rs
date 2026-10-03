@@ -170,10 +170,19 @@ fn load_catalog(workflow_path: &Path) -> Option<RecipeCatalog> {
         .ok()
 }
 
+fn is_identity(item: &InventoryItem) -> bool {
+    item.ready
+        && (item.adapter || item.kind == "checkpoint")
+        && item
+            .trigger
+            .as_deref()
+            .is_some_and(|trigger| !trigger.trim().is_empty())
+}
+
 fn identities_among(items: &[InventoryItem]) -> Vec<Identity> {
     items
         .iter()
-        .filter(|item| item.adapter && item.ready)
+        .filter(|item| is_identity(item))
         .filter_map(|item| {
             let trigger = item.trigger.as_deref()?.trim();
             (!trigger.is_empty()).then(|| Identity {
@@ -188,8 +197,7 @@ fn identity_among(items: &[InventoryItem], haystack: &str) -> Option<Identity> {
     let mut matches: Vec<&InventoryItem> = items
         .iter()
         .filter(|item| {
-            item.adapter
-                && item.ready
+            is_identity(item)
                 && item.trigger.as_deref().is_some_and(|trigger| {
                     let trigger = trigger.trim();
                     !trigger.is_empty() && contains_phrase(haystack, trigger)
@@ -689,6 +697,41 @@ mod tests {
         assert!(
             identity_for_prompt(&root, &catalog, "ohwx waving").is_none(),
             "two identities that share a trigger are ambiguous"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn write_person_checkpoint(root: &Path, filename: &str, trigger: Option<&str>) {
+        let checkpoint = root.join("checkpoints").join(filename);
+        fs::write(&checkpoint, b"ckpt").unwrap();
+        write_sidecar(
+            &checkpoint,
+            &WeightSidecar {
+                recipe_id: "sdxl".into(),
+                hf_base: Some("SG161222/RealVisXL_V5.0".into()),
+                trigger: trigger.map(str::to_string),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_ready_checkpoint_with_a_trigger_is_an_identity() {
+        let root = temp_models();
+        write_person_checkpoint(&root, "jerry.safetensors", Some("ohwx"));
+        fs::write(
+            root.join("checkpoints/RealVisXL_V5.0_fp16.safetensors"),
+            b"realvis",
+        )
+        .unwrap();
+        let catalog = RecipeCatalog::packaged().unwrap();
+
+        let matched = identity_for_prompt(&root, &catalog, "portrait of ohwx").unwrap();
+        assert_eq!(matched.filename, "jerry.safetensors");
+        assert_eq!(matched.trigger, "ohwx");
+        assert!(
+            identity_for_prompt(&root, &catalog, "a lighthouse").is_none(),
+            "a people base without a trigger is not an identity"
         );
         let _ = fs::remove_dir_all(root);
     }

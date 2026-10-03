@@ -34,8 +34,10 @@ use crate::services::endpoint::Origin;
 use crate::services::model::Model;
 use crate::services::route::Route;
 use crate::state::AppState;
+use crate::train_jobs::TrainJobView;
 use types::ModelCapability;
 use zone_comfy::caption::{Captioner, Draft};
+use zone_comfy::host_train;
 use zone_comfy::lora::{self, TrainError};
 use zone_comfy::recipe::RecipeCatalog;
 use zone_comfy::video;
@@ -715,8 +717,11 @@ pub async fn frames(
 
 /// GET /api/models/train
 pub async fn train_job(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
-    match state.train_jobs().current() {
-        Some(job) => Json(job).into_response(),
+    if let Some(job) = state.train_jobs().current() {
+        return Json(job).into_response();
+    }
+    match host_train::current_with_progress(&state.config().comfyui.models_dir) {
+        Some(job) => Json(TrainJobView::from_host(job)).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     }
 }
@@ -749,10 +754,17 @@ pub async fn train(
         }
         Ok(()) => {}
     }
+    if host_train::busy(&state.config().comfyui.models_dir) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new("a training job is already running")),
+        )
+            .into_response();
+    }
     let Some(job) = state.train_jobs().start(request.name.clone()) else {
         return (
             StatusCode::CONFLICT,
-            Json(ErrorResponse::new("a LoRA is already training")),
+            Json(ErrorResponse::new("a training job is already running")),
         )
             .into_response();
     };

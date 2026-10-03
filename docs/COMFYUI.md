@@ -63,6 +63,16 @@ Comfy checkout so core files stay unmodified:
 - Size: approximately 7.17 GiB / 7.70 GB
 - Model license: Apache-2.0
 
+### RealVisXL V5.0 fp16 (people)
+
+- Repository: `SG161222/RealVisXL_V5.0`
+- Revision: `ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc`
+- File: `RealVisXL_V5.0_fp16.safetensors` (`6,938,065,488` bytes)
+- SHA-256: `6a35a7855770ae9820a3c931d4964c3817b6d9e3c6f9c4dabb5b3a94e5643b80`
+- Model license: CreativeML Open RAIL++-M
+- Bundle: `image-people`
+- Recipe: `sdxl-people` (trainable), `sdxl-adapter` for a person LoRA
+
 ### Real-ESRGAN x4plus (upscale)
 
 - Model repository: `Comfy-Org/Real-ESRGAN_repackaged`
@@ -282,6 +292,8 @@ Shipped image recipes:
 - `qwen-image-edit-adapter` — the same graph with a LoRA slot
 - `sd15` — Stable Diffusion 1.5 (512, 20 Euler steps)
 - `sdxl` — SDXL / Pony / Illustrious (1024, 25 Euler steps)
+- `sdxl-people` — RealVisXL V5.0 fp16 people prior (trainable)
+- `sdxl-adapter` — the same graph with a LoRA slot on model and CLIP
 
 `sd15` and `sdxl` carry no weights of their own: they match a checkpoint you
 supply by filename hint. The other recipes name the files they need in
@@ -316,9 +328,11 @@ FLUX.1 Dev), 512px, and at least 150 steps. Checkpoints are spaced at least 50
 steps apart and capped at eight per run, plus the final adapter.
 
 The recipe catalog explicitly declares which base architecture a training job
-uses. The supported contracts are FLUX (`CheckpointLoaderSimple`) and Qwen
-Image Edit (`UNETLoader`, `CLIPLoader` with `qwen_image`, and `VAELoader`). A
-recipe without that metadata is rejected; recipe names, prompts, and the global
+uses. The supported contracts are FLUX (`CheckpointLoaderSimple`), Qwen Image
+Edit (`UNETLoader`, `CLIPLoader` with `qwen_image`, and `VAELoader`), and SDXL
+people (`sdxl-people` → RealVisXL). Generic `sdxl` stays generation-only so a
+Pony or Juggernaut checkpoint still matches that recipe. A recipe without that
+metadata is rejected; recipe names, prompts, and the global
 `COMFYUI_CHECKPOINT` are never used to guess a trainer.
 
 ### Using a trained identity
@@ -326,12 +340,14 @@ recipe without that metadata is rejected; recipe names, prompts, and the global
 Train writes the trigger word onto the adapter's `.zone.json` sidecar. Chat
 image generation still falls back to the org/workspace Image Model pin, but if
 the user message (or the agent's `generate_image` / `edit_image` prompt) names
-exactly one ready identity's trigger, that LoRA is loaded instead and the
-trigger is prefixed onto the CLIP prompt when it is missing. Two identities
-that share a trigger, a LoRA whose sidecar has no trigger, or a Qwen-edit
-adapter with an empty trigger stay on the pin. Retrain an older adapter to
-stamp the trigger; editing the sidecar by hand is enough only if the rest of
-the document stays coherent.
+exactly one ready identity's trigger, that adapter or person checkpoint is
+loaded instead and the trigger is prefixed onto the CLIP prompt when it is
+missing. Ready identities are adapters with a trigger and checkpoints whose
+sidecar has a trigger (person fine-tunes). Two identities that share a
+trigger, a LoRA whose sidecar has no trigger, or a Qwen-edit adapter with an
+empty trigger stay on the pin. Retrain an older adapter to stamp the trigger;
+editing the sidecar by hand is enough only if the rest of the document stays
+coherent.
 
 For FLUX, put each target in `<train dir>/targets/NNNN.png` with its caption in
 `NNNN.txt`. For Qwen Image Edit, the target is the desired edited image and an
@@ -393,6 +409,34 @@ make setup-vision-model    # into the shared models volume, as vision/u2net.onnx
 `ZONE_VISION_MODEL` overrides where the manager looks. Without the weights
 nothing fails: a photo is cropped on its centre and a video frame on whatever
 moved, which is what both did before subject detection was wired in.
+
+Person training keeps that same autogravity focus. After the subject is found,
+FLUX still squares at 512. A Person run instead crops to an SDXL 1024-area
+bucket snapped to 64 px so a portrait stays portrait, then adds a tighter
+head/shoulders square from the same focus so a body-heavy set still teaches
+the face. Both frames share one caption.
+
+### Person SDXL LoRA and fine-tune
+
+Subject **Person** always trains on `sdxl-people` (RealVisXL V5.0 fp16, bundle
+`image-people`). Person LoRA is rank 64 with the CLIP-L text encoder trained
+and loads through `sdxl-adapter` (`LoraLoader` on model and CLIP). Method
+**Fine-tune** writes a full SDXL checkpoint (~7 GB) onto the generic `sdxl`
+recipe, with prior preservation class `person`. Captions are
+`{trigger} person, {scene}`. Mixed subjects fail the job.
+
+Person jobs do not go through ComfyUI `/prompt`. Manager writes
+`models/.zone-train/{id}/` on the bind mount; host LaunchAgent `ai.zone.train`
+trains on MPS in fp32, writes `progress.json`, and publishes the weight plus
+sidecar. Recreating manager does not cancel a run. Install the worker with:
+
+```bash
+./scripts/setup-comfyui-macos.sh --install-trainer
+./scripts/setup-comfyui-macos.sh --download-model --bundle image-people
+```
+
+`COMFYUI_TRAIN_TIMEOUT_SECS` does not apply to the host worker. Person LoRA
+is hours; fine-tune is unbounded and resumes from snapshots.
 
 For a clip the two signals are combined rather than ranked. Saliency leads, and
 a frame's motion doubles the weight of the region that moved, which is enough to
