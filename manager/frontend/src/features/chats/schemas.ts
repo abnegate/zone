@@ -271,6 +271,8 @@ export const ChatSchema = z.object({
   // Servers predating the toggle omit this; treat those chats as confined.
   agent_sandboxed: z.boolean().default(true),
   auto_approve: z.boolean().default(false),
+  // Servers predating per-chat offline omit this; treat those chats as online.
+  offline: z.boolean().default(false),
   reasoning: z.boolean().nullish(),
   reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high']).default('auto'),
   character: ChatCharacterSchema.nullish(),
@@ -323,6 +325,7 @@ export const CreateChatRequestSchema = z.object({
   agent_enabled: z.boolean().optional(),
   agent_sandboxed: z.boolean().optional(),
   auto_approve: z.boolean().optional(),
+  offline: z.boolean().optional(),
   reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high']).optional(),
   project_id: z.string().min(1).optional(),
 });

@@ -637,6 +637,7 @@ async fn a_chat_title_uses_the_organization_endpoint() {
         false,
         ReasoningEffort::Auto,
         None,
+        false,
     )
     .await
     .expect("a chat awaiting its title");
@@ -1117,6 +1118,7 @@ async fn a_chat_title_on_an_endpoint_the_instance_no_longer_allows_asks_no_model
         false,
         ReasoningEffort::Auto,
         None,
+        false,
     )
     .await
     .expect("a chat awaiting its title");

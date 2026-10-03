@@ -53,6 +53,7 @@ async fn deferring_the_schemas_is_most_of_the_tool_block_on_a_32k_window() {
         workspace_id: harness.workspace,
         chat_id: Some(harness.chat),
         user_id: user,
+        offline: false,
     })
     .await;
 
@@ -146,6 +147,7 @@ async fn every_deferred_tool_is_still_reachable_by_name() {
         workspace_id: harness.workspace,
         chat_id: Some(harness.chat),
         user_id: user,
+        offline: false,
     })
     .await;
 

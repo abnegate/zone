@@ -190,7 +190,7 @@ Browse more models at [Ollama Library](https://ollama.com/library).
 
 ### VPN Configuration (Optional)
 
-VPN is optional. Zone chat works without it; public web search and page fetch use the public internet unless `ZONE_VPN_REQUIRED` is on. When the VPN is on, internet-facing services share Gluetun's network so all of their traffic uses the tunnel (search, page fetch, model catalogs, LiteLLM providers, Grafana alerts, bundled engine pulls, and tool HTTP). Host Ollama or ComfyUI daemons still use the host network.
+VPN is optional. Zone chat works without it. Public web search and page fetch use the public internet when no VPN credentials are set; a WireGuard private key or OpenVPN user keeps those requests offline while the tunnel is down unless `ZONE_VPN_REQUIRED=0`. When the VPN is on, internet-facing services share Gluetun's network so all of their traffic uses the tunnel (search, page fetch, model catalogs, LiteLLM providers, Grafana alerts, bundled engine pulls, and tool HTTP). Host Ollama or ComfyUI daemons still use the host network.
 
 To enable the VPN:
 ```bash

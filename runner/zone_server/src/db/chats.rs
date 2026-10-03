@@ -36,6 +36,8 @@ pub struct ChatRow {
     pub agent_sandboxed: bool,
     /// When true, mutating file and shell tools run without a confirmation.
     pub auto_approve: bool,
+    /// When true, this chat never uses public web search, page fetch, or curl/wget.
+    pub offline: bool,
     /// How much the model should think when the deployment advertised reasoning.
     pub reasoning_effort: ReasoningEffort,
     /// Persona for models that expect a character card. Absent on ordinary assistant chats.
@@ -60,6 +62,7 @@ macro_rules! map_chat_row {
             agent_enabled: $r.agent_enabled,
             agent_sandboxed: $r.agent_sandboxed,
             auto_approve: $r.auto_approve,
+            offline: $r.offline,
             reasoning_effort: effort(&$r.reasoning_effort),
             character: None,
             created_at: $r.created_at,
@@ -78,7 +81,7 @@ pub async fn list_chats(
         (Some(wid), Some(a)) => {
             let rows = sqlx::query!(
                 r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at
+                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at
                 FROM chats
                 WHERE workspace_id = $1 AND archived = $2
                 ORDER BY updated_at DESC
@@ -93,7 +96,7 @@ pub async fn list_chats(
         (Some(wid), None) => {
             let rows = sqlx::query!(
                 r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at
+                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at
                 FROM chats
                 WHERE workspace_id = $1
                 ORDER BY updated_at DESC
@@ -107,7 +110,7 @@ pub async fn list_chats(
         (None, Some(a)) => {
             let rows = sqlx::query!(
                 r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at
+                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at
                 FROM chats
                 WHERE archived = $1
                 ORDER BY updated_at DESC
@@ -121,7 +124,7 @@ pub async fn list_chats(
         (None, None) => {
             let rows = sqlx::query!(
                 r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at
+                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at
                 FROM chats
                 ORDER BY updated_at DESC
                 "#
@@ -148,7 +151,7 @@ pub async fn titles(pool: &PgPool, ids: &[Uuid]) -> DbResult<Vec<(Uuid, String)>
 pub async fn get_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> {
     let row = sqlx::query!(
         r#"
-        SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at
+        SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at
         FROM chats
         WHERE id = $1
         "#,
@@ -160,20 +163,7 @@ pub async fn get_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> {
     let Some(r) = row else {
         return Ok(None);
     };
-    let mut chat = ChatRow {
-        id: r.id,
-        workspace_id: r.workspace_id,
-        title: r.title,
-        model_name: r.model_name,
-        archived: r.archived,
-        agent_enabled: r.agent_enabled,
-        agent_sandboxed: r.agent_sandboxed,
-        auto_approve: r.auto_approve,
-        reasoning_effort: effort(&r.reasoning_effort),
-        character: None,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    };
+    let mut chat = map_chat_row!(r);
     chat.character = get_chat_character(pool, chat.id).await?;
     Ok(Some(chat))
 }
@@ -231,6 +221,7 @@ pub async fn create_chat(
         false,
         ReasoningEffort::Auto,
         None,
+        false,
     )
     .await
 }
@@ -246,14 +237,15 @@ pub async fn create_chat_with_title(
     auto_approve: bool,
     reasoning_effort: ReasoningEffort,
     project_id: Option<Uuid>,
+    offline: bool,
 ) -> DbResult<ChatRow> {
     let (agent_enabled, agent_sandboxed) = agent;
     let mut transaction = pool.begin().await?;
     let row = sqlx::query!(
         r#"
-        INSERT INTO chats (workspace_id, title, model_name, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at
+        INSERT INTO chats (workspace_id, title, model_name, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at
         "#,
         workspace_id,
         title,
@@ -261,7 +253,8 @@ pub async fn create_chat_with_title(
         agent_enabled,
         agent_sandboxed,
         auto_approve,
-        reasoning_effort.as_str()
+        reasoning_effort.as_str(),
+        offline
     )
     .fetch_one(&mut *transaction)
     .await?;
@@ -281,20 +274,7 @@ pub async fn create_chat_with_title(
     }
     transaction.commit().await?;
 
-    Ok(ChatRow {
-        id: row.id,
-        workspace_id: row.workspace_id,
-        title: row.title,
-        model_name: row.model_name,
-        archived: row.archived,
-        agent_enabled: row.agent_enabled,
-        agent_sandboxed: row.agent_sandboxed,
-        auto_approve: row.auto_approve,
-        reasoning_effort: effort(&row.reasoning_effort),
-        character: None,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
+    Ok(map_chat_row!(row))
 }
 
 /// Update a chat's title and/or agent mode. `None` leaves a field untouched.
@@ -324,7 +304,7 @@ pub async fn update_chat(
             reasoning_effort = COALESCE($6, reasoning_effort),
             updated_at = NOW()
         WHERE id = $1
-        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at
+        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at
         "#,
         id,
         title,
@@ -372,27 +352,14 @@ pub async fn archive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> 
         SET archived = true,
             updated_at = NOW()
         WHERE id = $1
-        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at
+        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at
         "#,
         id
     )
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| ChatRow {
-        id: r.id,
-        workspace_id: r.workspace_id,
-        title: r.title,
-        model_name: r.model_name,
-        archived: r.archived,
-        agent_enabled: r.agent_enabled,
-        agent_sandboxed: r.agent_sandboxed,
-        auto_approve: r.auto_approve,
-        reasoning_effort: effort(&r.reasoning_effort),
-        character: None,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    }))
+    Ok(row.map(|r| map_chat_row!(r)))
 }
 
 /// Unarchive a chat
@@ -403,27 +370,14 @@ pub async fn unarchive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>
         SET archived = false,
             updated_at = NOW()
         WHERE id = $1
-        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at
+        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at
         "#,
         id
     )
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| ChatRow {
-        id: r.id,
-        workspace_id: r.workspace_id,
-        title: r.title,
-        model_name: r.model_name,
-        archived: r.archived,
-        agent_enabled: r.agent_enabled,
-        agent_sandboxed: r.agent_sandboxed,
-        auto_approve: r.auto_approve,
-        reasoning_effort: effort(&r.reasoning_effort),
-        character: None,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    }))
+    Ok(row.map(|r| map_chat_row!(r)))
 }
 
 /// List messages for a chat

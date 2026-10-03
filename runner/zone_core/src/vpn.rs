@@ -1,10 +1,10 @@
 //! Whether this process is on the VPN tunnel, and whether public web may leave.
 //!
 //! Public fetches (SearXNG, page fetch, knowledge URLs, web sources, and
-//! `curl`/`wget` from `run_command`) stay offline only when the VPN is
-//! configured as required (`ZONE_VPN_REQUIRED`) and the tunnel is down
-//! (`ZONE_VPN` off). An install that never required the VPN uses the public
-//! internet directly.
+//! `curl`/`wget` from `run_command`) stay offline when the VPN is configured
+//! and the tunnel is down (`ZONE_VPN` off). Configured means a WireGuard
+//! private key or OpenVPN user is present, or `ZONE_VPN_REQUIRED` is on.
+//! `ZONE_VPN_REQUIRED=0` allows the public internet even with credentials.
 
 use std::env;
 use std::ffi::OsString;
@@ -13,8 +13,25 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// Why a public fetch refused to leave.
 pub const OFFLINE: &str = "Public web access is offline until the VPN is enabled.";
 
+/// Why a public fetch refused to leave this chat.
+pub const CHAT_OFFLINE: &str = "This chat is offline and does not use the public web.";
+
+/// Why public web must not leave, if it must not.
+pub fn refusal(chat_offline: bool) -> Option<&'static str> {
+    if chat_offline {
+        Some(CHAT_OFFLINE)
+    } else if !allows_public() {
+        Some(OFFLINE)
+    } else {
+        None
+    }
+}
+
 const VPN: &str = "ZONE_VPN";
 const REQUIRED: &str = "ZONE_VPN_REQUIRED";
+const WIREGUARD: &str = "VPN_WIREGUARD_PRIVATE_KEY";
+const OPENVPN: &str = "VPN_OPENVPN_USER";
+const NAMES: [&str; 4] = [VPN, REQUIRED, WIREGUARD, OPENVPN];
 
 fn truthy(name: &str) -> bool {
     match env::var(name) {
@@ -26,14 +43,38 @@ fn truthy(name: &str) -> bool {
     }
 }
 
+fn present(name: &str) -> bool {
+    match env::var(name) {
+        Ok(value) => !value.trim().is_empty(),
+        Err(_) => false,
+    }
+}
+
+fn required_flag() -> Option<bool> {
+    match env::var(REQUIRED) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        },
+        Err(_) => None,
+    }
+}
+
 /// `ZONE_VPN` is truthy (`1`, `true`, `yes`, `on`).
 pub fn enabled() -> bool {
     truthy(VPN)
 }
 
-/// `ZONE_VPN_REQUIRED` is truthy: public web must use the tunnel.
+/// A WireGuard private key or OpenVPN user is present.
+pub fn configured() -> bool {
+    present(WIREGUARD) || present(OPENVPN)
+}
+
+/// Public web must use the tunnel: `ZONE_VPN_REQUIRED` when set, otherwise
+/// credentials in the environment.
 pub fn required() -> bool {
-    truthy(REQUIRED)
+    required_flag().unwrap_or_else(configured)
 }
 
 /// Public web may leave this process.
@@ -50,47 +91,60 @@ fn lock() -> MutexGuard<'static, ()> {
 /// Holds VPN env vars in a known state for the guard's lifetime.
 pub struct Hold {
     _lock: MutexGuard<'static, ()>,
-    previous_vpn: Option<OsString>,
-    previous_required: Option<OsString>,
+    previous: [Option<OsString>; 4],
 }
 
 impl Hold {
     /// Tunnel on (`ZONE_VPN=1`).
     pub fn on() -> Self {
-        Self::set(true, true)
+        Self::apply(Some("1"), Some("1"), None, None)
     }
 
-    /// Tunnel off and not required: public web is allowed.
+    /// Tunnel off and not configured: public web is allowed.
     pub fn off() -> Self {
-        Self::set(false, false)
+        Self::apply(None, None, None, None)
     }
 
     /// VPN is required and the tunnel is down: public web stays offline.
     pub fn required_off() -> Self {
-        Self::set(false, true)
+        Self::apply(None, Some("1"), None, None)
     }
 
-    fn set(on: bool, required: bool) -> Self {
+    /// Credentials present, required unset, tunnel down: public web stays offline.
+    pub fn configured_off() -> Self {
+        Self::apply(None, None, Some("1"), None)
+    }
+
+    fn apply(
+        vpn: Option<&str>,
+        required: Option<&str>,
+        wireguard: Option<&str>,
+        openvpn: Option<&str>,
+    ) -> Self {
         let held = lock();
-        let previous_vpn = env::var_os(VPN);
-        let previous_required = env::var_os(REQUIRED);
+        let previous = [
+            env::var_os(VPN),
+            env::var_os(REQUIRED),
+            env::var_os(WIREGUARD),
+            env::var_os(OPENVPN),
+        ];
         // SAFETY: Hold owns ENVIRONMENT for the mutation and the restore.
         unsafe {
-            if on {
-                env::set_var(VPN, "1");
-            } else {
-                env::remove_var(VPN);
-            }
-            if required {
-                env::set_var(REQUIRED, "1");
-            } else {
-                env::remove_var(REQUIRED);
+            for (name, value) in [
+                (VPN, vpn),
+                (REQUIRED, required),
+                (WIREGUARD, wireguard),
+                (OPENVPN, openvpn),
+            ] {
+                match value {
+                    Some(value) => env::set_var(name, value),
+                    None => env::remove_var(name),
+                }
             }
         }
         Self {
             _lock: held,
-            previous_vpn,
-            previous_required,
+            previous,
         }
     }
 }
@@ -99,13 +153,11 @@ impl Drop for Hold {
     fn drop(&mut self) {
         // SAFETY: Hold still owns ENVIRONMENT while restoring.
         unsafe {
-            match &self.previous_vpn {
-                Some(value) => env::set_var(VPN, value),
-                None => env::remove_var(VPN),
-            }
-            match &self.previous_required {
-                Some(value) => env::set_var(REQUIRED, value),
-                None => env::remove_var(REQUIRED),
+            for (name, previous) in NAMES.iter().zip(self.previous.iter()) {
+                match previous {
+                    Some(value) => env::set_var(name, value),
+                    None => env::remove_var(name),
+                }
             }
         }
     }
@@ -120,6 +172,7 @@ mod tests {
         let _vpn = Hold::off();
         assert!(!enabled());
         assert!(!required());
+        assert!(!configured());
         unsafe { env::set_var(VPN, "0") };
         assert!(!enabled());
         unsafe { env::set_var(VPN, "") };
@@ -137,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn public_web_is_allowed_when_the_vpn_is_not_required() {
+    fn public_web_is_allowed_when_the_vpn_is_not_configured() {
         let _vpn = Hold::off();
         assert!(allows_public());
         unsafe { env::set_var(REQUIRED, "0") };
@@ -158,5 +211,41 @@ mod tests {
         assert!(required());
         assert!(!enabled());
         assert!(!allows_public());
+    }
+
+    #[test]
+    fn public_web_stays_offline_when_credentials_are_present_and_the_tunnel_is_down() {
+        let _vpn = Hold::configured_off();
+        assert!(configured());
+        assert!(!enabled());
+        assert!(required());
+        assert!(!allows_public());
+        unsafe { env::remove_var(WIREGUARD) };
+        unsafe { env::set_var(OPENVPN, "user") };
+        assert!(configured());
+        assert!(!allows_public());
+    }
+
+    #[test]
+    fn public_web_is_allowed_when_required_is_off_even_with_credentials() {
+        let _vpn = Hold::configured_off();
+        unsafe { env::set_var(REQUIRED, "0") };
+        assert!(configured());
+        assert!(!required());
+        assert!(allows_public());
+    }
+
+    #[test]
+    fn an_offline_chat_refuses_public_web_even_when_the_tunnel_is_on() {
+        let _vpn = Hold::on();
+        assert_eq!(refusal(true), Some(CHAT_OFFLINE));
+        assert_eq!(refusal(false), None);
+    }
+
+    #[test]
+    fn a_live_chat_still_follows_the_vpn_gate() {
+        let _vpn = Hold::required_off();
+        assert_eq!(refusal(false), Some(OFFLINE));
+        assert_eq!(refusal(true), Some(CHAT_OFFLINE));
     }
 }

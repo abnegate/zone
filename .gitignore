@@ -16,6 +16,8 @@ auth/users.htpasswd
 # Traefik
 traefik/acme.json
 traefik/logs/
+traefik/certs/*.crt
+traefik/certs/*.key
 
 # Logs
 *.log

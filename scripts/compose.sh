@@ -196,6 +196,7 @@ persist_profiles() {
         exit 1
     fi
     profiles=$(normalize_profiles "$list")
+    sh "$root/traefik/generate-local-cert.sh"
     if has_profile vpn "$profiles"; then
         sh "$root/scripts/configure-model-proxy.sh" "$ZONE_ENV_FILE" vpn
         if [ -z "$(read_env_value ZONE_VPN_REQUIRED "$ZONE_ENV_FILE")" ]; then

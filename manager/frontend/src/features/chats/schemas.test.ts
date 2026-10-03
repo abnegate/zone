@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   ActionReceiptSchema,
   ActionTargetSchema,
+  ChatSchema,
   HandoverSchema,
   MessageMetadataSchema,
   MessageSchema,
@@ -16,6 +17,26 @@ const reply = {
   content: 'Hi there!',
   created_at: '2026-09-13T09:45:00.000Z',
 };
+
+describe('ChatSchema', () => {
+  const listed = {
+    id: 'chat-1',
+    title: 'Chat 1',
+    model_name: 'llama2',
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    archived: false,
+    agent_enabled: false,
+  };
+
+  it('treats a chat from an older server as online', () => {
+    expect(ChatSchema.parse(listed).offline).toBe(false);
+  });
+
+  it('keeps offline when the server set it', () => {
+    expect(ChatSchema.parse({ ...listed, offline: true }).offline).toBe(true);
+  });
+});
 
 describe('declaring the memory-read flag costs no message', () => {
   it('keeps the flag on a reply the server set it on', () => {

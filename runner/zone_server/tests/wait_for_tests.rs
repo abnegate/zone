@@ -462,6 +462,7 @@ async fn chat_tools(state: &AppState, workspace: Uuid, user: Uuid, chat: Uuid) -
         workspace_id: workspace,
         chat_id: Some(chat),
         user_id: user,
+        offline: false,
     })
     .await
 }

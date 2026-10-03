@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE chats\n        SET title = COALESCE($2, title),\n            agent_enabled = COALESCE($3, agent_enabled),\n            agent_sandboxed = COALESCE($4, agent_sandboxed),\n            auto_approve = COALESCE($5, auto_approve),\n            reasoning_effort = COALESCE($6, reasoning_effort),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, created_at, updated_at\n        ",
+  "query": "\n        UPDATE chats\n        SET archived = false,\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, created_at, updated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,17 @@
       },
       {
         "ordinal": 9,
+        "name": "offline",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "chats",
+            "name": "offline"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "updated_at",
         "type_info": "Timestamp",
         "origin": {
@@ -127,12 +138,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text",
-        "Bool",
-        "Bool",
-        "Bool",
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -145,9 +151,10 @@
       false,
       false,
       false,
+      false,
       true,
       true
     ]
   },
-  "hash": "3d0ec4cc58f4e70406aec42a206f08fbbfd0a46b1f0388e098dd9092a3a706d2"
+  "hash": "6da5b2c334ef6da2e6b80e0a54d27502b1aebeb7e5216ebaeeb0683bdda706f1"
 }

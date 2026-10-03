@@ -2268,6 +2268,7 @@ mod tests {
                 workspace_id: Uuid::new_v4(),
                 chat_id: None,
                 user_id: Uuid::new_v4(),
+                offline: false,
             },
             operation,
         }
@@ -3630,6 +3631,7 @@ mod tests {
                 workspace_id: workspace.id,
                 chat_id: Some(Uuid::new_v4()),
                 user_id: user.id,
+                offline: false,
             },
         };
         let denied = tool.run(json!({"source_id":source.id})).await.unwrap_err();

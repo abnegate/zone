@@ -85,6 +85,8 @@ pub struct WorkspaceScope {
     pub workspace_id: Uuid,
     pub chat_id: Option<Uuid>,
     pub user_id: Uuid,
+    /// When true, this chat never uses public web search, page fetch, or curl/wget.
+    pub offline: bool,
 }
 
 /// Whether `actor` may act on the workspace as a task initiator: an active
@@ -187,6 +189,7 @@ fn context(profile: ToolProfile, cwd: std::path::PathBuf) -> ToolContext {
         unrestricted: profile == ToolProfile::Chat,
         denied: Vec::new(),
         session: Session::Detached,
+        offline: false,
     }
 }
 
@@ -305,6 +308,11 @@ impl ChatTools {
     pub async fn preview(scope: WorkspaceScope) -> Self {
         let denied = scope.state.config().agents.state.clone();
         Self::assemble(Some(scope), ToolProfile::Chat, None, false, denied).await
+    }
+
+    /// Whether this chat opted out of public web (search, page fetch, curl/wget).
+    pub fn offline(&self) -> bool {
+        self.context.offline
     }
 
     /// No tools at all, for a chat that answers from the server's own context.
@@ -450,6 +458,7 @@ impl ChatTools {
                     workspace_id,
                     user_id,
                     chat_id: None,
+                    offline: false,
                 })
             }
             _ => None,
@@ -713,8 +722,11 @@ impl ChatTools {
         };
         let mut context = context(profile, cwd);
         context.denied.push(denied);
-        if let Some(chat_id) = scope.as_ref().and_then(|scope| scope.chat_id) {
-            context.session = Session::Chat(chat_id);
+        if let Some(scope) = scope.as_ref() {
+            context.offline = scope.offline;
+            if let Some(chat_id) = scope.chat_id {
+                context.session = Session::Chat(chat_id);
+            }
         }
         let mcp_guidance = registry.mcp_guidance();
 
@@ -2305,6 +2317,7 @@ mod tests {
             workspace_id: Uuid::new_v4(),
             chat_id: chat,
             user_id: Uuid::new_v4(),
+            offline: false,
         })
     }
 
@@ -2685,7 +2698,26 @@ mod tests {
             user_id: Uuid::new_v4(),
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
+            offline: false,
         }
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_refuses_curl_even_when_the_tunnel_is_on() {
+        let _vpn = zone_core::vpn::Hold::on();
+        let mut scope = scope();
+        scope.offline = true;
+        let tools = ChatTools::preview(scope).await;
+        assert!(tools.offline());
+        let result = tools
+            .execute(
+                "run_command",
+                &json!({"command": "curl", "args": ["https://example.com"]}).to_string(),
+            )
+            .await;
+        assert!(!result.success, "{result:?}");
+        let error = result.error.as_deref().unwrap_or_default();
+        assert!(error.contains(zone_core::vpn::CHAT_OFFLINE), "{error}");
     }
 
     /// Every tool the user is asked to approve, across both crates: four host
@@ -3194,6 +3226,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
+            offline: false,
         };
         (scope, home)
     }
@@ -3461,6 +3494,7 @@ mod tests {
             workspace_id: workspace.id,
             chat_id: Some(chat),
             user_id: user.id,
+            offline: false,
         };
         let tools = ChatTools::build(scope.clone()).await;
         // The workspace reads a viewer can serve without a connected provider,

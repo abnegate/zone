@@ -33,6 +33,7 @@ async fn lease(harness: &Harness) -> (Lease, Console) {
             workspace_id: harness.workspace,
             chat_id: Some(harness.chat),
             user_id: Uuid::new_v4(),
+            offline: false,
         })
         .await,
     );

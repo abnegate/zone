@@ -166,6 +166,7 @@ mod tests {
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
+            offline: false,
         }
     }
 
@@ -328,6 +329,7 @@ mod tests {
             workspace_id,
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
+            offline: false,
         };
         assert_ne!(
             scope.state.config().comfyui.audio_checkpoint,
@@ -343,6 +345,7 @@ mod tests {
             unrestricted: false,
             denied: Vec::new(),
             session: Session::Detached,
+            offline: false,
         };
         let result = GenerateAudioTool(scope)
             .execute(json!({"prompt": "forest ambience"}), &context)

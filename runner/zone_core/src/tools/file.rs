@@ -1120,6 +1120,7 @@ mod tests {
             unrestricted: false,
             denied: Vec::new(),
             session: Session::Detached,
+            offline: false,
         }
     }
 

@@ -1097,6 +1097,50 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('creates an offline chat when Offline is checked', async () => {
+      mockCreateChat.mockResolvedValueOnce({
+        id: 'chat-offline',
+        title: 'New chat',
+        model_name: 'auto',
+        archived: false,
+        agent_enabled: false,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+        offline: true,
+      });
+      renderChatsPage();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+      });
+      expect(screen.getByLabelText('Offline')).toBeInTheDocument();
+      fireEvent.click(screen.getByLabelText('Offline'));
+      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
+      await waitFor(() => {
+        expect(mockClient.createChat).toHaveBeenCalledWith(
+          expect.objectContaining({ offline: true })
+        );
+      });
+    });
+
+    it('omits offline when creating a chat without checking Offline', async () => {
+      mockCreateChat.mockResolvedValueOnce({
+        id: 'chat-auto',
+        workspace_id: 'ws-1',
+        title: 'New chat',
+        model_name: 'auto',
+        archived: false,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+      });
+      renderChatsPage();
+      fireEvent.click((await screen.findAllByRole('button', { name: 'New chat' }))[0]);
+      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
+      await waitFor(() => {
+        expect(mockClient.createChat.mock.calls[0][0].offline).toBeUndefined();
+      });
+    });
+
     it('offers a project when creating a chat and sends the chosen id', async () => {
       mockCreateChat.mockResolvedValueOnce({
         id: 'chat-alpha',
@@ -1124,6 +1168,16 @@ describe('ChatsPage', () => {
           expect.objectContaining({ project_id: 'proj-alpha' })
         );
       });
+    });
+
+    it('names Offline on a chat created that way', async () => {
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        offline: true,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      expect(await screen.findByTestId('chat-offline')).toHaveTextContent('Offline');
     });
 
     it('names the project on an assistant chat that belongs to one', async () => {

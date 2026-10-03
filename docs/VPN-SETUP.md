@@ -15,7 +15,7 @@ make up
 ./scripts/compose.sh --replace-profiles= up -d
 ```
 
-**What works**: Everything, including public web, unless `ZONE_VPN_REQUIRED=1`
+**What works**: Everything, including public web, when no VPN credentials are set
 - ✅ Chat with local models
 - ✅ Semantic routing (auto/fast/reason)
 - ✅ All core functionality
@@ -23,8 +23,10 @@ make up
 - ✅ Chat web search when `SEARCH_SEARXNG_QUERY_URL` reaches a SearXNG
 - Bundled SearXNG starts only with the `vpn` profile
 
-Set `ZONE_VPN_REQUIRED=1` to keep public web offline while the tunnel is down.
-`make up-vpn` writes that the first time the value is empty.
+A WireGuard private key or OpenVPN user in `.env` keeps public web offline
+while the tunnel is down. Set `ZONE_VPN_REQUIRED=0` to allow public web with
+credentials present and the profile off. `make up-vpn` writes
+`ZONE_VPN_REQUIRED=1` the first time that value is empty.
 
 ## Running With VPN
 
@@ -75,7 +77,7 @@ The overlay requires Docker Compose v2.24+ (`!reset` / `!override`).
 
 When disabling the VPN, run `make down && make up`. The direct launch clears
 `ZONE_VPN` and both proxy URLs and keeps `ZONE_VPN_REQUIRED`. Public web then
-stays offline until the tunnel is up again, unless you set
+stays offline while credentials are still in `.env`, unless you set
 `ZONE_VPN_REQUIRED=0`. When a proxy URL is configured, an unavailable
 proxy causes proxy-aware HTTP requests to fail; they do not retry directly.
 Internal service and loopback destinations bypass the proxy.

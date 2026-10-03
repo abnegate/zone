@@ -183,6 +183,7 @@ async fn chat_catalog(chat_id: Uuid) -> ChatTools {
         state,
         workspace_id: Uuid::new_v4(),
         chat_id: Some(chat_id),
+        offline: false,
     })
     .await
 }
@@ -2375,6 +2376,7 @@ async fn memory_catalog(fixture: &Fixture) -> ChatTools {
         state,
         workspace_id: fixture.workspace,
         chat_id: Some(fixture.chat),
+        offline: false,
     })
     .await
 }

@@ -94,6 +94,7 @@ export default function ChatsPage() {
   const [newChatAutoApprove, setNewChatAutoApprove] = useState(false);
   const [newChatReasoning, setNewChatReasoning] = useState<ReasoningEffort>('auto');
   const [newChatProject, setNewChatProject] = useState(NO_PROJECT);
+  const [newChatOffline, setNewChatOffline] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -315,6 +316,7 @@ export default function ChatsPage() {
         reasoning_effort:
           showNewChatReasoning && newChatReasoning !== 'auto' ? newChatReasoning : undefined,
         ...(newChatProject !== NO_PROJECT ? { project_id: newChatProject } : {}),
+        ...(newChatOffline ? { offline: true } : {}),
       });
       setShowNewChatModal(false);
       setNewChatModel(AUTO_MODEL);
@@ -322,6 +324,7 @@ export default function ChatsPage() {
       setNewChatAutoApprove(false);
       setNewChatReasoning('auto');
       setNewChatProject(NO_PROJECT);
+      setNewChatOffline(false);
       selectChat(chat.id);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to create chat');
@@ -968,6 +971,11 @@ export default function ChatsPage() {
                       </Link>
                     </span>
                   )}
+                {displayedChat.offline && (
+                  <span className="chat-purpose" data-testid="chat-offline">
+                    Offline
+                  </span>
+                )}
               </div>
               <div className="chat-header-actions">
                 {showReasoning && (
@@ -1455,6 +1463,12 @@ export default function ChatsPage() {
               ]}
             />
           )}
+          <Checkbox
+            label="Offline"
+            helpText="Never use web search, page fetch, or curl/wget. Connected sources still work."
+            checked={newChatOffline}
+            onCheckedChange={setNewChatOffline}
+          />
           {showNewChatAgent && (
             <Checkbox
               label="Agent mode"

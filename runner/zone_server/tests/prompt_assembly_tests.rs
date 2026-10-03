@@ -66,6 +66,7 @@ async fn chat_tools() -> ChatTools {
         workspace_id: Uuid::new_v4(),
         chat_id: Some(Uuid::new_v4()),
         user_id: Uuid::new_v4(),
+        offline: false,
     })
     .await
 }
@@ -507,6 +508,7 @@ fn chat_row() -> ChatRow {
         character: None,
         created_at: None,
         updated_at: None,
+        offline: false,
     }
 }
 

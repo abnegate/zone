@@ -333,6 +333,7 @@ pub async fn build(
         workspace_id: workspace,
         chat_id: Some(chat.id),
         user_id: user,
+        offline: chat.offline,
     };
     let catalog = async {
         if matches!(mode, Mode::Generation(_)) && chat.agent_enabled {
@@ -631,6 +632,7 @@ pub(crate) fn chat_row(
         character,
         created_at: None,
         updated_at: None,
+        offline: false,
     }
 }
 

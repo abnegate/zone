@@ -9,6 +9,27 @@ fn env_truthy(name: &str, default: bool) -> bool {
     }
 }
 
+fn env_present(name: &str) -> bool {
+    env::var(name)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn vpn_configured() -> bool {
+    env_present("VPN_WIREGUARD_PRIVATE_KEY") || env_present("VPN_OPENVPN_USER")
+}
+
+fn vpn_required() -> bool {
+    match env::var("ZONE_VPN_REQUIRED") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => vpn_configured(),
+        },
+        Err(_) => vpn_configured(),
+    }
+}
+
 /// Default SearXNG query URL. SearXNG shares Gluetun's network namespace, so
 /// the hostname is `gluetun`, not `searxng`.
 pub const DEFAULT_SEARXNG_QUERY_URL: &str = "http://gluetun:8080/search?q=<query>&format=json";
@@ -39,10 +60,10 @@ impl Default for WebSearchConfig {
 }
 
 impl WebSearchConfig {
-    /// Load from `SEARCH_*`, `ZONE_VPN`, and `ZONE_VPN_REQUIRED`. Missing
+    /// Load from `SEARCH_*`, `ZONE_VPN`, and VPN credential presence. Missing
     /// values use the Compose defaults (`SEARCH_ENABLE_WEB_SEARCH=true`, the
-    /// Gluetun SearXNG URL). Lookups stay off when the VPN is required and
-    /// the tunnel is down.
+    /// Gluetun SearXNG URL). Lookups stay off when the VPN is configured and
+    /// the tunnel is down, unless `ZONE_VPN_REQUIRED=0`.
     pub fn from_env() -> Self {
         let result_count = env::var("SEARCH_RESULT_COUNT")
             .ok()
@@ -55,9 +76,8 @@ impl WebSearchConfig {
             .unwrap_or(15)
             .clamp(1, 60);
         let vpn_on = env_truthy("ZONE_VPN", false);
-        let vpn_required = env_truthy("ZONE_VPN_REQUIRED", false);
         Self {
-            enabled: env_truthy("SEARCH_ENABLE_WEB_SEARCH", true) && (vpn_on || !vpn_required),
+            enabled: env_truthy("SEARCH_ENABLE_WEB_SEARCH", true) && (vpn_on || !vpn_required()),
             query_url: env::var("SEARCH_SEARXNG_QUERY_URL")
                 .unwrap_or_else(|_| DEFAULT_SEARXNG_QUERY_URL.to_string()),
             result_count,
@@ -138,6 +158,8 @@ mod tests {
         "SEARCH_TIMEOUT_SECS",
         "ZONE_VPN",
         "ZONE_VPN_REQUIRED",
+        "VPN_WIREGUARD_PRIVATE_KEY",
+        "VPN_OPENVPN_USER",
     ];
 
     fn recency() -> &'static str {
@@ -168,6 +190,28 @@ mod tests {
         assert!(config.enabled);
         assert!(config.requested_for(recency(), None));
         assert_eq!(SearchContext::new(&config), SearchContext::NotRequested);
+    }
+
+    #[test]
+    fn from_env_stays_off_when_vpn_credentials_are_present() {
+        let _lock = lock();
+        let _environment = Isolated::new(NAMES);
+        Isolated::set("VPN_WIREGUARD_PRIVATE_KEY", "1");
+        let config = WebSearchConfig::from_env();
+        assert!(!config.enabled);
+        Isolated::set("VPN_WIREGUARD_PRIVATE_KEY", "");
+        Isolated::set("VPN_OPENVPN_USER", "user");
+        assert!(!WebSearchConfig::from_env().enabled);
+    }
+
+    #[test]
+    fn from_env_allows_search_when_required_is_off_even_with_credentials() {
+        let _lock = lock();
+        let _environment = Isolated::new(NAMES);
+        Isolated::set("VPN_WIREGUARD_PRIVATE_KEY", "1");
+        Isolated::set("ZONE_VPN_REQUIRED", "0");
+        let config = WebSearchConfig::from_env();
+        assert!(config.enabled);
     }
 
     #[test]

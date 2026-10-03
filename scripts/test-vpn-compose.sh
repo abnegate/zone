@@ -12,10 +12,12 @@ compose() {
     docker compose --env-file "$envfile" "$@"
 }
 
-unset ZONE_CONSOLE_ORIGINS ZONE_VPN ZONE_VPN_REQUIRED
+unset ZONE_CONSOLE_ORIGINS ZONE_VPN ZONE_VPN_REQUIRED VPN_WIREGUARD_PRIVATE_KEY VPN_OPENVPN_USER
 direct=$(mktemp)
 vpn=$(mktemp)
-trap 'rm -f "$direct" "$vpn"' EXIT HUP INT TERM
+keyed=$(mktemp)
+keyfile=$(mktemp)
+trap 'rm -f "$direct" "$vpn" "$keyed" "$keyfile"' EXIT HUP INT TERM
 
 compose -f "$root/docker-compose.yml" config --format json > "$direct"
 compose -f "$root/docker-compose.yml" -f "$root/docker-compose.vpn.yml" \
@@ -23,12 +25,23 @@ compose -f "$root/docker-compose.yml" -f "$root/docker-compose.vpn.yml" \
     --profile bundled-comfyui --profile comfyui-model-setup \
     config --format json > "$vpn"
 
-python3 - "$direct" "$vpn" <<'PY'
+awk '
+    $0 ~ "^[[:space:]]*(export[[:space:]]+)?VPN_WIREGUARD_PRIVATE_KEY[[:space:]]*=" {
+        print "VPN_WIREGUARD_PRIVATE_KEY=supersecret-test-key"
+        next
+    }
+    { print }
+' "$envfile" > "$keyfile"
+docker compose --env-file "$keyfile" -f "$root/docker-compose.yml" \
+    config --format json > "$keyed"
+
+python3 - "$direct" "$vpn" "$keyed" <<'PY'
 import json
 import sys
 
 direct = json.load(open(sys.argv[1], encoding="utf-8"))
 vpn = json.load(open(sys.argv[2], encoding="utf-8"))
+keyed = json.load(open(sys.argv[3], encoding="utf-8"))
 
 direct_manager = direct["services"]["manager"]
 if direct_manager.get("network_mode"):
@@ -176,6 +189,10 @@ for name, config in (("default", direct), ("VPN", vpn)):
 
 if service_env(direct["services"]["manager"]).get("ZONE_VPN"):
     raise SystemExit("default compose must not mark manager as on the VPN")
+if service_env(direct["services"]["manager"]).get("VPN_WIREGUARD_PRIVATE_KEY"):
+    raise SystemExit("default compose must not mark manager as having VPN credentials")
+if service_env(keyed["services"]["manager"]).get("VPN_WIREGUARD_PRIVATE_KEY") != "1":
+    raise SystemExit("manager must see VPN credential presence as 1, not the key")
 
 grafana_env = service_env(vpn["services"]["grafana"])
 if grafana_env.get("PROMETHEUS_URL") != f"http://{pinned['prometheus']}:9090":

@@ -307,6 +307,7 @@ mod tests {
                     workspace_id: Uuid::nil(),
                     chat_id: Some(Uuid::nil()),
                     user_id: Uuid::nil(),
+                    offline: false,
                 })
                 .await;
                 catalog

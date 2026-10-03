@@ -149,8 +149,8 @@ It holds each organization's Claude Code and Codex state, laid out as
 |-----------------------------------|---------------|
 | `<org>/<agent>/logins/<login id>/` | One signed-in account's home: for codex its `auth.json`, a working ChatGPT login stored in plain form, and for both CLIs that account's session files, claude's under `projects/` and codex's under `sessions/` |
 | `<org>/<agent>/work/` | The working directory every account of the agent shares |
-| `<org>/codex/auth.json` | A codex login from before migration 002 that Zone has not yet moved into its account's home |
-| `<org>/claude/projects/`, `<org>/codex/sessions/` | Session transcripts from before migration 002, which nothing reads again |
+| `<org>/codex/auth.json` | A codex login from before migration 003 that Zone has not yet moved into its account's home |
+| `<org>/claude/projects/`, `<org>/codex/sessions/` | Session transcripts from before migration 003, which nothing reads again |
 
 Each home is named by its sign-in's id in the database, so restore the
 database and the volume from the same archive: a home whose sign-in the
@@ -214,18 +214,19 @@ start against the migrated database: it stops with
 upgrade. Going back to an older image means restoring that backup, and losing
 whatever changed after it was taken.
 
-## Upgrading to migration 002
+## Upgrading to migration 003
 
 The first start of a server that signs an organization in to several accounts
-per agent applies migrations 002 and 003 on top of the squashed initial
-schema, `001_initial_schema.sql`. They upgrade a database that schema created.
+per agent applies migrations 003 and 004 on top of the squashed initial
+schema, `001_initial_schema.sql`, and of 002, which lets a chat stay off the
+public web. They upgrade a database those two created.
 A database migrated before the squash, with any of the old versions 002 to 055
 recorded, cannot be upgraded in place: the server stops with
 `Failed to run migrations: VersionMissing(n)` for the first old version the
 new history lacks, and only a fresh database that starts from the squashed 001
 gets past it.
 
-- 002 drops the key that allowed one sign-in per organization and agent, and
+- 003 drops the key that allowed one sign-in per organization and agent, and
   adds a unique index on organization, agent and account for sign-ins that
   name an account, and an index on organization and agent. It adds the
   columns each sign-in records its account and usage in: `account`,
@@ -235,12 +236,12 @@ gets past it.
   `agent_session_agent`, `agent_session_entry` and `agent_session_prompt`.
 - The foreign key from `chats.agent_login_id` to `agent_logins`, which clears
   a chat's sign-in when that account is signed out, is added `NOT VALID`, so
-  002 does not read `chats`; 003 then validates it while chats stay writable.
+  003 does not read `chats`; 004 then validates it while chats stay writable.
   `chats.agent_login_id` has no index of its own, so signing an account out
   scans `chats` once to clear it.
 
 An image built before them cannot start against the migrated database: it
-stops with `Failed to run migrations: VersionMissing(2)`. Run `make backup`
+stops with `Failed to run migrations: VersionMissing(3)`. Run `make backup`
 before the upgrade. Going back to an older image means restoring that backup,
 and losing whatever changed after it was taken.
 
