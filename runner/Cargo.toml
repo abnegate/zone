@@ -42,7 +42,7 @@ abnegate-index = "0.1"
 abnegate-secret = "0.1.3"
 
 # Server dependencies
-axum = { version = "=0.8.9", features = ["ws", "macros"] }
+axum = { version = "=0.8.9", features = ["ws", "macros", "multipart"] }
 sqlx = { version = "=0.9.0", features = ["postgres", "runtime-tokio", "uuid", "chrono", "ipnetwork", "bigdecimal", "macros"] }
 redis = { version = "=1.6.0", features = ["tokio-comp"] }
 jsonwebtoken = { version = "=11.0.0", features = ["rust_crypto"] }

@@ -31,6 +31,11 @@ import { client } from './client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
+function bearerHeaders(): HeadersInit {
+  const token = client.getAccessToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export type TrainFrame = z.infer<typeof TrainFrameSchema>;
 export type TrainClip = z.infer<typeof TrainClipSchema>;
 
@@ -186,12 +191,23 @@ export const modelsApi = {
 
   async captions(body: {
     trigger?: string;
-    images: Array<{ filename: string; caption: string; bytes_base64: string; group?: number }>;
+    images: Array<{ filename: string; caption: string; blob: Blob; group?: number }>;
   }): Promise<{ captions: string[] }> {
+    const form = new FormData();
+    if (body.trigger) form.append('trigger', body.trigger);
+    form.append(
+      'images',
+      JSON.stringify(
+        body.images.map(({ filename, caption, group }) => ({ filename, caption, group }))
+      )
+    );
+    body.images.forEach((image, index) => {
+      form.append(`image_${index}`, image.blob, image.filename);
+    });
     const response = await fetch(`${API_BASE}/api/models/train/captions`, {
       method: 'POST',
-      headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: bearerHeaders(),
+      body: form,
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({ error: 'Captioning failed' }));
@@ -243,18 +259,32 @@ export const modelsApi = {
       images: Array<{
         filename: string;
         caption: string;
-        bytes_base64: string;
-        before_base64?: string;
+        blob: Blob;
+        before?: Blob;
         group?: number;
       }>;
     },
     signal?: AbortSignal,
     onProgress?: (job: TrainJob) => void
   ): Promise<TrainResult> {
+    const form = new FormData();
+    form.append('name', body.name);
+    form.append('base', body.base);
+    if (body.trigger) form.append('trigger', body.trigger);
+    form.append(
+      'images',
+      JSON.stringify(
+        body.images.map(({ filename, caption, group }) => ({ filename, caption, group }))
+      )
+    );
+    body.images.forEach((image, index) => {
+      form.append(`image_${index}`, image.blob, image.filename);
+      if (image.before) form.append(`before_${index}`, image.before, `before-${image.filename}`);
+    });
     const response = await fetch(`${API_BASE}/api/models/train`, {
       method: 'POST',
-      headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: bearerHeaders(),
+      body: form,
       signal,
     });
     if (!response.ok) {
@@ -279,14 +309,19 @@ export const modelsApi = {
    */
   async frames(body: {
     filename: string;
-    bytes_base64: string;
+    blob: Blob;
     fps?: number;
     mirror?: boolean;
   }): Promise<TrainClip> {
+    const form = new FormData();
+    form.append('filename', body.filename);
+    form.append('video', body.blob, body.filename);
+    if (body.fps != null) form.append('fps', String(body.fps));
+    if (body.mirror != null) form.append('mirror', String(body.mirror));
     const response = await fetch(`${API_BASE}/api/models/train/frames`, {
       method: 'POST',
-      headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: bearerHeaders(),
+      body: form,
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({ error: 'Frame extraction failed' }));

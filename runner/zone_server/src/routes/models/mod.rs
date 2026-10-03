@@ -4,6 +4,7 @@
 
 mod providers;
 mod types;
+mod upload;
 
 pub use providers::{
     DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider, MAX_PAGE_SIZE, ModelProvider,
@@ -16,7 +17,7 @@ pub use types::{
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -34,24 +35,26 @@ use crate::services::model::Model;
 use crate::services::route::Route;
 use crate::state::AppState;
 use types::ModelCapability;
-use zone_comfy::caption::{CaptionRequest, Captioner, Draft};
-use zone_comfy::lora::{self, TrainError, TrainRequest};
+use zone_comfy::caption::{Captioner, Draft};
+use zone_comfy::lora::{self, TrainError};
 use zone_comfy::recipe::RecipeCatalog;
-use zone_comfy::video::{self, FrameRequest};
+use zone_comfy::video;
 
 // Constants
 
 const MAX_MODEL_NAME_LENGTH: usize = 256;
 
-/// Holds a training permit for the whole request, refusing rather than queueing.
+/// Holds a training-dataset permit for the whole request, refusing rather than
+/// queueing. Clip extracts use [`queue_frame_extract`] so a dump of videos can
+/// wait its turn instead of 429ing.
 ///
 /// This is middleware rather than a line in each handler because a handler only
-/// runs once `Json` has already read and parsed the body: taking the permit
-/// there would bound the work but not the buffering, which is the larger half
-/// of what a training upload holds.
+/// runs once the body has been read: taking the permit there would bound the
+/// work but not the buffering, which is the larger half of what a training
+/// upload holds.
 pub async fn one_training_upload_at_a_time(
     State(state): State<AppState>,
-    request: axum::extract::Request,
+    request: Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let Ok(_permit) = state.train_semaphore().clone().try_acquire_owned() else {
@@ -60,6 +63,22 @@ pub async fn one_training_upload_at_a_time(
             Json(ErrorResponse::new(
                 "another training upload is in progress; retry when it finishes",
             )),
+        )
+            .into_response();
+    };
+    next.run(request).await
+}
+
+/// Queues clip extracts so a dump of hundreds of videos does not 429.
+pub async fn queue_frame_extract(
+    State(state): State<AppState>,
+    request: Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let Ok(_permit) = state.frame_semaphore().clone().acquire_owned().await else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("frame extractor is shutting down")),
         )
             .into_response();
     };
@@ -593,8 +612,12 @@ pub async fn train_bases(State(state): State<AppState>, _auth: AuthUser) -> impl
 pub async fn captions(
     State(state): State<AppState>,
     _auth: AuthUser,
-    Json(request): Json<CaptionRequest>,
+    request: Request,
 ) -> impl IntoResponse {
+    let request = match upload::caption_request(request).await {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     let config = state.config();
     let captioner = Captioner::new(
         &config.comfyui,
@@ -621,12 +644,11 @@ pub async fn captions(
         .iter()
         .enumerate()
         .map(|(index, image)| {
-            Draft::new(
-                &image.filename,
-                &image.bytes_base64,
-                &image.caption,
-                image.group.unwrap_or(clips + index),
-            )
+            let group = image.group.unwrap_or(clips + index);
+            match &image.bytes {
+                Some(bytes) => Draft::from_bytes(&image.filename, bytes, &image.caption, group),
+                None => Draft::new(&image.filename, &image.bytes_base64, &image.caption, group),
+            }
         })
         .collect();
     let trigger = request.trigger.unwrap_or_default();
@@ -641,9 +663,12 @@ pub async fn captions(
 pub async fn frames(
     State(state): State<AppState>,
     _auth: AuthUser,
-    Json(request): Json<FrameRequest>,
+    request: Request,
 ) -> impl IntoResponse {
-    use base64::Engine;
+    let request = match upload::frame_request(request).await {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     let config = state.config();
     let resolution = match zone_comfy::train::packaged_config() {
         Ok(settings) => settings.resolution(),
@@ -655,13 +680,11 @@ pub async fn frames(
                 .into_response();
         }
     };
-    let Ok(video) = base64::engine::general_purpose::STANDARD.decode(request.bytes_base64.trim())
-    else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("video is not valid base64")),
-        )
-            .into_response();
+    let video = match request.video_bytes() {
+        Ok(video) => video,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response();
+        }
     };
     let options = video::Options {
         fps: request.fps.unwrap_or(config.comfyui.frame_fps),
@@ -702,8 +725,12 @@ pub async fn train_job(State(state): State<AppState>, _auth: AuthUser) -> impl I
 pub async fn train(
     State(state): State<AppState>,
     _auth: AuthUser,
-    Json(request): Json<TrainRequest>,
+    request: Request,
 ) -> impl IntoResponse {
+    let request = match upload::train_request(request).await {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     match lora::validate_request(&state.config().comfyui, &request) {
         Err(TrainError::Disabled) => {
             return (

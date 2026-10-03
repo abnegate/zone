@@ -124,37 +124,9 @@ function deferred<T>(): {
   return { promise, resolve };
 }
 
-function deferFileReads(): {
-  reads: Array<{ file: File; complete: (encoded: string) => void }>;
-  restore: () => void;
-} {
-  const OriginalFileReader = globalThis.FileReader;
-  const reads: Array<{ file: File; complete: (encoded: string) => void }> = [];
-
-  class DeferredFileReader {
-    result: string | ArrayBuffer | null = null;
-    error: DOMException | null = null;
-    onload: FileReader['onload'] = null;
-    onerror: FileReader['onerror'] = null;
-
-    readAsDataURL(file: Blob): void {
-      reads.push({
-        file: file as File,
-        complete: (encoded) => {
-          this.result = `data:image/png;base64,${encoded}`;
-          this.onload?.call(this as unknown as FileReader, {} as ProgressEvent<FileReader>);
-        },
-      });
-    }
-  }
-
-  globalThis.FileReader = DeferredFileReader as unknown as typeof FileReader;
-  return {
-    reads,
-    restore: () => {
-      globalThis.FileReader = OriginalFileReader;
-    },
-  };
+async function blobText(blob: Blob | undefined): Promise<string> {
+  expect(blob).toBeDefined();
+  return blob?.text() ?? '';
 }
 
 describe('TrainPanel', () => {
@@ -172,7 +144,7 @@ describe('TrainPanel', () => {
       target: { files: [new File(['clip'], 'subject.mp4', { type: 'video/mp4' })] },
     });
     expect(field.contains(await screen.findByText('Reading subject.mp4…'))).toBe(true);
-    expect(screen.getByLabelText('Video')).toBeDisabled();
+    expect(screen.getByLabelText('Video')).toBeEnabled();
 
     pending.resolve({
       sampled: 32,
@@ -210,7 +182,7 @@ describe('TrainPanel', () => {
     });
     expect(screen.queryByText(/frames read at/)).toBeNull();
     expect(screen.getByLabelText('Video').closest('.drop-zone')).toHaveTextContent(
-      'Drop a clip here, or browse'
+      'Drop clips or a folder'
     );
   });
 
@@ -227,9 +199,7 @@ describe('TrainPanel', () => {
     const head = first.querySelector('.train-pair-head');
     expect(head).toHaveTextContent('Target 1');
     expect(head).toHaveTextContent('frame-0000.png');
-    expect(first.querySelector('.train-pair-thumb img')?.getAttribute('src')).toMatch(
-      /^data:image\/png;base64,/
-    );
+    expect(first.querySelector('.train-pair-thumb img')?.getAttribute('src')).toMatch(/^blob:/);
     expect(screen.getByLabelText('Caption for frame-0000.png')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Move target 1: frame-0000.png up' })).toBeDisabled();
     expect(
@@ -246,8 +216,8 @@ describe('TrainPanel', () => {
 
     const targets = screen.getByLabelText('Target images');
     const clips = screen.getByLabelText('Video');
-    expect(targets.closest('.drop-zone')).toHaveTextContent('Drop images here, or browse');
-    expect(clips.closest('.drop-zone')).toHaveTextContent('Drop a clip here, or browse');
+    expect(targets.closest('.drop-zone')).toHaveTextContent('Drop images, clips, or a folder');
+    expect(clips.closest('.drop-zone')).toHaveTextContent('Drop clips or a folder');
     expect(targets.closest('.train-drops')).toBe(clips.closest('.train-drops'));
     expect(targets.closest('.train-drops')).not.toHaveClass('train-drops--single');
     expect(screen.getByText('Target images')).toHaveAttribute(
@@ -255,10 +225,11 @@ describe('TrainPanel', () => {
       targets.getAttribute('aria-labelledby')
     );
     expect(screen.getByText('Video')).toHaveAttribute('id', clips.getAttribute('aria-labelledby'));
-    expect(screen.getByText('Choose the images this LoRA should learn from.')).toHaveAttribute(
-      'id',
-      targets.getAttribute('aria-describedby')
-    );
+    expect(
+      screen.getByText(
+        'Choose the images this LoRA should learn from. Clips and folders are fine too.'
+      )
+    ).toHaveAttribute('id', targets.getAttribute('aria-describedby'));
     expect(document.querySelector('.ui-input[type="file"]')).toBeNull();
 
     const identity = screen.getByLabelText('Name').closest('.train-identity');
@@ -364,12 +335,12 @@ describe('TrainPanel', () => {
       filename: 'after-one.png',
       caption: 'add a red coat',
     });
-    expect(request?.images[0]?.before_base64).toBeTruthy();
+    expect(request?.images[0]?.before).toBeTruthy();
     expect(request?.images[1]).toMatchObject({
       filename: 'after-two.png',
       caption: 'move the subject outside',
     });
-    expect(request?.images[1]?.before_base64).toBeTruthy();
+    expect(request?.images[1]?.before).toBeTruthy();
   });
 
   it('clears edit-only state when switching away and revalidates when switching back', async () => {
@@ -601,58 +572,40 @@ describe('TrainPanel', () => {
     expect(screen.getByLabelText('Caption for d.png')).toHaveValue('');
   });
 
-  it('reserves rapid target selections in order while their file reads resolve out of order', async () => {
-    const pending = deferFileReads();
-    try {
-      render(<TrainPanel onTrained={mock()} />);
-      await waitFor(() =>
-        expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit')
-      );
-      fillIdentity();
-      const first = file('first.png', 'first');
-      const second = file('second.png', 'second');
+  it('keeps rapid target selections in the order they were added', async () => {
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    fillIdentity();
+    const first = file('first.png', 'first');
+    const second = file('second.png', 'second');
 
-      fireEvent.change(screen.getByLabelText('Target images'), {
-        target: { files: [first] },
-      });
-      fireEvent.change(screen.getByLabelText('Target images'), {
-        target: { files: [second] },
-      });
+    fireEvent.change(screen.getByLabelText('Target images'), {
+      target: { files: [first] },
+    });
+    fireEvent.change(screen.getByLabelText('Target images'), {
+      target: { files: [second] },
+    });
 
-      await waitFor(() => {
-        expect(screen.getAllByRole('group', { name: /target pair/i })).toHaveLength(2);
-      });
-      expect(screen.getByLabelText('Instruction for target 1: first.png')).toBeInTheDocument();
-      expect(screen.getByLabelText('Instruction for target 2: second.png')).toBeInTheDocument();
-      expect(document.activeElement).toBe(
-        screen.getByLabelText('Reference image for target 1: first.png')
-      );
-      expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
+    await waitFor(() => {
+      expect(screen.getAllByRole('group', { name: /target pair/i })).toHaveLength(2);
+    });
+    expect(screen.getByLabelText('Instruction for target 1: first.png')).toBeInTheDocument();
+    expect(screen.getByLabelText('Instruction for target 2: second.png')).toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByLabelText('Reference image for target 1: first.png')
+    );
 
-      const firstRead = pending.reads.find((read) => read.file === first);
-      const secondRead = pending.reads.find((read) => read.file === second);
-      expect(firstRead).toBeDefined();
-      expect(secondRead).toBeDefined();
-      secondRead?.complete(Buffer.from('second').toString('base64'));
-      firstRead?.complete(Buffer.from('first').toString('base64'));
-      pending.restore();
-
-      await selectBase('FLUX.1 Schnell');
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Train' })).toBeEnabled());
-      fireEvent.click(screen.getByRole('button', { name: 'Train' }));
-      await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
-      expect(
-        mockTrain.mock.calls[0]?.[0].images.map((image) => [image.filename, image.bytes_base64])
-      ).toEqual([
-        ['first.png', Buffer.from('first').toString('base64')],
-        ['second.png', Buffer.from('second').toString('base64')],
-      ]);
-    } finally {
-      pending.restore();
-    }
+    await selectBase('FLUX.1 Schnell');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Train' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    const uploaded = mockTrain.mock.calls[0]?.[0].images ?? [];
+    expect(uploaded.map((image) => image.filename)).toEqual(['first.png', 'second.png']);
+    expect(await blobText(uploaded[0]?.blob)).toBe('first');
+    expect(await blobText(uploaded[1]?.blob)).toBe('second');
   });
 
-  it('keeps the latest reference when rapid file reads resolve out of order', async () => {
+  it('keeps the latest reference when another is chosen immediately', async () => {
     render(<TrainPanel onTrained={mock()} />);
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
     fillIdentity();
@@ -661,32 +614,107 @@ describe('TrainPanel', () => {
       target: { value: 'turn the shirt blue' },
     });
 
-    const pending = deferFileReads();
-    try {
-      const first = file('first-before.png', 'first before');
-      const second = file('second-before.png', 'second before');
-      const reference = screen.getByLabelText('Reference image for target 1: after.png');
-      fireEvent.change(reference, { target: { files: [first] } });
-      fireEvent.change(reference, { target: { files: [second] } });
-      expect(screen.getByText('Reference: second-before.png')).toBeInTheDocument();
+    const first = file('first-before.png', 'first before');
+    const second = file('second-before.png', 'second before');
+    const reference = screen.getByLabelText('Reference image for target 1: after.png');
+    fireEvent.change(reference, { target: { files: [first] } });
+    fireEvent.change(reference, { target: { files: [second] } });
+    expect(screen.getByText('Reference: second-before.png')).toBeInTheDocument();
 
-      const firstRead = pending.reads.find((read) => read.file === first);
-      const secondRead = pending.reads.find((read) => read.file === second);
-      expect(firstRead).toBeDefined();
-      expect(secondRead).toBeDefined();
-      secondRead?.complete(Buffer.from('second before').toString('base64'));
-      firstRead?.complete(Buffer.from('first before').toString('base64'));
-      pending.restore();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Train' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    expect(await blobText(mockTrain.mock.calls[0]?.[0].images[0]?.before)).toBe('second before');
+  });
 
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Train' })).toBeEnabled());
-      fireEvent.click(screen.getByRole('button', { name: 'Train' }));
-      await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
-      expect(mockTrain.mock.calls[0]?.[0].images[0]?.before_base64).toBe(
-        Buffer.from('second before').toString('base64')
-      );
-    } finally {
-      pending.restore();
-    }
+  it('accepts a dump of empty-type images without reading them as data URLs', async () => {
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectBase('FLUX.1 Schnell');
+    fillIdentity();
+    const dumped = Array.from(
+      { length: 80 },
+      (_, index) => new File([`shot-${index}`], `shot-${index}.png`)
+    );
+    fireEvent.change(screen.getByLabelText('Target images'), {
+      target: { files: dumped },
+    });
+    expect(
+      await screen.findByRole('group', { name: 'Target pair 1: shot-0.png' })
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /target pair 80/i })).toBeNull();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Train' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    expect(mockTrain.mock.calls[0]?.[0].images).toHaveLength(80);
+  });
+
+  it('partitions a mixed drop of photos and clips', async () => {
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectBase('FLUX.1 Schnell');
+    const zone = screen.getByLabelText('Target images').closest('.drop-zone') as HTMLElement;
+    fireEvent.drop(zone, {
+      dataTransfer: {
+        files: [
+          file('portrait.png', 'a'),
+          new File(['clip'], 'walk.mp4', { type: 'video/mp4' }),
+          new File(['x'], 'notes.txt', { type: 'text/plain' }),
+        ],
+      },
+    });
+    expect(
+      await screen.findByRole('group', { name: 'Target pair 1: portrait.png' })
+    ).toBeInTheDocument();
+    const clips = await screen.findByLabelText('Accepted clips');
+    expect(clips).toHaveTextContent('walk.mp4: 32 frames read at 8.0/s, 2 kept');
+    expect(screen.getAllByRole('group', { name: /target pair/i })).toHaveLength(3);
+    expect(mockFrames).toHaveBeenCalledTimes(1);
+    expect(mockFrames.mock.calls[0]?.[0].filename).toBe('walk.mp4');
+    expect(mockFrames.mock.calls[0]?.[0].blob).toBeInstanceOf(Blob);
+  });
+
+  it('extracts several clips at once and leaves the video zone enabled', async () => {
+    const first = deferred<Awaited<ReturnType<typeof mockFrames>>>();
+    const second = deferred<Awaited<ReturnType<typeof mockFrames>>>();
+    mockFrames
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectBase('FLUX.1 Schnell');
+    fireEvent.change(screen.getByLabelText('Video'), {
+      target: {
+        files: [
+          new File(['one'], 'one.mp4', { type: 'video/mp4' }),
+          new File(['two'], 'two.mp4', { type: 'video/mp4' }),
+        ],
+      },
+    });
+    expect(await screen.findByText('Reading 2 clips…')).toBeInTheDocument();
+    expect(screen.getByLabelText('Video')).toBeEnabled();
+    await waitFor(() => expect(mockFrames).toHaveBeenCalledTimes(2));
+
+    const clip = {
+      sampled: 8,
+      sampled_fps: 4,
+      frames: [
+        {
+          filename: 'frame-0000.png',
+          bytes_base64: 'YWFh',
+          timestamp_ms: 0,
+          mirrored: false,
+          group: 0,
+        },
+      ],
+    };
+    first.resolve(clip);
+    second.resolve(clip);
+    const clips = await screen.findByLabelText('Accepted clips');
+    expect(clips).toHaveTextContent('one.mp4: 8 frames read at 4.0/s, 1 kept');
+    expect(clips).toHaveTextContent('two.mp4: 8 frames read at 4.0/s, 1 kept');
+    expect(screen.queryByText(/Reading/)).toBeNull();
+    expect(screen.getAllByRole('group', { name: /target pair/i })).toHaveLength(2);
   });
 
   it('freezes the submitted draft and exposes busy semantics until training completes', async () => {

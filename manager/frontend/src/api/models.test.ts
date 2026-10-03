@@ -192,6 +192,39 @@ describe('Namespaced model requests', () => {
     expect(seen[0]).toEqual({ step: 40, eta_seconds: 180 });
   });
 
+  it('posts training images and clips as multipart files', async () => {
+    const request = mock(async (input: RequestInfo, init?: RequestInit) => {
+      expect(init?.body).toBeInstanceOf(FormData);
+      const form = init?.body as FormData;
+      expect((init?.headers as Record<string, string>)?.['Content-Type']).toBeUndefined();
+      if (String(input).includes('/train/frames')) {
+        expect(form.get('video')).toBeInstanceOf(Blob);
+        return Response.json({ sampled: 1, sampled_fps: 8, frames: [] });
+      }
+      expect(form.get('name')).toBe('portrait');
+      expect(form.get('image_0')).toBeInstanceOf(Blob);
+      return Response.json({
+        id: 'job-1',
+        name: 'portrait',
+        status: 'succeeded',
+        filename: 'portrait.safetensors',
+        quality: null,
+        dataset: [],
+        screening: null,
+      });
+    });
+    global.fetch = request as typeof fetch;
+    const blob = new Blob(['pixels'], { type: 'image/png' });
+
+    await modelsApi.train({
+      name: 'portrait',
+      base: 'flux-schnell',
+      images: [{ filename: 'shot.png', caption: 'a person', blob }],
+    });
+    await modelsApi.frames({ filename: 'walk.mp4', blob: new Blob(['clip']), mirror: true });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
   it('encodes the complete model name when deleting it', async () => {
     const request = mock(async () => new Response(null, { status: 204 }));
     global.fetch = request as typeof fetch;

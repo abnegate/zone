@@ -147,8 +147,10 @@
 .train-clips {
   display: flex;
   flex-direction: column;
+  max-height: 12rem;
   margin: var(--ui-hint-gap) 0 0;
   padding: 0;
+  overflow: auto;
   list-style: none;
 }
 
@@ -208,6 +210,11 @@
   display: grid;
   gap: var(--ui-space-2);
   min-width: 0;
+  max-height: min(32rem, 70vh);
+}
+
+.train-pairs-window {
+  width: 100%;
 }
 
 .train-pair {

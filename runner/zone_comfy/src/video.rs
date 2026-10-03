@@ -75,7 +75,11 @@ pub struct Options {
 #[derive(Debug, Deserialize)]
 pub struct FrameRequest {
     pub filename: String,
+    #[serde(default)]
     pub bytes_base64: String,
+    /// Raw clip from a multipart upload. Preferred over `bytes_base64`.
+    #[serde(default, skip)]
+    pub bytes: Option<Vec<u8>>,
     /// Frames kept per second. Falls back to the configured rate.
     #[serde(default)]
     pub fps: Option<u32>,
@@ -83,6 +87,24 @@ pub struct FrameRequest {
     /// or anything else a mirror would render backwards.
     #[serde(default)]
     pub mirror: Option<bool>,
+}
+
+impl FrameRequest {
+    pub fn video_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        if let Some(bytes) = &self.bytes {
+            if bytes.is_empty() {
+                return Err("video is empty");
+            }
+            return Ok(bytes.clone());
+        }
+        let trimmed = self.bytes_base64.trim();
+        if trimmed.is_empty() {
+            return Err("video is empty");
+        }
+        base64::engine::general_purpose::STANDARD
+            .decode(trimmed)
+            .map_err(|_| "video is not valid base64")
+    }
 }
 
 /// One training image pulled from a clip.

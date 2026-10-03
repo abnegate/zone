@@ -63,7 +63,11 @@ pub struct CaptionRequest {
 #[derive(Debug, Deserialize)]
 pub struct CaptionImage {
     pub filename: String,
+    #[serde(default)]
     pub bytes_base64: String,
+    /// Raw pixels from a multipart upload. Preferred over `bytes_base64`.
+    #[serde(default, skip)]
+    pub bytes: Option<Vec<u8>>,
     #[serde(default)]
     pub caption: String,
     /// Images sharing a group show the same shot, so one description covers
@@ -89,6 +93,16 @@ impl Draft {
             caption: caption.to_string(),
             group,
         }
+    }
+
+    pub fn from_bytes(filename: &str, bytes: &[u8], caption: &str, group: usize) -> Self {
+        use base64::Engine;
+        Self::new(
+            filename,
+            &base64::engine::general_purpose::STANDARD.encode(bytes),
+            caption,
+            group,
+        )
     }
 }
 

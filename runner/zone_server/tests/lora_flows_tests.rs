@@ -615,6 +615,48 @@ async fn post_json(
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
+fn multipart(boundary: &str, fields: &[(&str, Option<&str>, &[u8])]) -> (String, Vec<u8>) {
+    let mut body = Vec::new();
+    for (name, filename, bytes) in fields {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        match filename {
+            Some(filename) => body.extend_from_slice(
+                format!(
+                    "Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                )
+                .as_bytes(),
+            ),
+            None => body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            ),
+        }
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+async fn post_multipart(
+    router: axum::Router,
+    token: &str,
+    uri: &str,
+    content_type: String,
+    body: Vec<u8>,
+) -> (StatusCode, Value) {
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", content_type)
+        .body(Body::from(body))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
 async fn get_json(router: axum::Router, token: &str, uri: &str) -> (StatusCode, Value) {
     let request = axum::http::Request::builder()
         .method("GET")
@@ -755,51 +797,115 @@ async fn frames_endpoint_maps_decoder_execution_failures() {
 }
 
 #[tokio::test]
-async fn a_second_training_upload_is_refused_while_one_is_running() {
+async fn concurrent_frame_extracts_queue_instead_of_429() {
     use base64::Engine;
     let models_dir = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-
-    // A decoder that blocks whatever it is passed, so the first request is
-    // still holding its permit when the second arrives.
-    let stub = models_dir.join("slow-ffmpeg");
-    fs::write(&stub, "#!/bin/sh\nsleep 30\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let path = stub.display().to_string();
-    let (router, token) = router_tuned(
-        &ollama,
-        &catalog,
-        models_dir.clone(),
-        None,
-        move |comfyui| {
-            comfyui.ffmpeg = path;
-        },
-    )
+    let (router, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
+        comfyui.ffmpeg = "zone-has-no-such-decoder".into();
+    })
     .await;
 
     let clip = json!({
         "filename": "clip.mp4",
         "bytes_base64": base64::engine::general_purpose::STANDARD.encode("pretend clip"),
     });
-    let holder = tokio::spawn({
+    let first = tokio::spawn({
         let router = router.clone();
         let token = token.clone();
         let clip = clip.clone();
         async move { post_frames(router, &token, clip).await }
     });
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let (status, body) = post_frames(router, &token, clip).await;
-    holder.abort();
-    assert_eq!(
-        status,
+    let second = tokio::spawn({
+        let router = router.clone();
+        let token = token.clone();
+        async move { post_frames(router, &token, clip).await }
+    });
+    let (first_status, first_body) = first.await.unwrap();
+    let (second_status, second_body) = second.await.unwrap();
+    assert_ne!(first_status, StatusCode::TOO_MANY_REQUESTS, "{first_body}");
+    assert_ne!(
+        second_status,
         StatusCode::TOO_MANY_REQUESTS,
-        "a training upload holds its body and its decoded bytes at once, so a second has to wait: {body}"
+        "{second_body}"
+    );
+    assert_eq!(
+        first_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{first_body}"
+    );
+    assert_eq!(
+        second_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{second_body}"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn frames_endpoint_accepts_a_multipart_clip() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
+        comfyui.ffmpeg = "zone-has-no-such-decoder".into();
+    })
+    .await;
+
+    let (content_type, body) = multipart(
+        "ZoneTestBoundary",
+        &[
+            ("filename", None, b"clip.mp4"),
+            ("mirror", None, b"false"),
+            ("video", Some("clip.mp4"), b"pretend clip"),
+        ],
+    );
+    let (status, response) = post_multipart(
+        router,
+        &token,
+        "/api/models/train/frames",
+        content_type,
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("zone-has-no-such-decoder")),
+        "{response}"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_endpoint_accepts_multipart_images() {
+    use base64::Engine;
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(TINY_PNG)
+        .unwrap();
+    let images = json!([{ "filename": "a.png", "caption": "a portrait" }]).to_string();
+    let (content_type, body) = multipart(
+        "ZoneTrainBoundary",
+        &[
+            ("name", None, b"studio-style"),
+            ("base", None, b"flux-schnell"),
+            ("trigger", None, b"ohwx"),
+            ("images", None, images.as_bytes()),
+            ("image_0", Some("a.png"), &png),
+        ],
+    );
+    let (status, response) =
+        post_multipart(router, &token, "/api/models/train", content_type, body).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+    assert_eq!(
+        response["error"],
+        "LoRA training is not configured on this server"
     );
     let _ = fs::remove_dir_all(models_dir);
 }

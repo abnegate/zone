@@ -26,6 +26,9 @@ const MAX_CONCURRENT_INDEX: usize = 3;
 /// One, because a training upload holds its whole body in memory and a second
 /// run would be waiting on the same ComfyUI and the same GPU regardless.
 const MAX_CONCURRENT_TRAIN: usize = 1;
+/// Clip extracts run ffmpeg and decode frames; a handful at once keeps a dump
+/// of hundreds of videos moving without stacking every clip in RAM.
+const MAX_CONCURRENT_FRAME_EXTRACT: usize = 4;
 
 /// The adapters a source can be verified and fetched with.
 ///
@@ -90,11 +93,14 @@ struct AppStateInner {
     pub encryption_key: [u8; 32],
     /// Semaphore for limiting concurrent indexing operations
     pub index_semaphore: Arc<Semaphore>,
-    /// Training uploads carry their images and clips inline as base64, so a
-    /// handler holds the encoded body and the bytes it decodes out of it at
-    /// once. One at a time bounds the peak to a single request's worth, and
-    /// costs nothing real: a second run would contend for the same ComfyUI.
+    /// Training uploads carry a whole dataset in one body, so a handler holds
+    /// that body and the bytes it decodes out of it at once. One at a time
+    /// bounds the peak to a single request's worth, and costs nothing real: a
+    /// second run would contend for the same ComfyUI.
     pub train_semaphore: Arc<Semaphore>,
+    /// Clip extracts queue here instead of 429ing, so a dump of hundreds of
+    /// videos can run a few ffmpeg jobs at a time.
+    pub frame_semaphore: Arc<Semaphore>,
     /// Process-wide MCP hub. Connected once, shared across chat turns.
     pub mcp: OnceCell<McpHub>,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
@@ -141,6 +147,7 @@ impl AppState {
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
+                frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
                 mcp: OnceCell::new(),
                 task_progress: task_progress::progress(),
             }),
@@ -191,6 +198,7 @@ impl AppState {
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
+                frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
                 mcp: OnceCell::new(),
                 task_progress: task_progress::progress(),
             }),
@@ -242,6 +250,7 @@ impl AppState {
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
+                frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
                 mcp: OnceCell::new(),
                 task_progress: task_progress::progress(),
             }),
@@ -301,6 +310,11 @@ impl AppState {
     /// Permits for training uploads, which are held for the whole request.
     pub fn train_semaphore(&self) -> &Arc<Semaphore> {
         &self.inner.train_semaphore
+    }
+
+    /// Permits for clip extracts. Waiters queue rather than 429.
+    pub fn frame_semaphore(&self) -> &Arc<Semaphore> {
+        &self.inner.frame_semaphore
     }
 
     /// Get the sync registry
@@ -572,6 +586,10 @@ mod tests {
             state.train_semaphore().available_permits(),
             MAX_CONCURRENT_TRAIN
         );
+        assert_eq!(
+            state.frame_semaphore().available_permits(),
+            MAX_CONCURRENT_FRAME_EXTRACT
+        );
         assert_eq!(state.encryption_key().len(), 32);
         let _ = state.rate_limiter();
         let _ = state.sync_registry();
@@ -607,6 +625,7 @@ mod tests {
         );
         assert!(Arc::ptr_eq(with_email.email_service().unwrap(), &email));
         assert_eq!(with_email.train_semaphore().available_permits(), 1);
+        assert_eq!(with_email.frame_semaphore().available_permits(), 4);
     }
 
     #[tokio::test]

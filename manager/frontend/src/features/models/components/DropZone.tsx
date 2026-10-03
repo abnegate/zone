@@ -1,5 +1,6 @@
 import { Label } from '@zone/ui';
 import { type DragEvent, type ReactElement, type ReactNode, useState } from 'react';
+import { accepts, filesFromDataTransfer } from '../dropFiles';
 import './DropZone.css';
 
 type DropZoneProps = {
@@ -12,13 +13,6 @@ type DropZoneProps = {
   onFiles: (files: File[]) => void;
   children?: ReactNode;
 };
-
-function accepts(accept: string, file: File): boolean {
-  return accept.split(',').some((pattern) => {
-    const wanted = pattern.trim();
-    return wanted.endsWith('/*') ? file.type.startsWith(wanted.slice(0, -1)) : file.type === wanted;
-  });
-}
 
 export default function DropZone({
   id,
@@ -44,8 +38,9 @@ export default function DropZone({
     event.preventDefault();
     setOver(false);
     if (disabled) return;
-    const dropped = Array.from(event.dataTransfer.files).filter((file) => accepts(accept, file));
-    if (dropped.length > 0) onFiles(dropped);
+    void filesFromDataTransfer(event.dataTransfer, accept).then((dropped) => {
+      if (dropped.length > 0) onFiles(dropped);
+    });
   };
 
   return (
@@ -71,7 +66,9 @@ export default function DropZone({
           aria-labelledby={labelId}
           aria-describedby={hintId}
           onChange={(event) => {
-            const chosen = Array.from(event.target.files ?? []);
+            const chosen = Array.from(event.target.files ?? []).filter((file) =>
+              accepts(accept, file)
+            );
             event.target.value = '';
             if (chosen.length > 0) onFiles(chosen);
           }}

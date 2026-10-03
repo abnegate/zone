@@ -47,13 +47,54 @@ pub struct TrainRequest {
 pub struct TrainImage {
     pub filename: String,
     pub caption: String,
+    #[serde(default)]
     pub bytes_base64: String,
+    /// Raw pixels from a multipart upload. Preferred over `bytes_base64` so a
+    /// large set never has to round-trip through JSON.
+    #[serde(default, skip)]
+    pub bytes: Option<Vec<u8>>,
     #[serde(default)]
     pub before_base64: Option<String>,
+    #[serde(default, skip)]
+    pub before: Option<Vec<u8>>,
     /// Images sharing a group are the same shot and are captioned together.
     /// Frames pulled from a clip arrive grouped; separate photos do not.
     #[serde(default)]
     pub group: Option<usize>,
+}
+
+impl TrainImage {
+    pub fn pixels(&self) -> Result<Vec<u8>, TrainError> {
+        if let Some(bytes) = &self.bytes {
+            return nonempty(bytes);
+        }
+        decode_base64(&self.bytes_base64)
+    }
+
+    pub fn reference_pixels(&self) -> Result<Option<Vec<u8>>, TrainError> {
+        if let Some(bytes) = &self.before {
+            return nonempty(bytes).map(Some);
+        }
+        match &self.before_base64 {
+            Some(before) => decode_base64(before).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub fn has_reference(&self) -> bool {
+        self.before.as_ref().is_some_and(|bytes| !bytes.is_empty())
+            || self
+                .before_base64
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+    }
+}
+
+fn nonempty(bytes: &[u8]) -> Result<Vec<u8>, TrainError> {
+    if bytes.is_empty() {
+        return Err(TrainError::Invalid("image is empty"));
+    }
+    Ok(bytes.to_vec())
 }
 
 /// A finished run: the adapter on disk and, when ComfyUI could be asked, how
@@ -353,7 +394,7 @@ async fn train_with_pipeline(
     let mut decoded = request
         .images
         .iter()
-        .map(|image| decode_base64(&image.bytes_base64))
+        .map(TrainImage::pixels)
         .collect::<Result<Vec<Vec<u8>>, TrainError>>()?;
     let side = crate::train::packaged_config()?.resolution();
     let mut verdict = screening(&decoded, side);
@@ -601,7 +642,7 @@ async fn train_with_pipeline(
 
 fn validate_pairing(images: &[TrainImage], model: &TrainingModel) -> Result<(), TrainError> {
     if matches!(model, TrainingModel::QwenEdit { .. }) {
-        if images.iter().any(|image| image.before_base64.is_none()) {
+        if images.iter().any(|image| !image.has_reference()) {
             return Err(TrainError::Invalid(
                 "edit training needs one reference image for every target",
             ));
@@ -611,7 +652,7 @@ fn validate_pairing(images: &[TrainImage], model: &TrainingModel) -> Result<(), 
                 "edit training needs a nonempty instruction for every image pair",
             ));
         }
-    } else if images.iter().any(|image| image.before_base64.is_some()) {
+    } else if images.iter().any(TrainImage::has_reference) {
         return Err(TrainError::Invalid(
             "reference images are only supported by edit training bases",
         ));
@@ -1352,7 +1393,7 @@ impl Framed {
 /// background the photographer happened to include.
 #[cfg(test)]
 fn frame(subject: &Subject, image: &TrainImage, side: u32) -> Result<Framed, TrainError> {
-    let target = decode_base64(&image.bytes_base64)?;
+    let target = image.pixels()?;
     frame_with_target(subject, image, &target, side)
 }
 
@@ -1364,10 +1405,10 @@ fn frame_with_target(
 ) -> Result<Framed, TrainError> {
     let raster = decode_bytes(target)?;
     let focus = subject.focus(&raster, CENTRE);
-    let control = match &image.before_base64 {
+    let control = match image.reference_pixels()? {
         // The control has to keep answering the target pixel for pixel, so it
         // is cropped to the target's subject rather than to its own.
-        Some(before) => Some(square(subject, &decode(before)?, side, focus)?),
+        Some(before) => Some(square(subject, &decode_bytes(&before)?, side, focus)?),
         None => None,
     };
     Ok(Framed {
@@ -1389,6 +1430,7 @@ fn square(
 
 /// Decoding is also what applies a photo's EXIF rotation: a sideways image
 /// otherwise trains a sideways subject.
+#[cfg(test)]
 fn decode(base64: &str) -> Result<Raster, TrainError> {
     decode_bytes(&decode_base64(base64)?)
 }
@@ -1446,7 +1488,9 @@ mod tests {
             filename: format!("{target}.png"),
             caption: caption.to_string(),
             bytes_base64: encoded(colour(target)),
+            bytes: None,
             before_base64: reference.map(|value| encoded(colour(value))),
+            before: None,
             group: None,
         }
     }
@@ -1622,7 +1666,9 @@ mod tests {
             filename: "a.png".into(),
             caption: caption.into(),
             bytes_base64: encoded([12, 34, 56]),
+            bytes: None,
             before_base64: None,
+            before: None,
             group,
         }
     }
@@ -2266,7 +2312,9 @@ mod tests {
                 filename: "target.png".into(),
                 caption: "a portrait".into(),
                 bytes_base64: base64::engine::general_purpose::STANDARD.encode(&repaired),
+                bytes: None,
                 before_base64: None,
+                before: None,
                 group: None,
             },
             crate::train::packaged_config().unwrap().resolution(),
@@ -3168,7 +3216,9 @@ mod tests {
                 filename: "a.jpg".into(),
                 caption: String::new(),
                 bytes_base64: base64::engine::general_purpose::STANDARD.encode(&jpeg),
+                bytes: None,
                 before_base64: None,
+                before: None,
                 group: None,
             },
             4,
@@ -3194,7 +3244,9 @@ mod tests {
                 filename: "a.png".into(),
                 caption: String::new(),
                 bytes_base64: base64::engine::general_purpose::STANDARD.encode(b"not an image"),
+                bytes: None,
                 before_base64: None,
+                before: None,
                 group: None,
             },
             512,
@@ -3212,7 +3264,9 @@ mod tests {
                 filename: "a.png".into(),
                 caption: String::new(),
                 bytes_base64: wide.clone(),
+                bytes: None,
                 before_base64: Some(wide),
+                before: None,
                 group: None,
             },
             8,

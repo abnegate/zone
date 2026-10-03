@@ -1,5 +1,6 @@
 import { Button, Checkbox, Input, Select } from '@zone/ui';
-import { type FormEvent, type ReactElement, useEffect, useState } from 'react';
+import { type FormEvent, type ReactElement, useEffect, useMemo, useState } from 'react';
+import { List, type RowComponentProps } from 'react-window';
 import {
   type DatasetConcern,
   type DatasetFinding,
@@ -11,6 +12,16 @@ import {
   type TrainResult,
   type TrainScreening,
 } from '../../../api/models';
+import { isImageFile, isVideoFile } from '../dropFiles';
+import {
+  blobFromBase64,
+  captionBatches,
+  FRAME_UPLOADS,
+  PAIR_LIST_MAX,
+  PAIR_ROW_HEIGHT,
+  poolMap,
+  prepareImage,
+} from '../trainMedia';
 import DropZone from './DropZone';
 import TrainMeter from './TrainMeter';
 import './TrainPanel.css';
@@ -20,8 +31,7 @@ type TrainBase = { id: string; label: string; edit: boolean };
 type Reference = {
   key: string;
   filename: string;
-  bytes_base64: string;
-  reading: boolean;
+  blob: Blob;
 };
 
 type Draft = {
@@ -30,14 +40,16 @@ type Draft = {
   caption: string;
   captionRevision: number;
   instruction: string;
-  bytes_base64: string;
-  reading: boolean;
+  blob: Blob;
   reference?: Reference;
   group?: number;
   source?: string;
   clip?: string;
   mirrored?: boolean;
 };
+
+const IMAGE_ACCEPT = 'image/png,image/jpeg,image/webp';
+const MIXED_ACCEPT = `${IMAGE_ACCEPT},video/*`;
 
 type Clip = { key: string; name: string; summary: string };
 
@@ -246,21 +258,15 @@ function Advice({ findings }: { findings: DatasetFinding[] }): ReactElement | nu
   );
 }
 
-const MIME_BY_EXTENSION: Record<string, string> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  webp: 'image/webp',
-};
-
-function previewOf(image: Pick<Draft, 'filename' | 'bytes_base64'>): string | null {
-  if (!image.bytes_base64) return null;
-  const extension = image.filename.split('.').pop()?.toLowerCase() ?? '';
-  return `data:${MIME_BY_EXTENSION[extension] ?? 'image/png'};base64,${image.bytes_base64}`;
-}
-
-function Thumbnail({ image }: { image: Draft }): ReactElement {
-  const source = previewOf(image);
+function Thumbnail({ blob }: { blob: Blob }): ReactElement {
+  const [source, setSource] = useState<string | null>(null);
+  useEffect(() => {
+    const url = URL.createObjectURL(blob);
+    setSource(url);
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [blob]);
   return (
     <div className="train-pair-thumb" aria-hidden="true">
       {source && <img src={source} alt="" />}
@@ -304,19 +310,6 @@ function CloseIcon(): ReactElement {
   );
 }
 
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = String(reader.result || '');
-      const encoded = result.includes(',') ? result.slice(result.indexOf(',') + 1) : result;
-      resolve(encoded);
-    };
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-}
-
 function missingReference(image: Draft): boolean {
   return !image.reference;
 }
@@ -339,10 +332,6 @@ function focusIncomplete(images: Draft[]): void {
 }
 
 function readiness(images: Draft[]): string {
-  const reading = images.filter((image) => image.reading || image.reference?.reading).length;
-  if (reading > 0) {
-    return `Reading selected ${reading === 1 ? 'image' : 'images'}.`;
-  }
   const pending = incomplete(images);
   if (images.length === 0) return 'Add at least one target image to begin pairing.';
   if (pending.length === 0) return 'Every target has one reference image and one instruction.';
@@ -369,6 +358,125 @@ function nextGroup(images: Draft[]): number {
   return images.reduce((highest, image) => Math.max(highest, (image.group ?? -1) + 1), 0);
 }
 
+type PairRowProps = {
+  images: Draft[];
+  edit: boolean;
+  busy: boolean;
+  onCaption: (key: string, value: string) => void;
+  onInstruction: (key: string, value: string) => void;
+  onReference: (key: string, files: FileList | null) => void;
+  onMove: (key: string, direction: -1 | 1) => void;
+  onRemove: (key: string) => void;
+};
+
+function TrainPairRow({
+  index,
+  style,
+  images,
+  edit,
+  busy,
+  onCaption,
+  onInstruction,
+  onReference,
+  onMove,
+  onRemove,
+}: RowComponentProps<PairRowProps>): ReactElement {
+  const image = images[index];
+  const number = index + 1;
+  const named = captionOf(image);
+  const referenceLabel = `Reference image for target ${number}: ${named}`;
+  const instructionLabel = `Instruction for target ${number}: ${named}`;
+  return (
+    <div style={style}>
+      <fieldset
+        className="train-pair"
+        aria-label={`Target pair ${number}: ${named}`}
+        aria-busy="false"
+      >
+        <Thumbnail blob={image.blob} />
+        <div className="train-pair-main">
+          <div className="train-pair-head">
+            <span className="train-pair-index">Target {number}</span>
+            <span className="train-pair-filename">{named}</span>
+          </div>
+          <div className={`train-pair-fields ${edit ? 'train-pair-fields--edit' : ''}`}>
+            {edit && (
+              <Input
+                id={`train-reference-${image.key}`}
+                aria-label={referenceLabel}
+                type="file"
+                accept={IMAGE_ACCEPT}
+                disabled={busy}
+                aria-required="true"
+                helpText={image.reference ? `Reference: ${image.reference.filename}` : undefined}
+                error={
+                  missingReference(image)
+                    ? 'Choose one reference image for this target.'
+                    : undefined
+                }
+                onChange={(event) => {
+                  onReference(image.key, event.target.files);
+                }}
+              />
+            )}
+            <Input
+              id={edit ? `train-instruction-${image.key}` : `train-caption-${image.key}`}
+              aria-label={edit ? instructionLabel : `Caption for ${named}`}
+              placeholder={edit ? 'Describe the edit' : 'Caption'}
+              value={edit ? image.instruction : image.caption}
+              disabled={busy}
+              required={edit}
+              error={
+                edit && missingInstruction(image)
+                  ? 'Describe the edit that turns the reference into this target.'
+                  : undefined
+              }
+              onChange={(event) => {
+                if (busy) return;
+                const value = event.target.value;
+                if (edit) onInstruction(image.key, value);
+                else onCaption(image.key, value);
+              }}
+            />
+          </div>
+        </div>
+        <div className="train-pair-actions" role="group" aria-label={`Arrange ${named}`}>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            disabled={busy || index === 0}
+            aria-label={`Move target ${number}: ${named} up`}
+            onClick={() => onMove(image.key, -1)}
+          >
+            <ArrowIcon direction="up" />
+          </Button>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            disabled={busy || index === images.length - 1}
+            aria-label={`Move target ${number}: ${named} down`}
+            onClick={() => onMove(image.key, 1)}
+          >
+            <ArrowIcon direction="down" />
+          </Button>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            disabled={busy}
+            aria-label={`Remove target ${number}: ${named}`}
+            onClick={() => onRemove(image.key)}
+          >
+            <CloseIcon />
+          </Button>
+        </div>
+      </fieldset>
+    </div>
+  );
+}
+
 export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [bases, setBases] = useState<TrainBase[]>([]);
   const [name, setName] = useState('');
@@ -383,7 +491,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [progress, setProgress] = useState<TrainJob | null>(null);
   const [captioning, setCaptioning] = useState(false);
   const [focusRequested, setFocusRequested] = useState(false);
-  const [sampling, setSampling] = useState<string | null>(null);
+  const [sampling, setSampling] = useState<Array<{ key: string; name: string }>>([]);
   const [clips, setClips] = useState<Clip[]>([]);
 
   useEffect(() => {
@@ -449,76 +557,39 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const selected = bases.find((row) => row.id === base);
   const edit = Boolean(selected?.edit);
   const pending = edit ? incomplete(images) : [];
-  const reading = images.some((image) => image.reading || image.reference?.reading);
   const ready =
-    Boolean(name.trim() && base && (edit || trigger.trim()) && images.length > 0 && !reading) &&
+    Boolean(name.trim() && base && (edit || trigger.trim()) && images.length > 0) &&
     pending.length === 0;
 
-  const handleTargets = async (files: File[]) => {
+  const handleTargets = (files: File[]) => {
     if (busy || files.length === 0) return;
-    const added = files.map((file) => ({
-      file,
-      draft: {
-        key: nextKey(),
-        filename: file.name,
-        caption: '',
-        captionRevision: 0,
-        instruction: '',
-        bytes_base64: '',
-        reading: true,
-      } satisfies Draft,
-    }));
-    setImages((current) => [...current, ...added.map(({ draft }) => draft)]);
-    if (edit) setFocusRequested(true);
-
-    await Promise.all(
-      added.map(async ({ draft, file }) => {
-        try {
-          const bytes_base64 = await fileToBase64(file);
-          setImages((current) =>
-            current.map((image) =>
-              image.key === draft.key ? { ...image, bytes_base64, reading: false } : image
-            )
-          );
-        } catch (caught) {
-          setImages((current) => current.filter((image) => image.key !== draft.key));
-          setError(caught instanceof Error ? caught.message : `Failed to read ${file.name}`);
-        }
-      })
+    const added = files.filter(isImageFile).map(
+      (file) =>
+        ({
+          key: nextKey(),
+          filename: file.name,
+          caption: '',
+          captionRevision: 0,
+          instruction: '',
+          blob: file,
+        }) satisfies Draft
     );
+    if (added.length === 0) return;
+    setImages((current) => [...current, ...added]);
+    if (edit) setFocusRequested(true);
   };
 
-  const handleReference = async (key: string, files: FileList | null) => {
+  const handleReference = (key: string, files: FileList | null) => {
     if (busy || files?.length !== 1) return;
     const [file] = Array.from(files);
     const reference: Reference = {
       key: nextKey(),
       filename: file.name,
-      bytes_base64: '',
-      reading: true,
+      blob: file,
     };
     setImages((current) =>
       current.map((image) => (image.key === key ? { ...image, reference } : image))
     );
-    try {
-      const bytes_base64 = await fileToBase64(file);
-      setImages((current) =>
-        current.map((image) =>
-          image.key === key && image.reference?.key === reference.key
-            ? { ...image, reference: { ...reference, bytes_base64, reading: false } }
-            : image
-        )
-      );
-    } catch (caught) {
-      setImages((current) =>
-        current.map((image) =>
-          image.key === key && image.reference?.key === reference.key
-            ? { ...image, reference: undefined }
-            : image
-        )
-      );
-      setError(caught instanceof Error ? caught.message : `Failed to read ${file.name}`);
-    }
   };
 
   const handleBase = (value: string) => {
@@ -535,21 +606,21 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   };
 
   const handleVideos = async (files: File[]) => {
-    if (busy || files.length === 0) return;
+    const clipsToRead = files.filter(isVideoFile);
+    if (busy || clipsToRead.length === 0) return;
     setError(null);
-    try {
-      for (const file of files) {
-        setSampling(file.name);
-        const key = nextKey('training-clip');
+    const jobs = clipsToRead.map((file) => ({ file, key: nextKey('training-clip') }));
+    setSampling((current) => [
+      ...current,
+      ...jobs.map(({ key, file }) => ({ key, name: file.name })),
+    ]);
+    await poolMap(jobs, FRAME_UPLOADS, async ({ file, key }) => {
+      try {
         const clip = await modelsApi.frames({
           filename: file.name,
-          bytes_base64: await fileToBase64(file),
+          blob: file,
           mirror,
         });
-        // Appended against whatever the list holds now, not against a copy
-        // taken before the upload: images picked while a clip was extracting
-        // would otherwise be dropped, and a clip that failed would take the
-        // frames of the clips before it with it.
         setImages((current) => {
           const offset = nextGroup(current);
           return [
@@ -560,8 +631,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
               caption: '',
               captionRevision: 0,
               instruction: '',
-              bytes_base64: frame.bytes_base64,
-              reading: false,
+              blob: blobFromBase64(frame.bytes_base64),
               group: offset + frame.group,
               source: file.name,
               clip: key,
@@ -577,12 +647,17 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             summary: `${clip.sampled} frames read at ${clip.sampled_fps.toFixed(1)}/s, ${clip.frames.length} kept`,
           },
         ]);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : `Could not read ${file.name}`);
+      } finally {
+        setSampling((current) => current.filter((item) => item.key !== key));
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not read the video');
-    } finally {
-      setSampling(null);
-    }
+    });
+  };
+
+  const handleDrop = (files: File[]) => {
+    handleTargets(files);
+    if (!edit) void handleVideos(files);
   };
 
   const removeClip = (key: string) => {
@@ -592,35 +667,42 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   };
 
   const handleCaption = async () => {
-    if (busy || edit || reading || images.length === 0) return;
-    const requested = images.map(
-      ({ key, filename, caption, captionRevision, bytes_base64, group }) => ({
-        key,
-        filename,
-        caption,
-        captionRevision,
-        bytes_base64,
-        group,
-      })
-    );
+    if (busy || edit || images.length === 0) return;
+    const requested = images.map(({ key, filename, caption, captionRevision, blob, group }) => ({
+      key,
+      filename,
+      caption,
+      captionRevision,
+      blob,
+      group,
+    }));
     setCaptioning(true);
     setError(null);
     try {
-      const { captions } = await modelsApi.captions({
-        trigger: trigger.trim() || undefined,
-        images: requested.map(({ filename, caption, bytes_base64, group }) => ({
-          filename,
-          caption,
-          bytes_base64,
-          group,
-        })),
-      });
-      const generated = new Map(
-        requested.map((image, index) => [
-          image.key,
-          { caption: captions[index], revision: image.captionRevision },
-        ])
-      );
+      const generated = new Map<string, { caption: string; revision: number }>();
+      for (const batch of captionBatches(requested)) {
+        const prepared = await Promise.all(
+          batch.map(async (image) => ({
+            ...image,
+            blob: await prepareImage(image.blob, image.filename),
+          }))
+        );
+        const { captions } = await modelsApi.captions({
+          trigger: trigger.trim() || undefined,
+          images: prepared.map(({ filename, caption, blob, group }) => ({
+            filename,
+            caption,
+            blob,
+            group,
+          })),
+        });
+        prepared.forEach((image, index) => {
+          generated.set(image.key, {
+            caption: captions[index],
+            revision: image.captionRevision,
+          });
+        });
+      }
       setImages((current) =>
         current.map((image) => {
           const result = generated.get(image.key);
@@ -652,13 +734,18 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           name: name.trim(),
           base,
           trigger: trigger.trim() || undefined,
-          images: images.map((image) => ({
-            filename: image.filename,
-            caption: edit ? image.instruction.trim() : image.caption,
-            bytes_base64: image.bytes_base64,
-            group: image.group,
-            ...(edit && image.reference ? { before_base64: image.reference.bytes_base64 } : {}),
-          })),
+          images: await Promise.all(
+            images.map(async (image) => ({
+              filename: image.filename,
+              caption: edit ? image.instruction.trim() : image.caption,
+              blob: await prepareImage(image.blob, image.filename),
+              group: image.group,
+              before:
+                edit && image.reference
+                  ? await prepareImage(image.reference.blob, image.reference.filename)
+                  : undefined,
+            }))
+          ),
         },
         undefined,
         setProgress
@@ -689,13 +776,48 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     });
   };
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: handlers close over setState
+  const pairRowProps = useMemo<PairRowProps>(
+    () => ({
+      images,
+      edit,
+      busy,
+      onCaption: (key, value) => {
+        setImages((current) =>
+          current.map((image) =>
+            image.key === key
+              ? { ...image, caption: value, captionRevision: image.captionRevision + 1 }
+              : image
+          )
+        );
+      },
+      onInstruction: (key, value) => {
+        setImages((current) =>
+          current.map((image) => (image.key === key ? { ...image, instruction: value } : image))
+        );
+      },
+      onReference: handleReference,
+      onMove: move,
+      onRemove: (key) => {
+        if (busy) return;
+        setImages((current) => current.filter((image) => image.key !== key));
+      },
+    }),
+    [images, edit, busy]
+  );
+
+  const listHeight = Math.max(
+    PAIR_ROW_HEIGHT,
+    Math.min(images.length * PAIR_ROW_HEIGHT, PAIR_LIST_MAX)
+  );
+
   return (
     <section className="card">
       <h2>Train a LoRA</h2>
       <p className="help-text">
         {edit
           ? 'Add target images, then pair each one with the reference image and instruction that produced it.'
-          : 'Drop images or a video, pick an installed base, and set a unique trigger word. Every image is cropped square on its subject, then Zone trains every transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that identity.'}
+          : 'Drop images, clips, or a folder, pick an installed base, and set a unique trigger word. Every image is cropped square on its subject, then Zone trains every transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that identity.'}
       </p>
       {error && <div className="error-placeholder">{error}</div>}
       {busy && (
@@ -751,27 +873,27 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           <DropZone
             id="train-targets"
             label="Target images"
-            prompt="Drop images here, or browse"
+            prompt={edit ? 'Drop images here, or browse' : 'Drop images, clips, or a folder'}
             hint={
               edit
                 ? 'Choose the finished images. You will add one reference and instruction for each target.'
-                : 'Choose the images this LoRA should learn from.'
+                : 'Choose the images this LoRA should learn from. Clips and folders are fine too.'
             }
-            accept="image/png,image/jpeg,image/webp"
+            accept={edit ? IMAGE_ACCEPT : MIXED_ACCEPT}
             disabled={busy}
-            onFiles={(files) => void handleTargets(files)}
+            onFiles={handleDrop}
           />
           {!edit && (
             <DropZone
               id="train-clips"
               label="Video"
-              prompt="Drop a clip here, or browse"
-              hint="A clip is sampled above the rate it keeps, so the sharpest frame of each moment wins its slot, repeats of a shot already taken are dropped, and every frame is cropped around whatever moved."
-              accept="video/*"
-              disabled={busy || Boolean(sampling)}
-              onFiles={(files) => void handleVideos(files)}
+              prompt="Drop clips or a folder"
+              hint="A clip is sampled above the rate it keeps, so the sharpest frame of each moment wins its slot, repeats of a shot already taken are dropped, and every frame is cropped around whatever moved. Many clips extract at once."
+              accept={MIXED_ACCEPT}
+              disabled={busy}
+              onFiles={handleDrop}
             >
-              {(clips.length > 0 || sampling) && (
+              {(clips.length > 0 || sampling.length > 0) && (
                 <ul className="train-clips" aria-label="Accepted clips">
                   {clips.map((clip) => (
                     <li key={clip.key} className="train-clip">
@@ -790,7 +912,12 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                       </Button>
                     </li>
                   ))}
-                  {sampling && <li className="train-clip">Reading {sampling}…</li>}
+                  {sampling.length === 1 && (
+                    <li className="train-clip">Reading {sampling[0].name}…</li>
+                  )}
+                  {sampling.length > 1 && (
+                    <li className="train-clip">Reading {sampling.length} clips…</li>
+                  )}
                 </ul>
               )}
             </DropZone>
@@ -811,7 +938,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
               type="button"
               variant="secondary"
               loading={captioning}
-              disabled={busy || captioning || reading}
+              disabled={busy || captioning}
               onClick={() => void handleCaption()}
             >
               Auto-caption images
@@ -835,126 +962,22 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         )}
         {images.length > 0 && (
           <div className="train-pairs">
-            {images.map((image, index) => {
-              const number = index + 1;
-              const named = captionOf(image);
-              const referenceLabel = `Reference image for target ${number}: ${named}`;
-              const instructionLabel = `Instruction for target ${number}: ${named}`;
-              return (
-                <fieldset
-                  className="train-pair"
-                  key={image.key}
-                  aria-label={`Target pair ${number}: ${named}`}
-                  aria-busy={image.reading || Boolean(image.reference?.reading)}
-                >
-                  <Thumbnail image={image} />
-                  <div className="train-pair-main">
-                    <div className="train-pair-head">
-                      <span className="train-pair-index">Target {number}</span>
-                      <span className="train-pair-filename">{named}</span>
-                    </div>
-                    <div className={`train-pair-fields ${edit ? 'train-pair-fields--edit' : ''}`}>
-                      {edit && (
-                        <Input
-                          id={`train-reference-${image.key}`}
-                          aria-label={referenceLabel}
-                          type="file"
-                          accept="image/png,image/jpeg,image/webp"
-                          disabled={busy}
-                          aria-required="true"
-                          helpText={
-                            image.reference ? `Reference: ${image.reference.filename}` : undefined
-                          }
-                          error={
-                            missingReference(image)
-                              ? 'Choose one reference image for this target.'
-                              : undefined
-                          }
-                          onChange={(event) => {
-                            const files = event.target.files;
-                            void handleReference(image.key, files);
-                          }}
-                        />
-                      )}
-                      <Input
-                        id={edit ? `train-instruction-${image.key}` : `train-caption-${image.key}`}
-                        aria-label={edit ? instructionLabel : `Caption for ${named}`}
-                        placeholder={edit ? 'Describe the edit' : 'Caption'}
-                        value={edit ? image.instruction : image.caption}
-                        disabled={busy}
-                        required={edit}
-                        error={
-                          edit && missingInstruction(image)
-                            ? 'Describe the edit that turns the reference into this target.'
-                            : undefined
-                        }
-                        onChange={(event) => {
-                          if (busy) return;
-                          const value = event.target.value;
-                          setImages((current) =>
-                            current.map((currentImage) =>
-                              currentImage.key === image.key
-                                ? edit
-                                  ? { ...currentImage, instruction: value }
-                                  : {
-                                      ...currentImage,
-                                      caption: value,
-                                      captionRevision: currentImage.captionRevision + 1,
-                                    }
-                                : currentImage
-                            )
-                          );
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <div className="train-pair-actions" role="group" aria-label={`Arrange ${named}`}>
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      disabled={busy || index === 0}
-                      aria-label={`Move target ${number}: ${named} up`}
-                      onClick={() => move(image.key, -1)}
-                    >
-                      <ArrowIcon direction="up" />
-                    </Button>
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      disabled={busy || index === images.length - 1}
-                      aria-label={`Move target ${number}: ${named} down`}
-                      onClick={() => move(image.key, 1)}
-                    >
-                      <ArrowIcon direction="down" />
-                    </Button>
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      disabled={busy}
-                      aria-label={`Remove target ${number}: ${named}`}
-                      onClick={() => {
-                        if (busy) return;
-                        setImages((current) =>
-                          current.filter((currentImage) => currentImage.key !== image.key)
-                        );
-                      }}
-                    >
-                      <CloseIcon />
-                    </Button>
-                  </div>
-                </fieldset>
-              );
-            })}
+            <List
+              rowComponent={TrainPairRow}
+              rowCount={images.length}
+              rowHeight={PAIR_ROW_HEIGHT}
+              rowProps={pairRowProps}
+              overscanCount={8}
+              className="train-pairs-window"
+              style={{ height: listHeight, width: '100%' }}
+            />
           </div>
         )}
         <div className="train-footer">
           <Button
             type="submit"
             loading={busy}
-            disabled={busy || !ready || Boolean(sampling)}
+            disabled={busy || !ready || sampling.length > 0}
             aria-describedby={edit ? 'train-pairs-status' : undefined}
           >
             Train

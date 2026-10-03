@@ -64,13 +64,14 @@ pub fn create_router(state: AppState) -> Router {
 
     crate::metrics::init();
 
-    // Training posts its images and clips inline as base64, so the 2 MB default
-    // rejects any set worth training on before a handler sees it.
+    // Training posts a whole dataset in one body, so the 2 MB default rejects
+    // any set worth training on before a handler sees it.
     let uploads =
         DefaultBodyLimit::max((state.config().train_upload_limit_mb * 1024 * 1024) as usize);
     // Runs before the body is read, so a refused upload is never buffered.
     let one_at_a_time =
         middleware::from_fn_with_state(state.clone(), models::one_training_upload_at_a_time);
+    let queue_frames = middleware::from_fn_with_state(state.clone(), models::queue_frame_extract);
 
     // Public routes (no auth required)
     // Note: WebSocket routes use in-message auth, not middleware
@@ -306,7 +307,7 @@ pub fn create_router(state: AppState) -> Router {
             get(models::train_job)
                 .post(models::train)
                 .layer(uploads)
-                .layer(one_at_a_time.clone()),
+                .layer(one_at_a_time),
         )
         .route("/api/models/train/bases", get(models::train_bases))
         .route(
@@ -315,7 +316,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/models/train/frames",
-            post(models::frames).layer(uploads).layer(one_at_a_time),
+            post(models::frames).layer(uploads).layer(queue_frames),
         )
         .route(
             "/api/models/{name}",

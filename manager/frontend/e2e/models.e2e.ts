@@ -99,12 +99,88 @@ function trainedAdapter(name: string): InstalledModel {
   };
 }
 
+function indexOfBuffer(haystack: Buffer, needle: Buffer, from = 0): number {
+  return haystack.indexOf(needle, from);
+}
+
+function splitBuffer(buffer: Buffer, delimiter: Buffer): Buffer[] {
+  const parts: Buffer[] = [];
+  let start = 0;
+  for (;;) {
+    const at = indexOfBuffer(buffer, delimiter, start);
+    if (at < 0) {
+      if (start < buffer.length) parts.push(buffer.subarray(start));
+      break;
+    }
+    if (at > start) parts.push(buffer.subarray(start, at));
+    start = at + delimiter.length;
+  }
+  return parts;
+}
+
+function parseMultipart(
+  buffer: Buffer,
+  contentType: string
+): Map<string, { filename?: string; value: Buffer }> {
+  const match = /boundary="?([^";]+)"?/.exec(contentType);
+  if (!match) throw new Error(`no boundary in ${contentType}`);
+  const boundary = `--${match[1]}`;
+  const fields = new Map<string, { filename?: string; value: Buffer }>();
+  for (const part of splitBuffer(buffer, Buffer.from(boundary))) {
+    if (part.length === 0 || part.toString('utf8').startsWith('--')) continue;
+    let slice = part;
+    if (slice.subarray(0, 2).toString() === '\r\n') slice = slice.subarray(2);
+    const headerEnd = indexOfBuffer(slice, Buffer.from('\r\n\r\n'));
+    if (headerEnd < 0) continue;
+    const header = slice.subarray(0, headerEnd).toString('utf8');
+    let value = slice.subarray(headerEnd + 4);
+    if (value.subarray(-2).toString() === '\r\n') value = value.subarray(0, -2);
+    const name = /name="([^"]+)"/.exec(header)?.[1];
+    const filename = /filename="([^"]+)"/.exec(header)?.[1];
+    if (!name) continue;
+    fields.set(name, { filename, value });
+  }
+  return fields;
+}
+
+function asTrainRequest(request: {
+  headers: () => Record<string, string>;
+  postDataJSON: () => unknown;
+  postDataBuffer: () => Buffer | null;
+}): TrainRequest {
+  const contentType = request.headers()['content-type'] ?? '';
+  if (!contentType.includes('multipart/form-data')) {
+    return request.postDataJSON() as TrainRequest;
+  }
+  const buffer = request.postDataBuffer();
+  if (!buffer) throw new Error('empty train post');
+  const fields = parseMultipart(buffer, contentType);
+  const meta = JSON.parse(fields.get('images')?.value.toString('utf8') ?? '[]') as Array<{
+    filename: string;
+    caption: string;
+  }>;
+  return {
+    name: fields.get('name')?.value.toString('utf8') ?? '',
+    base: fields.get('base')?.value.toString('utf8') ?? '',
+    trigger: fields.get('trigger')?.value.toString('utf8') || undefined,
+    images: meta.map((image, index) => {
+      const before = fields.get(`before_${index}`)?.value.toString('base64');
+      return {
+        filename: image.filename,
+        caption: image.caption,
+        bytes_base64: fields.get(`image_${index}`)?.value.toString('base64') ?? '',
+        ...(before ? { before_base64: before } : {}),
+      };
+    }),
+  };
+}
+
 function trainRequests(page: Page): TrainRequest[] {
   const requests: TrainRequest[] = [];
   page.on('request', (request) => {
     if (request.method() !== 'POST') return;
     if (new URL(request.url()).pathname !== '/api/models/train') return;
-    requests.push(request.postDataJSON() as TrainRequest);
+    requests.push(asTrainRequest(request));
   });
   return requests;
 }
@@ -361,7 +437,7 @@ test.describe('Models Page', () => {
   test('shows the train tab and a simple LoRA form', async ({ page }) => {
     await page.getByRole('tab', { name: 'Train' }).click();
     await expect(page.getByRole('heading', { name: 'Train a LoRA' })).toBeVisible();
-    await expect(page.getByText('Drop images or a video, pick an installed base')).toBeVisible();
+    await expect(page.getByText('Drop images, clips, or a folder, pick an installed base')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Train' })).toBeVisible();
   });
 
