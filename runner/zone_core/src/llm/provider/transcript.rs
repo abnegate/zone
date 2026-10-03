@@ -16,9 +16,16 @@ const TOOL: &str = "Tool result";
 /// that cannot tell its own earlier reply from the user's instruction will
 /// answer the wrong one.
 pub fn render(messages: &[Message]) -> String {
+    render_tail(messages, 0)
+}
+
+/// Render only what follows the first `from` messages, the part of a
+/// conversation a resumed session has not yet seen, in the format [`render`]
+/// uses for the whole of it.
+pub fn render_tail(messages: &[Message], from: usize) -> String {
     let mut prompt = String::new();
 
-    for message in messages {
+    for message in messages.iter().skip(from) {
         let Some(content) = message.content.as_deref().map(str::trim) else {
             continue;
         };
@@ -92,5 +99,30 @@ mod tests {
     #[test]
     fn an_empty_conversation_renders_an_empty_prompt() {
         assert!(render(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_tail_renders_only_entries_after_the_position() {
+        let conversation = [
+            Message::system("Be terse."),
+            Message::user("What does main do?"),
+            Message::assistant("Nothing yet."),
+            Message::system("Web search is unavailable this turn."),
+            Message::user("Make it print hello."),
+        ];
+
+        assert_eq!(
+            render_tail(&conversation, 3),
+            "System:\nWeb search is unavailable this turn.\n\nUser:\nMake it print hello."
+        );
+        assert_eq!(
+            render_tail(&conversation, 3),
+            render(&conversation[3..]),
+            "a tail reads as the same conversation rendered on its own"
+        );
+        assert_eq!(render_tail(&conversation, 0), render(&conversation));
+        assert_eq!(render_tail(&conversation, 4), "User:\nMake it print hello.");
+        assert!(render_tail(&conversation, conversation.len()).is_empty());
+        assert!(render_tail(&conversation, conversation.len() + 1).is_empty());
     }
 }

@@ -11,7 +11,7 @@ use crate::agent::prompt::{Context, Verbosity};
 const HEADING: &str = "Session context:";
 
 /// The one line that moves between two builds of the same turn's prompt.
-const NOW: &str = "- Now: ";
+pub(crate) const NOW: &str = "- Now: ";
 
 /// Zero-padded throughout, with a numeric offset, so the width never moves.
 const TIMESTAMP: &str = "%A %Y-%m-%d %H:%M:%S %:z";

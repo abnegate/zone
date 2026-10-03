@@ -1,4 +1,4 @@
-//! The sign-in Zone keeps for an organization's agent, ready for a turn to run with.
+//! One of the sign-ins Zone keeps for an organization's agent, ready for a turn to run with.
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -9,8 +9,8 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
 
-use super::claude;
-use super::locks::Locks;
+use super::locks::{Guard, Locks};
+use super::{claude, homes};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::state::AppState;
@@ -36,77 +36,84 @@ pub enum Error {
     Renewal(String),
     #[error("{0}")]
     Unreadable(String),
+    #[error("it was signed out")]
+    Deleted,
+    #[error("{0}")]
+    Home(String),
     #[error("could not read the sign-in: {0}")]
     Database(#[from] sqlx::Error),
 }
 
-/// The organization's own sign-in for `agent`, renewed first when it is about to expire, or
-/// `None` when Zone keeps none for it.
-pub async fn resolve(
-    state: &AppState,
-    organization: Uuid,
-    agent: AgentKind,
-) -> Result<Option<Login>, Error> {
-    match agent {
-        AgentKind::Claude => {
+/// Holds `login` on this server, against its renewal and every other write to its usage, until
+/// the guard drops. A write to the login's row that holds it first waits for a renewal here,
+/// rather than on a pooled connection the renewal's row lock keeps waiting.
+pub(super) async fn hold(login: Uuid) -> Guard<'static> {
+    RENEWALS.lock(login).await
+}
+
+/// `login`, ready for a turn to run with: a Claude login's token, renewed first when it is about
+/// to expire, or a codex login's own home.
+pub async fn resolve(state: &AppState, login: &AgentLoginRow) -> Result<Login, Error> {
+    match AgentKind::named(&login.agent) {
+        Some(AgentKind::Claude) => {
             let endpoint = claude::token_endpoint(&state.config().agents.claude_token_url)
                 .map_err(|error| Error::Renewal(error.to_string()))?;
-            resolve_claude(state, organization, &claude::Client::new(endpoint)).await
+            resolve_claude(state, login, &claude::Client::new(endpoint)).await
         }
-        AgentKind::Codex => {
-            let login = agent_logins::get(state.db(), organization, agent.as_str()).await?;
-            Ok(login.map(|_| Login::Codex {
-                home: state.config().agents.home(organization, agent),
-            }))
-        }
+        Some(AgentKind::Codex) => match homes::adopt(state, login).await {
+            Ok(home) => Ok(Login::Codex { home }),
+            Err(super::error::Error::Database(error)) => Err(Error::Database(error)),
+            Err(error) => Err(Error::Home(error.to_string())),
+        },
+        None => Err(Error::Unreadable(format!(
+            "{} is not an agent Zone drives",
+            login.agent
+        ))),
     }
 }
 
-/// [`resolve`] for claude, renewing through `client`.
+/// [`resolve`] for a Claude login, renewing through `client`.
 ///
 /// Only one renewal runs per login, across processes: it holds the row's lock, and a turn
 /// that waited for the lock finds the renewed tokens and runs with those. Turns on one server
-/// queue for the renewal before they take a connection.
+/// queue for the renewal before they take a connection, and renewals of different logins never
+/// wait on each other.
 pub(crate) async fn resolve_claude(
     state: &AppState,
-    organization: Uuid,
+    login: &AgentLoginRow,
     client: &claude::Client,
-) -> Result<Option<Login>, Error> {
-    let agent = AgentKind::Claude.as_str();
-    let Some(login) = agent_logins::get(state.db(), organization, agent).await? else {
-        return Ok(None);
-    };
+) -> Result<Login, Error> {
     let margin = margin(state.config());
-    let tokens = open(state, &login)?;
+    let tokens = open(state, login)?;
     if !renewable(&tokens, Utc::now(), margin) {
-        return current(tokens).map(Some);
+        return current(tokens);
     }
 
-    let _renewing = RENEWALS.lock(organization).await;
+    let _renewing = RENEWALS.lock(login.id).await;
     let mut transaction = state.db().begin().await?;
-    let Some(login) = agent_logins::lock(&mut transaction, organization, agent).await? else {
-        return Ok(None);
-    };
+    let login = agent_logins::lock(&mut transaction, login.id)
+        .await?
+        .ok_or(Error::Deleted)?;
     let tokens = open(state, &login)?;
     if !renewable(&tokens, Utc::now(), margin) {
-        return current(tokens).map(Some);
+        return current(tokens);
     }
+    let organization = login.organization_id;
     match client.refresh(&tokens).await {
         Ok(renewed) => {
             keep(state, transaction, organization, login.id, &renewed).await;
-            Ok(Some(Login::Claude {
+            Ok(Login::Claude {
                 token: renewed.access,
-            }))
+            })
         }
         Err(error) => {
             tracing::warn!(
                 %organization,
+                login = %login.id,
                 %error,
                 "Could not renew the organization's Claude sign-in"
             );
-            current(tokens)
-                .map(Some)
-                .map_err(|_| Error::Renewal(error.to_string()))
+            current(tokens).map_err(|_| Error::Renewal(error.to_string()))
         }
     }
 }
@@ -197,7 +204,7 @@ mod tests {
     use std::str::FromStr;
     use std::time::Duration;
 
-    use futures::future::join_all;
+    use futures::future::{join_all, try_join_all};
     use serde_json::json;
     use sqlx::PgPool;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -207,8 +214,9 @@ mod tests {
 
     use super::*;
     use crate::config::{AgentConfig, Config};
-    use crate::db::agent_logins::Upsert;
+    use crate::db::agent_logins::Insert;
     use crate::services::chat::session::Settings;
+    use crate::services::login::codex::CREDENTIALS;
 
     const TOKEN_PATH: &str = "/v1/oauth/token";
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";
@@ -223,6 +231,7 @@ mod tests {
     /// A pool small enough for turns waiting on one renewal to exhaust it, were each to hold a
     /// connection while it waits.
     const CONNECTIONS: u32 = 3;
+    /// How long other work waits for a connection before it counts the pool as taken.
     const ACQUIRE: Duration = Duration::from_secs(2);
     const HUNG: Duration = Duration::from_secs(4);
     const SETTLE: Duration = Duration::from_secs(1);
@@ -230,6 +239,7 @@ mod tests {
     const SLOW: Duration = Duration::from_secs(2);
     const PAUSE: Duration = Duration::from_millis(50);
     const ATTEMPTS: usize = 100;
+    const LEGACY: &str = r#"{"tokens":"legacy"}"#;
 
     struct Fixture {
         state: AppState,
@@ -260,24 +270,45 @@ mod tests {
             .expect("the test database")
     }
 
-    /// Drops the connection of the pool `name` that holds a transaction open, as a renewal does
-    /// while it waits for Claude.
-    async fn drop_renewal(pool: &PgPool, name: &str) {
+    /// Drops the connection of the pool `name` that holds the renewal's transaction open, once
+    /// `claude` has the renewal and the turn waits on its answer.
+    async fn drop_renewal(pool: &PgPool, name: &str, claude: &MockServer) {
+        asked(claude).await;
+        let dropped: Vec<bool> = sqlx::query_scalar(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE application_name = $1 AND state = 'idle in transaction'",
+        )
+        .bind(name)
+        .fetch_all(pool)
+        .await
+        .expect("the server's connections");
+        assert_eq!(
+            dropped,
+            [true],
+            "the renewal held no transaction open while it waited for Claude"
+        );
+    }
+
+    async fn asked(claude: &MockServer) {
         for _ in 0..ATTEMPTS {
-            let dropped: Option<bool> = sqlx::query_scalar(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-                 WHERE application_name = $1 AND state = 'idle in transaction'",
-            )
-            .bind(name)
-            .fetch_optional(pool)
-            .await
-            .expect("the server's connections");
-            if dropped == Some(true) {
+            let requests = claude
+                .received_requests()
+                .await
+                .expect("the token endpoint records its requests");
+            if !requests.is_empty() {
                 return;
             }
             tokio::time::sleep(PAUSE).await;
         }
-        panic!("the renewal never held a transaction open");
+        panic!("Claude was never asked to renew");
+    }
+
+    /// Opens every connection `pool` may hold, so that no later wait for one waits on a connect.
+    async fn opened(pool: &PgPool) {
+        let connections = try_join_all((0..CONNECTIONS).map(|_| pool.acquire()))
+            .await
+            .expect("the pool's connections");
+        drop(connections);
     }
 
     impl Fixture {
@@ -307,7 +338,7 @@ mod tests {
                     agents: AgentConfig {
                         state: agents.path().to_path_buf(),
                         claude_token_url: token_url,
-                        ..AgentConfig::default()
+                        ..crate::state::test_agents()
                     },
                     chat,
                     ..crate::state::test_config()
@@ -327,48 +358,69 @@ mod tests {
             Self::new(format!("{}{TOKEN_PATH}", server.uri())).await
         }
 
-        async fn sign_in(&self, tokens: &claude::Tokens) {
+        async fn sign_in(&self, tokens: &claude::Tokens) -> AgentLoginRow {
             let sealed = tokens
                 .seal(self.state.encryption_key())
                 .expect("tokens to seal");
             self.store(AgentKind::Claude, Some(&sealed), Some(tokens.expires_at))
-                .await;
+                .await
         }
 
+        /// A login of `agent` holding `credential`, in place of any the organization had.
         async fn store(
             &self,
             agent: AgentKind,
             credential: Option<&str>,
             expires_at: Option<DateTime<Utc>>,
-        ) {
-            agent_logins::upsert(
+        ) -> AgentLoginRow {
+            agent_logins::delete_all(&self.pool, self.organization, agent.as_str())
+                .await
+                .expect("the login it replaces is removed");
+            self.add(agent, credential, expires_at).await
+        }
+
+        /// A login of `agent` holding `credential`, beside any the organization has.
+        async fn add(
+            &self,
+            agent: AgentKind,
+            credential: Option<&str>,
+            expires_at: Option<DateTime<Utc>>,
+        ) -> AgentLoginRow {
+            agent_logins::insert(
                 &self.pool,
-                &Upsert {
+                &Insert {
                     organization_id: self.organization,
                     agent: agent.as_str(),
+                    account: None,
                     credential,
                     label: None,
                     expires_at,
                 },
             )
             .await
-            .expect("a stored login");
+            .expect("a stored login")
         }
 
         async fn stored(&self) -> (claude::Tokens, Option<DateTime<Utc>>) {
-            let login =
-                agent_logins::get(&self.pool, self.organization, AgentKind::Claude.as_str())
-                    .await
-                    .expect("the login to be readable")
-                    .expect("a claude login");
+            let login = self.first().await;
             let sealed = login.credential.expect("a sealed credential");
             let tokens = claude::Tokens::open(self.state.encryption_key(), sealed.expose())
                 .expect("tokens Zone sealed");
             (tokens, login.expires_at)
         }
 
-        async fn resolve(&self, agent: AgentKind) -> Result<Option<Login>, Error> {
-            resolve(&self.state, self.organization, agent).await
+        async fn first(&self) -> AgentLoginRow {
+            agent_logins::list_for(&self.pool, self.organization, AgentKind::Claude.as_str())
+                .await
+                .expect("the login to be readable")
+                .into_iter()
+                .next()
+                .expect("a claude login")
+        }
+
+        /// The organization's Claude login, read as a turn reads it, and resolved.
+        async fn resolve(&self) -> Result<Login, Error> {
+            resolve(&self.state, &self.first().await).await
         }
 
         async fn remove(&self) {
@@ -426,9 +478,9 @@ mod tests {
         ResponseTemplate::new(400).set_body_json(json!({"error": "invalid_grant"}))
     }
 
-    fn token(login: Result<Option<Login>, Error>) -> String {
+    fn token(login: Result<Login, Error>) -> String {
         match login {
-            Ok(Some(Login::Claude { token })) => token.expose().to_string(),
+            Ok(Login::Claude { token }) => token.expose().to_string(),
             other => panic!("expected a claude token, got {other:?}"),
         }
     }
@@ -441,7 +493,7 @@ mod tests {
             .sign_in(&tokens(Utc::now() + TimeDelta::hours(2), Some(REFRESH)))
             .await;
 
-        let login = fixture.resolve(AgentKind::Claude).await;
+        let login = fixture.resolve().await;
         fixture.remove().await;
 
         assert_eq!(token(login), ACCESS);
@@ -456,7 +508,7 @@ mod tests {
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(50), Some(REFRESH)))
             .await;
 
-        let login = fixture.resolve(AgentKind::Claude).await;
+        let login = fixture.resolve().await;
         fixture.remove().await;
 
         assert_eq!(
@@ -497,7 +549,7 @@ mod tests {
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(90), Some(REFRESH)))
             .await;
 
-        let login = fixture.resolve(AgentKind::Claude).await;
+        let login = fixture.resolve().await;
         fixture.remove().await;
 
         assert_eq!(
@@ -550,9 +602,9 @@ mod tests {
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
             .await;
 
-        let mut logins = join_all((0..TURNS).map(|_| fixture.resolve(AgentKind::Claude))).await;
+        let mut logins = join_all((0..TURNS).map(|_| fixture.resolve())).await;
         for _ in 0..TURNS {
-            logins.push(fixture.resolve(AgentKind::Claude).await);
+            logins.push(fixture.resolve().await);
         }
         let (stored, _) = fixture.stored().await;
         fixture.remove().await;
@@ -580,8 +632,8 @@ mod tests {
             .sign_in(&untimed(Utc::now() + TimeDelta::minutes(50)))
             .await;
 
-        let kept = lasting.resolve(AgentKind::Claude).await;
-        let renewal = expiring.resolve(AgentKind::Claude).await;
+        let kept = lasting.resolve().await;
+        let renewal = expiring.resolve().await;
         let (stored, _) = expiring.stored().await;
         lasting.remove().await;
         expiring.remove().await;
@@ -601,25 +653,25 @@ mod tests {
         let server = token_endpoint(renewed().set_delay(HUNG), 1).await;
         let pool = PgPoolOptions::new()
             .max_connections(CONNECTIONS)
-            .acquire_timeout(ACQUIRE)
             .connect(&database())
             .await
             .expect("the test database");
+        opened(&pool).await;
         let fixture = Fixture::on(pool.clone(), format!("{}{TOKEN_PATH}", server.uri())).await;
         fixture
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
             .await;
 
-        let turns = join_all((0..TURNS).map(|_| fixture.resolve(AgentKind::Claude)));
+        let turns = join_all((0..TURNS).map(|_| fixture.resolve()));
         let other_work = async {
             tokio::time::sleep(SETTLE).await;
-            sqlx::query("SELECT 1").execute(&pool).await
+            tokio::time::timeout(ACQUIRE, sqlx::query("SELECT 1").execute(&pool)).await
         };
         let (logins, other_work) = tokio::join!(turns, other_work);
         fixture.remove().await;
 
         assert!(
-            other_work.is_ok(),
+            matches!(other_work, Ok(Ok(_))),
             "turns waiting on one renewal took every connection: {other_work:?}"
         );
         for login in logins {
@@ -639,8 +691,8 @@ mod tests {
             .await;
 
         let (login, ()) = tokio::join!(
-            fixture.resolve(AgentKind::Claude),
-            drop_renewal(&fixture.pool, &name)
+            fixture.resolve(),
+            drop_renewal(&fixture.pool, &name, &server)
         );
         let (stored, _) = fixture.stored().await;
         fixture.remove().await;
@@ -663,8 +715,8 @@ mod tests {
         let current = tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH));
         fixture.sign_in(&current).await;
 
-        let (login, ()) = tokio::join!(fixture.resolve(AgentKind::Claude), async {
-            drop_renewal(&fixture.pool, &name).await;
+        let (login, ()) = tokio::join!(fixture.resolve(), async {
+            drop_renewal(&fixture.pool, &name, &server).await;
             fixture.state.db().close().await;
         });
         let (stored, _) = fixture.stored().await;
@@ -687,7 +739,7 @@ mod tests {
             .await;
         let before = Utc::now();
 
-        let logins = join_all((0..TURNS).map(|_| fixture.resolve(AgentKind::Claude))).await;
+        let logins = join_all((0..TURNS).map(|_| fixture.resolve())).await;
         let (stored, expires_at) = fixture.stored().await;
         fixture.remove().await;
 
@@ -721,7 +773,7 @@ mod tests {
         let current = tokens(Utc::now() + TimeDelta::minutes(2), Some(REFRESH));
         fixture.sign_in(&current).await;
 
-        let login = fixture.resolve(AgentKind::Claude).await;
+        let login = fixture.resolve().await;
         let (stored, _) = fixture.stored().await;
         fixture.remove().await;
 
@@ -741,7 +793,7 @@ mod tests {
             .sign_in(&tokens(Utc::now() - TimeDelta::minutes(1), Some(REFRESH)))
             .await;
 
-        let login = fixture.resolve(AgentKind::Claude).await;
+        let login = fixture.resolve().await;
         fixture.remove().await;
 
         assert!(
@@ -763,8 +815,8 @@ mod tests {
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), None))
             .await;
 
-        let expired = fixture.resolve(AgentKind::Claude).await;
-        let unrenewable = expiring.resolve(AgentKind::Claude).await;
+        let expired = fixture.resolve().await;
+        let unrenewable = expiring.resolve().await;
         fixture.remove().await;
         expiring.remove().await;
 
@@ -784,48 +836,88 @@ mod tests {
             .store(AgentKind::Claude, Some("not-a-sealed-credential"), None)
             .await;
 
-        let login = fixture.resolve(AgentKind::Claude).await;
+        let login = fixture.resolve().await;
         fixture.remove().await;
 
         assert!(matches!(login, Err(Error::Unreadable(_))), "{login:?}");
     }
 
     #[tokio::test]
-    async fn an_organization_zone_keeps_no_login_for_has_none() {
-        let fixture = Fixture::new(UNREACHABLE.to_string()).await;
+    async fn a_login_signed_out_before_it_renews_is_deleted() {
+        let server = token_endpoint(renewed(), 0).await;
+        let fixture = Fixture::answered_by(&server).await;
+        let login = fixture
+            .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
+            .await;
+        agent_logins::delete(&fixture.pool, fixture.organization, login.id)
+            .await
+            .expect("the login to be signed out");
 
-        let claude = fixture.resolve(AgentKind::Claude).await;
-        let codex = fixture.resolve(AgentKind::Codex).await;
+        let resolved = resolve(&fixture.state, &login).await;
         fixture.remove().await;
 
-        assert!(matches!(claude, Ok(None)), "{claude:?}");
-        assert!(matches!(codex, Ok(None)), "{codex:?}");
+        assert!(matches!(resolved, Err(Error::Deleted)), "{resolved:?}");
+        server.verify().await;
     }
 
     #[tokio::test]
-    async fn a_codex_login_is_the_organizations_codex_home() {
+    async fn a_codex_login_resolves_to_its_own_home_and_adopts_the_legacy_one() {
         let fixture = Fixture::new(UNREACHABLE.to_string()).await;
-        fixture.store(AgentKind::Codex, None, None).await;
+        let login = fixture.store(AgentKind::Codex, None, None).await;
+        let agents = &fixture.state.config().agents;
+        let legacy = agents
+            .create_home(fixture.organization, AgentKind::Codex)
+            .expect("the organization's codex root")
+            .join(CREDENTIALS);
+        std::fs::write(&legacy, LEGACY).expect("a codex login from before login homes");
 
-        let login = fixture.resolve(AgentKind::Codex).await;
+        let resolved = resolve(&fixture.state, &login).await;
         fixture.remove().await;
 
-        let expected = fixture
-            .state
-            .config()
-            .agents
-            .home(fixture.organization, AgentKind::Codex);
-        match login {
-            Ok(Some(Login::Codex { home })) => assert_eq!(home, expected),
-            other => panic!("expected the codex home, got {other:?}"),
+        let expected = agents.login_home(fixture.organization, AgentKind::Codex, login.id);
+        match resolved {
+            Ok(Login::Codex { home }) => assert_eq!(home, expected),
+            other => panic!("expected the login's own codex home, got {other:?}"),
         }
+        assert_eq!(
+            std::fs::read_to_string(expected.join(CREDENTIALS)).expect("the adopted login"),
+            LEGACY
+        );
+        assert!(!legacy.exists(), "the legacy login was copied, not moved");
+    }
+
+    /// Renewals queue per login: a renewal one login is in the middle of keeps no other login of
+    /// the organization waiting.
+    #[tokio::test]
+    async fn two_claude_logins_renew_at_once_without_waiting_on_each_other() {
+        let server = token_endpoint(renewed(), 1).await;
+        let fixture = Fixture::answered_by(&server).await;
+        let expiring = tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH));
+        let sealed = expiring
+            .seal(fixture.state.encryption_key())
+            .expect("tokens to seal");
+        let first = fixture
+            .add(AgentKind::Claude, Some(&sealed), Some(expiring.expires_at))
+            .await;
+        let second = fixture
+            .add(AgentKind::Claude, Some(&sealed), Some(expiring.expires_at))
+            .await;
+
+        let renewing = RENEWALS.lock(first.id).await;
+        let other = tokio::time::timeout(HUNG, resolve(&fixture.state, &second)).await;
+        drop(renewing);
+        fixture.remove().await;
+
+        let other = other.expect("a second login's renewal waited on the first's");
+        assert_eq!(token(other), RENEWED);
+        server.verify().await;
     }
 
     #[tokio::test]
     async fn a_claude_login_renews_through_the_client_it_is_given() {
         let server = token_endpoint(renewed(), 1).await;
         let fixture = Fixture::new(UNREACHABLE.to_string()).await;
-        fixture
+        let login = fixture
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
             .await;
         let client = claude::Client::new(
@@ -833,10 +925,10 @@ mod tests {
                 .expect("a loopback token endpoint"),
         );
 
-        let login = resolve_claude(&fixture.state, fixture.organization, &client).await;
+        let resolved = resolve_claude(&fixture.state, &login, &client).await;
         fixture.remove().await;
 
-        assert_eq!(token(login), RENEWED);
+        assert_eq!(token(resolved), RENEWED);
         server.verify().await;
     }
 }

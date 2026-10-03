@@ -636,6 +636,100 @@ describe('useChat', () => {
     expect(result.current.chat?.messages.at(-1)?.metadata?.citations).toEqual([citation]);
   });
 
+  it('puts a handover on the reply it moved, where the new account took over', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+    const frame = {
+      type: 'handover',
+      message_id: 'moved',
+      from: 'a@example.com',
+      to: 'b@example.com',
+      from_agent: 'claude',
+      agent: 'claude',
+      reason: 'limit',
+      resets_at: '2026-09-23T06:10:00Z',
+      carried: true,
+      at: 5,
+    };
+    const stored = {
+      kind: 'handover',
+      from: 'a@example.com',
+      to: 'b@example.com',
+      from_agent: 'claude',
+      agent: 'claude',
+      reason: 'limit',
+      resets_at: '2026-09-23T06:10:00Z',
+      carried: true,
+      at: 5,
+    };
+
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'moved', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: 'Half ', index: 0 });
+      lastSocket?.emit({ type: 'status', message: 'Switching to b@example.com…' });
+      lastSocket?.emit(frame);
+      lastSocket?.emit({ ...frame, message_id: 'elsewhere', to: 'c@example.com' });
+      lastSocket?.emit({ ...frame, at: 'nowhere', to: 'd@example.com' });
+      lastSocket?.emit(frame);
+      lastSocket?.emit({ type: 'chunk', content: 'done', index: 1 });
+    });
+
+    await waitFor(() => {
+      const moved = result.current.chat?.messages.at(-1);
+      expect(moved?.content).toBe('Half done');
+      expect(moved?.metadata?.handovers).toEqual([stored]);
+    });
+    expect(result.current.status).toBe('Switching to b@example.com…');
+    expect(result.current.streaming).toBe(true);
+
+    act(() =>
+      lastSocket?.emit({
+        type: 'message_end',
+        message_id: 'moved',
+        content: 'Half done',
+        metadata: { handovers: [{ ...stored, kind: undefined, reason: 'quota' }] },
+      })
+    );
+    await waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(result.current.status).toBeNull();
+    expect(result.current.chat?.messages.at(-1)?.metadata?.handovers).toEqual([stored]);
+  });
+
+  it('keeps the live handover when the end of the turn brings no metadata', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'moved', role: 'assistant' });
+      lastSocket?.emit({
+        type: 'handover',
+        message_id: 'moved',
+        from: 'a@example.com',
+        to: 'b@example.com',
+        from_agent: 'claude',
+        agent: 'codex',
+        reason: 'signed_out',
+        resets_at: null,
+        carried: false,
+        at: 0,
+      });
+      lastSocket?.emit({ type: 'message_end', message_id: 'moved', content: 'Answer' });
+    });
+
+    await waitFor(() => expect(result.current.streaming).toBe(false));
+    const handovers = result.current.chat?.messages.at(-1)?.metadata?.handovers;
+    expect(handovers).toHaveLength(1);
+    expect(handovers?.[0]).toMatchObject({ agent: 'codex', reason: 'signed_out', at: 0 });
+  });
+
   it('records a workspace write receipt from the live frame and keeps it on reload', async () => {
     const receipt = {
       id: 'call_1',

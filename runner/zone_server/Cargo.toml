@@ -91,6 +91,9 @@ metrics-exporter-prometheus = { workspace = true }
 # MCP server: serve zone's tools to a spawned coding agent
 rmcp = { workspace = true, default-features = false }
 
+# Per-login plan usage for agent routing
+aiusg = { version = "=0.5.0", default-features = false }
+
 # Internal
 abnegate-exec = { workspace = true }
 abnegate-http = { workspace = true }

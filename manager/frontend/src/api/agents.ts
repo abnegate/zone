@@ -95,7 +95,7 @@ export const agentsApi = {
     return parse(AgentStatusSchema, await response.json());
   },
 
-  /** Ends the caller's own sign-in, wherever its code is. */
+  /** Ends the caller's own sign-in, wherever its code is, including a pending device sign-in. */
   async cancel(organizationId: string, agent: Agent): Promise<void> {
     await send(
       `${agentsUrl(organizationId)}/${agent}/login/attempt`,
@@ -104,9 +104,10 @@ export const agentsApi = {
     );
   },
 
-  async signOut(organizationId: string, agent: Agent): Promise<void> {
+  /** Signs one of the agent's accounts out; the others stay signed in. */
+  async signOut(organizationId: string, agent: Agent, loginId: string): Promise<void> {
     await send(
-      `${agentsUrl(organizationId)}/${agent}/login`,
+      `${agentsUrl(organizationId)}/${agent}/logins/${encodeURIComponent(loginId)}`,
       { method: 'DELETE' },
       `Failed to sign out of ${agent}`
     );

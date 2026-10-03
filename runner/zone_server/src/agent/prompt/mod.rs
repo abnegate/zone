@@ -16,6 +16,7 @@ mod verbosity;
 
 pub(crate) use context::Context;
 pub use environment::Environment;
+pub(crate) use section::session::NOW;
 pub use surface::Surface;
 pub use vcs::Vcs;
 pub use verbosity::Verbosity;

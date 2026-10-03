@@ -91,11 +91,8 @@ describe('InvitationsSection', () => {
   it('fetches and displays invitations', async () => {
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 
-    await waitFor(() => {
-      expect(mockGetInvitations).toHaveBeenCalledWith(orgId);
-    });
-
-    expect(screen.getByText('invitee1@test.com')).toBeInTheDocument();
+    expect(await screen.findByText('invitee1@test.com')).toBeInTheDocument();
+    expect(mockGetInvitations).toHaveBeenCalledWith(orgId);
     expect(screen.getByText('invitee2@test.com')).toBeInTheDocument();
     expect(screen.getByText('Engineering')).toBeInTheDocument();
   });

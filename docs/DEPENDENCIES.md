@@ -87,3 +87,24 @@ attacker-controlled.
 This exception must be revisited if extract-zip publishes a patched release, if
 `@lhci/cli` moves out of devDependencies, or if a caller extracts an archive from
 a source outside the Chrome download. All other frontend advisories remain fatal.
+
+## aiusg
+
+`aiusg` 0.5.0 reads each signed-in Claude and ChatGPT login's plan usage, so
+agent routing can tell a limited login from one with headroom. It is pinned
+exactly in `runner/zone_server/Cargo.toml` with `default-features = false`,
+which leaves out its `cli` feature and everything only the command line needs:
+`clap`, `crossterm`, `webbrowser`, `rmcp`, `schemars`, `keyring` and
+`rusqlite`. The library half brings in `async-compression` 0.4.50,
+`compression-codecs` 0.4.45 and `compression-core` 0.4.33, through the `gzip`
+feature it enables on reqwest; no locked version changes.
+
+Check from `runner` that the command line half stays out:
+
+```sh
+cargo tree -p aiusg -e normal --prefix none | grep -E '^(crossterm|webbrowser|rusqlite|keyring|clap|rmcp|schemars) '
+cargo tree -p zone_server -i rusqlite
+```
+
+The first prints nothing and the second reports no match. Enabling any aiusg
+feature must pass that check again.

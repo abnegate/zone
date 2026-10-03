@@ -57,7 +57,7 @@ export function DeviceSteps({ prompt, account, busy, entry, onCancel }: DeviceSt
           size="sm"
           variant="ghost"
           onClick={onCancel}
-          loading={busy === 'signOut'}
+          loading={busy === 'cancel'}
           disabled={busy !== null}
         >
           Cancel

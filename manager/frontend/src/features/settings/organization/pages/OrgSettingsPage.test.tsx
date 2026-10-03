@@ -32,6 +32,7 @@ const agentsApi = {
   get: mock(),
   start: mock(),
   submitCode: mock(),
+  cancel: mock(),
   signOut: mock(),
 };
 
@@ -268,7 +269,8 @@ describe('OrgSettingsPage', () => {
       ).toBeInTheDocument();
       expect(agentsApi.list).toHaveBeenCalledWith(mockCurrentOrganization.id);
       expect(screen.queryByLabelText(/LiteLLM Host/i)).toBeNull();
-      expect(screen.getByText('Signed in')).toBeInTheDocument();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
+      expect(screen.getByText('jake@example.com')).toBeInTheDocument();
 
       fireEvent.change(select, { target: { value: 'codex' } });
 
@@ -412,7 +414,14 @@ describe('OrgSettingsPage', () => {
     describe('after the provider changes', () => {
       const [claudeStatus, codexStatus] = fixture.agents;
       const signedOut = [
-        { ...claudeStatus, state: 'signed_out', source: null, label: null, expires_at: null },
+        {
+          ...claudeStatus,
+          state: 'signed_out',
+          source: null,
+          label: null,
+          expires_at: null,
+          logins: [],
+        },
         { ...codexStatus, state: 'signed_out', pending: null },
       ];
       const later = () => new Date(Date.now() + 10 * 60_000).toISOString();
@@ -430,14 +439,14 @@ describe('OrgSettingsPage', () => {
           user_code: 'ABCD-EFGHI',
           expires_at: later(),
         });
-        agentsApi.signOut.mockRejectedValue(new Error('Failed to sign out of codex: 500'));
+        agentsApi.cancel.mockRejectedValue(new Error('Failed to cancel the codex sign-in: 500'));
         render(<OrgSettingsPage />);
 
         fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }));
         expect(await screen.findByText('ABCD-EFGHI')).toBeInTheDocument();
         fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
         expect(await screen.findByRole('alert')).toHaveTextContent(
-          'Failed to sign out of codex: 500'
+          'Failed to cancel the codex sign-in: 500'
         );
 
         fireEvent.change(screen.getByLabelText('AI Provider'), {
@@ -504,7 +513,14 @@ describe('OrgSettingsPage', () => {
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
       agentsApi.list.mockResolvedValue([
-        { ...claudeStatus, state: 'signed_out', source: null, label: null, expires_at: null },
+        {
+          ...claudeStatus,
+          state: 'signed_out',
+          source: null,
+          label: null,
+          expires_at: null,
+          logins: [],
+        },
         codexStatus,
       ]);
       agentsApi.start.mockResolvedValue({
@@ -535,7 +551,14 @@ describe('OrgSettingsPage', () => {
     it('lets an owner sign in and shows a member whom to ask', async () => {
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
       agentsApi.list.mockResolvedValue([
-        { ...fixture.agents[0], state: 'signed_out', source: null, label: null, expires_at: null },
+        {
+          ...fixture.agents[0],
+          state: 'signed_out',
+          source: null,
+          label: null,
+          expires_at: null,
+          logins: [],
+        },
         fixture.agents[1],
       ]);
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };

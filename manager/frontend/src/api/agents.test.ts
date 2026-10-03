@@ -13,7 +13,7 @@ const original = globalThis.fetch;
 const organization = '00000000-0000-0000-0000-000000000001';
 const agents = `/api/organizations/${organization}/agents`;
 const authorize =
-  'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=fake-challenge&code_challenge_method=S256&state=fake-state';
+  'https://claude.com/cai/oauth/authorize?code=true&client_id=fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference+user%3Aprofile&code_challenge=fake-challenge&code_challenge_method=S256&state=fake-state';
 const refusal =
   'Error logging in with device code: device code request failed with status 403 Forbidden';
 const attempt = '6f1b1f63-5a3e-4c8e-9d0e-2b7f7c1d9a10';
@@ -46,6 +46,55 @@ describe('agent status contract', () => {
     expect(statuses[0].models).toEqual(['sonnet', 'opus', 'haiku']);
     expect(statuses[1].models).toEqual(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']);
     expect(statuses[1].pending?.user_code).toBe('ABCD-EFGHI');
+  });
+
+  it('reads every account of an agent with its usage', () => {
+    const { agents: statuses } = AgentStatusesSchema.parse(fixture);
+    expect(statuses[0].logins).toEqual([
+      {
+        id: '3f2b9c1e-6d4a-4f0b-9c7e-1a2b3c4d5e6f',
+        label: 'jake@example.com',
+        plan: 'Claude Max',
+        state: 'signed_in',
+        expires_at: null,
+        exhausted_until: null,
+        usage: {
+          windows: [
+            {
+              name: '5h',
+              used_percent: 62,
+              used: null,
+              limit: null,
+              resets_at: '2026-09-23T06:10:00Z',
+            },
+            {
+              name: '7d',
+              used_percent: 31,
+              used: null,
+              limit: null,
+              resets_at: '2026-09-28T04:00:00Z',
+            },
+          ],
+          headroom: 38,
+          fetched_at: '2026-09-23T04:00:00Z',
+        },
+        last_used_at: '2026-09-23T03:50:00Z',
+      },
+    ]);
+    expect(statuses[1].logins).toEqual([]);
+  });
+
+  it('reads a status that lists no accounts as holding none', () => {
+    const { logins: _, ...bare } = fixture.agents[0];
+    expect(AgentStatusSchema.parse(bare).logins).toEqual([]);
+  });
+
+  it('reads an account without a usage reading, and refuses one without an id', () => {
+    const [login] = fixture.agents[0].logins;
+    const unread = { ...fixture.agents[0], logins: [{ ...login, usage: null }] };
+    expect(AgentStatusSchema.parse(unread).logins[0].usage).toBeNull();
+    const anonymous = { ...fixture.agents[0], logins: [{ ...login, id: 'not-a-login' }] };
+    expect(AgentStatusSchema.safeParse(anonymous).success).toBe(false);
   });
 
   it('accepts a pending sign-in whose code the server hides from a member', () => {
@@ -201,11 +250,28 @@ describe('agentsApi', () => {
     });
   });
 
-  it('signs out', async () => {
+  it('signs one account out', async () => {
     const request = respond(null, 204);
-    await agentsApi.signOut(organization, 'codex');
+    const login = fixture.agents[0].logins[0].id;
+    await agentsApi.signOut(organization, 'claude', login);
     expect(sent(request)).toEqual({
-      url: `${agents}/codex/login`,
+      url: `${agents}/claude/logins/${login}`,
+      method: 'DELETE',
+      body: undefined,
+    });
+  });
+
+  it('encodes the account it signs out', async () => {
+    const request = respond(null, 204);
+    await agentsApi.signOut(organization, 'codex', '../login');
+    expect(sent(request).url).toBe(`${agents}/codex/logins/..%2Flogin`);
+  });
+
+  it('cancels a device sign-in without signing any account out', async () => {
+    const request = respond(null, 204);
+    await agentsApi.cancel(organization, 'codex');
+    expect(sent(request)).toEqual({
+      url: `${agents}/codex/login/attempt`,
       method: 'DELETE',
       body: undefined,
     });
