@@ -1,0 +1,13 @@
+# Default certificate covering the local console hosts. Let's Encrypt does not
+# issue for .localhost, and Traefik's own default cert has a random SAN that
+# makes browsers load the page after an exception and then fail fetch() with
+# NetworkError.
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/traefik/certs/local.crt
+        keyFile: /etc/traefik/certs/local.key
+  certificates:
+    - certFile: /etc/traefik/certs/local.crt
+      keyFile: /etc/traefik/certs/local.key

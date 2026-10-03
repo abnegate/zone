@@ -20,6 +20,7 @@ services:
       - traefik_letsencrypt:/letsencrypt
       - ./traefik/entrypoint.sh:/custom-entrypoint.sh:ro
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./traefik/certs:/etc/traefik/certs:ro
     entrypoint: ["/custom-entrypoint.sh"]
     command:
       - --api.dashboard=true
@@ -358,7 +359,7 @@ services:
       - SMTP_FROM=${SMTP_FROM:-}
       - SMTP_FROM_NAME=${SMTP_FROM_NAME:-Zone}
       - DOMAIN_HOST_WEBUI=${DOMAIN_HOST_WEBUI}
-      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
       - LITELLM_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_MANAGER_API_KEY=${SECURITY_MANAGER_API_KEY}

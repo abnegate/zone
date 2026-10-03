@@ -761,15 +761,17 @@ pub struct AllowedOrigins {
 }
 
 impl AllowedOrigins {
-    /// `CORS_ORIGINS` plus the deployment's base domain. With neither set this
-    /// admits loopback only, so a deployment that forgot to configure the
-    /// console fails closed rather than open.
+    /// `CORS_ORIGINS`, the consoles in `ZONE_CONSOLE_ORIGINS`, plus the
+    /// deployment's base domain. With none of those this admits loopback only,
+    /// so a deployment that forgot to configure the console fails closed
+    /// rather than open.
     pub fn from_config(config: &Config) -> Self {
         Self::new(
             config
                 .cors_origins
                 .iter()
                 .cloned()
+                .chain(config.agents.consoles.iter().cloned())
                 .chain(env::var(DOMAIN_HOST).ok()),
         )
     }
@@ -1529,6 +1531,23 @@ mod tests {
         assert_eq!(origins, AllowedOrigins::default());
         assert!(origins.allows("http://localhost:3001"));
         assert!(!origins.allows("https://anything.example.com"));
+    }
+
+    #[test]
+    fn console_origins_are_browser_origins_for_cors() {
+        let mut config = create_test_config();
+        config.agents.consoles = vec![
+            "http://manager.localhost".into(),
+            "https://manager.localhost".into(),
+        ];
+        let origins = AllowedOrigins::from_config(&config);
+        for origin in ["http://manager.localhost", "https://manager.localhost"] {
+            assert!(origins.allows(origin), "{origin} must be accepted");
+        }
+        assert!(
+            !origins.allows("https://evil.example.com"),
+            "hosts outside the console list stay closed"
+        );
     }
 
     #[test]
