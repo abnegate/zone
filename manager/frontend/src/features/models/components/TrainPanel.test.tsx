@@ -739,6 +739,9 @@ describe('TrainPanel', () => {
         status: 'running',
         filename: null,
         quality: null,
+        step: 40,
+        total: 400,
+        eta_seconds: 180,
       })
     );
     const response = deferred<{ filename: string; quality: null; dataset: never[] }>();
@@ -746,7 +749,9 @@ describe('TrainPanel', () => {
     render(<TrainPanel onTrained={trained} />);
 
     await waitFor(() => expect(screen.getByText('Training jerry')).toBeInTheDocument());
-    expect(screen.getByText('This run keeps going if you leave the page.')).toBeInTheDocument();
+    expect(screen.getByText('Step 40 of 400')).toBeInTheDocument();
+    expect(screen.getByText(/about 3 minutes left/)).toBeInTheDocument();
+    expect(screen.getByText(/This run keeps going if you leave the page/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
 
     response.resolve({ filename: 'jerry.safetensors', quality: null, dataset: [] });

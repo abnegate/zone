@@ -205,6 +205,18 @@ describe('page chrome', () => {
     expect(rule(css, '.context-label')).not.toContain('gap');
   });
 
+  it('pins the train overlay in front of the page at the bottom right', () => {
+    const layout = read(join(app, 'shared', 'components', 'Layout', 'Layout.css'));
+    expect(rule(layout, '.layout-docks')).toContain('position: fixed');
+    expect(rule(layout, '.layout-docks')).toContain('z-index: 1200');
+    expect(rule(layout, '.layout-docks')).toContain('right: var(--ui-space-6)');
+    expect(rule(layout, '.layout-docks')).toContain('bottom: var(--ui-space-6)');
+
+    const dock = read(join(app, 'features', 'models', 'components', 'TrainDock.css'));
+    expect(rule(dock, '.train-dock')).toContain('width: min(22rem, calc(100vw - 2rem))');
+    expect(rule(dock, '.train-dock')).toContain('border-radius: var(--ui-radius-xl)');
+  });
+
   it('replaces the Train file pickers with 96px dashed drop zones and right-aligns Train', () => {
     const zone = read(join(app, 'features', 'models', 'components', 'DropZone.css'));
     expect(rule(zone, '.drop-zone')).toContain('min-height: 6rem');

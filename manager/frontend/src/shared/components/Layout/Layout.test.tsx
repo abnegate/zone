@@ -10,6 +10,7 @@ mock.module('../Sidebar/Sidebar', () => ({
 
 mock.module('../../../features/models', () => ({
   DownloadDock: () => null,
+  TrainDock: () => null,
 }));
 
 // Mock react-router-dom

@@ -146,6 +146,52 @@ describe('Namespaced model requests', () => {
     expect(request.mock.calls.some((call) => call[1]?.method !== 'POST')).toBe(true);
   });
 
+  it('reports step progress while a 202 training job is still running', async () => {
+    const running = {
+      id: 'job-1',
+      name: 'portrait',
+      status: 'running',
+      step: 40,
+      total: 400,
+      eta_seconds: 180,
+      started_at: '2026-10-03T12:00:00Z',
+    };
+    const done = {
+      ...running,
+      status: 'succeeded',
+      filename: 'portrait.safetensors',
+      quality: null,
+      dataset: [],
+      screening: null,
+    };
+    const request = mock(async (_input: RequestInfo, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return new Response(JSON.stringify(running), { status: 202 });
+      }
+      return Response.json(done);
+    });
+    global.fetch = request as typeof fetch;
+    const seen: Array<{ step?: number; eta_seconds?: number | null }> = [];
+
+    expect(
+      await modelsApi.train(
+        {
+          name: 'portrait',
+          base: 'flux-schnell',
+          images: [],
+        },
+        undefined,
+        (job) => seen.push({ step: job.step, eta_seconds: job.eta_seconds })
+      )
+    ).toEqual({
+      filename: 'portrait.safetensors',
+      quality: null,
+      dataset: [],
+      screening: null,
+    });
+    expect(seen[0]).toEqual({ step: 40, eta_seconds: 180 });
+  });
+
   it('encodes the complete model name when deleting it', async () => {
     const request = mock(async () => new Response(null, { status: 204 }));
     global.fetch = request as typeof fetch;

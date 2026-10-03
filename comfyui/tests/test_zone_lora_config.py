@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -126,3 +128,19 @@ class CheckpointCadenceTests(unittest.TestCase):
 
     def test_checkpointing_can_be_turned_off(self):
         self.assertEqual(self.interval(6000, checkpoint_every=0), 0)
+
+
+class ProgressSidecarTests(unittest.TestCase):
+    def test_progress_filename_matches_the_artifact_stem(self):
+        self.assertEqual(
+            train_config.progress_filename('zone-lora-abcd'),
+            'zone-lora-abcd-progress.json',
+        )
+
+    def test_write_progress_replaces_a_complete_json_object(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'zone-lora-abcd-progress.json'
+            train_config.write_progress(path, 0, 400)
+            train_config.write_progress(path, 12, 400)
+            self.assertEqual(json.loads(path.read_text()), {'step': 12, 'total': 400})
+            self.assertFalse(path.with_name(path.name + '.tmp').exists())

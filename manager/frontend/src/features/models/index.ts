@@ -1,9 +1,9 @@
 // Types
 
 // Components
-export { DownloadDock, VirtualBrowseList } from './components';
+export { DownloadDock, TrainDock, VirtualBrowseList } from './components';
 // Hooks
-export { PullProvider, useBrowse, useModels, usePull } from './hooks';
+export { PullProvider, TrainProvider, useBrowse, useModels, usePull, useTrain } from './hooks';
 // Pages
 export { ModelsPage } from './pages';
 // Schemas

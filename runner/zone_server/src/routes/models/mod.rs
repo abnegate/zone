@@ -734,9 +734,32 @@ pub async fn train(
     let litellm_host = state.config().litellm_host.clone();
     let litellm_key = state.config().litellm_key.clone();
     tokio::spawn(async move {
-        match lora::train(&comfyui, litellm_host, litellm_key, request).await {
-            Ok(outcome) => job.succeed(outcome),
-            Err(error) => job.fail(error),
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let reporter = job.clone();
+        let training =
+            lora::train_reporting(&comfyui, litellm_host, litellm_key, request, progress_tx);
+        tokio::pin!(training);
+        let mut progress_open = true;
+        loop {
+            tokio::select! {
+                biased;
+                update = progress_rx.recv(), if progress_open => {
+                    match update {
+                        Some(update) => reporter.progress(update.step, update.total),
+                        None => progress_open = false,
+                    }
+                }
+                result = &mut training => {
+                    while let Ok(update) = progress_rx.try_recv() {
+                        reporter.progress(update.step, update.total);
+                    }
+                    match result {
+                        Ok(outcome) => reporter.succeed(outcome),
+                        Err(error) => reporter.fail(error),
+                    }
+                    break;
+                }
+            }
         }
     });
     (StatusCode::ACCEPTED, Json(view)).into_response()

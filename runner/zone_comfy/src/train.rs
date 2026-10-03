@@ -11,6 +11,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const PACKAGED_TRAIN_CONFIG: &str =
@@ -60,6 +61,29 @@ impl Default for Run {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrainProgress {
+    pub step: u32,
+    pub total: u32,
+}
+
+pub fn progress_filename(artifact: &str) -> String {
+    format!("{artifact}-progress.json")
+}
+
+pub fn parse_progress(bytes: &[u8]) -> Option<TrainProgress> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
+    let step = u32::try_from(value.get("step")?.as_u64()?).ok()?;
+    let total = u32::try_from(value.get("total")?.as_u64()?).ok()?;
+    if total == 0 {
+        return None;
+    }
+    Some(TrainProgress {
+        step: step.min(total),
+        total,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,11 +177,32 @@ pub async fn run(
     output: &Path,
     image_count: usize,
 ) -> Result<Run, TrainError> {
+    run_with_progress(config, model, work, output, image_count, None).await
+}
+
+pub async fn run_with_progress(
+    config: &Config,
+    model: &TrainingModel,
+    work: &Path,
+    output: &Path,
+    image_count: usize,
+    progress: Option<mpsc::UnboundedSender<TrainProgress>>,
+) -> Result<Run, TrainError> {
     if !config.enabled {
         return Err(TrainError::Disabled);
     }
     let run = Run::new();
-    match execute(config, model, work, output, image_count, &run).await {
+    match execute(
+        config,
+        model,
+        work,
+        output,
+        image_count,
+        &run,
+        progress.as_ref(),
+    )
+    .await
+    {
         Ok(()) => Ok(run),
         Err(failure) => {
             if failure.cleanup {
@@ -175,10 +220,18 @@ async fn execute(
     output: &Path,
     image_count: usize,
     run: &Run,
+    progress: Option<&mpsc::UnboundedSender<TrainProgress>>,
 ) -> Result<(), Failure> {
     run.validate()?;
     let settings = packaged_config()?;
     let client = client(config)?;
+    let steps = settings.steps(image_count);
+    if let Some(progress) = progress {
+        let _ = progress.send(TrainProgress {
+            step: 0,
+            total: steps,
+        });
+    }
     let manifest = stage_or_upload(&client, config, model, work, run).await?;
     let graph = train_graph(
         model,
@@ -186,7 +239,7 @@ async fn execute(
         &manifest,
         &run.artifact,
         &settings,
-        settings.steps(image_count),
+        steps,
     );
     let prompt = queue(&client, config, graph)
         .await
@@ -199,6 +252,8 @@ async fn execute(
         config,
         prompt,
         Duration::from_secs(config.train_timeout_secs),
+        Some(&run.artifact),
+        progress,
     )
     .await
     {
@@ -754,6 +809,8 @@ async fn wait_prompt(
     config: &Config,
     prompt: Uuid,
     timeout: Duration,
+    artifact: Option<&str>,
+    progress: Option<&mpsc::UnboundedSender<TrainProgress>>,
 ) -> Result<(), WaitFailure> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -791,8 +848,38 @@ async fn wait_prompt(
                 }
             }
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        if let (Some(artifact), Some(progress)) = (artifact, progress)
+            && let Some(update) = prompt_progress(client, config, artifact).await
+        {
+            let _ = progress.send(update);
+        }
+        tokio::time::sleep(Duration::from_millis(config.poll_interval_ms)).await;
     }
+}
+
+async fn prompt_progress(
+    client: &reqwest::Client,
+    config: &Config,
+    artifact: &str,
+) -> Option<TrainProgress> {
+    let filename = progress_filename(artifact);
+    let response = authorize(
+        config,
+        client
+            .get(format!(
+                "{}/view?filename={}&subfolder=loras&type=output",
+                config.base_url,
+                urlencoding::encode(&filename)
+            ))
+            .timeout(REQUEST_TIMEOUT),
+    )
+    .send()
+    .await
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    parse_progress(&response.bytes().await.ok()?)
 }
 
 async fn history(
@@ -936,7 +1023,7 @@ pub async fn cleanup(config: &Config, run: &Run) {
     let Ok(prompt) = queue(&client, config, graph).await else {
         return;
     };
-    let _ = wait_prompt(&client, config, prompt, Duration::from_secs(30)).await;
+    let _ = wait_prompt(&client, config, prompt, Duration::from_secs(30), None, None).await;
 }
 
 fn cleanup_local(config: &Config, run: &Run) {
@@ -947,13 +1034,16 @@ fn cleanup_local(config: &Config, run: &Run) {
     if let Some(output) = local_output(config) {
         let prefix = format!("{}-step", run.artifact);
         let final_name = format!("{}.safetensors", run.artifact);
+        let progress_name = progress_filename(&run.artifact);
         let Ok(entries) = fs::read_dir(output) else {
             return;
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if (name == final_name || name.starts_with(&prefix) && name.ends_with(".safetensors"))
+            if (name == final_name
+                || name == progress_name
+                || name.starts_with(&prefix) && name.ends_with(".safetensors"))
                 && !entry
                     .file_type()
                     .is_ok_and(|file_type| file_type.is_symlink())
@@ -1485,6 +1575,8 @@ mod tests {
             &config(&server),
             prompt,
             Duration::from_millis(120),
+            None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1515,6 +1607,8 @@ mod tests {
             &config(&server),
             prompt,
             Duration::from_secs(5),
+            None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1789,6 +1883,8 @@ mod tests {
             },
             prompt,
             Duration::from_secs(1),
+            None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1952,5 +2048,87 @@ mod tests {
             "{message}"
         );
         assert!(!message.contains('{'), "{message}");
+    }
+
+    #[test]
+    fn a_progress_sidecar_names_the_step() {
+        let progress = parse_progress(br#"{"step":12,"total":400}"#).unwrap();
+        assert_eq!(
+            progress,
+            TrainProgress {
+                step: 12,
+                total: 400
+            }
+        );
+        assert!(parse_progress(br#"{"step":1,"total":0}"#).is_none());
+        assert!(parse_progress(b"not json").is_none());
+        assert_eq!(
+            parse_progress(br#"{"step":500,"total":400}"#).unwrap().step,
+            400
+        );
+        assert_eq!(
+            progress_filename("zone-lora-abcd"),
+            "zone-lora-abcd-progress.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_prompt_forwards_sidecar_progress() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        let artifact = "zone-lora-progress";
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(RunningThenDone(
+                std::sync::atomic::AtomicUsize::new(0),
+                prompt,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .and(query_param("filename", format!("{artifact}-progress.json")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"step": 12, "total": 400})),
+            )
+            .mount(&server)
+            .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        wait_prompt(
+            &reqwest::Client::new(),
+            &config(&server),
+            prompt,
+            Duration::from_secs(5),
+            Some(artifact),
+            Some(&tx),
+        )
+        .await
+        .unwrap();
+        drop(tx);
+        let update = rx.recv().await.expect("sidecar progress");
+        assert_eq!(
+            update,
+            TrainProgress {
+                step: 12,
+                total: 400
+            }
+        );
+    }
+
+    struct RunningThenDone(std::sync::atomic::AtomicUsize, Uuid);
+
+    impl wiremock::Respond for RunningThenDone {
+        fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+            let seen = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let status = if seen == 0 {
+                json!({"status_str": "running"})
+            } else {
+                json!({"completed": true, "status_str": "success"})
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                self.1.to_string(): {"status": status}
+            }))
+        }
     }
 }

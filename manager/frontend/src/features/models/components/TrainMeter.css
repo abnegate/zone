@@ -1,0 +1,41 @@
+.train-meter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+}
+
+.train-meter-copy {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ui-space-2);
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.train-meter-percent {
+  font-weight: 600;
+  color: var(--ui-text-primary);
+}
+
+.train-meter-eta {
+  margin: 0;
+  font-size: var(--ui-text-2xs);
+  line-height: var(--ui-space-4);
+  color: var(--ui-text-muted);
+}
+
+.progress-bar-fill--unknown {
+  width: 40%;
+  animation: train-progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes train-progress-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(280%);
+  }
+}

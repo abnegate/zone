@@ -84,7 +84,7 @@ pub use dataset::{Concern, Finding, inspect};
 pub use inventory::{Identity, InventoryItem, WeightSidecar, bind_identity, identities, scan};
 pub use lora::{
     TrainBase, TrainError, TrainImage, TrainOutcome, TrainRequest, available_bases,
-    identity_caption, train, validate_request,
+    identity_caption, train, train_reporting, validate_request,
 };
 pub use media::MediaType;
 pub use observe::{RequestObserver, observe_requests};
@@ -92,4 +92,5 @@ pub use quality::Quality;
 pub use recipe::{PromptMode, Recipe, RecipeCatalog, sanitize_weight_filename};
 pub use screening::{Rejection, Verdict, screen};
 pub use subject::Subject;
+pub use train::TrainProgress;
 pub use video::{Clip, Frame, FrameRequest, extract};

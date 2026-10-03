@@ -1,8 +1,10 @@
 //! One in-process LoRA training job. The request that starts it returns before
 //! the trainer finishes, so a refresh does not cancel the run.
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_comfy::dataset::Finding;
 use zone_comfy::lora::{Screening, TrainError, TrainOutcome};
@@ -31,6 +33,13 @@ pub struct TrainJobView {
     pub screening: Option<Screening>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_seconds: Option<u64>,
+    pub started_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Default)]
@@ -41,6 +50,7 @@ pub struct TrainRegistry {
 pub struct Job {
     id: Uuid,
     name: String,
+    started_at: DateTime<Utc>,
     snapshot: Mutex<Snapshot>,
 }
 
@@ -51,6 +61,9 @@ struct Snapshot {
     dataset: Option<Vec<Finding>>,
     screening: Option<Screening>,
     error: Option<String>,
+    step: Option<u32>,
+    total: Option<u32>,
+    step_started: Option<Instant>,
 }
 
 impl TrainRegistry {
@@ -87,6 +100,7 @@ impl Job {
         Arc::new(Self {
             id: Uuid::new_v4(),
             name,
+            started_at: Utc::now(),
             snapshot: Mutex::new(Snapshot {
                 status: TrainJobStatus::Running,
                 filename: None,
@@ -94,6 +108,9 @@ impl Job {
                 dataset: None,
                 screening: None,
                 error: None,
+                step: None,
+                total: None,
+                step_started: None,
             }),
         })
     }
@@ -109,6 +126,29 @@ impl Job {
             dataset: snapshot.dataset.clone(),
             screening: snapshot.screening.clone(),
             error: snapshot.error.clone(),
+            step: snapshot.step,
+            total: snapshot.total,
+            eta_seconds: eta_seconds(
+                snapshot.step,
+                snapshot.total,
+                snapshot.step_started.map(|started| started.elapsed()),
+            ),
+            started_at: self.started_at,
+        }
+    }
+
+    pub fn progress(&self, step: u32, total: u32) {
+        if total == 0 {
+            return;
+        }
+        let mut snapshot = self.snapshot.lock().expect("train job");
+        if snapshot.status != TrainJobStatus::Running {
+            return;
+        }
+        snapshot.step = Some(step.min(total));
+        snapshot.total = Some(total);
+        if step > 0 && snapshot.step_started.is_none() {
+            snapshot.step_started = Some(Instant::now());
         }
     }
 
@@ -139,9 +179,18 @@ impl Job {
     }
 }
 
+fn eta_seconds(step: Option<u32>, total: Option<u32>, elapsed: Option<Duration>) -> Option<u64> {
+    let step = step.filter(|step| *step > 0)?;
+    let total = total.filter(|total| *total > step)?;
+    let elapsed = elapsed.filter(|elapsed| !elapsed.is_zero())?;
+    let remaining = elapsed.as_secs_f64() * f64::from(total - step) / f64::from(step);
+    Some(remaining.round() as u64)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TrainJobStatus, TrainRegistry};
+    use super::{TrainJobStatus, TrainRegistry, eta_seconds};
+    use std::time::Duration;
     use zone_comfy::lora::TrainError;
 
     #[test]
@@ -157,5 +206,35 @@ mod tests {
             .expect("finished job frees the slot");
         assert_eq!(next.view().name, "other");
         assert_eq!(next.view().status, TrainJobStatus::Running);
+    }
+
+    #[test]
+    fn progress_is_visible_on_the_running_job() {
+        let registry = TrainRegistry::new();
+        let job = registry.start("jerry".into()).expect("start");
+        job.progress(12, 400);
+        let view = registry.current().unwrap();
+        assert_eq!(view.step, Some(12));
+        assert_eq!(view.total, Some(400));
+        assert!(view.started_at.timestamp() > 0);
+        job.fail(TrainError::Failed("stopped".into()));
+        job.progress(13, 400);
+        assert_eq!(job.view().step, Some(12));
+    }
+
+    #[test]
+    fn eta_scales_remaining_steps_by_elapsed_time() {
+        assert_eq!(
+            eta_seconds(Some(10), Some(20), Some(Duration::from_secs(50))),
+            Some(50)
+        );
+        assert_eq!(
+            eta_seconds(Some(0), Some(20), Some(Duration::from_secs(5))),
+            None
+        );
+        assert_eq!(
+            eta_seconds(Some(20), Some(20), Some(Duration::from_secs(5))),
+            None
+        );
     }
 }

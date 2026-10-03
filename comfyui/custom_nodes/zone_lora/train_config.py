@@ -16,6 +16,19 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     return json.loads(source.read_text())
 
 
+def progress_filename(stem: str) -> str:
+    return f'{stem}-progress.json'
+
+
+def write_progress(path: Path, step: int, total: int) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({'step': int(step), 'total': int(total)}, separators=(',', ':'))
+    temporary = destination.with_name(destination.name + '.tmp')
+    temporary.write_text(payload)
+    temporary.replace(destination)
+
+
 def lora_alpha(rank: int, config: dict[str, Any] | None = None) -> float:
     settings = config or load_config()
     if settings.get('alpha_equals_rank', True):

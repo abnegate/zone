@@ -453,6 +453,7 @@ class GraphContractTests(unittest.TestCase):
         other = train_lora.Run.create()
         artifact = f'{run.artifact}.safetensors'
         checkpoint = f'{run.artifact}-step12.safetensors'
+        progress = f'{run.artifact}-progress.json'
         unrelated = f'{other.artifact}.safetensors'
 
         with tempfile.TemporaryDirectory() as directory:
@@ -465,6 +466,7 @@ class GraphContractTests(unittest.TestCase):
             (input_root / run.folder).mkdir(parents=True)
             (output_root / 'loras' / artifact).write_bytes(b'final')
             (output_root / 'loras' / checkpoint).write_bytes(b'checkpoint')
+            (output_root / 'loras' / progress).write_text('{"step":1,"total":400}')
             (output_root / 'loras' / unrelated).write_bytes(b'unrelated')
 
             originals = {
@@ -493,6 +495,7 @@ class GraphContractTests(unittest.TestCase):
             self.assertFalse((input_root / run.folder).exists())
             self.assertFalse((output_root / 'loras' / artifact).exists())
             self.assertFalse((output_root / 'loras' / checkpoint).exists())
+            self.assertFalse((output_root / 'loras' / progress).exists())
             self.assertFalse((model_root / artifact).exists())
             self.assertTrue((output_root / 'loras' / unrelated).is_file())
 

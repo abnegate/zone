@@ -215,12 +215,16 @@ export const modelsApi = {
     return parse(TrainJobSchema, await response.json());
   },
 
-  async waitTrain(signal?: AbortSignal): Promise<TrainResult> {
+  async waitTrain(
+    signal?: AbortSignal,
+    onProgress?: (job: TrainJob) => void
+  ): Promise<TrainResult> {
     for (;;) {
       const job = await modelsApi.trainJob(signal);
       if (!job) {
         throw new Error('Training job disappeared');
       }
+      onProgress?.(job);
       if (job.status === 'failed') {
         throw new Error(job.error || 'Training failed');
       }
@@ -244,7 +248,8 @@ export const modelsApi = {
         group?: number;
       }>;
     },
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onProgress?: (job: TrainJob) => void
   ): Promise<TrainResult> {
     const response = await fetch(`${API_BASE}/api/models/train`, {
       method: 'POST',
@@ -261,7 +266,8 @@ export const modelsApi = {
       throw new Error(job.error || 'Training failed');
     }
     if (job.status === 'running' || response.status === 202) {
-      return modelsApi.waitTrain(signal);
+      onProgress?.(job);
+      return modelsApi.waitTrain(signal, onProgress);
     }
     return asTrainResult(job);
   },

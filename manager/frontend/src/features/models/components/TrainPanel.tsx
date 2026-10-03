@@ -5,12 +5,14 @@ import {
   type DatasetFinding,
   type DropReason,
   modelsApi,
+  type TrainJob,
   type TrainQuality,
   type TrainRemediation,
   type TrainResult,
   type TrainScreening,
 } from '../../../api/models';
 import DropZone from './DropZone';
+import TrainMeter from './TrainMeter';
 import './TrainPanel.css';
 
 type TrainBase = { id: string; label: string; edit: boolean };
@@ -378,6 +380,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [result, setResult] = useState<TrainResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [runName, setRunName] = useState<string | null>(null);
+  const [progress, setProgress] = useState<TrainJob | null>(null);
   const [captioning, setCaptioning] = useState(false);
   const [focusRequested, setFocusRequested] = useState(false);
   const [sampling, setSampling] = useState<string | null>(null);
@@ -408,9 +411,11 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         if (job.status === 'running') {
           setBusy(true);
           setRunName(job.name ?? null);
-          const trained = await modelsApi.waitTrain(controller.signal);
+          setProgress(job);
+          const trained = await modelsApi.waitTrain(controller.signal, setProgress);
           if (controller.signal.aborted) return;
           setResult(trained);
+          setProgress(null);
           setImages([]);
           setClips([]);
           onTrained();
@@ -640,26 +645,33 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     setRunName(name.trim() || null);
     setError(null);
     setResult(null);
+    setProgress({ name: name.trim(), status: 'running' });
     try {
-      const trained = await modelsApi.train({
-        name: name.trim(),
-        base,
-        trigger: trigger.trim() || undefined,
-        images: images.map((image) => ({
-          filename: image.filename,
-          caption: edit ? image.instruction.trim() : image.caption,
-          bytes_base64: image.bytes_base64,
-          group: image.group,
-          ...(edit && image.reference ? { before_base64: image.reference.bytes_base64 } : {}),
-        })),
-      });
+      const trained = await modelsApi.train(
+        {
+          name: name.trim(),
+          base,
+          trigger: trigger.trim() || undefined,
+          images: images.map((image) => ({
+            filename: image.filename,
+            caption: edit ? image.instruction.trim() : image.caption,
+            bytes_base64: image.bytes_base64,
+            group: image.group,
+            ...(edit && image.reference ? { before_base64: image.reference.bytes_base64 } : {}),
+          })),
+        },
+        undefined,
+        setProgress
+      );
       setResult(trained);
+      setProgress(null);
       setImages([]);
       setClips([]);
       setName('');
       onTrained();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Training failed');
+      setProgress(null);
     } finally {
       setBusy(false);
     }
@@ -686,10 +698,13 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           : 'Drop images or a video, pick an installed base, and set a unique trigger word. Every image is cropped square on its subject, then Zone trains every transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that identity.'}
       </p>
       {error && <div className="error-placeholder">{error}</div>}
-      {busy && images.length === 0 && (
+      {busy && (
         <div className="train-result" role="status">
           <h3 className="train-result-title">Training{runName ? ` ${runName}` : ''}</h3>
-          <p className="help-text">This run keeps going if you leave the page.</p>
+          <TrainMeter
+            job={progress ?? { name: runName ?? undefined, status: 'running' }}
+            detail="This run keeps going if you leave the page."
+          />
         </div>
       )}
       {result && (

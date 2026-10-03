@@ -38,7 +38,9 @@ from .train_config import (
     checkpoint_interval,
     load_config,
     lora_alpha,
+    progress_filename,
     trains,
+    write_progress,
 )
 
 
@@ -399,11 +401,14 @@ class ZoneTrainLoRA(io.ComfyNode):
             stem = Path(save_name).name.removesuffix('.safetensors')
             output_dir = Path(folder_paths.get_output_directory()) / 'loras'
             every = checkpoint_interval(steps, settings)
+            sidecar = output_dir / progress_filename(stem)
+            write_progress(sidecar, 0, steps)
 
             def loss_callback(loss):
                 losses.append(loss)
                 if loss != loss:
                     raise RuntimeError('training loss became NaN')
+                write_progress(sidecar, len(losses), steps)
                 if len(losses) == 1 or len(losses) % 10 == 0:
                     logging.info('Zone LoRA step %s/%s loss=%s', len(losses), steps, f'{loss:.4f}')
                 if every and len(losses) % every == 0 and len(losses) < steps:

@@ -155,4 +155,8 @@ export const TrainJobSchema = z.object({
   dataset: z.array(DatasetFindingSchema).optional(),
   screening: TrainScreeningSchema.nullable().optional(),
   error: z.string().nullable().optional(),
+  step: z.number().int().nonnegative().nullable().optional(),
+  total: z.number().int().positive().nullable().optional(),
+  eta_seconds: z.number().int().nonnegative().nullable().optional(),
+  started_at: z.string().optional(),
 });

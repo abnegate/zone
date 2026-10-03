@@ -47,7 +47,10 @@ class ZoneCleanupTrainingRun(io.ComfyNode):
             shutil.rmtree(dataset)
             removed.append(folder)
 
-        pattern = re.compile(rf'{re.escape(artifact)}(?:-step[0-9]+)?\.safetensors')
+        pattern = re.compile(
+            rf'{re.escape(artifact)}(?:-step[0-9]+)?\.safetensors'
+            rf'|{re.escape(artifact)}-progress\.json'
+        )
         roots = [
             (Path(folder_paths.get_output_directory()) / 'loras').resolve(strict=True),
             Path(folder_paths.get_folder_paths('loras')[0]).resolve(strict=True),

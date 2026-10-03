@@ -1,18 +1,16 @@
-.download-dock {
+.train-dock {
   display: flex;
   flex-direction: column;
   gap: var(--ui-space-2);
-  width: min(26rem, calc(100vw - 2rem));
-  max-height: min(70vh, 36rem);
+  width: min(22rem, calc(100vw - 2rem));
   padding: var(--ui-space-2) var(--ui-space-3) var(--ui-space-3);
-  overflow: auto;
   background: var(--ui-bg-elevated);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-xl);
   box-shadow: var(--ui-shadow-lg, 0 18px 40px rgba(0, 0, 0, 0.28));
 }
 
-.download-dock-header {
+.train-dock-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -20,18 +18,36 @@
   height: var(--ui-control-height-sm);
 }
 
-.download-dock-header h2 {
+.train-dock-header h2 {
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--ui-font-body);
   font-size: var(--ui-text-md);
   font-weight: 600;
 }
 
-.download-dock-header .pull-job-action {
-  margin-left: 0;
+.train-dock-action {
+  flex-shrink: 0;
+  height: var(--ui-control-height-sm);
+  padding: 0 var(--ui-space-2);
+  border: none;
+  border-radius: var(--ui-radius-md);
+  background: none;
+  color: var(--ui-accent);
+  font-family: var(--ui-font-body);
+  font-size: var(--ui-text-xs);
+  font-weight: 500;
+  cursor: pointer;
 }
 
-.download-dock--minimized {
+.train-dock-action:hover {
+  background: var(--ui-accent-muted);
+}
+
+.train-dock--minimized {
   display: inline-flex;
   align-items: center;
   gap: var(--ui-space-2);
@@ -48,20 +64,32 @@
   cursor: pointer;
 }
 
-.download-dock--minimized:hover {
+.train-dock--minimized:hover {
   border-color: var(--ui-border-strong);
 }
 
-.download-dock-dot {
+.train-dock-dot {
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 50%;
   background: var(--ui-text-muted);
 }
 
-.download-dock-dot[data-active='true'] {
+.train-dock-dot[data-active='true'] {
   background: var(--ui-accent);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-accent) 20%, transparent);
 }
 
+.train-dock-error {
+  margin: 0;
+  max-height: 6rem;
+  overflow: auto;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-error-600);
+  overflow-wrap: anywhere;
+}
 
+:root[data-theme='dark'] .train-dock-error {
+  color: var(--ui-error-400);
+}

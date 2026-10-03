@@ -9,7 +9,7 @@ use crate::inventory::{
 use crate::quality::Quality;
 use crate::recipe::{RecipeCatalog, TrainingModel, sanitize_weight_filename};
 use crate::subject::{CENTRE, Subject};
-use crate::train::Run;
+use crate::train::{Run, TrainProgress};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 use zone_vision::gravity::Point;
 use zone_vision::{Raster, Rendered, decode};
@@ -235,6 +236,25 @@ pub async fn train(
         litellm_key,
         request,
         crate::screening::screen,
+        None,
+    )
+    .await
+}
+
+pub async fn train_reporting(
+    config: &Config,
+    litellm_host: String,
+    litellm_key: String,
+    request: TrainRequest,
+    progress: mpsc::UnboundedSender<TrainProgress>,
+) -> Result<TrainOutcome, TrainError> {
+    train_with_remediation(
+        config,
+        litellm_host,
+        litellm_key,
+        request,
+        crate::screening::screen,
+        Some(progress),
     )
     .await
 }
@@ -245,8 +265,18 @@ async fn train_with_remediation(
     litellm_key: String,
     request: TrainRequest,
     screening: fn(&[Vec<u8>], u32) -> crate::screening::Verdict,
+    progress: Option<mpsc::UnboundedSender<TrainProgress>>,
 ) -> Result<TrainOutcome, TrainError> {
-    train_with_pipeline(config, litellm_host, litellm_key, request, screening, true).await
+    train_with_pipeline(
+        config,
+        litellm_host,
+        litellm_key,
+        request,
+        screening,
+        true,
+        progress,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -257,7 +287,16 @@ async fn train_with_screening(
     request: TrainRequest,
     screening: fn(&[Vec<u8>], u32) -> crate::screening::Verdict,
 ) -> Result<TrainOutcome, TrainError> {
-    train_with_pipeline(config, litellm_host, litellm_key, request, screening, false).await
+    train_with_pipeline(
+        config,
+        litellm_host,
+        litellm_key,
+        request,
+        screening,
+        false,
+        None,
+    )
+    .await
 }
 
 /// Cheap checks a caller can run before spawning the trainer, so a bad name or
@@ -296,6 +335,7 @@ async fn train_with_pipeline(
     request: TrainRequest,
     screening: fn(&[Vec<u8>], u32) -> crate::screening::Verdict,
     repair_rejections: bool,
+    progress: Option<mpsc::UnboundedSender<TrainProgress>>,
 ) -> Result<TrainOutcome, TrainError> {
     validate_request(config, &request)?;
     let filename = final_filename(&request.name)?;
@@ -391,6 +431,10 @@ async fn train_with_pipeline(
         described
     };
     let findings = crate::dataset::inspect(&described, survivors.len());
+    if let Some(progress) = &progress {
+        let total = crate::train::packaged_config()?.steps(survivors.len());
+        let _ = progress.send(TrainProgress { step: 0, total });
+    }
     let mut attempt = Attempt::create(&config.models_dir)?;
     let loras = ensure_child_directory(&config.models_dir, "loras")?;
     let output = validate_output(&loras, &loras.join(&filename))?;
@@ -492,7 +536,15 @@ async fn train_with_pipeline(
         }
         run
     } else {
-        crate::train::run(config, &model, &attempt.root, &staged, survivors.len()).await?
+        crate::train::run_with_progress(
+            config,
+            &model,
+            &attempt.root,
+            &staged,
+            survivors.len(),
+            progress,
+        )
+        .await?
     };
     attempt.register(&run)?;
     if require_regular_file(&attempt.root, &staged).is_err() {
@@ -2192,6 +2244,7 @@ mod tests {
             String::new(),
             identity("repaired"),
             reject_tiny,
+            None,
         )
         .await
         .expect("repaired target trains");

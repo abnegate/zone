@@ -11,7 +11,7 @@ import {
 } from './features/auth';
 import { ChatsPage } from './features/chats';
 import { WikiPage } from './features/knowledge';
-import { ModelsPage, PullProvider } from './features/models';
+import { ModelsPage, PullProvider, TrainProvider } from './features/models';
 import { ProjectsPage } from './features/projects';
 import { AgentSignInPage, OrgSettingsPage, WorkspaceSettingsPage } from './features/settings';
 import { SourcesPage } from './features/sources';
@@ -29,120 +29,122 @@ function App() {
       <AuthProvider>
         <WorkspaceProvider>
           <PullProvider>
-            <WorkspaceTheme />
-            <BrowserRouter>
-              <Routes>
-                <Route path="/login" element={<LoginPage />} />
-                <Route path="/register" element={<RegisterPage />} />
-                <Route path="/verify-email" element={<EmailVerificationPage />} />
-                <Route path="/verify" element={<EmailVerificationPage />} />
-                <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-                <Route path="/reset-password" element={<ResetPasswordPage />} />
-                <Route path="/invitations" element={<InvitationAcceptPage />} />
-                <Route path="/unauthorized" element={<UnauthorizedPage />} />
-                <Route
-                  path="/agent-sign-in"
-                  element={
-                    <ProtectedRoute>
-                      <AgentSignInPage />
-                    </ProtectedRoute>
-                  }
-                />
-                <Route
-                  path="/"
-                  element={
-                    <ProtectedRoute>
-                      <Layout />
-                    </ProtectedRoute>
-                  }
-                >
+            <TrainProvider>
+              <WorkspaceTheme />
+              <BrowserRouter>
+                <Routes>
+                  <Route path="/login" element={<LoginPage />} />
+                  <Route path="/register" element={<RegisterPage />} />
+                  <Route path="/verify-email" element={<EmailVerificationPage />} />
+                  <Route path="/verify" element={<EmailVerificationPage />} />
+                  <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+                  <Route path="/reset-password" element={<ResetPasswordPage />} />
+                  <Route path="/invitations" element={<InvitationAcceptPage />} />
+                  <Route path="/unauthorized" element={<UnauthorizedPage />} />
                   <Route
-                    index
-                    element={
-                      <ProtectedRoute requiredPermission={PERMISSIONS.CHATS.READ}>
-                        <ChatsPage />
-                      </ProtectedRoute>
-                    }
-                  />
-                  <Route
-                    path="chats"
-                    element={
-                      <ProtectedRoute requiredPermission={PERMISSIONS.CHATS.READ}>
-                        <ChatsPage />
-                      </ProtectedRoute>
-                    }
-                  />
-                  <Route
-                    path="models"
-                    element={
-                      <ProtectedRoute requiredPermission={PERMISSIONS.MODELS.READ}>
-                        <ModelsPage />
-                      </ProtectedRoute>
-                    }
-                  />
-                  <Route
-                    path="projects"
-                    element={
-                      <ProtectedRoute requiredPermission={PERMISSIONS.PROJECTS.READ}>
-                        <ProjectsPage />
-                      </ProtectedRoute>
-                    }
-                  />
-                  <Route
-                    path="tasks"
-                    element={
-                      <ProtectedRoute requiredPermission={PERMISSIONS.TASKS.READ}>
-                        <TasksPage />
-                      </ProtectedRoute>
-                    }
-                  />
-                  <Route
-                    path="sources"
-                    element={
-                      <ProtectedRoute requiredPermission={PERMISSIONS.SOURCES.READ}>
-                        <SourcesPage />
-                      </ProtectedRoute>
-                    }
-                  />
-                  <Route path="search" element={<Navigate to="/wiki" replace />} />
-                  <Route
-                    path="wiki"
-                    element={
-                      <ProtectedRoute requiredPermission={PERMISSIONS.WIKI.READ}>
-                        <WikiPage />
-                      </ProtectedRoute>
-                    }
-                  />
-                  <Route
-                    path="org-settings"
-                    element={
-                      <ProtectedRoute
-                        requiredPermission={PERMISSIONS.ORGANIZATIONS.UPDATE}
-                        requiredOrganizationRole="admin"
-                      >
-                        <OrgSettingsPage />
-                      </ProtectedRoute>
-                    }
-                  />
-                  <Route
-                    path="settings"
-                    element={
-                      <ProtectedRoute requiredPermission={PERMISSIONS.WORKSPACES.UPDATE}>
-                        <WorkspaceSettingsPage />
-                      </ProtectedRoute>
-                    }
-                  />
-                  <Route
-                    path="sessions"
+                    path="/agent-sign-in"
                     element={
                       <ProtectedRoute>
-                        <SessionsPage />
+                        <AgentSignInPage />
                       </ProtectedRoute>
                     }
                   />
-                </Route>
-              </Routes>
-            </BrowserRouter>
+                  <Route
+                    path="/"
+                    element={
+                      <ProtectedRoute>
+                        <Layout />
+                      </ProtectedRoute>
+                    }
+                  >
+                    <Route
+                      index
+                      element={
+                        <ProtectedRoute requiredPermission={PERMISSIONS.CHATS.READ}>
+                          <ChatsPage />
+                        </ProtectedRoute>
+                      }
+                    />
+                    <Route
+                      path="chats"
+                      element={
+                        <ProtectedRoute requiredPermission={PERMISSIONS.CHATS.READ}>
+                          <ChatsPage />
+                        </ProtectedRoute>
+                      }
+                    />
+                    <Route
+                      path="models"
+                      element={
+                        <ProtectedRoute requiredPermission={PERMISSIONS.MODELS.READ}>
+                          <ModelsPage />
+                        </ProtectedRoute>
+                      }
+                    />
+                    <Route
+                      path="projects"
+                      element={
+                        <ProtectedRoute requiredPermission={PERMISSIONS.PROJECTS.READ}>
+                          <ProjectsPage />
+                        </ProtectedRoute>
+                      }
+                    />
+                    <Route
+                      path="tasks"
+                      element={
+                        <ProtectedRoute requiredPermission={PERMISSIONS.TASKS.READ}>
+                          <TasksPage />
+                        </ProtectedRoute>
+                      }
+                    />
+                    <Route
+                      path="sources"
+                      element={
+                        <ProtectedRoute requiredPermission={PERMISSIONS.SOURCES.READ}>
+                          <SourcesPage />
+                        </ProtectedRoute>
+                      }
+                    />
+                    <Route path="search" element={<Navigate to="/wiki" replace />} />
+                    <Route
+                      path="wiki"
+                      element={
+                        <ProtectedRoute requiredPermission={PERMISSIONS.WIKI.READ}>
+                          <WikiPage />
+                        </ProtectedRoute>
+                      }
+                    />
+                    <Route
+                      path="org-settings"
+                      element={
+                        <ProtectedRoute
+                          requiredPermission={PERMISSIONS.ORGANIZATIONS.UPDATE}
+                          requiredOrganizationRole="admin"
+                        >
+                          <OrgSettingsPage />
+                        </ProtectedRoute>
+                      }
+                    />
+                    <Route
+                      path="settings"
+                      element={
+                        <ProtectedRoute requiredPermission={PERMISSIONS.WORKSPACES.UPDATE}>
+                          <WorkspaceSettingsPage />
+                        </ProtectedRoute>
+                      }
+                    />
+                    <Route
+                      path="sessions"
+                      element={
+                        <ProtectedRoute>
+                          <SessionsPage />
+                        </ProtectedRoute>
+                      }
+                    />
+                  </Route>
+                </Routes>
+              </BrowserRouter>
+            </TrainProvider>
           </PullProvider>
         </WorkspaceProvider>
       </AuthProvider>
