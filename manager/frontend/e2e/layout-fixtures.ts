@@ -380,6 +380,10 @@ export async function setupCommonRoutes(
       body = { workspace: mockWorkspace };
     else if (path === '/api/models')
       body = { models: populated ? mockModels : [], next_cursor: null };
+    else if (path === '/api/models/train') {
+      await route.fulfill({ status: 204, body: '' });
+      return;
+    }
     else if (path === '/api/chats')
       body = { chats: populated ? mockChats : [] };
     else if (path === '/api/projects')

@@ -33,6 +33,10 @@ const mockFrames = mock(() =>
 const mockTrain = mock(() =>
   Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
 );
+const mockTrainJob = mock(() => Promise.resolve(null));
+const mockWaitTrain = mock(() =>
+  Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
+);
 
 mock.module('../../../api/models', () => ({
   modelsApi: {
@@ -40,6 +44,8 @@ mock.module('../../../api/models', () => ({
     captions: mockCaptions,
     frames: mockFrames,
     train: mockTrain,
+    trainJob: mockTrainJob,
+    waitTrain: mockWaitTrain,
   },
 }));
 
@@ -53,7 +59,13 @@ beforeEach(() => {
   mockCaptions.mockClear();
   mockFrames.mockClear();
   mockTrain.mockClear();
+  mockTrainJob.mockClear();
+  mockWaitTrain.mockClear();
   mockTrain.mockImplementation(() =>
+    Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
+  );
+  mockTrainJob.mockImplementation(() => Promise.resolve(null));
+  mockWaitTrain.mockImplementation(() =>
     Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
   );
 });
@@ -716,5 +728,29 @@ describe('TrainPanel', () => {
     expect(form).toHaveAttribute('aria-busy', 'false');
     expect(screen.getByLabelText('Name')).toBeEnabled();
     expect(screen.queryByLabelText('Instruction for target 1: after.png')).toBeNull();
+  });
+
+  it('resumes a running job when the page is opened', async () => {
+    const trained = mock();
+    mockTrainJob.mockImplementationOnce(() =>
+      Promise.resolve({
+        id: 'job-1',
+        name: 'jerry',
+        status: 'running',
+        filename: null,
+        quality: null,
+      })
+    );
+    const response = deferred<{ filename: string; quality: null; dataset: never[] }>();
+    mockWaitTrain.mockImplementationOnce(() => response.promise);
+    render(<TrainPanel onTrained={trained} />);
+
+    await waitFor(() => expect(screen.getByText('Training jerry')).toBeInTheDocument());
+    expect(screen.getByText('This run keeps going if you leave the page.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
+
+    response.resolve({ filename: 'jerry.safetensors', quality: null, dataset: [] });
+    await screen.findByText('Training finished: jerry.safetensors');
+    expect(trained).toHaveBeenCalled();
   });
 });

@@ -35,7 +35,7 @@ use crate::services::route::Route;
 use crate::state::AppState;
 use types::ModelCapability;
 use zone_comfy::caption::{CaptionRequest, Captioner, Draft};
-use zone_comfy::lora::{self, TrainRequest};
+use zone_comfy::lora::{self, TrainError, TrainRequest};
 use zone_comfy::recipe::RecipeCatalog;
 use zone_comfy::video::{self, FrameRequest};
 
@@ -690,41 +690,56 @@ pub async fn frames(
     }
 }
 
+/// GET /api/models/train
+pub async fn train_job(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
+    match state.train_jobs().current() {
+        Some(job) => Json(job).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
 /// POST /api/models/train
 pub async fn train(
     State(state): State<AppState>,
     _auth: AuthUser,
     Json(request): Json<TrainRequest>,
 ) -> impl IntoResponse {
-    match lora::train(
-        &state.config().comfyui,
-        state.config().litellm_host.clone(),
-        state.config().litellm_key.clone(),
-        request,
-    )
-    .await
-    {
-        Ok(outcome) => Json(serde_json::json!({
-            "filename": outcome.path.file_name().and_then(|name| name.to_str()),
-            "quality": outcome.quality,
-            "dataset": outcome.dataset,
-            "screening": outcome.screening,
-        }))
-        .into_response(),
-        Err(lora::TrainError::Disabled) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse::new(
-                "LoRA training is not configured on this server",
-            )),
-        )
-            .into_response(),
-        Err(lora::TrainError::Invalid(message)) => {
-            (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response()
+    match lora::validate_request(&state.config().comfyui, &request) {
+        Err(TrainError::Disabled) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse::new(
+                    "LoRA training is not configured on this server",
+                )),
+            )
+                .into_response();
         }
-        Err(lora::TrainError::Failed(message)) => {
-            (StatusCode::BAD_GATEWAY, Json(ErrorResponse::new(message))).into_response()
+        Err(TrainError::Invalid(message)) => {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response();
         }
+        Err(TrainError::Failed(message)) => {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response();
+        }
+        Ok(()) => {}
     }
+    let Some(job) = state.train_jobs().start(request.name.clone()) else {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new("a LoRA is already training")),
+        )
+            .into_response();
+    };
+    let view = job.view();
+    let comfyui = state.config().comfyui.clone();
+    let litellm_host = state.config().litellm_host.clone();
+    let litellm_key = state.config().litellm_key.clone();
+    tokio::spawn(async move {
+        match lora::train(&comfyui, litellm_host, litellm_key, request).await {
+            Ok(outcome) => job.succeed(outcome),
+            Err(error) => job.fail(error),
+        }
+    });
+    (StatusCode::ACCEPTED, Json(view)).into_response()
 }
 
 /// GET /api/models/disk

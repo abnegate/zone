@@ -65,14 +65,14 @@ pub struct TrainOutcome {
     pub screening: Screening,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Screening {
     pub kept: usize,
     pub dropped: Vec<Dropped>,
     pub attempted: Vec<Remediation>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Dropped {
     pub filename: String,
     pub reason: crate::screening::Rejection,
@@ -88,7 +88,7 @@ pub enum RemediationOutcome {
 }
 
 /// One target that Zone tried to repair before selecting the training set.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Remediation {
     pub source_index: usize,
     pub filename: String,
@@ -260,18 +260,13 @@ async fn train_with_screening(
     train_with_pipeline(config, litellm_host, litellm_key, request, screening, false).await
 }
 
-async fn train_with_pipeline(
-    config: &Config,
-    litellm_host: String,
-    litellm_key: String,
-    request: TrainRequest,
-    screening: fn(&[Vec<u8>], u32) -> crate::screening::Verdict,
-    repair_rejections: bool,
-) -> Result<TrainOutcome, TrainError> {
+/// Cheap checks a caller can run before spawning the trainer, so a bad name or
+/// missing trigger is refused on the request rather than as a failed job.
+pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), TrainError> {
     if config.train_command.is_none() && !config.enabled {
         return Err(TrainError::Disabled);
     }
-    let filename = final_filename(&request.name)?;
+    let _filename = final_filename(&request.name)?;
     if request.images.is_empty() {
         return Err(TrainError::Invalid("training needs images"));
     }
@@ -291,7 +286,30 @@ async fn train_with_pipeline(
             "trigger word is required so the LoRA can retain identity",
         ));
     }
-    validate_pairing(&request.images, &model)?;
+    validate_pairing(&request.images, &model)
+}
+
+async fn train_with_pipeline(
+    config: &Config,
+    litellm_host: String,
+    litellm_key: String,
+    request: TrainRequest,
+    screening: fn(&[Vec<u8>], u32) -> crate::screening::Verdict,
+    repair_rejections: bool,
+) -> Result<TrainOutcome, TrainError> {
+    validate_request(config, &request)?;
+    let filename = final_filename(&request.name)?;
+    let catalog = RecipeCatalog::load(Some(config.workflow_path.as_path()))
+        .map_err(|_| TrainError::Invalid("recipe catalog is missing"))?;
+    let recipe = catalog
+        .get(&request.base)
+        .filter(|recipe| !recipe.adapter)
+        .ok_or(TrainError::Invalid("unknown training base"))?;
+    let model = recipe
+        .training_model()
+        .map_err(|_| TrainError::Invalid("training base is not supported"))?;
+    let edit = matches!(&model, TrainingModel::QwenEdit { .. });
+    let trigger = request.trigger.as_deref().unwrap_or_default().trim();
     let mut decoded = request
         .images
         .iter()

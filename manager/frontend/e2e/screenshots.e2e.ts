@@ -404,6 +404,10 @@ describeScreenshots('Screenshots - Populated States', () => {
       });
     });
     await routeApi(page, '**/api/models/train', async (route) => {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({ status: 204, body: '' });
+        return;
+      }
       announceStart();
       await finish;
       await route.fulfill({

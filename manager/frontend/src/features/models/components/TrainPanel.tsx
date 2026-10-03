@@ -377,6 +377,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<TrainResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const [runName, setRunName] = useState<string | null>(null);
   const [captioning, setCaptioning] = useState(false);
   const [focusRequested, setFocusRequested] = useState(false);
   const [sampling, setSampling] = useState<string | null>(null);
@@ -390,6 +391,48 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         setBase((current) => current || rows[0]?.id || '');
       })
       .catch(() => setBases([]));
+  }, []);
+
+  // Resume the process-wide job once. onTrained is the inventory refresh from
+  // first mount; re-running this on a new callback would abort a live poll.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resume once per mount
+  useEffect(() => {
+    const controller = new AbortController();
+    const aborted = (caught: unknown) =>
+      (caught instanceof DOMException && caught.name === 'AbortError') ||
+      (caught instanceof Error && caught.name === 'AbortError');
+    void (async () => {
+      try {
+        const job = await modelsApi.trainJob(controller.signal);
+        if (controller.signal.aborted || !job) return;
+        if (job.status === 'running') {
+          setBusy(true);
+          setRunName(job.name ?? null);
+          const trained = await modelsApi.waitTrain(controller.signal);
+          if (controller.signal.aborted) return;
+          setResult(trained);
+          setImages([]);
+          setClips([]);
+          onTrained();
+        } else if (job.status === 'succeeded') {
+          setResult({
+            filename: job.filename ?? null,
+            quality: job.quality ?? null,
+            dataset: job.dataset,
+            screening: job.screening ?? null,
+          });
+        } else if (job.status === 'failed' && job.error) {
+          setError(job.error);
+        }
+      } catch (caught) {
+        if (!aborted(caught) && !controller.signal.aborted) {
+          setError(caught instanceof Error ? caught.message : 'Could not read training status');
+        }
+      } finally {
+        if (!controller.signal.aborted) setBusy(false);
+      }
+    })();
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -594,6 +637,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       return;
     }
     setBusy(true);
+    setRunName(name.trim() || null);
     setError(null);
     setResult(null);
     try {
@@ -642,6 +686,12 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           : 'Drop images or a video, pick an installed base, and set a unique trigger word. Every image is cropped square on its subject, then Zone trains every transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that identity.'}
       </p>
       {error && <div className="error-placeholder">{error}</div>}
+      {busy && images.length === 0 && (
+        <div className="train-result" role="status">
+          <h3 className="train-result-title">Training{runName ? ` ${runName}` : ''}</h3>
+          <p className="help-text">This run keeps going if you leave the page.</p>
+        </div>
+      )}
       {result && (
         <div className="train-result" role="status">
           <h3 className="train-result-title">

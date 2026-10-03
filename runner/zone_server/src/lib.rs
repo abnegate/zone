@@ -19,6 +19,7 @@ pub mod routes;
 pub mod services;
 pub mod state;
 pub mod sync;
+pub mod train_jobs;
 pub mod utils;
 pub mod workers;
 pub mod ws;

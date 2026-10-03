@@ -131,6 +131,10 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
         });
         return;
       }
+      if (url.includes('/api/models/train')) {
+        route.fulfill({ status: 204, body: '' });
+        return;
+      }
       if (url.includes('/api/models/disk')) {
         route.fulfill({
           status: 200,
@@ -243,6 +247,10 @@ function trainPanel(page: Page): Locator {
 
 async function routeTrainResult(page: Page, result: TrainResult): Promise<void> {
   await routeApi(page, '**/api/models/train', (route) => {
+    if (route.request().method() === 'GET') {
+      route.fulfill({ status: 204, body: '' });
+      return;
+    }
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -619,6 +627,10 @@ test.describe('Models Page', () => {
     const requested = deferred<TrainRequest>();
     const release = deferred<void>();
     await routeApi(page, '**/api/models/train', async (route) => {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({ status: 204, body: '' });
+        return;
+      }
       requested.resolve(route.request().postDataJSON() as TrainRequest);
       await release.promise;
       await route.fulfill({

@@ -336,7 +336,10 @@ async fn train_endpoint_writes_lora_and_lists_it() {
         ))
         .unwrap();
     let response = router.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job = wait_train_job(&router, &token).await;
+    assert_eq!(job["status"], "succeeded", "{job}");
+    assert_eq!(job["filename"], "studio-style.safetensors");
     let output = models_dir.join("loras/studio-style.safetensors");
     assert_eq!(fs::read(&output).unwrap(), b"trained");
 
@@ -610,6 +613,38 @@ async fn post_json(
     let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+async fn get_json(router: axum::Router, token: &str, uri: &str) -> (StatusCode, Value) {
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    if body.is_empty() {
+        return (status, Value::Null);
+    }
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+async fn wait_train_job(router: &axum::Router, token: &str) -> Value {
+    for _ in 0..200 {
+        let (status, body) = get_json(router.clone(), token, "/api/models/train").await;
+        if status == StatusCode::NO_CONTENT {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            continue;
+        }
+        assert_eq!(status, StatusCode::OK, "{body}");
+        if body["status"] != "running" {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("training job did not finish");
 }
 
 #[tokio::test]
@@ -922,13 +957,51 @@ async fn train_maps_disabled_invalid_and_runner_failures() {
 
     let (failed, token) =
         router_with(&ollama, &catalog, models_dir.clone(), Some("exit 7".into())).await;
-    let (status, body) = post_json(failed, &token, "/api/models/train", request).await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
-    assert!(
-        body["error"]
-            .as_str()
-            .is_some_and(|message| message == "trainer exited 7"),
-        "{body}"
-    );
+    let (status, body) = post_json(failed.clone(), &token, "/api/models/train", request).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let job = wait_train_job(&failed, &token).await;
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["error"], "trainer exited 7", "{job}");
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_is_a_background_job_that_survives_the_request() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let body = json!({
+        "name": "studio-style",
+        "base": "flux-schnell",
+        "trigger": "ohwx",
+        "images": [{
+            "filename": "a.png",
+            "caption": "a portrait",
+            "bytes_base64": TINY_PNG
+        }]
+    });
+    let (idle, token) = router_with(
+        &ollama,
+        &catalog,
+        models_dir.clone(),
+        Some("sleep 1; printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+    )
+    .await;
+    let (status, none) = get_json(idle.clone(), &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{none}");
+
+    let (status, started) =
+        post_json(idle.clone(), &token, "/api/models/train", body.clone()).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    assert_eq!(started["status"], "running");
+    assert_eq!(started["name"], "studio-style");
+
+    let (status, conflict) = post_json(idle.clone(), &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["error"], "a LoRA is already training");
+
+    let job = wait_train_job(&idle, &token).await;
+    assert_eq!(job["status"], "succeeded", "{job}");
+    assert_eq!(job["filename"], "studio-style.safetensors");
     let _ = fs::remove_dir_all(models_dir);
 }

@@ -303,7 +303,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/disk", get(models::disk))
         .route(
             "/api/models/train",
-            post(models::train)
+            get(models::train_job)
+                .post(models::train)
                 .layer(uploads)
                 .layer(one_at_a_time.clone()),
         )

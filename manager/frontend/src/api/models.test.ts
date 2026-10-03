@@ -99,6 +99,53 @@ describe('Namespaced model requests', () => {
     ).rejects.toThrow('Validation failed: screening.dropped.0.reason');
   });
 
+  it('treats an empty training status as no job', async () => {
+    const request = mock(async () => new Response(null, { status: 204 }));
+    global.fetch = request as typeof fetch;
+
+    expect(await modelsApi.trainJob()).toBeNull();
+    expect(request).toHaveBeenCalledWith('/api/models/train', expect.anything());
+  });
+
+  it('polls until a 202 training job finishes', async () => {
+    const running = {
+      id: 'job-1',
+      name: 'portrait',
+      status: 'running',
+    };
+    const done = {
+      id: 'job-1',
+      name: 'portrait',
+      status: 'succeeded',
+      filename: 'portrait.safetensors',
+      quality: null,
+      dataset: [],
+      screening: null,
+    };
+    const request = mock(async (_input: RequestInfo, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return new Response(JSON.stringify(running), { status: 202 });
+      }
+      return Response.json(done);
+    });
+    global.fetch = request as typeof fetch;
+
+    expect(
+      await modelsApi.train({
+        name: 'portrait',
+        base: 'flux-schnell',
+        images: [],
+      })
+    ).toEqual({
+      filename: 'portrait.safetensors',
+      quality: null,
+      dataset: [],
+      screening: null,
+    });
+    expect(request.mock.calls.some((call) => call[1]?.method === 'POST')).toBe(true);
+    expect(request.mock.calls.some((call) => call[1]?.method !== 'POST')).toBe(true);
+  });
+
   it('encodes the complete model name when deleting it', async () => {
     const request = mock(async () => new Response(null, { status: 204 }));
     global.fetch = request as typeof fetch;

@@ -428,7 +428,10 @@ merely copies the format example, or repeats another image's answer verbatim, is
 discarded, and that image falls back to the trigger word alone. Captions you
 write by hand are never overwritten. The Models Train tab exposes this as
 **Auto-caption images**, so the captions can be reviewed and edited before
-training starts.
+training starts. Training itself is a background job: `POST /api/models/train`
+returns as soon as the run is accepted, `GET /api/models/train` reports the
+current job, and a refresh of the Train tab reattaches. Only one LoRA trains
+at a time.
 
 ### Why the base weights are cloned before training
 

@@ -18,6 +18,7 @@ use crate::config::{Config, ModelBackend};
 use crate::pull::PullRegistry;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
+use crate::train_jobs::TrainRegistry;
 use zone_email::EmailService;
 
 /// Maximum concurrent indexing operations
@@ -83,6 +84,8 @@ struct AppStateInner {
     pub rate_limiter: Arc<RateLimiter<Uuid>>,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
+    /// The one LoRA training run. Survives the HTTP request that started it.
+    pub train_jobs: TrainRegistry,
     /// Derived encryption key (32 bytes) for AES-256-GCM
     pub encryption_key: [u8; 32],
     /// Semaphore for limiting concurrent indexing operations
@@ -134,6 +137,7 @@ impl AppState {
                 rate_limiter,
                 sync_registry: SyncRegistry::new(),
                 pull_registry: PullRegistry::new(),
+                train_jobs: TrainRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
@@ -183,6 +187,7 @@ impl AppState {
                 rate_limiter,
                 sync_registry: SyncRegistry::new(),
                 pull_registry: PullRegistry::new(),
+                train_jobs: TrainRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
@@ -233,6 +238,7 @@ impl AppState {
                 rate_limiter,
                 sync_registry: SyncRegistry::new(),
                 pull_registry: PullRegistry::new(),
+                train_jobs: TrainRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
@@ -305,6 +311,11 @@ impl AppState {
     /// Get the background model pull registry
     pub fn pull_registry(&self) -> &PullRegistry {
         &self.inner.pull_registry
+    }
+
+    /// The one LoRA training run for this process.
+    pub fn train_jobs(&self) -> &TrainRegistry {
+        &self.inner.train_jobs
     }
 
     /// MCP servers for this process. Connected once on first chat or task use.
@@ -565,6 +576,7 @@ mod tests {
         let _ = state.rate_limiter();
         let _ = state.sync_registry();
         let _ = state.pull_registry();
+        assert!(state.train_jobs().current().is_none());
         assert!(state.existing_mcp().is_none());
         state.disable_mcp();
         assert!(state.existing_mcp().is_some());

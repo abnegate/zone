@@ -7,6 +7,7 @@ import type {
   TrainFrameSchema,
   TrainQualitySchema,
   TrainRemediationSchema,
+  TrainResultSchema,
   TrainScreeningSchema,
 } from '../features/models/schemas';
 import {
@@ -14,7 +15,7 @@ import {
   DiskUsageSchema,
   ModelsResponseSchema,
   TrainClipSchema,
-  TrainResultSchema,
+  TrainJobSchema,
 } from '../features/models/schemas';
 import type {
   BrowseOptions,
@@ -41,6 +42,31 @@ export type DroppedImage = z.infer<typeof DroppedImageSchema>;
 export type TrainRemediation = z.infer<typeof TrainRemediationSchema>;
 export type TrainScreening = z.infer<typeof TrainScreeningSchema>;
 export type TrainResult = z.infer<typeof TrainResultSchema>;
+export type TrainJob = z.infer<typeof TrainJobSchema>;
+
+function asTrainResult(job: TrainJob): TrainResult {
+  return {
+    filename: job.filename ?? null,
+    quality: job.quality ?? null,
+    dataset: job.dataset,
+    screening: job.screening ?? null,
+  };
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
 
 /**
  * Models API
@@ -174,28 +200,70 @@ export const modelsApi = {
     return response.json();
   },
 
-  async train(body: {
-    name: string;
-    base: string;
-    trigger?: string;
-    images: Array<{
-      filename: string;
-      caption: string;
-      bytes_base64: string;
-      before_base64?: string;
-      group?: number;
-    }>;
-  }): Promise<TrainResult> {
+  async trainJob(signal?: AbortSignal): Promise<TrainJob | null> {
+    const response = await fetch(`${API_BASE}/api/models/train`, {
+      headers: client.getHeaders(),
+      signal,
+    });
+    if (response.status === 204) return null;
+    if (!response.ok) {
+      const payload = await response
+        .json()
+        .catch(() => ({ error: 'Could not read training status' }));
+      throw new Error(payload.error || `Failed to read training status: ${response.status}`);
+    }
+    return parse(TrainJobSchema, await response.json());
+  },
+
+  async waitTrain(signal?: AbortSignal): Promise<TrainResult> {
+    for (;;) {
+      const job = await modelsApi.trainJob(signal);
+      if (!job) {
+        throw new Error('Training job disappeared');
+      }
+      if (job.status === 'failed') {
+        throw new Error(job.error || 'Training failed');
+      }
+      if (job.status !== 'running') {
+        return asTrainResult(job);
+      }
+      await sleep(2000, signal);
+    }
+  },
+
+  async train(
+    body: {
+      name: string;
+      base: string;
+      trigger?: string;
+      images: Array<{
+        filename: string;
+        caption: string;
+        bytes_base64: string;
+        before_base64?: string;
+        group?: number;
+      }>;
+    },
+    signal?: AbortSignal
+  ): Promise<TrainResult> {
     const response = await fetch(`${API_BASE}/api/models/train`, {
       method: 'POST',
       headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({ error: 'Training failed' }));
       throw new Error(payload.error || `Failed to train: ${response.status}`);
     }
-    return parse(TrainResultSchema, await response.json());
+    const job = parse(TrainJobSchema, await response.json());
+    if (job.status === 'failed') {
+      throw new Error(job.error || 'Training failed');
+    }
+    if (job.status === 'running' || response.status === 202) {
+      return modelsApi.waitTrain(signal);
+    }
+    return asTrainResult(job);
   },
 
   /**

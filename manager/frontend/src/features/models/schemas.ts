@@ -145,3 +145,14 @@ export const TrainResultSchema = z.object({
   dataset: z.array(DatasetFindingSchema).optional(),
   screening: TrainScreeningSchema.nullable().optional(),
 });
+
+export const TrainJobSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().optional(),
+  status: z.enum(['running', 'succeeded', 'failed']).optional(),
+  filename: z.string().nullable().optional(),
+  quality: TrainQualitySchema.nullable().optional(),
+  dataset: z.array(DatasetFindingSchema).optional(),
+  screening: TrainScreeningSchema.nullable().optional(),
+  error: z.string().nullable().optional(),
+});
