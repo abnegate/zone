@@ -298,6 +298,7 @@ export function useChat(
         chat.agent_enabled,
         chat.character,
         chat.auto_approve,
+        chat.context_tokens ?? null,
         chat.messages.length,
       ])
     : null;

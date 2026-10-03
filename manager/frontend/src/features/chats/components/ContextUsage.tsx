@@ -1,4 +1,5 @@
 import { useId, useRef, useState } from 'react';
+import { formatContextLength } from '../../models/utils/formatters';
 import type { ContextUsage as Usage } from '../types';
 import './ContextUsage.css';
 
@@ -6,6 +7,7 @@ interface Props {
   usage: Usage | null;
   error?: string | null;
   previewing?: boolean;
+  capacity?: number | null;
 }
 const labels: Record<keyof Usage['breakdown'], string> = {
   instructions: 'Instructions',
@@ -21,14 +23,17 @@ const count = (value: number | null): string =>
 const compact = (value: number): string =>
   value >= 1000 ? `${(value / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(value);
 
-export function ContextUsage({ usage, error, previewing = false }: Props) {
+function positive(value?: number | null): number | null {
+  return value && value > 0 ? value : null;
+}
+
+export function ContextUsage({ usage, error, previewing = false, capacity = null }: Props) {
   const [expanded, setExpanded] = useState(false);
   const identifier = useId();
   const button = useRef<HTMLButtonElement>(null);
+  const total = positive(capacity) ?? positive(usage?.limit);
   const percentage =
-    usage && usage.limit !== null && usage.limit > 0 && !usage.incomplete
-      ? Math.round((100 * usage.used) / usage.limit)
-      : null;
+    usage && total && !usage.incomplete ? Math.round((100 * usage.used) / total) : null;
   const status =
     usage?.status === 'compacting'
       ? 'Compacting…'
@@ -36,17 +41,20 @@ export function ContextUsage({ usage, error, previewing = false }: Props) {
         ? 'Compacted'
         : usage?.status === 'blocked'
           ? 'Needs attention'
-          : usage?.status === 'unavailable'
+          : usage?.status === 'unavailable' && !total
             ? 'Unavailable'
             : usage?.status === 'ready' && usage.threshold !== null && usage.remaining === 0
               ? 'Will compact before sending'
               : null;
+  const approx = usage && (usage.estimated || usage.incomplete) ? '≈ ' : '';
   const summary = usage
-    ? `${usage.estimated || usage.incomplete ? '≈ ' : ''}${count(usage.used)} tokens`
+    ? `${approx}${count(usage.used)} tokens${total ? ` / ${count(total)}` : ''}`
     : 'Usage unavailable';
-  const brief = usage
-    ? `${usage.estimated || usage.incomplete ? '≈ ' : ''}${compact(usage.used)}`
-    : 'Unavailable';
+  const brief = total
+    ? `${approx}${compact(usage?.used ?? 0)} / ${formatContextLength(total)}`
+    : usage
+      ? `${approx}${compact(usage.used)}`
+      : 'Unavailable';
   return (
     <div
       role="group"
@@ -76,9 +84,7 @@ export function ContextUsage({ usage, error, previewing = false }: Props) {
             }}
           />
         </span>
-        <span className="context-usage-value">
-          {percentage === null ? brief : `${usage?.estimated ? '≈ ' : ''}${percentage}%`}
-        </span>
+        <span className="context-usage-value">{brief}</span>
         {status && <span className="context-usage-state">{status}</span>}
         <svg
           className="context-usage-caret"
@@ -127,7 +133,7 @@ export function ContextUsage({ usage, error, previewing = false }: Props) {
               <dl className="context-usage-budget">
                 <div>
                   <dt>Total capacity</dt>
-                  <dd>{count(usage.limit)}</dd>
+                  <dd>{count(total)}</dd>
                 </div>
                 <div>
                   <dt>Reserved for response</dt>

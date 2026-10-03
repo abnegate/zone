@@ -29,15 +29,19 @@ const usage: Usage = {
   },
 };
 describe('ContextUsage', () => {
-  it('uses total capacity for percentage and exposes budget separately with keyboard dismissal', () => {
+  it('uses total capacity for the meter fill and exposes budget separately with keyboard dismissal', () => {
     render(<ContextUsage usage={usage} />);
     const button = screen.getByRole('button', { name: /Context/ });
-    expect(button.textContent).toContain('24%');
+    expect(button.textContent).toContain('≈ 2.4k / 10K');
+    expect(button.querySelector('.context-usage-track > span')?.getAttribute('style')).toContain(
+      'scaleX(0.24)'
+    );
     expect(button.getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(button);
     expect(screen.getByRole('region', { name: 'Context usage details' })).toBeTruthy();
     expect(screen.getByText('8 messages summarized.', { exact: false })).toBeTruthy();
     expect(screen.getByText('Reserved for response')).toBeTruthy();
+    expect(screen.getByText('≈ 2,400 tokens / 10,000')).toBeTruthy();
     fireEvent.keyDown(button, { key: 'Escape' });
     expect(button.getAttribute('aria-expanded')).toBe('false');
     expect(document.activeElement).toBe(button);
@@ -55,9 +59,9 @@ describe('ContextUsage', () => {
     );
   });
 
-  it('keeps the percentage visible while a draft preview is in flight', () => {
+  it('keeps used and total visible while a draft preview is in flight', () => {
     render(<ContextUsage usage={usage} previewing />);
-    expect(screen.getByRole('button').textContent).toContain('24%');
+    expect(screen.getByRole('button').textContent).toContain('≈ 2.4k / 10K');
     expect(screen.queryByText('Estimating…')).toBeNull();
   });
   it('never renders a precise percentage for unknown image costs or zero capacity', () => {
@@ -67,16 +71,19 @@ describe('ContextUsage', () => {
       />
     );
     expect(screen.getByRole('button').textContent).not.toContain('%');
+    expect(screen.getByRole('button').textContent).toContain('≈ 2.4k / 10K');
     fireEvent.click(screen.getByRole('button'));
     expect(screen.getByText('Estimate incomplete: some input costs are unknown.')).toBeTruthy();
     rerender(<ContextUsage usage={{ ...usage, limit: 0 }} />);
     expect(screen.getByRole('button').textContent).not.toContain('%');
+    expect(screen.getByRole('button').textContent).toContain('≈ 2.4k');
+    expect(screen.getByRole('button').textContent).not.toContain('/');
   });
   it('shows blocked/compacting state and older server fallback without disabling sending', () => {
     const { rerender } = render(
       <ContextUsage usage={{ ...usage, status: 'blocked', used: 12000 }} />
     );
-    expect(screen.getByRole('button').textContent).toContain('120%');
+    expect(screen.getByRole('button').textContent).toContain('≈ 12k / 10K');
     expect(screen.getByText('Needs attention')).toBeTruthy();
     rerender(<ContextUsage usage={{ ...usage, status: 'compacting' }} />);
     expect(screen.getByText('Compacting…')).toBeTruthy();
@@ -120,7 +127,28 @@ it('abbreviates the token count on the meter row when there is no limit to measu
   render(<ContextUsage usage={{ ...usage, limit: null, used: 23409 }} />);
   const button = screen.getByRole('button', { name: /Context/ });
   expect(button.textContent).toContain('≈ 23.4k');
+  expect(button.textContent).not.toContain('/');
   expect(button.textContent).not.toContain('tokens');
   fireEvent.click(button);
   expect(screen.getByText('≈ 23,409 tokens')).toBeTruthy();
+});
+
+it('uses the chosen window as total when the server omitted a limit', () => {
+  const { rerender } = render(
+    <ContextUsage usage={{ ...usage, limit: null, used: 2400 }} capacity={32768} />
+  );
+  const button = screen.getByRole('button', { name: /Context/ });
+  expect(button.textContent).toContain('≈ 2.4k / 32K');
+  expect(button.querySelector('.context-usage-track > span')?.getAttribute('style')).toContain(
+    'scaleX(0.07)'
+  );
+  fireEvent.click(button);
+  expect(screen.getByText('≈ 2,400 tokens / 32,768')).toBeTruthy();
+  rerender(<ContextUsage usage={{ ...usage, limit: 262144, used: 2400 }} capacity={8192} />);
+  expect(screen.getByRole('button', { name: /Context/ }).textContent).toContain('≈ 2.4k / 8K');
+});
+
+it('still shows the known total when usage has not arrived', () => {
+  render(<ContextUsage usage={null} capacity={131072} />);
+  expect(screen.getByRole('button', { name: /Context/ }).textContent).toContain('0 / 128K');
 });

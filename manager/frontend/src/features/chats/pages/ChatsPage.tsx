@@ -235,6 +235,11 @@ export default function ChatsPage() {
     displayedChat && displayedChat.model_name !== AUTO_MODEL && offersLocalContext(installedLocal)
   );
   const chatNative = installedLocal?.details?.context_length;
+  const meterCapacity = showChatContext
+    ? selectedContextTokens(displayedChat?.context_tokens, chatNative)
+    : chatNative && chatNative > 0
+      ? chatNative
+      : null;
 
   const scrollToBottom = useCallback(() => {
     if (!stickToBottom.current) {
@@ -1413,7 +1418,12 @@ export default function ChatsPage() {
                   )}
                 </div>
               </form>
-              <ContextUsage usage={context ?? null} error={contextError} previewing={previewing} />
+              <ContextUsage
+                usage={context ?? null}
+                error={contextError}
+                previewing={previewing}
+                capacity={meterCapacity}
+              />
             </div>
           </>
         ) : selectedChatId && chatError ? (

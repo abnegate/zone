@@ -2456,6 +2456,27 @@ describe('ChatsPage', () => {
     });
   });
 
+  it('shows used and total on the meter from the chosen window', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      context_tokens: 32768,
+      context: null,
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      context_tokens: 131072,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('context-tokens')).toBeInTheDocument());
+    expect(document.querySelector('.context-usage-toggle')?.textContent).toContain('0 / 32K');
+    fireEvent.change(screen.getByTestId('context-tokens'), { target: { value: '131072' } });
+    await waitFor(() => {
+      expect(document.querySelector('.context-usage-toggle')?.textContent).toContain('0 / 128K');
+    });
+  });
+
   it('hides context size for an Automatic chat', async () => {
     mockClient.getChat.mockResolvedValueOnce({
       ...mockChatWithMessages,

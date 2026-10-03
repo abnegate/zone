@@ -2792,4 +2792,21 @@ describe('context freshness', () => {
     expect(result.current.context).toBeNull();
     unmount();
   });
+  it('re-previews when the chosen context window changes', async () => {
+    mockGetChat.mockResolvedValue({ ...contextChat, context_tokens: 32768 });
+    mockPreviewContext.mockResolvedValue({ ...usage, limit: 32768 });
+    mockUpdateChat.mockResolvedValue({ ...contextChat, context_tokens: 131072 });
+    const { result, unmount } = renderHook(() =>
+      useChat('context', undefined, { content: 'draft' })
+    );
+    await waitFor(() => expect(result.current.context?.limit).toBe(32768));
+    mockPreviewContext.mockClear();
+    mockPreviewContext.mockResolvedValue({ ...usage, limit: 131072 });
+    await act(async () => {
+      await result.current.setContextTokens(131072);
+    });
+    await waitFor(() => expect(mockPreviewContext).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.context?.limit).toBe(131072));
+    unmount();
+  });
 });
