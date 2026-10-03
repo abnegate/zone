@@ -88,6 +88,11 @@ For production, regenerate secrets for security.
   - `deepseek-r1:32b` (highest quality reasoning)
   - `llama3.1:70b` (alternative large model)
 
+### `OLLAMA_MODEL_VISION`
+- **Default**: empty
+- **Description**: Vision model for chats with attached images and for auto-captioning LoRA training images. Must accept images. `COMFYUI_CAPTION_MODEL` overrides it for captions only.
+- **Example**: `llava:7b`
+
 ### `OLLAMA_MODEL_EMBED`
 - **Default**: `qwen3-embedding:0.6b`
 - **Description**: Embedding model for search, memory recall and RAG. The manager reads it at startup and uses it for every workspace without an embedding model of its own; the bundled Ollama init pulls it.
@@ -1233,12 +1238,14 @@ details, and native macOS / bundled NVIDIA instructions.
   same folder; Compose bind-mounts it over the container custom node.
 
 ### `COMFYUI_CAPTION_MODEL`
-- **Default**: empty (auto-captioning disabled)
-- **Description**: Vision model used to caption LoRA training images that have
-  no caption. Zone first asks the model to name the subject shared by every
-  image, then describes each image while excluding that subject, so the trigger
-  word carries the identity. Captions typed by hand are never overwritten. Must
-  be a model that accepts images; leave empty to caption manually.
+- **Default**: `OLLAMA_MODEL_VISION` when that is set, otherwise empty
+- **Description**: Optional override for the vision model that captions LoRA
+  training images. When empty, Zone uses the instance vision model
+  (`OLLAMA_MODEL_VISION`). Zone first asks the model to name the subject
+  shared by every image, then describes each image while excluding that
+  subject, so the trigger word carries the identity. Captions typed by hand
+  are never overwritten. Must be a model that accepts images. Auto-captioning
+  is disabled only when no vision model is configured at all.
 
 ### `COMFYUI_CAPTION_TIMEOUT_SECS`
 - **Default**: `60`
@@ -1726,7 +1733,7 @@ Need to find a specific config? Quick lookup:
 - **Docker Versions**: DOCKER_VERSION_TRAEFIK, DOCKER_VERSION_OLLAMA, DOCKER_VERSION_POSTGRES, DOCKER_VERSION_LITELLM, DOCKER_VERSION_GLUETUN, DOCKER_VERSION_SEARXNG, COMFYUI_COMMIT
 - **Domains**: DOMAIN_HOST_WEBUI
 - **Email**: ACME_EMAIL
-- **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED
+- **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED, OLLAMA_MODEL_VISION
 - **Model backend and coding agents**: ZONE_LLM_BACKEND,
   ZONE_LLM_BACKEND_EXECUTABLE, ZONE_AGENT_STATE_DIR, ZONE_AGENT_HOST_LOGIN,
   ZONE_CLAUDE_TOKEN_URL, ZONE_AGENT_CALLBACK, ZONE_AGENT_CALLBACK_BIND,

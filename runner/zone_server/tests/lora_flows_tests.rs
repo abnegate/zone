@@ -866,7 +866,7 @@ async fn captions_report_configuration_and_preserve_user_drafts() {
     assert!(
         error["error"]
             .as_str()
-            .is_some_and(|message| message.contains("COMFYUI_CAPTION_MODEL"))
+            .is_some_and(|message| message.contains("no vision model is available"))
     );
 
     let (enabled, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {

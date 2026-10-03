@@ -34,6 +34,12 @@ fn text(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// `COMFYUI_CAPTION_MODEL` is an override. The instance vision model already
+/// accepts images, so captioning uses that when the override is blank.
+fn resolve_caption_model(caption: Option<String>, vision: Option<String>) -> String {
+    text(caption).or_else(|| text(vision)).unwrap_or_default()
+}
+
 fn bounded(value: Option<String>, default: u64, min: u64, max: u64) -> u64 {
     value
         .and_then(|value| value.parse().ok())
@@ -176,7 +182,10 @@ impl Config {
             classifier_model: env_text("COMFYUI_CLASSIFIER_MODEL")
                 .unwrap_or_else(|| "auto".to_string()),
             classifier_timeout_secs: env_u64("COMFYUI_CLASSIFIER_TIMEOUT_SECS", 3, 1, 30),
-            caption_model: env_text("COMFYUI_CAPTION_MODEL").unwrap_or_default(),
+            caption_model: resolve_caption_model(
+                env::var("COMFYUI_CAPTION_MODEL").ok(),
+                env::var("OLLAMA_MODEL_VISION").ok(),
+            ),
             caption_timeout_secs: env_u64("COMFYUI_CAPTION_TIMEOUT_SECS", 60, 5, 600),
             request_timeout_secs: env_u64("COMFYUI_REQUEST_TIMEOUT_SECS", 15, 1, 120),
             generation_timeout_secs: env_u64("COMFYUI_GENERATION_TIMEOUT_SECS", 300, 10, 3600),
@@ -264,6 +273,23 @@ mod tests {
         assert_eq!(text(Some("   ".into())), None, "whitespace is not a value");
         assert_eq!(text(Some(String::new())), None);
         assert_eq!(text(None), None);
+    }
+
+    #[test]
+    fn captioning_uses_the_instance_vision_model_when_no_caption_model_is_set() {
+        assert_eq!(
+            resolve_caption_model(Some("clip-override".into()), Some("llava:7b".into())),
+            "clip-override"
+        );
+        assert_eq!(
+            resolve_caption_model(Some("  ".into()), Some("llava:7b".into())),
+            "llava:7b"
+        );
+        assert_eq!(
+            resolve_caption_model(None, Some(" llava:7b ".into())),
+            "llava:7b"
+        );
+        assert_eq!(resolve_caption_model(None, None), "");
     }
 
     #[test]

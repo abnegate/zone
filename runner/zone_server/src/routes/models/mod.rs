@@ -605,7 +605,7 @@ pub async fn captions(
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse::new(
-                "set COMFYUI_CAPTION_MODEL to a vision model to auto-caption training images",
+                "no vision model is available to auto-caption training images",
             )),
         )
             .into_response();

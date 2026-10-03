@@ -418,9 +418,9 @@ bad:  zrkxyz, a lime-green cube-headed robot with a red teapot body, three-quart
 
 Put one `.txt` beside each `.png` under `<train dir>/targets/`.
 
-Set `COMFYUI_CAPTION_MODEL` to a vision model and Zone writes those captions for
-you. One pass names the subject, then each image is captioned with that subject
-excluded. Small vision models ignore "do not describe the subject", so the answer
+Zone writes those captions with the instance vision model (`OLLAMA_MODEL_VISION`),
+or `COMFYUI_CAPTION_MODEL` when that override is set. One pass names the subject,
+then each image is captioned with that subject excluded. Small vision models ignore "do not describe the subject", so the answer
 is filtered rather than trusted: a word that appears in a third or more of the
 descriptions cannot be describing what varies between them, so clauses carrying
 those words are dropped along with the subject phrase itself. A description that
