@@ -137,9 +137,11 @@ cd "$HOME/Library/Application Support/Zone/ComfyUI"
   --force-fp16
 ```
 
-`--force-fp16` keeps compute on the broadly supported MPS path while the FP8
-checkpoint retains its smaller storage and memory footprint. ComfyUI has no
-built-in authentication, so it must stay bound to loopback.
+`--force-fp16` keeps inference on the broadly supported MPS path while the FP8
+checkpoint retains its smaller storage and memory footprint. LoRA training still
+runs in fp32 on MPS: fp16 autocast overflows FLUX attention and the first step's
+loss becomes NaN. ComfyUI has no built-in authentication, so it must stay bound
+to loopback.
 
 First test whether Docker Desktop can reach the loopback listener:
 

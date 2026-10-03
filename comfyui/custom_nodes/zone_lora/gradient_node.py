@@ -23,7 +23,12 @@ from comfy_extras.nodes_train import (
 
 from .inference_hooks import install_all, prepare_frozen_weights, wrap_early_frozen
 from .train_config import load_config
-from .train_node import error_scale, setup_identity_lora
+from .train_node import (
+    error_scale,
+    setup_identity_lora,
+    training_autocast,
+    training_compute,
+)
 
 
 class FixedBatchDescent(comfy.samplers.Sampler):
@@ -77,7 +82,7 @@ class FixedBatchDescent(comfy.samplers.Sampler):
             x0 = latent.detach().clone()
             sigma = sigma.detach().clone()
         for _ in range(self.iterations):
-            with torch.autocast(xt.device.type, dtype=self.training_dtype):
+            with training_autocast(xt.device.type, self.training_dtype):
                 x0_pred = model_wrap(xt, sigma, **extra)
                 scale = error_scale(sigma, x0_pred, self.sigma_floor)
                 loss = torch.nn.functional.mse_loss(
@@ -152,7 +157,11 @@ class ZoneProbeGradient(io.ComfyNode):
         latents = _process_latents_standard_mode(latents)
         positive = _process_conditioning(positive)
         with torch.inference_mode(False):
-            dtype = torch.float16 if model.model.get_dtype() == torch.float16 else torch.bfloat16
+            model_dtype = model.model.get_dtype()
+            device_type = comfy.model_management.get_torch_device().type
+            dtype, _ = training_compute(model_dtype, 'none', torch.bfloat16, device_type)
+            if dtype != model_dtype:
+                model.set_model_compute_dtype(dtype)
             latents, count, _ = _prepare_latents_and_count(latents, dtype, False)
             positive = _validate_and_expand_conditioning(positive, count, False)
             model.model.requires_grad_(False).train()

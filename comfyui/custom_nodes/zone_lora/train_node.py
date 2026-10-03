@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -39,6 +40,35 @@ from .train_config import (
     lora_alpha,
     trains,
 )
+
+
+def training_compute(
+    model_dtype: torch.dtype,
+    requested: str,
+    lora_dtype: torch.dtype,
+    device_type: str,
+) -> tuple[torch.dtype, bool]:
+    """Compute dtype and whether GradScaler is used.
+
+    `--force-fp16` is an inference flag. FLUX attention overflows in fp16
+    autocast on MPS, and the first training step's loss becomes NaN.
+    """
+    if requested != 'none':
+        dtype = node_helpers.string_to_torch_dtype(requested)
+    elif model_dtype == torch.float16:
+        dtype = torch.float16
+    else:
+        dtype = torch.bfloat16
+    if device_type == 'mps' and dtype == torch.float16:
+        return torch.float32, False
+    scaler = dtype == torch.float16 and lora_dtype != torch.bfloat16
+    return dtype, scaler
+
+
+def training_autocast(device_type: str, dtype: torch.dtype):
+    if dtype in (torch.float16, torch.bfloat16):
+        return torch.autocast(device_type, dtype=dtype)
+    return contextlib.nullcontext()
 
 
 def error_scale(sigmas, sample, sigma_floor: float):
@@ -94,7 +124,7 @@ class ZoneTrainSampler(TrainSampler):
         with torch.inference_mode(False):
             xt = xt.detach().clone()
             batch_sigmas = batch_sigmas.detach().clone()
-        with torch.autocast(xt.device.type, dtype=self.training_dtype):
+        with training_autocast(xt.device.type, self.training_dtype):
             x0_pred = model_wrap(xt, batch_sigmas, **batch_extra_args)
             scale = self.error_scale(batch_sigmas, x0_pred)
             loss = self.loss_fn(x0_pred.float() / scale, x0.float() / scale)
@@ -317,22 +347,27 @@ class ZoneTrainLoRA(io.ComfyNode):
         with torch.inference_mode(False):
             mp = model
             lora_dtype_t = node_helpers.string_to_torch_dtype(lora_dtype)
-            use_grad_scaler = False
-            if training_dtype != 'none':
-                dtype = node_helpers.string_to_torch_dtype(training_dtype)
+            model_dtype = mp.model.get_dtype()
+            device_type = comfy.model_management.get_torch_device().type
+            dtype, use_grad_scaler = training_compute(
+                model_dtype, training_dtype, lora_dtype_t, device_type
+            )
+            if training_dtype != 'none' or dtype != model_dtype:
                 mp.set_model_compute_dtype(dtype)
-            else:
-                model_dtype = mp.model.get_dtype()
-                if model_dtype == torch.float16:
-                    dtype = torch.float16
-                    if lora_dtype_t != torch.bfloat16:
-                        use_grad_scaler = True
-                    if PerformanceFeature.Fp16Accumulation in args.fast:
-                        logging.warning(
-                            'FP16 model with fp16_accumulation can NaN during training'
-                        )
-                else:
-                    dtype = torch.bfloat16
+            if dtype != model_dtype:
+                logging.info(
+                    'Zone LoRA: %s compute on %s (weights are %s)',
+                    dtype,
+                    device_type,
+                    model_dtype,
+                )
+            if (
+                dtype == torch.float16
+                and PerformanceFeature.Fp16Accumulation in args.fast
+            ):
+                logging.warning(
+                    'FP16 model with fp16_accumulation can NaN during training'
+                )
             latents, num_images, multi_res = _prepare_latents_and_count(
                 latents, dtype, False
             )

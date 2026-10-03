@@ -380,6 +380,30 @@ class LossWeightingTests(unittest.TestCase):
         sampler.sigma_floor = floor
         return sampler
 
+    def test_mps_fp16_weights_train_in_fp32(self):
+        torch = self.torch
+        node = self.node
+        dtype, scaler = node.training_compute(
+            torch.float16, 'none', torch.bfloat16, 'mps'
+        )
+        self.assertEqual(dtype, torch.float32)
+        self.assertFalse(scaler)
+
+    def test_cuda_fp16_weights_keep_fp16_without_a_scaler_for_bf16_lora(self):
+        torch = self.torch
+        node = self.node
+        dtype, scaler = node.training_compute(
+            torch.float16, 'none', torch.bfloat16, 'cuda'
+        )
+        self.assertEqual(dtype, torch.float16)
+        self.assertFalse(scaler)
+
+    def test_fp32_autocast_is_disabled(self):
+        import contextlib
+
+        context = self.node.training_autocast('mps', self.torch.float32)
+        self.assertIsInstance(context, contextlib.nullcontext)
+
     def test_floor_caps_the_amplification_near_zero_noise(self):
         torch = self.torch
         sampler = self.sampler(0.05)

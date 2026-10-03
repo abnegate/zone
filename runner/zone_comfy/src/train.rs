@@ -839,16 +839,43 @@ fn exact_history(history: &Value, prompt: Uuid) -> Result<Option<&Value>, TrainE
 }
 
 fn train_prompt_complete(entry: &Value) -> Result<bool, TrainError> {
-    let status: HistoryStatus =
-        serde_json::from_value(entry.get("status").cloned().unwrap_or(json!({})))
-            .map_err(|_| TrainError::Failed("ComfyUI history status is invalid".into()))?;
+    let status_value = entry.get("status").cloned().unwrap_or(json!({}));
+    let status: HistoryStatus = serde_json::from_value(status_value.clone())
+        .map_err(|_| TrainError::Failed("ComfyUI history status is invalid".into()))?;
     if status.status_str.eq_ignore_ascii_case("error") {
         return Err(TrainError::Failed(format!(
             "ComfyUI train failed: {}",
-            entry.get("status").cloned().unwrap_or(json!({}))
+            train_error_detail(&status_value)
         )));
     }
     Ok(status.completed == Some(true) || status.status_str.eq_ignore_ascii_case("success"))
+}
+
+fn train_error_detail(status: &Value) -> String {
+    execution_error(status).unwrap_or_else(|| "the trainer reported an error".to_string())
+}
+
+fn execution_error(status: &Value) -> Option<String> {
+    let messages = status.get("messages")?.as_array()?;
+    messages.iter().find_map(|item| {
+        let pair = item.as_array()?;
+        if pair.first()?.as_str()? != "execution_error" {
+            return None;
+        }
+        let payload = pair.get(1)?;
+        let exception = payload.get("exception_message")?.as_str()?.trim();
+        if exception.is_empty() {
+            return None;
+        }
+        match payload
+            .get("node_type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+        {
+            Some(node) if !node.is_empty() => Some(format!("{node}: {exception}")),
+            _ => Some(exception.to_string()),
+        }
+    })
 }
 
 async fn cancel_and_wait(
@@ -1885,5 +1912,45 @@ mod tests {
                 .unwrap()
         );
         assert!(train_prompt_complete(&json!({"status": {"status_str": "error"}})).is_err());
+    }
+
+    #[test]
+    fn a_trainer_exception_is_named_without_dumping_inputs() {
+        let error = train_prompt_complete(&json!({
+            "status": {
+                "completed": false,
+                "status_str": "error",
+                "messages": [[
+                    "execution_error",
+                    {
+                        "exception_message": "training loss became NaN",
+                        "node_type": "ZoneTrainLoRA",
+                        "current_inputs": {
+                            "latents": "{'samples': tensor([[1.234, 5.678]])}"
+                        }
+                    }
+                ]]
+            }
+        }))
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("training loss became NaN"), "{message}");
+        assert!(message.contains("ZoneTrainLoRA"), "{message}");
+        assert!(!message.contains("tensor("), "{message}");
+        assert!(!message.contains("current_inputs"), "{message}");
+    }
+
+    #[test]
+    fn an_error_without_an_exception_stays_short() {
+        let error = train_prompt_complete(&json!({
+            "status": { "status_str": "error", "completed": false }
+        }))
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("the trainer reported an error"),
+            "{message}"
+        );
+        assert!(!message.contains('{'), "{message}");
     }
 }
