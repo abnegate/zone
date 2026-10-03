@@ -139,6 +139,63 @@ class SetupMacosTest(unittest.TestCase):
         self.assertIn("--install-trainer", result.stdout)
         self.assertEqual(self.script("--install-trainer", "--help").returncode, 0)
 
+    def test_install_trainer_inherits_comfy_site_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            install = root / "runtime"
+            (home / "Library/LaunchAgents").mkdir(parents=True)
+            (home / "Library/Logs").mkdir(parents=True)
+            venv = install / ".venv"
+            subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+            comfy_python = venv / "bin" / "python"
+            site = subprocess.check_output(
+                [
+                    str(comfy_python),
+                    "-c",
+                    "import sysconfig; print(sysconfig.get_path('purelib'))",
+                ],
+                text=True,
+            ).strip()
+            Path(site, "torch.py").write_text("x = 1\n", encoding="utf-8")
+            self.stub(root / "uname", UNAME_STUB)
+            launchctl_log = root / "launchctl.log"
+            self.stub(
+                root / "launchctl",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '@RECORD@'\n".replace(
+                    "@RECORD@", str(launchctl_log)
+                ),
+            )
+            result = subprocess.run(
+                ["sh", str(SCRIPT), "--install-trainer"],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                    "HOME": str(home),
+                    "COMFYUI_INSTALL_DIR": str(install),
+                    "COMFYUI_MODELS_DIR": str(root / "models"),
+                    "ZONE_TRAIN_SKIP_PIP": "1",
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertTrue((install / "train_sdxl.py").is_file())
+            self.assertTrue((install / "train_sdxl_config.json").is_file())
+            self.assertTrue((install / "sdxl_checkpoint.py").is_file())
+            imported = subprocess.run(
+                [str(install / ".venv-train" / "bin" / "python"), "-c", "import torch"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            plist = (home / "Library/LaunchAgents/ai.zone.train.plist").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("ai.zone.train", plist)
+            self.assertIn("train_sdxl.py", plist)
+            self.assertIn("bootstrap", launchctl_log.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

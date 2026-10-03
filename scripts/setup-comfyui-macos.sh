@@ -150,21 +150,29 @@ install_trainer() {
     if [ -f "$PROJECT_DIR/comfyui/sdxl_checkpoint.py" ]; then
         cp "$PROJECT_DIR/comfyui/sdxl_checkpoint.py" "$INSTALL_DIR/sdxl_checkpoint.py"
     fi
-    if [ ! -x "$INSTALL_DIR/.venv-train/bin/python" ]; then
-        "$INSTALL_DIR/.venv/bin/python" -m venv --system-site-packages "$INSTALL_DIR/.venv-train"
+    COMFY_PYTHON="$INSTALL_DIR/.venv/bin/python"
+    TRAIN_VENV="$INSTALL_DIR/.venv-train"
+    if [ ! -x "$TRAIN_VENV/bin/python" ]; then
+        "$COMFY_PYTHON" -m venv "$TRAIN_VENV"
     fi
-    TRAIN_PYTHON="$INSTALL_DIR/.venv-train/bin/python"
-    if ! "$TRAIN_PYTHON" -c "import torch" >/dev/null 2>&1; then
-        rm -rf "$INSTALL_DIR/.venv-train"
-        "$INSTALL_DIR/.venv/bin/python" -m venv --system-site-packages "$INSTALL_DIR/.venv-train"
-        TRAIN_PYTHON="$INSTALL_DIR/.venv-train/bin/python"
-    fi
-    if ! "$TRAIN_PYTHON" -c "import torch" >/dev/null 2>&1; then
-        echo "ComfyUI torch is not importable from $INSTALL_DIR/.venv-train" >&2
+    # Nested venvs do not inherit the parent venv via --system-site-packages;
+    # that flag only sees Homebrew's site. A .pth keeps Comfy's torch.
+    COMFY_SITE=$("$COMFY_PYTHON" -c "import sysconfig; print(sysconfig.get_path('purelib'))")
+    TRAIN_SITE=$("$TRAIN_VENV/bin/python" -c "import sysconfig; print(sysconfig.get_path('purelib'))")
+    if [ -z "$COMFY_SITE" ] || [ ! -d "$COMFY_SITE" ]; then
+        echo "ComfyUI site-packages was not found at $COMFY_SITE" >&2
         exit 1
     fi
-    "$TRAIN_PYTHON" -m pip install --disable-pip-version-check \
-        diffusers peft accelerate transformers safetensors pillow
+    printf '%s\n' "$COMFY_SITE" > "$TRAIN_SITE/comfy-site.pth"
+    TRAIN_PYTHON="$TRAIN_VENV/bin/python"
+    if ! "$TRAIN_PYTHON" -c "import torch" >/dev/null 2>&1; then
+        echo "ComfyUI torch is not importable from $TRAIN_VENV" >&2
+        exit 1
+    fi
+    if [ "${ZONE_TRAIN_SKIP_PIP:-}" != "1" ]; then
+        "$TRAIN_PYTHON" -m pip install --disable-pip-version-check \
+            diffusers peft accelerate transformers safetensors pillow
+    fi
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
     PLIST="$HOME/Library/LaunchAgents/ai.zone.train.plist"
     LOG="$HOME/Library/Logs/zone-train.log"
