@@ -310,6 +310,7 @@ mod tests {
 
     use abnegate_secret::SecretValue;
     use chrono::SubsecRound;
+    use futures::future::try_join_all;
     use sqlx::PgPool;
     use sqlx::postgres::PgPoolOptions;
     use tempfile::TempDir;
@@ -1010,13 +1011,17 @@ mod tests {
 
     #[tokio::test]
     async fn a_usage_write_waits_out_a_renewal_without_holding_a_connection() {
+        const CONNECTIONS: u32 = 3;
+        const ACQUIRE: Duration = Duration::from_secs(2);
         let scene = Scene::pooled(
             UNREACHABLE.to_string(),
-            PgPoolOptions::new()
-                .max_connections(3)
-                .acquire_timeout(Duration::from_secs(2)),
+            PgPoolOptions::new().max_connections(CONNECTIONS),
         )
         .await;
+        let opened = try_join_all((0..CONNECTIONS).map(|_| scene.pool.acquire()))
+            .await
+            .expect("the pool's connections");
+        drop(opened);
         let login = scene.login(AgentKind::Claude, "renewing", None).await;
         let renewing = credential::hold(login).await;
         let mut renewal = scene.pool.begin().await.expect("a renewal's transaction");
@@ -1034,7 +1039,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let meanwhile = sqlx::query("SELECT 1").execute(&scene.pool).await;
+        let meanwhile =
+            tokio::time::timeout(ACQUIRE, sqlx::query("SELECT 1").execute(&scene.pool)).await;
         renewal.commit().await.expect("the renewal to end");
         drop(renewing);
         for write in writes {
@@ -1044,7 +1050,7 @@ mod tests {
         scene.remove().await;
 
         assert!(
-            meanwhile.is_ok(),
+            matches!(meanwhile, Ok(Ok(_))),
             "usage writes waiting on the renewal drained the pool: {meanwhile:?}"
         );
         assert_eq!(stored.windows.len(), 1);

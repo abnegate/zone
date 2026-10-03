@@ -204,7 +204,7 @@ mod tests {
     use std::str::FromStr;
     use std::time::Duration;
 
-    use futures::future::join_all;
+    use futures::future::{join_all, try_join_all};
     use serde_json::json;
     use sqlx::PgPool;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -231,6 +231,7 @@ mod tests {
     /// A pool small enough for turns waiting on one renewal to exhaust it, were each to hold a
     /// connection while it waits.
     const CONNECTIONS: u32 = 3;
+    /// How long other work waits for a connection before it counts the pool as taken.
     const ACQUIRE: Duration = Duration::from_secs(2);
     const HUNG: Duration = Duration::from_secs(4);
     const SETTLE: Duration = Duration::from_secs(1);
@@ -269,24 +270,45 @@ mod tests {
             .expect("the test database")
     }
 
-    /// Drops the connection of the pool `name` that holds a transaction open, as a renewal does
-    /// while it waits for Claude.
-    async fn drop_renewal(pool: &PgPool, name: &str) {
+    /// Drops the connection of the pool `name` that holds the renewal's transaction open, once
+    /// `claude` has the renewal and the turn waits on its answer.
+    async fn drop_renewal(pool: &PgPool, name: &str, claude: &MockServer) {
+        asked(claude).await;
+        let dropped: Vec<bool> = sqlx::query_scalar(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE application_name = $1 AND state = 'idle in transaction'",
+        )
+        .bind(name)
+        .fetch_all(pool)
+        .await
+        .expect("the server's connections");
+        assert_eq!(
+            dropped,
+            [true],
+            "the renewal held no transaction open while it waited for Claude"
+        );
+    }
+
+    async fn asked(claude: &MockServer) {
         for _ in 0..ATTEMPTS {
-            let dropped: Option<bool> = sqlx::query_scalar(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-                 WHERE application_name = $1 AND state = 'idle in transaction'",
-            )
-            .bind(name)
-            .fetch_optional(pool)
-            .await
-            .expect("the server's connections");
-            if dropped == Some(true) {
+            let requests = claude
+                .received_requests()
+                .await
+                .expect("the token endpoint records its requests");
+            if !requests.is_empty() {
                 return;
             }
             tokio::time::sleep(PAUSE).await;
         }
-        panic!("the renewal never held a transaction open");
+        panic!("Claude was never asked to renew");
+    }
+
+    /// Opens every connection `pool` may hold, so that no later wait for one waits on a connect.
+    async fn opened(pool: &PgPool) {
+        let connections = try_join_all((0..CONNECTIONS).map(|_| pool.acquire()))
+            .await
+            .expect("the pool's connections");
+        drop(connections);
     }
 
     impl Fixture {
@@ -631,10 +653,10 @@ mod tests {
         let server = token_endpoint(renewed().set_delay(HUNG), 1).await;
         let pool = PgPoolOptions::new()
             .max_connections(CONNECTIONS)
-            .acquire_timeout(ACQUIRE)
             .connect(&database())
             .await
             .expect("the test database");
+        opened(&pool).await;
         let fixture = Fixture::on(pool.clone(), format!("{}{TOKEN_PATH}", server.uri())).await;
         fixture
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
@@ -643,13 +665,13 @@ mod tests {
         let turns = join_all((0..TURNS).map(|_| fixture.resolve()));
         let other_work = async {
             tokio::time::sleep(SETTLE).await;
-            sqlx::query("SELECT 1").execute(&pool).await
+            tokio::time::timeout(ACQUIRE, sqlx::query("SELECT 1").execute(&pool)).await
         };
         let (logins, other_work) = tokio::join!(turns, other_work);
         fixture.remove().await;
 
         assert!(
-            other_work.is_ok(),
+            matches!(other_work, Ok(Ok(_))),
             "turns waiting on one renewal took every connection: {other_work:?}"
         );
         for login in logins {
@@ -668,7 +690,10 @@ mod tests {
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
             .await;
 
-        let (login, ()) = tokio::join!(fixture.resolve(), drop_renewal(&fixture.pool, &name));
+        let (login, ()) = tokio::join!(
+            fixture.resolve(),
+            drop_renewal(&fixture.pool, &name, &server)
+        );
         let (stored, _) = fixture.stored().await;
         fixture.remove().await;
 
@@ -691,7 +716,7 @@ mod tests {
         fixture.sign_in(&current).await;
 
         let (login, ()) = tokio::join!(fixture.resolve(), async {
-            drop_renewal(&fixture.pool, &name).await;
+            drop_renewal(&fixture.pool, &name, &server).await;
             fixture.state.db().close().await;
         });
         let (stored, _) = fixture.stored().await;
