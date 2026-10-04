@@ -2,6 +2,7 @@ import type { TrainJob } from '../../../api/models';
 import {
   formatEta,
   formatLoss,
+  previewSrc,
   trainHeadline,
   trainJobPercent,
   trainStepLabel,
@@ -14,6 +15,7 @@ export default function TrainMeter({ job, detail }: { job: TrainJob; detail?: st
   const loss = job.status === 'running' ? formatLoss(job.loss) : '';
   const stepLabel = trainStepLabel(job);
   const footnote = [eta, loss, detail].filter(Boolean).join(' · ');
+  const previews = job.previews?.filter(Boolean) ?? [];
 
   return (
     <div className="train-meter">
@@ -37,6 +39,20 @@ export default function TrainMeter({ job, detail }: { job: TrainJob; detail?: st
         />
       </div>
       {footnote && <p className="train-meter-eta">{footnote}</p>}
+      {previews.length > 0 && (
+        <div className="train-meter-previews">
+          {previews.map((value, index) => (
+            <img
+              key={value}
+              className="train-meter-preview"
+              src={previewSrc(value)}
+              alt={`Training preview ${index + 1} of ${previews.length}`}
+              width={72}
+              height={72}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -75,6 +75,7 @@
 .sidebar.collapsed .train-dock-header,
 .sidebar.collapsed .train-meter-copy,
 .sidebar.collapsed .train-meter-eta,
+.sidebar.collapsed .train-meter-previews,
 .sidebar.collapsed .train-dock-error {
   display: none;
 }

@@ -104,6 +104,20 @@ pub fn job_dir(models_dir: &Path, id: Uuid) -> PathBuf {
     root(models_dir).join(id.to_string())
 }
 
+pub fn preview_basename(name: &str) -> Option<&str> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return None;
+    }
+    Some(name)
+}
+
+pub fn preview_file(models_dir: &Path, name: &str) -> Option<PathBuf> {
+    let name = preview_basename(name)?;
+    let job = current(models_dir)?;
+    let path = job_dir(models_dir, job.id).join("previews").join(name);
+    path.is_file().then_some(path)
+}
+
 pub fn current(models_dir: &Path) -> Option<HostJob> {
     let root = root(models_dir);
     let entries = fs::read_dir(&root).ok()?;
@@ -393,6 +407,24 @@ mod tests {
         .unwrap();
         let viewed = current_with_progress(models).unwrap();
         assert_eq!(viewed.previews, vec!["previews/step-250-0.png".to_string()]);
+    }
+
+    #[test]
+    fn preview_file_resolves_a_basename_under_the_current_job() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path();
+        let job = HostJob::create("jerry", "lora", "ohwx", "base.safetensors");
+        let dir = job_dir(models, job.id);
+        write_job(&dir, &job).unwrap();
+        let previews = dir.join("previews");
+        fs::create_dir_all(&previews).unwrap();
+        let png = previews.join("step-250-0.png");
+        fs::write(&png, b"png").unwrap();
+        assert_eq!(preview_file(models, "step-250-0.png"), Some(png));
+        assert!(preview_file(models, "../job.json").is_none());
+        assert!(preview_file(models, "missing.png").is_none());
+        let empty = tempfile::tempdir().unwrap();
+        assert!(preview_file(empty.path(), "step-250-0.png").is_none());
     }
 
     #[test]

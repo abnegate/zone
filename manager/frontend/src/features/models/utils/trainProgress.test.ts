@@ -3,6 +3,7 @@ import {
   formatEta,
   formatLoss,
   methodAdvice,
+  previewSrc,
   trainHeadline,
   trainJobPercent,
   trainPercent,
@@ -83,5 +84,17 @@ describe('trainProgress', () => {
     expect(methodAdvice({ subject: 'person', method: 'video', stills: 0, clips: 40 })).toMatch(
       /trains Wan from the clips/
     );
+  });
+
+  it('turns a relative preview path into a train preview url', () => {
+    expect(previewSrc('previews/step-250-0.png')).toBe('/api/models/train/previews/step-250-0.png');
+    expect(previewSrc('previews\\step-250-0.png')).toBe(
+      '/api/models/train/previews/step-250-0.png'
+    );
+    expect(previewSrc('/api/models/train/previews/already.png')).toBe(
+      '/api/models/train/previews/already.png'
+    );
+    expect(previewSrc('https://example.test/p.png')).toBe('https://example.test/p.png');
+    expect(previewSrc('data:image/png;base64,abc')).toBe('data:image/png;base64,abc');
   });
 });

@@ -22,14 +22,13 @@ import {
   poolMap,
   prepareImage,
 } from '../trainMedia';
-import { methodAdvice } from '../utils/trainProgress';
+import { methodAdvice, type TrainMethodKind } from '../utils/trainProgress';
 import DropZone from './DropZone';
 import TrainMeter from './TrainMeter';
 import './TrainPanel.css';
 
 type TrainBase = { id: string; label: string; edit: boolean };
 type TrainSubjectKind = 'person' | 'other';
-type TrainMethodKind = 'lora' | 'finetune';
 
 const PEOPLE_BASE = 'sdxl-people';
 const PEOPLE_BUNDLE_HELP =
@@ -39,9 +38,22 @@ function firstOtherBase(bases: TrainBase[]): string {
   return bases.find((row) => row.id !== PEOPLE_BASE)?.id ?? '';
 }
 
+function trainingHeading(method: TrainMethodKind): string {
+  if (method === 'finetune') return 'Fine-tune a person';
+  if (method === 'pivotal') return 'Pivotal training';
+  if (method === 'video') return 'Train video identity';
+  return 'Train a LoRA';
+}
+
 function trainingHelp(subject: TrainSubjectKind, method: TrainMethodKind, edit: boolean): string {
   if (subject === 'person' && method === 'finetune') {
     return 'Drop images, clips, or a folder, set a unique trigger word, and fine-tune the SDXL people checkpoint. A run takes days to weeks, writes a ~7 GB checkpoint (full UNet + CLIP-L, prior preservation), and resumes after a refresh or restart. Plan ~20 GB of disk during a run. Fine-tune from about 200 unique stills or 20 clips; 500 stills or 50 clips is the strong set for likeness, hands, and body.';
+  }
+  if (subject === 'person' && method === 'pivotal') {
+    return 'Drop images, clips, or a folder, set a unique trigger word, and train a rank-64 SDXL people LoRA plus a CLIP-L textual inversion of the trigger. Hours, same dump as LoRA, cleaner promptability. Face and body still come from the people bundle.';
+  }
+  if (subject === 'person' && method === 'video') {
+    return 'Drop clips (stills in the dump are ignored for this method), set a unique trigger word, and train a Wan 2.2 TI2V 5B video LoRA from 2–3 windows per clip. Run a still method too for image identity. Needs the Wan video bundle on the host.';
   }
   if (subject === 'person') {
     return 'Drop images, clips, or a folder, set a unique trigger word, and train an SDXL people adapter. A run takes hours and writes a ~100–200 MB adapter (1024 buckets, rank 64, text encoder trained). Body shots stay in frame; a tighter head crop is added so faces stay sharp. LoRA fits about 20–200 unique stills. Fine-tune starts around 200 stills or 20 clips; 500 stills or 50 clips is the strong set.';
@@ -653,9 +665,9 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
 
   const handleMethod = (value: string) => {
     if (busy) return;
-    if (value === 'finetune') {
+    if (value === 'finetune' || value === 'pivotal' || value === 'video') {
       if (subject !== 'person') return;
-      setMethod('finetune');
+      setMethod(value);
       return;
     }
     setMethod('lora');
@@ -895,7 +907,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
 
   return (
     <section className="card">
-      <h2>{method === 'finetune' ? 'Fine-tune a person' : 'Train a LoRA'}</h2>
+      <h2>{trainingHeading(method)}</h2>
       <p className="help-text">{trainingHelp(subject, method, edit)}</p>
       {advice && <p className="help-text">{advice}</p>}
       {error && <div className="error-placeholder">{error}</div>}
@@ -937,6 +949,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             options={[
               { value: 'lora', label: 'LoRA' },
               { value: 'finetune', label: 'Fine-tune', disabled: subject !== 'person' },
+              { value: 'pivotal', label: 'Pivotal', disabled: subject !== 'person' },
+              { value: 'video', label: 'Video', disabled: subject !== 'person' },
             ]}
             disabled={busy}
           />

@@ -18,8 +18,8 @@ pub use types::{
 use axum::{
     Json,
     extract::{Path, Query, Request, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use once_cell::sync::Lazy;
 use serde::Serialize;
@@ -715,6 +715,28 @@ pub async fn frames(
     }
 }
 
+/// GET /api/models/train/previews/{name}
+pub async fn train_preview(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    train_preview_response(&state.config().comfyui.models_dir, &name)
+}
+
+fn train_preview_response(models_dir: &std::path::Path, name: &str) -> Response {
+    if host_train::preview_basename(name).is_none() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(path) = host_train::preview_file(models_dir, name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// GET /api/models/train
 pub async fn train_job(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
     if let Some(job) = state.train_jobs().current() {
@@ -952,5 +974,44 @@ mod weight_path_tests {
             Some(PathBuf::from("/models/loras/style.safetensors.zone.json"))
         );
         assert!(confined_sidecar_path(&weight, "../style").is_none());
+    }
+}
+
+#[cfg(test)]
+mod train_preview_tests {
+    use super::train_preview_response;
+    use axum::http::{StatusCode, header};
+    use http_body_util::BodyExt;
+    use std::fs;
+    use zone_comfy::host_train::{self, HostJob};
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\npreview";
+
+    #[tokio::test]
+    async fn train_preview_serves_png_rejects_traversal_and_missing_job() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path();
+        let job = HostJob::create("jerry", "lora", "ohwx", "base.safetensors");
+        let dir = host_train::job_dir(models, job.id);
+        host_train::write_job(&dir, &job).unwrap();
+        let previews = dir.join("previews");
+        fs::create_dir_all(&previews).unwrap();
+        fs::write(previews.join("step-250-0.png"), PNG).unwrap();
+
+        let served = train_preview_response(models, "step-250-0.png");
+        assert_eq!(served.status(), StatusCode::OK);
+        assert_eq!(
+            served.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        let body = served.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], PNG);
+
+        let junk = train_preview_response(models, "../job.json");
+        assert_eq!(junk.status(), StatusCode::BAD_REQUEST);
+
+        let empty = tempfile::tempdir().unwrap();
+        let missing = train_preview_response(empty.path(), "step-250-0.png");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 }

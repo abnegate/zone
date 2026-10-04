@@ -88,6 +88,27 @@ describe('TrainDock', () => {
     expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '8');
   });
 
+  it('renders snapshot previews from the job', () => {
+    trainState.job = {
+      id: 'job-1',
+      name: 'jerry',
+      status: 'running',
+      step: 250,
+      total: 8000,
+      previews: [
+        'previews/step-250-0.png',
+        'previews/step-250-1.png',
+        'previews/step-500-0.png',
+        'previews/step-500-1.png',
+      ],
+    };
+    render(<TrainDock />);
+    const images = screen.getAllByRole('img');
+    expect(images).toHaveLength(4);
+    expect(images[0]).toHaveAttribute('src', '/api/models/train/previews/step-250-0.png');
+    expect(images[0]).toHaveAttribute('alt', 'Training preview 1 of 4');
+  });
+
   it('lets a finished failure be dismissed', () => {
     trainState.job = {
       id: 'job-1',

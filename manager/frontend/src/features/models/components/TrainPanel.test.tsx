@@ -243,7 +243,10 @@ describe('TrainPanel', () => {
       'id',
       targets.getAttribute('aria-labelledby')
     );
-    expect(screen.getByText('Video')).toHaveAttribute('id', clips.getAttribute('aria-labelledby'));
+    expect(screen.getByText('Video', { selector: 'label' })).toHaveAttribute(
+      'id',
+      clips.getAttribute('aria-labelledby')
+    );
     expect(
       screen.getByText(
         'Choose the images this LoRA should learn from. Clips and folders are fine too.'
@@ -899,6 +902,83 @@ describe('TrainPanel', () => {
     expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
   });
 
+  it('submits a person pivotal train and retitles the panel', async () => {
+    mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Person');
+    fireEvent.click(screen.getByLabelText('Method'));
+    expect(await screen.findByRole('option', { name: 'Pivotal' })).not.toHaveAttribute(
+      'data-disabled'
+    );
+    fireEvent.click(screen.getByRole('option', { name: 'Pivotal' }));
+    await waitFor(() => {
+      expect(screen.getByLabelText('Method')).toHaveTextContent('Pivotal');
+    });
+
+    expect(screen.getByRole('heading', { name: 'Pivotal training' })).toBeInTheDocument();
+    expect(screen.getByText(/textual inversion/)).toBeInTheDocument();
+    expect(screen.getByText(/CLIP-L/)).toBeInTheDocument();
+
+    fillIdentity();
+    await addTargets(file('portrait.png', 'portrait'));
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    expect(mockTrain.mock.calls[0]?.[0]).toMatchObject({
+      base: 'sdxl-people',
+      subject: 'person',
+      method: 'pivotal',
+    });
+  });
+
+  it('submits a person video train and retitles the panel', async () => {
+    mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Person');
+    fireEvent.click(screen.getByLabelText('Method'));
+    expect(await screen.findByRole('option', { name: 'Video' })).not.toHaveAttribute(
+      'data-disabled'
+    );
+    fireEvent.click(screen.getByRole('option', { name: 'Video' }));
+    await waitFor(() => {
+      expect(screen.getByLabelText('Method')).toHaveTextContent('Video');
+    });
+
+    expect(screen.getByRole('heading', { name: 'Train video identity' })).toBeInTheDocument();
+    expect(screen.getByText(/Wan 2\.2 TI2V 5B/)).toBeInTheDocument();
+    expect(screen.getAllByText(/2–3 windows/).length).toBeGreaterThan(0);
+
+    fillIdentity();
+    await addTargets(file('portrait.png', 'portrait'));
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    expect(mockTrain.mock.calls[0]?.[0]).toMatchObject({
+      base: 'sdxl-people',
+      subject: 'person',
+      method: 'video',
+    });
+  });
+
+  it('keeps Pivotal and Video disabled while Subject is Other', async () => {
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    expect(screen.getByLabelText('Subject')).toHaveTextContent('Other');
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+
+    fireEvent.click(screen.getByLabelText('Method'));
+    const pivotal = await screen.findByRole('option', { name: 'Pivotal' });
+    const video = screen.getByRole('option', { name: 'Video' });
+    expect(pivotal).toHaveAttribute('data-disabled');
+    expect(video).toHaveAttribute('data-disabled');
+    fireEvent.click(pivotal);
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+    fireEvent.click(screen.getByRole('option', { name: 'Video' }));
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+    fireEvent.click(screen.getByRole('option', { name: 'LoRA' }));
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+  });
+
   it('disables Train when Person is chosen without the SDXL people bundle', async () => {
     render(<TrainPanel onTrained={mock()} />);
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
@@ -937,5 +1017,26 @@ describe('TrainPanel', () => {
     expect(screen.getByRole('option', { name: 'FLUX.1 Schnell' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'SDXL people (Lustify)' })).toBeNull();
     fireEvent.click(screen.getByRole('option', { name: 'Qwen Image Edit' }));
+  });
+
+  it('restores LoRA when switching Person back to Other after Pivotal or Video', async () => {
+    mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Person');
+    await selectMethod('Pivotal');
+    expect(screen.getByRole('heading', { name: 'Pivotal training' })).toBeInTheDocument();
+
+    await selectSubject('Other');
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+    expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
+
+    await selectSubject('Person');
+    await selectMethod('Video');
+    expect(screen.getByRole('heading', { name: 'Train video identity' })).toBeInTheDocument();
+
+    await selectSubject('Other');
+    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+    expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
   });
 });

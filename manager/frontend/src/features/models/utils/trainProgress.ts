@@ -86,6 +86,19 @@ export function formatLoss(loss?: number | null): string {
   return `loss ${rounded}`;
 }
 
+export function previewSrc(value: string): string {
+  if (
+    value.startsWith('data:') ||
+    value.startsWith('http://') ||
+    value.startsWith('https://') ||
+    value.startsWith('/')
+  ) {
+    return value;
+  }
+  const name = value.split(/[\\/]/).pop() ?? value;
+  return `/api/models/train/previews/${encodeURIComponent(name)}`;
+}
+
 export function methodAdvice(input: {
   subject: TrainSubjectKind;
   method: TrainMethodKind;

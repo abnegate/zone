@@ -319,6 +319,10 @@ pub fn create_router(state: AppState) -> Router {
             post(models::frames).layer(uploads).layer(queue_frames),
         )
         .route(
+            "/api/models/train/previews/{name}",
+            get(models::train_preview),
+        )
+        .route(
             "/api/models/{name}",
             get(models::get).delete(models::delete),
         )

@@ -673,6 +673,28 @@ async fn get_json(router: axum::Router, token: &str, uri: &str) -> (StatusCode, 
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
+async fn get_bytes(
+    router: axum::Router,
+    token: &str,
+    uri: &str,
+) -> (StatusCode, bytes::Bytes, Option<String>) {
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, body, content_type)
+}
+
 async fn wait_train_job(router: &axum::Router, token: &str) -> Value {
     for _ in 0..200 {
         let (status, body) = get_json(router.clone(), token, "/api/models/train").await;
@@ -1169,4 +1191,50 @@ async fn a_busy_host_job_refuses_a_second_train() {
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
     assert_eq!(conflict["error"], "a training job is already running");
     let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_preview_serves_png_rejects_traversal_and_missing_job() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let mut job =
+        zone_comfy::host_train::HostJob::create("jerry", "lora", "ohwx", "base.safetensors");
+    job.status = zone_comfy::host_train::HostStatus::Running;
+    let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
+    zone_comfy::host_train::write_job(&dir, &job).unwrap();
+    let previews = dir.join("previews");
+    fs::create_dir_all(&previews).unwrap();
+    fs::write(previews.join("step-250-0.png"), b"preview-png").unwrap();
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+
+    let (status, body, content_type) = get_bytes(
+        router.clone(),
+        &token,
+        "/api/models/train/previews/step-250-0.png",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{status}");
+    assert_eq!(content_type.as_deref(), Some("image/png"));
+    assert_eq!(&body[..], b"preview-png");
+
+    let (status, _, _) = get_bytes(
+        router.clone(),
+        &token,
+        "/api/models/train/previews/..%2Fjob.json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let empty = temp_models();
+    let (empty_router, empty_token) = router_with(&ollama, &catalog, empty.clone(), None).await;
+    let (status, _, _) = get_bytes(
+        empty_router,
+        &empty_token,
+        "/api/models/train/previews/step-250-0.png",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(empty);
 }

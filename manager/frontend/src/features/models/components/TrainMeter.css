@@ -27,6 +27,22 @@
   color: var(--ui-text-muted);
 }
 
+.train-meter-previews {
+  display: flex;
+  gap: var(--ui-space-1);
+  overflow-x: auto;
+}
+
+.train-meter-preview {
+  width: 4.5rem;
+  height: 4.5rem;
+  flex-shrink: 0;
+  object-fit: cover;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-bg-muted);
+}
+
 .progress-bar-fill--unknown {
   width: 40%;
   animation: train-progress-indeterminate 1.2s ease-in-out infinite;
