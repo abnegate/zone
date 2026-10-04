@@ -269,6 +269,24 @@ class ParseIterTests(unittest.TestCase):
             (20, 1.234),
         )
 
+    def test_csi_wrapped_train_ui_table_row(self) -> None:
+        self.assertEqual(
+            train_llm.parse_iter('\x1b[2m20\x1b[0m 1.234 ▼    123    1.2k'),
+            (20, 1.234),
+        )
+
+    def test_csi_wrapped_iter_train_loss_line(self) -> None:
+        self.assertEqual(
+            train_llm.parse_iter('\x1b[1mIter 1: Train loss 1.23\x1b[0m'),
+            (1, 1.23),
+        )
+
+    def test_truecolor_csi_wrapped_iter_train_loss_line(self) -> None:
+        self.assertEqual(
+            train_llm.parse_iter('\x1b[38;2;255;128;0mIter 1: Train loss 1.23\x1b[0m'),
+            (1, 1.23),
+        )
+
     def test_header_line_is_ignored(self) -> None:
         self.assertEqual(
             train_llm.parse_iter('iter   train_loss     tok/s     tokens'),

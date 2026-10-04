@@ -22,6 +22,7 @@ GGUF_TYPES = {'llama', 'mixtral', 'mistral'}
 LANGUAGE_METHODS = {'lora', 'finetune'}
 ITER_RE = re.compile(r'\bIter(?:ation)?s?\s+(\d+)\b', re.I)
 LOSS_RE = re.compile(r'\b(?:Train\s+)?loss\s+([0-9]*\.?[0-9]+)', re.I)
+CSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 SIZE_RE = re.compile(r'(\d+(?:\.\d+)?)\s*b\b', re.I)
 MIXTRAL_RE = re.compile(r'(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*b\b', re.I)
 TEXT_SUFFIXES = {'.txt', '.md', '.text', '.csv'}
@@ -472,6 +473,8 @@ def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[
 
 
 def parse_iter(line: str) -> tuple[int | None, float | None]:
+    # mlx TrainUI wraps tokens in CSI when make_console forces truecolor.
+    line = CSI_RE.sub('', line)
     iter_match = ITER_RE.search(line)
     loss_match = LOSS_RE.search(line)
     if iter_match:
