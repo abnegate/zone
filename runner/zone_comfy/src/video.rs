@@ -15,10 +15,13 @@
 //! frames are worth keeping.
 
 use crate::config::Config;
+use crate::dataset::{self, ClipWindow};
 use crate::lora::{TrainError, png};
+use crate::media::MediaType;
 use crate::subject::Subject;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
@@ -55,6 +58,13 @@ const GROUP_DISTANCE: u32 = 14;
 /// Frames kept before near-duplicate rejection is allowed to stop early. Below
 /// this a static clip would train on a single pose.
 const FLOOR: usize = 8;
+/// Wan 2.2 TI2V 5B latent size. Identity clip windows match generate.
+pub const WAN_WIDTH: u32 = 832;
+pub const WAN_HEIGHT: u32 = 480;
+pub const WAN_FRAMES: u32 = 49;
+pub const WAN_FPS: u32 = 24;
+const MIN_WINDOWS: usize = 2;
+const MAX_WINDOWS: usize = 3;
 
 /// How a clip is turned into training images.
 #[derive(Clone, Copy, Debug)]
@@ -667,6 +677,260 @@ fn hash(luma: &[f32]) -> u64 {
     bits
 }
 
+pub fn window_secs() -> f32 {
+    WAN_FRAMES as f32 / WAN_FPS as f32
+}
+
+pub fn is_clip_filename(name: &str) -> bool {
+    if MediaType::for_filename(name).is_some_and(|media| media.is_video()) {
+        return true;
+    }
+    matches!(
+        Path::new(name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("mov" | "m4v" | "mkv" | "avi" | "mpeg" | "mpg")
+    )
+}
+
+/// 2–3 temporal windows on a source clip. `shifts` are pose-change times.
+pub fn windows_for(duration_s: f32, shifts: &[(f32, &str)]) -> Vec<ClipWindow> {
+    if duration_s <= 0.0 {
+        return Vec::new();
+    }
+    let length = window_secs().min(duration_s);
+    let unique = unique_shifts(duration_s, shifts);
+    if unique.len() >= MIN_WINDOWS {
+        return pick_shifts(unique, MAX_WINDOWS)
+            .into_iter()
+            .map(|(at, pose)| clamp_window(at, length, duration_s, pose))
+            .collect();
+    }
+    let pose = unique
+        .first()
+        .map(|(_, pose)| pose.clone())
+        .unwrap_or_default();
+    evenly_spaced(duration_s, length, spaced_count(duration_s, length), &pose)
+}
+
+fn unique_shifts(duration_s: f32, shifts: &[(f32, &str)]) -> Vec<(f32, String)> {
+    let mut unique = Vec::new();
+    for (at, pose) in shifts {
+        if *at < 0.0 || *at > duration_s {
+            continue;
+        }
+        if unique.iter().any(|(_, existing)| existing == pose) {
+            continue;
+        }
+        unique.push((*at, (*pose).to_string()));
+    }
+    unique
+}
+
+fn pick_shifts(mut unique: Vec<(f32, String)>, max: usize) -> Vec<(f32, String)> {
+    unique.sort_by(|left, right| left.0.total_cmp(&right.0));
+    if unique.len() <= max {
+        return unique;
+    }
+    let first = unique.remove(0);
+    let last = unique.pop().unwrap_or_else(|| first.clone());
+    let mut kept = vec![first];
+    if max >= 3 && !unique.is_empty() {
+        let mid_time = (kept[0].0 + last.0) / 2.0;
+        unique.sort_by(|left, right| {
+            (left.0 - mid_time)
+                .abs()
+                .total_cmp(&(right.0 - mid_time).abs())
+        });
+        kept.push(unique.remove(0));
+    }
+    kept.push(last);
+    kept.sort_by(|left, right| left.0.total_cmp(&right.0));
+    kept
+}
+
+fn spaced_count(duration: f32, length: f32) -> usize {
+    if duration < length * 1.25 {
+        1
+    } else if duration < length * 2.5 {
+        2
+    } else {
+        3
+    }
+}
+
+fn clamp_window(center: f32, length: f32, duration: f32, pose: String) -> ClipWindow {
+    let mut start = (center - length / 2.0).max(0.0);
+    let mut end = start + length;
+    if end > duration {
+        end = duration;
+        start = (end - length).max(0.0);
+    }
+    ClipWindow {
+        start_s: start,
+        end_s: end,
+        pose,
+    }
+}
+
+fn evenly_spaced(duration: f32, length: f32, count: usize, pose: &str) -> Vec<ClipWindow> {
+    if count <= 1 {
+        return vec![ClipWindow {
+            start_s: 0.0,
+            end_s: length.min(duration),
+            pose: pose.to_string(),
+        }];
+    }
+    let span = (duration - length).max(0.0);
+    (0..count)
+        .map(|index| {
+            let start = span * index as f32 / (count as f32 - 1.0);
+            ClipWindow {
+                start_s: start,
+                end_s: (start + length).min(duration),
+                pose: pose.to_string(),
+            }
+        })
+        .collect()
+}
+
+pub async fn stage_clip_windows(
+    config: &Config,
+    video: &[u8],
+    filename: &str,
+    destination: &Path,
+    start_index: u32,
+) -> Result<Vec<ClipWindow>, TrainError> {
+    if video.is_empty() {
+        return Err(TrainError::Invalid("video is empty"));
+    }
+    std::fs::create_dir_all(destination).map_err(|error| TrainError::Failed(error.to_string()))?;
+    let work = tempfile::tempdir().map_err(|error| TrainError::Failed(error.to_string()))?;
+    let clip = work.path().join(format!("clip.{}", container(filename)));
+    std::fs::write(&clip, video).map_err(|error| TrainError::Failed(error.to_string()))?;
+    let seconds = duration(config, &clip)
+        .await
+        .filter(|value| *value > 0.0)
+        .ok_or(TrainError::Invalid("video has no readable duration"))?;
+    let shifts = anatomy_shifts(config, &clip, seconds).await;
+    let shifts: Vec<(f32, &str)> = shifts
+        .iter()
+        .map(|(at, pose)| (*at, pose.as_str()))
+        .collect();
+    let windows = windows_for(seconds as f32, &shifts);
+    if windows.is_empty() {
+        return Err(TrainError::Invalid("video has no usable clip windows"));
+    }
+    let mut written = Vec::with_capacity(windows.len());
+    for (offset, window) in windows.into_iter().enumerate() {
+        let stem = format!("{:04}", start_index as usize + offset);
+        let mp4 = dataset::clip_path(destination, &stem);
+        transcode_window(config, &clip, &mp4, &window).await?;
+        dataset::write_clip_sidecar(destination, &stem, &window)
+            .map_err(|error| TrainError::Failed(error.to_string()))?;
+        written.push(window);
+    }
+    Ok(written)
+}
+
+async fn anatomy_shifts(config: &Config, clip: &Path, seconds: f64) -> Vec<(f32, String)> {
+    let stills = clip.parent().map(|parent| parent.join("analysis"));
+    let Some(stills) = stills else {
+        return Vec::new();
+    };
+    if std::fs::create_dir_all(&stills).is_err() {
+        return Vec::new();
+    }
+    let fps = (CEILING as f64 / seconds).clamp(0.5, 2.0);
+    if sample(config, clip, &stills, fps).await.is_err() {
+        return Vec::new();
+    }
+    let Ok(measured) = measure(&stills, fps) else {
+        return Vec::new();
+    };
+    shifts_from_measured(&measured)
+}
+
+fn shifts_from_measured(measured: &[Measured]) -> Vec<(f32, String)> {
+    if measured.is_empty() {
+        return Vec::new();
+    }
+    let indices: Vec<usize> = (0..measured.len()).collect();
+    let groups = group(&indices, measured);
+    let mut seen = HashSet::new();
+    let mut shifts = Vec::new();
+    for (index, group_id) in indices.iter().zip(groups) {
+        if !seen.insert(group_id) {
+            continue;
+        }
+        shifts.push((
+            measured[*index].timestamp_ms as f32 / 1000.0,
+            format!("pose-{group_id}"),
+        ));
+        if shifts.len() == MAX_WINDOWS {
+            break;
+        }
+    }
+    shifts
+}
+
+async fn transcode_window(
+    config: &Config,
+    source: &Path,
+    destination: &Path,
+    window: &ClipWindow,
+) -> Result<(), TrainError> {
+    let filter = format!(
+        "scale={WAN_WIDTH}:{WAN_HEIGHT}:force_original_aspect_ratio=decrease,\
+         pad={WAN_WIDTH}:{WAN_HEIGHT}:(ow-iw)/2:(oh-ih)/2,fps={WAN_FPS}"
+    );
+    let start = format!("{:.3}", window.start_s);
+    let length = format!(
+        "{:.3}",
+        (window.end_s - window.start_s).max(1.0 / WAN_FPS as f32)
+    );
+    let output = Command::new(program(&config.ffmpeg).ok_or(TrainError::Disabled)?)
+        .env_clear()
+        .envs(environment::inherited())
+        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i"])
+        .arg(source)
+        .args([
+            "-ss",
+            &start,
+            "-t",
+            &length,
+            "-vf",
+            &filter,
+            "-frames:v",
+            &WAN_FRAMES.to_string(),
+            "-an",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(destination)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => TrainError::Disabled,
+            _ => TrainError::Failed(error.to_string()),
+        })?;
+    if !output.status.success() {
+        tracing::warn!(
+            reason = %String::from_utf8_lossy(&output.stderr).trim(),
+            "ffmpeg could not cut a clip window"
+        );
+        return Err(TrainError::Invalid(
+            "the video could not be decoded; try re-exporting it as H.264 MP4",
+        ));
+    }
+    Ok(())
+}
+
 /// The extension ffmpeg should demux the upload as, taken from the name the
 /// browser sent. ffmpeg probes the content anyway; this only stops it guessing
 /// from an extension that is not there.
@@ -922,6 +1186,80 @@ mod tests {
         assert_eq!(container("clip.webm"), "webm");
         assert_eq!(container("clip"), "mp4");
         assert_eq!(container("clip.../etc/passwd"), "mp4");
+    }
+
+    #[test]
+    fn clip_filenames_include_common_containers() {
+        assert!(is_clip_filename("walk.mp4"));
+        assert!(is_clip_filename("walk.MOV"));
+        assert!(is_clip_filename("walk.webm"));
+        assert!(!is_clip_filename("walk.png"));
+        assert!(!is_clip_filename("walk.jpg"));
+        assert!(!is_clip_filename("a portrait"));
+    }
+
+    #[test]
+    fn clip_windows_cover_fake_durations_and_anatomy_shifts() {
+        let short = windows_for(2.0, &[]);
+        assert_eq!(short.len(), 1);
+        assert!((short[0].end_s - short[0].start_s - 2.0).abs() < 0.05);
+
+        let pair = windows_for(5.0, &[]);
+        assert_eq!(pair.len(), 2);
+        for window in &pair {
+            assert!((window.end_s - window.start_s - window_secs()).abs() < 0.05);
+        }
+
+        let spaced = windows_for(12.0, &[]);
+        assert_eq!(spaced.len(), 3);
+        assert!(spaced[0].start_s < spaced[1].start_s);
+        assert!(spaced[1].start_s < spaced[2].start_s);
+
+        let shifts = windows_for(
+            12.0,
+            &[
+                (1.0, "standing"),
+                (2.0, "standing"),
+                (6.0, "sitting"),
+                (10.0, "walking"),
+                (11.0, "lying"),
+            ],
+        );
+        assert_eq!(shifts.len(), 3);
+        let poses: Vec<&str> = shifts.iter().map(|window| window.pose.as_str()).collect();
+        assert_eq!(poses[0], "standing");
+        assert_eq!(poses[2], "lying");
+        assert!(poses.contains(&"sitting") || poses.contains(&"walking"));
+        for window in &shifts {
+            assert!(window.start_s >= 0.0);
+            assert!(window.end_s <= 12.0 + 1e-3);
+            assert!(window.end_s > window.start_s);
+        }
+    }
+
+    #[test]
+    fn clip_windows_are_written_from_fake_durations() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("clips");
+        let windows = windows_for(
+            8.0,
+            &[(1.0, "standing"), (4.0, "sitting"), (7.0, "walking")],
+        );
+        assert_eq!(windows.len(), 3);
+        for (index, window) in windows.iter().enumerate() {
+            dataset::write_clip_window(
+                &dir,
+                &format!("{index:04}"),
+                format!("clip-{index}").as_bytes(),
+                window,
+            )
+            .unwrap();
+        }
+        assert_eq!(std::fs::read(dir.join("0001.mp4")).unwrap(), b"clip-1");
+        let loaded: crate::dataset::ClipWindow =
+            serde_json::from_slice(&std::fs::read(dir.join("0002.json")).unwrap()).unwrap();
+        assert_eq!(loaded.pose, "walking");
+        assert_eq!(loaded.start_s, windows[2].start_s);
     }
 
     #[test]

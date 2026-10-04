@@ -827,10 +827,12 @@ def process_job(
     stub: bool,
 ) -> None:
     job = load_job(job_dir)
+    if (job.get('method') or '') == 'video':
+        import train_wan
+
+        train_wan.process_job(models_dir, job_dir, stub)
+        return
     try:
-        method = str(job.get('method') or 'lora')
-        if method == 'video':
-            raise ValueError('video training is not implemented')
         job = normalize_job(job, job_dir)
         job = mark_running(job_dir, job)
         if stub:

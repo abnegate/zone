@@ -215,6 +215,35 @@ pub fn read_job(dir: &Path) -> Result<HostJob, TrainError> {
     serde_json::from_slice(&bytes).map_err(|error| TrainError::Failed(error.to_string()))
 }
 
+pub fn video_steps_for(window_count: usize) -> u32 {
+    (window_count as u32).saturating_mul(20).clamp(150, 2000)
+}
+
+pub fn write_queued_video_progress(dir: &Path, window_count: usize) -> Result<(), TrainError> {
+    write_progress(
+        dir,
+        &TrainProgress::new(0, video_steps_for(window_count))
+            .phase("queued", "Waiting for the host trainer")
+            .percent(0),
+    )
+}
+
+pub fn stage_clips(attempt: &Path, job: &Path) -> Result<(), TrainError> {
+    let source = crate::dataset::clips_dir(attempt);
+    if !source.is_dir() {
+        return Ok(());
+    }
+    let destination = crate::dataset::clips_dir(job);
+    fs::create_dir_all(&destination).map_err(|error| TrainError::Failed(error.to_string()))?;
+    for entry in fs::read_dir(&source).map_err(|error| TrainError::Failed(error.to_string()))? {
+        let entry = entry.map_err(|error| TrainError::Failed(error.to_string()))?;
+        let name = entry.file_name();
+        fs::copy(entry.path(), destination.join(name))
+            .map_err(|error| TrainError::Failed(error.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Copy staged `targets/` into the host job dataset directory.
 pub fn stage_dataset(attempt: &Path, job: &Path) -> Result<(), TrainError> {
     let source = attempt.join("targets");
@@ -386,6 +415,36 @@ mod tests {
         assert_eq!(steps_for(26), 520);
         assert_eq!(steps_for(400), 8000);
         assert_eq!(steps_for(500), 8000);
+    }
+
+    #[test]
+    fn video_step_budget_matches_the_wan_config() {
+        assert_eq!(video_steps_for(1), 150);
+        assert_eq!(video_steps_for(7), 150);
+        assert_eq!(video_steps_for(8), 160);
+        assert_eq!(video_steps_for(100), 2000);
+        assert_eq!(video_steps_for(200), 2000);
+    }
+
+    #[test]
+    fn stage_clips_copies_windows() {
+        let root = tempfile::tempdir().unwrap();
+        let attempt = root.path().join("attempt");
+        let clips = crate::dataset::clips_dir(&attempt);
+        fs::create_dir_all(&clips).unwrap();
+        let window = crate::dataset::ClipWindow {
+            start_s: 0.5,
+            end_s: 2.5,
+            pose: "standing".into(),
+        };
+        crate::dataset::write_clip_window(&clips, "0000", b"mp4", &window).unwrap();
+        let job = root.path().join("job");
+        stage_clips(&attempt, &job).unwrap();
+        let staged = crate::dataset::clips_dir(&job);
+        assert_eq!(fs::read(staged.join("0000.mp4")).unwrap(), b"mp4");
+        let loaded: crate::dataset::ClipWindow =
+            serde_json::from_slice(&fs::read(staged.join("0000.json")).unwrap()).unwrap();
+        assert_eq!(loaded, window);
     }
 
     #[tokio::test]

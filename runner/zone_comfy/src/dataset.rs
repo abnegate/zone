@@ -19,6 +19,7 @@
 use crate::caption::content_words;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// A measured eight-image run improved the subject by 34.72%, so the floor sits
@@ -99,6 +100,32 @@ pub fn rebalance_path(dir: &Path) -> PathBuf {
 
 pub fn clips_dir(job: &Path) -> PathBuf {
     job.join(CLIPS_DIRECTORY)
+}
+
+pub fn clip_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.mp4"))
+}
+
+pub fn clip_sidecar_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}.json"))
+}
+
+pub fn write_clip_sidecar(dir: &Path, stem: &str, window: &ClipWindow) -> std::io::Result<()> {
+    let encoded = serde_json::to_vec_pretty(window)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    fs::create_dir_all(dir)?;
+    fs::write(clip_sidecar_path(dir, stem), encoded)
+}
+
+pub fn write_clip_window(
+    dir: &Path,
+    stem: &str,
+    mp4: &[u8],
+    window: &ClipWindow,
+) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::write(clip_path(dir, stem), mp4)?;
+    write_clip_sidecar(dir, stem, window)
 }
 
 /// What the subject is doing and where the camera is, grouped by the pose each
@@ -812,5 +839,22 @@ mod tests {
         assert_eq!(balanced.clusters.get("standing"), Some(&1));
         assert_eq!(balanced.clusters.get("sitting"), Some(&2));
         assert_eq!(balanced.weights.len(), 3);
+    }
+
+    #[test]
+    fn clip_windows_are_written_beside_the_mp4() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = clips_dir(root.path());
+        let window = ClipWindow {
+            start_s: 0.0,
+            end_s: 2.041_666_7,
+            pose: "sitting".into(),
+        };
+        write_clip_window(&dir, "0000", b"mp4", &window).unwrap();
+        assert_eq!(std::fs::read(clip_path(&dir, "0000")).unwrap(), b"mp4");
+        let loaded: ClipWindow =
+            serde_json::from_slice(&std::fs::read(clip_sidecar_path(&dir, "0000")).unwrap())
+                .unwrap();
+        assert_eq!(loaded, window);
     }
 }

@@ -147,6 +147,8 @@ install_trainer() {
     fi
     cp "$PROJECT_DIR/comfyui/train_sdxl.py" "$INSTALL_DIR/train_sdxl.py"
     cp "$PROJECT_DIR/comfyui/train_sdxl_config.json" "$INSTALL_DIR/train_sdxl_config.json"
+    cp "$PROJECT_DIR/comfyui/train_wan.py" "$INSTALL_DIR/train_wan.py"
+    cp "$PROJECT_DIR/comfyui/train_wan_config.json" "$INSTALL_DIR/train_wan_config.json"
     if [ -f "$PROJECT_DIR/comfyui/sdxl_checkpoint.py" ]; then
         cp "$PROJECT_DIR/comfyui/sdxl_checkpoint.py" "$INSTALL_DIR/sdxl_checkpoint.py"
     fi

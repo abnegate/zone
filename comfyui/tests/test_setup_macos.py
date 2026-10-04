@@ -182,6 +182,8 @@ class SetupMacosTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertTrue((install / "train_sdxl.py").is_file())
             self.assertTrue((install / "train_sdxl_config.json").is_file())
+            self.assertTrue((install / "train_wan.py").is_file())
+            self.assertTrue((install / "train_wan_config.json").is_file())
             self.assertTrue((install / "sdxl_checkpoint.py").is_file())
             imported = subprocess.run(
                 [str(install / ".venv-train" / "bin" / "python"), "-c", "import torch"],

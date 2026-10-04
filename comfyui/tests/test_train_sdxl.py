@@ -567,16 +567,6 @@ class StubOnceTests(unittest.TestCase):
             result = self.run_worker(Path(directory), extra=['--stub'])
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
-    def test_video_is_left_for_the_video_workstream(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            models = Path(directory)
-            job_dir = self.stage(models, method='video')
-            with self.assertRaisesRegex(ValueError, 'video training is not implemented'):
-                train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
-            job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
-            self.assertEqual(job['status'], 'failed')
-            self.assertIn('video training is not implemented', job['error'])
-
 
 if __name__ == '__main__':
     unittest.main()

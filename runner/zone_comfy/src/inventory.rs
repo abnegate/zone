@@ -50,6 +50,13 @@ pub struct Identity {
     pub trigger: String,
 }
 
+/// Video generate bind: prefix the trigger, and load a wan-adapter when one exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoIdentity {
+    pub trigger: String,
+    pub lora: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct WeightDocument {
     #[serde(flatten)]
@@ -181,6 +188,15 @@ pub fn identity_for_prompt(
     identity_among(&scan(models_dir, catalog), haystack)
 }
 
+pub fn bind_video_identity(
+    models_dir: &Path,
+    workflow_path: &Path,
+    haystack: &str,
+) -> Option<VideoIdentity> {
+    let catalog = load_catalog(workflow_path)?;
+    video_identity_among(&scan(models_dir, &catalog), haystack)
+}
+
 fn load_catalog(workflow_path: &Path) -> Option<RecipeCatalog> {
     RecipeCatalog::load(Some(workflow_path))
         .or_else(|_| RecipeCatalog::packaged())
@@ -195,6 +211,23 @@ fn is_identity(item: &InventoryItem) -> bool {
             .trigger
             .as_deref()
             .is_some_and(|trigger| !trigger.trim().is_empty())
+}
+
+fn is_wan_adapter(item: &InventoryItem) -> bool {
+    item.ready
+        && item.recipe_id == "wan-adapter"
+        && item.adapter
+        && item
+            .trigger
+            .as_deref()
+            .is_some_and(|trigger| !trigger.trim().is_empty())
+}
+
+fn names_trigger(item: &InventoryItem, haystack: &str) -> bool {
+    item.trigger.as_deref().is_some_and(|trigger| {
+        let trigger = trigger.trim();
+        !trigger.is_empty() && contains_phrase(haystack, trigger)
+    })
 }
 
 fn identities_among(items: &[InventoryItem]) -> Vec<Identity> {
@@ -214,13 +247,7 @@ fn identities_among(items: &[InventoryItem]) -> Vec<Identity> {
 fn identity_among(items: &[InventoryItem], haystack: &str) -> Option<Identity> {
     let mut matches: Vec<&InventoryItem> = items
         .iter()
-        .filter(|item| {
-            is_identity(item)
-                && item.trigger.as_deref().is_some_and(|trigger| {
-                    let trigger = trigger.trim();
-                    !trigger.is_empty() && contains_phrase(haystack, trigger)
-                })
-        })
+        .filter(|item| is_identity(item) && names_trigger(item, haystack))
         .collect();
     if matches.is_empty() {
         return None;
@@ -246,6 +273,47 @@ fn identity_among(items: &[InventoryItem], haystack: &str) -> Option<Identity> {
             .trim()
             .to_string(),
     })
+}
+
+fn video_identity_among(items: &[InventoryItem], haystack: &str) -> Option<VideoIdentity> {
+    let matches: Vec<&InventoryItem> = items
+        .iter()
+        .filter(|item| (is_wan_adapter(item) || is_identity(item)) && names_trigger(item, haystack))
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    let longest = matches
+        .iter()
+        .filter_map(|item| item.trigger.as_deref())
+        .map(|trigger| trigger.trim().chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut triggers: Vec<&str> = matches
+        .iter()
+        .filter_map(|item| item.trigger.as_deref())
+        .map(str::trim)
+        .filter(|trigger| trigger.chars().count() == longest)
+        .collect();
+    triggers.sort_unstable();
+    triggers.dedup();
+    if triggers.len() != 1 {
+        return None;
+    }
+    let trigger = triggers[0].to_string();
+    let wan: Vec<&InventoryItem> = matches
+        .iter()
+        .copied()
+        .filter(|item| {
+            is_wan_adapter(item)
+                && item
+                    .trigger
+                    .as_deref()
+                    .is_some_and(|value| value.trim() == trigger)
+        })
+        .collect();
+    let lora = (wan.len() == 1).then(|| wan[0].filename.clone());
+    Some(VideoIdentity { trigger, lora })
 }
 
 /// Trigger matching is Unicode-lowercase and requires a boundary around the
@@ -732,6 +800,59 @@ mod tests {
         assert!(item.ready);
         assert!(item.adapter);
         assert!(identities_among(&items).is_empty());
+        let bound = video_identity_among(&items, "portrait of ohwx").unwrap();
+        assert_eq!(bound.trigger, "ohwx");
+        assert_eq!(bound.lora.as_deref(), Some("jerry-wan.safetensors"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn video_bind_prefixes_a_still_identity_without_a_wan_lora() {
+        let root = temp_models();
+        write_identity(&root, "jerry.safetensors", "ohwx");
+        let catalog = RecipeCatalog::packaged().unwrap();
+        let items = scan(&root, &catalog);
+        let bound = video_identity_among(&items, "ohwx walking on the beach").unwrap();
+        assert_eq!(bound.trigger, "ohwx");
+        assert_eq!(bound.lora, None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn video_bind_prefers_the_wan_adapter_when_both_exist() {
+        let root = temp_models();
+        write_identity(&root, "jerry.safetensors", "ohwx");
+        let lora = root.join("loras/jerry-wan.safetensors");
+        fs::write(&lora, b"lora").unwrap();
+        write_sidecar(
+            &lora,
+            &WeightSidecar {
+                recipe_id: "wan-adapter".into(),
+                hf_base: Some("Comfy-Org/Wan_2.2_ComfyUI_Repackaged".into()),
+                trigger: Some("ohwx".into()),
+                architecture: Some("wan".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (directory, filename) in [
+            ("diffusion_models", "wan2.2_ti2v_5B_fp16.safetensors"),
+            ("text_encoders", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
+            ("vae", "wan2.2_vae.safetensors"),
+        ] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+            fs::write(root.join(directory).join(filename), b"wan").unwrap();
+        }
+        let catalog = RecipeCatalog::packaged().unwrap();
+        let items = scan(&root, &catalog);
+        let bound = video_identity_among(&items, "ohwx at dusk").unwrap();
+        assert_eq!(bound.trigger, "ohwx");
+        assert_eq!(bound.lora.as_deref(), Some("jerry-wan.safetensors"));
+        assert!(
+            identities_among(&items)
+                .iter()
+                .any(|item| item.filename == "jerry.safetensors")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
