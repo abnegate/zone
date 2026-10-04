@@ -152,6 +152,7 @@ async fn multipart_train(request: Request) -> Result<TrainRequest, UploadError> 
         trigger,
         subject: match optional_text(&parts, "subject").unwrap_or("other") {
             "person" => TrainSubject::Person,
+            "language" => TrainSubject::Language,
             _ => TrainSubject::Other,
         },
         method: match optional_text(&parts, "method").unwrap_or("lora") {

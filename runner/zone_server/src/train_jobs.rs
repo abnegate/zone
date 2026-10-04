@@ -51,6 +51,8 @@ pub struct TrainJobView {
     pub eta_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub previews: Vec<String>,
     pub started_at: DateTime<Utc>,
@@ -171,6 +173,7 @@ impl Job {
                     )
                 }),
             method: self.method.clone(),
+            subject: None,
             previews: snapshot.previews.clone(),
             started_at: self.started_at,
         }
@@ -260,6 +263,7 @@ impl TrainJobView {
             loss: job.loss,
             eta_seconds,
             method: Some(job.method),
+            subject: (!job.subject.is_empty()).then_some(job.subject),
             previews: job.previews,
             started_at: job.started_at,
         }
@@ -360,6 +364,18 @@ mod tests {
         assert_eq!(view.step, Some(4));
         assert_eq!(view.total, Some(20));
         assert_eq!(view.method.as_deref(), Some("finetune"));
+        assert_eq!(view.subject, None);
+    }
+
+    #[test]
+    fn host_job_subject_is_surfaced_when_set() {
+        let mut job =
+            zone_comfy::host_train::HostJob::create("support-bot", "lora", "", "llama3.2:1b");
+        job.subject = "language".into();
+        let view = super::TrainJobView::from_host(job);
+        assert_eq!(view.subject.as_deref(), Some("language"));
+        let encoded = serde_json::to_value(&view).unwrap();
+        assert_eq!(encoded["subject"], "language");
     }
 
     #[test]
