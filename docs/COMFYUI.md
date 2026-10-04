@@ -63,15 +63,37 @@ Comfy checkout so core files stay unmodified:
 - Size: approximately 7.17 GiB / 7.70 GB
 - Model license: Apache-2.0
 
-### RealVisXL V5.0 fp16 (people)
+### Lustify SDXL GGWP V7 (people)
 
-- Repository: `SG161222/RealVisXL_V5.0`
-- Revision: `ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc`
-- File: `RealVisXL_V5.0_fp16.safetensors` (`6,938,065,488` bytes)
-- SHA-256: `6a35a7855770ae9820a3c931d4964c3817b6d9e3c6f9c4dabb5b3a94e5643b80`
-- Model license: CreativeML Open RAIL++-M
+- Repository: `boopyfloopy/lustifyXL_v7`
+- Revision: `a1e0c4aa31e420c5f9352c975ac2c029963721c4`
+- File: `lustifySDXLNSFW_ggwpV7.safetensors` (`6,938,099,634` bytes)
+- SHA-256: `d234c60d67cedfe69433e3934a459707c2cf43b30232d3db2becd10371d2220f`
+- Diffusers config: `John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl`
+- Model license: CreativeML Open RAIL-M
 - Bundle: `image-people`
 - Recipe: `sdxl-people` (trainable), `sdxl-adapter` for a person LoRA
+
+### FLUX Uncensored LoRA
+
+- Repository: `kenerateai/Flux-uncensored`
+- Revision: `2281926a1ca6ce4303104408da6ed8d312128873`
+- Hub file: `lora.safetensors`, installed as `loras/flux-uncensored.safetensors`
+- Size: `687,476,088` bytes
+- SHA-256: `5ad714d27dea0bfddce0599ab860d249c0356f7e097f9e68ef7160ed535ef93b`
+- Model license: CreativeML Open RAIL-M
+- Bundles: `image`, `image-dev`
+- Always loaded on packaged FLUX.1 Schnell and Dev graphs (node `15`)
+
+### Qwen Image Edit NSFW LoRA
+
+- Repository: `ScottzillaSystems/qwen-image-edit-plus-nsfw-lora`
+- Revision: `66e89e998dd4ea1a359c4bf0dd5e17d2f0b06ef0`
+- File: `qwen-image-edit-plus-nsfw-lora.safetensors` (`590,058,864` bytes)
+- SHA-256: `16c4841028615bb82c38e79756c0abad42494d85bca0daebc2939384a74d86bb`
+- Model license: CreativeML Open RAIL++-M
+- Bundle: `image-edit`
+- Always loaded on packaged Qwen Image Edit graphs (node `15`)
 
 ### Real-ESRGAN x4plus (upscale)
 
@@ -292,7 +314,7 @@ Shipped image recipes:
 - `qwen-image-edit-adapter` — the same graph with a LoRA slot
 - `sd15` — Stable Diffusion 1.5 (512, 20 Euler steps)
 - `sdxl` — SDXL / Pony / Illustrious (1024, 25 Euler steps)
-- `sdxl-people` — RealVisXL V5.0 fp16 people prior (trainable)
+- `sdxl-people` — Lustify SDXL GGWP V7 people prior (trainable)
 - `sdxl-adapter` — the same graph with a LoRA slot on model and CLIP
 
 `sd15` and `sdxl` carry no weights of their own: they match a checkpoint you
@@ -330,7 +352,7 @@ steps apart and capped at eight per run, plus the final adapter.
 The recipe catalog explicitly declares which base architecture a training job
 uses. The supported contracts are FLUX (`CheckpointLoaderSimple`), Qwen Image
 Edit (`UNETLoader`, `CLIPLoader` with `qwen_image`, and `VAELoader`), and SDXL
-people (`sdxl-people` → RealVisXL). Generic `sdxl` stays generation-only so a
+people (`sdxl-people` → Lustify). Generic `sdxl` stays generation-only so a
 Pony or Juggernaut checkpoint still matches that recipe. A recipe without that
 metadata is rejected; recipe names, prompts, and the global
 `COMFYUI_CHECKPOINT` are never used to guess a trainer.
@@ -418,7 +440,7 @@ the face. Both frames share one caption.
 
 ### Person SDXL LoRA and fine-tune
 
-Subject **Person** always trains on `sdxl-people` (RealVisXL V5.0 fp16, bundle
+Subject **Person** always trains on `sdxl-people` (Lustify SDXL GGWP V7, bundle
 `image-people`). Person LoRA is rank 64 with the CLIP-L text encoder trained
 and loads through `sdxl-adapter` (`LoraLoader` on model and CLIP). Method
 **Fine-tune** writes a full SDXL checkpoint (~7 GB) onto the generic `sdxl`
@@ -671,7 +693,7 @@ that image to ComfyUI's input folder, then may also replace:
 
 Node `11` scales the source to 1024×1024 with a centered crop. Node `12`
 VAE-encodes it. Packaged denoise is `0.6` so Schnell's four Euler/simple
-steps still apply the edit while the source latent keeps identity, clothes,
+steps still apply the edit while the source latent keeps identity
 and photographic texture.
 
 `comfyui/workflows/flux1-dev-fp8-img2img-api.json` (and the adapter sibling)
@@ -684,8 +706,9 @@ stays on `14`.
 When chat has a source image (an attachment or a reused thread image), it
 rewrites the user instruction into a positive CLIP prompt before filling
 node `6`. CLIP cannot see the photo, so the rewrite describes the same
-photograph with only the requested change — clothes, printed text, logos,
-background, lighting, pose, and camera stay. The original instruction is
+photograph with only the requested change — identity, printed text, logos,
+background, lighting, pose, and camera stay, and clothing follows the request.
+The original instruction is
 kept in that prompt so edits such as removing an object or placing the
 subject in a new environment stay grounded in what the user asked.
 

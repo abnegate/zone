@@ -18,8 +18,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 WATCH_INTERVAL = 2
-DEFAULT_HF_BASE = 'SG161222/RealVisXL_V5.0'
-DEFAULT_CHECKPOINT = 'RealVisXL_V5.0_fp16.safetensors'
+DEFAULT_HF_BASE = 'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl'
+DEFAULT_CHECKPOINT = 'lustifySDXLNSFW_ggwpV7.safetensors'
 CONFIG_PATH = Path(__file__).with_name('train_sdxl_config.json')
 TRAIN_ROOT = '.zone-train'
 UNET_TARGETS = [

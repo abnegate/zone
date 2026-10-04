@@ -938,6 +938,11 @@ async fn train_bases_lists_flux_when_checkpoint_present() {
         b"ckpt",
     )
     .unwrap();
+    fs::write(
+        models_dir.join("loras/flux-uncensored.safetensors"),
+        b"uncensored",
+    )
+    .unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
     let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;

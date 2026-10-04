@@ -33,6 +33,10 @@
         {
           "filename": "flux1-schnell-fp8.safetensors",
           "directory": "checkpoints"
+        },
+        {
+          "filename": "flux-uncensored.safetensors",
+          "directory": "loras"
         }
       ],
       "hf_bases": [
@@ -72,6 +76,10 @@
         {
           "filename": "flux1-schnell-fp8.safetensors",
           "directory": "checkpoints"
+        },
+        {
+          "filename": "flux-uncensored.safetensors",
+          "directory": "loras"
         }
       ],
       "hf_bases": [
@@ -109,6 +117,10 @@
         {
           "filename": "flux1-dev-fp8.safetensors",
           "directory": "checkpoints"
+        },
+        {
+          "filename": "flux-uncensored.safetensors",
+          "directory": "loras"
         }
       ],
       "hf_bases": [
@@ -148,6 +160,10 @@
         {
           "filename": "flux1-dev-fp8.safetensors",
           "directory": "checkpoints"
+        },
+        {
+          "filename": "flux-uncensored.safetensors",
+          "directory": "loras"
         }
       ],
       "hf_bases": [
@@ -218,13 +234,14 @@
         "sd-xl",
         "pony",
         "illustrious",
-        "juggernautxl"
+        "juggernautxl",
+        "realvisxl"
       ]
     },
     {
       "id": "sdxl-people",
       "kind": "image",
-      "label": "SDXL people (RealVisXL)",
+      "label": "SDXL people (Lustify)",
       "bare": "sdxl-api.json",
       "with_source": "sdxl-img2img-api.json",
       "output_node": "9",
@@ -238,27 +255,27 @@
         }
       },
       "defaults": {
-        "checkpoint": "RealVisXL_V5.0_fp16.safetensors"
+        "checkpoint": "lustifySDXLNSFW_ggwpV7.safetensors"
       },
       "training": {
         "architecture": "sdxl",
         "adapter": "sdxl-adapter",
-        "hf_base": "SG161222/RealVisXL_V5.0"
+        "hf_base": "John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl"
       },
       "files": [
-        "RealVisXL_V5.0_fp16.safetensors"
+        "lustifySDXLNSFW_ggwpV7.safetensors"
       ],
       "required_files": [
         {
-          "filename": "RealVisXL_V5.0_fp16.safetensors",
+          "filename": "lustifySDXLNSFW_ggwpV7.safetensors",
           "directory": "checkpoints"
         }
       ],
       "hf_bases": [
-        "SG161222/RealVisXL_V5.0"
+        "John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl"
       ],
       "filename_hints": [
-        "realvisxl"
+        "lustify"
       ]
     },
     {
@@ -280,16 +297,16 @@
         }
       },
       "defaults": {
-        "checkpoint": "RealVisXL_V5.0_fp16.safetensors"
+        "checkpoint": "lustifySDXLNSFW_ggwpV7.safetensors"
       },
       "required_files": [
         {
-          "filename": "RealVisXL_V5.0_fp16.safetensors",
+          "filename": "lustifySDXLNSFW_ggwpV7.safetensors",
           "directory": "checkpoints"
         }
       ],
       "hf_bases": [
-        "SG161222/RealVisXL_V5.0"
+        "John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl"
       ]
     },
     {
@@ -337,6 +354,10 @@
         {
           "filename": "qwen_image_vae.safetensors",
           "directory": "vae"
+        },
+        {
+          "filename": "qwen-image-edit-plus-nsfw-lora.safetensors",
+          "directory": "loras"
         }
       ],
       "hf_bases": [
@@ -385,6 +406,10 @@
         {
           "filename": "qwen_image_vae.safetensors",
           "directory": "vae"
+        },
+        {
+          "filename": "qwen-image-edit-plus-nsfw-lora.safetensors",
+          "directory": "loras"
         }
       ],
       "hf_bases": [

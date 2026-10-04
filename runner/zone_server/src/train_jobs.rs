@@ -273,7 +273,7 @@ mod tests {
             "jerry",
             "finetune",
             "ohwx",
-            "RealVisXL_V5.0_fp16.safetensors",
+            "lustifySDXLNSFW_ggwpV7.safetensors",
         );
         job.step = Some(4);
         job.total = Some(20);

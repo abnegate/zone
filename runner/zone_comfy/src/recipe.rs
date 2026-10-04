@@ -812,13 +812,21 @@ mod tests {
             assert_eq!(workflow["3"]["inputs"]["latent_image"], json!(["12", 0]));
             assert_eq!(workflow["3"]["inputs"]["steps"], 40);
             assert_eq!(workflow["3"]["inputs"]["denoise"], 0.5);
+            assert_eq!(workflow["15"]["class_type"], "LoraLoaderModelOnly");
+            assert_eq!(
+                workflow["15"]["inputs"]["lora_name"],
+                "flux-uncensored.safetensors"
+            );
             if id == "flux-dev-adapter" {
                 assert_eq!(workflow["13"]["class_type"], "LoraLoaderModelOnly");
+                assert_eq!(workflow["13"]["inputs"]["model"], json!(["15", 0]));
                 assert_eq!(workflow["3"]["inputs"]["model"], json!(["13", 0]));
                 assert_eq!(
                     workflow["13"]["inputs"]["lora_name"],
                     "identity.safetensors"
                 );
+            } else {
+                assert_eq!(workflow["3"]["inputs"]["model"], json!(["15", 0]));
             }
         }
     }
@@ -848,6 +856,11 @@ mod tests {
             assert_eq!(workflow["3"]["inputs"]["denoise"], 0.6);
             assert_eq!(workflow["11"]["class_type"], "ImageScale");
             assert_eq!(workflow["12"]["inputs"]["pixels"], json!(["11", 0]));
+            assert_eq!(workflow["15"]["class_type"], "LoraLoaderModelOnly");
+            assert_eq!(
+                workflow["15"]["inputs"]["lora_name"],
+                "flux-uncensored.safetensors"
+            );
         }
     }
 
@@ -913,7 +926,7 @@ mod tests {
                 .training_model()
                 .unwrap(),
             TrainingModel::Sdxl {
-                checkpoint: "RealVisXL_V5.0_fp16.safetensors".into()
+                checkpoint: "lustifySDXLNSFW_ggwpV7.safetensors".into()
             }
         );
         assert_eq!(
@@ -924,7 +937,7 @@ mod tests {
                 .unwrap(),
             &TrainingAdapter {
                 recipe_id: "sdxl-adapter".into(),
-                hf_base: "SG161222/RealVisXL_V5.0".into(),
+                hf_base: "John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl".into(),
             }
         );
     }
@@ -983,10 +996,17 @@ mod tests {
         );
         assert_eq!(
             catalog
-                .image_recipe_for("RealVisXL_V5.0_fp16.safetensors")
+                .image_recipe_for("lustifySDXLNSFW_ggwpV7.safetensors")
                 .unwrap()
                 .id,
             "sdxl-people"
+        );
+        assert_eq!(
+            catalog
+                .image_recipe_for("RealVisXL_V5.0_fp16.safetensors")
+                .unwrap()
+                .id,
+            "sdxl"
         );
         assert_eq!(
             catalog
@@ -1097,7 +1117,7 @@ mod tests {
         assert_eq!(workflow["3"]["inputs"]["model"], json!(["13", 0]));
         assert_eq!(
             workflow["4"]["inputs"]["ckpt_name"],
-            "RealVisXL_V5.0_fp16.safetensors"
+            "lustifySDXLNSFW_ggwpV7.safetensors"
         );
         let edit = recipe
             .apply(Fill {
@@ -1270,6 +1290,12 @@ mod tests {
             "qwen_image_edit_2511_fp8mixed.safetensors"
         );
         assert_eq!(workflow["10"]["inputs"]["image"], "zone-img2img-source.png");
+        assert_eq!(workflow["15"]["class_type"], "LoraLoaderModelOnly");
+        assert_eq!(
+            workflow["15"]["inputs"]["lora_name"],
+            "qwen-image-edit-plus-nsfw-lora.safetensors"
+        );
+        assert_eq!(workflow["3"]["inputs"]["model"], json!(["15", 0]));
     }
 
     #[test]
@@ -1297,6 +1323,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             workflow["4"]["inputs"]["lora_name"],
+            "qwen-image-edit-plus-nsfw-lora.safetensors"
+        );
+        assert_eq!(workflow["4"]["inputs"]["model"], json!(["15", 0]));
+        assert_eq!(workflow["15"]["class_type"], "LoraLoaderModelOnly");
+        assert_eq!(
+            workflow["15"]["inputs"]["lora_name"],
             "qwen-image-edit-plus-nsfw-lora.safetensors"
         );
         assert_eq!(workflow["3"]["inputs"]["steps"], 40);

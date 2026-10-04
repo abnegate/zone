@@ -4,10 +4,22 @@
     "inputs": {
       "cfg": 1,
       "denoise": 1,
-      "latent_image": ["5", 0],
-      "model": ["13", 0],
-      "negative": ["7", 0],
-      "positive": ["6", 0],
+      "latent_image": [
+        "5",
+        0
+      ],
+      "model": [
+        "13",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
       "sampler_name": "euler",
       "scheduler": "simple",
       "seed": 0,
@@ -40,7 +52,10 @@
   "6": {
     "class_type": "CLIPTextEncode",
     "inputs": {
-      "clip": ["4", 1],
+      "clip": [
+        "4",
+        1
+      ],
       "text": "A cinematic photograph of a lighthouse on a stormy coast"
     },
     "_meta": {
@@ -50,7 +65,10 @@
   "7": {
     "class_type": "CLIPTextEncode",
     "inputs": {
-      "clip": ["4", 1],
+      "clip": [
+        "4",
+        1
+      ],
       "text": ""
     },
     "_meta": {
@@ -60,8 +78,14 @@
   "8": {
     "class_type": "VAEDecode",
     "inputs": {
-      "samples": ["3", 0],
-      "vae": ["4", 2]
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "4",
+        2
+      ]
     },
     "_meta": {
       "title": "Decode Image"
@@ -70,7 +94,10 @@
   "9": {
     "class_type": "PreviewImage",
     "inputs": {
-      "images": ["8", 0]
+      "images": [
+        "8",
+        0
+      ]
     },
     "_meta": {
       "title": "Temporary Image Output"
@@ -80,11 +107,28 @@
     "class_type": "LoraLoaderModelOnly",
     "inputs": {
       "lora_name": "adapter.safetensors",
-      "model": ["4", 0],
+      "model": [
+        "15",
+        0
+      ],
       "strength_model": 1
     },
     "_meta": {
       "title": "Adapter"
+    }
+  },
+  "15": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "flux-uncensored.safetensors",
+      "model": [
+        "4",
+        0
+      ],
+      "strength_model": 1
+    },
+    "_meta": {
+      "title": "Uncensored"
     }
   }
 }

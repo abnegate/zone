@@ -1022,15 +1022,17 @@ fn is_environment_change(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> boo
 /// redraw the subject as a generic illustration.
 const EDIT_SCENE_REWRITE: &str = "Rewrite the user's request as a positive prompt for an image \
      model that starts from an attached photograph the model cannot see. Do not invent a new \
-     scene, person, clothing, or props. Describe the same photograph with only the requested \
+     scene, person, or props. Describe the same photograph with only the requested \
      change. Photorealistic photograph, natural skin texture, sharp photographic detail. Keep \
-     clothes, printed text, logos, background, lighting, pose, and camera. If they asked to \
+     identity, printed text, logos, background, lighting, pose, and camera. Clothing follows \
+     the user's request: if they asked to change, remove, or add clothing, describe that; \
+     otherwise leave the clothing as in the photograph. If they asked to \
      remove something, describe the scene without it and with that area filled in naturally; \
      do not name the removed thing. If they asked to change the environment or background, \
-     describe the same subject in that new setting, still keeping clothes and identity. No \
+     describe the same subject in that new setting, still keeping identity. No \
      quotes, labels, or preamble. One or two sentences.";
 
-const EDIT_PRESERVE: &str = "keep identity, clothes, printed text, logos, background, lighting, \
+const EDIT_PRESERVE: &str = "keep identity, printed text, logos, background, lighting, \
      pose, and camera, photorealistic photograph, natural skin texture";
 
 /// CLIP text for img2img when the classifier model cannot rewrite the request.
@@ -1049,7 +1051,7 @@ pub fn heuristic_edit_prompt(content: &str) -> String {
     } else if is_environment_change(&tokens, &has_phrase) {
         format!(
             "the same photograph in the new environment described, keep the subject's identity, \
-             clothes, pose, and appearance, only change the setting, matching lighting, \
+             pose, and appearance, only change the setting, matching lighting, \
              photorealistic photograph, natural skin texture. {trimmed}"
         )
     } else {
@@ -2036,9 +2038,17 @@ mod tests {
 
         let appearance = heuristic_edit_prompt("Edit jerry to be fat");
         assert!(appearance.contains("same photograph"));
-        assert!(appearance.contains("clothes"));
+        assert!(appearance.contains("identity"));
         assert!(appearance.contains("natural skin"));
         assert!(appearance.contains("Edit jerry to be fat"));
+        assert!(
+            !appearance.contains("clothes"),
+            "appearance edits must not lock clothing against the request"
+        );
+
+        let undress = heuristic_edit_prompt("Take the clothes off");
+        assert!(undress.contains("Take the clothes off"));
+        assert!(!undress.contains("keep identity, clothes"));
     }
 
     #[test]

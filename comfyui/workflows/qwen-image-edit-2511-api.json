@@ -25,10 +25,22 @@
     "inputs": {
       "cfg": 4,
       "denoise": 1,
-      "latent_image": ["5", 0],
-      "model": ["1", 0],
-      "negative": ["7", 0],
-      "positive": ["6", 0],
+      "latent_image": [
+        "5",
+        0
+      ],
+      "model": [
+        "15",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
       "sampler_name": "euler",
       "scheduler": "simple",
       "seed": 0,
@@ -52,9 +64,15 @@
   "6": {
     "class_type": "TextEncodeQwenImageEditPlus",
     "inputs": {
-      "clip": ["2", 0],
+      "clip": [
+        "2",
+        0
+      ],
       "prompt": "A cinematic photograph of a lighthouse on a stormy coast",
-      "vae": ["8", 0]
+      "vae": [
+        "8",
+        0
+      ]
     },
     "_meta": {
       "title": "Positive Prompt"
@@ -63,9 +81,15 @@
   "7": {
     "class_type": "TextEncodeQwenImageEditPlus",
     "inputs": {
-      "clip": ["2", 0],
+      "clip": [
+        "2",
+        0
+      ],
       "prompt": " ",
-      "vae": ["8", 0]
+      "vae": [
+        "8",
+        0
+      ]
     },
     "_meta": {
       "title": "Negative Prompt"
@@ -83,8 +107,14 @@
   "13": {
     "class_type": "VAEDecode",
     "inputs": {
-      "samples": ["3", 0],
-      "vae": ["8", 0]
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "8",
+        0
+      ]
     },
     "_meta": {
       "title": "Decode Image"
@@ -93,10 +123,27 @@
   "9": {
     "class_type": "PreviewImage",
     "inputs": {
-      "images": ["13", 0]
+      "images": [
+        "13",
+        0
+      ]
     },
     "_meta": {
       "title": "Temporary Image Output"
+    }
+  },
+  "15": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "qwen-image-edit-plus-nsfw-lora.safetensors",
+      "model": [
+        "1",
+        0
+      ],
+      "strength_model": 1
+    },
+    "_meta": {
+      "title": "Uncensored"
     }
   }
 }

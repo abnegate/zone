@@ -335,13 +335,8 @@ impl Client {
     }
 
     fn recipe_is_ready(&self, recipe: &Recipe) -> bool {
-        if !self.config.models_dir.is_dir() {
-            return false;
-        }
-        let items = crate::inventory::scan(&self.config.models_dir, &self.catalog);
-        recipe.required_files.iter().all(|file| {
-            crate::inventory::find(&items, &file.filename).is_some_and(|item| item.ready)
-        })
+        self.config.models_dir.is_dir()
+            && crate::inventory::files_present(&self.config.models_dir, &recipe.required_files)
     }
 
     fn video_workflows(&self) -> Result<(Value, Value), Error> {
@@ -1386,6 +1381,12 @@ mod tests {
         assert_eq!(workflow["3"]["inputs"]["steps"], 4);
         assert_eq!(workflow["5"]["inputs"]["width"], 1024);
         assert!(workflow.get("10").is_none());
+        assert_eq!(workflow["15"]["class_type"], "LoraLoaderModelOnly");
+        assert_eq!(
+            workflow["15"]["inputs"]["lora_name"],
+            "flux-uncensored.safetensors"
+        );
+        assert_eq!(workflow["3"]["inputs"]["model"], json!(["15", 0]));
     }
 
     #[test]
@@ -1438,6 +1439,7 @@ mod tests {
         let (_root, models) = models_with(&[
             ("checkpoints", "flux1-schnell-fp8.safetensors"),
             ("checkpoints", "flux1-dev-fp8.safetensors"),
+            ("loras", "flux-uncensored.safetensors"),
         ]);
         let client = Client::new(Config {
             checkpoint: "flux1-schnell-fp8.safetensors".into(),
@@ -1457,7 +1459,10 @@ mod tests {
 
     #[test]
     fn edits_stay_on_schnell_when_dev_is_missing() {
-        let (_root, models) = models_with(&[("checkpoints", "flux1-schnell-fp8.safetensors")]);
+        let (_root, models) = models_with(&[
+            ("checkpoints", "flux1-schnell-fp8.safetensors"),
+            ("loras", "flux-uncensored.safetensors"),
+        ]);
         let client = Client::new(Config {
             checkpoint: "flux1-schnell-fp8.safetensors".into(),
             models_dir: models,
@@ -1478,6 +1483,7 @@ mod tests {
             ("checkpoints", "flux1-schnell-fp8.safetensors"),
             ("checkpoints", "flux1-dev-fp8.safetensors"),
             ("loras", "identity.safetensors"),
+            ("loras", "flux-uncensored.safetensors"),
         ]);
         crate::inventory::write_sidecar(
             &models.join("loras/identity.safetensors"),

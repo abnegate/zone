@@ -98,10 +98,15 @@ class DownloadModelsTest(unittest.TestCase):
             {"id": "video", "bundle": "video"},
             {"id": "audio", "bundle": "audio"},
             {"id": "legacy"},
+            {"id": "flux-uncensored", "bundle": "image", "bundles": ["image-dev"]},
         ]
         self.assertEqual(
             [model["id"] for model in download_models.select_models(models, "image")],
-            ["image", "legacy"],
+            ["image", "legacy", "flux-uncensored"],
+        )
+        self.assertEqual(
+            [model["id"] for model in download_models.select_models(models, "image-dev")],
+            ["flux-uncensored"],
         )
         self.assertEqual(
             [model["id"] for model in download_models.select_models(models, "image-edit")],
@@ -115,7 +120,7 @@ class DownloadModelsTest(unittest.TestCase):
             [model["id"] for model in download_models.select_models(models, "audio")],
             ["audio"],
         )
-        self.assertEqual(len(download_models.select_models(models, "all")), 5)
+        self.assertEqual(len(download_models.select_models(models, "all")), 6)
 
     def test_parse_args_accepts_every_valid_bundle(self) -> None:
         self.assertEqual(

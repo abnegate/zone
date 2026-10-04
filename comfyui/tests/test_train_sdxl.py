@@ -30,7 +30,7 @@ def queued_job(
         'name': name,
         'method': method,
         'trigger': trigger,
-        'checkpoint': 'RealVisXL_V5.0_fp16.safetensors',
+        'checkpoint': 'lustifySDXLNSFW_ggwpV7.safetensors',
         'status': 'queued',
         'error': None,
         'step': None,
@@ -135,21 +135,24 @@ class NormalizeAndPublishTests(unittest.TestCase):
                     'name': 'jerry',
                     'method': 'lora',
                     'trigger': 'ohwx',
-                    'checkpoint': 'RealVisXL_V5.0_fp16.safetensors',
+                    'checkpoint': 'lustifySDXLNSFW_ggwpV7.safetensors',
                     'status': 'queued',
                 },
                 job_dir,
             )
             self.assertEqual(job['filename'], 'jerry.safetensors')
             self.assertEqual(job['recipe_id'], 'sdxl-adapter')
-            self.assertEqual(job['hf_base'], 'SG161222/RealVisXL_V5.0')
+            self.assertEqual(
+                job['hf_base'],
+                'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl',
+            )
             self.assertEqual(job['image_count'], 3)
             finetune = train_sdxl.normalize_job(
                 {
                     'name': 'jerry',
                     'method': 'finetune',
                     'trigger': 'ohwx',
-                    'checkpoint': 'RealVisXL_V5.0_fp16.safetensors',
+                    'checkpoint': 'lustifySDXLNSFW_ggwpV7.safetensors',
                     'status': 'queued',
                 },
                 job_dir,
@@ -167,7 +170,10 @@ class NormalizeAndPublishTests(unittest.TestCase):
             sidecar = json.loads(train_sdxl.sidecar_path(destination).read_text(encoding='utf-8'))
             self.assertEqual(sidecar['recipe_id'], 'sdxl-adapter')
             self.assertEqual(sidecar['trigger'], 'ohwx')
-            self.assertEqual(sidecar['hf_base'], 'SG161222/RealVisXL_V5.0')
+            self.assertEqual(
+                sidecar['hf_base'],
+                'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl',
+            )
             self.assertFalse(sidecar.get('generation'))
 
 

@@ -334,6 +334,10 @@ fn missing_required(models_dir: &Path, required: &[RequiredFile]) -> Vec<String>
         .collect()
 }
 
+pub(crate) fn files_present(models_dir: &Path, required: &[RequiredFile]) -> bool {
+    missing_required(models_dir, required).is_empty()
+}
+
 /// The models root the operator configured, resolved to the real directory it
 /// names. A setting that points at anything else has nothing to scan.
 fn models_root(models_dir: &Path) -> Option<PathBuf> {
@@ -635,6 +639,10 @@ mod tests {
         if !checkpoint.is_file() {
             fs::write(checkpoint, b"ckpt").unwrap();
         }
+        let uncensored = root.join("loras/flux-uncensored.safetensors");
+        if !uncensored.is_file() {
+            fs::write(uncensored, b"uncensored").unwrap();
+        }
     }
 
     #[test]
@@ -708,7 +716,7 @@ mod tests {
             &checkpoint,
             &WeightSidecar {
                 recipe_id: "sdxl".into(),
-                hf_base: Some("SG161222/RealVisXL_V5.0".into()),
+                hf_base: Some("John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl".into()),
                 trigger: trigger.map(str::to_string),
             },
         )
@@ -720,8 +728,8 @@ mod tests {
         let root = temp_models();
         write_person_checkpoint(&root, "jerry.safetensors", Some("ohwx"));
         fs::write(
-            root.join("checkpoints/RealVisXL_V5.0_fp16.safetensors"),
-            b"realvis",
+            root.join("checkpoints/lustifySDXLNSFW_ggwpV7.safetensors"),
+            b"lustify",
         )
         .unwrap();
         let catalog = RecipeCatalog::packaged().unwrap();

@@ -74,13 +74,36 @@ These weights are not included in Zone images or source distributions. They
 are downloaded only when the operator runs the explicit upscale model setup
 command.
 
-## RealVisXL V5.0 fp16
+## Lustify SDXL GGWP V7 (people)
 
-- Packaged model: <https://huggingface.co/SG161222/RealVisXL_V5.0>
-- Original model: <https://huggingface.co/SG161222/RealVisXL_V5.0>
-- File: `RealVisXL_V5.0_fp16.safetensors`
+- Packaged model: <https://huggingface.co/boopyfloopy/lustifyXL_v7>
+- Original model: Lustify SDXL by coyotte (CreativeML Open RAIL-M)
+- Diffusers config: <https://huggingface.co/John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl>
+- File: `lustifySDXLNSFW_ggwpV7.safetensors`
+- License: CreativeML Open RAIL-M
+- License text: <https://huggingface.co/spaces/CompVis/stable-diffusion-license>
+
+These weights are not included in Zone images or source distributions. They
+are downloaded only when the operator runs `--bundle image-people`.
+
+## FLUX Uncensored LoRA
+
+- Packaged model: <https://huggingface.co/kenerateai/Flux-uncensored>
+- File: `lora.safetensors`, installed as `loras/flux-uncensored.safetensors`
+- License: CreativeML Open RAIL-M
+- License text: <https://huggingface.co/spaces/CompVis/stable-diffusion-license>
+
+These weights are not included in Zone images or source distributions. They
+are downloaded with the `image` and `image-dev` bundles and always loaded on
+the packaged FLUX graphs.
+
+## Qwen Image Edit NSFW LoRA
+
+- Packaged model: <https://huggingface.co/ScottzillaSystems/qwen-image-edit-plus-nsfw-lora>
+- File: `qwen-image-edit-plus-nsfw-lora.safetensors`
 - License: CreativeML Open RAIL++-M
 - License text: <https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/LICENSE.md>
 
 These weights are not included in Zone images or source distributions. They
-are downloaded only when the operator runs `--bundle image-people`.
+are downloaded with the `image-edit` bundle and always loaded on the packaged
+Qwen Image Edit graphs.

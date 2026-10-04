@@ -44,6 +44,22 @@ def model_bundle(model: dict[str, Any]) -> str:
     return bundle
 
 
+def model_bundles(model: dict[str, Any]) -> set[str]:
+    primary = model_bundle(model)
+    extra = model.get("bundles")
+    if extra is None:
+        return {primary}
+    if not isinstance(extra, list):
+        raise ValueError(f"unsupported bundles list: {extra!r}")
+    bundles = {primary}
+    for item in extra:
+        name = str(item)
+        if name not in VALID_BUNDLES:
+            raise ValueError(f"unsupported model bundle: {name}")
+        bundles.add(name)
+    return bundles
+
+
 def select_models(
     models: list[dict[str, Any]], bundle: str, only: str | None = None
 ) -> list[dict[str, Any]]:
@@ -57,7 +73,7 @@ def select_models(
         return models
     if bundle not in VALID_BUNDLES:
         raise ValueError(f"unsupported bundle filter: {bundle}")
-    return [model for model in models if model_bundle(model) == bundle]
+    return [model for model in models if bundle in model_bundles(model)]
 
 
 def checked_target(models_dir: Path, relative_path: str) -> Path:

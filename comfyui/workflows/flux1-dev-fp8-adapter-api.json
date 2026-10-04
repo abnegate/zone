@@ -17,7 +17,7 @@
     "inputs": {
       "lora_name": "adapter.safetensors",
       "model": [
-        "4",
+        "15",
         0
       ],
       "strength_model": 1
@@ -125,6 +125,20 @@
         "8",
         0
       ]
+    }
+  },
+  "15": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "flux-uncensored.safetensors",
+      "model": [
+        "4",
+        0
+      ],
+      "strength_model": 1
+    },
+    "_meta": {
+      "title": "Uncensored"
     }
   }
 }

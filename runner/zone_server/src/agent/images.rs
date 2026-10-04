@@ -528,6 +528,10 @@ mod tests {
         if !checkpoint.is_file() {
             std::fs::write(checkpoint, b"ckpt").unwrap();
         }
+        let uncensored = models.join("loras/flux-uncensored.safetensors");
+        if !uncensored.is_file() {
+            std::fs::write(uncensored, b"uncensored").unwrap();
+        }
     }
 
     fn submitted_values(submitted: &Value, pointer: &str) -> Vec<String> {
@@ -594,10 +598,9 @@ mod tests {
             .expect("the mock server records requests");
         let submitted: Value =
             serde_json::from_slice(&requests[0].body).expect("ComfyUI is submitted a JSON prompt");
-        assert_eq!(
-            submitted_values(&submitted, "/inputs/lora_name"),
-            vec!["jake.safetensors".to_string()]
-        );
+        let named_loras = submitted_values(&submitted, "/inputs/lora_name");
+        assert!(named_loras.contains(&"jake.safetensors".to_string()));
+        assert!(named_loras.contains(&"flux-uncensored.safetensors".to_string()));
         assert!(
             submitted_values(&submitted, "/inputs/text")
                 .iter()
@@ -609,9 +612,10 @@ mod tests {
         assert!(!unnamed.success);
         let requests = server.received_requests().await.unwrap();
         let submitted: Value = serde_json::from_slice(&requests[1].body).unwrap();
-        assert!(
-            submitted_values(&submitted, "/inputs/lora_name").is_empty(),
-            "a prompt that names no identity must keep the pinned checkpoint"
+        assert_eq!(
+            submitted_values(&submitted, "/inputs/lora_name"),
+            vec!["flux-uncensored.safetensors".to_string()],
+            "a prompt that names no identity keeps the uncensored LoRA and the pinned checkpoint"
         );
         assert_eq!(
             submitted_values(&submitted, "/inputs/ckpt_name"),
@@ -628,11 +632,12 @@ mod tests {
         assert!(!switched.success);
         let requests = server.received_requests().await.unwrap();
         let submitted: Value = serde_json::from_slice(&requests[2].body).unwrap();
-        assert_eq!(
-            submitted_values(&submitted, "/inputs/lora_name"),
-            vec!["teapot.safetensors".to_string()],
+        let switched_loras = submitted_values(&submitted, "/inputs/lora_name");
+        assert!(
+            switched_loras.contains(&"teapot.safetensors".to_string()),
             "a prompt that names a different identity must leave the pin"
         );
+        assert!(switched_loras.contains(&"flux-uncensored.safetensors".to_string()));
         let _ = std::fs::remove_dir_all(root);
     }
 

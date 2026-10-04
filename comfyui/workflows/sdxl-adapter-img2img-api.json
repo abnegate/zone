@@ -20,7 +20,7 @@
   "4": {
     "class_type": "CheckpointLoaderSimple",
     "inputs": {
-      "ckpt_name": "RealVisXL_V5.0_fp16.safetensors"
+      "ckpt_name": "lustifySDXLNSFW_ggwpV7.safetensors"
     },
     "_meta": {
       "title": "SDXL People Checkpoint"

@@ -913,7 +913,13 @@ async fn publish_host_person(
     let mut job = host_train::HostJob::create(&request.name, method, trigger, checkpoint);
     job.filename = Some(filename.to_string());
     job.recipe_id = recipe_id.to_string();
-    job.hf_base = "SG161222/RealVisXL_V5.0".into();
+    job.hf_base = RecipeCatalog::packaged()
+        .ok()
+        .as_ref()
+        .and_then(|catalog| catalog.get(&request.base))
+        .and_then(|recipe| recipe.training_adapter().ok())
+        .map(|adapter| adapter.hf_base.clone())
+        .unwrap_or_default();
     job.image_count = fs::read_dir(attempt.root.join("targets"))
         .map(|entries| {
             entries
@@ -2170,6 +2176,7 @@ mod tests {
     fn only_installed_bases_are_offered_for_training() {
         let root = std::env::temp_dir().join(format!("zone-bases-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("checkpoints")).unwrap();
+        fs::create_dir_all(root.join("loras")).unwrap();
         let catalog = RecipeCatalog::packaged().unwrap();
 
         assert!(
@@ -2185,6 +2192,11 @@ mod tests {
             .get("checkpoint")
             .expect("flux-schnell declares a checkpoint");
         fs::write(root.join("checkpoints").join(checkpoint), vec![0u8; 1024]).unwrap();
+        fs::write(
+            root.join("loras/flux-uncensored.safetensors"),
+            vec![0u8; 64],
+        )
+        .unwrap();
 
         let bases = available_bases(&catalog, &root);
         assert!(
@@ -3221,11 +3233,17 @@ mod tests {
         fs::create_dir_all(config.models_dir.join("diffusion_models")).unwrap();
         fs::create_dir_all(config.models_dir.join("text_encoders")).unwrap();
         fs::create_dir_all(config.models_dir.join("vae")).unwrap();
+        fs::create_dir_all(config.models_dir.join("loras")).unwrap();
         fs::write(
             config
                 .models_dir
                 .join("checkpoints/flux1-schnell-fp8.safetensors"),
             b"flux",
+        )
+        .unwrap();
+        fs::write(
+            config.models_dir.join("loras/flux-uncensored.safetensors"),
+            b"uncensored",
         )
         .unwrap();
         fs::write(
@@ -3254,6 +3272,13 @@ mod tests {
             b"vae",
         )
         .unwrap();
+        fs::write(
+            config
+                .models_dir
+                .join("loras/qwen-image-edit-plus-nsfw-lora.safetensors"),
+            b"nsfw",
+        )
+        .unwrap();
         let catalog = RecipeCatalog::packaged().unwrap();
 
         let bases = available_bases(&catalog, &config.models_dir);
@@ -3272,14 +3297,14 @@ mod tests {
             bases
                 .iter()
                 .all(|base| base.id != "sdxl" && base.id != "sdxl-people"),
-            "sdxl-people is listed only when RealVis is on disk"
+            "sdxl-people is listed only when Lustify is on disk"
         );
 
         fs::write(
             config
                 .models_dir
-                .join("checkpoints/RealVisXL_V5.0_fp16.safetensors"),
-            b"realvis",
+                .join("checkpoints/lustifySDXLNSFW_ggwpV7.safetensors"),
+            b"lustify",
         )
         .unwrap();
         let bases = available_bases(&catalog, &config.models_dir);
@@ -3338,8 +3363,8 @@ mod tests {
         fs::write(
             config
                 .models_dir
-                .join("checkpoints/RealVisXL_V5.0_fp16.safetensors"),
-            b"realvis",
+                .join("checkpoints/lustifySDXLNSFW_ggwpV7.safetensors"),
+            b"lustify",
         )
         .unwrap();
         validate_request(&config, &person).expect("people base on disk is enough to start");
@@ -3359,8 +3384,8 @@ mod tests {
         fs::write(
             config
                 .models_dir
-                .join("checkpoints/RealVisXL_V5.0_fp16.safetensors"),
-            b"realvis",
+                .join("checkpoints/lustifySDXLNSFW_ggwpV7.safetensors"),
+            b"lustify",
         )
         .unwrap();
         let captions = [

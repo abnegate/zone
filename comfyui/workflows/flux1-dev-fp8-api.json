@@ -22,7 +22,7 @@
         0
       ],
       "model": [
-        "4",
+        "15",
         0
       ],
       "negative": [
@@ -111,6 +111,20 @@
         "8",
         0
       ]
+    }
+  },
+  "15": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "flux-uncensored.safetensors",
+      "model": [
+        "4",
+        0
+      ],
+      "strength_model": 1
+    },
+    "_meta": {
+      "title": "Uncensored"
     }
   }
 }

@@ -14,6 +14,19 @@
       "license": "Apache-2.0"
     },
     {
+      "id": "flux-uncensored",
+      "bundle": "image",
+      "bundles": ["image-dev"],
+      "filename": "flux-uncensored.safetensors",
+      "relative_path": "loras/flux-uncensored.safetensors",
+      "source_repository": "kenerateai/Flux-uncensored",
+      "source_revision": "2281926a1ca6ce4303104408da6ed8d312128873",
+      "url": "https://huggingface.co/kenerateai/Flux-uncensored/resolve/2281926a1ca6ce4303104408da6ed8d312128873/lora.safetensors",
+      "size_bytes": 687476088,
+      "sha256": "5ad714d27dea0bfddce0599ab860d249c0356f7e097f9e68ef7160ed535ef93b",
+      "license": "CreativeML Open RAIL-M"
+    },
+    {
       "id": "flux1-dev-fp8",
       "bundle": "image-dev",
       "filename": "flux1-dev-fp8.safetensors",
@@ -98,6 +111,18 @@
       "license": "Apache-2.0"
     },
     {
+      "id": "qwen-image-edit-plus-nsfw-lora",
+      "bundle": "image-edit",
+      "filename": "qwen-image-edit-plus-nsfw-lora.safetensors",
+      "relative_path": "loras/qwen-image-edit-plus-nsfw-lora.safetensors",
+      "source_repository": "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora",
+      "source_revision": "66e89e998dd4ea1a359c4bf0dd5e17d2f0b06ef0",
+      "url": "https://huggingface.co/ScottzillaSystems/qwen-image-edit-plus-nsfw-lora/resolve/66e89e998dd4ea1a359c4bf0dd5e17d2f0b06ef0/qwen-image-edit-plus-nsfw-lora.safetensors",
+      "size_bytes": 590058864,
+      "sha256": "16c4841028615bb82c38e79756c0abad42494d85bca0daebc2939384a74d86bb",
+      "license": "CreativeML Open RAIL++-M"
+    },
+    {
       "id": "ace-step-v1-3.5b",
       "bundle": "audio",
       "filename": "ace_step_v1_3.5b.safetensors",
@@ -110,16 +135,16 @@
       "license": "Apache-2.0"
     },
     {
-      "id": "realvisxl-v5-fp16",
+      "id": "lustify-sdxl-ggwp-v7",
       "bundle": "image-people",
-      "filename": "RealVisXL_V5.0_fp16.safetensors",
-      "relative_path": "checkpoints/RealVisXL_V5.0_fp16.safetensors",
-      "source_repository": "SG161222/RealVisXL_V5.0",
-      "source_revision": "ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc",
-      "url": "https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc/RealVisXL_V5.0_fp16.safetensors",
-      "size_bytes": 6938065488,
-      "sha256": "6a35a7855770ae9820a3c931d4964c3817b6d9e3c6f9c4dabb5b3a94e5643b80",
-      "license": "CreativeML Open RAIL++-M"
+      "filename": "lustifySDXLNSFW_ggwpV7.safetensors",
+      "relative_path": "checkpoints/lustifySDXLNSFW_ggwpV7.safetensors",
+      "source_repository": "boopyfloopy/lustifyXL_v7",
+      "source_revision": "a1e0c4aa31e420c5f9352c975ac2c029963721c4",
+      "url": "https://huggingface.co/boopyfloopy/lustifyXL_v7/resolve/a1e0c4aa31e420c5f9352c975ac2c029963721c4/lustifySDXLNSFW_ggwpV7.safetensors",
+      "size_bytes": 6938099634,
+      "sha256": "d234c60d67cedfe69433e3934a459707c2cf43b30232d3db2becd10371d2220f",
+      "license": "CreativeML Open RAIL-M"
     },
     {
       "id": "u2net",
