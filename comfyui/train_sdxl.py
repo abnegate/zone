@@ -64,6 +64,7 @@ JOB_KEYS = (
     'id',
     'name',
     'method',
+    'subject',
     'trigger',
     'checkpoint',
     'filename',
@@ -478,6 +479,12 @@ PHASE_WEIGHTS = {
         ('training', 72),
         ('publishing', 6),
     ),
+    'language': (
+        ('converting', 10),
+        ('loading', 10),
+        ('training', 70),
+        ('publishing', 10),
+    ),
 }
 
 
@@ -512,10 +519,16 @@ def eta_seconds(elapsed: float, step: int, total: int) -> int | None:
     return int(round(remaining))
 
 
-def phase_message(phase: str, phase_step: int, phase_total: int) -> str:
+def phase_message(
+    phase: str, phase_step: int, phase_total: int, method: str = ''
+) -> str:
     if phase == 'queued':
         return 'Waiting for the host trainer'
+    if phase == 'converting':
+        return 'Converting the dataset'
     if phase == 'loading':
+        if method == 'language':
+            return 'Loading the language model'
         return 'Loading the people checkpoint'
     if phase == 'class_images':
         if phase_total > 0:
@@ -573,7 +586,9 @@ class Progress:
             'step': int(min(step, self.total)),
             'total': self.total,
             'phase': phase,
-            'message': phase_message(phase, int(phase_step), int(phase_total)),
+            'message': phase_message(
+                phase, int(phase_step), int(phase_total), method=self.method
+            ),
             'percent': overall_percent(self.method, phase, int(phase_step), int(phase_total)),
         }
         if phase_total > 0:
@@ -827,6 +842,11 @@ def process_job(
     stub: bool,
 ) -> None:
     job = load_job(job_dir)
+    if (job.get('subject') or '') == 'language':
+        import train_llm
+
+        train_llm.process_job(models_dir, job_dir, stub)
+        return
     if (job.get('method') or '') == 'video':
         import train_wan
 

@@ -184,18 +184,29 @@ class SetupMacosTest(unittest.TestCase):
             self.assertTrue((install / "train_sdxl_config.json").is_file())
             self.assertTrue((install / "train_wan.py").is_file())
             self.assertTrue((install / "train_wan_config.json").is_file())
+            self.assertTrue((install / "train_llm.py").is_file())
+            self.assertTrue((install / "train_llm_config.json").is_file())
             self.assertTrue((install / "sdxl_checkpoint.py").is_file())
+            self.assertTrue((install / ".venv-train-llm" / "bin" / "python").is_file())
             imported = subprocess.run(
                 [str(install / ".venv-train" / "bin" / "python"), "-c", "import torch"],
                 capture_output=True,
                 text=True,
             )
             self.assertEqual(imported.returncode, 0, imported.stderr)
+            mlx = subprocess.run(
+                [str(install / ".venv-train" / "bin" / "python"), "-c", "import mlx"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(mlx.returncode, 0, mlx.stdout + mlx.stderr)
             plist = (home / "Library/LaunchAgents/ai.zone.train.plist").read_text(
                 encoding="utf-8"
             )
             self.assertIn("ai.zone.train", plist)
             self.assertIn("train_sdxl.py", plist)
+            self.assertIn(".venv-train/bin/python", plist)
+            self.assertNotIn(".venv-train-llm", plist)
             self.assertIn("bootstrap", launchctl_log.read_text(encoding="utf-8"))
 
 
