@@ -3,5 +3,6 @@
  * Re-exports all source-related components.
  */
 
-// No shared components yet - components are currently internal to SourcesPage
-export {};
+export { CreateSourceWizard } from './CreateSourceWizard';
+export { FormFieldRenderer, FormFieldsRenderer, withCredentialField } from './FormFields';
+export { SourceDetail } from './SourceDetail';

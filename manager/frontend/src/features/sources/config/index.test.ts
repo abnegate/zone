@@ -1,5 +1,6 @@
 import type { SourceCategory, SourceType } from '../types';
 import {
+  formStateFromConfig,
   getEnabledSources,
   getSourceBadgeColor,
   getSourceById,
@@ -43,6 +44,7 @@ describe('Source Registry', () => {
         expect(typeof source.enabled).toBe('boolean');
         expect(source.formFields).toBeInstanceOf(Array);
         expect(typeof source.buildConfig).toBe('function');
+        expect(typeof source.fromConfig).toBe('function');
         expect(typeof source.getDefaultName).toBe('function');
         expect(typeof source.getFieldIds).toBe('function');
       }
@@ -174,6 +176,70 @@ describe('Source Registry', () => {
 
     it('returns empty object for unknown source', () => {
       const state = initializeFormState('unknown' as SourceType);
+      expect(state).toEqual({});
+    });
+  });
+
+  describe('formStateFromConfig', () => {
+    it('maps github config onto prefixed form fields, not raw config keys', () => {
+      const state = formStateFromConfig('github', {
+        owner: 'acme',
+        repo: 'zone',
+        branch: 'develop',
+      });
+
+      expect(state.ghOwner).toBe('acme');
+      expect(state.ghRepo).toBe('zone');
+      expect(state.ghBranch).toBe('develop');
+      expect(state).not.toHaveProperty('owner');
+      expect(state).not.toHaveProperty('repo');
+      expect(state).not.toHaveProperty('branch');
+    });
+
+    it('maps gitlab config onto prefixed form fields', () => {
+      const state = formStateFromConfig('gitlab', {
+        project_id: 'group/project',
+        host: 'https://gitlab.example.com',
+        branch: 'dev',
+      });
+
+      expect(state.glProjectId).toBe('group/project');
+      expect(state.glHost).toBe('https://gitlab.example.com');
+      expect(state.glBranch).toBe('dev');
+      expect(state).not.toHaveProperty('project_id');
+    });
+
+    it('maps filesystem config onto prefixed form fields', () => {
+      const state = formStateFromConfig('filesystem', {
+        base_path: '/tmp/app',
+        allow_writes: false,
+      });
+
+      expect(state.fsBasePath).toBe('/tmp/app');
+      expect(state.fsAllowWrites).toBe(false);
+      expect(state).not.toHaveProperty('base_path');
+    });
+
+    it('maps web config onto prefixed form fields', () => {
+      const state = formStateFromConfig('web', { url: 'https://example.com' });
+
+      expect(state.webUrl).toBe('https://example.com');
+      expect(state).not.toHaveProperty('url');
+    });
+
+    it('maps text config onto prefixed form fields', () => {
+      const state = formStateFromConfig('text', { content: 'hello', label: 'notes' });
+
+      expect(state.textContent).toBe('hello');
+      expect(state.textLabel).toBe('notes');
+      expect(state).not.toHaveProperty('content');
+    });
+
+    it('returns empty object for unknown source without spreading config', () => {
+      const state = formStateFromConfig('unknown' as SourceType, {
+        owner: 'acme',
+        repo: 'zone',
+      });
       expect(state).toEqual({});
     });
   });

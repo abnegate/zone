@@ -45,6 +45,9 @@ export interface SourceDefinition {
   // Build config from form state
   buildConfig: (state: Record<string, unknown>) => SourceConfig;
 
+  // Inverse of buildConfig: prefixed form field ids from a stored config
+  fromConfig: (config: SourceConfig) => Record<string, unknown>;
+
   // Generate default name from config
   getDefaultName: (state: Record<string, unknown>) => string;
 

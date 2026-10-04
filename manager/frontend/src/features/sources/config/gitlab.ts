@@ -54,6 +54,15 @@ export const gitlabSource: SourceDefinition = {
     branch: (state.glBranch as string) || 'main',
   }),
 
+  fromConfig: (config) => {
+    const gitlab = config as GitLabConfig;
+    return {
+      glProjectId: gitlab.project_id,
+      glHost: gitlab.host || 'https://gitlab.com',
+      glBranch: gitlab.branch || 'main',
+    };
+  },
+
   getDefaultName: (state) => state.glProjectId as string,
 
   getUrl: (state) => {

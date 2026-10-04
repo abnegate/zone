@@ -52,6 +52,15 @@ export const githubSource: SourceDefinition = {
     branch: (state.ghBranch as string) || 'main',
   }),
 
+  fromConfig: (config) => {
+    const github = config as GitHubConfig;
+    return {
+      ghOwner: github.owner,
+      ghRepo: github.repo,
+      ghBranch: github.branch || 'main',
+    };
+  },
+
   getDefaultName: (state) => `${state.ghOwner}/${state.ghRepo}`,
 
   getUrl: (state) => {

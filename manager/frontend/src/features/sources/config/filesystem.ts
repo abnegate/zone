@@ -37,6 +37,14 @@ export const filesystemSource: SourceDefinition = {
     allow_writes: state.fsAllowWrites as boolean,
   }),
 
+  fromConfig: (config) => {
+    const filesystem = config as FilesystemConfig;
+    return {
+      fsBasePath: filesystem.base_path,
+      fsAllowWrites: filesystem.allow_writes ?? true,
+    };
+  },
+
   getDefaultName: (state) => {
     const path = state.fsBasePath as string;
     return path.split('/').pop() || path;

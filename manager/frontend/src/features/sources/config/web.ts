@@ -28,6 +28,13 @@ export const webSource: SourceDefinition = {
     url: state.webUrl as string,
   }),
 
+  fromConfig: (config) => {
+    const web = config as WebConfig;
+    return {
+      webUrl: web.url,
+    };
+  },
+
   getDefaultName: (state) => {
     try {
       return new URL(state.webUrl as string).hostname;
