@@ -1,17 +1,17 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Badge, Button, EmptyState } from '@zone/ui';
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
+import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
-import { CreateTaskWizard } from '../components';
-import { useTasks } from '../hooks';
-import type { Task } from '../types';
+import { CreateTaskWizard, TaskDetail } from '../components';
+import { useTask, useTasks } from '../hooks';
+import type { Task, UpdateTaskRequest } from '../types';
 import { TaskExecutionView } from './TaskExecutionView';
 import './TasksPage.css';
-import { useWorkspace } from '../../../shared/context';
 
 type Tint = 'neutral' | 'info' | 'warning' | 'destructive' | 'accent' | 'success';
 
@@ -33,6 +33,10 @@ const PR_TINTS: Record<string, Tint> = {
 
 const SKELETON_CARDS = [1, 2, 3, 4];
 
+function stopRowAction(event: { stopPropagation: () => void }) {
+  event.stopPropagation();
+}
+
 function TaskStatusBadge({ status }: { status: string }) {
   return <Badge variant={STATUS_TINTS[status] ?? 'neutral'}>{status.replace('_', ' ')}</Badge>;
 }
@@ -43,9 +47,11 @@ function PrStatusBadge({ status }: { status: 'pending' | 'open' | 'merged' | 'cl
 
 export default function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const queryClient = useQueryClient();
   const [filterProject, setFilterProject] = useState<string>('');
   const [filterStatus, setFilterStatus] = useState<string>('');
   const linkedTaskId = searchParams.get('id');
+  const taskParam = searchParams.get('task');
 
   const {
     tasks,
@@ -63,21 +69,47 @@ export default function TasksPage() {
     queryFn: () => client.getSources(workspaceId as string),
     enabled: !!workspaceId,
   });
+  const {
+    task: editorTask,
+    loading: editorLoading,
+    error: editorError,
+    updateTask,
+  } = useTask(taskParam);
 
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [executionTask, setExecutionTask] = useState<Task | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const editorReady = Boolean(taskParam) && editorTask?.id === taskParam;
+  const editorFailed = Boolean(taskParam) && !editorLoading && !editorReady && Boolean(editorError);
+  const listing = !taskParam || editorFailed;
+  const showSpinner = Boolean(taskParam) && !editorReady && !editorFailed;
+
   useEffect(() => {
-    if (!linkedTaskId) return;
+    if (!linkedTaskId || taskParam) return;
     const found = tasks.find((task) => task.id === linkedTaskId);
     if (found) {
-      setSelectedTask(found);
+      setExecutionTask(found);
     }
-  }, [linkedTaskId, tasks]);
+  }, [linkedTaskId, tasks, taskParam]);
 
-  const closeSelectedTask = () => {
-    setSelectedTask(null);
+  const openEditor = (id: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('task', id);
+    next.delete('id');
+    setSearchParams(next);
+    setExecutionTask(null);
+  };
+
+  const closeEditor = () => {
+    setExecutionTask(null);
+    const next = new URLSearchParams(searchParams);
+    next.delete('task');
+    setSearchParams(next, { replace: true });
+  };
+
+  const closeExecution = () => {
+    setExecutionTask(null);
     if (searchParams.get('id')) {
       const next = new URLSearchParams(searchParams);
       next.delete('id');
@@ -85,8 +117,9 @@ export default function TasksPage() {
     }
   };
 
-  const handleTaskCreated = async (_task: Task) => {
-    // Task is already added to the list by the createTask hook
+  const handleSave = async (request: UpdateTaskRequest) => {
+    await updateTask(request);
+    await queryClient.invalidateQueries({ queryKey: ['tasks'] });
   };
 
   const handleDeleteTask = async (taskId: string) => {
@@ -100,7 +133,7 @@ export default function TasksPage() {
   };
 
   const loading = tasksLoading || projectsLoading;
-  const displayError = tasksError || error;
+  const displayError = tasksError || error || (editorFailed ? editorError : null);
   const filtered = filterProject !== '' || filterStatus !== '';
 
   const clearFilters = () => {
@@ -116,42 +149,46 @@ export default function TasksPage() {
   return (
     <div className="page page--workspace tasks-page">
       <PageBar title="Tasks" subtitle="Autonomous agent workflows">
-        <div className="tasks-filters">
-          <select
-            value={filterProject}
-            onChange={(e) => setFilterProject(e.target.value)}
-            aria-label="Filter by project"
-            disabled={loading}
-          >
-            <option value="">All Projects</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <select
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-            aria-label="Filter by status"
-            disabled={loading}
-          >
-            <option value="">All Statuses</option>
-            <option value="created">Created</option>
-            <option value="queued">Queued</option>
-            <option value="in_progress">In Progress</option>
-            <option value="blocked">Blocked</option>
-            <option value="review">Review</option>
-            <option value="complete">Complete</option>
-          </select>
-        </div>
-        <Button
-          onClick={() => setShowCreateModal(true)}
-          disabled={loading || projects.length === 0}
-        >
-          <PlusIcon />
-          New task
-        </Button>
+        {listing ? (
+          <>
+            <div className="tasks-filters">
+              <select
+                value={filterProject}
+                onChange={(e) => setFilterProject(e.target.value)}
+                aria-label="Filter by project"
+                disabled={loading}
+              >
+                <option value="">All Projects</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                aria-label="Filter by status"
+                disabled={loading}
+              >
+                <option value="">All Statuses</option>
+                <option value="created">Created</option>
+                <option value="queued">Queued</option>
+                <option value="in_progress">In Progress</option>
+                <option value="blocked">Blocked</option>
+                <option value="review">Review</option>
+                <option value="complete">Complete</option>
+              </select>
+            </div>
+            <Button
+              onClick={() => setShowCreateModal(true)}
+              disabled={loading || projects.length === 0}
+            >
+              <PlusIcon />
+              New task
+            </Button>
+          </>
+        ) : null}
       </PageBar>
 
       <div className="page-body tasks-body">
@@ -161,7 +198,20 @@ export default function TasksPage() {
           </div>
         )}
 
-        {loading ? (
+        {showSpinner ? (
+          <div className="loading" role="status">
+            Loading task...
+          </div>
+        ) : editorReady && editorTask ? (
+          <TaskDetail
+            task={editorTask}
+            projects={projects}
+            sources={sources}
+            onClose={closeEditor}
+            onExecute={() => setExecutionTask(editorTask)}
+            onSave={handleSave}
+          />
+        ) : loading ? (
           <div className="tasks-table-wrapper" aria-hidden="true">
             <table className="tasks-table">
               <thead>
@@ -249,6 +299,14 @@ export default function TasksPage() {
                   <tr
                     key={task.id}
                     className={`task-card ${task.is_agentic ? 'task-card-agentic' : ''}`}
+                    tabIndex={0}
+                    onClick={() => openEditor(task.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        if (event.key === ' ') event.preventDefault();
+                        openEditor(task.id);
+                      }
+                    }}
                   >
                     <td>
                       <div className="task-card-title">
@@ -288,7 +346,7 @@ export default function TasksPage() {
                               target="_blank"
                               rel="noopener noreferrer"
                               className="task-pr-link"
-                              onClick={(e) => e.stopPropagation()}
+                              onClick={stopRowAction}
                             >
                               View PR
                             </a>
@@ -304,15 +362,30 @@ export default function TasksPage() {
                       )}
                     </td>
                     <td>
-                      <div className="task-actions">
-                        <Button size="sm" variant="secondary" onClick={() => setSelectedTask(task)}>
+                      <div
+                        className="task-actions"
+                        role="group"
+                        onClick={stopRowAction}
+                        onKeyDown={stopRowAction}
+                      >
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={(event) => {
+                            stopRowAction(event);
+                            setExecutionTask(task);
+                          }}
+                        >
                           Execute
                         </Button>
                         <Button
                           size="sm"
                           variant="ghost"
                           className="task-delete"
-                          onClick={() => handleDeleteTask(task.id)}
+                          onClick={(event) => {
+                            stopRowAction(event);
+                            handleDeleteTask(task.id);
+                          }}
                         >
                           Delete
                         </Button>
@@ -329,14 +402,14 @@ export default function TasksPage() {
       <CreateTaskWizard
         isOpen={showCreateModal && projects.length > 0}
         onClose={() => setShowCreateModal(false)}
-        onCreated={handleTaskCreated}
+        onCreated={() => {}}
         createTask={createTask}
         projects={projects}
         sources={sources}
       />
 
-      {selectedTask && (
-        <TaskExecutionView key={selectedTask.id} task={selectedTask} onClose={closeSelectedTask} />
+      {executionTask && (
+        <TaskExecutionView key={executionTask.id} task={executionTask} onClose={closeExecution} />
       )}
     </div>
   );

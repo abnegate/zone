@@ -326,6 +326,12 @@ describe('tasks page layout', () => {
     expect(rule(css, '.logs-container')).toContain('max-height: 40vh');
     expect(rule(css, '.log-entry')).toContain('min-height: var(--ui-control-height-sm)');
   });
+
+  it('opens the editor from a pointer row and sizes the editor chrome to the header', () => {
+    expect(rule(css, '.tasks-table tbody .task-card')).toContain('cursor: pointer');
+    expect(rule(css, '.task-details-header')).toContain('height: var(--ui-header-height)');
+    expect(rule(css, '.task-details-actions')).toContain('height: var(--ui-header-height)');
+  });
 });
 
 describe('projects page layout', () => {
