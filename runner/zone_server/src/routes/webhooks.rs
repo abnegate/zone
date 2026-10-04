@@ -493,6 +493,9 @@ async fn apply_to_linked(
         priority: None,
         project_ids: None,
         require_plan_approval: None,
+        is_agentic: None,
+        source_id: None,
+        model_name: None,
     };
     let mut applied = event.payload.clone();
     let mut event_type = event.event_type;

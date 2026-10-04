@@ -264,6 +264,9 @@ pub struct UpdateTaskRequest {
     priority: Option<i32>,
     project_ids: Option<Vec<Uuid>>,
     require_plan_approval: Option<bool>,
+    is_agentic: Option<bool>,
+    source_id: Option<Uuid>,
+    model_name: Option<String>,
 }
 
 fn denied(status: StatusCode, message: &str) -> Box<Response> {
@@ -473,6 +476,9 @@ pub async fn update(
             priority: req.priority,
             project_ids: req.project_ids.as_deref(),
             require_plan_approval: req.require_plan_approval,
+            is_agentic: req.is_agentic,
+            source_id: req.source_id,
+            model_name: req.model_name.as_deref(),
         },
     )
     .await

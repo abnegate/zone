@@ -1360,6 +1360,138 @@ async fn test_task_update() {
 }
 
 #[tokio::test]
+async fn test_task_update_persists_agentic_source_and_model() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+
+    let response = client
+        .post_json_auth(
+            "/api/projects",
+            &json!({"workspace_id": workspace_id, "name": "Task Agentic Update Project" }),
+            &token,
+        )
+        .await;
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{}/sources", workspace_id),
+            &json!({
+                "name": test_source_name(),
+                "source_type": "filesystem",
+                "config": { "base_path": "/tmp/test" }
+            }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    let source_id = response.json_value()["source"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{}/tasks", workspace_id),
+            &json!({
+                "project_ids": [project_id],
+                "title": "Original Task",
+                "description": "Original"
+            }),
+            &token,
+        )
+        .await;
+    let task_id = response.json_value()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = client
+        .put_json_auth(
+            &format!("/api/tasks/{}", task_id),
+            &json!({
+                "is_agentic": true,
+                "source_id": source_id,
+                "model_name": "llama3.2:3b"
+            }),
+            &token,
+        )
+        .await;
+
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["task"]["is_agentic"], true);
+    assert_eq!(body["task"]["source_id"], source_id);
+    assert_eq!(body["task"]["model_name"], "llama3.2:3b");
+
+    let response = client
+        .get_auth(&format!("/api/tasks/{}", task_id), &token)
+        .await;
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["task"]["is_agentic"], true);
+    assert_eq!(body["task"]["source_id"], source_id);
+    assert_eq!(body["task"]["model_name"], "llama3.2:3b");
+}
+
+#[tokio::test]
+async fn test_task_update_rejects_unknown_source() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+
+    let response = client
+        .post_json_auth(
+            "/api/projects",
+            &json!({"workspace_id": workspace_id, "name": "Task Unknown Source Project" }),
+            &token,
+        )
+        .await;
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{}/tasks", workspace_id),
+            &json!({
+                "project_ids": [project_id],
+                "title": "Original Task",
+                "description": "Original"
+            }),
+            &token,
+        )
+        .await;
+    let task_id = response.json_value()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = client
+        .put_json_auth(
+            &format!("/api/tasks/{}", task_id),
+            &json!({
+                "is_agentic": true,
+                "source_id": uuid::Uuid::new_v4(),
+                "model_name": "llama3.2:3b"
+            }),
+            &token,
+        )
+        .await;
+
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": "Source is not available in this workspace" })
+    );
+}
+
+#[tokio::test]
 async fn test_task_delete() {
     let client = TestClient::with_db().await;
     let token = get_auth_token(&client).await;
