@@ -68,6 +68,7 @@ pub mod config;
 pub mod dataset;
 pub mod host_train;
 pub mod inventory;
+pub mod language;
 pub mod lora;
 pub mod media;
 pub mod observe;

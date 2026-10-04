@@ -8,6 +8,7 @@ use crate::host_train;
 use crate::inventory::{
     PUBLICATION_DIRECTORY, WeightDocument, WeightSidecar, contains_phrase, publication_marker,
 };
+use crate::language;
 use crate::person;
 use crate::quality::Quality;
 use crate::recipe::{RecipeCatalog, TrainingModel, sanitize_weight_filename};
@@ -39,12 +40,19 @@ pub enum TrainError {
     Failed(String),
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainSubject {
     #[default]
     Other,
     Person,
+    Language,
+}
+
+impl TrainSubject {
+    fn is_other(&self) -> bool {
+        matches!(self, Self::Other)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -201,6 +209,10 @@ pub struct TrainBase {
     pub id: String,
     pub label: String,
     pub edit: bool,
+    #[serde(skip_serializing_if = "TrainSubject::is_other")]
+    pub subject: TrainSubject,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub finetune: bool,
 }
 
 struct ScreenedImage {
@@ -315,10 +327,19 @@ pub fn available_bases(catalog: &RecipeCatalog, models_dir: &Path) -> Vec<TrainB
                 .iter()
                 .any(|item| item.recipe_id == recipe.id && item.ready)
         })
-        .map(|recipe| TrainBase {
-            id: recipe.id.clone(),
-            label: recipe.label.clone(),
-            edit: matches!(recipe.training_model(), Ok(TrainingModel::QwenEdit { .. })),
+        .map(|recipe| {
+            let people = recipe.id == "sdxl-people";
+            TrainBase {
+                id: recipe.id.clone(),
+                label: recipe.label.clone(),
+                edit: matches!(recipe.training_model(), Ok(TrainingModel::QwenEdit { .. })),
+                subject: if people {
+                    TrainSubject::Person
+                } else {
+                    TrainSubject::Other
+                },
+                finetune: people,
+            }
         })
         .collect()
 }
@@ -404,6 +425,9 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
     if config.train_command.is_none() && !config.enabled {
         return Err(TrainError::Disabled);
     }
+    if request.subject == TrainSubject::Language {
+        return validate_language(request);
+    }
     let _filename = final_filename(&request.name)?;
     if request.images.is_empty() {
         return Err(TrainError::Invalid(
@@ -488,6 +512,9 @@ async fn train_with_pipeline(
     progress: Option<mpsc::UnboundedSender<TrainProgress>>,
 ) -> Result<TrainOutcome, TrainError> {
     validate_request(config, &request)?;
+    if request.subject == TrainSubject::Language {
+        return train_language(config, request, progress).await;
+    }
     if request.method == TrainMethod::Video {
         return train_video(config, request, progress).await;
     }
@@ -901,6 +928,126 @@ fn validate_pairing(images: &[TrainImage], model: &TrainingModel) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+fn validate_language(request: &TrainRequest) -> Result<(), TrainError> {
+    if request.images.is_empty() {
+        return Err(TrainError::Invalid("training needs documents"));
+    }
+    match request.method {
+        TrainMethod::Lora | TrainMethod::Finetune => {}
+        TrainMethod::Pivotal | TrainMethod::Video => {
+            return Err(TrainError::Invalid("not available for a chat model"));
+        }
+    }
+    if request.base.trim().is_empty() {
+        return Err(TrainError::Invalid("unknown training base"));
+    }
+    let _name = chat_model_name(&request.name)?;
+    Ok(())
+}
+
+fn chat_model_name(name: &str) -> Result<String, TrainError> {
+    let name = name.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.ends_with(".safetensors")
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-'))
+    {
+        return Err(TrainError::Invalid("invalid chat model name"));
+    }
+    let path = Path::new(name);
+    if path.file_name().and_then(|value| value.to_str()) != Some(name)
+        || path.components().count() != 1
+        || name.chars().any(char::is_control)
+    {
+        return Err(TrainError::Invalid("invalid chat model name"));
+    }
+    Ok(name.to_string())
+}
+
+async fn train_language(
+    config: &Config,
+    request: TrainRequest,
+    progress: Option<mpsc::UnboundedSender<TrainProgress>>,
+) -> Result<TrainOutcome, TrainError> {
+    let chat_name = chat_model_name(&request.name)?;
+    let dataset = language::to_jsonl(&request.images)?;
+    let attempt = Attempt::create(&config.models_dir)?;
+    let data = ensure_child_directory(&attempt.root, "data")?;
+    language::write(&data, &dataset)?;
+    let targets = ensure_child_directory(&attempt.root, "targets")?;
+    for (index, document) in request.images.iter().enumerate() {
+        let name = staged_document_name(index, &document.filename);
+        write_new(
+            &attempt.root,
+            &targets.join(name),
+            &language::document_bytes(document)?,
+        )?;
+    }
+    let mut job = host_train::HostJob::create(
+        &request.name,
+        request.method.as_str(),
+        "",
+        request.base.trim(),
+    );
+    job.subject = "language".to_string();
+    job.filename = Some(chat_name.clone());
+    job.recipe_id = "chat".to_string();
+    job.image_count = dataset.len();
+    let dir = host_train::job_dir(&config.models_dir, job.id);
+    host_train::write_job(&dir, &job)?;
+    host_train::stage_language(&attempt.root, &dir)?;
+    host_train::write_queued_language_progress(&dir, job.image_count)?;
+    if let Some(progress) = &progress {
+        let _ = progress.send(
+            TrainProgress::new(0, host_train::language_steps_for(job.image_count))
+                .phase("queued", "Waiting for the host trainer")
+                .percent(0),
+        );
+    }
+    let finished = host_train::wait(&dir, progress).await?;
+    let published = finished
+        .filename
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&chat_name);
+    Ok(TrainOutcome {
+        path: dir.join(published),
+        quality: None,
+        dataset: Vec::new(),
+        screening: Screening {
+            kept: job.image_count,
+            dropped: Vec::new(),
+            attempted: Vec::new(),
+        },
+    })
+}
+
+fn staged_document_name(index: usize, filename: &str) -> String {
+    let base = Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("document");
+    let safe: String = base
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = if safe.is_empty() || safe == "." || safe == ".." {
+        "document".to_string()
+    } else {
+        safe
+    };
+    format!("{index:04}-{safe}")
 }
 
 fn phase_percent(done: u32, total: u32) -> Option<u8> {
@@ -3703,12 +3850,29 @@ mod tests {
         )
         .unwrap();
         let bases = available_bases(&catalog, &config.models_dir);
+        let people = bases
+            .iter()
+            .find(|base| base.id == "sdxl-people")
+            .expect("people checkpoint on disk lists sdxl-people");
+        assert!(!people.edit);
+        assert!(people.finetune);
+        assert_eq!(people.subject, TrainSubject::Person);
+        let encoded = serde_json::to_value(people).unwrap();
+        assert_eq!(encoded["finetune"], true);
+        assert_eq!(encoded["subject"], "person");
         assert!(
             bases
                 .iter()
-                .any(|base| base.id == "sdxl-people" && !base.edit)
+                .filter(|base| base.id != "sdxl-people")
+                .all(|base| !base.finetune && base.subject == TrainSubject::Other)
         );
         assert!(bases.iter().all(|base| base.id != "sdxl"));
+        assert!(
+            bases
+                .iter()
+                .all(|base| !base.id.contains(':') && base.subject != TrainSubject::Language),
+            "available_bases must not list Ollama chat models: {bases:?}"
+        );
     }
 
     #[test]
@@ -3831,6 +3995,145 @@ mod tests {
                 "video training is only available for a person"
             ))
         ));
+    }
+
+    fn language_request(name: &str, base: &str, documents: Vec<TrainImage>) -> TrainRequest {
+        TrainRequest {
+            name: name.into(),
+            base: base.into(),
+            trigger: None,
+            subject: TrainSubject::Language,
+            method: TrainMethod::Lora,
+            images: documents,
+        }
+    }
+
+    fn document(filename: &str, body: &str) -> TrainImage {
+        TrainImage {
+            filename: filename.into(),
+            caption: String::new(),
+            bytes_base64: String::new(),
+            bytes: Some(body.as_bytes().to_vec()),
+            before_base64: None,
+            before: None,
+            group: None,
+        }
+    }
+
+    #[test]
+    fn language_training_validates_documents_without_weights() {
+        let (_root, config) = harness("unused");
+        let mut empty = language_request("support-bot", "qwen2.5:7b", Vec::new());
+        assert!(matches!(
+            validate_request(&config, &empty),
+            Err(TrainError::Invalid("training needs documents"))
+        ));
+        empty.images = vec![document(
+            "chat.json",
+            r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#,
+        )];
+        empty.method = TrainMethod::Video;
+        assert!(matches!(
+            validate_request(&config, &empty),
+            Err(TrainError::Invalid("not available for a chat model"))
+        ));
+        empty.method = TrainMethod::Pivotal;
+        assert!(matches!(
+            validate_request(&config, &empty),
+            Err(TrainError::Invalid("not available for a chat model"))
+        ));
+        empty.method = TrainMethod::Lora;
+        empty.base.clear();
+        assert!(matches!(
+            validate_request(&config, &empty),
+            Err(TrainError::Invalid("unknown training base"))
+        ));
+        empty.base = "qwen2.5:7b".into();
+        empty.name = "support.safetensors".into();
+        assert!(matches!(
+            validate_request(&config, &empty),
+            Err(TrainError::Invalid("invalid chat model name"))
+        ));
+        empty.name = "support-bot".into();
+        validate_request(&config, &empty)
+            .expect("language LoRA dumps do not need a people checkpoint or a .safetensors name");
+        empty.method = TrainMethod::Finetune;
+        validate_request(&config, &empty).expect("language fine-tune is a host chat job");
+        let mut other = request("jerry", "flux-schnell", Some("ohwx"));
+        other.method = TrainMethod::Finetune;
+        assert!(matches!(
+            validate_request(&config, &other),
+            Err(TrainError::Invalid(
+                "fine-tune is only available for a person"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn language_training_outcome_path_is_the_ollama_name() {
+        let (_root, config) = harness("unused");
+        let watching = config.models_dir.clone();
+        tokio::spawn(async move {
+            for _ in 0..200 {
+                if let Some(job) = host_train::current(&watching) {
+                    let dir = host_train::job_dir(&watching, job.id);
+                    let mut finished = host_train::read_job(&dir).unwrap();
+                    finished.status = host_train::HostStatus::Succeeded;
+                    host_train::write_job(&dir, &finished).unwrap();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        let outcome = train(
+            &config,
+            String::new(),
+            String::new(),
+            language_request(
+                "support-bot",
+                "qwen2.5:7b",
+                vec![document(
+                    "chat.json",
+                    r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#,
+                )],
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.path.file_name().unwrap(), "support-bot");
+        assert!(
+            !outcome
+                .path
+                .as_os_str()
+                .to_string_lossy()
+                .ends_with(".safetensors")
+        );
+        assert!(outcome.quality.is_none());
+        let job = host_train::current(&config.models_dir).unwrap();
+        assert_eq!(job.subject, "language");
+        assert_eq!(job.recipe_id, "chat");
+        assert_eq!(job.checkpoint, "qwen2.5:7b");
+        assert_eq!(job.filename.as_deref(), Some("support-bot"));
+        assert_eq!(job.trigger, "");
+        assert_eq!(job.method, "lora");
+        assert_eq!(job.image_count, 1);
+        let dir = host_train::job_dir(&config.models_dir, job.id);
+        assert!(dir.join("data/train.jsonl").is_file());
+        assert!(dir.join("data/format.json").is_file());
+        assert!(
+            !config
+                .models_dir
+                .join("loras")
+                .join("support-bot.safetensors")
+                .exists()
+        );
+        assert!(
+            !config
+                .models_dir
+                .join("checkpoints")
+                .join("support-bot.safetensors")
+                .exists()
+        );
     }
 
     #[tokio::test]
