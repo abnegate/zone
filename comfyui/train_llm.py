@@ -50,22 +50,11 @@ OLLAMA_MLX = {
     'qwen2.5:32b': 'mlx-community/Qwen2.5-32B-Instruct-4bit',
     'qwen2.5': 'mlx-community/Qwen2.5-7B-Instruct-4bit',
     'qwen2.5:latest': 'mlx-community/Qwen2.5-7B-Instruct-4bit',
+    'qwen3.8:27b': 'mlx-community/Qwen3.8-27B-4bit',
+    'qwen38u:32k': 'mlx-community/Qwen3.8-27B-4bit',
+    'qwen3.8': 'mlx-community/Qwen3.8-27B-4bit',
 }
-FAMILY_TITLE = {
-    'llama3.2': 'Llama-3.2',
-    'llama3.1': 'Llama-3.1',
-    'llama3': 'Llama-3',
-    'llama2': 'Llama-2',
-    'qwen2.5': 'Qwen2.5',
-    'qwen2': 'Qwen2',
-    'qwen3': 'Qwen3',
-    'mistral': 'Mistral-7B',
-    'mixtral': 'Mixtral-8x7B',
-    'gemma2': 'gemma-2',
-    'gemma3': 'gemma-3',
-    'phi3': 'Phi-3',
-    'phi4': 'Phi-4',
-}
+SMALL_LLAMA_TAGS = {'llama3.2:1b', 'llama3.2:3b'}
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
@@ -114,35 +103,11 @@ def mlx_repo(checkpoint: str) -> str:
         mapped = OLLAMA_MLX.get(base)
         if mapped:
             return mapped
-        tag = ''
     elif tag in {'', 'latest'}:
         mapped = OLLAMA_MLX.get(base)
         if mapped:
             return mapped
-    return heuristic_mlx(base, tag)
-
-
-def heuristic_mlx(base: str, tag: str) -> str:
-    title = FAMILY_TITLE.get(base, base)
-    size = tag if tag and tag not in {'latest', 'instruct', 'chat'} else ''
-    if size:
-        size_norm = size.upper()
-        if re.fullmatch(r'\d+(\.\d+)?', size_norm):
-            size_norm = f'{size_norm}B'
-        elif size_norm.endswith('B'):
-            size_norm = size_norm[:-1] + 'B'
-        size_part = f'-{size_norm}'
-    elif title.endswith('B'):
-        size_part = ''
-    else:
-        size_part = ''
-    if title.lower().startswith('gemma'):
-        stem = f'{title}{size_part.lower()}' if size_part else title
-        return f'mlx-community/{stem}-it-4bit'
-    stem = f'{title}{size_part}' if size_part else title
-    if 'Instruct' in stem or 'instruct' in stem:
-        return f'mlx-community/{stem}-4bit'
-    return f'mlx-community/{stem}-Instruct-4bit'
+    raise ValueError(f'no MLX mapping for {name}')
 
 
 def family_name(name: str) -> str:
@@ -175,6 +140,14 @@ def param_millions(name: str) -> int | None:
     if not matches:
         return None
     return int(float(matches[-1]) * 1000)
+
+
+def should_dequantize(checkpoint: str) -> bool:
+    lowered = (checkpoint or '').strip().lower()
+    if lowered in SMALL_LLAMA_TAGS:
+        return True
+    millions = param_millions(checkpoint)
+    return millions is not None and millions < 8000
 
 
 def fine_tune_type(method: str, checkpoint: str, config: dict[str, Any]) -> str:
@@ -430,6 +403,7 @@ def fuse_args(
     adapter_path: Path,
     save_path: Path,
     export_gguf: bool,
+    dequantize: bool,
 ) -> list[str]:
     args = [
         '--model',
@@ -438,10 +412,11 @@ def fuse_args(
         str(adapter_path),
         '--save-path',
         str(save_path),
-        '--dequantize',
     ]
-    if export_gguf:
-        args.append('--export-gguf')
+    if dequantize:
+        args.append('--dequantize')
+        if export_gguf:
+            args.append('--export-gguf')
     return args
 
 
@@ -498,9 +473,19 @@ def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[
 
 def parse_iter(line: str) -> tuple[int | None, float | None]:
     iter_match = ITER_RE.search(line)
-    step = int(iter_match.group(1)) if iter_match else None
     loss_match = LOSS_RE.search(line)
-    loss = float(loss_match.group(1)) if loss_match else None
+    if iter_match:
+        step = int(iter_match.group(1))
+        loss = float(loss_match.group(1)) if loss_match else None
+        return step, loss
+    tokens = line.split()
+    if len(tokens) < 2:
+        return None, None
+    try:
+        step = int(tokens[0])
+        loss = float(tokens[1])
+    except ValueError:
+        return None, None
     return step, loss
 
 
@@ -613,7 +598,9 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     run_logged(train_command, on_line)
 
     progress.emit('publishing', step=0, phase_step=0, phase_total=1)
-    export_gguf = exports_gguf(str(job['checkpoint']))
+    checkpoint = str(job['checkpoint'])
+    dequantize = should_dequantize(checkpoint)
+    export_gguf = exports_gguf(checkpoint) and dequantize
     fuse_command = mlx_command(
         'fuse',
         fuse_args(
@@ -621,14 +608,17 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
             adapter_path=adapter_path,
             save_path=fused_path,
             export_gguf=export_gguf,
+            dequantize=dequantize,
         ),
     )
     run_logged(fuse_command, lambda _line: None)
     gguf = fused_path / 'ggml-model-f16.gguf'
-    source = str(gguf) if export_gguf and gguf.is_file() else str(fused_path)
     modelfile = job_dir / 'Modelfile'
-    write_modelfile(modelfile, source)
-    ollama_create(str(job['filename']), modelfile)
+    if gguf.is_file():
+        write_modelfile(modelfile, str(gguf))
+        ollama_create(str(job['filename']), modelfile)
+    else:
+        write_modelfile(modelfile, str(fused_path))
     job['step'] = total
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     train_sdxl.write_job(job_dir, job)
