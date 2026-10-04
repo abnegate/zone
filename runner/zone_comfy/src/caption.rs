@@ -17,14 +17,14 @@ use crate::config::Config;
 
 const SUBJECT_TOKENS: u32 = 40;
 const DESCRIPTION_TOKENS: u32 = 80;
-const MAX_CAPTION_WORDS: usize = 18;
+const MAX_CAPTION_WORDS: usize = 24;
 /// A word in at least this share of the descriptions is invariant, so it is identity.
 /// Set low on purpose: leaking identity costs more than dropping a little context.
 const INVARIANT_SHARE: f32 = 0.34;
 /// Shown to anchor the answer format. Small models copy it verbatim, so it is
 /// also the one answer that is never accepted.
 const EXAMPLE_CAPTION: &str =
-    "close-up from the side, sitting on a wooden stool, warm indoor light";
+    "standing full body, one hand on her hip, wooden stool, warm indoor light";
 
 const PREAMBLES: &[&str] = &[
     "in this image,",
@@ -203,16 +203,7 @@ impl Captioner {
 
     /// What varies in one image: pose, framing, setting, lighting, props.
     async fn describe(&self, image: &str, subject: Option<&str>) -> Option<String> {
-        let exclusion = match subject {
-            Some(subject) => format!(" Do not name or describe the {subject} itself."),
-            None => String::new(),
-        };
-        let prompt = format!(
-            "Write a short caption for this photo. Say where it was taken, how it is framed, \
-             and what the lighting is like.{exclusion} Answer with lowercase phrases separated \
-             by commas.\nExample answer: {EXAMPLE_CAPTION}"
-        );
-        let mut message = Message::user(prompt);
+        let mut message = Message::user(describe_prompt(subject));
         message.images = vec![image.to_string()];
         let answer = self.ask(message, DESCRIPTION_TOKENS).await?;
         let cleaned = tidy(&answer);
@@ -278,10 +269,24 @@ fn identity_words(
     banned.extend(
         counts
             .into_iter()
-            .filter(|(_, count)| *count >= threshold)
+            .filter(|(word, count)| *count >= threshold && !crate::dataset::pose_word(word))
             .map(|(word, _)| word.clone()),
     );
     banned
+}
+
+fn describe_prompt(subject: Option<&str>) -> String {
+    let exclusion = match subject {
+        Some(subject) => format!(" Do not name or describe the {subject} itself."),
+        None => String::new(),
+    };
+    format!(
+        "Write a short caption for this photo. Name the pose or anatomy position (standing, \
+         sitting, lying, on back, from behind, full body, close-up, plus arm or hand notes \
+         when they are visible), where it was taken, how it is framed, and what the lighting \
+         is like.{exclusion} Answer with lowercase phrases separated by commas.\nExample \
+         answer: {EXAMPLE_CAPTION}"
+    )
 }
 
 pub(crate) fn content_words(value: &str) -> impl Iterator<Item = String> + '_ {
@@ -416,7 +421,7 @@ mod tests {
 
     #[test]
     fn captions_are_capped_without_cutting_a_clause_in_half() {
-        let clause = "standing on a wooden stool in a warehouse under warm light";
+        let clause = "standing on a wooden stool in a large warehouse under warm indoor light";
         let description = format!("{clause}, {clause}");
         let capped = strip_words(&description, &HashSet::new());
         assert_eq!(
@@ -424,6 +429,42 @@ mod tests {
             "a clause that does not fit is dropped whole"
         );
         assert!(capped.split_whitespace().count() <= MAX_CAPTION_WORDS);
+    }
+
+    #[test]
+    fn describe_prompt_requires_pose() {
+        let prompt = describe_prompt(None);
+        assert!(
+            prompt.contains("pose or anatomy position"),
+            "vision must be asked for pose, got {prompt}"
+        );
+        assert!(prompt.contains("standing"));
+        assert!(prompt.contains("hand"));
+        assert!(prompt.contains(EXAMPLE_CAPTION));
+    }
+
+    #[test]
+    fn pose_words_are_not_stripped_as_identity() {
+        let drafts: Vec<Option<String>> = [
+            "standing, wooden porch, warm afternoon",
+            "standing, grassy field, bright daylight",
+            "standing, tiled floor, cool window",
+            "sitting, leather couch, lamp glow",
+            "lying, garden path, overcast sky",
+            "walking, city street, neon signs",
+        ]
+        .iter()
+        .map(|value| Some((*value).to_string()))
+        .collect();
+        let banned = identity_words(&drafts, None, "ohwx");
+        assert!(
+            !banned.contains("standing"),
+            "a pose term must stay even at 50% frequency: {banned:?}"
+        );
+        assert_eq!(
+            strip_words(drafts[0].as_deref().unwrap(), &banned),
+            "standing, wooden porch, warm afternoon"
+        );
     }
 
     #[tokio::test]

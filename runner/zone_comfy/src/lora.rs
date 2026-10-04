@@ -3,7 +3,7 @@
 use crate::caption::{Captioner, Draft};
 use crate::client::{Client, SourceImage};
 use crate::config::Config;
-use crate::dataset::Concern;
+use crate::dataset::{self, Concern, FrameKind};
 use crate::host_train;
 use crate::inventory::{
     PUBLICATION_DIRECTORY, WeightDocument, WeightSidecar, contains_phrase, publication_marker,
@@ -11,7 +11,7 @@ use crate::inventory::{
 use crate::person;
 use crate::quality::Quality;
 use crate::recipe::{RecipeCatalog, TrainingModel, sanitize_weight_filename};
-use crate::subject::{CENTRE, Subject};
+use crate::subject::{CENTRE, SaliencyMap, Subject};
 use crate::train::{Run, TrainProgress};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -24,6 +24,7 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+use zone_vision::crop::{self, Region, Target};
 use zone_vision::gravity::Point;
 use zone_vision::{Raster, Rendered, decode};
 
@@ -208,6 +209,8 @@ struct ScreenedImage {
     /// Base64 of the crop, kept only for identity runs, which caption it.
     encoded: Option<String>,
     group: usize,
+    kind: Option<FrameKind>,
+    mask: Option<Vec<u8>>,
 }
 
 struct RemediationAttempt {
@@ -558,6 +561,8 @@ async fn train_with_pipeline(
                 reference: framed.control,
                 text: image.caption.clone(),
                 group: *group,
+                kind: framed.kind,
+                mask: framed.mask,
             });
         }
     }
@@ -623,6 +628,7 @@ async fn train_with_pipeline(
         .then(|| ensure_child_directory(&attempt.root, "control_1"))
         .transpose()?;
     let mut captions = HashMap::with_capacity(survivors.len());
+    let mut pose_frames: Vec<(String, String)> = Vec::new();
     for (index, image) in survivors.iter().enumerate() {
         let stem = format!("{index:04}");
         write_new(
@@ -642,7 +648,25 @@ async fn train_with_pipeline(
             &targets.join(format!("{stem}.txt")),
             text.as_bytes(),
         )?;
-        captions.insert(format!("{stem}.png"), text);
+        captions.insert(format!("{stem}.png"), text.clone());
+        if person {
+            let kind = image.kind.unwrap_or(FrameKind::Body);
+            let pose = dataset::pose_cluster(&text);
+            write_new(
+                &attempt.root,
+                &dataset::kind_path(&targets, &stem),
+                kind.as_str().as_bytes(),
+            )?;
+            write_new(
+                &attempt.root,
+                &dataset::pose_path(&targets, &stem),
+                pose.as_bytes(),
+            )?;
+            if let Some(mask) = &image.mask {
+                write_new(&attempt.root, &dataset::mask_path(&targets, &stem), mask)?;
+            }
+            pose_frames.push((stem.clone(), pose));
+        }
         if let (Some(controls), Some(reference)) = (&controls, &image.reference) {
             write_new(
                 &attempt.root,
@@ -650,6 +674,12 @@ async fn train_with_pipeline(
                 reference,
             )?;
         }
+    }
+    if person {
+        let balanced = dataset::rebalance(&pose_frames);
+        let encoded = serde_json::to_vec_pretty(&balanced)
+            .map_err(|error| TrainError::Failed(error.to_string()))?;
+        write_new(&attempt.root, &dataset::rebalance_path(&targets), &encoded)?;
     }
     let staged = attempt.output();
     let run = if let Some(command) = config.train_command.as_deref() {
@@ -1626,6 +1656,8 @@ const CROP: &str = "crop.png";
 struct Framed {
     target: Vec<u8>,
     control: Option<Vec<u8>>,
+    kind: Option<FrameKind>,
+    mask: Option<Vec<u8>>,
 }
 
 impl Framed {
@@ -1664,34 +1696,86 @@ fn frame_with_target(
     Ok(Framed {
         target: square(subject, &raster, side, focus)?,
         control,
+        kind: None,
+        mask: None,
     })
 }
 
 /// Autogravity still finds the subject. The target is a 1024-area bucket plus
-/// a head/shoulders square when that is a different frame.
+/// a head/shoulders square when that is a different frame, and a hand crop
+/// when the caption names hands.
 fn frame_person(
     subject: &Subject,
-    _image: &TrainImage,
+    image: &TrainImage,
     target: &[u8],
 ) -> Result<Vec<Framed>, TrainError> {
     let raster = decode_bytes(target)?;
     let focus = subject.focus(&raster, CENTRE);
+    let size = raster.oriented_size();
+    let saliency = subject.saliency_map(&raster);
     let body = person::render_body(subject, &raster, focus)
         .map_err(|error| TrainError::Failed(error.to_string()))?;
-    let body_target = zone_vision::Target::new(body.width, body.height);
+    let body_target = Target::new(body.width, body.height);
+    let body_region = crop::plan(size, body_target, focus)
+        .map_err(|error| TrainError::Failed(error.to_string()))?;
     let mut frames = vec![Framed {
         target: png(&body)?,
         control: None,
+        kind: Some(FrameKind::Body),
+        mask: luma_mask(&saliency, &raster, body_region, body_target),
     }];
+    let head_target = person::head_target(body_target);
     if let Some(head) = person::render_head(subject, &raster, focus, body_target)
         .map_err(|error| TrainError::Failed(error.to_string()))?
     {
+        let region = crop::plan(size, head_target, person::head_focus(focus))
+            .map_err(|error| TrainError::Failed(error.to_string()))?;
         frames.push(Framed {
             target: png(&head)?,
             control: None,
+            kind: Some(FrameKind::Head),
+            mask: luma_mask(&saliency, &raster, region, head_target),
+        });
+    }
+    let hands = person::render_hands(subject, &raster, focus, body_target, &image.caption)
+        .map_err(|error| TrainError::Failed(error.to_string()))?;
+    let hand_target = person::hand_target(body_target);
+    let mut seen: Vec<Region> = Vec::new();
+    for (index, hand) in hands.into_iter().enumerate() {
+        let point = person::hand_focus(focus, index == 0);
+        let region = crop::plan(size, hand_target, point)
+            .map_err(|error| TrainError::Failed(error.to_string()))?;
+        if seen.contains(&region) {
+            continue;
+        }
+        seen.push(region);
+        frames.push(Framed {
+            target: png(&hand)?,
+            control: None,
+            kind: Some(FrameKind::Hand),
+            mask: luma_mask(&saliency, &raster, region, hand_target),
         });
     }
     Ok(frames)
+}
+
+fn luma_mask(
+    saliency: &Option<SaliencyMap>,
+    raster: &Raster,
+    region: Region,
+    target: Target,
+) -> Option<Vec<u8>> {
+    let saliency = saliency.as_ref()?;
+    let pixels = crop::render_mask(
+        &saliency.map,
+        (saliency.width, saliency.height),
+        saliency.content,
+        raster.oriented_size(),
+        region,
+        target,
+    )
+    .ok()?;
+    png_luma(target.width, target.height, &pixels).ok()
 }
 
 fn square(
@@ -1728,6 +1812,20 @@ pub(crate) fn png(rendered: &Rendered) -> Result<Vec<u8>, TrainError> {
             rendered.height,
             image::ExtendedColorType::Rgb8,
         )
+        .map_err(|error| TrainError::Failed(error.to_string()))?;
+    Ok(bytes)
+}
+
+fn png_luma(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, TrainError> {
+    use image::ImageEncoder;
+    if pixels.len() != width as usize * height as usize {
+        return Err(TrainError::Failed(
+            "mask size does not match the crop".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(pixels, width, height, image::ExtendedColorType::L8)
         .map_err(|error| TrainError::Failed(error.to_string()))?;
     Ok(bytes)
 }
@@ -3560,10 +3658,38 @@ mod tests {
         };
         let frames = frame_person(&Subject::none(), &image, &encoded).unwrap();
         assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].kind, Some(FrameKind::Body));
+        assert_eq!(frames[1].kind, Some(FrameKind::Head));
+        assert!(frames.iter().all(|frame| frame.mask.is_none()));
         let body = decode::decode(&frames[0].target).unwrap();
         let head = decode::decode(&frames[1].target).unwrap();
         assert!(body.oriented_size().1 > body.oriented_size().0);
         assert_eq!(head.oriented_size().0, head.oriented_size().1);
+    }
+
+    #[test]
+    fn a_person_frame_that_names_hands_adds_a_hand_crop() {
+        let pixels: Vec<u8> = (0..768u32 * 1280 * 3)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let encoded = png(&Rendered {
+            width: 768,
+            height: 1280,
+            pixels,
+        })
+        .unwrap();
+        let image = TrainImage {
+            filename: "body.png".into(),
+            caption: "standing with hands on hips".into(),
+            bytes_base64: String::new(),
+            bytes: Some(encoded.clone()),
+            before_base64: None,
+            before: None,
+            group: None,
+        };
+        let frames = frame_person(&Subject::none(), &image, &encoded).unwrap();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[2].kind, Some(FrameKind::Hand));
     }
 
     #[cfg(unix)]

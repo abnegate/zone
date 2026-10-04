@@ -317,6 +317,7 @@ mod tests {
         fs::write(attempt.join("targets/0000.mask.png"), b"mask").unwrap();
         fs::write(attempt.join("targets/0000.kind"), b"body").unwrap();
         fs::write(attempt.join("targets/0000.pose"), b"standing").unwrap();
+        fs::write(attempt.join("targets/rebalance.json"), b"{}").unwrap();
         let job = root.path().join("job");
         stage_dataset(&attempt, &job).unwrap();
         assert_eq!(
@@ -328,6 +329,7 @@ mod tests {
             fs::read(job.join("dataset/0000.pose")).unwrap(),
             b"standing"
         );
+        assert_eq!(fs::read(job.join("dataset/rebalance.json")).unwrap(), b"{}");
     }
 
     #[test]

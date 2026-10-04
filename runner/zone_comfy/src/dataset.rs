@@ -18,7 +18,7 @@
 
 use crate::caption::content_words;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A measured eight-image run improved the subject by 34.72%, so the floor sits
@@ -49,6 +49,8 @@ pub const MASK_SUFFIX: &str = ".mask.png";
 pub const KIND_SUFFIX: &str = ".kind";
 pub const POSE_SUFFIX: &str = ".pose";
 pub const CLIPS_DIRECTORY: &str = "clips";
+pub const REBALANCE_FILE: &str = "rebalance.json";
+pub const UNKNOWN_POSE: &str = "unknown";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +93,10 @@ pub fn pose_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(companion(stem, POSE_SUFFIX))
 }
 
+pub fn rebalance_path(dir: &Path) -> PathBuf {
+    dir.join(REBALANCE_FILE)
+}
+
 pub fn clips_dir(job: &Path) -> PathBuf {
     job.join(CLIPS_DIRECTORY)
 }
@@ -102,14 +108,11 @@ pub const POSES: &[&[&str]] = &[
     &["standing", "stands", "stood", "upright"],
     &["sitting", "sits", "seated", "sat", "perched"],
     &["lying", "lies", "laying", "reclining", "sprawled", "curled"],
-    &[
-        "crouching",
-        "crouched",
-        "squatting",
-        "kneeling",
-        "knelt",
-        "hunched",
-    ],
+    &["on back", "supine"],
+    &["on side"],
+    &["crouching", "crouched", "squatting", "hunched"],
+    &["kneeling", "knelt", "on knees"],
+    &["all fours", "on all fours", "hands and knees"],
     &["leaning", "leans", "propped"],
     &["walking", "walks", "striding", "strolling"],
     &["running", "runs", "sprinting", "bounding"],
@@ -270,16 +273,76 @@ fn one_pose(descriptions: &[String], described: usize) -> bool {
 }
 
 fn poses(description: &str) -> HashSet<usize> {
-    let words: Vec<String> = description
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect();
+    let words = tokens(description);
     POSES
         .iter()
         .enumerate()
         .filter(|(_, terms)| terms.iter().any(|term| mentions(&words, term)))
         .map(|(index, _)| index)
+        .collect()
+}
+
+/// The first matching pose group's canonical term, or [`UNKNOWN_POSE`].
+pub fn pose_cluster(caption: &str) -> String {
+    let words = tokens(caption);
+    POSES
+        .iter()
+        .find(|terms| terms.iter().any(|term| mentions(&words, term)))
+        .map(|terms| terms[0].to_string())
+        .unwrap_or_else(|| UNKNOWN_POSE.to_string())
+}
+
+/// True when `word` is a token from the pose lexicon, so identity stripping
+/// must not treat it as an invariant subject word.
+pub fn pose_word(word: &str) -> bool {
+    let word = word.to_ascii_lowercase();
+    POSES.iter().any(|group| {
+        group
+            .iter()
+            .any(|term| term.split_ascii_whitespace().any(|part| part == word))
+    })
+}
+
+/// Draw weights for unique frames. A dump whose largest pose cluster is at
+/// most [`REBALANCE_SHARE`] stays uniform; otherwise overflow is inverse-
+/// frequency so rare clusters still appear.
+pub fn rebalance<S: AsRef<str>, C: AsRef<str>>(frames: &[(S, C)]) -> Rebalance {
+    let mut by_stem: BTreeMap<String, String> = BTreeMap::new();
+    for (stem, cluster) in frames {
+        by_stem.insert(stem.as_ref().to_string(), cluster.as_ref().to_string());
+    }
+    let total = by_stem.len();
+    let mut clusters: BTreeMap<String, usize> = BTreeMap::new();
+    for cluster in by_stem.values() {
+        *clusters.entry(cluster.clone()).or_default() += 1;
+    }
+    let largest = clusters.values().copied().max().unwrap_or(0);
+    let fire = total > 0 && (largest as f32 / total as f32) > REBALANCE_SHARE;
+    let rarest = clusters.values().copied().min().unwrap_or(1).max(1);
+    let mut weights = BTreeMap::new();
+    for (stem, cluster) in &by_stem {
+        let count = clusters.get(cluster).copied().unwrap_or(1).max(1);
+        let weight = if fire {
+            rarest as f32 / count as f32
+        } else {
+            1.0
+        };
+        weights.insert(stem.clone(), weight);
+    }
+    Rebalance { clusters, weights }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Rebalance {
+    pub clusters: BTreeMap<String, usize>,
+    pub weights: BTreeMap<String, f32>,
+}
+
+fn tokens(description: &str) -> Vec<String> {
+    description
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
         .collect()
 }
 
@@ -664,5 +727,90 @@ mod tests {
             window
         );
         assert_eq!(clips_dir(Path::new("/job")), Path::new("/job/clips"));
+    }
+
+    #[test]
+    fn pose_cluster_uses_the_first_matching_canonical_term() {
+        assert_eq!(
+            pose_cluster("standing in a kitchen, warm light"),
+            "standing"
+        );
+        assert_eq!(
+            pose_cluster("from behind, tiled bathroom, cool window light"),
+            "back view"
+        );
+        assert_eq!(pose_cluster("lying on back on a sofa"), "lying");
+        assert_eq!(pose_cluster("on all fours on a rug"), "all fours");
+        assert_eq!(pose_cluster("a kitchen with warm light"), UNKNOWN_POSE);
+    }
+
+    #[test]
+    fn a_spread_pose_histogram_stays_uniform() {
+        let frames = [
+            ("0000", "standing"),
+            ("0001", "sitting"),
+            ("0002", "lying"),
+            ("0003", "standing"),
+            ("0004", "sitting"),
+            ("0005", "lying"),
+        ];
+        let balanced = rebalance(&frames);
+        assert_eq!(balanced.clusters.get("standing"), Some(&2));
+        assert!(
+            balanced.weights.values().all(|weight| *weight == 1.0),
+            "a dump under {REBALANCE_SHARE} stays uniform: {:?}",
+            balanced.weights
+        );
+    }
+
+    #[test]
+    fn rebalance_downsamples_only_when_one_cluster_exceeds_the_share() {
+        let even = [
+            ("0000", "standing"),
+            ("0001", "sitting"),
+            ("0002", "lying"),
+            ("0003", "kneeling"),
+            ("0004", "standing"),
+            ("0005", "sitting"),
+            ("0006", "lying"),
+            ("0007", "kneeling"),
+        ];
+        let even = rebalance(&even);
+        assert!(
+            even.weights.values().all(|weight| *weight == 1.0),
+            "2/8 is not above {REBALANCE_SHARE}: {:?}",
+            even.weights
+        );
+
+        let overflow = [
+            ("0000", "standing"),
+            ("0001", "standing"),
+            ("0002", "standing"),
+            ("0003", "standing"),
+            ("0004", "standing"),
+            ("0005", "sitting"),
+            ("0006", "sitting"),
+            ("0007", "lying"),
+            ("0008", "lying"),
+        ];
+        let overflow = rebalance(&overflow);
+        assert_eq!(overflow.clusters.get("standing"), Some(&5));
+        assert_eq!(overflow.weights.get("0000"), Some(&(2.0 / 5.0)));
+        assert_eq!(overflow.weights.get("0005"), Some(&1.0));
+        assert_eq!(overflow.weights.get("0007"), Some(&1.0));
+    }
+
+    #[test]
+    fn rebalance_counts_each_stem_once() {
+        let frames = [
+            ("0000", "standing"),
+            ("0000", "standing"),
+            ("0001", "sitting"),
+            ("0002", "sitting"),
+        ];
+        let balanced = rebalance(&frames);
+        assert_eq!(balanced.clusters.get("standing"), Some(&1));
+        assert_eq!(balanced.clusters.get("sitting"), Some(&2));
+        assert_eq!(balanced.weights.len(), 3);
     }
 }

@@ -4,7 +4,7 @@ use fast_image_resize::images::{Image, ImageRef};
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 
 use crate::decode::{Layout, Orientation, Raster};
-use crate::gravity::Point;
+use crate::gravity::{Point, Rect};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -145,6 +145,65 @@ pub fn render(raster: &Raster, region: Region, target: Target) -> Result<Rendere
             channels,
         ),
     })
+}
+
+/// An 8-bit luma mask of `target`, sampled from a saliency map of the source.
+///
+/// `content` is the letterboxed rectangle the oriented image occupies inside
+/// `map`. The crop `region` is in oriented-image pixels, the same space
+/// [`plan`] uses.
+pub fn render_mask(
+    map: &[f32],
+    map_size: (u32, u32),
+    content: Rect,
+    source: (u32, u32),
+    region: Region,
+    target: Target,
+) -> Result<Vec<u8>, Error> {
+    let (map_width, map_height) = map_size;
+    if map_width == 0
+        || map_height == 0
+        || map.len() != map_width as usize * map_height as usize
+        || source.0 == 0
+        || source.1 == 0
+        || region.width == 0
+        || region.height == 0
+        || content.is_empty()
+    {
+        return Err(Error::EmptySource);
+    }
+    if target.width == 0 || target.height == 0 {
+        return Err(Error::EmptyTarget);
+    }
+
+    let content_width = f64::from(content.width().max(1));
+    let content_height = f64::from(content.height().max(1));
+    let mut pixels = vec![0u8; target.width as usize * target.height as usize];
+    for y in 0..target.height {
+        let image_y = f64::from(region.y)
+            + (f64::from(y) + 0.5) * f64::from(region.height) / f64::from(target.height);
+        let map_y = f64::from(content.min_y) + image_y * content_height / f64::from(source.1);
+        for x in 0..target.width {
+            let image_x = f64::from(region.x)
+                + (f64::from(x) + 0.5) * f64::from(region.width) / f64::from(target.width);
+            let map_x = f64::from(content.min_x) + image_x * content_width / f64::from(source.0);
+            let column = map_x.floor() as i64;
+            let row = map_y.floor() as i64;
+            if column < 0
+                || row < 0
+                || column >= i64::from(map_width)
+                || row >= i64::from(map_height)
+            {
+                continue;
+            }
+            let value = map[row as usize * map_width as usize + column as usize];
+            if value.is_finite() {
+                pixels[y as usize * target.width as usize + x as usize] =
+                    (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+    }
+    Ok(pixels)
 }
 
 /// Maps a region of the oriented image back to the stored pixel buffer.
@@ -308,6 +367,39 @@ mod tests {
 
         assert_eq!((rendered.width, rendered.height), (32, 32));
         assert_eq!(rendered.pixels.len(), 32 * 32 * 3);
+    }
+
+    #[test]
+    fn a_mask_matches_the_target_bucket() {
+        let mut map = vec![0.0f32; 8 * 8];
+        for y in 0..8 {
+            for x in 0..4 {
+                map[y * 8 + x] = 1.0;
+            }
+        }
+        let target = Target::new(64, 96);
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+        };
+        let mask = render_mask(
+            &map,
+            (8, 8),
+            Rect::new(0, 0, 8, 8),
+            (16, 16),
+            region,
+            target,
+        )
+        .unwrap();
+        assert_eq!(mask.len(), 64 * 96);
+        assert!(mask[0] > 200, "left side of the map is the subject");
+        assert!(
+            mask[63] < 32,
+            "right side of the map is background, got {}",
+            mask[63]
+        );
     }
 
     #[test]

@@ -13,8 +13,16 @@
 
 use crate::config::Config;
 use zone_vision::crop::{self, Rendered, Target};
-use zone_vision::gravity::Point;
+use zone_vision::gravity::{Point, Rect};
 use zone_vision::{Raster, decode};
+
+/// A copied U2-Net map, used to render an 8-bit training mask.
+pub(crate) struct SaliencyMap {
+    pub map: Vec<f32>,
+    pub width: u32,
+    pub height: u32,
+    pub content: Rect,
+}
 
 /// The centre of the frame, and the answer whenever nothing better is known.
 pub const CENTRE: Point = Point { x: 0.5, y: 0.5 };
@@ -90,6 +98,27 @@ impl Subject {
     #[cfg(not(feature = "saliency"))]
     pub fn available(&self) -> bool {
         false
+    }
+
+    /// The saliency map used for autogravity, when the model is loaded.
+    pub(crate) fn saliency_map(&self, raster: &Raster) -> Option<SaliencyMap> {
+        #[cfg(feature = "saliency")]
+        if let Some(analyzer) = &self.analyzer {
+            match analyzer.saliency(raster, |map, content| SaliencyMap {
+                map: map.to_vec(),
+                width: zone_vision::saliency::INPUT_WIDTH as u32,
+                height: zone_vision::saliency::INPUT_HEIGHT as u32,
+                content,
+            }) {
+                Ok(value) => return Some(value),
+                Err(error) => {
+                    tracing::warn!(%error, "saliency map failed for one image");
+                    return None;
+                }
+            }
+        }
+        let _ = raster;
+        None
     }
 
     /// Where the subject of one image sits, or `fallback` when the model
@@ -212,6 +241,10 @@ mod tests {
         let elsewhere = Point { x: 0.2, y: 0.8 };
         assert_eq!(subject.focus(&raster, elsewhere), elsewhere);
         assert_eq!(subject.weighted(&raster, &[1.0; 16], elsewhere), elsewhere);
+        assert!(
+            subject.saliency_map(&raster).is_none(),
+            "no model means no mask"
+        );
     }
 
     fn encoded(width: u32, height: u32) -> Vec<u8> {

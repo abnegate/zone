@@ -83,8 +83,8 @@ pub use caption::{CaptionImage, CaptionRequest, Captioner, Draft, data_url};
 pub use client::{Client, Error, GeneratedImage, SourceImage, SourceVideo};
 pub use config::Config;
 pub use dataset::{
-    ClipWindow, Concern, Finding, FrameKind, REBALANCE_SHARE, inspect, kind_path, mask_path,
-    pose_path,
+    ClipWindow, Concern, Finding, FrameKind, REBALANCE_SHARE, Rebalance, inspect, kind_path,
+    mask_path, pose_cluster, pose_path, rebalance,
 };
 pub use inventory::{Identity, InventoryItem, WeightSidecar, bind_identity, identities, scan};
 pub use lora::{
