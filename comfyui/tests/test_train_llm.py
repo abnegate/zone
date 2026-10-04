@@ -121,17 +121,33 @@ class MappingTests(unittest.TestCase):
             'mlx-community/Llama-3.2-1B-Instruct-4bit',
         )
         self.assertEqual(
+            train_llm.mlx_repo('llama3.2:3b'),
+            'mlx-community/Llama-3.2-3B-Instruct-4bit',
+        )
+        self.assertEqual(
             train_llm.mlx_repo('mlx-community/Llama-3.2-1B-Instruct-4bit'),
             'mlx-community/Llama-3.2-1B-Instruct-4bit',
         )
-        self.assertTrue(train_llm.mlx_repo('qwen2.5:7b').startswith('mlx-community/'))
-        self.assertIn('Qwen', train_llm.mlx_repo('qwen2.5:7b'))
+        self.assertEqual(
+            train_llm.mlx_repo('qwen2.5:7b'),
+            'mlx-community/Qwen2.5-7B-Instruct-4bit',
+        )
+        repo = 'mlx-community/Qwen3.8-27B-4bit'
+        self.assertEqual(train_llm.mlx_repo('qwen3.8:27b'), repo)
+        self.assertEqual(train_llm.mlx_repo('qwen38u:32k'), repo)
+        self.assertEqual(train_llm.mlx_repo('qwen3.8'), repo)
+
+    def test_unmapped_checkpoint_raises(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            train_llm.mlx_repo('totally-unknown:7b')
+        self.assertIn('no MLX mapping for totally-unknown:7b', str(raised.exception))
 
     def test_gguf_export_is_llama_mixtral_mistral_only(self) -> None:
         self.assertTrue(train_llm.exports_gguf('llama3.2:1b'))
         self.assertTrue(train_llm.exports_gguf('mistral'))
         self.assertTrue(train_llm.exports_gguf('mixtral:8x7b'))
         self.assertFalse(train_llm.exports_gguf('qwen2.5:7b'))
+        self.assertFalse(train_llm.exports_gguf('qwen3.8:27b'))
         self.assertFalse(train_llm.exports_gguf('mlx-community/Qwen2.5-7B-Instruct-4bit'))
 
     def test_finetune_type_stays_full_under_the_param_cap(self) -> None:
@@ -216,17 +232,48 @@ class CommandTests(unittest.TestCase):
             adapter_path=Path('/tmp/adapters'),
             save_path=Path('/tmp/fused'),
             export_gguf=train_llm.exports_gguf('llama3.2:1b'),
+            dequantize=train_llm.should_dequantize('llama3.2:1b'),
         )
         qwen = train_llm.fuse_args(
             model=train_llm.mlx_repo('qwen2.5:7b'),
             adapter_path=Path('/tmp/adapters'),
             save_path=Path('/tmp/fused'),
             export_gguf=train_llm.exports_gguf('qwen2.5:7b'),
+            dequantize=train_llm.should_dequantize('qwen2.5:7b'),
         )
+        large = train_llm.fuse_args(
+            model=train_llm.mlx_repo('qwen3.8:27b'),
+            adapter_path=Path('/tmp/adapters'),
+            save_path=Path('/tmp/fused'),
+            export_gguf=train_llm.exports_gguf('qwen3.8:27b'),
+            dequantize=train_llm.should_dequantize('qwen3.8:27b'),
+        )
+        self.assertTrue(train_llm.should_dequantize('llama3.2:1b'))
+        self.assertTrue(train_llm.should_dequantize('llama3.2:3b'))
+        self.assertFalse(train_llm.should_dequantize('qwen3.8:27b'))
         self.assertIn('--dequantize', llama)
         self.assertIn('--export-gguf', llama)
         self.assertIn('--dequantize', qwen)
         self.assertNotIn('--export-gguf', qwen)
+        self.assertNotIn('--dequantize', large)
+        self.assertNotIn('--export-gguf', large)
+
+
+class ParseIterTests(unittest.TestCase):
+    def test_iter_train_loss_line(self) -> None:
+        self.assertEqual(train_llm.parse_iter('Iter 1: Train loss 1.23'), (1, 1.23))
+
+    def test_train_ui_table_row(self) -> None:
+        self.assertEqual(
+            train_llm.parse_iter('  20    1.234 ▼    123    1.2k'),
+            (20, 1.234),
+        )
+
+    def test_header_line_is_ignored(self) -> None:
+        self.assertEqual(
+            train_llm.parse_iter('iter   train_loss     tok/s     tokens'),
+            (None, None),
+        )
 
 
 class ProgressWeightTests(unittest.TestCase):
@@ -369,6 +416,31 @@ class StubPublishTests(unittest.TestCase):
             self.assertEqual(job['method'], 'finetune')
             self.assertEqual(job['checkpoint'], 'llama3.2:1b')
             self.assertEqual(job['filename'], 'jerry')
+
+
+class FusePublishTests(unittest.TestCase):
+    def test_qwen_without_gguf_skips_ollama_create(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            write_texts(job_dir, count=1)
+            job = queued_job(extra={'checkpoint': 'qwen3.8:27b'})
+            job = train_llm.normalize_job(job, job_dir)
+            with (
+                mock.patch.object(
+                    train_llm, 'require_llm_python', return_value=Path('/usr/bin/python3')
+                ),
+                mock.patch.object(train_llm, 'run_logged'),
+                mock.patch.object(train_llm, 'ollama_create') as create,
+            ):
+                train_llm.train(models, job_dir, job, train_llm.load_config())
+            create.assert_not_called()
+            self.assertEqual(job['filename'], 'jerry')
+            self.assertEqual(
+                (job_dir / 'Modelfile').read_text(encoding='utf-8'),
+                f'FROM {job_dir / "fused"}\n',
+            )
 
 
 if __name__ == '__main__':
