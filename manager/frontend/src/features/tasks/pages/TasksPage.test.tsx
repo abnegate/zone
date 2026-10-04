@@ -345,7 +345,12 @@ describe('TasksPage', () => {
 
   it('does not open the editor from View PR', async () => {
     renderTasksPage();
-    fireEvent.click(await screen.findByRole('link', { name: 'View PR' }));
+    const link = await screen.findByRole('link', { name: 'View PR' });
+    fireEvent.click(link);
+    expect(document.querySelector('section.task-details')).toBeNull();
+    fireEvent.keyDown(link, { key: 'Enter' });
+    expect(document.querySelector('section.task-details')).toBeNull();
+    fireEvent.keyDown(link, { key: ' ' });
     expect(document.querySelector('section.task-details')).toBeNull();
     expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
   });
@@ -357,6 +362,24 @@ describe('TasksPage', () => {
     });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(mockGetTask).toHaveBeenCalledWith('task-1');
+  });
+
+  it('strips id from a landing URL that also has task', async () => {
+    renderTasksPage('/tasks?task=task-1&id=task-1');
+    await waitFor(() => {
+      expect(document.querySelector('section.task-details')).not.toBeNull();
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get('id')).toBeNull();
+    expect(new URLSearchParams(window.location.search).get('task')).toBe('task-1');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => {
+      expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get('id')).toBeNull();
+    expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
   });
 
   it('replaces the execute dialog with the editor when another row is opened', async () => {

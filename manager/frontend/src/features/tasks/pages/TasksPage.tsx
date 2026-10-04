@@ -86,12 +86,19 @@ export default function TasksPage() {
   const showSpinner = Boolean(taskParam) && !editorReady && !editorFailed;
 
   useEffect(() => {
+    if (taskParam && linkedTaskId) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('id');
+      setSearchParams(next, { replace: true });
+      setExecutionTask(null);
+      return;
+    }
     if (!linkedTaskId || taskParam) return;
     const found = tasks.find((task) => task.id === linkedTaskId);
     if (found) {
       setExecutionTask(found);
     }
-  }, [linkedTaskId, tasks, taskParam]);
+  }, [linkedTaskId, tasks, taskParam, searchParams, setSearchParams]);
 
   const openEditor = (id: string) => {
     const next = new URLSearchParams(searchParams);
@@ -347,6 +354,7 @@ export default function TasksPage() {
                               rel="noopener noreferrer"
                               className="task-pr-link"
                               onClick={stopRowAction}
+                              onKeyDown={stopRowAction}
                             >
                               View PR
                             </a>
