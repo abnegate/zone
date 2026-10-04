@@ -28,7 +28,11 @@ const POSE_FILES: &[&str] = &[
     "standing.png",
     "sitting.png",
     "lying.png",
+    "on_back.png",
+    "on_side.png",
     "crouching.png",
+    "kneeling.png",
+    "all_fours.png",
     "leaning.png",
     "walking.png",
     "running.png",
@@ -416,6 +420,8 @@ mod tests {
         assert_eq!(pose_file("ohwx sitting in a kitchen"), "sitting.png");
         assert_eq!(pose_file("standing close up"), "close_up.png");
         assert_eq!(pose_file("lying on a sofa, full body"), "full_body.png");
+        assert_eq!(pose_file("lying on back on a sofa"), "on_back.png");
+        assert_eq!(pose_file("on all fours on a rug"), "all_fours.png");
     }
 
     #[test]
