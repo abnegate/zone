@@ -71,6 +71,7 @@ pub mod inventory;
 pub mod lora;
 pub mod media;
 pub mod observe;
+pub mod people;
 pub mod person;
 pub mod quality;
 pub mod recipe;

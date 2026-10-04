@@ -147,6 +147,42 @@
       "license": "CreativeML Open RAIL-M"
     },
     {
+      "id": "sdxl-openpose-controlnet",
+      "bundle": "image-people-control",
+      "filename": "thibaud_xl_openpose.safetensors",
+      "relative_path": "controlnet/thibaud_xl_openpose.safetensors",
+      "source_repository": "lllyasviel/sd_control_collection",
+      "source_revision": "7cf256327b341fedc82e00b0d7fb5481ad693210",
+      "url": "https://huggingface.co/lllyasviel/sd_control_collection/resolve/7cf256327b341fedc82e00b0d7fb5481ad693210/thibaud_xl_openpose.safetensors",
+      "size_bytes": 2502139104,
+      "sha256": "9e070426568a3c60c128ffb98c66cdc7a0ea21d0d8abb86f73564aaf2e0c6f42",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "ip-adapter-plus-face-sdxl",
+      "bundle": "image-people-control",
+      "filename": "ip-adapter-plus-face_sdxl_vit-h.safetensors",
+      "relative_path": "ipadapter/ip-adapter-plus-face_sdxl_vit-h.safetensors",
+      "source_repository": "h94/IP-Adapter",
+      "source_revision": "018e402774aeeddd60609b4ecdb7e298259dc729",
+      "url": "https://huggingface.co/h94/IP-Adapter/resolve/018e402774aeeddd60609b4ecdb7e298259dc729/sdxl_models/ip-adapter-plus-face_sdxl_vit-h.safetensors",
+      "size_bytes": 847517512,
+      "sha256": "677ad8860204f7d0bfba12d29e6c31ded9beefdf3e4bbd102518357d31a292c1",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "clip-vit-h-14-laion2b",
+      "bundle": "image-people-control",
+      "filename": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+      "relative_path": "clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+      "source_repository": "h94/IP-Adapter",
+      "source_revision": "018e402774aeeddd60609b4ecdb7e298259dc729",
+      "url": "https://huggingface.co/h94/IP-Adapter/resolve/018e402774aeeddd60609b4ecdb7e298259dc729/models/image_encoder/model.safetensors",
+      "size_bytes": 2528373448,
+      "sha256": "6ca9667da1ca9e0b0f75e46bb030f7e011f44f86cbfb8d5a36590fcd7507b030",
+      "license": "Apache-2.0"
+    },
+    {
       "id": "u2net",
       "bundle": "vision",
       "filename": "u2net.onnx",

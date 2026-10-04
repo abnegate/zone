@@ -12,9 +12,11 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::media::MediaType;
+use crate::people;
 use crate::recipe::{
     Fill, PromptMode, Recipe, RecipeCatalog, sanitize_upload_name, sanitize_weight_filename,
 };
+use crate::subject::Subject;
 
 pub const MAX_SOURCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 /// Clips come back from the artifact store rather than a chat upload, so the
@@ -412,28 +414,107 @@ impl Client {
         } else {
             prompt
         };
+        let images = self
+            .generate_image(
+                prompt,
+                source,
+                true,
+                None,
+                cancel,
+                deadline,
+                progress.clone(),
+            )
+            .await?;
+        self.maybe_refine(prompt, images, cancel, deadline, progress)
+            .await
+    }
+
+    async fn generate_image(
+        &self,
+        prompt: &str,
+        source: Option<&SourceImage>,
+        extras: bool,
+        denoise: Option<f64>,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<Vec<GeneratedImage>, Error> {
         let (recipe, weights) = self.generation_plan(source.is_some())?;
+        let selected = self.config.checkpoint.as_str();
+        let sidecar = crate::inventory::sidecar_for_weight(&self.config.models_dir, selected);
+        let prompt = people::prefix_embedding(prompt, sidecar.as_ref());
+        let mut extras = people::extras(
+            &self.config.models_dir,
+            &recipe.id,
+            selected,
+            source.is_some(),
+            extras,
+        );
+        let pose = if extras.controlnet {
+            people::pose_bytes(&self.config.workflow_path, &prompt)
+        } else {
+            None
+        };
+        if extras.controlnet && pose.is_none() {
+            extras.controlnet = false;
+        }
+        let face_bytes = if extras.ipadapter {
+            crate::inventory::face_path(&self.config.models_dir, selected)
+                .and_then(|path| std::fs::read(path).ok())
+                .and_then(|bytes| SourceImage::from_bytes(bytes).ok())
+        } else {
+            None
+        };
+        if extras.ipadapter && face_bytes.is_none() {
+            extras.ipadapter = false;
+        }
+        let pose_name = if let Some((name, bytes)) = pose {
+            let uploaded = self
+                .upload_media(
+                    &bytes::Bytes::from(bytes),
+                    &name,
+                    "image/png",
+                    cancel,
+                    deadline,
+                )
+                .await?;
+            Some(uploaded)
+        } else {
+            None
+        };
+        let face_name = if let Some(face) = &face_bytes {
+            Some(self.upload_source(face, cancel, deadline).await?)
+        } else {
+            None
+        };
         let fill_weights: HashMap<&str, &str> = weights
             .iter()
             .map(|(name, filename)| (name.as_str(), filename.as_str()))
             .collect();
-        let workflow = if let Some(source) = source {
+        let mut workflow = if let Some(source) = source {
             let _ = progress.send("Uploading source image...".to_string());
             let uploaded = self.upload_source(source, cancel, deadline).await?;
             recipe.apply(Fill {
-                prompt,
+                prompt: &prompt,
                 seed: rand::random::<u64>() & i64::MAX as u64,
                 weights: fill_weights,
                 source: Some(uploaded.as_str()),
             })?
         } else {
             recipe.apply(Fill {
-                prompt,
+                prompt: &prompt,
                 seed: rand::random::<u64>() & i64::MAX as u64,
                 weights: fill_weights,
                 source: None,
             })?
         };
+        people::apply_graph(
+            &mut workflow,
+            &extras,
+            pose_name.as_deref(),
+            face_name.as_deref(),
+            denoise,
+        );
         self.submit_and_collect(
             workflow,
             cancel,
@@ -448,6 +529,79 @@ impl Client {
             },
         )
         .await
+    }
+
+    async fn maybe_refine(
+        &self,
+        prompt: &str,
+        images: Vec<GeneratedImage>,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<Vec<GeneratedImage>, Error> {
+        let recipe = self.image_recipe()?;
+        let sidecar =
+            crate::inventory::sidecar_for_weight(&self.config.models_dir, &self.config.checkpoint);
+        if !people::should_refine(&recipe.id, sidecar.as_ref()) {
+            return Ok(images);
+        }
+        let subject = Subject::shared(&self.config);
+        let mut refined = Vec::with_capacity(images.len());
+        for image in images {
+            refined.push(
+                self.refine_one(prompt, image, &subject, cancel, deadline, progress.clone())
+                    .await?,
+            );
+        }
+        Ok(refined)
+    }
+
+    async fn refine_one(
+        &self,
+        prompt: &str,
+        image: GeneratedImage,
+        subject: &Subject,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<GeneratedImage, Error> {
+        let Some(crop) = people::head_crop(&image.bytes, subject) else {
+            return Ok(image);
+        };
+        let Ok(source) = SourceImage::from_bytes(crop.png) else {
+            return Ok(image);
+        };
+        match self
+            .generate_image(
+                prompt,
+                Some(&source),
+                false,
+                Some(people::REFINE_DENOISE),
+                cancel,
+                deadline,
+                progress,
+            )
+            .await
+        {
+            Ok(outputs) => {
+                let Some(refined) = outputs.into_iter().next() else {
+                    return Ok(image);
+                };
+                if crop.full_frame {
+                    return Ok(refined);
+                }
+                match people::paste(&image.bytes, &refined.bytes, crop.region) {
+                    Some(bytes) => Ok(GeneratedImage {
+                        bytes: bytes.into(),
+                        mime: "image/png".into(),
+                        filename: image.filename,
+                    }),
+                    None => Ok(image),
+                }
+            }
+            Err(error @ (Error::Cancelled | Error::Timeout)) => Err(error),
+            Err(_) => Ok(image),
+        }
     }
 
     pub async fn generate_video(
@@ -2799,5 +2953,290 @@ mod tests {
         assert_eq!(clips[0].mime, "audio/flac");
         assert_eq!(clips[0].filename, "zone.flac");
         assert_eq!(progress_rx.recv().await.as_deref(), Some("Audio queued..."));
+    }
+
+    fn rgb_png(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        let pixels: Vec<u8> = (0..width * height).flat_map(|_| [80u8, 40, 20]).collect();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(&pixels, width, height, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        bytes
+    }
+
+    async fn mock_output(server: &MockServer, prompt_id: &str, filename: &str, body: Vec<u8>) {
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt_id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                prompt_id: {"status": {"status_str": "success"}, "outputs": {
+                    "9": {"images": [{"filename": filename, "subfolder": "", "type": "temp"}]}
+                }}
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(body),
+            )
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn people_generate_without_extras_omits_controlnet() {
+        let server = MockServer::start().await;
+        let (_root, models) = models_with(&[("checkpoints", "lustifySDXLNSFW_ggwpV7.safetensors")]);
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains("KSampler"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "plain"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_output(&server, "plain", "zone.png", vec![1, 2, 3]).await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            checkpoint: "lustifySDXLNSFW_ggwpV7.safetensors".into(),
+            models_dir: models,
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let images = client
+            .generate("a person in a kitchen", None, &mut cancel_rx, progress_tx)
+            .await
+            .unwrap();
+        assert_eq!(images[0].bytes.as_ref(), &[1, 2, 3]);
+        let body =
+            String::from_utf8(server.received_requests().await.unwrap()[0].body.clone()).unwrap();
+        assert!(
+            !body.contains("ControlNetLoader"),
+            "missing extras must strip ControlNet: {body}"
+        );
+        assert!(!body.contains("ZoneIPAdapterFace"));
+    }
+
+    #[tokio::test]
+    async fn people_identity_loads_controlnet_faceid_and_embedding() {
+        let server = MockServer::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models");
+        for (directory, filename) in [
+            ("checkpoints", "lustifySDXLNSFW_ggwpV7.safetensors"),
+            ("loras", "jerry.safetensors"),
+            ("controlnet", people::CONTROLNET_FILE),
+            ("ipadapter", people::IPADAPTER_FILE),
+            ("clip_vision", people::CLIP_VISION_FILE),
+            ("embeddings", "ohwx.safetensors"),
+        ] {
+            let folder = models.join(directory);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(filename), filename.as_bytes()).unwrap();
+        }
+        std::fs::write(models.join("loras/jerry.face.png"), rgb_png(8, 8)).unwrap();
+        crate::inventory::write_sidecar(
+            &models.join("loras/jerry.safetensors"),
+            &crate::inventory::WeightSidecar {
+                recipe_id: "sdxl-adapter".into(),
+                hf_base: Some("John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl".into()),
+                trigger: Some("ohwx".into()),
+                embedding: Some("ohwx.safetensors".into()),
+                face: Some("jerry.face.png".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "uploaded.png",
+                "subfolder": ""
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains("ControlNetLoader"))
+            .and(wiremock::matchers::body_string_contains(
+                "ZoneIPAdapterFace",
+            ))
+            .and(wiremock::matchers::body_string_contains("embedding:ohwx"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "id"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_output(&server, "id", "zone.png", vec![9, 8, 7]).await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            checkpoint: "jerry.safetensors".into(),
+            models_dir: models,
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let images = client
+            .generate(
+                "ohwx sitting in a kitchen",
+                None,
+                &mut cancel_rx,
+                progress_tx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(images[0].bytes.as_ref(), &[9, 8, 7]);
+    }
+
+    #[tokio::test]
+    async fn people_img2img_skips_controlnet_when_no_preprocessor() {
+        let server = MockServer::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models");
+        for (directory, filename) in [
+            ("checkpoints", "lustifySDXLNSFW_ggwpV7.safetensors"),
+            ("loras", "jerry.safetensors"),
+            ("controlnet", people::CONTROLNET_FILE),
+        ] {
+            let folder = models.join(directory);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(filename), filename.as_bytes()).unwrap();
+        }
+        crate::inventory::write_sidecar(
+            &models.join("loras/jerry.safetensors"),
+            &crate::inventory::WeightSidecar {
+                recipe_id: "sdxl-adapter".into(),
+                hf_base: Some("John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl".into()),
+                trigger: Some("ohwx".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "source.png",
+                "subfolder": ""
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains("VAEEncode"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "edit"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_output(&server, "edit", "edited.png", vec![3, 2, 1]).await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            checkpoint: "jerry.safetensors".into(),
+            models_dir: models,
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let source = SourceImage::from_bytes(rgb_png(8, 8)).unwrap();
+        let images = client
+            .generate("ohwx sitting", Some(&source), &mut cancel_rx, progress_tx)
+            .await
+            .unwrap();
+        assert_eq!(images[0].bytes.as_ref(), &[3, 2, 1]);
+        let bodies: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path() == "/prompt")
+            .map(|request| String::from_utf8(request.body).unwrap())
+            .collect();
+        assert!(
+            bodies.iter().all(|body| !body.contains("ControlNetLoader")),
+            "img2img must skip ControlNet without a preprocessor: {bodies:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn face_refine_reruns_img2img_at_low_denoise() {
+        let server = MockServer::start().await;
+        let (_root, models) = models_with(&[("checkpoints", "lustifySDXLNSFW_ggwpV7.safetensors")]);
+        let first = rgb_png(64, 64);
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "head.png",
+                "subfolder": ""
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains("EmptyLatentImage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "first"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains("\"denoise\":0.3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "refine"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/history/first"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "first": {"status": {"status_str": "success"}, "outputs": {
+                    "9": {"images": [{"filename": "one.png", "subfolder": "", "type": "temp"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/history/refine"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "refine": {"status": {"status_str": "success"}, "outputs": {
+                    "9": {"images": [{"filename": "two.png", "subfolder": "", "type": "temp"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(first.clone()),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            checkpoint: "lustifySDXLNSFW_ggwpV7.safetensors".into(),
+            models_dir: models,
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let images = client
+            .generate("a person standing", None, &mut cancel_rx, progress_tx)
+            .await
+            .unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].bytes.as_ref(), first.as_slice());
     }
 }

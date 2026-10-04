@@ -114,6 +114,7 @@ COPY --from=builder /build/bin/zone-runner /app/zone-runner
 COPY --from=builder /build/runner/zone_server/migrations /app/migrations
 COPY --from=builder /build/comfyui/workflows /app/comfyui/workflows
 COPY --from=builder /build/comfyui/recipes /app/comfyui/recipes
+COPY comfyui/poses /app/comfyui/poses
 COPY comfyui/train_lora.py /app/comfyui/train_lora.py
 COPY comfyui/custom_nodes/zone_lora/train_config.json /app/comfyui/custom_nodes/zone_lora/train_config.json
 

@@ -43,6 +43,46 @@ pub fn face_filename(weight: &str) -> Option<String> {
     Some(format!("{stem}{FACE_SUFFIX}"))
 }
 
+pub(crate) fn sidecar_for_weight(models_dir: &Path, filename: &str) -> Option<WeightSidecar> {
+    let filename = sanitize_weight_filename(filename).ok()?;
+    for directory in ["loras", "checkpoints"] {
+        let path = models_dir.join(directory).join(&filename);
+        if path.is_file() {
+            return read_sidecar(&path).map(|document| document.sidecar);
+        }
+    }
+    None
+}
+
+pub(crate) fn face_path(models_dir: &Path, filename: &str) -> Option<PathBuf> {
+    let sidecar = sidecar_for_weight(models_dir, filename);
+    let name = sidecar
+        .as_ref()
+        .and_then(|sidecar| sidecar.face.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| face_filename(filename))?;
+    let name = path_component(&name)?;
+    for directory in ["loras", "checkpoints"] {
+        let path = models_dir.join(directory).join(&name);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+pub(crate) fn model_file_present(models_dir: &Path, directory: &str, filename: &str) -> bool {
+    let Some(directory) = path_component(directory) else {
+        return false;
+    };
+    let Some(filename) = path_component(filename) else {
+        return false;
+    };
+    models_dir.join(directory).join(filename).is_file()
+}
+
 /// A ready identity adapter whose trigger word can select it at generate time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
@@ -963,6 +1003,49 @@ mod tests {
         config.checkpoint = "flux1-schnell-fp8.safetensors".into();
         assert!(bind_identity(&mut config, "a lighthouse").is_none());
         assert_eq!(config.checkpoint, "flux1-schnell-fp8.safetensors");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bind_identity_keeps_an_embedding_sidecar_on_the_selected_weight() {
+        let root = temp_models();
+        let lora = root.join("loras/jerry.safetensors");
+        fs::write(&lora, b"lora").unwrap();
+        write_sidecar(
+            &lora,
+            &WeightSidecar {
+                recipe_id: "sdxl-adapter".into(),
+                hf_base: Some("John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl".into()),
+                trigger: Some("ohwx".into()),
+                embedding: Some("ohwx.safetensors".into()),
+                face: Some("jerry.face.png".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        fs::write(
+            root.join("checkpoints/lustifySDXLNSFW_ggwpV7.safetensors"),
+            b"lustify",
+        )
+        .unwrap();
+        fs::write(root.join("loras/jerry.face.png"), b"face").unwrap();
+        let mut config = Config {
+            models_dir: root.clone(),
+            checkpoint: "flux1-schnell-fp8.safetensors".into(),
+            ..Default::default()
+        };
+        let identity = bind_identity(&mut config, "portrait of ohwx").unwrap();
+        assert_eq!(identity.filename, "jerry.safetensors");
+        assert_eq!(config.checkpoint, "jerry.safetensors");
+        let sidecar = sidecar_for_weight(&root, "jerry.safetensors").unwrap();
+        assert_eq!(sidecar.embedding.as_deref(), Some("ohwx.safetensors"));
+        assert_eq!(
+            face_path(&root, "jerry.safetensors")
+                .unwrap()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("jerry.face.png")
+        );
         let _ = fs::remove_dir_all(root);
     }
 

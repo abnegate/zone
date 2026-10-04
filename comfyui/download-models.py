@@ -23,6 +23,7 @@ VALID_BUNDLES = {
     "image-dev",
     "image-edit",
     "image-people",
+    "image-people-control",
     "upscale",
     "video",
     "vision",

@@ -2,6 +2,7 @@ from comfy_api.latest import ComfyExtension
 
 from .cleanup_node import ZoneCleanupTrainingRun
 from .dataset_node import ZoneLoadTrainDataset
+from .face_node import ZoneIPAdapterFace
 from .gradient_node import ZoneProbeGradient
 from .inference_hooks import install_all
 from .probe_node import ZoneProbeLoss
@@ -9,6 +10,10 @@ from .stage_node import ZoneStageTrainingArtifact
 from .train_node import ZoneLoadTrainFolder, ZoneTrainLoRA
 
 install_all()
+
+NODE_CLASS_MAPPINGS = {
+    'ZoneIPAdapterFace': ZoneIPAdapterFace,
+}
 
 
 class ZoneLoraExtension(ComfyExtension):

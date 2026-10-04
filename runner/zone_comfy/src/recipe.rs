@@ -1159,6 +1159,47 @@ mod tests {
     }
 
     #[test]
+    fn sdxl_people_required_files_are_lustify_only() {
+        let catalog = catalog();
+        for id in ["sdxl-people", "sdxl-adapter"] {
+            let files: Vec<&str> = catalog
+                .get(id)
+                .unwrap()
+                .required_files
+                .iter()
+                .map(|file| file.filename.as_str())
+                .collect();
+            assert_eq!(files, ["lustifySDXLNSFW_ggwpV7.safetensors"], "{id}");
+        }
+    }
+
+    #[test]
+    fn sdxl_people_graph_wires_openpose_controlnet() {
+        let catalog = catalog();
+        let recipe = catalog.get("sdxl-people").unwrap();
+        let workflow = recipe
+            .apply(Fill {
+                prompt: "a person standing",
+                seed: 1,
+                weights: HashMap::from([("checkpoint", "lustifySDXLNSFW_ggwpV7.safetensors")]),
+                source: None,
+            })
+            .unwrap();
+        assert_eq!(workflow["20"]["class_type"], "LoadImage");
+        assert_eq!(workflow["21"]["class_type"], "ControlNetLoader");
+        assert_eq!(
+            workflow["21"]["inputs"]["control_net_name"],
+            "thibaud_xl_openpose.safetensors"
+        );
+        assert_eq!(workflow["22"]["class_type"], "ControlNetApplyAdvanced");
+        assert_eq!(workflow["22"]["inputs"]["strength"], 0.7);
+        assert_eq!(workflow["3"]["inputs"]["positive"], json!(["22", 0]));
+        assert_eq!(workflow["3"]["inputs"]["negative"], json!(["22", 1]));
+        assert_eq!(workflow["22"]["inputs"]["positive"], json!(["6", 0]));
+        assert_eq!(workflow["22"]["inputs"]["negative"], json!(["7", 0]));
+    }
+
+    #[test]
     fn source_graph_fills_load_image() {
         let catalog = catalog();
         let recipe = catalog.get("sd15").unwrap();

@@ -86,6 +86,28 @@ command.
 These weights are not included in Zone images or source distributions. They
 are downloaded only when the operator runs `--bundle image-people`.
 
+## SDXL OpenPose ControlNet
+
+- Packaged model: <https://huggingface.co/lllyasviel/sd_control_collection>
+- File: `thibaud_xl_openpose.safetensors`
+- License: Apache License 2.0
+- License text: <https://huggingface.co/lllyasviel/sd_control_collection>
+
+These weights are not included in Zone images or source distributions. They
+are downloaded only when the operator runs `--bundle image-people-control`.
+
+## IP-Adapter Plus Face SDXL
+
+- Packaged model: <https://huggingface.co/h94/IP-Adapter>
+- Files: `sdxl_models/ip-adapter-plus-face_sdxl_vit-h.safetensors`,
+  `models/image_encoder/model.safetensors` (installed as
+  `clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors`)
+- License: Apache License 2.0
+- License text: <https://huggingface.co/datasets/choosealicense/licenses/blob/main/markdown/apache-2.0.md>
+
+These weights are not included in Zone images or source distributions. They
+are downloaded only when the operator runs `--bundle image-people-control`.
+
 ## FLUX Uncensored LoRA
 
 - Packaged model: <https://huggingface.co/kenerateai/Flux-uncensored>

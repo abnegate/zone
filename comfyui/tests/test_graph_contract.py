@@ -331,6 +331,9 @@ class GraphContractTests(unittest.TestCase):
                     if isinstance(choices, list) and name not in {
                         'ckpt_name',
                         'clip_name',
+                        'control_net_name',
+                        'image',
+                        'ipadapter_name',
                         'lora_name',
                         'unet_name',
                         'vae_name',
@@ -366,6 +369,7 @@ class GraphContractTests(unittest.TestCase):
     def test_repository_extension_is_part_of_the_loaded_registry(self) -> None:
         expected = {
             'ZoneCleanupTrainingRun',
+            'ZoneIPAdapterFace',
             'ZoneLoadTrainDataset',
             'ZoneProbeGradient',
             'ZoneProbeLoss',
@@ -373,6 +377,17 @@ class GraphContractTests(unittest.TestCase):
             'ZoneTrainLoRA',
         }
         self.assertLessEqual(expected, set(self.nodes.NODE_CLASS_MAPPINGS))
+
+    def test_sdxl_people_graphs_match_the_pinned_registry(self) -> None:
+        for name in (
+            'sdxl-api.json',
+            'sdxl-img2img-api.json',
+            'sdxl-adapter-api.json',
+            'sdxl-adapter-img2img-api.json',
+        ):
+            graph = json.loads((COMFYUI / 'workflows' / name).read_text())
+            with self.subTest(graph=name):
+                self.validate_graph(name, graph)
 
     def test_two_pair_dataset_executes_with_native_zipped_list_mapping(self) -> None:
         node_class = self.nodes.NODE_CLASS_MAPPINGS['ZoneLoadTrainDataset']
