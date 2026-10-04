@@ -149,6 +149,8 @@ install_trainer() {
     cp "$PROJECT_DIR/comfyui/train_sdxl_config.json" "$INSTALL_DIR/train_sdxl_config.json"
     cp "$PROJECT_DIR/comfyui/train_wan.py" "$INSTALL_DIR/train_wan.py"
     cp "$PROJECT_DIR/comfyui/train_wan_config.json" "$INSTALL_DIR/train_wan_config.json"
+    cp "$PROJECT_DIR/comfyui/train_llm.py" "$INSTALL_DIR/train_llm.py"
+    cp "$PROJECT_DIR/comfyui/train_llm_config.json" "$INSTALL_DIR/train_llm_config.json"
     if [ -f "$PROJECT_DIR/comfyui/sdxl_checkpoint.py" ]; then
         cp "$PROJECT_DIR/comfyui/sdxl_checkpoint.py" "$INSTALL_DIR/sdxl_checkpoint.py"
     fi
@@ -174,6 +176,13 @@ install_trainer() {
     if [ "${ZONE_TRAIN_SKIP_PIP:-}" != "1" ]; then
         "$TRAIN_PYTHON" -m pip install --disable-pip-version-check \
             diffusers peft accelerate transformers safetensors pillow prodigyopt
+    fi
+    LLM_VENV="$INSTALL_DIR/.venv-train-llm"
+    if [ ! -x "$LLM_VENV/bin/python" ]; then
+        "$COMFY_PYTHON" -m venv "$LLM_VENV"
+    fi
+    if [ "${ZONE_TRAIN_SKIP_PIP:-}" != "1" ]; then
+        "$LLM_VENV/bin/python" -m pip install --disable-pip-version-check "mlx-lm[train]"
     fi
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
     PLIST="$HOME/Library/LaunchAgents/ai.zone.train.plist"
