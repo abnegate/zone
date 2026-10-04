@@ -846,6 +846,18 @@ describe('SourcesPage', () => {
       expect(new URLSearchParams(window.location.search).get('source')).toBe('src-1');
     });
 
+    it('has no Delete button in the editor', async () => {
+      renderSourcesPage();
+      await openGitHubEditor();
+
+      expect(
+        within(document.querySelector('.source-details')!).queryByRole('button', { name: 'Delete' })
+      ).toBeNull();
+      expect(screen.getByRole('button', { name: 'Verify' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+    });
+
     it('saves a changed name with a sparse PUT', async () => {
       renderSourcesPage();
       await openGitHubEditor();

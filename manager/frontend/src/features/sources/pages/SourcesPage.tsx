@@ -213,7 +213,6 @@ export default function SourcesPage() {
             onSaved={refresh}
             updateSource={updateSelected}
             verifySource={verifySelected}
-            deleteSource={deleteSource}
           />
         ) : loading ? (
           <SourceSkeleton />

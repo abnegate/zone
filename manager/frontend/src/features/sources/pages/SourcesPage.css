@@ -203,8 +203,7 @@
   white-space: nowrap;
 }
 
-.source-actions .source-delete,
-.source-details-actions .source-delete {
+.source-actions .source-delete {
   color: var(--ui-error);
 }
 
