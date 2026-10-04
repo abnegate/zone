@@ -163,5 +163,6 @@ export const TrainJobSchema = z.object({
   loss: z.number().nullable().optional(),
   eta_seconds: z.number().int().nonnegative().nullable().optional(),
   method: z.string().nullable().optional(),
+  previews: z.array(z.string()).optional(),
   started_at: z.string().optional(),
 });

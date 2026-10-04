@@ -257,7 +257,7 @@ export const modelsApi = {
       base: string;
       trigger?: string;
       subject?: 'person' | 'other';
-      method?: 'lora' | 'finetune';
+      method?: 'lora' | 'finetune' | 'pivotal' | 'video';
       images: Array<{
         filename: string;
         caption: string;

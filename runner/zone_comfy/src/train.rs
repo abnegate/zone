@@ -72,6 +72,7 @@ pub struct TrainProgress {
     pub percent: Option<u8>,
     pub loss: Option<f32>,
     pub eta_seconds: Option<u64>,
+    pub previews: Vec<String>,
 }
 
 impl TrainProgress {
@@ -105,6 +106,11 @@ impl TrainProgress {
         self.eta_seconds = Some(seconds);
         self
     }
+
+    pub fn previews(mut self, previews: Vec<String>) -> Self {
+        self.previews = previews;
+        self
+    }
 }
 
 pub fn progress_filename(artifact: &str) -> String {
@@ -131,7 +137,21 @@ pub fn parse_progress(bytes: &[u8]) -> Option<TrainProgress> {
             .map(|value| value as f32)
             .filter(|value| value.is_finite()),
         eta_seconds: json_u64(&value, "eta_seconds").filter(|seconds| *seconds > 0),
+        previews: json_string_list(&value, "previews"),
     })
+}
+
+fn json_string_list(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn json_u64(value: &Value, key: &str) -> Option<u64> {
@@ -2137,6 +2157,18 @@ mod tests {
         assert_eq!(detailed.percent, Some(8));
         assert_eq!(detailed.eta_seconds, Some(14400));
         assert_eq!(detailed.loss, Some(0.21));
+        assert!(detailed.previews.is_empty());
+        let with_previews = parse_progress(
+            br#"{"step":250,"total":8000,"previews":["previews/step-250-0.png","previews/step-250-1.png"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with_previews.previews,
+            vec![
+                "previews/step-250-0.png".to_string(),
+                "previews/step-250-1.png".to_string()
+            ]
+        );
         assert_eq!(
             progress_filename("zone-lora-abcd"),
             "zone-lora-abcd-progress.json"

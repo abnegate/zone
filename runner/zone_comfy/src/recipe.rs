@@ -64,6 +64,12 @@ fn packaged_workflow(name: &str) -> Option<&'static str> {
         "qwen-image-edit-2511-adapter-edit-api.json" => Some(include_str!(
             "../../../comfyui/workflows/qwen-image-edit-2511-adapter-edit-api.json"
         )),
+        "wan-adapter-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/wan-adapter-api.json"
+        )),
+        "wan-adapter-i2v-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/wan-adapter-i2v-api.json"
+        )),
         _ => None,
     }
 }
@@ -79,6 +85,7 @@ pub enum MediaKind {
 #[serde(rename_all = "snake_case")]
 pub enum RecipeOutput {
     PreviewImage,
+    SaveWebm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -591,6 +598,13 @@ fn validate_graph(workflow: &Value, slots: &RecipeSlots, with_source: bool) -> R
                 ));
             }
         }
+        RecipeOutput::SaveWebm => {
+            if workflow.pointer(&output_class).and_then(Value::as_str) != Some("SaveWEBM") {
+                return Err(Error::Configuration(
+                    "video workflow output must use SaveWEBM storage",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -753,6 +767,10 @@ mod tests {
         assert!(catalog.get("sdxl-adapter").is_some());
         assert!(catalog.get("qwen-image-edit").is_some());
         assert!(catalog.get("qwen-image-edit-adapter").is_some());
+        let wan = catalog.get("wan-adapter").unwrap();
+        assert!(wan.adapter);
+        assert!(wan.has_lora_slot());
+        assert_eq!(wan.kind, MediaKind::Video);
         for name in [
             "flux1-schnell-fp8-api.json",
             "flux1-schnell-fp8-img2img-api.json",
@@ -772,6 +790,8 @@ mod tests {
             "qwen-image-edit-2511-edit-api.json",
             "qwen-image-edit-2511-adapter-api.json",
             "qwen-image-edit-2511-adapter-edit-api.json",
+            "wan-adapter-api.json",
+            "wan-adapter-i2v-api.json",
         ] {
             assert!(packaged_workflow(name).is_some(), "{name}");
         }

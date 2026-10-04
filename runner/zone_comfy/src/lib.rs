@@ -82,7 +82,10 @@ pub mod video;
 pub use caption::{CaptionImage, CaptionRequest, Captioner, Draft, data_url};
 pub use client::{Client, Error, GeneratedImage, SourceImage, SourceVideo};
 pub use config::Config;
-pub use dataset::{Concern, Finding, inspect};
+pub use dataset::{
+    ClipWindow, Concern, Finding, FrameKind, REBALANCE_SHARE, inspect, kind_path, mask_path,
+    pose_path,
+};
 pub use inventory::{Identity, InventoryItem, WeightSidecar, bind_identity, identities, scan};
 pub use lora::{
     TrainBase, TrainError, TrainImage, TrainMethod, TrainOutcome, TrainRequest, TrainSubject,

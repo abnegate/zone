@@ -156,6 +156,8 @@ async fn multipart_train(request: Request) -> Result<TrainRequest, UploadError> 
         },
         method: match optional_text(&parts, "method").unwrap_or("lora") {
             "finetune" => TrainMethod::Finetune,
+            "pivotal" => TrainMethod::Pivotal,
+            "video" => TrainMethod::Video,
             _ => TrainMethod::Lora,
         },
         images,

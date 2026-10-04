@@ -521,6 +521,7 @@ mod tests {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                 trigger: Some(trigger.into()),
+                ..Default::default()
             },
         )
         .unwrap();

@@ -51,6 +51,38 @@ pub enum TrainMethod {
     #[default]
     Lora,
     Finetune,
+    Pivotal,
+    Video,
+}
+
+impl TrainMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lora => "lora",
+            Self::Finetune => "finetune",
+            Self::Pivotal => "pivotal",
+            Self::Video => "video",
+        }
+    }
+
+    pub fn requires_person(self) -> bool {
+        !matches!(self, Self::Lora)
+    }
+
+    pub fn person_recipe_id(self) -> &'static str {
+        match self {
+            Self::Finetune => "sdxl",
+            Self::Video => "wan-adapter",
+            Self::Lora | Self::Pivotal => "sdxl-adapter",
+        }
+    }
+
+    pub fn publish_directory(self) -> &'static str {
+        match self {
+            Self::Finetune => "checkpoints",
+            Self::Lora | Self::Pivotal | Self::Video => "loras",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -383,10 +415,13 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
         .map_err(|_| TrainError::Invalid("training base is not supported"))?;
     let edit = matches!(&model, TrainingModel::QwenEdit { .. });
     let trigger = request.trigger.as_deref().unwrap_or_default().trim();
-    if request.method == TrainMethod::Finetune && request.subject != TrainSubject::Person {
-        return Err(TrainError::Invalid(
-            "fine-tune is only available for a person",
-        ));
+    if request.method.requires_person() && request.subject != TrainSubject::Person {
+        return Err(TrainError::Invalid(match request.method {
+            TrainMethod::Finetune => "fine-tune is only available for a person",
+            TrainMethod::Pivotal => "pivotal training is only available for a person",
+            TrainMethod::Video => "video training is only available for a person",
+            TrainMethod::Lora => "fine-tune is only available for a person",
+        }));
     }
     if request.subject == TrainSubject::Person {
         if !matches!(model, TrainingModel::Sdxl { .. }) {
@@ -404,6 +439,17 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
             if !path.is_file() {
                 return Err(TrainError::Invalid(
                     "download the SDXL people bundle before training a person",
+                ));
+            }
+        }
+        if request.method == TrainMethod::Video {
+            let path = config
+                .models_dir
+                .join("diffusion_models")
+                .join("wan2.2_ti2v_5B_fp16.safetensors");
+            if !path.is_file() {
+                return Err(TrainError::Invalid(
+                    "download the video bundle before training a person video adapter",
                 ));
             }
         }
@@ -722,6 +768,7 @@ async fn train_with_pipeline(
             recipe_id: adapter.recipe_id.clone(),
             hf_base: Some(adapter.hf_base.clone()),
             trigger: (!trigger.is_empty()).then(|| trigger.to_string()),
+            ..Default::default()
         },
         generation: Some(attempt.id.clone()),
     })
@@ -920,14 +967,8 @@ async fn publish_host_person(
             "person training uses the SDXL people base",
         ));
     };
-    let method = match request.method {
-        TrainMethod::Lora => "lora",
-        TrainMethod::Finetune => "finetune",
-    };
-    let recipe_id = match request.method {
-        TrainMethod::Finetune => "sdxl",
-        TrainMethod::Lora => "sdxl-adapter",
-    };
+    let method = request.method.as_str();
+    let recipe_id = request.method.person_recipe_id();
     let mut job = host_train::HostJob::create(&request.name, method, trigger, checkpoint);
     job.filename = Some(filename.to_string());
     job.recipe_id = recipe_id.to_string();
@@ -963,10 +1004,7 @@ async fn publish_host_person(
         );
     }
     let finished = host_train::wait(&dir, progress).await?;
-    let directory = match request.method {
-        TrainMethod::Finetune => "checkpoints",
-        TrainMethod::Lora => "loras",
-    };
+    let directory = request.method.publish_directory();
     let published = finished.filename.as_deref().unwrap_or(filename);
     let path = config.models_dir.join(directory).join(published);
     if require_regular_file(&config.models_dir.join(directory), &path).is_err() {
@@ -1869,6 +1907,7 @@ mod tests {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                     trigger: None,
+                    ..Default::default()
                 },
                 generation: Some(generation.to_string()),
             })
@@ -3018,6 +3057,7 @@ mod tests {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                     trigger: None,
+                    ..Default::default()
                 },
                 generation: Some(previous_generation.clone()),
             })
@@ -3086,6 +3126,7 @@ mod tests {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                     trigger: None,
+                    ..Default::default()
                 },
                 generation: Some(previous_generation.clone()),
             })
@@ -3140,6 +3181,7 @@ mod tests {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                     trigger: None,
+                    ..Default::default()
                 },
                 generation: Some(wrong_generation),
             })
@@ -3399,6 +3441,40 @@ mod tests {
             validate_request(&config, &person),
             Err(TrainError::Invalid(
                 "trigger word is required so the person run can retain identity"
+            ))
+        ));
+        person.trigger = Some("ohwx".into());
+        person.method = TrainMethod::Pivotal;
+        validate_request(&config, &person).expect("pivotal uses the people base");
+        person.method = TrainMethod::Video;
+        assert!(matches!(
+            validate_request(&config, &person),
+            Err(TrainError::Invalid(
+                "download the video bundle before training a person video adapter"
+            ))
+        ));
+        fs::create_dir_all(config.models_dir.join("diffusion_models")).unwrap();
+        fs::write(
+            config
+                .models_dir
+                .join("diffusion_models/wan2.2_ti2v_5B_fp16.safetensors"),
+            b"wan",
+        )
+        .unwrap();
+        validate_request(&config, &person).expect("video bundle on disk is enough to start");
+        let mut other_pivotal = request("jerry", "flux-schnell", Some("ohwx"));
+        other_pivotal.method = TrainMethod::Pivotal;
+        assert!(matches!(
+            validate_request(&config, &other_pivotal),
+            Err(TrainError::Invalid(
+                "pivotal training is only available for a person"
+            ))
+        ));
+        other_pivotal.method = TrainMethod::Video;
+        assert!(matches!(
+            validate_request(&config, &other_pivotal),
+            Err(TrainError::Invalid(
+                "video training is only available for a person"
             ))
         ));
     }

@@ -51,6 +51,8 @@ pub struct TrainJobView {
     pub eta_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub previews: Vec<String>,
     pub started_at: DateTime<Utc>,
 }
 
@@ -82,6 +84,7 @@ struct Snapshot {
     loss: Option<f32>,
     eta_override: Option<u64>,
     step_started: Option<Instant>,
+    previews: Vec<String>,
 }
 
 impl TrainRegistry {
@@ -135,6 +138,7 @@ impl Job {
                 loss: None,
                 eta_override: None,
                 step_started: None,
+                previews: Vec::new(),
             }),
         })
     }
@@ -167,6 +171,7 @@ impl Job {
                     )
                 }),
             method: self.method.clone(),
+            previews: snapshot.previews.clone(),
             started_at: self.started_at,
         }
     }
@@ -186,6 +191,7 @@ impl Job {
         snapshot.percent = update.percent;
         snapshot.loss = update.loss;
         snapshot.eta_override = update.eta_seconds;
+        snapshot.previews = update.previews;
         if update.step > 0 && snapshot.step_started.is_none() {
             snapshot.step_started = Some(Instant::now());
         }
@@ -254,6 +260,7 @@ impl TrainJobView {
             loss: job.loss,
             eta_seconds,
             method: Some(job.method),
+            previews: job.previews,
             started_at: job.started_at,
         }
     }

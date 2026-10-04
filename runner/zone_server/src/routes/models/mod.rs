@@ -761,10 +761,7 @@ pub async fn train(
         )
             .into_response();
     }
-    let method = match request.method {
-        zone_comfy::lora::TrainMethod::Finetune => "finetune",
-        zone_comfy::lora::TrainMethod::Lora => "lora",
-    };
+    let method = request.method.as_str();
     let Some(job) = state
         .train_jobs()
         .start(request.name.clone(), Some(method.to_string()))

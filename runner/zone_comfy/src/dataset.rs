@@ -17,8 +17,9 @@
 //! can overrule costs far less than a refusal they cannot.
 
 use crate::caption::content_words;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// A measured eight-image run improved the subject by 34.72%, so the floor sits
 /// below it: under five, the set is also too small for the checks below to say
@@ -40,11 +41,64 @@ const REPEATED: f32 = 0.65;
 /// angles, measured 0.33; sets that changed only the background measured 0.83
 /// and up.
 const UNIFORM: f32 = 0.6;
+/// Draw-weight cap: a cluster larger than this share of unique frames is
+/// downsampled so a few common setups cannot eat the step budget.
+pub const REBALANCE_SHARE: f32 = 0.40;
+
+pub const MASK_SUFFIX: &str = ".mask.png";
+pub const KIND_SUFFIX: &str = ".kind";
+pub const POSE_SUFFIX: &str = ".pose";
+pub const CLIPS_DIRECTORY: &str = "clips";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameKind {
+    Body,
+    Head,
+    Hand,
+}
+
+impl FrameKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Body => "body",
+            Self::Head => "head",
+            Self::Hand => "hand",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipWindow {
+    pub start_s: f32,
+    pub end_s: f32,
+    pub pose: String,
+}
+
+pub fn companion(stem: &str, suffix: &str) -> String {
+    format!("{stem}{suffix}")
+}
+
+pub fn mask_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(companion(stem, MASK_SUFFIX))
+}
+
+pub fn kind_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(companion(stem, KIND_SUFFIX))
+}
+
+pub fn pose_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(companion(stem, POSE_SUFFIX))
+}
+
+pub fn clips_dir(job: &Path) -> PathBuf {
+    job.join(CLIPS_DIRECTORY)
+}
 
 /// What the subject is doing and where the camera is, grouped by the pose each
 /// term names so that paraphrase does not read as variety: a set that says
 /// "standing" in half its descriptions and "stands" in the rest is one pose.
-const POSES: &[&[&str]] = &[
+pub const POSES: &[&[&str]] = &[
     &["standing", "stands", "stood", "upright"],
     &["sitting", "sits", "seated", "sat", "perched"],
     &["lying", "lies", "laying", "reclining", "sprawled", "curled"],
@@ -578,5 +632,37 @@ mod tests {
             vec![Concern::LowPoseVariety],
             "the same pose in different words is still the same pose"
         );
+    }
+
+    #[test]
+    fn companion_files_use_the_frame_stem() {
+        let dir = Path::new("/job/dataset");
+        assert_eq!(
+            mask_path(dir, "0000"),
+            Path::new("/job/dataset/0000.mask.png")
+        );
+        assert_eq!(kind_path(dir, "0000"), Path::new("/job/dataset/0000.kind"));
+        assert_eq!(pose_path(dir, "0000"), Path::new("/job/dataset/0000.pose"));
+        assert_eq!(FrameKind::Hand.as_str(), "hand");
+        assert_eq!(REBALANCE_SHARE, 0.40);
+    }
+
+    #[test]
+    fn clip_windows_round_trip() {
+        let window = ClipWindow {
+            start_s: 1.5,
+            end_s: 4.0,
+            pose: "standing".into(),
+        };
+        let encoded = serde_json::to_value(&window).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({"start_s": 1.5, "end_s": 4.0, "pose": "standing"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ClipWindow>(encoded).unwrap(),
+            window
+        );
+        assert_eq!(clips_dir(Path::new("/job")), Path::new("/job/clips"));
     }
 }

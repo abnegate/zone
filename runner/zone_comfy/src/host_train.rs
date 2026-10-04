@@ -58,6 +58,8 @@ pub struct HostJob {
     pub eta_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previews: Vec<String>,
     pub started_at: DateTime<Utc>,
 }
 
@@ -84,6 +86,7 @@ impl HostJob {
             loss: None,
             eta_seconds: None,
             pid: None,
+            previews: Vec::new(),
             started_at: Utc::now(),
         }
     }
@@ -153,6 +156,7 @@ fn overlay_progress(dir: &Path, job: &mut HostJob) {
     job.percent = update.percent;
     job.loss = update.loss;
     job.eta_seconds = update.eta_seconds;
+    job.previews = update.previews;
 }
 
 pub fn write_progress(dir: &Path, update: &TrainProgress) -> Result<(), TrainError> {
@@ -174,6 +178,9 @@ pub fn write_progress(dir: &Path, update: &TrainProgress) -> Result<(), TrainErr
     }
     if let Some(eta_seconds) = update.eta_seconds {
         payload.insert("eta_seconds".into(), serde_json::json!(eta_seconds));
+    }
+    if !update.previews.is_empty() {
+        payload.insert("previews".into(), serde_json::json!(update.previews));
     }
     let encoded = serde_json::to_vec(&serde_json::Value::Object(payload))
         .map_err(|error| TrainError::Failed(error.to_string()))?;
@@ -301,6 +308,29 @@ mod tests {
     }
 
     #[test]
+    fn stage_dataset_copies_mask_kind_and_pose() {
+        let root = tempfile::tempdir().unwrap();
+        let attempt = root.path().join("attempt");
+        fs::create_dir_all(attempt.join("targets")).unwrap();
+        fs::write(attempt.join("targets/0000.png"), b"png").unwrap();
+        fs::write(attempt.join("targets/0000.txt"), b"ohwx person").unwrap();
+        fs::write(attempt.join("targets/0000.mask.png"), b"mask").unwrap();
+        fs::write(attempt.join("targets/0000.kind"), b"body").unwrap();
+        fs::write(attempt.join("targets/0000.pose"), b"standing").unwrap();
+        let job = root.path().join("job");
+        stage_dataset(&attempt, &job).unwrap();
+        assert_eq!(
+            fs::read(job.join("dataset/0000.mask.png")).unwrap(),
+            b"mask"
+        );
+        assert_eq!(fs::read(job.join("dataset/0000.kind")).unwrap(), b"body");
+        assert_eq!(
+            fs::read(job.join("dataset/0000.pose")).unwrap(),
+            b"standing"
+        );
+    }
+
+    #[test]
     fn current_with_progress_reads_the_sidecar() {
         let root = tempfile::tempdir().unwrap();
         let models = root.path();
@@ -323,7 +353,15 @@ mod tests {
         assert_eq!(viewed.percent, Some(8));
         assert_eq!(viewed.eta_seconds, Some(14400));
         assert_eq!(viewed.loss, Some(0.21));
+        assert!(viewed.previews.is_empty());
         assert_eq!(viewed.name, "jerry");
+        fs::write(
+            dir.join("progress.json"),
+            br#"{"step":250,"total":8000,"previews":["previews/step-250-0.png"]}"#,
+        )
+        .unwrap();
+        let viewed = current_with_progress(models).unwrap();
+        assert_eq!(viewed.previews, vec!["previews/step-250-0.png".to_string()]);
     }
 
     #[test]

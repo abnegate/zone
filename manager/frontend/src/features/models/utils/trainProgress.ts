@@ -4,7 +4,7 @@ export const FINE_TUNE_MIN_CLIPS = 20;
 export const FINE_TUNE_READY_STILLS = 500;
 export const FINE_TUNE_READY_CLIPS = 50;
 
-export type TrainMethodKind = 'lora' | 'finetune';
+export type TrainMethodKind = 'lora' | 'finetune' | 'pivotal' | 'video';
 export type TrainSubjectKind = 'person' | 'other';
 
 export type TrainProgressJob = {
@@ -18,6 +18,7 @@ export type TrainProgressJob = {
   message?: string | null;
   loss?: number | null;
   eta_seconds?: number | null;
+  previews?: string[] | null;
 };
 
 export function formatEta(seconds: number): string {
@@ -52,7 +53,14 @@ export function trainHeadline(
   name?: string | null,
   method?: string | null
 ): string {
-  const verb = method === 'finetune' ? 'Fine-tuning' : 'Training';
+  const verb =
+    method === 'finetune'
+      ? 'Fine-tuning'
+      : method === 'pivotal'
+        ? 'Pivotal training'
+        : method === 'video'
+          ? 'Training video'
+          : 'Training';
   const suffix = name?.trim() ? ` ${name.trim()}` : '';
   if (status === 'succeeded') return `${verb} finished${suffix}`;
   if (status === 'failed') return `${verb} failed${suffix}`;
@@ -89,6 +97,12 @@ export function methodAdvice(input: {
   const clips = Math.max(0, input.clips);
   const ready = stills >= FINE_TUNE_READY_STILLS || clips >= FINE_TUNE_READY_CLIPS;
   const consider = stills >= FINE_TUNE_MIN_STILLS || clips >= FINE_TUNE_MIN_CLIPS;
+  if (input.method === 'video') {
+    return 'This method trains Wan from the clips (2–3 windows per clip). Run a still method too for image identity.';
+  }
+  if (input.method === 'pivotal') {
+    return null;
+  }
   if (input.method === 'lora') {
     if (ready) {
       return `This set (${stills} stills, ${clips} clips) is large enough that a full fine-tune will beat LoRA on likeness, hands, and body.`;

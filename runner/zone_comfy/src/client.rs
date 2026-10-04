@@ -1491,6 +1491,7 @@ mod tests {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                 trigger: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1717,6 +1718,7 @@ mod tests {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
                 trigger: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1728,6 +1730,7 @@ mod tests {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                 trigger: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1918,6 +1921,7 @@ mod tests {
                 recipe_id: "qwen-image-edit-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
                 trigger: None,
+                ..Default::default()
             },
         )
         .unwrap();

@@ -17,13 +17,30 @@ const SCAN_DIRECTORIES: &[(&str, &str)] = &[
     ("loras", "lora"),
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WeightSidecar {
     pub recipe_id: String,
     #[serde(default)]
     pub hf_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<String>,
+}
+
+pub const FACE_SUFFIX: &str = ".face.png";
+pub const EMBEDDINGS_DIRECTORY: &str = "embeddings";
+
+pub fn face_filename(weight: &str) -> Option<String> {
+    let stem = Path::new(weight).file_stem()?.to_str()?;
+    if stem.is_empty() {
+        return None;
+    }
+    Some(format!("{stem}{FACE_SUFFIX}"))
 }
 
 /// A ready identity adapter whose trigger word can select it at generate time.
@@ -172,6 +189,7 @@ fn load_catalog(workflow_path: &Path) -> Option<RecipeCatalog> {
 
 fn is_identity(item: &InventoryItem) -> bool {
     item.ready
+        && item.recipe_id != "wan-adapter"
         && (item.adapter || item.kind == "checkpoint")
         && item
             .trigger
@@ -295,7 +313,7 @@ fn resolve_recipe<'a>(
         let sidecar = &document.sidecar;
         let recipe = catalog.get(&sidecar.recipe_id)?;
         let hf_base = sidecar.hf_base.as_deref()?;
-        return (recipe.kind == MediaKind::Image
+        return (matches!(recipe.kind, MediaKind::Image | MediaKind::Video)
             && recipe.adapter
             && recipe.has_lora_slot()
             && recipe
@@ -422,6 +440,7 @@ mod tests {
                 recipe_id: "qwen-image-edit-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
                 trigger: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -487,6 +506,7 @@ mod tests {
                 recipe_id: "qwen-image-edit-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
                 trigger: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -513,6 +533,7 @@ mod tests {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: None,
                 trigger: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -522,6 +543,7 @@ mod tests {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
                 trigger: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -531,6 +553,7 @@ mod tests {
                 recipe_id: "missing-adapter".into(),
                 hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
                 trigger: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -541,6 +564,7 @@ mod tests {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                     trigger: None,
+                    ..Default::default()
                 },
                 generation: Some("not-a-generation".into()),
             })
@@ -609,6 +633,7 @@ mod tests {
                     recipe_id: "flux-schnell-adapter".into(),
                     hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                     trigger: None,
+                    ..Default::default()
                 },
                 generation: Some(uuid::Uuid::new_v4().to_string()),
             })
@@ -632,6 +657,7 @@ mod tests {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                 trigger: Some(trigger.into()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -652,6 +678,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sidecar.trigger, None);
+        assert_eq!(sidecar.embedding, None);
+        assert_eq!(sidecar.architecture, None);
+        assert_eq!(sidecar.face, None);
+    }
+
+    #[test]
+    fn a_person_sidecar_keeps_embedding_architecture_and_face() {
+        let sidecar: WeightSidecar = serde_json::from_str(
+            r#"{"recipe_id":"sdxl-adapter","hf_base":"John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl","trigger":"ohwx","embedding":"ohwx.safetensors","architecture":"sdxl","face":"jerry.face.png"}"#,
+        )
+        .unwrap();
+        assert_eq!(sidecar.embedding.as_deref(), Some("ohwx.safetensors"));
+        assert_eq!(sidecar.architecture.as_deref(), Some("sdxl"));
+        assert_eq!(sidecar.face.as_deref(), Some("jerry.face.png"));
+        assert_eq!(
+            face_filename("jerry.safetensors").as_deref(),
+            Some("jerry.face.png")
+        );
+    }
+
+    #[test]
+    fn a_video_adapter_is_inventoried_but_not_an_image_identity() {
+        let root = temp_models();
+        let lora = root.join("loras/jerry-wan.safetensors");
+        fs::write(&lora, b"lora").unwrap();
+        write_sidecar(
+            &lora,
+            &WeightSidecar {
+                recipe_id: "wan-adapter".into(),
+                hf_base: Some("Comfy-Org/Wan_2.2_ComfyUI_Repackaged".into()),
+                trigger: Some("ohwx".into()),
+                architecture: Some("wan".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (directory, filename) in [
+            ("diffusion_models", "wan2.2_ti2v_5B_fp16.safetensors"),
+            ("text_encoders", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
+            ("vae", "wan2.2_vae.safetensors"),
+        ] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+            fs::write(root.join(directory).join(filename), b"wan").unwrap();
+        }
+        let catalog = RecipeCatalog::packaged().unwrap();
+        let items = scan(&root, &catalog);
+        let item = items
+            .iter()
+            .find(|item| item.filename == "jerry-wan.safetensors")
+            .unwrap();
+        assert_eq!(item.recipe_id, "wan-adapter");
+        assert!(item.ready);
+        assert!(item.adapter);
+        assert!(identities_among(&items).is_empty());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -718,6 +799,7 @@ mod tests {
                 recipe_id: "sdxl".into(),
                 hf_base: Some("John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl".into()),
                 trigger: trigger.map(str::to_string),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -774,6 +856,7 @@ mod tests {
                 recipe_id: "flux-schnell-adapter".into(),
                 hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
                 trigger: Some("ohwx".into()),
+                ..Default::default()
             },
         )
         .unwrap();
