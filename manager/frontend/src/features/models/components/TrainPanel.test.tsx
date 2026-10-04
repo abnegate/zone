@@ -604,6 +604,31 @@ describe('TrainPanel', () => {
     expect(screen.getByLabelText('Caption for d.png')).toHaveValue('');
   });
 
+  it('keeps captions from finished batches when a later batch fails', async () => {
+    mockCaptions
+      .mockImplementationOnce(async (body: { images: Array<{ filename: string }> }) => ({
+        captions: body.images.map((image) => `caption ${image.filename}`),
+      }))
+      .mockImplementationOnce(() => Promise.reject(new Error('captioning failed')));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectBase('FLUX.1 Schnell');
+    const files = Array.from({ length: 25 }, (_, index) =>
+      file(`${String(index).padStart(2, '0')}.png`, `img-${index}`)
+    );
+    fireEvent.change(screen.getByLabelText('Target images'), { target: { files } });
+    await waitFor(() => {
+      expect(screen.getByLabelText('Caption for 00.png')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Auto-caption images' }));
+
+    await waitFor(() => expect(mockCaptions).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.getByText('captioning failed')).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText('Caption for 00.png')).toHaveValue('caption 00.png');
+  });
+
   it('keeps rapid target selections in the order they were added', async () => {
     render(<TrainPanel onTrained={mock()} />);
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));

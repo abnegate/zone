@@ -149,10 +149,28 @@ impl Captioner {
     /// words are stripped from them, so a caller can measure how much of that
     /// vocabulary the set has in common.
     pub async fn fill(&self, drafts: &mut [Draft], trigger: &str) -> Vec<String> {
+        self.fill_with_progress(drafts, trigger, |_, _| {}).await
+    }
+
+    /// Same as [`Self::fill`], reporting `(done, total)` after each unique shot
+    /// is sent to the vision model, including `(0, total)` before the first.
+    pub async fn fill_with_progress(
+        &self,
+        drafts: &mut [Draft],
+        trigger: &str,
+        mut on_progress: impl FnMut(u32, u32),
+    ) -> Vec<String> {
         if !self.available() || drafts.iter().all(|draft| !draft.caption.trim().is_empty()) {
             return Vec::new();
         }
         let subject = self.subject(&drafts[0].image).await;
+        let shot_total = drafts
+            .iter()
+            .filter(|draft| draft.caption.trim().is_empty())
+            .map(|draft| draft.group)
+            .collect::<HashSet<_>>()
+            .len() as u32;
+        on_progress(0, shot_total);
         let mut shots: Vec<usize> = Vec::new();
         let mut described: Vec<Option<String>> = Vec::new();
         for draft in drafts.iter() {
@@ -161,6 +179,7 @@ impl Captioner {
             }
             shots.push(draft.group);
             described.push(self.describe(&draft.image, subject.as_deref()).await);
+            on_progress(shots.len() as u32, shot_total);
         }
         let banned = identity_words(&described, subject.as_deref(), trigger);
         let vocabulary: Vec<String> = described.iter().flatten().cloned().collect();
@@ -491,8 +510,18 @@ mod tests {
             Draft::new("a.png", "aaa", "", 0),
             Draft::new("b.png", "bbb", "hand written", 1),
         ];
-        captioner.fill(&mut images, "zrkxyz").await;
+        let mut ticks = Vec::new();
+        captioner
+            .fill_with_progress(&mut images, "zrkxyz", |done, total| {
+                ticks.push((done, total))
+            })
+            .await;
 
+        assert_eq!(
+            ticks,
+            vec![(0, 1), (1, 1)],
+            "one blank shot reports start and completion"
+        );
         assert_eq!(
             images[1].caption, "hand written",
             "written captions must survive"

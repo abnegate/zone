@@ -764,8 +764,17 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     }));
     setCaptioning(true);
     setError(null);
+    const generated = new Map<string, { caption: string; revision: number }>();
+    const apply = () => {
+      setImages((current) =>
+        current.map((image) => {
+          const result = generated.get(image.key);
+          if (!result?.caption || image.captionRevision !== result.revision) return image;
+          return { ...image, caption: result.caption };
+        })
+      );
+    };
     try {
-      const generated = new Map<string, { caption: string; revision: number }>();
       for (const batch of captionBatches(requested)) {
         const prepared = await Promise.all(
           batch.map(async (image) => ({
@@ -788,15 +797,10 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             revision: image.captionRevision,
           });
         });
+        apply();
       }
-      setImages((current) =>
-        current.map((image) => {
-          const result = generated.get(image.key);
-          if (!result?.caption || image.captionRevision !== result.revision) return image;
-          return { ...image, caption: result.caption };
-        })
-      );
     } catch (caught) {
+      apply();
       setError(caught instanceof Error ? caught.message : 'Captioning failed');
     } finally {
       setCaptioning(false);

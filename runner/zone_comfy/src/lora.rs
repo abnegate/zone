@@ -504,20 +504,31 @@ async fn train_with_pipeline(
     let edit = matches!(&model, TrainingModel::QwenEdit { .. });
     let trigger = request.trigger.as_deref().unwrap_or_default().trim();
     let person = request.subject == TrainSubject::Person;
-    if let Some(progress) = &progress {
-        let total = if person {
-            host_train::steps_for(request.images.len())
-        } else {
-            crate::train::packaged_config()?.steps(request.images.len().max(1))
-        };
-        let _ =
-            progress.send(TrainProgress::new(0, total).phase("screening", "Screening the dataset"));
+    let training_total = if person {
+        host_train::steps_for(request.images.len())
+    } else {
+        crate::train::packaged_config()?.steps(request.images.len().max(1))
+    };
+    report(
+        &progress,
+        training_total,
+        "screening",
+        "Screening the dataset",
+        Some(0),
+    );
+    let mut decoded = Vec::with_capacity(request.images.len());
+    let image_count = request.images.len() as u32;
+    for (index, image) in request.images.iter().enumerate() {
+        decoded.push(image.pixels()?);
+        let done = index as u32 + 1;
+        report(
+            &progress,
+            training_total,
+            "screening",
+            format!("Loading image {done} of {image_count}"),
+            phase_percent(done, image_count),
+        );
     }
-    let mut decoded = request
-        .images
-        .iter()
-        .map(TrainImage::pixels)
-        .collect::<Result<Vec<Vec<u8>>, TrainError>>()?;
     let side = if person {
         1024
     } else {
@@ -551,11 +562,21 @@ async fn train_with_pipeline(
     // describe a background the crop is about to remove.
     let subject = Subject::shared(config);
     let groups = shots(&request.images);
+    let keep_count = verdict.keep.len().max(1) as u32;
+    let mut cropped = 0u32;
     let mut survivors = Vec::new();
     for (original, (image, group)) in request.images.iter().zip(&groups).enumerate() {
         if verdict.keep.binary_search(&original).is_err() {
             continue;
         }
+        cropped += 1;
+        report(
+            &progress,
+            training_total,
+            "screening",
+            format!("Cropping image {cropped} of {keep_count}"),
+            phase_percent(cropped, keep_count),
+        );
         let frames = if person && !edit {
             frame_person(&subject, image, &decoded[original])?
         } else {
@@ -593,15 +614,18 @@ async fn train_with_pipeline(
             image.text = image.text.trim().to_string();
         }
     } else {
-        if let Some(progress) = &progress {
-            let total = if person {
-                host_train::steps_for(survivors.len())
-            } else {
-                crate::train::packaged_config()?.steps(survivors.len())
-            };
-            let _ = progress
-                .send(TrainProgress::new(0, total).phase("captioning", "Captioning the dataset"));
-        }
+        let caption_total = if person {
+            host_train::steps_for(survivors.len())
+        } else {
+            crate::train::packaged_config()?.steps(survivors.len().max(1))
+        };
+        report(
+            &progress,
+            caption_total,
+            "captioning",
+            "Captioning the dataset",
+            Some(0),
+        );
         let mut drafts = survivors
             .iter()
             .map(|image| {
@@ -612,7 +636,22 @@ async fn train_with_pipeline(
             })
             .collect::<Result<Vec<Draft>, TrainError>>()?;
         Captioner::new(config, litellm_host, litellm_key)
-            .fill(&mut drafts, trigger)
+            .fill_with_progress(&mut drafts, trigger, {
+                let progress = progress.clone();
+                move |done, shots| {
+                    report(
+                        &progress,
+                        caption_total,
+                        "captioning",
+                        if shots == 0 {
+                            "Captioning the dataset".to_string()
+                        } else {
+                            format!("Captioning image {done} of {shots}")
+                        },
+                        phase_percent(done, shots),
+                    );
+                }
+            })
             .await;
         for (image, draft) in survivors.iter_mut().zip(drafts) {
             image.text = draft.caption;
@@ -862,6 +901,30 @@ fn validate_pairing(images: &[TrainImage], model: &TrainingModel) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+fn phase_percent(done: u32, total: u32) -> Option<u8> {
+    if total == 0 {
+        return Some(0);
+    }
+    Some(((u64::from(done) * 100) / u64::from(total)).min(100) as u8)
+}
+
+fn report(
+    progress: &Option<mpsc::UnboundedSender<TrainProgress>>,
+    total: u32,
+    phase: &str,
+    message: impl Into<String>,
+    percent: Option<u8>,
+) {
+    let Some(progress) = progress else {
+        return;
+    };
+    let mut update = TrainProgress::new(0, total.max(1)).phase(phase, message);
+    if let Some(percent) = percent {
+        update = update.percent(percent);
+    }
+    let _ = progress.send(update);
 }
 
 fn validate_verdict(verdict: &crate::screening::Verdict, count: usize) -> Result<(), TrainError> {
@@ -1993,6 +2056,14 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::screening::{Rejection, Verdict};
+
+    #[test]
+    fn phase_percent_covers_a_phase_from_empty_to_done() {
+        assert_eq!(phase_percent(0, 0), Some(0));
+        assert_eq!(phase_percent(0, 8), Some(0));
+        assert_eq!(phase_percent(2, 8), Some(25));
+        assert_eq!(phase_percent(8, 8), Some(100));
+    }
     use base64::Engine;
     use serde_json::{Value, json};
     use wiremock::{
