@@ -1,18 +1,19 @@
 import type { TrainJob } from '../../../api/models';
-import { formatEta, trainHeadline, trainPercent } from '../utils/trainProgress';
+import {
+  formatEta,
+  formatLoss,
+  trainHeadline,
+  trainJobPercent,
+  trainStepLabel,
+} from '../utils/trainProgress';
 import './TrainMeter.css';
 
 export default function TrainMeter({ job, detail }: { job: TrainJob; detail?: string }) {
-  const percent = trainPercent(job.step, job.total);
+  const percent = trainJobPercent(job);
   const eta = job.status === 'running' && job.eta_seconds != null ? formatEta(job.eta_seconds) : '';
-  const stepLabel =
-    job.total != null && job.step != null
-      ? job.step === 0
-        ? 'Starting training'
-        : `Step ${job.step} of ${job.total}`
-      : job.status === 'running'
-        ? 'Preparing the dataset'
-        : null;
+  const loss = job.status === 'running' ? formatLoss(job.loss) : '';
+  const stepLabel = trainStepLabel(job);
+  const footnote = [eta, loss, detail].filter(Boolean).join(' · ');
 
   return (
     <div className="train-meter">
@@ -26,7 +27,7 @@ export default function TrainMeter({ job, detail }: { job: TrainJob; detail?: st
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percent ?? undefined}
-        aria-label={trainHeadline(job.status, job.name)}
+        aria-label={trainHeadline(job.status, job.name, job.method)}
       >
         <div
           className={
@@ -35,13 +36,7 @@ export default function TrainMeter({ job, detail }: { job: TrainJob; detail?: st
           style={percent == null ? undefined : { width: `${percent}%` }}
         />
       </div>
-      {(eta || detail) && (
-        <p className="train-meter-eta">
-          {eta}
-          {eta && detail ? ' · ' : ''}
-          {detail}
-        </p>
-      )}
+      {footnote && <p className="train-meter-eta">{footnote}</p>}
     </div>
   );
 }

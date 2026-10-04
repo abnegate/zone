@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+use zone_comfy::TrainProgress;
 use zone_comfy::dataset::Finding;
 use zone_comfy::host_train::{HostJob, HostStatus};
 use zone_comfy::lora::{Screening, TrainError, TrainOutcome};
@@ -39,7 +40,17 @@ pub struct TrainJobView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loss: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub eta_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
     pub started_at: DateTime<Utc>,
 }
 
@@ -51,6 +62,7 @@ pub struct TrainRegistry {
 pub struct Job {
     id: Uuid,
     name: String,
+    method: Option<String>,
     started_at: DateTime<Utc>,
     snapshot: Mutex<Snapshot>,
 }
@@ -64,6 +76,11 @@ struct Snapshot {
     error: Option<String>,
     step: Option<u32>,
     total: Option<u32>,
+    phase: Option<String>,
+    message: Option<String>,
+    percent: Option<u8>,
+    loss: Option<f32>,
+    eta_override: Option<u64>,
     step_started: Option<Instant>,
 }
 
@@ -82,7 +99,7 @@ impl TrainRegistry {
 
     /// Occupies the single training slot. `None` when a run is already in
     /// progress, so the caller attaches to `current` instead of starting two.
-    pub fn start(&self, name: String) -> Option<Arc<Job>> {
+    pub fn start(&self, name: String, method: Option<String>) -> Option<Arc<Job>> {
         let mut slot = self.slot.lock().expect("train job");
         if slot
             .as_ref()
@@ -90,17 +107,18 @@ impl TrainRegistry {
         {
             return None;
         }
-        let job = Job::running(name);
+        let job = Job::running(name, method);
         *slot = Some(job.clone());
         Some(job)
     }
 }
 
 impl Job {
-    fn running(name: String) -> Arc<Self> {
+    fn running(name: String, method: Option<String>) -> Arc<Self> {
         Arc::new(Self {
             id: Uuid::new_v4(),
             name,
+            method,
             started_at: Utc::now(),
             snapshot: Mutex::new(Snapshot {
                 status: TrainJobStatus::Running,
@@ -111,6 +129,11 @@ impl Job {
                 error: None,
                 step: None,
                 total: None,
+                phase: None,
+                message: None,
+                percent: None,
+                loss: None,
+                eta_override: None,
                 step_started: None,
             }),
         })
@@ -129,26 +152,41 @@ impl Job {
             error: snapshot.error.clone(),
             step: snapshot.step,
             total: snapshot.total,
-            eta_seconds: eta_seconds(
-                snapshot.step,
-                snapshot.total,
-                snapshot.step_started.map(|started| started.elapsed()),
-            ),
+            phase: snapshot.phase.clone(),
+            message: snapshot.message.clone(),
+            percent: snapshot.percent,
+            loss: snapshot.loss,
+            eta_seconds: snapshot
+                .eta_override
+                .filter(|seconds| *seconds > 0)
+                .or_else(|| {
+                    eta_seconds(
+                        snapshot.step,
+                        snapshot.total,
+                        snapshot.step_started.map(|started| started.elapsed()),
+                    )
+                }),
+            method: self.method.clone(),
             started_at: self.started_at,
         }
     }
 
-    pub fn progress(&self, step: u32, total: u32) {
-        if total == 0 {
+    pub fn progress(&self, update: TrainProgress) {
+        if update.total == 0 {
             return;
         }
         let mut snapshot = self.snapshot.lock().expect("train job");
         if snapshot.status != TrainJobStatus::Running {
             return;
         }
-        snapshot.step = Some(step.min(total));
-        snapshot.total = Some(total);
-        if step > 0 && snapshot.step_started.is_none() {
+        snapshot.step = Some(update.step.min(update.total));
+        snapshot.total = Some(update.total);
+        snapshot.phase = update.phase;
+        snapshot.message = update.message;
+        snapshot.percent = update.percent;
+        snapshot.loss = update.loss;
+        snapshot.eta_override = update.eta_seconds;
+        if update.step > 0 && snapshot.step_started.is_none() {
             snapshot.step_started = Some(Instant::now());
         }
     }
@@ -191,6 +229,14 @@ impl TrainJobView {
             .signed_duration_since(job.started_at)
             .to_std()
             .ok();
+        let phase = job.phase;
+        let eta_seconds =
+            job.eta_seconds
+                .filter(|seconds| *seconds > 0)
+                .or_else(|| match phase.as_deref() {
+                    Some("training") | None => eta_seconds(job.step, job.total, elapsed),
+                    _ => None,
+                });
         Self {
             id: job.id,
             name: job.name,
@@ -202,7 +248,12 @@ impl TrainJobView {
             error: job.error,
             step: job.step,
             total: job.total,
-            eta_seconds: eta_seconds(job.step, job.total, elapsed),
+            phase,
+            message: job.message,
+            percent: job.percent,
+            loss: job.loss,
+            eta_seconds,
+            method: Some(job.method),
             started_at: job.started_at,
         }
     }
@@ -220,18 +271,21 @@ fn eta_seconds(step: Option<u32>, total: Option<u32>, elapsed: Option<Duration>)
 mod tests {
     use super::{TrainJobStatus, TrainRegistry, eta_seconds};
     use std::time::Duration;
+    use zone_comfy::TrainProgress;
     use zone_comfy::lora::TrainError;
 
     #[test]
     fn a_running_job_refuses_a_second_start() {
         let registry = TrainRegistry::new();
-        let job = registry.start("jerry".into()).expect("first start");
-        assert!(registry.start("other".into()).is_none());
+        let job = registry
+            .start("jerry".into(), Some("lora".into()))
+            .expect("first start");
+        assert!(registry.start("other".into(), None).is_none());
         assert_eq!(registry.current().unwrap().name, "jerry");
         assert_eq!(registry.current().unwrap().status, TrainJobStatus::Running);
         job.fail(TrainError::Failed("stopped".into()));
         let next = registry
-            .start("other".into())
+            .start("other".into(), Some("finetune".into()))
             .expect("finished job frees the slot");
         assert_eq!(next.view().name, "other");
         assert_eq!(next.view().status, TrainJobStatus::Running);
@@ -240,14 +294,30 @@ mod tests {
     #[test]
     fn progress_is_visible_on_the_running_job() {
         let registry = TrainRegistry::new();
-        let job = registry.start("jerry".into()).expect("start");
-        job.progress(12, 400);
+        let job = registry
+            .start("jerry".into(), Some("finetune".into()))
+            .expect("start");
+        job.progress(
+            TrainProgress::new(0, 8000)
+                .phase("class_images", "Generating class image 12 of 2000")
+                .percent(8)
+                .eta_seconds(14400),
+        );
+        let view = registry.current().unwrap();
+        assert_eq!(view.step, Some(0));
+        assert_eq!(view.total, Some(8000));
+        assert_eq!(view.phase.as_deref(), Some("class_images"));
+        assert_eq!(view.percent, Some(8));
+        assert_eq!(view.eta_seconds, Some(14400));
+        assert_eq!(view.method.as_deref(), Some("finetune"));
+        job.progress(TrainProgress::new(12, 400).loss(0.21));
         let view = registry.current().unwrap();
         assert_eq!(view.step, Some(12));
         assert_eq!(view.total, Some(400));
+        assert_eq!(view.loss, Some(0.21));
         assert!(view.started_at.timestamp() > 0);
         job.fail(TrainError::Failed("stopped".into()));
-        job.progress(13, 400);
+        job.progress(TrainProgress::new(13, 400));
         assert_eq!(job.view().step, Some(12));
     }
 
@@ -282,5 +352,28 @@ mod tests {
         assert_eq!(view.status, TrainJobStatus::Running);
         assert_eq!(view.step, Some(4));
         assert_eq!(view.total, Some(20));
+        assert_eq!(view.method.as_deref(), Some("finetune"));
+    }
+
+    #[test]
+    fn host_eta_prefers_the_sidecar_over_job_age() {
+        let mut job = zone_comfy::host_train::HostJob::create(
+            "jerry",
+            "finetune",
+            "ohwx",
+            "lustifySDXLNSFW_ggwpV7.safetensors",
+        );
+        job.step = Some(0);
+        job.total = Some(8000);
+        job.phase = Some("class_images".into());
+        job.message = Some("Generating class image 12 of 2000".into());
+        job.percent = Some(8);
+        job.eta_seconds = Some(14_400);
+        job.loss = Some(0.21);
+        let view = super::TrainJobView::from_host(job);
+        assert_eq!(view.eta_seconds, Some(14_400));
+        assert_eq!(view.percent, Some(8));
+        assert_eq!(view.phase.as_deref(), Some("class_images"));
+        assert_eq!(view.loss, Some(0.21));
     }
 }

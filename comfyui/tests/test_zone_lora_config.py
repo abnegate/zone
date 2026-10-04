@@ -141,6 +141,11 @@ class ProgressSidecarTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'zone-lora-abcd-progress.json'
             train_config.write_progress(path, 0, 400)
-            train_config.write_progress(path, 12, 400)
-            self.assertEqual(json.loads(path.read_text()), {'step': 12, 'total': 400})
+            train_config.write_progress(path, 12, 400, loss=0.21)
+            payload = json.loads(path.read_text())
+            self.assertEqual(payload['step'], 12)
+            self.assertEqual(payload['total'], 400)
+            self.assertEqual(payload['phase'], 'training')
+            self.assertEqual(payload['percent'], 3)
+            self.assertEqual(payload['loss'], 0.21)
             self.assertFalse(path.with_name(path.name + '.tmp').exists())

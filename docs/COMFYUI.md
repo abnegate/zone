@@ -449,8 +449,13 @@ recipe, with prior preservation class `person`. Captions are
 
 Person jobs do not go through ComfyUI `/prompt`. Manager writes
 `models/.zone-train/{id}/` on the bind mount; host LaunchAgent `ai.zone.train`
-trains on MPS in fp32, writes `progress.json`, and publishes the weight plus
-sidecar. Recreating manager does not cancel a run. Install the worker with:
+trains on MPS in fp32, writes `progress.json` with `phase`, `message`,
+weighted `percent`, `loss`, and a per-phase `eta_seconds`, and publishes the
+weight plus sidecar. Fine-tune phases are queued, loading, class_images,
+encoding, training, publishing. Recreating manager does not cancel a run.
+LoRA is the path for about 20–200 unique stills. Fine-tune starts around 200
+unique stills or 20 clips; 500 stills or 50 clips is the strong set. Install
+the worker with:
 
 ```bash
 ./scripts/setup-comfyui-macos.sh --install-trainer

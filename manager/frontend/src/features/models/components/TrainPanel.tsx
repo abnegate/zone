@@ -22,6 +22,7 @@ import {
   poolMap,
   prepareImage,
 } from '../trainMedia';
+import { methodAdvice } from '../utils/trainProgress';
 import DropZone from './DropZone';
 import TrainMeter from './TrainMeter';
 import './TrainPanel.css';
@@ -40,10 +41,10 @@ function firstOtherBase(bases: TrainBase[]): string {
 
 function trainingHelp(subject: TrainSubjectKind, method: TrainMethodKind, edit: boolean): string {
   if (subject === 'person' && method === 'finetune') {
-    return 'Drop images, clips, or a folder, set a unique trigger word, and fine-tune the SDXL people checkpoint. A run takes days to weeks, writes a ~7 GB checkpoint (full UNet + CLIP-L, prior preservation), and resumes after a refresh or restart. Plan ~20 GB of disk during a run.';
+    return 'Drop images, clips, or a folder, set a unique trigger word, and fine-tune the SDXL people checkpoint. A run takes days to weeks, writes a ~7 GB checkpoint (full UNet + CLIP-L, prior preservation), and resumes after a refresh or restart. Plan ~20 GB of disk during a run. Fine-tune from about 200 unique stills or 20 clips; 500 stills or 50 clips is the strong set for likeness, hands, and body.';
   }
   if (subject === 'person') {
-    return 'Drop images, clips, or a folder, set a unique trigger word, and train an SDXL people adapter. A run takes hours and writes a ~100–200 MB adapter (1024 buckets, rank 64, text encoder trained). Body shots stay in frame; a tighter head crop is added so faces stay sharp.';
+    return 'Drop images, clips, or a folder, set a unique trigger word, and train an SDXL people adapter. A run takes hours and writes a ~100–200 MB adapter (1024 buckets, rank 64, text encoder trained). Body shots stay in frame; a tighter head crop is added so faces stay sharp. LoRA fits about 20–200 unique stills. Fine-tune starts around 200 stills or 20 clips; 500 stills or 50 clips is the strong set.';
   }
   if (edit) {
     return 'Add target images, then pair each one with the reference image and instruction that produced it.';
@@ -885,11 +886,18 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     PAIR_ROW_HEIGHT,
     Math.min(images.length * PAIR_ROW_HEIGHT, PAIR_LIST_MAX)
   );
+  const advice = methodAdvice({
+    subject,
+    method,
+    stills: images.length,
+    clips: clips.length,
+  });
 
   return (
     <section className="card">
       <h2>{method === 'finetune' ? 'Fine-tune a person' : 'Train a LoRA'}</h2>
       <p className="help-text">{trainingHelp(subject, method, edit)}</p>
+      {advice && <p className="help-text">{advice}</p>}
       {error && <div className="error-placeholder">{error}</div>}
       {busy && (
         <div className="train-result" role="status">

@@ -761,7 +761,14 @@ pub async fn train(
         )
             .into_response();
     }
-    let Some(job) = state.train_jobs().start(request.name.clone()) else {
+    let method = match request.method {
+        zone_comfy::lora::TrainMethod::Finetune => "finetune",
+        zone_comfy::lora::TrainMethod::Lora => "lora",
+    };
+    let Some(job) = state
+        .train_jobs()
+        .start(request.name.clone(), Some(method.to_string()))
+    else {
         return (
             StatusCode::CONFLICT,
             Json(ErrorResponse::new("a training job is already running")),
@@ -784,13 +791,13 @@ pub async fn train(
                 biased;
                 update = progress_rx.recv(), if progress_open => {
                     match update {
-                        Some(update) => reporter.progress(update.step, update.total),
+                        Some(update) => reporter.progress(update),
                         None => progress_open = false,
                     }
                 }
                 result = &mut training => {
                     while let Ok(update) = progress_rx.try_recv() {
-                        reporter.progress(update.step, update.total);
+                        reporter.progress(update);
                     }
                     match result {
                         Ok(outcome) => reporter.succeed(outcome),

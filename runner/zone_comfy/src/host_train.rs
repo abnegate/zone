@@ -47,6 +47,16 @@ pub struct HostJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub started_at: DateTime<Utc>,
 }
@@ -68,6 +78,11 @@ impl HostJob {
             error: None,
             step: None,
             total: None,
+            phase: None,
+            message: None,
+            percent: None,
+            loss: None,
+            eta_seconds: None,
             pid: None,
             started_at: Utc::now(),
         }
@@ -120,6 +135,10 @@ pub fn current_with_progress(models_dir: &Path) -> Option<HostJob> {
     Some(job)
 }
 
+pub fn steps_for(image_count: usize) -> u32 {
+    (image_count as u32).saturating_mul(20).clamp(500, 8000)
+}
+
 fn overlay_progress(dir: &Path, job: &mut HostJob) {
     let Ok(bytes) = fs::read(dir.join("progress.json")) else {
         return;
@@ -129,6 +148,48 @@ fn overlay_progress(dir: &Path, job: &mut HostJob) {
     };
     job.step = Some(update.step);
     job.total = Some(update.total);
+    job.phase = update.phase;
+    job.message = update.message;
+    job.percent = update.percent;
+    job.loss = update.loss;
+    job.eta_seconds = update.eta_seconds;
+}
+
+pub fn write_progress(dir: &Path, update: &TrainProgress) -> Result<(), TrainError> {
+    fs::create_dir_all(dir).map_err(|error| TrainError::Failed(error.to_string()))?;
+    let mut payload = serde_json::Map::new();
+    payload.insert("step".into(), serde_json::json!(update.step));
+    payload.insert("total".into(), serde_json::json!(update.total));
+    if let Some(phase) = &update.phase {
+        payload.insert("phase".into(), serde_json::json!(phase));
+    }
+    if let Some(message) = &update.message {
+        payload.insert("message".into(), serde_json::json!(message));
+    }
+    if let Some(percent) = update.percent {
+        payload.insert("percent".into(), serde_json::json!(percent));
+    }
+    if let Some(loss) = update.loss {
+        payload.insert("loss".into(), serde_json::json!(loss));
+    }
+    if let Some(eta_seconds) = update.eta_seconds {
+        payload.insert("eta_seconds".into(), serde_json::json!(eta_seconds));
+    }
+    let encoded = serde_json::to_vec(&serde_json::Value::Object(payload))
+        .map_err(|error| TrainError::Failed(error.to_string()))?;
+    let temporary = dir.join("progress.json.tmp");
+    fs::write(&temporary, encoded).map_err(|error| TrainError::Failed(error.to_string()))?;
+    fs::rename(temporary, dir.join("progress.json"))
+        .map_err(|error| TrainError::Failed(error.to_string()))
+}
+
+pub fn write_queued_progress(dir: &Path, image_count: usize) -> Result<(), TrainError> {
+    write_progress(
+        dir,
+        &TrainProgress::new(0, steps_for(image_count))
+            .phase("queued", "Waiting for the host trainer")
+            .percent(0),
+    )
 }
 
 pub fn write_job(dir: &Path, job: &HostJob) -> Result<(), TrainError> {
@@ -246,11 +307,45 @@ mod tests {
         let job = HostJob::create("jerry", "lora", "ohwx", "base.safetensors");
         let dir = job_dir(models, job.id);
         write_job(&dir, &job).unwrap();
-        fs::write(dir.join("progress.json"), br#"{"step":12,"total":400}"#).unwrap();
+        fs::write(
+            dir.join("progress.json"),
+            br#"{"step":0,"total":8000,"phase":"class_images","message":"Generating class image 12 of 2000","percent":8,"eta_seconds":14400,"loss":0.21}"#,
+        )
+        .unwrap();
         let viewed = current_with_progress(models).unwrap();
-        assert_eq!(viewed.step, Some(12));
-        assert_eq!(viewed.total, Some(400));
+        assert_eq!(viewed.step, Some(0));
+        assert_eq!(viewed.total, Some(8000));
+        assert_eq!(viewed.phase.as_deref(), Some("class_images"));
+        assert_eq!(
+            viewed.message.as_deref(),
+            Some("Generating class image 12 of 2000")
+        );
+        assert_eq!(viewed.percent, Some(8));
+        assert_eq!(viewed.eta_seconds, Some(14400));
+        assert_eq!(viewed.loss, Some(0.21));
         assert_eq!(viewed.name, "jerry");
+    }
+
+    #[test]
+    fn queued_progress_keeps_parse_progress_alive() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("job");
+        write_queued_progress(&dir, 40).unwrap();
+        let bytes = fs::read(dir.join("progress.json")).unwrap();
+        let update = parse_progress(&bytes).unwrap();
+        assert_eq!(update.step, 0);
+        assert_eq!(update.total, 800);
+        assert_eq!(update.phase.as_deref(), Some("queued"));
+        assert_eq!(update.percent, Some(0));
+    }
+
+    #[test]
+    fn person_step_budget_matches_the_host_config() {
+        assert_eq!(steps_for(1), 500);
+        assert_eq!(steps_for(25), 500);
+        assert_eq!(steps_for(26), 520);
+        assert_eq!(steps_for(400), 8000);
+        assert_eq!(steps_for(500), 8000);
     }
 
     #[tokio::test]

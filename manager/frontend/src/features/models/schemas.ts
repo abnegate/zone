@@ -157,6 +157,11 @@ export const TrainJobSchema = z.object({
   error: z.string().nullable().optional(),
   step: z.number().int().nonnegative().nullable().optional(),
   total: z.number().int().positive().nullable().optional(),
+  phase: z.string().nullable().optional(),
+  message: z.string().nullable().optional(),
+  percent: z.number().int().min(0).max(100).nullable().optional(),
+  loss: z.number().nullable().optional(),
   eta_seconds: z.number().int().nonnegative().nullable().optional(),
+  method: z.string().nullable().optional(),
   started_at: z.string().optional(),
 });

@@ -42,7 +42,7 @@ describe('TrainDock', () => {
       eta_seconds: 180,
     };
     render(<TrainDock />);
-    expect(screen.getByRole('complementary', { name: 'LoRA training' })).toBeInTheDocument();
+    expect(screen.getByRole('complementary', { name: 'Training' })).toBeInTheDocument();
     expect(screen.getByText('Training jerry')).toBeInTheDocument();
     expect(screen.getByText('Step 40 of 400')).toBeInTheDocument();
     expect(screen.getAllByText('10%').length).toBeGreaterThan(0);
@@ -61,7 +61,31 @@ describe('TrainDock', () => {
     };
     render(<TrainDock />);
     expect(screen.getByText('Starting training')).toBeInTheDocument();
-    expect(screen.getByRole('complementary', { name: 'LoRA training' })).toBeInTheDocument();
+    expect(screen.getByRole('complementary', { name: 'Training' })).toBeInTheDocument();
+  });
+
+  it('shows a fine-tune phase, weighted percent, loss, and day-scale eta', () => {
+    trainState.job = {
+      id: 'job-1',
+      name: 'jerry',
+      status: 'running',
+      method: 'finetune',
+      step: 0,
+      total: 8000,
+      phase: 'class_images',
+      message: 'Generating class image 12 of 2000',
+      percent: 8,
+      loss: 0.2134,
+      eta_seconds: 7 * 86400,
+    };
+    render(<TrainDock />);
+    expect(screen.getByRole('complementary', { name: 'Training' })).toBeInTheDocument();
+    expect(screen.getByText('Fine-tuning jerry')).toBeInTheDocument();
+    expect(screen.getByText('Generating class image 12 of 2000')).toBeInTheDocument();
+    expect(screen.getAllByText('8%').length).toBeGreaterThan(0);
+    expect(screen.getByText(/about 7 days left/)).toBeInTheDocument();
+    expect(screen.getByText(/loss 0.2134/)).toBeInTheDocument();
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '8');
   });
 
   it('lets a finished failure be dismissed', () => {

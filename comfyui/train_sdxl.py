@@ -165,12 +165,135 @@ def normalize_job(job: dict[str, Any], job_dir: Path) -> dict[str, Any]:
     return job
 
 
-def write_progress(job_dir: Path, step: int, total: int) -> None:
-    write_json(
-        Path(job_dir) / 'progress.json',
-        {'step': int(step), 'total': int(total)},
-        pretty=False,
-    )
+PHASE_WEIGHTS = {
+    'lora': (
+        ('loading', 6),
+        ('encoding', 8),
+        ('training', 80),
+        ('publishing', 6),
+    ),
+    'finetune': (
+        ('loading', 4),
+        ('class_images', 12),
+        ('encoding', 6),
+        ('training', 72),
+        ('publishing', 6),
+    ),
+}
+
+
+def overall_percent(method: str, phase: str, phase_step: int, phase_total: int) -> int:
+    if phase in {'queued', 'screening', 'captioning'}:
+        return 0
+    weights = PHASE_WEIGHTS['finetune' if method == 'finetune' else 'lora']
+    completed = 0
+    current = 0
+    found = False
+    for name, weight in weights:
+        if name == phase:
+            current = weight
+            found = True
+            break
+        completed += weight
+    if not found:
+        return 100 if phase == 'publishing' else min(100, completed)
+    if phase_total <= 0:
+        fraction = 0.0
+    else:
+        fraction = min(1.0, max(0.0, float(phase_step) / float(phase_total)))
+    return min(100, int(round(completed + current * fraction)))
+
+
+def eta_seconds(elapsed: float, step: int, total: int) -> int | None:
+    if step <= 0 or total <= step or elapsed <= 0:
+        return None
+    remaining = elapsed * (total - step) / step
+    if remaining < 1:
+        return None
+    return int(round(remaining))
+
+
+def phase_message(phase: str, phase_step: int, phase_total: int) -> str:
+    if phase == 'queued':
+        return 'Waiting for the host trainer'
+    if phase == 'loading':
+        return 'Loading the people checkpoint'
+    if phase == 'class_images':
+        if phase_total > 0:
+            return f'Generating class image {max(phase_step, 1)} of {phase_total}'
+        return 'Generating class images for prior preservation'
+    if phase == 'encoding':
+        if phase_total > 0:
+            return f'Encoding image {max(phase_step, 1)} of {phase_total}'
+        return 'Encoding dataset latents'
+    if phase == 'training':
+        if phase_total > 0:
+            return f'Training step {phase_step} of {phase_total}'
+        return 'Training'
+    if phase == 'publishing':
+        return 'Publishing the trained weights'
+    if phase == 'screening':
+        return 'Screening the dataset'
+    if phase == 'captioning':
+        return 'Captioning the dataset'
+    return phase.replace('_', ' ').capitalize()
+
+
+class Progress:
+    def __init__(self, job_dir: Path, method: str, total: int) -> None:
+        self.job_dir = Path(job_dir)
+        self.method = 'finetune' if method == 'finetune' else 'lora'
+        self.total = max(int(total), 1)
+        self.phase = 'queued'
+        self.phase_started = time.monotonic()
+
+    def emit(
+        self,
+        phase: str,
+        *,
+        step: int | None = None,
+        phase_step: int = 0,
+        phase_total: int = 0,
+        loss: float | None = None,
+    ) -> None:
+        if phase != self.phase:
+            self.phase = phase
+            self.phase_started = time.monotonic()
+        if step is None:
+            if phase == 'training':
+                step = phase_step
+            elif phase == 'publishing':
+                step = self.total
+            else:
+                step = 0
+        payload: dict[str, Any] = {
+            'step': int(min(step, self.total)),
+            'total': self.total,
+            'phase': phase,
+            'message': phase_message(phase, int(phase_step), int(phase_total)),
+            'percent': overall_percent(self.method, phase, int(phase_step), int(phase_total)),
+        }
+        if phase_total > 0:
+            payload['phase_step'] = int(phase_step)
+            payload['phase_total'] = int(phase_total)
+        if loss is not None and loss == loss:
+            payload['loss'] = float(loss)
+        remaining = eta_seconds(
+            time.monotonic() - self.phase_started,
+            int(phase_step),
+            int(phase_total),
+        )
+        if remaining is not None:
+            payload['eta_seconds'] = remaining
+        write_progress(self.job_dir, payload['step'], payload['total'], **{
+            key: value for key, value in payload.items() if key not in {'step', 'total'}
+        })
+
+
+def write_progress(job_dir: Path, step: int, total: int, **extra: Any) -> None:
+    payload: dict[str, Any] = {'step': int(step), 'total': int(total)}
+    payload.update(extra)
+    write_json(Path(job_dir) / 'progress.json', payload, pretty=False)
 
 
 def sidecar_path(weight: Path) -> Path:
@@ -308,13 +431,15 @@ def publish_stub(models_dir: Path, job: dict[str, Any]) -> Path:
 
 def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str, Any]) -> None:
     total = steps_for(int(job.get('image_count') or 0), config)
+    progress = Progress(job_dir, str(job.get('method') or 'lora'), total)
     job['total'] = total
     job['step'] = 0
-    write_progress(job_dir, 0, total)
+    progress.emit('loading', phase_step=1, phase_total=1)
     write_job(job_dir, job)
+    progress.emit('publishing', step=0, phase_step=0, phase_total=1)
     publish_stub(models_dir, job)
     job['step'] = total
-    write_progress(job_dir, total, total)
+    progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     write_job(job_dir, job)
 
 
@@ -561,6 +686,7 @@ def ensure_class_images(
     count: int,
     prompt: str,
     device: Any,
+    progress: Progress | None = None,
 ) -> list[tuple[Path, str]]:
     import torch
 
@@ -568,6 +694,8 @@ def ensure_class_images(
     existing = sorted(
         path for path in class_dir.iterdir() if path.is_file() and path.suffix.lower() == '.png'
     )
+    if progress is not None:
+        progress.emit('class_images', phase_step=len(existing), phase_total=count)
     if len(existing) < count:
         pipeline = pipeline.to(device)
         for index in range(len(existing), count):
@@ -582,6 +710,8 @@ def ensure_class_images(
             destination = class_dir / f'{index:04}.png'
             image.save(destination)
             print(f'class image {index + 1}/{count}', flush=True)
+            if progress is not None:
+                progress.emit('class_images', phase_step=index + 1, phase_total=count)
         existing = sorted(
             path
             for path in class_dir.iterdir()
@@ -763,11 +893,13 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     job['total'] = total
     job['step'] = job.get('step') or 0
     write_job(job_dir, job)
-    write_progress(job_dir, int(job['step'] or 0), total)
+    progress = Progress(job_dir, method, total)
+    progress.emit('loading', phase_step=0, phase_total=1)
 
     device = select_device()
     print(f'device={device} method={method} steps={total} images={len(pairs)}', flush=True)
     pipeline = load_base_pipeline(checkpoint, str(job.get('hf_base') or ''))
+    progress.emit('loading', phase_step=1, phase_total=1)
     unet = pipeline.unet
     vae = pipeline.vae
     text_encoder = pipeline.text_encoder
@@ -794,6 +926,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
             len(pairs),
             str(config.get('class_prompt') or 'a photo of a person'),
             device,
+            progress,
         )
 
     vae.requires_grad_(False)
@@ -853,10 +986,19 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     else:
         text_encoder.eval()
 
-    encoded_instance = [encode_latents(vae, path, device) + (caption,) for path, caption in pairs]
-    encoded_class = [
-        encode_latents(vae, path, device) + (caption,) for path, caption in class_pairs
-    ]
+    encode_total = len(pairs) + len(class_pairs)
+    encoded_instance: list[Any] = []
+    encoded_class: list[Any] = []
+    encoded = 0
+    progress.emit('encoding', phase_step=0, phase_total=encode_total)
+    for path, caption in pairs:
+        encoded_instance.append(encode_latents(vae, path, device) + (caption,))
+        encoded += 1
+        progress.emit('encoding', phase_step=encoded, phase_total=encode_total)
+    for path, caption in class_pairs:
+        encoded_class.append(encode_latents(vae, path, device) + (caption,))
+        encoded += 1
+        progress.emit('encoding', phase_step=encoded, phase_total=encode_total)
     vae.to('cpu')
 
     checkpoint_dir = Path(job_dir) / 'checkpoints'
@@ -876,6 +1018,13 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         )
         start_step += 1
         print(f'resume from step {resume_step}', flush=True)
+        progress.emit(
+            'training',
+            step=resume_step,
+            phase_step=resume_step,
+            phase_total=total,
+            loss=best_loss if best_loss < float('inf') else None,
+        )
 
     every = int(config.get('checkpoint_every') or 0)
     keep = int(config.get('keep_snapshots') or 2)
@@ -922,7 +1071,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         value = float(loss.detach().cpu())
         job['step'] = step
         job['total'] = total
-        write_progress(job_dir, step, total)
+        progress.emit('training', step=step, phase_step=step, phase_total=total, loss=value)
         if step == start_step or step % 10 == 0 or step == total:
             write_job(job_dir, job)
             print(f'step {step}/{total} loss={value:.4f}', flush=True)
@@ -947,6 +1096,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
             )
             prune_snapshots(checkpoint_dir, keep, best_step)
 
+    progress.emit('publishing', step=total, phase_step=0, phase_total=1)
     destination = publish_trained(
         models_dir,
         job,
@@ -957,6 +1107,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         text_encoder_2=text_encoder_2,
         alpha=int(config['alpha']),
     )
+    progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     print(f'wrote {destination}', flush=True)
 
 

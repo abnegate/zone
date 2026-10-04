@@ -1,5 +1,5 @@
 import { useTrain } from '../hooks/useTrain';
-import { trainHeadline, trainPercent } from '../utils/trainProgress';
+import { trainHeadline, trainJobPercent } from '../utils/trainProgress';
 import TrainMeter from './TrainMeter';
 import './TrainDock.css';
 
@@ -7,12 +7,12 @@ export default function TrainDock() {
   const { job, dismiss } = useTrain();
   if (!job) return null;
 
-  const percent = trainPercent(job.step, job.total);
+  const percent = trainJobPercent(job);
   const running = job.status === 'running';
-  const title = trainHeadline(job.status, job.name);
+  const title = trainHeadline(job.status, job.name, job.method);
 
   return (
-    <aside className="train-dock" aria-label="LoRA training" title={title}>
+    <aside className="train-dock" aria-label="Training" title={title}>
       <header className="train-dock-header">
         <h2>{title}</h2>
         {!running && (

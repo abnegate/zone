@@ -402,13 +402,14 @@ class ZoneTrainLoRA(io.ComfyNode):
             output_dir = Path(folder_paths.get_output_directory()) / 'loras'
             every = checkpoint_interval(steps, settings)
             sidecar = output_dir / progress_filename(stem)
-            write_progress(sidecar, 0, steps)
+            write_progress(sidecar, 0, steps, phase='training', message='Starting training')
 
             def loss_callback(loss):
                 losses.append(loss)
                 if loss != loss:
                     raise RuntimeError('training loss became NaN')
-                write_progress(sidecar, len(losses), steps)
+                value = float(loss)
+                write_progress(sidecar, len(losses), steps, loss=value)
                 if len(losses) == 1 or len(losses) % 10 == 0:
                     logging.info('Zone LoRA step %s/%s loss=%s', len(losses), steps, f'{loss:.4f}')
                 if every and len(losses) % every == 0 and len(losses) < steps:

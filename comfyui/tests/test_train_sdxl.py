@@ -51,6 +51,40 @@ def write_dataset(job_dir: Path, count: int = 1) -> None:
         (dataset / f'{index:04}.txt').write_text('ohwx person, studio', encoding='utf-8')
 
 
+class ProgressTests(unittest.TestCase):
+    def test_weighted_percent_covers_fine_tune_prep_phases(self) -> None:
+        self.assertEqual(train_sdxl.overall_percent('lora', 'loading', 0, 1), 0)
+        self.assertEqual(train_sdxl.overall_percent('lora', 'loading', 1, 1), 6)
+        self.assertEqual(train_sdxl.overall_percent('lora', 'encoding', 4, 8), 10)
+        self.assertEqual(train_sdxl.overall_percent('lora', 'training', 50, 100), 54)
+        self.assertEqual(train_sdxl.overall_percent('lora', 'publishing', 1, 1), 100)
+        self.assertEqual(train_sdxl.overall_percent('finetune', 'class_images', 0, 10), 4)
+        self.assertEqual(train_sdxl.overall_percent('finetune', 'class_images', 5, 10), 10)
+        self.assertEqual(train_sdxl.overall_percent('finetune', 'encoding', 0, 10), 16)
+        self.assertEqual(train_sdxl.overall_percent('finetune', 'training', 0, 8000), 22)
+        self.assertEqual(train_sdxl.overall_percent('finetune', 'training', 4000, 8000), 58)
+        self.assertEqual(train_sdxl.overall_percent('finetune', 'publishing', 1, 1), 100)
+
+    def test_eta_scales_remaining_steps_by_elapsed_time(self) -> None:
+        self.assertEqual(train_sdxl.eta_seconds(50, 10, 20), 50)
+        self.assertIsNone(train_sdxl.eta_seconds(5, 0, 20))
+        self.assertIsNone(train_sdxl.eta_seconds(5, 20, 20))
+
+    def test_emit_writes_phase_message_percent_and_keeps_step_zero_during_prep(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            progress = train_sdxl.Progress(job_dir, 'finetune', 8000)
+            progress.emit('class_images', phase_step=12, phase_total=2000)
+            payload = json.loads((job_dir / 'progress.json').read_text(encoding='utf-8'))
+            self.assertEqual(payload['step'], 0)
+            self.assertEqual(payload['total'], 8000)
+            self.assertEqual(payload['phase'], 'class_images')
+            self.assertEqual(payload['message'], 'Generating class image 12 of 2000')
+            self.assertEqual(payload['percent'], 4)
+            self.assertEqual(payload['phase_step'], 12)
+            self.assertEqual(payload['phase_total'], 2000)
+
+
 class StepsForTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = train_sdxl.load_config()
@@ -211,6 +245,8 @@ class StubOnceTests(unittest.TestCase):
             progress = json.loads((job_dir / 'progress.json').read_text(encoding='utf-8'))
             self.assertEqual(progress['step'], progress['total'])
             self.assertEqual(progress['total'], 500)
+            self.assertEqual(progress['phase'], 'publishing')
+            self.assertEqual(progress['percent'], 100)
             weight = models / 'loras' / 'jerry.safetensors'
             self.assertTrue(weight.is_file())
             sidecar = json.loads((models / 'loras' / 'jerry.safetensors.zone.json').read_text())

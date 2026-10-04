@@ -8,6 +8,7 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--ui-space-2);
   font-size: var(--ui-text-xs);
   color: var(--ui-text-secondary);

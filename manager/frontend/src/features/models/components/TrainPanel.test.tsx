@@ -830,6 +830,7 @@ describe('TrainPanel', () => {
     expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
     expect(screen.getByText(/~100–200 MB adapter/)).toBeInTheDocument();
     expect(screen.getByText(/1024 buckets, rank 64/)).toBeInTheDocument();
+    expect(screen.getByText(/20–200 unique stills/)).toBeInTheDocument();
     expect(screen.getByLabelText('Video')).toBeInTheDocument();
     expect(screen.queryByLabelText(/Reference image/)).toBeNull();
 
@@ -868,6 +869,8 @@ describe('TrainPanel', () => {
     expect(screen.getByText(/~7 GB checkpoint/)).toBeInTheDocument();
     expect(screen.getByText(/full UNet \+ CLIP-L/)).toBeInTheDocument();
     expect(screen.getByText(/resumes after a refresh or restart/)).toBeInTheDocument();
+    expect(screen.getAllByText(/200 unique stills or 20 clips/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/train a LoRA first/)).toBeInTheDocument();
 
     fillIdentity();
     await addTargets(file('portrait.png', 'portrait'));

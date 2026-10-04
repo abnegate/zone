@@ -63,10 +63,48 @@ impl Default for Run {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrainProgress {
     pub step: u32,
     pub total: u32,
+    pub phase: Option<String>,
+    pub message: Option<String>,
+    pub percent: Option<u8>,
+    pub loss: Option<f32>,
+    pub eta_seconds: Option<u64>,
+}
+
+impl TrainProgress {
+    pub fn new(step: u32, total: u32) -> Self {
+        Self {
+            step: if total == 0 { 0 } else { step.min(total) },
+            total,
+            ..Self::default()
+        }
+    }
+
+    pub fn phase(mut self, phase: impl Into<String>, message: impl Into<String>) -> Self {
+        self.phase = Some(phase.into());
+        self.message = Some(message.into());
+        self
+    }
+
+    pub fn percent(mut self, percent: u8) -> Self {
+        self.percent = Some(percent.min(100));
+        self
+    }
+
+    pub fn loss(mut self, loss: f32) -> Self {
+        if loss.is_finite() {
+            self.loss = Some(loss);
+        }
+        self
+    }
+
+    pub fn eta_seconds(mut self, seconds: u64) -> Self {
+        self.eta_seconds = Some(seconds);
+        self
+    }
 }
 
 pub fn progress_filename(artifact: &str) -> String {
@@ -75,15 +113,41 @@ pub fn progress_filename(artifact: &str) -> String {
 
 pub fn parse_progress(bytes: &[u8]) -> Option<TrainProgress> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
-    let step = u32::try_from(value.get("step")?.as_u64()?).ok()?;
-    let total = u32::try_from(value.get("total")?.as_u64()?).ok()?;
+    let step = u32::try_from(json_u64(&value, "step")?).ok()?;
+    let total = u32::try_from(json_u64(&value, "total")?).ok()?;
     if total == 0 {
         return None;
     }
     Some(TrainProgress {
         step: step.min(total),
         total,
+        phase: json_string(&value, "phase"),
+        message: json_string(&value, "message"),
+        percent: json_u64(&value, "percent")
+            .map(|value| u8::try_from(value.min(100)).unwrap_or(100)),
+        loss: value
+            .get("loss")
+            .and_then(Value::as_f64)
+            .map(|value| value as f32)
+            .filter(|value| value.is_finite()),
+        eta_seconds: json_u64(&value, "eta_seconds").filter(|seconds| *seconds > 0),
     })
+}
+
+fn json_u64(value: &Value, key: &str) -> Option<u64> {
+    let item = value.get(key)?;
+    item.as_u64()
+        .or_else(|| item.as_i64().and_then(|value| u64::try_from(value).ok()))
+        .or_else(|| item.as_f64().map(|value| value.round() as u64))
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,10 +291,7 @@ async fn execute(
     let client = client(config)?;
     let steps = settings.steps(image_count);
     if let Some(progress) = progress {
-        let _ = progress.send(TrainProgress {
-            step: 0,
-            total: steps,
-        });
+        let _ = progress.send(TrainProgress::new(0, steps).phase("training", "Starting training"));
     }
     let manifest = stage_or_upload(&client, config, model, work, run).await?;
     let graph = train_graph(
@@ -2055,19 +2116,27 @@ mod tests {
     #[test]
     fn a_progress_sidecar_names_the_step() {
         let progress = parse_progress(br#"{"step":12,"total":400}"#).unwrap();
-        assert_eq!(
-            progress,
-            TrainProgress {
-                step: 12,
-                total: 400
-            }
-        );
+        assert_eq!(progress, TrainProgress::new(12, 400));
         assert!(parse_progress(br#"{"step":1,"total":0}"#).is_none());
         assert!(parse_progress(b"not json").is_none());
         assert_eq!(
             parse_progress(br#"{"step":500,"total":400}"#).unwrap().step,
             400
         );
+        let detailed = parse_progress(
+            br#"{"step":0,"total":8000,"phase":"class_images","message":"Generating class image 12 of 2000","percent":8,"eta_seconds":14400,"loss":0.21}"#,
+        )
+        .unwrap();
+        assert_eq!(detailed.step, 0);
+        assert_eq!(detailed.total, 8000);
+        assert_eq!(detailed.phase.as_deref(), Some("class_images"));
+        assert_eq!(
+            detailed.message.as_deref(),
+            Some("Generating class image 12 of 2000")
+        );
+        assert_eq!(detailed.percent, Some(8));
+        assert_eq!(detailed.eta_seconds, Some(14400));
+        assert_eq!(detailed.loss, Some(0.21));
         assert_eq!(
             progress_filename("zone-lora-abcd"),
             "zone-lora-abcd-progress.json"
@@ -2109,13 +2178,7 @@ mod tests {
         .unwrap();
         drop(tx);
         let update = rx.recv().await.expect("sidecar progress");
-        assert_eq!(
-            update,
-            TrainProgress {
-                step: 12,
-                total: 400
-            }
-        );
+        assert_eq!(update, TrainProgress::new(12, 400));
     }
 
     struct RunningThenDone(std::sync::atomic::AtomicUsize, Uuid);

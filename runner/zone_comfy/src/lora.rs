@@ -438,6 +438,15 @@ async fn train_with_pipeline(
     let edit = matches!(&model, TrainingModel::QwenEdit { .. });
     let trigger = request.trigger.as_deref().unwrap_or_default().trim();
     let person = request.subject == TrainSubject::Person;
+    if let Some(progress) = &progress {
+        let total = if person {
+            host_train::steps_for(request.images.len())
+        } else {
+            crate::train::packaged_config()?.steps(request.images.len().max(1))
+        };
+        let _ =
+            progress.send(TrainProgress::new(0, total).phase("screening", "Screening the dataset"));
+    }
     let mut decoded = request
         .images
         .iter()
@@ -516,6 +525,15 @@ async fn train_with_pipeline(
             image.text = image.text.trim().to_string();
         }
     } else {
+        if let Some(progress) = &progress {
+            let total = if person {
+                host_train::steps_for(survivors.len())
+            } else {
+                crate::train::packaged_config()?.steps(survivors.len())
+            };
+            let _ = progress
+                .send(TrainProgress::new(0, total).phase("captioning", "Captioning the dataset"));
+        }
         let mut drafts = survivors
             .iter()
             .map(|image| {
@@ -548,7 +566,7 @@ async fn train_with_pipeline(
     }
     if !person && let Some(progress) = &progress {
         let total = crate::train::packaged_config()?.steps(survivors.len());
-        let _ = progress.send(TrainProgress { step: 0, total });
+        let _ = progress.send(TrainProgress::new(0, total).phase("training", "Starting training"));
     }
     let mut attempt = Attempt::create(&config.models_dir)?;
     let loras = ensure_child_directory(&config.models_dir, "loras")?;
@@ -936,6 +954,14 @@ async fn publish_host_person(
     let dir = host_train::job_dir(&config.models_dir, job.id);
     host_train::write_job(&dir, &job)?;
     host_train::stage_dataset(&attempt.root, &dir)?;
+    host_train::write_queued_progress(&dir, job.image_count)?;
+    if let Some(progress) = &progress {
+        let _ = progress.send(
+            TrainProgress::new(0, host_train::steps_for(job.image_count))
+                .phase("queued", "Waiting for the host trainer")
+                .percent(0),
+        );
+    }
     let finished = host_train::wait(&dir, progress).await?;
     let directory = match request.method {
         TrainMethod::Finetune => "checkpoints",

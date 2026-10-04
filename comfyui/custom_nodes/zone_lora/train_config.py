@@ -20,12 +20,33 @@ def progress_filename(stem: str) -> str:
     return f'{stem}-progress.json'
 
 
-def write_progress(path: Path, step: int, total: int) -> None:
+def write_progress(
+    path: Path,
+    step: int,
+    total: int,
+    *,
+    phase: str = 'training',
+    message: str | None = None,
+    loss: float | None = None,
+) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({'step': int(step), 'total': int(total)}, separators=(',', ':'))
+    step = int(step)
+    total = int(total)
+    percent = 0 if total <= 0 else min(100, round(100 * step / total))
+    payload: dict[str, Any] = {
+        'step': step,
+        'total': total,
+        'phase': phase,
+        'message': message
+        or ('Starting training' if step == 0 else f'Training step {step} of {total}'),
+        'percent': percent,
+    }
+    if loss is not None and loss == loss:
+        payload['loss'] = float(loss)
+    encoded = json.dumps(payload, separators=(',', ':'))
     temporary = destination.with_name(destination.name + '.tmp')
-    temporary.write_text(payload)
+    temporary.write_text(encoded)
     temporary.replace(destination)
 
 
