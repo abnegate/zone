@@ -29,6 +29,8 @@ pub struct HostJob {
     pub id: Uuid,
     pub name: String,
     pub method: String,
+    #[serde(default)]
+    pub subject: String,
     pub trigger: String,
     pub checkpoint: String,
     pub status: HostStatus,
@@ -70,6 +72,7 @@ impl HostJob {
             id: Uuid::new_v4(),
             name: name.to_string(),
             method: method.to_string(),
+            subject: String::new(),
             trigger: trigger.to_string(),
             checkpoint: checkpoint.to_string(),
             status: HostStatus::Queued,
@@ -240,6 +243,40 @@ pub fn write_queued_video_progress(dir: &Path, window_count: usize) -> Result<()
             .phase("queued", "Waiting for the host trainer")
             .percent(0),
     )
+}
+
+pub fn language_steps_for(count: usize) -> u32 {
+    (count as u32).saturating_mul(1).clamp(200, 1000)
+}
+
+pub fn write_queued_language_progress(dir: &Path, count: usize) -> Result<(), TrainError> {
+    write_progress(
+        dir,
+        &TrainProgress::new(0, language_steps_for(count))
+            .phase("queued", "Waiting for the host trainer")
+            .percent(0),
+    )
+}
+
+/// Copy staged `data/` and `targets/` into the host job directories.
+pub fn stage_language(attempt: &Path, job: &Path) -> Result<(), TrainError> {
+    copy_flat(&attempt.join("data"), &job.join("data"))?;
+    let targets = attempt.join("targets");
+    if targets.is_dir() {
+        copy_flat(&targets, &job.join("dataset"))?;
+    }
+    Ok(())
+}
+
+fn copy_flat(source: &Path, destination: &Path) -> Result<(), TrainError> {
+    fs::create_dir_all(destination).map_err(|error| TrainError::Failed(error.to_string()))?;
+    for entry in fs::read_dir(source).map_err(|error| TrainError::Failed(error.to_string()))? {
+        let entry = entry.map_err(|error| TrainError::Failed(error.to_string()))?;
+        let name = entry.file_name();
+        fs::copy(entry.path(), destination.join(name))
+            .map_err(|error| TrainError::Failed(error.to_string()))?;
+    }
+    Ok(())
 }
 
 pub fn stage_clips(attempt: &Path, job: &Path) -> Result<(), TrainError> {
@@ -456,6 +493,61 @@ mod tests {
         assert_eq!(video_steps_for(8), 160);
         assert_eq!(video_steps_for(100), 2000);
         assert_eq!(video_steps_for(200), 2000);
+    }
+
+    #[test]
+    fn language_step_budget_clamps_to_the_chat_range() {
+        assert_eq!(language_steps_for(1), 200);
+        assert_eq!(language_steps_for(200), 200);
+        assert_eq!(language_steps_for(1000), 1000);
+        assert_eq!(language_steps_for(5000), 1000);
+    }
+
+    #[test]
+    fn host_job_without_subject_deserializes() {
+        let job = HostJob::create("yvonne", "finetune", "ohwx", "base.safetensors");
+        let mut value = serde_json::to_value(&job).unwrap();
+        value.as_object_mut().unwrap().remove("subject");
+        let loaded: HostJob = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.subject, "");
+        assert_eq!(loaded.name, "yvonne");
+        assert_eq!(loaded.method, "finetune");
+    }
+
+    #[test]
+    fn language_host_job_round_trips_subject() {
+        let mut job = HostJob::create("support-bot", "lora", "", "qwen2.5:7b");
+        job.subject = "language".into();
+        job.recipe_id = "chat".into();
+        job.filename = Some("support-bot".into());
+        let encoded = serde_json::to_vec(&job).unwrap();
+        let loaded: HostJob = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(loaded.subject, "language");
+        assert_eq!(loaded.recipe_id, "chat");
+        assert_eq!(loaded.checkpoint, "qwen2.5:7b");
+        assert_eq!(loaded.filename.as_deref(), Some("support-bot"));
+        assert_eq!(loaded.trigger, "");
+        assert_eq!(loaded.method, "lora");
+    }
+
+    #[test]
+    fn stage_language_copies_train_jsonl() {
+        let root = tempfile::tempdir().unwrap();
+        let attempt = root.path().join("attempt");
+        fs::create_dir_all(attempt.join("data")).unwrap();
+        fs::write(attempt.join("data/train.jsonl"), b"{\"text\":\"hi\"}\n").unwrap();
+        fs::write(attempt.join("data/format.json"), b"{\"mask_prompt\":false}").unwrap();
+        let job = root.path().join("job");
+        stage_language(&attempt, &job).unwrap();
+        assert_eq!(
+            fs::read(job.join("data/train.jsonl")).unwrap(),
+            b"{\"text\":\"hi\"}\n"
+        );
+        assert_eq!(
+            fs::read(job.join("data/format.json")).unwrap(),
+            b"{\"mask_prompt\":false}"
+        );
+        assert!(!job.join("dataset").exists());
     }
 
     #[test]
