@@ -18,6 +18,8 @@ export const discordSource: SourceDefinition = {
     server_id: '',
   }),
 
+  fromConfig: () => ({}),
+
   getDefaultName: () => 'Discord',
 
   getFieldIds: () => [],

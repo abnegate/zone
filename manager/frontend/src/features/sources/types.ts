@@ -126,6 +126,7 @@ export interface UpdateSourceRequest {
   credentials?: string;
   description?: string;
   is_active?: boolean;
+  url?: string;
 }
 
 export interface SourceType_Info {

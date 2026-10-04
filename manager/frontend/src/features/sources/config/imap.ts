@@ -69,6 +69,17 @@ export const imapSource: SourceDefinition = {
     folder: (state.imapFolder as string) || 'INBOX',
   }),
 
+  fromConfig: (config) => {
+    const imap = config as IMAPConfig;
+    return {
+      imapHost: imap.host,
+      imapPort: imap.port ?? 993,
+      imapUsername: imap.username,
+      imapUseSsl: imap.use_ssl ?? true,
+      imapFolder: imap.folder || 'INBOX',
+    };
+  },
+
   getDefaultName: (state) => `${state.imapUsername}@${state.imapHost}`,
 
   getFieldIds: () => ['imapHost', 'imapPort', 'imapUsername', 'imapUseSsl', 'imapFolder'],

@@ -28,6 +28,13 @@ export const icalSource: SourceDefinition = {
     url: state.icalUrl as string,
   }),
 
+  fromConfig: (config) => {
+    const ical = config as ICalConfig;
+    return {
+      icalUrl: ical.url,
+    };
+  },
+
   getDefaultName: (state) => {
     try {
       return new URL(state.icalUrl as string).hostname;

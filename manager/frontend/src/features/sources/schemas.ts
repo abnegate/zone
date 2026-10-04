@@ -167,6 +167,7 @@ export const UpdateSourceRequestSchema = z.object({
   credentials: z.string().optional(),
   description: z.string().optional(),
   is_active: z.boolean().optional(),
+  url: z.string().optional(),
 });
 
 export const SourcesResponseSchema = z.object({

@@ -27,6 +27,8 @@ export function useSource(id: string | null): UseSourceResult {
 
   const loadSource = useCallback(async () => {
     if (!id || !workspaceId) {
+      setSource(null);
+      setError(null);
       setLoading(false);
       return;
     }

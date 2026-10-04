@@ -18,6 +18,8 @@ export const slackSource: SourceDefinition = {
     workspace_id: '',
   }),
 
+  fromConfig: () => ({}),
+
   getDefaultName: () => 'Slack',
 
   getFieldIds: () => [],

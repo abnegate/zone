@@ -8,7 +8,7 @@
  * 3. Import and add it to the `sources` array below
  */
 
-import type { SourceCategory, SourceType } from '../types';
+import type { SourceCategory, SourceConfig, SourceType } from '../types';
 import { discordSource } from './discord';
 import { filesystemSource } from './filesystem';
 import { githubSource } from './github';
@@ -83,4 +83,16 @@ export const initializeFormState = (sourceId: SourceType): Record<string, unknow
   }
 
   return state;
+};
+
+export const formStateFromConfig = (
+  type: SourceType,
+  config: SourceConfig
+): Record<string, unknown> => {
+  const source = getSourceById(type);
+  if (!source) return {};
+  return {
+    ...initializeFormState(type),
+    ...source.fromConfig(config),
+  };
 };

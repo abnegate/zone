@@ -388,6 +388,16 @@ describe('sources page layout', () => {
     expect(rule(css, '.source-description')).toContain('height: var(--ui-space-4)');
     expect(rule(css, '.source-url')).toContain('line-height: var(--ui-space-4)');
   });
+
+  it('makes source rows clickable and lays the editor out as a 48px header and footer', () => {
+    expect(rule(css, '.sources-table tbody .source-card')).toContain('cursor: pointer');
+    expect(rule(css, '.source-details-header')).toContain('height: var(--ui-header-height)');
+    expect(rule(css, '.source-details-header')).toContain('padding: 0 var(--ui-gutter)');
+    expect(rule(css, '.source-details-body')).toContain(
+      'padding: var(--ui-panel-padding) var(--ui-gutter)'
+    );
+    expect(rule(css, '.source-details-actions')).toContain('height: var(--ui-header-height)');
+  });
 });
 
 describe('settings page layout', () => {

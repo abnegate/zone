@@ -1,14 +1,20 @@
 import { Badge, Button, EmptyState } from '@zone/ui';
 import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { CreateSourceWizard } from '../components/CreateSourceWizard';
+import { SourceDetail } from '../components/SourceDetail';
 import { getSourceById, getSourceLabel } from '../config';
-import { useSources } from '../hooks';
+import { useSource, useSources } from '../hooks';
 import type { Source } from '../types';
 import './SourcesPage.css';
 
 const SKELETON_ROWS = [1, 2, 3];
+
+function stopRowActivation(event: { stopPropagation: () => void }) {
+  event.stopPropagation();
+}
 
 function SourceStatusBadge({ source }: { source: Source }) {
   if (!source.is_active) {
@@ -91,6 +97,8 @@ function SourceSkeleton() {
 }
 
 export default function SourcesPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const sourceParam = searchParams.get('source') || null;
   const {
     sources,
     loading,
@@ -101,9 +109,36 @@ export default function SourcesPage() {
     verifySource,
     refresh,
   } = useSources();
+  const {
+    source: selected,
+    loading: sourceLoading,
+    error: sourceError,
+    updateSource: updateSelected,
+    verifySource: verifySelected,
+  } = useSource(sourceParam);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [verifying, setVerifying] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
+
+  const showEditor =
+    Boolean(sourceParam) && selected?.id === sourceParam && !sourceError && !sourceLoading;
+  const showSpinner = Boolean(sourceParam) && !showEditor && !sourceError;
+  const showAddSource = !showSpinner && !showEditor;
+  const displayError = error || operationError || (sourceParam && !showEditor ? sourceError : null);
+  const unloaded = error !== null && sources.length === 0;
+
+  const openSource = (id: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('source', id);
+    setSearchParams(next);
+  };
+
+  const closeSource = () => {
+    if (!searchParams.has('source')) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete('source');
+    setSearchParams(next, { replace: true });
+  };
 
   const handleVerify = async (sourceId: string) => {
     setVerifying(sourceId);
@@ -140,19 +175,18 @@ export default function SourcesPage() {
     }
   };
 
-  const displayError = error || operationError;
-  const unloaded = error !== null && sources.length === 0;
-
   return (
     <div className="page page--workspace sources-page">
       <PageBar
         title="Sources"
         subtitle="Connect repositories, calendars, email, and other data sources"
       >
-        <Button onClick={() => setShowCreateModal(true)}>
-          <PlusIcon />
-          Add source
-        </Button>
+        {showAddSource ? (
+          <Button onClick={() => setShowCreateModal(true)}>
+            <PlusIcon />
+            Add source
+          </Button>
+        ) : undefined}
       </PageBar>
 
       <div className="page-body sources-body">
@@ -167,7 +201,21 @@ export default function SourcesPage() {
           </div>
         )}
 
-        {loading ? (
+        {showSpinner ? (
+          <div className="source-details-loading" role="status">
+            Loading source
+          </div>
+        ) : showEditor && selected ? (
+          <SourceDetail
+            key={selected.id}
+            source={selected}
+            onClose={closeSource}
+            onSaved={refresh}
+            updateSource={updateSelected}
+            verifySource={verifySelected}
+            deleteSource={deleteSource}
+          />
+        ) : loading ? (
           <SourceSkeleton />
         ) : unloaded ? null : sources.length === 0 ? (
           <EmptyState
@@ -202,6 +250,13 @@ export default function SourcesPage() {
                     <tr
                       key={source.id}
                       className={`source-card ${source.is_active ? '' : 'source-inactive'}`.trim()}
+                      tabIndex={0}
+                      onClick={() => openSource(source.id)}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' && event.key !== ' ') return;
+                        event.preventDefault();
+                        openSource(source.id);
+                      }}
                     >
                       <td>
                         <div className="source-name-cell">
@@ -238,6 +293,8 @@ export default function SourcesPage() {
                           href={source.url}
                           target="_blank"
                           rel="noopener noreferrer"
+                          onClick={stopRowActivation}
+                          onKeyDown={stopRowActivation}
                         >
                           {source.url}
                         </a>
@@ -250,11 +307,19 @@ export default function SourcesPage() {
                         </span>
                       </td>
                       <td>
-                        <div className="source-actions">
+                        <div
+                          className="source-actions"
+                          role="group"
+                          onClick={stopRowActivation}
+                          onKeyDown={stopRowActivation}
+                        >
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => handleVerify(source.id)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleVerify(source.id);
+                            }}
                             loading={verifying === source.id}
                           >
                             {verifying === source.id ? 'Verifying...' : 'Verify'}
@@ -262,7 +327,10 @@ export default function SourcesPage() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => handleToggleActive(source)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleToggleActive(source);
+                            }}
                           >
                             {source.is_active ? 'Disable' : 'Enable'}
                           </Button>
@@ -270,7 +338,10 @@ export default function SourcesPage() {
                             className="source-delete"
                             variant="ghost"
                             size="sm"
-                            onClick={() => handleDelete(source.id)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleDelete(source.id);
+                            }}
                           >
                             Delete
                           </Button>

@@ -33,6 +33,14 @@ export const textSource: SourceDefinition = {
     label: (state.textLabel as string) || undefined,
   }),
 
+  fromConfig: (config) => {
+    const text = config as TextConfig;
+    return {
+      textContent: text.content,
+      textLabel: text.label ?? '',
+    };
+  },
+
   getDefaultName: (state) => (state.textLabel as string) || 'Text content',
 
   getFieldIds: () => ['textLabel', 'textContent'],
