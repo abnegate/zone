@@ -75,6 +75,9 @@ pub struct Patch<'a> {
     pub priority: Option<i32>,
     pub project_ids: Option<&'a [Uuid]>,
     pub require_plan_approval: Option<bool>,
+    pub is_agentic: Option<bool>,
+    pub source_id: Option<Uuid>,
+    pub model_name: Option<&'a str>,
 }
 
 /// Task row from database
@@ -627,6 +630,9 @@ pub async fn update_task(
         priority,
         project_ids,
         require_plan_approval: None,
+        is_agentic: None,
+        source_id: None,
+        model_name: None,
     };
     let mut transaction = pool.begin().await?;
     let workspace_id: Option<Uuid> =
@@ -656,6 +662,11 @@ pub async fn update_task_authorized(
     let Some(workspace_id) = lock_task_writer(&mut transaction, input.id, user_id).await? else {
         return Ok(Mutation::NotFound);
     };
+    if let Some(source_id) = input.source_id
+        && !lock_source(&mut transaction, workspace_id, source_id).await?
+    {
+        return Err(MutationError::Source);
+    }
     if let Some(project_ids) = input.project_ids {
         lock_projects(&mut transaction, workspace_id, project_ids).await?;
     }
@@ -702,6 +713,9 @@ pub(crate) async fn update_task_in(
             status = COALESCE($5, status),
             priority = COALESCE($6, priority),
             require_plan_approval = COALESCE($7, require_plan_approval),
+            is_agentic = COALESCE($8, is_agentic),
+            source_id = COALESCE($9, source_id),
+            model_name = COALESCE($10, model_name),
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, title, description, acceptance_criteria, status, priority,
@@ -715,7 +729,10 @@ pub(crate) async fn update_task_in(
         input.acceptance_criteria,
         input.status,
         input.priority,
-        input.require_plan_approval
+        input.require_plan_approval,
+        input.is_agentic,
+        input.source_id,
+        input.model_name
     )
     .fetch_optional(&mut *connection)
     .await?;

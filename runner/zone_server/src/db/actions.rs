@@ -1925,6 +1925,9 @@ mod tests {
                 priority: None,
                 project_ids: None,
                 require_plan_approval: None,
+                is_agentic: None,
+                source_id: None,
+                model_name: None,
             },
         )
         .await;

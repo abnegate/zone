@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE tasks\n        SET title = COALESCE($2, title),\n            description = COALESCE($3, description),\n            acceptance_criteria = COALESCE($4, acceptance_criteria),\n            status = COALESCE($5, status),\n            priority = COALESCE($6, priority),\n            require_plan_approval = COALESCE($7, require_plan_approval),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by\n        ",
+  "query": "\n        UPDATE tasks\n        SET title = COALESCE($2, title),\n            description = COALESCE($3, description),\n            acceptance_criteria = COALESCE($4, acceptance_criteria),\n            status = COALESCE($5, status),\n            priority = COALESCE($6, priority),\n            require_plan_approval = COALESCE($7, require_plan_approval),\n            is_agentic = COALESCE($8, is_agentic),\n            source_id = COALESCE($9, source_id),\n            model_name = COALESCE($10, model_name),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by\n        ",
   "describe": {
     "columns": [
       {
@@ -287,7 +287,10 @@
         "Text",
         "Text",
         "Int4",
-        "Bool"
+        "Bool",
+        "Bool",
+        "Uuid",
+        "Text"
       ]
     },
     "nullable": [
@@ -318,5 +321,5 @@
       true
     ]
   },
-  "hash": "393ba8ba6373538eeca7a9f73d418d89190cf8b3ee3b91a66dcd617cbd14e22d"
+  "hash": "d1f54ba86c3aa24fcbdc4c0a8fc08addb8493840204a3d309d5dae0816270dd3"
 }
