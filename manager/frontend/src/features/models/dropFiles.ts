@@ -1,5 +1,6 @@
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp']);
 const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'm4v', 'mkv']);
+const DOCUMENT_EXTENSIONS = new Set(['jsonl', 'json', 'txt', 'md']);
 
 type FileSystemFileEntryLike = {
   isFile: boolean;
@@ -41,10 +42,20 @@ export function isVideoFile(file: File): boolean {
   return VIDEO_EXTENSIONS.has(fileExtension(file.name));
 }
 
+export function isDocumentFile(file: File): boolean {
+  if (DOCUMENT_EXTENSIONS.has(fileExtension(file.name))) return true;
+  return (
+    file.type === 'application/json' || file.type === 'text/plain' || file.type === 'text/markdown'
+  );
+}
+
 export function accepts(accept: string, file: File): boolean {
   return accept.split(',').some((pattern) => {
     const wanted = pattern.trim();
     if (!wanted) return false;
+    if (wanted.startsWith('.')) {
+      return fileExtension(file.name) === wanted.slice(1).toLowerCase();
+    }
     if (wanted.endsWith('/*')) {
       const prefix = wanted.slice(0, -1);
       if (file.type.startsWith(prefix)) return true;
@@ -59,6 +70,9 @@ export function accepts(accept: string, file: File): boolean {
     if (wanted === 'image/png') return extension === 'png';
     if (wanted === 'image/jpeg') return extension === 'jpg' || extension === 'jpeg';
     if (wanted === 'image/webp') return extension === 'webp';
+    if (wanted === 'application/json') return extension === 'json' || extension === 'jsonl';
+    if (wanted === 'text/plain') return extension === 'txt';
+    if (wanted === 'text/markdown') return extension === 'md';
     return false;
   });
 }

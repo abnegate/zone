@@ -5,7 +5,7 @@ export const FINE_TUNE_READY_STILLS = 500;
 export const FINE_TUNE_READY_CLIPS = 50;
 
 export type TrainMethodKind = 'lora' | 'finetune' | 'pivotal' | 'video';
-export type TrainSubjectKind = 'person' | 'other';
+export type TrainSubjectKind = 'person' | 'other' | 'language';
 
 export type TrainProgressJob = {
   status?: string;
@@ -51,7 +51,8 @@ export function trainJobPercent(job: TrainProgressJob): number | null {
 export function trainHeadline(
   status?: string,
   name?: string | null,
-  method?: string | null
+  method?: string | null,
+  subject?: string | null
 ): string {
   const verb =
     method === 'finetune'
@@ -60,7 +61,9 @@ export function trainHeadline(
         ? 'Pivotal training'
         : method === 'video'
           ? 'Training video'
-          : 'Training';
+          : subject === 'language'
+            ? 'Training language LoRA'
+            : 'Training';
   const suffix = name?.trim() ? ` ${name.trim()}` : '';
   if (status === 'succeeded') return `${verb} finished${suffix}`;
   if (status === 'failed') return `${verb} failed${suffix}`;

@@ -9,7 +9,30 @@ function fluxQwenBases() {
 }
 
 function peopleReadyBases() {
-  return [...fluxQwenBases(), { id: 'sdxl-people', label: 'SDXL people', edit: false }];
+  return [
+    ...fluxQwenBases(),
+    { id: 'sdxl-people', label: 'SDXL people', edit: false, finetune: true },
+  ];
+}
+
+function languageBases() {
+  return [
+    ...fluxQwenBases(),
+    {
+      id: 'qwen2.5:32b',
+      label: 'qwen2.5 32B',
+      edit: false,
+      subject: 'language' as const,
+      finetune: false,
+    },
+    {
+      id: 'llama3.2:1b',
+      label: 'llama3.2 1B',
+      edit: false,
+      subject: 'language' as const,
+      finetune: true,
+    },
+  ];
 }
 
 const mockTrainBases = mock(() => Promise.resolve(fluxQwenBases()));
@@ -1063,5 +1086,99 @@ describe('TrainPanel', () => {
     await selectSubject('Other');
     expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
     expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
+  });
+
+  it('trains a language LoRA from documents without a trigger', async () => {
+    mockTrainBases.mockImplementation(() => Promise.resolve(languageBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await addTargets(file('portrait.png', 'portrait'));
+    expect(screen.getByRole('group', { name: /target pair/i })).toBeInTheDocument();
+
+    await selectSubject('Language');
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('qwen2.5 32B');
+    });
+    expect(screen.getByRole('heading', { name: 'Train a language LoRA' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Method')).toHaveTextContent('Language LoRA');
+    expect(screen.getByText(/installed chat model/)).toBeInTheDocument();
+    expect(screen.getByText(/under 8B/)).toBeInTheDocument();
+    expect(screen.getByText(/Large bases stay language LoRA/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Trigger word')).toBeNull();
+    expect(screen.queryByLabelText('Video')).toBeNull();
+    expect(screen.queryByLabelText('Mirror half the frames of each second')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Auto-caption images' })).toBeNull();
+    expect(screen.queryByRole('group', { name: /target pair/i })).toBeNull();
+    fireEvent.click(screen.getByLabelText('Base'));
+    expect(screen.queryByRole('option', { name: 'FLUX.1 Schnell' })).toBeNull();
+    expect(screen.queryByRole('option', { name: 'Qwen Image Edit' })).toBeNull();
+    expect(screen.queryByRole('option', { name: 'SDXL people' })).toBeNull();
+    fireEvent.click(screen.getByRole('option', { name: 'qwen2.5 32B' }));
+
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'notes' } });
+    const dump = new File(['{"text":"hello"}\n'], 'notes.jsonl', { type: 'application/json' });
+    fireEvent.change(screen.getByLabelText('Documents'), { target: { files: [dump] } });
+    await waitFor(() => expect(screen.getByText('notes.jsonl')).toBeInTheDocument());
+    expect(screen.getByLabelText('Training documents')).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /target pair/i })).toBeNull();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Train' })).toBeEnabled());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    const request = mockTrain.mock.calls[0]?.[0];
+    expect(request).toMatchObject({
+      name: 'notes',
+      base: 'qwen2.5:32b',
+      subject: 'language',
+      method: 'lora',
+    });
+    expect(request?.trigger).toBeUndefined();
+    expect(request?.images).toHaveLength(1);
+    expect(request?.images[0]).toMatchObject({ filename: 'notes.jsonl', caption: '' });
+    expect(await blobText(request?.images[0]?.blob)).toBe('{"text":"hello"}\n');
+  });
+
+  it('disables Fine-tune on a large chat base and enables it on a 1B', async () => {
+    mockTrainBases.mockImplementation(() => Promise.resolve(languageBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Language');
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('qwen2.5 32B');
+    });
+
+    fireEvent.click(screen.getByLabelText('Method'));
+    const disabledFineTune = await screen.findByRole('option', { name: 'Fine-tune' });
+    expect(disabledFineTune).toHaveAttribute('data-disabled');
+    expect(screen.getByRole('option', { name: 'Pivotal' })).toHaveAttribute('data-disabled');
+    expect(screen.getByRole('option', { name: 'Video' })).toHaveAttribute('data-disabled');
+    fireEvent.click(disabledFineTune);
+    expect(screen.getByLabelText('Method')).toHaveTextContent('Language LoRA');
+    fireEvent.click(screen.getByRole('option', { name: 'Language LoRA' }));
+
+    await selectBase('llama3.2 1B');
+    fireEvent.click(screen.getByLabelText('Method'));
+    const enabledFineTune = await screen.findByRole('option', { name: 'Fine-tune' });
+    expect(enabledFineTune).not.toHaveAttribute('data-disabled');
+    fireEvent.click(enabledFineTune);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Method')).toHaveTextContent('Fine-tune');
+    });
+    expect(screen.getByRole('heading', { name: 'Fine-tune a chat model' })).toBeInTheDocument();
+  });
+
+  it('asks to install a chat model when none are listed', async () => {
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Language');
+    expect(screen.getByText('Install a chat model on Ollama before training.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Base')).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'notes' } });
+    fireEvent.change(screen.getByLabelText('Documents'), {
+      target: { files: [new File(['hello'], 'notes.txt', { type: 'text/plain' })] },
+    });
+    await waitFor(() => expect(screen.getByText('notes.txt')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
+    expect(mockTrain).not.toHaveBeenCalled();
   });
 });

@@ -12,7 +12,7 @@ import {
   type TrainResult,
   type TrainScreening,
 } from '../../../api/models';
-import { isImageFile, isVideoFile } from '../dropFiles';
+import { isDocumentFile, isImageFile, isVideoFile } from '../dropFiles';
 import {
   blobFromBase64,
   captionBatches,
@@ -22,23 +22,36 @@ import {
   poolMap,
   prepareImage,
 } from '../trainMedia';
-import { methodAdvice, type TrainMethodKind } from '../utils/trainProgress';
+import { methodAdvice, type TrainMethodKind, type TrainSubjectKind } from '../utils/trainProgress';
 import DropZone from './DropZone';
 import TrainMeter from './TrainMeter';
 import './TrainPanel.css';
 
-type TrainBase = { id: string; label: string; edit: boolean };
-type TrainSubjectKind = 'person' | 'other';
+type TrainBase = {
+  id: string;
+  label: string;
+  edit: boolean;
+  subject?: TrainSubjectKind;
+  finetune?: boolean;
+};
 
 const PEOPLE_BASE = 'sdxl-people';
 const PEOPLE_BUNDLE_HELP =
   'The SDXL people bundle must be downloaded before training a person: ./scripts/setup-comfyui-macos.sh --download-model --bundle image-people';
+const LANGUAGE_HELP = 'Install a chat model on Ollama before training.';
 
 function firstOtherBase(bases: TrainBase[]): string {
-  return bases.find((row) => row.id !== PEOPLE_BASE)?.id ?? '';
+  return bases.find((row) => row.id !== PEOPLE_BASE && row.subject !== 'language')?.id ?? '';
 }
 
-function trainingHeading(method: TrainMethodKind): string {
+function firstLanguageBase(bases: TrainBase[]): string {
+  return bases.find((row) => row.subject === 'language')?.id ?? '';
+}
+
+function trainingHeading(subject: TrainSubjectKind, method: TrainMethodKind): string {
+  if (subject === 'language') {
+    return method === 'finetune' ? 'Fine-tune a chat model' : 'Train a language LoRA';
+  }
   if (method === 'finetune') return 'Fine-tune a person';
   if (method === 'pivotal') return 'Pivotal training';
   if (method === 'video') return 'Train video identity';
@@ -46,6 +59,9 @@ function trainingHeading(method: TrainMethodKind): string {
 }
 
 function trainingHelp(subject: TrainSubjectKind, method: TrainMethodKind, edit: boolean): string {
+  if (subject === 'language') {
+    return 'Drop .jsonl, .json, .txt, or .md files, or a folder, and pick an installed chat model. Fine-tune only small chat bases (~under 8B, llama3.2 1B/3B). Large bases stay language LoRA.';
+  }
   if (subject === 'person' && method === 'finetune') {
     return 'Drop images, clips, or a folder, set a unique trigger word, and fine-tune the SDXL people checkpoint. A run takes days to weeks, writes a ~7 GB checkpoint (full UNet + CLIP-L, prior preservation), and resumes after a refresh or restart. Plan ~20 GB of disk during a run. Fine-tune from about 200 unique stills or 20 clips; 500 stills or 50 clips is the strong set for likeness, hands, and body.';
   }
@@ -86,6 +102,7 @@ type Draft = {
 
 const IMAGE_ACCEPT = 'image/png,image/jpeg,image/webp';
 const MIXED_ACCEPT = `${IMAGE_ACCEPT},video/*`;
+const DOCUMENT_ACCEPT = '.jsonl,.json,.txt,.md,application/json,text/plain,text/markdown';
 
 type Clip = { key: string; name: string; summary: string };
 
@@ -544,8 +561,20 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       setBase(bases.some((row) => row.id === PEOPLE_BASE) ? PEOPLE_BASE : '');
       return;
     }
+    if (subject === 'language') {
+      setBase((current) =>
+        current && bases.some((row) => row.id === current && row.subject === 'language')
+          ? current
+          : firstLanguageBase(bases)
+      );
+      return;
+    }
     setBase((current) => {
-      if (current && current !== PEOPLE_BASE && bases.some((row) => row.id === current)) {
+      if (
+        current &&
+        current !== PEOPLE_BASE &&
+        bases.some((row) => row.id === current && row.subject !== 'language')
+      ) {
         return current;
       }
       return firstOtherBase(bases);
@@ -605,15 +634,25 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const visibleBases =
     subject === 'person'
       ? bases.filter((row) => row.id === PEOPLE_BASE)
-      : bases.filter((row) => row.id !== PEOPLE_BASE);
+      : subject === 'language'
+        ? bases.filter((row) => row.subject === 'language')
+        : bases.filter((row) => row.id !== PEOPLE_BASE && row.subject !== 'language');
   const peopleMissing = subject === 'person' && visibleBases.length === 0;
+  const languageMissing = subject === 'language' && visibleBases.length === 0;
   const selected = visibleBases.find((row) => row.id === base);
+  const language = subject === 'language';
   const edit = subject === 'other' && Boolean(selected?.edit);
   const pending = edit ? incomplete(images) : [];
   const ready =
-    Boolean(name.trim() && base && (edit || trigger.trim()) && images.length > 0) &&
+    Boolean(name.trim() && base && images.length > 0) &&
+    (language || edit || Boolean(trigger.trim())) &&
     pending.length === 0 &&
-    !peopleMissing;
+    !peopleMissing &&
+    !languageMissing;
+
+  useEffect(() => {
+    if (method === 'finetune' && !selected?.finetune) setMethod('lora');
+  }, [method, selected]);
 
   const handleTargets = (files: File[]) => {
     if (busy || files.length === 0) return;
@@ -633,6 +672,23 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     if (edit) setFocusRequested(true);
   };
 
+  const handleDocuments = (files: File[]) => {
+    if (busy || files.length === 0) return;
+    const added = files.filter(isDocumentFile).map(
+      (file) =>
+        ({
+          key: nextKey('training-document'),
+          filename: file.name,
+          caption: '',
+          captionRevision: 0,
+          instruction: '',
+          blob: file,
+        }) satisfies Draft
+    );
+    if (added.length === 0) return;
+    setImages((current) => [...current, ...added]);
+  };
+
   const handleReference = (key: string, files: FileList | null) => {
     if (busy || files?.length !== 1) return;
     const [file] = Array.from(files);
@@ -648,6 +704,12 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
 
   const handleSubject = (value: string) => {
     if (busy) return;
+    const leavingLanguage = subject === 'language' && value !== 'language';
+    const enteringLanguage = value === 'language' && subject !== 'language';
+    if (leavingLanguage || enteringLanguage) {
+      setImages([]);
+      setClips([]);
+    }
     if (value === 'person') {
       setSubject('person');
       setBase(bases.some((row) => row.id === PEOPLE_BASE) ? PEOPLE_BASE : '');
@@ -658,6 +720,12 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       }
       return;
     }
+    if (value === 'language') {
+      setSubject('language');
+      setMethod('lora');
+      setBase(firstLanguageBase(bases));
+      return;
+    }
     setSubject('other');
     setMethod('lora');
     setBase(firstOtherBase(bases));
@@ -665,7 +733,12 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
 
   const handleMethod = (value: string) => {
     if (busy) return;
-    if (value === 'finetune' || value === 'pivotal' || value === 'video') {
+    if (value === 'finetune') {
+      if (!selected?.finetune) return;
+      setMethod('finetune');
+      return;
+    }
+    if (value === 'pivotal' || value === 'video') {
       if (subject !== 'person') return;
       setMethod(value);
       return;
@@ -678,6 +751,11 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     if (subject === 'person') {
       if (value !== PEOPLE_BASE) return;
       setBase(PEOPLE_BASE);
+      return;
+    }
+    if (subject === 'language') {
+      if (!visibleBases.some((row) => row.id === value)) return;
+      setBase(value);
       return;
     }
     const nextEdit = Boolean(visibleBases.find((row) => row.id === value)?.edit);
@@ -742,6 +820,10 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   };
 
   const handleDrop = (files: File[]) => {
+    if (language) {
+      handleDocuments(files);
+      return;
+    }
     handleTargets(files);
     if (!edit) void handleVideos(files);
   };
@@ -753,7 +835,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   };
 
   const handleCaption = async () => {
-    if (busy || edit || images.length === 0) return;
+    if (busy || edit || language || images.length === 0) return;
     const requested = images.map(({ key, filename, caption, captionRevision, blob, group }) => ({
       key,
       filename,
@@ -823,21 +905,27 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         {
           name: name.trim(),
           base,
-          trigger: trigger.trim() || undefined,
+          trigger: language ? undefined : trigger.trim() || undefined,
           subject,
           method,
-          images: await Promise.all(
-            images.map(async (image) => ({
-              filename: image.filename,
-              caption: edit ? image.instruction.trim() : image.caption,
-              blob: await prepareImage(image.blob, image.filename),
-              group: image.group,
-              before:
-                edit && image.reference
-                  ? await prepareImage(image.reference.blob, image.reference.filename)
-                  : undefined,
-            }))
-          ),
+          images: language
+            ? images.map((image) => ({
+                filename: image.filename,
+                caption: '',
+                blob: image.blob,
+              }))
+            : await Promise.all(
+                images.map(async (image) => ({
+                  filename: image.filename,
+                  caption: edit ? image.instruction.trim() : image.caption,
+                  blob: await prepareImage(image.blob, image.filename),
+                  group: image.group,
+                  before:
+                    edit && image.reference
+                      ? await prepareImage(image.reference.blob, image.reference.filename)
+                      : undefined,
+                }))
+              ),
         },
         undefined,
         setProgress
@@ -911,7 +999,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
 
   return (
     <section className="card">
-      <h2>{trainingHeading(method)}</h2>
+      <h2>{trainingHeading(subject, method)}</h2>
       <p className="help-text">{trainingHelp(subject, method, edit)}</p>
       {advice && <p className="help-text">{advice}</p>}
       {error && <div className="error-placeholder">{error}</div>}
@@ -943,6 +1031,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             options={[
               { value: 'person', label: 'Person' },
               { value: 'other', label: 'Other' },
+              { value: 'language', label: 'Language' },
             ]}
             disabled={busy}
           />
@@ -951,8 +1040,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             value={method}
             onValueChange={handleMethod}
             options={[
-              { value: 'lora', label: 'LoRA' },
-              { value: 'finetune', label: 'Fine-tune', disabled: subject !== 'person' },
+              { value: 'lora', label: language ? 'Language LoRA' : 'LoRA' },
+              { value: 'finetune', label: 'Fine-tune', disabled: !selected?.finetune },
               { value: 'pivotal', label: 'Pivotal', disabled: subject !== 'person' },
               { value: 'video', label: 'Video', disabled: subject !== 'person' },
             ]}
@@ -969,16 +1058,18 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             }}
             required
           />
-          <Input
-            label="Trigger word"
-            value={trigger}
-            disabled={busy}
-            onChange={(event) => {
-              if (!busy) setTrigger(event.target.value);
-            }}
-            placeholder={edit ? 'optional subject name' : 'required for a unique identity'}
-            required={!edit}
-          />
+          {!language && (
+            <Input
+              label="Trigger word"
+              value={trigger}
+              disabled={busy}
+              onChange={(event) => {
+                if (!busy) setTrigger(event.target.value);
+              }}
+              placeholder={edit ? 'optional subject name' : 'required for a unique identity'}
+              required={!edit}
+            />
+          )}
         </div>
         <Select
           label="Base"
@@ -987,63 +1078,102 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           options={visibleBases.map((row) => ({ value: row.id, label: row.label }))}
           placeholder="No trainable base installed"
           disabled={busy || visibleBases.length === 0}
-          helpText={peopleMissing ? PEOPLE_BUNDLE_HELP : undefined}
+          helpText={
+            peopleMissing ? PEOPLE_BUNDLE_HELP : languageMissing ? LANGUAGE_HELP : undefined
+          }
         />
-        <div className={`train-drops${edit ? ' train-drops--single' : ''}`}>
-          <DropZone
-            id="train-targets"
-            label="Target images"
-            prompt={edit ? 'Drop images here, or browse' : 'Drop images, clips, or a folder'}
-            hint={
-              edit
-                ? 'Choose the finished images. You will add one reference and instruction for each target.'
-                : 'Choose the images this LoRA should learn from. Clips and folders are fine too.'
-            }
-            accept={edit ? IMAGE_ACCEPT : MIXED_ACCEPT}
-            disabled={busy}
-            onFiles={handleDrop}
-          />
-          {!edit && (
+        <div className={`train-drops${edit || language ? ' train-drops--single' : ''}`}>
+          {language ? (
             <DropZone
-              id="train-clips"
-              label="Video"
-              prompt="Drop clips or a folder"
-              hint="A clip is sampled above the rate it keeps, so the sharpest frame of each moment wins its slot, repeats of a shot already taken are dropped, and every frame is cropped around whatever moved. Many clips extract at once."
-              accept={MIXED_ACCEPT}
+              id="train-documents"
+              label="Documents"
+              prompt="Drop .jsonl, .json, .txt, .md, or a folder"
+              hint="Choose the files this chat model should learn from. Folders are fine too."
+              accept={DOCUMENT_ACCEPT}
               disabled={busy}
               onFiles={handleDrop}
             >
-              {(clips.length > 0 || sampling.length > 0) && (
-                <ul className="train-clips" aria-label="Accepted clips">
-                  {clips.map((clip) => (
-                    <li key={clip.key} className="train-clip">
-                      <span className="train-clip-receipt">
-                        <span className="train-clip-name">{clip.name}</span>: {clip.summary}
-                      </span>
+              {images.length > 0 && (
+                <ul className="train-clips" aria-label="Training documents">
+                  {images.map((image) => (
+                    <li key={image.key} className="train-clip">
+                      <span className="train-clip-name">{image.filename}</span>
                       <Button
                         type="button"
                         size="icon"
                         variant="ghost"
                         disabled={busy}
-                        aria-label={`Remove clip ${clip.name}`}
-                        onClick={() => removeClip(clip.key)}
+                        aria-label={`Remove ${image.filename}`}
+                        onClick={() => {
+                          if (busy) return;
+                          setImages((current) => current.filter((row) => row.key !== image.key));
+                        }}
                       >
                         <CloseIcon />
                       </Button>
                     </li>
                   ))}
-                  {sampling.length === 1 && (
-                    <li className="train-clip">Reading {sampling[0].name}…</li>
-                  )}
-                  {sampling.length > 1 && (
-                    <li className="train-clip">Reading {sampling.length} clips…</li>
-                  )}
                 </ul>
               )}
             </DropZone>
+          ) : (
+            <>
+              <DropZone
+                id="train-targets"
+                label="Target images"
+                prompt={edit ? 'Drop images here, or browse' : 'Drop images, clips, or a folder'}
+                hint={
+                  edit
+                    ? 'Choose the finished images. You will add one reference and instruction for each target.'
+                    : 'Choose the images this LoRA should learn from. Clips and folders are fine too.'
+                }
+                accept={edit ? IMAGE_ACCEPT : MIXED_ACCEPT}
+                disabled={busy}
+                onFiles={handleDrop}
+              />
+              {!edit && (
+                <DropZone
+                  id="train-clips"
+                  label="Video"
+                  prompt="Drop clips or a folder"
+                  hint="A clip is sampled above the rate it keeps, so the sharpest frame of each moment wins its slot, repeats of a shot already taken are dropped, and every frame is cropped around whatever moved. Many clips extract at once."
+                  accept={MIXED_ACCEPT}
+                  disabled={busy}
+                  onFiles={handleDrop}
+                >
+                  {(clips.length > 0 || sampling.length > 0) && (
+                    <ul className="train-clips" aria-label="Accepted clips">
+                      {clips.map((clip) => (
+                        <li key={clip.key} className="train-clip">
+                          <span className="train-clip-receipt">
+                            <span className="train-clip-name">{clip.name}</span>: {clip.summary}
+                          </span>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            disabled={busy}
+                            aria-label={`Remove clip ${clip.name}`}
+                            onClick={() => removeClip(clip.key)}
+                          >
+                            <CloseIcon />
+                          </Button>
+                        </li>
+                      ))}
+                      {sampling.length === 1 && (
+                        <li className="train-clip">Reading {sampling[0].name}…</li>
+                      )}
+                      {sampling.length > 1 && (
+                        <li className="train-clip">Reading {sampling.length} clips…</li>
+                      )}
+                    </ul>
+                  )}
+                </DropZone>
+              )}
+            </>
           )}
         </div>
-        {!edit && (
+        {!edit && !language && (
           <Checkbox
             label="Mirror half the frames of each second"
             helpText="More variety from one angle, applied as each clip is read. Turn it off for a subject carrying text, or one a mirror would get wrong."
@@ -1052,7 +1182,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             onCheckedChange={setMirror}
           />
         )}
-        {images.length > 0 && !edit && (
+        {images.length > 0 && !edit && !language && (
           <div className="train-caption">
             <Button
               type="button"
@@ -1080,7 +1210,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             {readiness(images)}
           </p>
         )}
-        {images.length > 0 && (
+        {images.length > 0 && !language && (
           <div className="train-pairs">
             <List
               rowComponent={TrainPairRow}

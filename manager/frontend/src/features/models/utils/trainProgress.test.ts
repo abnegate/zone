@@ -45,6 +45,13 @@ describe('trainProgress', () => {
     expect(trainHeadline('succeeded', 'jerry', 'finetune')).toBe('Fine-tuning finished jerry');
     expect(trainHeadline('running', 'jerry', 'pivotal')).toBe('Pivotal training jerry');
     expect(trainHeadline('running', 'jerry', 'video')).toBe('Training video jerry');
+    expect(trainHeadline('running', 'notes', 'lora', 'language')).toBe(
+      'Training language LoRA notes'
+    );
+    expect(trainHeadline('succeeded', 'notes', 'lora', 'language')).toBe(
+      'Training language LoRA finished notes'
+    );
+    expect(trainHeadline('running', 'notes', 'finetune', 'language')).toBe('Fine-tuning notes');
   });
 
   it('uses the phase message as the step label', () => {
@@ -80,6 +87,9 @@ describe('trainProgress', () => {
       methodAdvice({ subject: 'person', method: 'finetune', stills: 2000, clips: 1000 })
     ).toMatch(/strong fine-tune range/);
     expect(methodAdvice({ subject: 'other', method: 'lora', stills: 2000, clips: 0 })).toBeNull();
+    expect(
+      methodAdvice({ subject: 'language', method: 'lora', stills: 2000, clips: 0 })
+    ).toBeNull();
     expect(methodAdvice({ subject: 'person', method: 'pivotal', stills: 80, clips: 0 })).toBeNull();
     expect(methodAdvice({ subject: 'person', method: 'video', stills: 0, clips: 40 })).toMatch(
       /trains Wan from the clips/
