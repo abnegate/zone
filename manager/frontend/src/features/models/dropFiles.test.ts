@@ -3,6 +3,7 @@ import {
   accepts,
   fileExtension,
   filesFromDataTransfer,
+  isDocumentFile,
   isImageFile,
   isVideoFile,
 } from './dropFiles';
@@ -103,5 +104,26 @@ describe('dropFiles', () => {
       'image/png,image/jpeg,image/webp,video/*'
     );
     expect(dropped.map((item) => item.name)).toEqual(['shot.png', 'take.mov']);
+  });
+
+  it('classifies jsonl, json, txt and md as documents', () => {
+    expect(isDocumentFile(file('notes.jsonl'))).toBe(true);
+    expect(isDocumentFile(file('notes.JSONL'))).toBe(true);
+    expect(isDocumentFile(file('notes.json', 'application/json'))).toBe(true);
+    expect(isDocumentFile(file('notes.txt'))).toBe(true);
+    expect(isDocumentFile(file('notes.md'))).toBe(true);
+    expect(isDocumentFile(file('notes.MD', 'text/markdown'))).toBe(true);
+    expect(isDocumentFile(file('shot.png', 'image/png'))).toBe(false);
+    expect(isDocumentFile(file('clip.mp4'))).toBe(false);
+  });
+
+  it('honors .jsonl and .md accept tokens when MIME is empty', () => {
+    const accept = '.jsonl,.json,.txt,.md,application/json,text/plain,text/markdown';
+    expect(accepts(accept, file('dump.jsonl'))).toBe(true);
+    expect(accepts(accept, file('notes.md'))).toBe(true);
+    expect(accepts(accept, file('notes.txt', 'text/plain'))).toBe(true);
+    expect(accepts(accept, file('notes.json', 'application/json'))).toBe(true);
+    expect(accepts(accept, file('shot.png'))).toBe(false);
+    expect(accepts(accept, file('walk.mp4', 'video/mp4'))).toBe(false);
   });
 });

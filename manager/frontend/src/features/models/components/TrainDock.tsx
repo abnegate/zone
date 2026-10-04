@@ -9,7 +9,7 @@ export default function TrainDock() {
 
   const percent = trainJobPercent(job);
   const running = job.status === 'running';
-  const title = trainHeadline(job.status, job.name, job.method);
+  const title = trainHeadline(job.status, job.name, job.method, job.subject);
 
   return (
     <aside className="train-dock" aria-label="Training" title={title}>

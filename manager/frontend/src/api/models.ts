@@ -256,7 +256,7 @@ export const modelsApi = {
       name: string;
       base: string;
       trigger?: string;
-      subject?: 'person' | 'other';
+      subject?: 'person' | 'other' | 'language';
       method?: 'lora' | 'finetune' | 'pivotal' | 'video';
       images: Array<{
         filename: string;
@@ -334,7 +334,15 @@ export const modelsApi = {
     return parse(TrainClipSchema, await response.json());
   },
 
-  async trainBases(): Promise<Array<{ id: string; label: string; edit: boolean }>> {
+  async trainBases(): Promise<
+    Array<{
+      id: string;
+      label: string;
+      edit: boolean;
+      subject?: 'person' | 'other' | 'language';
+      finetune?: boolean;
+    }>
+  > {
     const response = await fetch(`${API_BASE}/api/models/train/bases`, {
       headers: client.getHeaders(),
     });
