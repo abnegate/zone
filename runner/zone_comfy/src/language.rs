@@ -9,6 +9,7 @@ const CHUNK_CHARS: usize = 2048;
 const CHUNK_OVERLAP: usize = 200;
 const VALID_FRACTION: f32 = 0.1;
 const VALID_MIN: usize = 10;
+const MIXED_FORMAT: &str = "training documents must be one format";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExampleKind {
@@ -45,12 +46,9 @@ pub fn to_jsonl(documents: &[TrainImage]) -> Result<Dataset, TrainError> {
     for document in documents {
         examples.extend(examples_from(document)?);
     }
-    if examples.is_empty() {
-        return Err(TrainError::Invalid("training needs documents"));
-    }
-    let mask_prompt = examples
-        .iter()
-        .all(|example| example.kind != ExampleKind::Text);
+    let kind = one_kind(examples.iter().map(|example| example.kind))?
+        .ok_or(TrainError::Invalid("training needs documents"))?;
+    let mask_prompt = kind != ExampleKind::Text;
     let (train, valid) = split(examples);
     Ok(Dataset {
         train: train.into_iter().map(|example| example.record).collect(),
@@ -60,6 +58,13 @@ pub fn to_jsonl(documents: &[TrainImage]) -> Result<Dataset, TrainError> {
 }
 
 pub fn write(directory: &Path, dataset: &Dataset) -> Result<(), TrainError> {
+    one_kind(
+        dataset
+            .train
+            .iter()
+            .chain(&dataset.valid)
+            .filter_map(record_kind),
+    )?;
     fs::create_dir_all(directory).map_err(|error| TrainError::Failed(error.to_string()))?;
     write_jsonl(&directory.join("train.jsonl"), &dataset.train)?;
     if !dataset.valid.is_empty() {
@@ -81,7 +86,7 @@ pub(crate) fn document_bytes(document: &TrainImage) -> Result<Vec<u8>, TrainErro
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(document.bytes_base64.trim())
-        .map_err(|_| TrainError::Invalid("document is not valid UTF-8"))
+        .map_err(|_| TrainError::Invalid("document is not valid base64"))
 }
 
 fn examples_from(document: &TrainImage) -> Result<Vec<Example>, TrainError> {
@@ -267,6 +272,35 @@ fn line_break(window: &[char], min: usize) -> Option<usize> {
     None
 }
 
+fn one_kind(
+    kinds: impl IntoIterator<Item = ExampleKind>,
+) -> Result<Option<ExampleKind>, TrainError> {
+    let mut found = None;
+    for kind in kinds {
+        match found {
+            None => found = Some(kind),
+            Some(expected) if expected != kind => {
+                return Err(TrainError::Invalid(MIXED_FORMAT));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(found)
+}
+
+fn record_kind(record: &Value) -> Option<ExampleKind> {
+    let object = record.as_object()?;
+    if object.contains_key("messages") {
+        Some(ExampleKind::Chat)
+    } else if object.contains_key("prompt") && object.contains_key("completion") {
+        Some(ExampleKind::Completions)
+    } else if object.contains_key("text") {
+        Some(ExampleKind::Text)
+    } else {
+        None
+    }
+}
+
 fn split(mut examples: Vec<Example>) -> (Vec<Example>, Vec<Example>) {
     if examples.len() < VALID_MIN {
         return (examples, Vec::new());
@@ -356,14 +390,60 @@ mod tests {
 
     #[test]
     fn json_array_accepts_mixed_shapes() {
-        let records = records(&[document(
-            "dump.json",
-            r#"[{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]},{"prompt":"Q","completion":"A"},{"text":"loose"}]"#,
-        )]);
-        assert_eq!(records.len(), 3);
-        assert!(records[0].get("messages").is_some());
-        assert_eq!(records[1]["prompt"], "Q");
-        assert_eq!(records[2]["text"], "loose");
+        assert!(matches!(
+            to_jsonl(&[document(
+                "dump.json",
+                r#"[{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]},{"prompt":"Q","completion":"A"},{"text":"loose"}]"#,
+            )]),
+            Err(TrainError::Invalid(MIXED_FORMAT))
+        ));
+    }
+
+    #[test]
+    fn mixed_chat_and_text_are_rejected() {
+        assert!(matches!(
+            to_jsonl(&[
+                document(
+                    "chat.jsonl",
+                    r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#,
+                ),
+                document("notes.txt", "loose"),
+            ]),
+            Err(TrainError::Invalid(MIXED_FORMAT))
+        ));
+    }
+
+    #[test]
+    fn mixed_completions_and_chat_are_rejected() {
+        assert!(matches!(
+            to_jsonl(&[document(
+                "dump.jsonl",
+                concat!(
+                    r#"{"prompt":"Q","completion":"A"}"#,
+                    "\n",
+                    r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#,
+                ),
+            )]),
+            Err(TrainError::Invalid(MIXED_FORMAT))
+        ));
+    }
+
+    #[test]
+    fn write_rejects_mixed_records() {
+        let root = tempfile::tempdir().unwrap();
+        let mixed = Dataset {
+            train: vec![
+                json!({"prompt": "Q", "completion": "A"}),
+                json!({"text": "loose"}),
+            ],
+            valid: vec![],
+            mask_prompt: false,
+        };
+        assert!(matches!(
+            write(root.path(), &mixed),
+            Err(TrainError::Invalid(MIXED_FORMAT))
+        ));
+        assert!(!root.path().join("train.jsonl").exists());
     }
 
     #[test]
@@ -381,15 +461,55 @@ mod tests {
         assert!(root.path().join("train.jsonl").is_file());
         assert!(!root.path().join("valid.jsonl").exists());
 
-        let mixed = to_jsonl(&[document(
-            "dump.json",
-            r#"[{"prompt":"Q","completion":"A"},{"text":"loose"}]"#,
+        let completions = to_jsonl(&[document(
+            "pairs.jsonl",
+            r#"{"prompt":"Q","completion":"A"}"#,
         )])
         .unwrap();
-        write(root.path(), &mixed).unwrap();
+        write(root.path(), &completions).unwrap();
+        let format: Value =
+            serde_json::from_slice(&fs::read(root.path().join("format.json")).unwrap()).unwrap();
+        assert_eq!(format["mask_prompt"], true);
+
+        let text = to_jsonl(&[document("notes.txt", "loose")]).unwrap();
+        write(root.path(), &text).unwrap();
         let format: Value =
             serde_json::from_slice(&fs::read(root.path().join("format.json")).unwrap()).unwrap();
         assert_eq!(format["mask_prompt"], false);
+    }
+
+    #[test]
+    fn document_bytes_rejects_invalid_base64() {
+        let document = TrainImage {
+            filename: "notes.txt".into(),
+            caption: String::new(),
+            bytes_base64: "!!!not base64!!!".into(),
+            bytes: None,
+            before_base64: None,
+            before: None,
+            group: None,
+        };
+        assert!(matches!(
+            document_bytes(&document),
+            Err(TrainError::Invalid("document is not valid base64"))
+        ));
+    }
+
+    #[test]
+    fn invalid_utf8_documents_are_rejected() {
+        let document = TrainImage {
+            filename: "notes.txt".into(),
+            caption: String::new(),
+            bytes_base64: String::new(),
+            bytes: Some(vec![0xff, 0xfe]),
+            before_base64: None,
+            before: None,
+            group: None,
+        };
+        assert!(matches!(
+            to_jsonl(&[document]),
+            Err(TrainError::Invalid("document is not valid UTF-8"))
+        ));
     }
 
     #[test]
