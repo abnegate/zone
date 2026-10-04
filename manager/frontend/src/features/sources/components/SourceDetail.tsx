@@ -12,7 +12,6 @@ interface SourceDetailProps {
   onSaved: () => Promise<void> | void;
   updateSource: (request: UpdateSourceRequest) => Promise<Source>;
   verifySource: () => Promise<SourceVerifyResponse>;
-  deleteSource: (id: string) => Promise<void>;
 }
 
 function configChanged(
@@ -29,7 +28,6 @@ export function SourceDetail({
   onSaved,
   updateSource,
   verifySource,
-  deleteSource,
 }: SourceDetailProps) {
   const definition = getSourceById(source.source_type);
   const baseline = useMemo(
@@ -108,18 +106,6 @@ export function SourceDetail({
       setError(err instanceof Error ? err.message : 'Failed to verify source');
     } finally {
       setVerifying(false);
-    }
-  };
-
-  const handleDelete = async () => {
-    if (!window.confirm('Are you sure you want to delete this source?')) return;
-
-    setError(null);
-    try {
-      await deleteSource(source.id);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete source');
     }
   };
 
@@ -209,9 +195,6 @@ export function SourceDetail({
       <footer className="source-details-actions">
         <Button variant="ghost" size="sm" onClick={handleVerify} loading={verifying}>
           {verifying ? 'Verifying...' : 'Verify'}
-        </Button>
-        <Button className="source-delete" variant="ghost" size="sm" onClick={handleDelete}>
-          Delete
         </Button>
         <Button variant="ghost" size="sm" onClick={onClose}>
           Cancel
