@@ -74,7 +74,7 @@ These weights are not included in Zone images or source distributions. They
 are downloaded only when the operator runs the explicit upscale model setup
 command.
 
-## Lustify SDXL GGWP V7 (people)
+## SDXL people checkpoint
 
 - Packaged model: <https://huggingface.co/boopyfloopy/lustifyXL_v7>
 - Original model: Lustify SDXL by coyotte (CreativeML Open RAIL-M)

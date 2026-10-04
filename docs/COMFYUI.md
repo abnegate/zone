@@ -63,7 +63,7 @@ Comfy checkout so core files stay unmodified:
 - Size: approximately 7.17 GiB / 7.70 GB
 - Model license: Apache-2.0
 
-### Lustify SDXL GGWP V7 (people)
+### SDXL people checkpoint
 
 - Repository: `boopyfloopy/lustifyXL_v7`
 - Revision: `a1e0c4aa31e420c5f9352c975ac2c029963721c4`
@@ -314,7 +314,7 @@ Shipped image recipes:
 - `qwen-image-edit-adapter` — the same graph with a LoRA slot
 - `sd15` — Stable Diffusion 1.5 (512, 20 Euler steps)
 - `sdxl` — SDXL / Pony / Illustrious (1024, 25 Euler steps)
-- `sdxl-people` — Lustify SDXL GGWP V7 people prior (trainable)
+- `sdxl-people` — open SDXL people prior (trainable)
 - `sdxl-adapter` — the same graph with a LoRA slot on model and CLIP
 
 `sd15` and `sdxl` carry no weights of their own: they match a checkpoint you
@@ -352,7 +352,7 @@ steps apart and capped at eight per run, plus the final adapter.
 The recipe catalog explicitly declares which base architecture a training job
 uses. The supported contracts are FLUX (`CheckpointLoaderSimple`), Qwen Image
 Edit (`UNETLoader`, `CLIPLoader` with `qwen_image`, and `VAELoader`), and SDXL
-people (`sdxl-people` → Lustify). Generic `sdxl` stays generation-only so a
+people (`sdxl-people`). Generic `sdxl` stays generation-only so a
 Pony or Juggernaut checkpoint still matches that recipe. A recipe without that
 metadata is rejected; recipe names, prompts, and the global
 `COMFYUI_CHECKPOINT` are never used to guess a trainer.
@@ -440,8 +440,8 @@ the face. Both frames share one caption.
 
 ### Person SDXL LoRA and fine-tune
 
-Subject **Person** always trains on `sdxl-people` (Lustify SDXL GGWP V7, bundle
-`image-people`). Person LoRA is rank 64 with the CLIP-L text encoder trained
+Subject **Person** always trains on `sdxl-people` (open SDXL people checkpoint,
+bundle `image-people`). Person LoRA is rank 64 with the CLIP-L text encoder trained
 and loads through `sdxl-adapter` (`LoraLoader` on model and CLIP). Method
 **Fine-tune** writes a full SDXL checkpoint (~7 GB) onto the generic `sdxl`
 recipe, with prior preservation class `person`. Captions are

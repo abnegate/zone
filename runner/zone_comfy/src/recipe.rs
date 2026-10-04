@@ -1159,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn sdxl_people_required_files_are_lustify_only() {
+    fn sdxl_people_required_files_are_the_people_checkpoint() {
         let catalog = catalog();
         for id in ["sdxl-people", "sdxl-adapter"] {
             let files: Vec<&str> = catalog

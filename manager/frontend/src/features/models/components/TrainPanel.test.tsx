@@ -9,7 +9,7 @@ function fluxQwenBases() {
 }
 
 function peopleReadyBases() {
-  return [...fluxQwenBases(), { id: 'sdxl-people', label: 'SDXL people (Lustify)', edit: false }];
+  return [...fluxQwenBases(), { id: 'sdxl-people', label: 'SDXL people', edit: false }];
 }
 
 const mockTrainBases = mock(() => Promise.resolve(fluxQwenBases()));
@@ -853,7 +853,7 @@ describe('TrainPanel', () => {
     await selectSubject('Person');
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Base')).toHaveTextContent('SDXL people (Lustify)');
+      expect(screen.getByLabelText('Base')).toHaveTextContent('SDXL people');
     });
     expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
     expect(screen.getByText(/~100–200 MB adapter/)).toBeInTheDocument();
@@ -865,7 +865,7 @@ describe('TrainPanel', () => {
     fireEvent.click(screen.getByLabelText('Base'));
     expect(screen.queryByRole('option', { name: 'FLUX.1 Schnell' })).toBeNull();
     expect(screen.queryByRole('option', { name: 'Qwen Image Edit' })).toBeNull();
-    fireEvent.click(screen.getByRole('option', { name: 'SDXL people (Lustify)' }));
+    fireEvent.click(screen.getByRole('option', { name: 'SDXL people' }));
 
     fireEvent.click(screen.getByLabelText('Method'));
     expect(await screen.findByRole('option', { name: 'Fine-tune' })).not.toHaveAttribute(
@@ -1029,7 +1029,7 @@ describe('TrainPanel', () => {
     await selectBase('FLUX.1 Schnell');
     await selectSubject('Person');
     await waitFor(() => {
-      expect(screen.getByLabelText('Base')).toHaveTextContent('SDXL people (Lustify)');
+      expect(screen.getByLabelText('Base')).toHaveTextContent('SDXL people');
     });
     await selectMethod('Fine-tune');
     expect(screen.getByRole('heading', { name: 'Fine-tune a person' })).toBeInTheDocument();
@@ -1040,7 +1040,7 @@ describe('TrainPanel', () => {
     expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit');
     fireEvent.click(screen.getByLabelText('Base'));
     expect(screen.getByRole('option', { name: 'FLUX.1 Schnell' })).toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: 'SDXL people (Lustify)' })).toBeNull();
+    expect(screen.queryByRole('option', { name: 'SDXL people' })).toBeNull();
     fireEvent.click(screen.getByRole('option', { name: 'Qwen Image Edit' }));
   });
 

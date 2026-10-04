@@ -241,7 +241,7 @@
     {
       "id": "sdxl-people",
       "kind": "image",
-      "label": "SDXL people (Lustify)",
+      "label": "SDXL people",
       "bare": "sdxl-api.json",
       "with_source": "sdxl-img2img-api.json",
       "output_node": "9",

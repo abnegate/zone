@@ -3692,7 +3692,7 @@ mod tests {
             bases
                 .iter()
                 .all(|base| base.id != "sdxl" && base.id != "sdxl-people"),
-            "sdxl-people is listed only when Lustify is on disk"
+            "sdxl-people is listed only when the people checkpoint is on disk"
         );
 
         fs::write(
