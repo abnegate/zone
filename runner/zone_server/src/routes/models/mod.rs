@@ -597,17 +597,63 @@ pub async fn delete(
 pub async fn train_bases(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
     let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()));
     match catalog {
-        Ok(catalog) => Json(lora::available_bases(
-            &catalog,
-            &state.config().comfyui.models_dir,
-        ))
-        .into_response(),
+        Ok(catalog) => {
+            let mut bases = lora::available_bases(&catalog, &state.config().comfyui.models_dir);
+            bases.extend(chat_train_bases(&state).await);
+            Json(bases).into_response()
+        }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::new("recipe catalog is not readable")),
         )
             .into_response(),
     }
+}
+
+async fn chat_train_bases(state: &AppState) -> Vec<lora::TrainBase> {
+    match list_ollama_model_rows(state).await {
+        Ok(models) => models
+            .into_iter()
+            .filter(is_chat_train_model)
+            .map(chat_train_base)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn is_chat_train_model(model: &ModelResponse) -> bool {
+    let capabilities = model.capabilities.as_deref().unwrap_or(&[]);
+    model.completion == Some(true) || capabilities.contains(&ModelCapability::Text)
+}
+
+fn chat_train_base(model: ModelResponse) -> lora::TrainBase {
+    let parameter_size = model
+        .details
+        .as_ref()
+        .and_then(|details| details.parameter_size.as_deref());
+    let finetune = chat_finetune(&model.name, parameter_size);
+    lora::TrainBase {
+        id: model.name.clone(),
+        label: model.name,
+        edit: false,
+        subject: lora::TrainSubject::Language,
+        finetune,
+    }
+}
+
+fn chat_finetune(name: &str, parameter_size: Option<&str>) -> bool {
+    llama32_small_chat(name)
+        || crate::services::stages::parse_params(parameter_size)
+            .is_some_and(|million| million < 8_000)
+}
+
+fn llama32_small_chat(name: &str) -> bool {
+    let name = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+    matches!(name.as_str(), "llama3.2:1b" | "llama3.2:3b")
+}
+
+fn language_train_base<'a>(bases: &'a [lora::TrainBase], id: &str) -> Option<&'a lora::TrainBase> {
+    bases.iter().find(|base| base.id == id)
 }
 
 /// POST /api/models/train/captions
@@ -758,6 +804,28 @@ pub async fn train(
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
+    if request.subject == lora::TrainSubject::Language {
+        let bases = chat_train_bases(&state).await;
+        match language_train_base(&bases, request.base.trim()) {
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::new("unknown training base")),
+                )
+                    .into_response();
+            }
+            Some(base) if request.method == lora::TrainMethod::Finetune && !base.finetune => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::new(
+                        "fine-tune is only available for small chat models",
+                    )),
+                )
+                    .into_response();
+            }
+            Some(_) => {}
+        }
+    }
     match lora::validate_request(&state.config().comfyui, &request) {
         Err(TrainError::Disabled) => {
             return (
@@ -1013,5 +1081,67 @@ mod train_preview_tests {
         let empty = tempfile::tempdir().unwrap();
         let missing = train_preview_response(empty.path(), "step-250-0.png");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod chat_train_base_tests {
+    use super::{chat_finetune, is_chat_train_model};
+    use crate::routes::models::types::{ModelCapability, ModelDetails, ModelResponse};
+
+    fn model(
+        name: &str,
+        completion: Option<bool>,
+        capabilities: &[ModelCapability],
+        parameter_size: Option<&str>,
+    ) -> ModelResponse {
+        ModelResponse {
+            name: name.to_string(),
+            completion,
+            capabilities: (!capabilities.is_empty()).then(|| capabilities.to_vec()),
+            details: parameter_size.map(|size| ModelDetails {
+                parameter_size: Some(size.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn chat_filter_keeps_completion_and_completion_plus_vision() {
+        assert!(is_chat_train_model(&model(
+            "llama3.2:1b",
+            Some(true),
+            &[ModelCapability::Text],
+            Some("1B"),
+        )));
+        assert!(is_chat_train_model(&model(
+            "qwen3.8:27b",
+            Some(true),
+            &[ModelCapability::Text, ModelCapability::ImageInput],
+            Some("27.3B"),
+        )));
+        assert!(!is_chat_train_model(&model(
+            "qwen3-embedding:0.6b",
+            Some(false),
+            &[ModelCapability::Embeddings],
+            Some("0.6B"),
+        )));
+        assert!(!is_chat_train_model(&model(
+            "llava:7b",
+            None,
+            &[ModelCapability::ImageInput],
+            Some("7B"),
+        )));
+    }
+
+    #[test]
+    fn fine_tune_is_for_small_chat_models() {
+        assert!(chat_finetune("llama3.2:1b", Some("1B")));
+        assert!(chat_finetune("llama3.2:3b", Some("3.2B")));
+        assert!(chat_finetune("llama3.2:1b", None));
+        assert!(chat_finetune("qwen2.5:7b", Some("7B")));
+        assert!(!chat_finetune("llama3.1:8b", Some("8B")));
+        assert!(!chat_finetune("qwen3.8:27b", Some("27.3B")));
     }
 }

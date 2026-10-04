@@ -591,7 +591,7 @@ impl From<Tag> for Installed {
     }
 }
 
-fn parse_params(value: Option<&str>) -> Option<u32> {
+pub(crate) fn parse_params(value: Option<&str>) -> Option<u32> {
     let value = value?;
     let lowered = value.to_ascii_lowercase();
     let candidate = lowered

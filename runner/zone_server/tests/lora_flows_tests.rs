@@ -3,8 +3,12 @@
 mod common;
 
 use axum::{
-    Json, Router, body::Body, extract::Request, http::StatusCode, response::IntoResponse,
-    routing::get,
+    Json, Router,
+    body::Body,
+    extract::Request,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
 };
 use futures::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
@@ -172,15 +176,116 @@ async fn router_tuned(
     )
 }
 
+fn ollama_tag(name: &str, parameter_size: &str) -> Value {
+    json!({
+        "name": name,
+        "size": 1,
+        "digest": "sha256:test",
+        "modified_at": "2024-01-15T10:30:00Z",
+        "details": {
+            "format": "gguf",
+            "family": "llama",
+            "parameter_size": parameter_size,
+            "quantization_level": "Q4_0"
+        }
+    })
+}
+
+async fn mock_ollama_tags() -> Json<Value> {
+    Json(json!({
+        "models": [
+            ollama_tag("llama3.2:1b", "1B"),
+            ollama_tag("llama3.2:3b", "3.2B"),
+            ollama_tag("qwen3.8:27b", "27.3B"),
+            ollama_tag("qwen3-embedding:0.6b", "0.6B"),
+            ollama_tag("llava:7b", "7B")
+        ]
+    }))
+}
+
+async fn mock_ollama_show(Json(payload): Json<Value>) -> Result<Json<Value>, StatusCode> {
+    let name = payload["model"]
+        .as_str()
+        .or_else(|| payload["name"].as_str())
+        .unwrap_or("");
+    let (capabilities, parameter_size) = match name {
+        "llama3.2:1b" => (json!(["completion"]), "1B"),
+        "llama3.2:3b" => (json!(["completion"]), "3.2B"),
+        "qwen3.8:27b" => (json!(["completion", "vision"]), "27.3B"),
+        "qwen3-embedding:0.6b" => (json!(["embedding"]), "0.6B"),
+        "llava:7b" => (json!(["vision"]), "7B"),
+        _ => return Err(StatusCode::NOT_FOUND),
+    };
+    Ok(Json(json!({
+        "capabilities": capabilities,
+        "details": { "parameter_size": parameter_size }
+    })))
+}
+
 async fn mock_ollama() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let router = Router::new().route("/api/tags", get(|| async { Json(json!({"models": []})) }));
+    let router = Router::new()
+        .route("/api/tags", get(mock_ollama_tags))
+        .route("/api/show", post(mock_ollama_show));
     tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
     format!("http://{addr}")
 }
+
+async fn dead_ollama() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    format!("http://{addr}")
+}
+
+fn plant_image_bases(models_dir: &std::path::Path) {
+    fs::write(
+        models_dir.join("checkpoints/flux1-schnell-fp8.safetensors"),
+        b"ckpt",
+    )
+    .unwrap();
+    fs::write(
+        models_dir.join("loras/flux-uncensored.safetensors"),
+        b"uncensored",
+    )
+    .unwrap();
+    fs::write(
+        models_dir.join("checkpoints/lustifySDXLNSFW_ggwpV7.safetensors"),
+        b"people",
+    )
+    .unwrap();
+}
+
+fn finetune(base: &Value) -> bool {
+    base.get("finetune")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn complete_language_host_job(models_dir: PathBuf) {
+    tokio::spawn(async move {
+        for _ in 0..500 {
+            if let Some(job) = zone_comfy::host_train::current(&models_dir) {
+                let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
+                if dir.join("data/train.jsonl").is_file() {
+                    let mut finished = zone_comfy::host_train::read_job(&dir).unwrap();
+                    if finished.busy() {
+                        finished.status = zone_comfy::host_train::HostStatus::Succeeded;
+                        zone_comfy::host_train::write_job(&dir, &finished).unwrap();
+                    }
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+}
+
+const LANGUAGE_JSONL: &[u8] =
+    br#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#;
 
 #[tokio::test]
 #[ignore] // Requires network access to huggingface.co
@@ -1237,4 +1342,225 @@ async fn train_preview_serves_png_rejects_traversal_and_missing_job() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let _ = fs::remove_dir_all(models_dir);
     let _ = fs::remove_dir_all(empty);
+}
+
+fn language_multipart(name: &[u8], base: &[u8], method: &[u8]) -> (String, Vec<u8>) {
+    let images = json!([{ "filename": "train.jsonl", "caption": "" }]).to_string();
+    multipart(
+        "ZoneTrainBoundary",
+        &[
+            ("name", None, name),
+            ("base", None, base),
+            ("subject", None, b"language"),
+            ("method", None, method),
+            ("images", None, images.as_bytes()),
+            ("image_0", Some("train.jsonl"), LANGUAGE_JSONL),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn train_bases_lists_chat_models_alongside_image_rows() {
+    let models_dir = temp_models();
+    plant_image_bases(&models_dir);
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (status, body) = get_json(router, &token, "/api/models/train/bases").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let bases = body.as_array().expect("bases list");
+    let flux = bases
+        .iter()
+        .find(|base| base["id"] == "flux-schnell")
+        .expect("image bases remain listed");
+    assert_eq!(flux["edit"], false);
+    let people = bases
+        .iter()
+        .find(|base| base["id"] == "sdxl-people")
+        .expect("people base is listed when its checkpoint is present");
+    assert_eq!(people["subject"], "person");
+    assert!(finetune(people));
+    let llama = bases
+        .iter()
+        .find(|base| base["id"] == "llama3.2:1b")
+        .expect("small chat models are listed");
+    assert_eq!(llama["label"], "llama3.2:1b");
+    assert_eq!(llama["subject"], "language");
+    assert_eq!(llama["edit"], false);
+    assert!(finetune(llama));
+    let qwen = bases
+        .iter()
+        .find(|base| base["id"] == "qwen3.8:27b")
+        .expect("completion+vision chat models are listed");
+    assert_eq!(qwen["subject"], "language");
+    assert!(!finetune(qwen));
+    assert!(
+        bases.iter().any(|base| base["id"] == "llama3.2:3b"),
+        "{bases:?}"
+    );
+    assert!(
+        bases
+            .iter()
+            .all(|base| base["id"] != "qwen3-embedding:0.6b"),
+        "embed-only models are not training bases: {bases:?}"
+    );
+    assert!(
+        bases.iter().all(|base| base["id"] != "llava:7b"),
+        "vision-only models are not training bases: {bases:?}"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_bases_keep_image_rows_when_ollama_is_down() {
+    let models_dir = temp_models();
+    plant_image_bases(&models_dir);
+    let ollama = dead_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (status, body) = get_json(router, &token, "/api/models/train/bases").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let bases = body.as_array().expect("bases list");
+    assert!(
+        bases
+            .iter()
+            .any(|base| base["id"] == "flux-schnell" && base["edit"] == false)
+    );
+    assert!(
+        bases.iter().any(|base| base["id"] == "sdxl-people"),
+        "{bases:?}"
+    );
+    assert!(
+        bases.iter().all(|base| base["subject"] != "language"
+            && !base["id"].as_str().unwrap_or("").contains(':')),
+        "chat bases are omitted when Ollama is unreachable: {bases:?}"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_language_multipart_starts_a_host_job() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    complete_language_host_job(models_dir.clone());
+    let (router, token) = router_with(
+        &ollama,
+        &catalog,
+        models_dir.clone(),
+        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+    )
+    .await;
+    let (content_type, body) = language_multipart(b"support-bot", b"llama3.2:1b", b"lora");
+    let (status, response) = post_multipart(
+        router.clone(),
+        &token,
+        "/api/models/train",
+        content_type,
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+    let job = wait_train_job(&router, &token).await;
+    assert_eq!(job["status"], "succeeded", "{job}");
+    let host = zone_comfy::host_train::current(&models_dir).expect("host job");
+    assert_eq!(host.subject, "language");
+    assert_eq!(host.checkpoint, "llama3.2:1b");
+    assert_eq!(host.method, "lora");
+    let dir = zone_comfy::host_train::job_dir(&models_dir, host.id);
+    assert!(
+        dir.join("data/train.jsonl").is_file(),
+        "language dumps are staged as jsonl"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_language_rejects_finetune_on_a_large_chat_model() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(
+        &ollama,
+        &catalog,
+        models_dir.clone(),
+        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+    )
+    .await;
+    let body = json!({
+        "name": "support-bot",
+        "base": "qwen3.8:27b",
+        "subject": "language",
+        "method": "finetune",
+        "images": [{
+            "filename": "train.jsonl",
+            "caption": "",
+            "bytes_base64": ""
+        }]
+    });
+    let (status, response) = post_json(router, &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(
+        response["error"],
+        "fine-tune is only available for small chat models"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_language_rejects_video() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(
+        &ollama,
+        &catalog,
+        models_dir.clone(),
+        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+    )
+    .await;
+    let body = json!({
+        "name": "support-bot",
+        "base": "llama3.2:1b",
+        "subject": "language",
+        "method": "video",
+        "images": [{
+            "filename": "train.jsonl",
+            "caption": "",
+            "bytes_base64": ""
+        }]
+    });
+    let (status, response) = post_json(router, &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"], "not available for a chat model");
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_language_rejects_an_unknown_base() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(
+        &ollama,
+        &catalog,
+        models_dir.clone(),
+        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+    )
+    .await;
+    let body = json!({
+        "name": "support-bot",
+        "base": "qwen3-embedding:0.6b",
+        "subject": "language",
+        "method": "lora",
+        "images": [{
+            "filename": "train.jsonl",
+            "caption": "",
+            "bytes_base64": ""
+        }]
+    });
+    let (status, response) = post_json(router, &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"], "unknown training base");
+    let _ = fs::remove_dir_all(models_dir);
 }
