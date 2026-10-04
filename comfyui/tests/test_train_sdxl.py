@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 COMFYUI = Path(__file__).parents[1]
 if str(COMFYUI) not in sys.path:
@@ -55,9 +57,11 @@ class ProgressTests(unittest.TestCase):
     def test_weighted_percent_covers_fine_tune_prep_phases(self) -> None:
         self.assertEqual(train_sdxl.overall_percent('lora', 'loading', 0, 1), 0)
         self.assertEqual(train_sdxl.overall_percent('lora', 'loading', 1, 1), 6)
-        self.assertEqual(train_sdxl.overall_percent('lora', 'encoding', 4, 8), 10)
-        self.assertEqual(train_sdxl.overall_percent('lora', 'training', 50, 100), 54)
+        self.assertEqual(train_sdxl.overall_percent('lora', 'class_images', 8, 8), 14)
+        self.assertEqual(train_sdxl.overall_percent('lora', 'encoding', 4, 8), 18)
+        self.assertEqual(train_sdxl.overall_percent('lora', 'training', 50, 100), 58)
         self.assertEqual(train_sdxl.overall_percent('lora', 'publishing', 1, 1), 100)
+        self.assertEqual(train_sdxl.overall_percent('pivotal', 'encoding', 4, 8), 18)
         self.assertEqual(train_sdxl.overall_percent('finetune', 'class_images', 0, 10), 4)
         self.assertEqual(train_sdxl.overall_percent('finetune', 'class_images', 5, 10), 10)
         self.assertEqual(train_sdxl.overall_percent('finetune', 'encoding', 0, 10), 16)
@@ -181,6 +185,18 @@ class NormalizeAndPublishTests(unittest.TestCase):
                 'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl',
             )
             self.assertEqual(job['image_count'], 3)
+            pivotal = train_sdxl.normalize_job(
+                {
+                    'name': 'jerry',
+                    'method': 'pivotal',
+                    'trigger': 'ohwx',
+                    'checkpoint': 'lustifySDXLNSFW_ggwpV7.safetensors',
+                    'status': 'queued',
+                },
+                job_dir,
+            )
+            self.assertEqual(pivotal['recipe_id'], 'sdxl-adapter')
+            self.assertEqual(pivotal['filename'], 'jerry.safetensors')
             finetune = train_sdxl.normalize_job(
                 {
                     'name': 'jerry',
@@ -209,6 +225,242 @@ class NormalizeAndPublishTests(unittest.TestCase):
                 'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl',
             )
             self.assertFalse(sidecar.get('generation'))
+
+    def test_pivotal_stub_publish_writes_embedding_and_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job = train_sdxl.normalize_job(queued_job(method='pivotal'), models)
+            destination = train_sdxl.publish_stub(models, job)
+            self.assertEqual(destination, models / 'loras' / 'jerry.safetensors')
+            embedding = models / 'embeddings' / 'jerry.safetensors'
+            self.assertTrue(embedding.is_file())
+            sidecar = json.loads(train_sdxl.sidecar_path(destination).read_text(encoding='utf-8'))
+            self.assertEqual(sidecar['recipe_id'], 'sdxl-adapter')
+            self.assertEqual(sidecar['embedding'], 'jerry.safetensors')
+
+
+class CaptionDropoutTests(unittest.TestCase):
+    def test_dropout_changes_some_captions_seed_stable(self) -> None:
+        captions = ['ohwx person, studio'] * 100
+        class_prompt = 'a photo of a person'
+        first = []
+        rng = random.Random(0)
+        for caption in captions:
+            first.append(train_sdxl.drop_caption(caption, class_prompt, 0.1, rng))
+        rng = random.Random(0)
+        second = [
+            train_sdxl.drop_caption(caption, class_prompt, 0.1, rng) for caption in captions
+        ]
+        self.assertEqual(first, second)
+        dropped = sum(1 for caption in first if caption == class_prompt)
+        kept = sum(1 for caption in first if caption == 'ohwx person, studio')
+        self.assertGreater(dropped, 0)
+        self.assertGreater(kept, 0)
+        self.assertEqual(dropped + kept, 100)
+        unchanged = [
+            train_sdxl.drop_caption(caption, class_prompt, 0.0, random.Random(0))
+            for caption in captions
+        ]
+        self.assertEqual(unchanged, captions)
+
+
+class MaskedLossTests(unittest.TestCase):
+    def test_masked_loss_ignores_zero_mask_pixels(self) -> None:
+        predicted = [0.0, 10.0, 0.0, 10.0]
+        target = [0.0, 0.0, 0.0, 0.0]
+        mask = [1.0, 0.0, 0.19, 0.0]
+        self.assertEqual(train_sdxl.masked_mse(predicted, target, mask), 0.0)
+        self.assertEqual(train_sdxl.masked_mse(predicted, target, None), 50.0)
+        predicted = [3.0, 10.0]
+        target = [0.0, 0.0]
+        mask = [1.0, 0.0]
+        self.assertEqual(train_sdxl.masked_mse(predicted, target, mask), 9.0)
+        mask = [0.2, 0.0]
+        self.assertEqual(train_sdxl.masked_mse(predicted, target, mask), 9.0)
+        self.assertEqual(train_sdxl.masked_mse(predicted, target, [0.0, 0.0]), 0.0)
+
+
+class PoseSamplingTests(unittest.TestCase):
+    def test_missing_pose_files_stay_uniform(self) -> None:
+        frames = [{'pose': '', 'kind': 'body'} for _ in range(8)]
+        self.assertEqual(
+            train_sdxl.pose_sample_weights(frames, {'kind_boost': 1.25, 'rebalance_share': 0.4}),
+            [1.0] * 8,
+        )
+
+    def test_inverse_frequency_and_kind_boost(self) -> None:
+        frames = [{'pose': 'standing', 'kind': 'body'}] * 4
+        frames.append({'pose': 'sitting', 'kind': 'body'})
+        weights = train_sdxl.pose_sample_weights(
+            frames, {'kind_boost': 1.25, 'rebalance_share': 0.4}
+        )
+        self.assertAlmostEqual(weights[4], weights[0] * 4)
+        mixed = [
+            {'pose': 'standing', 'kind': 'body'},
+            {'pose': 'standing', 'kind': 'hand'},
+            {'pose': 'standing', 'kind': 'head'},
+        ]
+        boosted = train_sdxl.pose_sample_weights(
+            mixed, {'kind_boost': 1.25, 'rebalance_share': 0.4}
+        )
+        self.assertAlmostEqual(boosted[1], boosted[0] * 1.25)
+        self.assertAlmostEqual(boosted[2], boosted[0] * 1.25)
+
+    def test_cap_limits_a_dominant_cluster(self) -> None:
+        weights = [1.0] * 10
+        clusters = ['standing'] * 8 + ['sitting', 'lying']
+        capped = train_sdxl.cap_cluster_weights(weights, clusters, 0.4)
+        standing = sum(capped[:8])
+        total = sum(capped)
+        self.assertLessEqual(standing / total, 0.4 + 1e-6)
+
+
+class ClassCacheTests(unittest.TestCase):
+    def test_class_cache_is_reused_when_warm(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            cache = train_sdxl.class_cache_path(
+                models, {'class_cache_dir': '.zone-class/person'}
+            )
+            cache.mkdir(parents=True)
+            for index in range(4):
+                (cache / f'{index:04}.png').write_bytes(b'png')
+                (cache / f'{index:04}.txt').write_text(
+                    train_sdxl.class_prompt_for('a photo of a person', index),
+                    encoding='utf-8',
+                )
+
+            class Boom:
+                def to(self, device):
+                    raise AssertionError('warm cache should not move the pipeline')
+
+                def __call__(self, *args, **kwargs):
+                    raise AssertionError('warm cache should not generate')
+
+            first = train_sdxl.ensure_class_images(
+                Boom(), cache, 4, 'a photo of a person', 'cpu'
+            )
+            second = train_sdxl.ensure_class_images(
+                Boom(), cache, 4, 'a photo of a person', 'cpu'
+            )
+            self.assertEqual(len(first), 4)
+            self.assertEqual(first, second)
+            self.assertTrue(all(caption.startswith('a photo of a person, ') for _, caption in first))
+
+    def test_cold_cache_writes_pose_diverse_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+
+            class FakeImage:
+                def save(self, path):
+                    Path(path).write_bytes(b'png')
+
+            class FakePipeline:
+                def __init__(self) -> None:
+                    self.calls: list[str] = []
+
+                def to(self, device):
+                    return self
+
+                def __call__(self, prompt, **kwargs):
+                    self.calls.append(prompt)
+
+                    class Result:
+                        images = [FakeImage()]
+
+                    return Result()
+
+            pipeline = FakePipeline()
+            pairs = train_sdxl.ensure_class_images(
+                pipeline, cache, 3, 'a photo of a person', 'cpu'
+            )
+            self.assertEqual(len(pipeline.calls), 3)
+            self.assertEqual(len(pairs), 3)
+            self.assertEqual(pipeline.calls[0], 'a photo of a person, standing')
+            self.assertEqual(pipeline.calls[1], 'a photo of a person, sitting')
+            self.assertTrue((cache / '0000.txt').is_file())
+            pipeline.calls.clear()
+            again = train_sdxl.ensure_class_images(
+                pipeline, cache, 3, 'a photo of a person', 'cpu'
+            )
+            self.assertEqual(pipeline.calls, [])
+            self.assertEqual(len(again), 3)
+
+
+class OptimizerTests(unittest.TestCase):
+    def test_prodigy_path_is_config_gated(self) -> None:
+        config = train_sdxl.load_config()
+        self.assertEqual(config['optimizer'], 'prodigy')
+        self.assertEqual(config['finetune_optimizer'], 'adamw')
+        self.assertEqual(train_sdxl.optimizer_kind('lora', config), 'prodigy')
+        self.assertEqual(train_sdxl.optimizer_kind('pivotal', config), 'prodigy')
+        self.assertEqual(train_sdxl.optimizer_kind('finetune', config), 'adamw')
+        overridden = dict(config)
+        overridden['optimizer'] = 'adamw'
+        self.assertEqual(train_sdxl.optimizer_kind('lora', overridden), 'adamw')
+        self.assertEqual(train_sdxl.optimizer_kind('pivotal', overridden), 'adamw')
+        self.assertEqual(train_sdxl.optimizer_kind('finetune', overridden), 'adamw')
+
+    def test_missing_prodigy_raises_a_clear_error(self) -> None:
+        with mock.patch.object(
+            train_sdxl,
+            'load_prodigy',
+            side_effect=RuntimeError(
+                'Prodigy is not installed in the train venv; pip install prodigyopt'
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'pip install prodigyopt'):
+                train_sdxl.make_optimizer(
+                    'lora',
+                    [{'params': [object()], 'lr': 1.0}],
+                    {'optimizer': 'prodigy'},
+                )
+
+
+class PreviewTests(unittest.TestCase):
+    def test_placeholder_previews_are_written_for_a_fake_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            paths = train_sdxl.write_preview_placeholders(job_dir, 250)
+            self.assertEqual(
+                paths,
+                [
+                    'previews/step-250-0.png',
+                    'previews/step-250-1.png',
+                    'previews/step-250-2.png',
+                    'previews/step-250-3.png',
+                ],
+            )
+            for relative in paths:
+                payload = (job_dir / relative).read_bytes()
+                self.assertTrue(payload.startswith(b'\x89PNG'))
+            progress = train_sdxl.Progress(job_dir, 'lora', 500)
+            progress.emit('training', step=250, phase_step=250, phase_total=500, previews=paths)
+            sidecar = json.loads((job_dir / 'progress.json').read_text(encoding='utf-8'))
+            self.assertEqual(sidecar['previews'], paths)
+            self.assertEqual(sidecar['phase'], 'training')
+
+
+class DatasetListingTests(unittest.TestCase):
+    def test_mask_pngs_are_not_counted_as_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            write_dataset(job_dir, count=2)
+            dataset = job_dir / 'dataset'
+            (dataset / '0000.mask.png').write_bytes(b'mask')
+            (dataset / '0000.kind').write_text('head', encoding='utf-8')
+            (dataset / '0000.pose').write_text('standing', encoding='utf-8')
+            self.assertEqual(train_sdxl.count_images(dataset), 2)
+            frames = train_sdxl.list_frames(dataset)
+            self.assertEqual(len(frames), 2)
+            self.assertEqual(frames[0]['kind'], 'head')
+            self.assertEqual(frames[0]['pose'], 'standing')
+            self.assertEqual(frames[0]['mask'], dataset / '0000.mask.png')
+            self.assertIsNone(frames[1]['mask'])
+            job = train_sdxl.normalize_job(
+                queued_job(extra={'image_count': 99}), job_dir
+            )
+            self.assertEqual(job['image_count'], 2)
 
 
 class StubOnceTests(unittest.TestCase):
@@ -269,10 +521,61 @@ class StubOnceTests(unittest.TestCase):
             self.assertEqual(sidecar['recipe_id'], 'sdxl')
             self.assertEqual(sidecar['trigger'], 'ohwx')
 
+    def test_stub_once_pivotal_writes_lora_embedding_and_previews(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models, method='pivotal')
+            result = self.run_worker(models, extra=['--stub'])
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+            self.assertEqual(job['status'], 'succeeded')
+            self.assertEqual(job['recipe_id'], 'sdxl-adapter')
+            weight = models / 'loras' / 'jerry.safetensors'
+            embedding = models / 'embeddings' / 'jerry.safetensors'
+            self.assertTrue(weight.is_file())
+            self.assertTrue(embedding.is_file())
+            sidecar = json.loads((models / 'loras' / 'jerry.safetensors.zone.json').read_text())
+            self.assertEqual(sidecar['recipe_id'], 'sdxl-adapter')
+            self.assertEqual(sidecar['embedding'], 'jerry.safetensors')
+            progress = json.loads((job_dir / 'progress.json').read_text(encoding='utf-8'))
+            self.assertEqual(len(progress['previews']), 4)
+            for relative in progress['previews']:
+                self.assertTrue((job_dir / relative).is_file())
+                self.assertTrue((job_dir / relative).read_bytes().startswith(b'\x89PNG'))
+
+    def test_stub_writes_preview_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            result = self.run_worker(models, extra=['--stub'])
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            progress = json.loads((job_dir / 'progress.json').read_text(encoding='utf-8'))
+            self.assertEqual(
+                progress['previews'],
+                [
+                    'previews/step-500-0.png',
+                    'previews/step-500-1.png',
+                    'previews/step-500-2.png',
+                    'previews/step-500-3.png',
+                ],
+            )
+            for relative in progress['previews']:
+                self.assertTrue((job_dir / relative).is_file())
+
     def test_once_with_no_job_exits_zero(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = self.run_worker(Path(directory), extra=['--stub'])
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_video_is_left_for_the_video_workstream(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models, method='video')
+            with self.assertRaisesRegex(ValueError, 'video training is not implemented'):
+                train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+            job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+            self.assertEqual(job['status'], 'failed')
+            self.assertIn('video training is not implemented', job['error'])
 
 
 if __name__ == '__main__':

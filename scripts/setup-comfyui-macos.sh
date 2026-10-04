@@ -171,7 +171,7 @@ install_trainer() {
     fi
     if [ "${ZONE_TRAIN_SKIP_PIP:-}" != "1" ]; then
         "$TRAIN_PYTHON" -m pip install --disable-pip-version-check \
-            diffusers peft accelerate transformers safetensors pillow
+            diffusers peft accelerate transformers safetensors pillow prodigyopt
     fi
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
     PLIST="$HOME/Library/LaunchAgents/ai.zone.train.plist"
