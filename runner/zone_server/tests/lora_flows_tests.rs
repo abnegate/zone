@@ -1537,6 +1537,45 @@ async fn train_language_rejects_video() {
 }
 
 #[tokio::test]
+async fn train_language_rejects_mixed_document_formats() {
+    use base64::Engine;
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(
+        &ollama,
+        &catalog,
+        models_dir.clone(),
+        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+    )
+    .await;
+    let chat =
+        r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#;
+    let body = json!({
+        "name": "support-bot",
+        "base": "llama3.2:1b",
+        "subject": "language",
+        "method": "lora",
+        "images": [
+            {
+                "filename": "chat.jsonl",
+                "caption": "",
+                "bytes_base64": base64::engine::general_purpose::STANDARD.encode(chat)
+            },
+            {
+                "filename": "notes.txt",
+                "caption": "",
+                "bytes_base64": base64::engine::general_purpose::STANDARD.encode("loose")
+            }
+        ]
+    });
+    let (status, response) = post_json(router, &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"], "training documents must be one format");
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
 async fn train_language_rejects_an_unknown_base() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;

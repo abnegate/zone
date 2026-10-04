@@ -944,6 +944,7 @@ fn validate_language(request: &TrainRequest) -> Result<(), TrainError> {
         return Err(TrainError::Invalid("unknown training base"));
     }
     let _name = chat_model_name(&request.name)?;
+    let _ = language::to_jsonl(&request.images)?;
     Ok(())
 }
 
@@ -4066,6 +4067,26 @@ mod tests {
             Err(TrainError::Invalid(
                 "fine-tune is only available for a person"
             ))
+        ));
+    }
+
+    #[test]
+    fn language_training_rejects_mixed_document_formats() {
+        let (_root, config) = harness("unused");
+        let request = language_request(
+            "support-bot",
+            "qwen2.5:7b",
+            vec![
+                document(
+                    "chat.jsonl",
+                    r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#,
+                ),
+                document("notes.txt", "loose"),
+            ],
+        );
+        assert!(matches!(
+            validate_request(&config, &request),
+            Err(TrainError::Invalid("training documents must be one format"))
         ));
     }
 
