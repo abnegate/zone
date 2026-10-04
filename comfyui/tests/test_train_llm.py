@@ -460,6 +460,29 @@ class FusePublishTests(unittest.TestCase):
                 f'FROM {job_dir / "fused"}\n',
             )
 
+    def test_small_qwen_without_gguf_calls_ollama_create(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            write_texts(job_dir, count=1)
+            job = queued_job(extra={'checkpoint': 'qwen2.5:7b'})
+            job = train_llm.normalize_job(job, job_dir)
+            with (
+                mock.patch.object(
+                    train_llm, 'require_llm_python', return_value=Path('/usr/bin/python3')
+                ),
+                mock.patch.object(train_llm, 'run_logged'),
+                mock.patch.object(train_llm, 'ollama_create') as create,
+            ):
+                train_llm.train(models, job_dir, job, train_llm.load_config())
+            create.assert_called_once_with('jerry', job_dir / 'Modelfile')
+            self.assertEqual(job['filename'], 'jerry')
+            self.assertEqual(
+                (job_dir / 'Modelfile').read_text(encoding='utf-8'),
+                f'FROM {job_dir / "fused"}\n',
+            )
+
 
 if __name__ == '__main__':
     unittest.main()

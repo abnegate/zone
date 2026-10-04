@@ -618,10 +618,14 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     gguf = fused_path / 'ggml-model-f16.gguf'
     modelfile = job_dir / 'Modelfile'
     if gguf.is_file():
-        write_modelfile(modelfile, str(gguf))
-        ollama_create(str(job['filename']), modelfile)
+        source = str(gguf)
+    elif dequantize:
+        source = str(fused_path)
     else:
-        write_modelfile(modelfile, str(fused_path))
+        source = None
+    write_modelfile(modelfile, source or str(fused_path))
+    if source is not None:
+        ollama_create(str(job['filename']), modelfile)
     job['step'] = total
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     train_sdxl.write_job(job_dir, job)
