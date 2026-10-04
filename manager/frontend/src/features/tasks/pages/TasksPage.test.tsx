@@ -9,7 +9,9 @@ import TasksPage from './TasksPage';
 
 // Create mock functions for tasks API
 const mockGetTasks = mock(() => Promise.resolve([] as Task[]));
+const mockGetTask = mock(() => Promise.resolve({} as Task));
 const mockCreateTask = mock(() => Promise.resolve({} as Task));
+const mockUpdateTask = mock(() => Promise.resolve({} as Task));
 const mockDeleteTask = mock(() => Promise.resolve());
 const running: TaskRun = {
   id: 'run-1',
@@ -55,7 +57,9 @@ mock.module('../../../shared/context/WorkspaceContext', () => ({
 mock.module('../../../api/tasks', () => ({
   tasksApi: {
     getTasks: mockGetTasks,
+    getTask: mockGetTask,
     createTask: mockCreateTask,
+    updateTask: mockUpdateTask,
     deleteTask: mockDeleteTask,
     runTask: mockRunTask,
     getTaskRuns: mockGetTaskRuns,
@@ -202,7 +206,9 @@ const mockTasks: Task[] = [
 describe('TasksPage', () => {
   beforeEach(() => {
     mockGetTasks.mockReset();
+    mockGetTask.mockReset();
     mockCreateTask.mockReset();
+    mockUpdateTask.mockReset();
     mockDeleteTask.mockReset();
     mockRunTask.mockReset();
     mockRunTask.mockImplementation(() => Promise.resolve(running));
@@ -215,6 +221,15 @@ describe('TasksPage', () => {
     mockGetProjects.mockReset();
     mockGetSources.mockReset();
     mockGetTasks.mockImplementation(() => Promise.resolve(mockTasks));
+    mockGetTask.mockImplementation((id: string) => {
+      const found = mockTasks.find((task) => task.id === id);
+      return found ? Promise.resolve(found) : Promise.reject(new Error('Task not found'));
+    });
+    mockUpdateTask.mockImplementation((id: string, request: Partial<Task>) => {
+      const found = mockTasks.find((task) => task.id === id);
+      if (!found) return Promise.reject(new Error('Task not found'));
+      return Promise.resolve({ ...found, ...request });
+    });
     mockGetProjects.mockImplementation(() => Promise.resolve(mockProjects));
     mockGetSources.mockImplementation(() => Promise.resolve(mockSources));
     window.confirm = mock(() => true);
@@ -273,6 +288,152 @@ describe('TasksPage', () => {
     renderTasksPage('/tasks?id=task-1');
     await waitFor(() => {
       expect(screen.getByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
+    });
+  });
+
+  it('opens an editor section from the title cell, not a dialog', async () => {
+    renderTasksPage();
+    const title = await screen.findByText('Implement login');
+    fireEvent.click(title.closest('td') as HTMLElement);
+
+    await waitFor(() => {
+      expect(document.querySelector('section.task-details')).not.toBeNull();
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: 'Tasks' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New task' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Filter by project' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Filter by status' })).not.toBeInTheDocument();
+  });
+
+  it('saves only the changed title', async () => {
+    renderTasksPage();
+    fireEvent.click((await screen.findByText('Implement login')).closest('td') as HTMLElement);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Title')).toBeInTheDocument();
+    });
+    expect(mockGetTask).toHaveBeenCalledWith('task-1');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Implement logout' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mockUpdateTask).toHaveBeenCalledWith('task-1', { title: 'Implement logout' });
+    });
+    expect(mockUpdateTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not open the editor from Execute or Delete', async () => {
+    renderTasksPage();
+    await screen.findByText('Implement login');
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Execute' })[0]);
+    expect(screen.getByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
+    expect(document.querySelector('section.task-details')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Implement login' })).not.toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0]);
+    expect(document.querySelector('section.task-details')).toBeNull();
+    expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+  });
+
+  it('does not open the editor from View PR', async () => {
+    renderTasksPage();
+    fireEvent.click(await screen.findByRole('link', { name: 'View PR' }));
+    expect(document.querySelector('section.task-details')).toBeNull();
+    expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+  });
+
+  it('opens the editor from the task query, not a dialog', async () => {
+    renderTasksPage('/tasks?task=task-1');
+    await waitFor(() => {
+      expect(document.querySelector('section.task-details')).not.toBeNull();
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockGetTask).toHaveBeenCalledWith('task-1');
+  });
+
+  it('replaces the execute dialog with the editor when another row is opened', async () => {
+    renderTasksPage('/tasks?id=task-1');
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Fix button styling'));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(document.querySelector('section.task-details')).not.toBeNull();
+    });
+    expect(new URLSearchParams(window.location.search).get('id')).toBeNull();
+    expect(new URLSearchParams(window.location.search).get('task')).toBe('task-2');
+  });
+
+  it('closes the editor from Close and Cancel and drops the task param', async () => {
+    renderTasksPage();
+    fireEvent.click((await screen.findByText('Implement login')).closest('td') as HTMLElement);
+    await waitFor(() => {
+      expect(document.querySelector('section.task-details')).not.toBeNull();
+    });
+    expect(new URLSearchParams(window.location.search).get('task')).toBe('task-1');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => {
+      expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+    });
+    expect(document.querySelector('section.task-details')).toBeNull();
+    expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
+
+    fireEvent.click(screen.getByText('Implement login').closest('td') as HTMLElement);
+    await waitFor(() => {
+      expect(document.querySelector('section.task-details')).not.toBeNull();
+    });
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Dirty title' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => {
+      expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+    });
+    expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
+    expect(mockUpdateTask).not.toHaveBeenCalled();
+  });
+
+  it('shows the table and an alert when the task query is unknown', async () => {
+    renderTasksPage('/tasks?task=missing');
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeInTheDocument();
+      expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: 'New task' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Filter by project' })).toBeInTheDocument();
+    expect(document.querySelector('section.task-details')).toBeNull();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('opens the editor from the row with Enter and Space', async () => {
+    renderTasksPage();
+    const row = (await screen.findByText('Implement login')).closest('tr') as HTMLElement;
+    row.focus();
+    fireEvent.keyDown(row, { key: 'Enter' });
+    await waitFor(() => {
+      expect(document.querySelector('section.task-details')).not.toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => {
+      expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+    });
+
+    const rowAgain = screen.getByText('Implement login').closest('tr') as HTMLElement;
+    rowAgain.focus();
+    fireEvent.keyDown(rowAgain, { key: ' ' });
+    await waitFor(() => {
+      expect(document.querySelector('section.task-details')).not.toBeNull();
     });
   });
 
