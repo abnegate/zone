@@ -65,31 +65,42 @@ describe('trainProgress', () => {
     expect(trainHeadline('running', 'jerry', 'lora', 'person', 'local')).toBe('Training jerry');
   });
 
-  it('quotes Runpod compute for Person trains', () => {
+  it('quotes Runpod compute for every train subject', () => {
+    const saveKey = 'Save a Runpod API key in Workspace Settings.';
+    const gpu24 = 'A 24 GB GPU is enough for this method.';
     expect(
       computeHelp({ subject: 'other', method: 'lora', provider: 'local', hasKey: false })
-    ).toBeNull();
+    ).toBe(saveKey);
+    expect(
+      computeHelp({ subject: 'language', method: 'lora', provider: 'local', hasKey: false })
+    ).toBe(saveKey);
     expect(
       computeHelp({ subject: 'person', method: 'lora', provider: 'local', hasKey: false })
-    ).toBe('Save a Runpod API key in Workspace Settings.');
+    ).toBe(saveKey);
     expect(
       computeHelp({ subject: 'person', method: 'lora', provider: 'local', hasKey: true })
+    ).toBeNull();
+    expect(
+      computeHelp({ subject: 'other', method: 'lora', provider: 'local', hasKey: true })
     ).toBeNull();
     expect(
       computeHelp({ subject: 'person', method: 'finetune', provider: 'runpod', hasKey: true })
     ).toBe('Auto-picks a 48 GB GPU (A40 class). About 4 hours, $1–2.');
     expect(
       computeHelp({ subject: 'person', method: 'lora', provider: 'runpod', hasKey: true })
-    ).toBe('A 24 GB GPU is enough for this method.');
+    ).toBe(gpu24);
     expect(
       computeHelp({ subject: 'person', method: 'pivotal', provider: 'runpod', hasKey: true })
-    ).toBe('A 24 GB GPU is enough for this method.');
+    ).toBe(gpu24);
     expect(
       computeHelp({ subject: 'person', method: 'video', provider: 'runpod', hasKey: true })
-    ).toBe('A 24 GB GPU is enough for this method.');
+    ).toBe(gpu24);
     expect(
       computeHelp({ subject: 'language', method: 'lora', provider: 'runpod', hasKey: true })
-    ).toBeNull();
+    ).toBe(gpu24);
+    expect(
+      computeHelp({ subject: 'other', method: 'lora', provider: 'runpod', hasKey: true })
+    ).toBe(gpu24);
   });
 
   it('uses the phase message as the step label', () => {

@@ -589,8 +589,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   }, [currentOrganization?.id, currentWorkspace?.id]);
 
   useEffect(() => {
-    if (subject !== 'person' || !hasRunpodKey) setProvider('local');
-  }, [subject, hasRunpodKey]);
+    if (!hasRunpodKey) setProvider('local');
+  }, [hasRunpodKey]);
 
   useEffect(() => {
     if (subject === 'person') {
@@ -772,7 +772,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const handleProvider = (value: string) => {
     if (busy) return;
     if (value === 'runpod') {
-      if (subject !== 'person' || !hasRunpodKey) return;
+      if (!hasRunpodKey) return;
       setProvider('runpod');
       return;
     }
@@ -1046,7 +1046,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     stills: images.length,
     clips: clips.length,
   });
-  const runpodDisabled = subject !== 'person' || !hasRunpodKey;
+  const runpodDisabled = !hasRunpodKey;
   const computeHint = computeHelp({
     subject,
     method,

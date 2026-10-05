@@ -1219,18 +1219,11 @@ describe('TrainPanel', () => {
     expect(mockTrain).not.toHaveBeenCalled();
   });
 
-  it('disables Runpod until a Person train has a Runpod key', async () => {
-    mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
+  it('disables Runpod until a Runpod key is saved', async () => {
     render(<TrainPanel onTrained={mock()} />);
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
-    fireEvent.click(screen.getByLabelText('Compute'));
-    expect(await screen.findByRole('option', { name: 'Runpod' })).toHaveAttribute('data-disabled');
-    fireEvent.click(screen.getByRole('option', { name: 'Local' }));
-
-    await selectSubject('Person');
-    await waitFor(() => {
-      expect(screen.getByText('Save a Runpod API key in Workspace Settings.')).toBeInTheDocument();
-    });
+    expect(screen.getByLabelText('Subject')).toHaveTextContent('Other');
+    expect(screen.getByText('Save a Runpod API key in Workspace Settings.')).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('Compute'));
     expect(await screen.findByRole('option', { name: 'Runpod' })).toHaveAttribute('data-disabled');
     fireEvent.click(screen.getByRole('option', { name: 'Local' }));
@@ -1284,7 +1277,7 @@ describe('TrainPanel', () => {
     expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
   });
 
-  it('keeps Runpod disabled for language even when a key is saved', async () => {
+  it('posts Runpod compute for a language LoRA when a key is saved', async () => {
     mockGetEffectiveAiSettings.mockImplementation(() =>
       Promise.resolve({ has_runpod_api_key: true })
     );
@@ -1295,9 +1288,47 @@ describe('TrainPanel', () => {
     await waitFor(() => {
       expect(screen.getByLabelText('Base')).toHaveTextContent('qwen2.5 32B');
     });
-    expect(screen.getByLabelText('Compute')).toHaveTextContent('Local');
-    fireEvent.click(screen.getByLabelText('Compute'));
-    expect(await screen.findByRole('option', { name: 'Runpod' })).toHaveAttribute('data-disabled');
-    fireEvent.click(screen.getByRole('option', { name: 'Local' }));
+    await waitFor(() => {
+      expect(screen.queryByText('Save a Runpod API key in Workspace Settings.')).toBeNull();
+    });
+    await selectOption('Compute', 'Runpod');
+    expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'notes' } });
+    const dump = new File(['{"text":"hello"}\n'], 'notes.jsonl', { type: 'application/json' });
+    fireEvent.change(screen.getByLabelText('Documents'), { target: { files: [dump] } });
+    await waitFor(() => expect(screen.getByText('notes.jsonl')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Train' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    expect(mockTrain.mock.calls[0]?.[0]).toMatchObject({
+      subject: 'language',
+      method: 'lora',
+      provider: 'runpod',
+    });
+  });
+
+  it('posts Runpod compute for an Other LoRA when a key is saved', async () => {
+    mockGetEffectiveAiSettings.mockImplementation(() =>
+      Promise.resolve({ has_runpod_api_key: true })
+    );
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await waitFor(() => {
+      expect(screen.queryByText('Save a Runpod API key in Workspace Settings.')).toBeNull();
+    });
+    await selectBase('FLUX.1 Schnell');
+    await selectOption('Compute', 'Runpod');
+    expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
+    fillIdentity();
+    await addTargets(file('target.png', 'target'));
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    expect(mockTrain.mock.calls[0]?.[0]).toMatchObject({
+      subject: 'other',
+      method: 'lora',
+      provider: 'runpod',
+      workspace_id: 'ws-1',
+    });
   });
 });
