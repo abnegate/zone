@@ -38,8 +38,9 @@
 //!
 //! # Content
 //!
-//! A notification's text passes through [`zone_core::tools::sanitize`] as it
-//! is built, which strips terminal control sequences and redacts credentials.
+//! A notification's text passes through [`abnegate_secret::sanitize`] as it
+//! is built, which strips terminal control sequences and invisible formatting
+//! characters and redacts credentials.
 //! Bodies carry tool output and user data, a chat channel's history is much
 //! harder to scrub than a log file, and control sequences in a message can
 //! forge output in a terminal-based reader.

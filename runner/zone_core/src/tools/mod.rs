@@ -10,18 +10,16 @@ mod identity;
 pub mod job;
 mod reason;
 pub mod routing;
-mod sanitize;
 pub mod tail;
 mod tier;
 
 pub use command::*;
 pub use file::*;
 pub use reason::{REASON_DESCRIPTION, REASON_PARAM, reason_property};
-pub use sanitize::sanitize;
 pub use tier::{CONFIRMED_FROM, Tier};
 
+use abnegate_secret::sanitize_owned;
 use async_trait::async_trait;
-use sanitize::sanitize_owned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -179,7 +177,7 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
-    /// Wrap successful tool output, [`sanitize`]d on the way in.
+    /// Wrap successful tool output, [`sanitize`](abnegate_secret::sanitize)d on the way in.
     pub fn success(output: impl Into<String>) -> Self {
         Self {
             success: true,
@@ -189,7 +187,7 @@ impl ToolResult {
         }
     }
 
-    /// Wrap a tool failure, [`sanitize`]d on the way in.
+    /// Wrap a tool failure, [`sanitize`](abnegate_secret::sanitize)d on the way in.
     pub fn error(error: impl Into<String>) -> Self {
         Self {
             success: false,
@@ -751,6 +749,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_secret::REDACTED;
 
     /// A preview a reader approves has to say what will run. `sh -c` runs one
     /// command per line, so two lines joined by a space showed them a single
@@ -805,11 +804,9 @@ mod tests {
     #[test]
     fn success_redacts_a_credential_in_the_output() {
         let result = ToolResult::success("printenv\nGITHUB_TOKEN=ghp_0123456789abcdefghij\n");
-        assert_eq!(
-            result.output.as_deref(),
-            Some("printenv\nGITHUB_TOKEN=[REDACTED]\n")
-        );
-        assert_eq!(result.to_message(), "printenv\nGITHUB_TOKEN=[REDACTED]\n");
+        let redacted = format!("printenv\nGITHUB_TOKEN={REDACTED}\n");
+        assert_eq!(result.output.as_deref(), Some(redacted.as_str()));
+        assert_eq!(result.to_message(), redacted);
     }
 
     #[test]
@@ -817,6 +814,45 @@ mod tests {
         let result = ToolResult::error("\u{1b}]0;stolen title\u{7}command not found\r\n");
         assert_eq!(result.error.as_deref(), Some("command not found\n"));
         assert_eq!(result.to_message(), "Error: command not found\n");
+    }
+
+    #[test]
+    fn success_redacts_a_credential_split_by_an_invisible_character() {
+        let result = ToolResult::success("fatal: ghp_0123\u{200B}456789abcdefghij rejected");
+        assert_eq!(result.output, Some(format!("fatal: {REDACTED} rejected")));
+    }
+
+    #[test]
+    fn success_strips_bidirectional_overrides() {
+        let result = ToolResult::success("access = \u{202E}nimda\u{202C} check");
+        assert_eq!(result.output.as_deref(), Some("access = nimda check"));
+    }
+
+    #[test]
+    fn error_strips_a_whole_two_byte_escape() {
+        let result = ToolResult::error("a\u{1b}7b\u{1b}cc");
+        assert_eq!(result.error.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn error_strips_an_escape_with_intermediates() {
+        let result = ToolResult::error("a\u{1b}(Bb");
+        assert_eq!(result.error.as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn error_strips_a_start_of_string_with_its_payload() {
+        let result = ToolResult::error("a\u{1b}Xhidden\u{1b}\\b");
+        assert_eq!(result.error.as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn success_drops_emoji_joiners_and_variation_selectors() {
+        let result = ToolResult::success("\u{2764}\u{FE0F} \u{1F468}\u{200D}\u{1F469}");
+        assert_eq!(
+            result.output.as_deref(),
+            Some("\u{2764} \u{1F468}\u{1F469}")
+        );
     }
 
     #[test]

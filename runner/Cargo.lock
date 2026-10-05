@@ -9934,7 +9934,6 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
- "zone_core",
 ]
 
 [[package]]

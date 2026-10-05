@@ -2,12 +2,12 @@
 
 use std::fmt;
 
+use abnegate_secret::sanitize;
 use async_trait::async_trait;
 use lettre::message::Mailbox;
 use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Address, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
-use zone_core::tools::sanitize;
 
 use crate::backend::smtp::SmtpConfig;
 use crate::channel::Channel;
