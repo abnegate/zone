@@ -146,6 +146,7 @@ install_trainer() {
         exit 1
     fi
     cp "$PROJECT_DIR/comfyui/train_sdxl.py" "$INSTALL_DIR/train_sdxl.py"
+    cp "$PROJECT_DIR/comfyui/train_runpod.py" "$INSTALL_DIR/train_runpod.py"
     cp "$PROJECT_DIR/comfyui/train_sdxl_config.json" "$INSTALL_DIR/train_sdxl_config.json"
     cp "$PROJECT_DIR/comfyui/train_wan.py" "$INSTALL_DIR/train_wan.py"
     cp "$PROJECT_DIR/comfyui/train_wan_config.json" "$INSTALL_DIR/train_wan_config.json"

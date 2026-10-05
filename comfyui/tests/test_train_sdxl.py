@@ -1022,5 +1022,27 @@ class CrashResumeTests(unittest.TestCase):
             self.assertFalse((path / 'step-000001.pt.tmp').exists())
 
 
+class RunpodDispatchTests(unittest.TestCase):
+    def test_process_job_dispatches_runpod_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            write_dataset(job_dir)
+            train_sdxl.write_job(job_dir, queued_job(extra={'provider': 'runpod'}))
+            config = train_sdxl.load_config()
+            with (
+                mock.patch('train_runpod.process_job') as remote,
+                mock.patch.object(train_sdxl, 'train') as train,
+                mock.patch.object(train_sdxl, 'run_stub') as run_stub,
+                mock.patch.object(train_sdxl, 'normalize_job') as normalize,
+            ):
+                train_sdxl.process_job(models, job_dir, config, stub=True)
+            remote.assert_called_once_with(models, job_dir, config, True)
+            train.assert_not_called()
+            run_stub.assert_not_called()
+            normalize.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

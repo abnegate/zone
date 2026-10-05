@@ -902,6 +902,11 @@ def process_job(
 
         train_llm.process_job(models_dir, job_dir, stub)
         return
+    if (job.get('provider') or '') == 'runpod':
+        import train_runpod
+
+        train_runpod.process_job(models_dir, job_dir, config, stub)
+        return
     if (job.get('method') or '') == 'video':
         import train_wan
 
