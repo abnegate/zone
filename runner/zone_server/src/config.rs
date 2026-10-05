@@ -9,6 +9,8 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use abnegate_vcs::pull_request::PullRequestResult;
+use abnegate_vcs::{PullRequestError, PullRequestService};
 use uuid::Uuid;
 use zone_core::llm::{AgentKind, CodexSandbox};
 
@@ -85,6 +87,9 @@ pub struct Config {
     /// to GitHub Enterprise, and so the publication path can be exercised
     /// against something other than github.com.
     pub github_api_url: String,
+    /// Whether `github_api_url` may be plain HTTP. Off unless the operator
+    /// opts in, because the token then crosses the network in the clear.
+    pub github_api_allows_http: bool,
     /// Live web search via SearXNG (through Gluetun when the VPN profile is up)
     pub web_search: WebSearchConfig,
     /// Direct ComfyUI image generation and artifact storage.
@@ -1051,6 +1056,15 @@ impl Config {
         }
     }
 
+    /// The GitHub API at the configured origin, over plain HTTP only when
+    /// `GITHUB_API_ALLOW_HTTP` opted in to it.
+    pub fn pull_requests(&self) -> PullRequestResult<PullRequestService> {
+        match self.github_api_allows_http {
+            true => PullRequestService::configured_allowing_http(&self.github_api_url),
+            false => PullRequestService::configured(&self.github_api_url),
+        }
+    }
+
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
         let jwt_secret = env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
@@ -1092,8 +1106,9 @@ impl Config {
             .map(|url| url.trim().trim_end_matches('/').to_string())
             .filter(|url| !url.is_empty())
             .unwrap_or_else(|| DEFAULT_GITHUB_API_URL.to_string());
+        let github_api_allows_http = env_truthy("GITHUB_API_ALLOW_HTTP", false);
         // A prefix is not an origin: `https:///api/v3` passes one and leaves
-        // PrService building request URLs with no host to send them to. Parsing
+        // PullRequestService building request URLs with no host to send them to. Parsing
         // also refuses embedded credentials, which would otherwise reach any
         // log that prints this config.
         match reqwest::Url::parse(&github_api_url) {
@@ -1111,6 +1126,11 @@ impl Config {
                 if url.query().is_some() || url.fragment().is_some() {
                     return Err(ConfigError::Invalid(
                         "GITHUB_API_URL must be an origin, without a query or fragment",
+                    ));
+                }
+                if url.scheme() == "http" && !github_api_allows_http {
+                    return Err(ConfigError::Invalid(
+                        "GITHUB_API_URL is plain http; set GITHUB_API_ALLOW_HTTP=true to send the repository token over it",
                     ));
                 }
             }
@@ -1133,7 +1153,7 @@ impl Config {
             }
         }
 
-        Ok(Self {
+        let config = Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: env::var("PORT")
                 .ok()
@@ -1170,6 +1190,7 @@ impl Config {
             cors_allow_credentials,
             app_base_url,
             github_api_url,
+            github_api_allows_http,
             web_search: crate::services::search::from_environment(),
             comfyui: ComfyUiConfig::from_env(),
             source_index: SourceIndexConfig::from_env(),
@@ -1184,7 +1205,9 @@ impl Config {
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
                 )
             })?,
-        })
+        };
+        config.pull_requests().map_err(ConfigError::GitHubOrigin)?;
+        Ok(config)
     }
 }
 
@@ -1215,6 +1238,7 @@ impl std::fmt::Debug for Config {
             .field("cors_allow_credentials", &self.cors_allow_credentials)
             .field("app_base_url", &self.app_base_url)
             .field("github_api_url", &self.github_api_url)
+            .field("github_api_allows_http", &self.github_api_allows_http)
             .field("web_search", &self.web_search)
             .field("comfyui", &self.comfyui)
             .field("source_index", &self.source_index)
@@ -1234,6 +1258,8 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("Invalid configuration: {0}")]
     Invalid(&'static str),
+    #[error("Invalid configuration: GITHUB_API_URL is not a GitHub origin: {0}")]
+    GitHubOrigin(PullRequestError),
 }
 
 #[cfg(test)]
@@ -1264,6 +1290,7 @@ mod tests {
             cors_allow_credentials: false,
             app_base_url: "http://localhost:3000".to_string(),
             github_api_url: DEFAULT_GITHUB_API_URL.to_string(),
+            github_api_allows_http: false,
             web_search: crate::services::search::defaults(),
             comfyui: ComfyUiConfig::default(),
             source_index: SourceIndexConfig::default(),
@@ -1427,7 +1454,7 @@ mod tests {
         AllowedOrigins::new(entries.iter().map(|entry| entry.to_string()))
     }
 
-    /// `PrService` carries a configurable-origin constructor and the App issuer an
+    /// `PullRequestService` carries a configurable-origin constructor and the App issuer an
     /// `at` one, both documented for GitHub Enterprise, and neither was
     /// reachable from configuration -- every production caller hardcoded
     /// github.com. That left Enterprise unusable and the publication path
@@ -1437,6 +1464,7 @@ mod tests {
         let names = [
             "DATABASE_URL",
             "ENCRYPTION_KEY",
+            "GITHUB_API_ALLOW_HTTP",
             "GITHUB_API_URL",
             "JWT_SECRET",
             "LITELLM_HOST",
@@ -1532,13 +1560,51 @@ mod tests {
         }
 
         environment.set("GITHUB_API_URL", "http://localhost:3000");
+        assert!(
+            matches!(
+                Config::from_env(),
+                Err(ConfigError::Invalid(
+                    "GITHUB_API_URL is plain http; set GITHUB_API_ALLOW_HTTP=true to send the repository token over it"
+                ))
+            ),
+            "a plain http origin carries the token in the clear, so it is never the default"
+        );
+
+        for spelling in ["yes", "1", "ON"] {
+            environment.set("GITHUB_API_ALLOW_HTTP", spelling);
+            assert!(
+                Config::from_env()
+                    .expect("every truthy spelling opts in")
+                    .github_api_allows_http,
+                "GITHUB_API_ALLOW_HTTP={spelling} is an opt-in like the other switches"
+            );
+        }
+
+        environment.set("GITHUB_API_ALLOW_HTTP", "true");
+        let configured = Config::from_env().expect("an operator may opt in to a host they run");
         assert_eq!(
-            Config::from_env()
-                .expect("an operator may point this at a host they run")
-                .github_api_url,
-            "http://localhost:3000",
-            "http stays configurable: the origin is operator configuration, and \
-             it is routinely a loopback or LAN host"
+            configured.github_api_url, "http://localhost:3000",
+            "http stays configurable once opted in: the origin is operator \
+             configuration, and it is routinely a loopback or LAN host"
+        );
+        assert!(configured.github_api_allows_http);
+        let service = configured
+            .pull_requests()
+            .expect("the opted-in origin reaches the GitHub client");
+        assert!(
+            service
+                .pull_request("http://localhost:3000/owner/repository/pull/1")
+                .is_ok(),
+            "links on the opted-in origin's host may use http too"
+        );
+
+        let refused = Config {
+            github_api_allows_http: false,
+            ..configured
+        };
+        assert!(
+            refused.pull_requests().is_err(),
+            "without the opt-in the client refuses a plain http origin too"
         );
     }
 
