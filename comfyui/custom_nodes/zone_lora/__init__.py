@@ -1,4 +1,4 @@
-from comfy_api.latest import ComfyExtension
+from comfy_api.latest import ComfyExtension, io
 
 from .cleanup_node import ZoneCleanupTrainingRun
 from .dataset_node import ZoneLoadTrainDataset
@@ -11,16 +11,13 @@ from .train_node import ZoneLoadTrainFolder, ZoneTrainLoRA
 
 install_all()
 
-NODE_CLASS_MAPPINGS = {
-    'ZoneIPAdapterFace': ZoneIPAdapterFace,
-}
-
 
 class ZoneLoraExtension(ComfyExtension):
-    async def get_node_list(self):
+    async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             ZoneLoadTrainDataset,
             ZoneCleanupTrainingRun,
+            ZoneIPAdapterFace,
             ZoneLoadTrainFolder,
             ZoneProbeGradient,
             ZoneProbeLoss,

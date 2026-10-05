@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ PIN = '30bdda1ef13a3a34fce2cd2fec633f15d832122a'
 ZONE_NODES = COMFYUI / 'custom_nodes' / 'zone_lora'
 TRAIN_SERVER = ROOT / 'runner/zone_comfy/src/train.rs'
 QUALITY_SERVER = ROOT / 'runner/zone_comfy/src/quality.rs'
+PEOPLE_SERVER = ROOT / 'runner/zone_comfy/src/people.rs'
 
 if not INSTALL.is_dir():
     raise RuntimeError('COMFYUI_INSTALL_DIR must point to the pinned ComfyUI checkout')
@@ -163,6 +165,53 @@ def rust_graphs() -> dict[str, dict]:
         'Rust flux probe': rust_graph(QUALITY_SERVER, 'flux_graph'),
         'Rust qwen probe': rust_graph(QUALITY_SERVER, 'qwen_graph'),
     }
+
+
+def resolve(value: object, constants: dict[str, str]) -> object:
+    if isinstance(value, Expression):
+        return constants.get(value.text, value)
+    if isinstance(value, list):
+        return [resolve(item, constants) for item in value]
+    if isinstance(value, dict):
+        return {name: resolve(item, constants) for name, item in value.items()}
+    return value
+
+
+def people_strings() -> dict[str, str]:
+    return dict(re.findall(r'const (\w+): &str = "([^"]*)";', PEOPLE_SERVER.read_text()))
+
+
+def people_numbers() -> dict[str, float]:
+    return {
+        name: float(value)
+        for name, value in re.findall(r'const (\w+): f64 = ([0-9.]+);', PEOPLE_SERVER.read_text())
+    }
+
+
+def rust_face_graph() -> dict:
+    source = PEOPLE_SERVER.read_text()
+    constants = people_strings()
+    start = source.find('fn inject_ipadapter(')
+    if start < 0:
+        raise AssertionError(f'{PEOPLE_SERVER}: inject_ipadapter is missing')
+    end = source.find('\n}\n', start)
+    if end <= start:
+        raise AssertionError(f'{PEOPLE_SERVER}: inject_ipadapter has no closing brace')
+    graph = {
+        '4': {
+            'class_type': 'CheckpointLoaderSimple',
+            'inputs': {'ckpt_name': 'model.safetensors'},
+        }
+    }
+    for insert in re.finditer(r'object\.insert\(\s*(\w+)\.into\(\),\s*json!\(', source[start:end]):
+        key = insert.group(1)
+        if key not in constants:
+            raise AssertionError(f'{PEOPLE_SERVER}: node key {key} is not a &str constant')
+        node = RustLiteral(source, start + insert.end(), PEOPLE_SERVER).object()
+        graph[constants[key]] = resolve(node, constants)
+    face = graph[constants['IPADAPTER_NODE']]
+    face['inputs']['model'] = ['4', 0]
+    return graph
 
 
 def flux() -> train_lora.TrainingModel:
@@ -371,12 +420,58 @@ class GraphContractTests(unittest.TestCase):
             'ZoneCleanupTrainingRun',
             'ZoneIPAdapterFace',
             'ZoneLoadTrainDataset',
+            'ZoneLoadTrainFolder',
             'ZoneProbeGradient',
             'ZoneProbeLoss',
             'ZoneStageTrainingArtifact',
             'ZoneTrainLoRA',
         }
         self.assertLessEqual(expected, set(self.nodes.NODE_CLASS_MAPPINGS))
+
+    def test_rust_face_graph_matches_the_pinned_registry(self) -> None:
+        graph = rust_face_graph()
+        self.assertEqual(
+            sorted(node['class_type'] for node in graph.values()),
+            ['CLIPVisionLoader', 'CheckpointLoaderSimple', 'LoadImage', 'ZoneIPAdapterFace'],
+        )
+        self.validate_graph('Rust face', graph)
+
+    def test_rust_face_constants_fit_the_face_node(self) -> None:
+        node_class = self.nodes.NODE_CLASS_MAPPINGS['ZoneIPAdapterFace']
+        inputs, _, _ = schema(node_class)
+        bounds = inputs['strength'][1]
+        strength = people_numbers()['IPADAPTER_STRENGTH']
+        self.assertGreaterEqual(strength, bounds['min'], f'{PEOPLE_SERVER}: IPADAPTER_STRENGTH')
+        self.assertLessEqual(strength, bounds['max'], f'{PEOPLE_SERVER}: IPADAPTER_STRENGTH')
+        self.assertEqual(
+            people_strings()['IPADAPTER_FILE'],
+            sys.modules[node_class.__module__].PLUS_FACE,
+            f'{PEOPLE_SERVER}: IPADAPTER_FILE',
+        )
+
+    def test_face_node_at_zero_strength_returns_the_model_untouched(self) -> None:
+        from execution import _async_map_node_over_list
+
+        node_class = self.nodes.NODE_CLASS_MAPPINGS['ZoneIPAdapterFace']
+        model = object()
+        results = asyncio.run(
+            _async_map_node_over_list(
+                'contract',
+                'face',
+                node_class,
+                {
+                    'model': [model],
+                    'clip_vision': [None],
+                    'image': [None],
+                    'ipadapter_name': ['missing.safetensors'],
+                    'strength': [0.0],
+                },
+                node_class.FUNCTION,
+                v3_data={},
+            )
+        )
+        self.assertEqual(len(results), 1)
+        self.assertIs(results[0].result[0], model)
 
     def test_sdxl_people_graphs_match_the_pinned_registry(self) -> None:
         for name in (
