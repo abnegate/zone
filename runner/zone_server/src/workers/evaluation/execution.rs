@@ -226,20 +226,27 @@ mod tests {
     /// shares, so this runs again in a child that names one.
     #[tokio::test]
     async fn routes_the_tool_through_the_tool_runner_proxy() {
-        const NAME: &str =
-            "workers::evaluation::execution::tests::routes_the_tool_through_the_tool_runner_proxy";
         const CHILD: &str = "ZONE_EVALUATION_TEST_CHILD";
         const PROXY: &str = "http://127.0.0.1:28888";
+        let path = concat!(
+            module_path!(),
+            "::routes_the_tool_through_the_tool_runner_proxy"
+        );
+        let (_, name) = path.split_once("::").expect("a path inside the crate");
 
-        if std::env::var(CHILD).as_deref() != Ok(NAME) {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", NAME, "--nocapture", "--test-threads", "1"])
+        if std::env::var(CHILD).as_deref() != Ok(name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", name, "--nocapture", "--test-threads", "1"])
                 .env_clear()
-                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-                .env(CHILD, NAME)
-                .env(routing::PROXY_URL_VARIABLE, PROXY)
-                .output()
-                .unwrap();
+                .env(CHILD, name)
+                .env(routing::PROXY_URL_VARIABLE, PROXY);
+            for variable in ["PATH", "LLVM_PROFILE_FILE", "RUST_BACKTRACE"] {
+                if let Some(value) = std::env::var_os(variable) {
+                    child.env(variable, value);
+                }
+            }
+            let output = child.output().await.unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
                 output.status.success() && stdout.contains("1 passed"),
