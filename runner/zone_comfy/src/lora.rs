@@ -508,7 +508,7 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
         }
         if let TrainingModel::Sdxl { checkpoint } = &model {
             let path = config.models_dir.join("checkpoints").join(checkpoint);
-            if !path.is_file() {
+            if !request.provider.is_runpod() && !path.is_file() {
                 return Err(TrainError::Invalid(
                     "download the SDXL people bundle before training a person",
                 ));
@@ -519,7 +519,7 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
                 .models_dir
                 .join("diffusion_models")
                 .join("wan2.2_ti2v_5B_fp16.safetensors");
-            if !path.is_file() {
+            if !request.provider.is_runpod() && !path.is_file() {
                 return Err(TrainError::Invalid(
                     "download the video bundle before training a person video adapter",
                 ));
@@ -2587,6 +2587,15 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(runpod.provider, TrainProvider::Runpod);
+    }
+
+    #[test]
+    fn runpod_person_does_not_need_the_local_people_checkpoint() {
+        let (_root, config) = harness("unused");
+        let mut person = request("jerry", "sdxl-people", Some("ohwx"));
+        person.subject = TrainSubject::Person;
+        person.provider = TrainProvider::Runpod;
+        assert!(validate_request(&config, &person).is_ok());
     }
 
     #[test]

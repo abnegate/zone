@@ -126,9 +126,10 @@ class CreateAndKeyTests(unittest.TestCase):
 
         client = mock.Mock()
         client.create_pod.side_effect = create
-        pod = train_runpod.place_pod(client, queued_job(), [RTX_4090])
+        pod, gpu = train_runpod.place_pod(client, queued_job(), [RTX_4090])
         self.assertEqual(clouds, ['COMMUNITY', 'SECURE'])
         self.assertEqual(pod['id'], 'pod1')
+        self.assertEqual(gpu['id'], RTX_4090['id'])
 
     def test_finetune_create_uses_a40_and_150gb(self) -> None:
         bodies: list[dict] = []
@@ -151,6 +152,8 @@ class CreateAndKeyTests(unittest.TestCase):
             path = job_dir / 'runpod.key'
             path.write_text('rp-secret\n', encoding='utf-8')
             self.assertEqual(train_runpod.load_key(job_dir), 'rp-secret')
+            self.assertTrue(path.exists())
+            train_runpod.drop_key(job_dir)
             self.assertFalse(path.exists())
 
     def test_delete_called_on_train_error(self) -> None:
@@ -179,21 +182,30 @@ class CreateAndKeyTests(unittest.TestCase):
             self.assertEqual(job['error'], 'boom')
             self.assertNotIn('rp-test-key', json.dumps(job))
 
-    def test_process_job_unlinks_key_before_create(self) -> None:
+    def test_process_job_keeps_the_key_until_the_job_ends(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
             job_dir = stage_job(models)
+            key = job_dir / 'runpod.key'
             client = mock.Mock()
-            client.list_gpus.side_effect = RuntimeError('catalog down')
-            with self.assertRaisesRegex(RuntimeError, 'catalog down'):
-                train_runpod.process_job(
-                    models,
-                    job_dir,
-                    train_sdxl.load_config(),
-                    client=client,
-                    sleep=lambda _interval: None,
-                )
-            self.assertFalse((job_dir / 'runpod.key').exists())
+            client.list_gpus.return_value = [A40]
+            client.create_pod.return_value = {'id': 'pod9', 'status': 'RUNNING'}
+            client.get_pod.return_value = {'id': 'pod9', 'status': 'RUNNING'}
+
+            def wait_ready(*_args: object, **_kwargs: object) -> dict:
+                self.assertTrue(key.exists())
+                raise RuntimeError('boom')
+
+            with mock.patch.object(train_runpod, 'wait_ready', side_effect=wait_ready):
+                with self.assertRaisesRegex(RuntimeError, 'boom'):
+                    train_runpod.process_job(
+                        models,
+                        job_dir,
+                        train_sdxl.load_config(),
+                        client=client,
+                        sleep=lambda _interval: None,
+                    )
+            self.assertFalse(key.exists())
 
     def test_resume_skips_create_when_pod_is_running(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -404,6 +416,7 @@ class HttpClientTests(unittest.TestCase):
             self.assertFalse((job_dir / 'runpod.key').exists())
             job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
             self.assertEqual(job['status'], 'succeeded')
+            self.assertEqual(job['gpu'], 'A40')
             self.assertNotIn('rp-live', json.dumps(job))
             progress = json.loads((job_dir / 'progress.json').read_text(encoding='utf-8'))
             self.assertEqual(progress['percent'], 100)

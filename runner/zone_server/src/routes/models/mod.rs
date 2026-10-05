@@ -813,13 +813,11 @@ async fn runpod_key(
     state: &AppState,
     auth: &AuthUser,
     workspace_id: Option<Uuid>,
-) -> Result<Option<String>, Response> {
+) -> Result<Option<String>, ServerError> {
     let Some(workspace_id) = workspace_id else {
         return Ok(None);
     };
-    check_workspace_read_access(state, auth, workspace_id)
-        .await
-        .map_err(IntoResponse::into_response)?;
+    check_workspace_read_access(state, auth, workspace_id).await?;
     Ok(ai_settings::runpod_api_key(state.db(), workspace_id)
         .await
         .map(|key| key.expose().trim().to_string())
@@ -889,7 +887,7 @@ pub async fn train(
                 )
                     .into_response();
             }
-            Err(response) => return response,
+            Err(error) => return error.into_response(),
         }
     } else {
         None

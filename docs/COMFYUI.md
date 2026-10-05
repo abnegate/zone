@@ -449,13 +449,23 @@ recipe, with prior preservation class `person`. Captions are
 
 Person jobs do not go through ComfyUI `/prompt`. Manager writes
 `models/.zone-train/{id}/` on the bind mount; host LaunchAgent `ai.zone.train`
-trains on MPS in fp32, writes `progress.json` with `phase`, `message`,
-weighted `percent`, `loss`, and a per-phase `eta_seconds`, and publishes the
-weight plus sidecar. Fine-tune phases are queued, loading, class_images,
-encoding, training, publishing. Recreating manager does not cancel a run.
-LoRA is the path for about 20–200 unique stills. Fine-tune starts around 200
-unique stills or 20 clips; 500 stills or 50 clips is the strong set. Install
-the worker with:
+runs the same gold recipe on every backend (float32, AdamW for fine-tune,
+Prodigy for LoRA and pivotal, no AMP, no 8-bit Adam, TF32 off). Compute on the
+Train form is **Local** (CUDA if `torch.cuda.is_available()`, else MPS, else
+CPU) or **Runpod**. Runpod is Person-only (LoRA, fine-tune, pivotal, video).
+Save a Runpod API key under Workspace or organization AI settings; GET returns
+`has_runpod_api_key` and never the secret. The host worker writes
+`job_dir/runpod.key` mode `0600`, auto-picks a GPU from the Runpod catalog
+(fine-tune ≥48 GB, LoRA/pivotal/video ≥24 GB, Community then Secure), and
+deletes the pod when the job ends. A card below the VRAM floor fails closed
+instead of dropping precision. Language and Flux/Qwen Other stay Local.
+
+The worker writes `progress.json` with `phase`, `message`, weighted `percent`,
+`loss`, and a per-phase `eta_seconds`, and publishes the weight plus sidecar.
+Fine-tune phases are queued, loading, class_images, encoding, training,
+publishing. Recreating manager does not cancel a run. LoRA is the path for
+about 20–200 unique stills. Fine-tune starts around 200 unique stills or 20
+clips; 500 stills or 50 clips is the strong set. Install the worker with:
 
 ```bash
 ./scripts/setup-comfyui-macos.sh --install-trainer

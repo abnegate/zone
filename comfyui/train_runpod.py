@@ -211,7 +211,6 @@ def load_key(job_dir: Path) -> str:
     if not path.is_file():
         raise RuntimeError('Runpod API key is missing')
     key = path.read_text(encoding='utf-8').strip()
-    path.unlink()
     if not key:
         raise RuntimeError('Runpod API key is missing')
     return key
@@ -221,9 +220,13 @@ def consume_key_file(job_dir: Path) -> str | None:
     path = Path(job_dir) / KEY_NAME
     if not path.is_file():
         return None
-    key = path.read_text(encoding='utf-8').strip()
-    path.unlink()
-    return key or None
+    return path.read_text(encoding='utf-8').strip() or None
+
+
+def drop_key(job_dir: Path) -> None:
+    path = Path(job_dir) / KEY_NAME
+    if path.is_file():
+        path.unlink()
 
 
 def memory_floor(method: str) -> int:
@@ -299,11 +302,15 @@ def pod_body(job: dict[str, Any], gpu: dict[str, Any], cloud: str) -> dict[str, 
     }
 
 
+def gpu_label(gpu: dict[str, Any]) -> str:
+    return str(gpu.get('name') or gpu.get('id') or '').strip()
+
+
 def place_pod(
     client: Client,
     job: dict[str, Any],
     gpus: list[dict[str, Any]],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     method = str(job.get('method') or 'lora')
     candidates = rank_gpus(gpus, method)
     if not candidates:
@@ -314,7 +321,7 @@ def place_pod(
             if not offers_cloud(gpu, cloud):
                 continue
             try:
-                return client.create_pod(pod_body(job, gpu, cloud))
+                return client.create_pod(pod_body(job, gpu, cloud)), gpu
             except HttpError as error:
                 last = str(error)
                 if error.status == 402:
@@ -667,9 +674,12 @@ def process_job(
         job = train_sdxl.mark_running(job_dir, job)
         pod = resume_pod(active, job)
         if pod is None:
-            pod = place_pod(active, job, active.list_gpus())
+            pod, gpu = place_pod(active, job, active.list_gpus())
             pod_id = str(pod['id'])
             job['pod_id'] = pod_id
+            label = gpu_label(gpu)
+            if label:
+                job['gpu'] = label
             train_sdxl.write_job(job_dir, job)
             wait_running(active, pod_id, sleep)
         else:
@@ -685,6 +695,7 @@ def process_job(
         train_sdxl.mark_failed(job_dir, job, error)
         raise
     finally:
+        drop_key(job_dir)
         if pod_id and active is not None:
             try:
                 active.delete_pod(pod_id)
