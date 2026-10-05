@@ -147,6 +147,41 @@ impl DaemonProcess {
     /// Kill the daemon once `limit` has passed, so a daemon that stops
     /// answering fails the test instead of hanging it. Dropping the
     /// watchdog disarms it.
+    fn start(&mut self, job_id: &str, command: &str, args: &[&str]) {
+        self.send(&RunStart {
+            msg_type: "RunStart".to_string(),
+            job_id: job_id.to_string(),
+            workspace: "/tmp".to_string(),
+            command: command.to_string(),
+            args: args.iter().map(|argument| argument.to_string()).collect(),
+            timeout_ms: Some(60000),
+        });
+        let started = self.recv_until(Duration::from_secs(5), |message| {
+            message["type"] == "RunStarted" || message["type"] == "RunError"
+        });
+        assert_eq!(
+            started.last().map(|message| &message["type"]),
+            Some(&Value::from("RunStarted")),
+            "{started:?}"
+        );
+    }
+
+    fn write_stdin(&mut self, job_id: &str, data: String, eof: bool) {
+        self.send(&RunStdin {
+            msg_type: "RunStdin".to_string(),
+            job_id: job_id.to_string(),
+            data,
+            eof,
+        });
+    }
+
+    fn finish(&mut self) -> Vec<Value> {
+        self.recv_until(Duration::from_secs(10), |message| {
+            message["type"] == "RunExit"
+                || (message["type"] == "RunError" && message["job_id"] != "")
+        })
+    }
+
     fn watchdog(&self, limit: Duration) -> Watchdog {
         let pid = self.child.id().to_string();
         let (armed, disarmed) = mpsc::channel::<()>();
@@ -797,40 +832,81 @@ fn test_pid_in_started() {
 fn stdin_sent_to_a_job_reaches_it() {
     let mut daemon = DaemonProcess::spawn();
     daemon.handshake();
-    daemon.send(&RunStart {
-        msg_type: "RunStart".to_string(),
-        job_id: "job-stdin".to_string(),
-        workspace: "/tmp".to_string(),
-        command: "cat".to_string(),
-        args: Vec::new(),
-        timeout_ms: Some(10000),
-    });
-    let started = daemon.recv_until(Duration::from_secs(5), |message| {
-        message["type"] == "RunStarted" || message["type"] == "RunError"
-    });
-    assert_eq!(
-        started.last().map(|message| &message["type"]),
-        Some(&Value::from("RunStarted")),
-        "{started:?}"
-    );
+    daemon.start("job-stdin", "cat", &[]);
 
-    daemon.send(&RunStdin {
-        msg_type: "RunStdin".to_string(),
-        job_id: "job-stdin".to_string(),
-        data: BASE64_STANDARD.encode("piped through\n"),
-        eof: true,
-    });
-    let messages = daemon.recv_until(Duration::from_secs(10), |message| {
-        message["type"] == "RunExit" || message["type"] == "RunError"
-    });
+    daemon.write_stdin("job-stdin", BASE64_STANDARD.encode("piped through\n"), true);
 
-    assert_eq!(stdout_of(&messages), "piped through\n", "{messages:?}");
+    assert_piped_through(&daemon.finish());
+    daemon.shutdown();
+}
+
+fn assert_piped_through(messages: &[Value]) {
+    assert_eq!(stdout_of(messages), "piped through\n", "{messages:?}");
     let exit = messages
         .iter()
         .find(|message| message["type"] == "RunExit")
         .unwrap_or_else(|| panic!("cat never exited: {messages:?}"));
     assert_eq!(exit["exit_code"], 0, "{exit}");
+}
 
+#[test]
+fn invalid_stdin_leaves_the_job_running() {
+    let mut daemon = DaemonProcess::spawn();
+    let _watchdog = daemon.watchdog(Duration::from_secs(60));
+    daemon.handshake();
+    daemon.start("job-invalid-stdin", "cat", &[]);
+
+    daemon.write_stdin("job-invalid-stdin", "not base64!".to_string(), false);
+    let refused = daemon.recv();
+    daemon.write_stdin(
+        "job-invalid-stdin",
+        BASE64_STANDARD.encode("piped through\n"),
+        true,
+    );
+
+    assert_eq!(refused["type"], "RunError", "{refused}");
+    assert_eq!(refused["job_id"], "", "{refused}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("job-invalid-stdin")),
+        "{refused}"
+    );
+    assert_piped_through(&daemon.finish());
+    daemon.shutdown();
+}
+
+#[test]
+fn a_duplicate_run_start_leaves_the_running_job_alone() {
+    let mut daemon = DaemonProcess::spawn();
+    let _watchdog = daemon.watchdog(Duration::from_secs(60));
+    daemon.handshake();
+    daemon.start("job-duplicate", "cat", &[]);
+
+    daemon.send(&RunStart {
+        msg_type: "RunStart".to_string(),
+        job_id: "job-duplicate".to_string(),
+        workspace: "/tmp".to_string(),
+        command: "cat".to_string(),
+        args: Vec::new(),
+        timeout_ms: Some(60000),
+    });
+    let refused = daemon.recv();
+    daemon.write_stdin(
+        "job-duplicate",
+        BASE64_STANDARD.encode("piped through\n"),
+        true,
+    );
+
+    assert_eq!(refused["type"], "RunError", "{refused}");
+    assert_eq!(refused["job_id"], "", "{refused}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("job-duplicate")),
+        "{refused}"
+    );
+    assert_piped_through(&daemon.finish());
     daemon.shutdown();
 }
 
@@ -873,31 +949,11 @@ fn a_job_that_never_reads_its_stdin_cannot_stall_the_daemon() {
     let mut daemon = DaemonProcess::spawn();
     let _watchdog = daemon.watchdog(Duration::from_secs(60));
     daemon.handshake();
-    daemon.send(&RunStart {
-        msg_type: "RunStart".to_string(),
-        job_id: "job-sleeping".to_string(),
-        workspace: "/tmp".to_string(),
-        command: "sleep".to_string(),
-        args: vec!["30".to_string()],
-        timeout_ms: Some(60000),
-    });
-    let started = daemon.recv_until(Duration::from_secs(5), |message| {
-        message["type"] == "RunStarted" || message["type"] == "RunError"
-    });
-    assert_eq!(
-        started.last().map(|message| &message["type"]),
-        Some(&Value::from("RunStarted")),
-        "{started:?}"
-    );
+    daemon.start("job-sleeping", "sleep", &["30"]);
 
     let chunk = BASE64_STANDARD.encode(vec![b'x'; 64 * 1024]);
     for _ in 0..200 {
-        daemon.send(&RunStdin {
-            msg_type: "RunStdin".to_string(),
-            job_id: "job-sleeping".to_string(),
-            data: chunk.clone(),
-            eof: false,
-        });
+        daemon.write_stdin("job-sleeping", chunk.clone(), false);
     }
     let pinged = Instant::now();
     daemon.send(&Ping {

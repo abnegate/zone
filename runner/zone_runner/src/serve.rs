@@ -204,11 +204,9 @@ async fn handle_message(
                 Ok(bytes) => bytes,
                 Err(error) => {
                     sender
-                        .send(OutboundMessage::error(
-                            &job_id,
-                            ErrorCode::InvalidMessage,
-                            format!("Invalid base64 data: {}", error),
-                        ))
+                        .send(protocol_error(format!(
+                            "Invalid base64 stdin for job {job_id}: {error}"
+                        )))
                         .await?;
                     return Ok(());
                 }
@@ -293,11 +291,9 @@ async fn start(
         Ok(token) => token,
         Err(error) => {
             sender
-                .send(OutboundMessage::error(
-                    &job_id,
-                    ErrorCode::InternalError,
-                    format!("Failed to register job: {}", error),
-                ))
+                .send(protocol_error(format!(
+                    "Failed to register job {job_id}: {error}"
+                )))
                 .await?;
             return Ok(());
         }
