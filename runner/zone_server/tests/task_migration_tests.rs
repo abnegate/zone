@@ -800,8 +800,8 @@ async fn workspace_theme_defaults_match_the_product() {
     database.cleanup().await;
 }
 
-/// 003 adds the chat's login key under the brief lock of an unvalidated
-/// constraint, and 004 proves the rows while chats stay writable. A login kept
+/// 004 adds the chat's login key under the brief lock of an unvalidated
+/// constraint, and 005 proves the rows while chats stay writable. A login kept
 /// before them keeps its id, and an organization may then hold a second one.
 #[tokio::test]
 async fn the_chat_login_key_is_added_unvalidated_and_proven_after() {
@@ -829,31 +829,31 @@ async fn the_chat_login_key_is_added_unvalidated_and_proven_after() {
         .await
         .expect_err("the initial schema keeps one login per agent");
 
-    database.through(3).await;
+    database.through(4).await;
     let added: bool = sqlx::query_scalar(VALIDATED)
         .fetch_one(&database.pool)
         .await
-        .expect("003 adds the chat's login key");
-    database.through(4).await;
+        .expect("004 adds the chat's login key");
+    database.through(5).await;
     let proven: bool = sqlx::query_scalar(VALIDATED)
         .fetch_one(&database.pool)
         .await
-        .expect("004 keeps the chat's login key");
+        .expect("005 keeps the chat's login key");
 
-    assert!(!added, "003 must not scan chats under its exclusive lock");
-    assert!(proven, "004 validates what 003 added");
+    assert!(!added, "004 must not scan chats under its exclusive lock");
+    assert!(proven, "005 validates what 004 added");
     let logins: Vec<Uuid> =
         sqlx::query_scalar("SELECT id FROM agent_logins WHERE organization_id=$1")
             .bind(organization)
             .fetch_all(&database.pool)
             .await
             .unwrap();
-    assert_eq!(logins, [kept], "003 must keep the login saved before it");
+    assert_eq!(logins, [kept], "004 must keep the login saved before it");
     sqlx::query(SIGN_IN)
         .bind(organization)
         .fetch_one(&database.pool)
         .await
-        .expect("003 lets an organization keep a second login of one agent");
+        .expect("004 lets an organization keep a second login of one agent");
     database.cleanup().await;
 }
 
@@ -866,7 +866,7 @@ async fn the_chat_login_key_is_added_unvalidated_and_proven_after() {
 #[test]
 fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait() {
     const FIRST: i64 = 2;
-    const RELEASED: [&str; 1] = ["002_chat_offline.sql"];
+    const RELEASED: [&str; 2] = ["002_chat_offline.sql", "003_chat_context_tokens.sql"];
     const BOUND: &str = "SET LOCAL lock_timeout = '5s';";
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let mut bounded: Vec<String> = Vec::new();
@@ -910,8 +910,9 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
     assert_eq!(
         bounded,
         [
-            "003_agent_login_usage.sql",
-            "004_agent_login_usage_validation.sql",
+            "004_agent_login_usage.sql",
+            "005_agent_login_usage_validation.sql",
+            "006_runpod_api_key.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );

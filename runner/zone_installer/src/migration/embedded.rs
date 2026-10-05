@@ -23,6 +23,8 @@ macro_rules! source {
 pub const EMBEDDED: &[Source] = &[
     source!("001_initial_schema.sql"),
     source!("002_chat_offline.sql"),
-    source!("003_agent_login_usage.sql"),
-    source!("004_agent_login_usage_validation.sql"),
+    source!("003_chat_context_tokens.sql"),
+    source!("004_agent_login_usage.sql"),
+    source!("005_agent_login_usage_validation.sql"),
+    source!("006_runpod_api_key.sql"),
 ];
