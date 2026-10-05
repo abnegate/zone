@@ -14,6 +14,7 @@ use crate::db::{
     workspace_members::{self, WorkspaceRole},
     workspaces,
 };
+use crate::services::mail::Template;
 use crate::state::AppState;
 use crate::utils::crypto::hash_token;
 
@@ -790,23 +791,19 @@ pub async fn resend_verification(
             }
         };
 
-    // Send verification email if email service is configured
-    if let Some(email_service) = state.email_service() {
-        let verification_url = verification_url(&state.config().app_base_url, &token);
-        let display_name = user.display_name.as_deref().unwrap_or(&user.email);
+    if let Some(mail) = state.account_mail() {
+        let link = verification_url(&state.config().app_base_url, &token);
+        let name = user.display_name.as_deref().unwrap_or(&user.email);
 
-        if let Err(e) = email_service
-            .send_verification_email(&user.email, display_name, &verification_url)
-            .await
+        if mail
+            .dispatch(&user.email, &Template::Verification { name, link: &link })
+            .is_some()
         {
-            tracing::error!("Failed to send verification email: {}", e);
-            // Don't fail the request - token is created, user can retry
-        } else {
-            tracing::info!("Verification email sent to user_id: {}", user.id);
+            tracing::info!("Verification email queued for user_id: {}", user.id);
         }
     } else {
         tracing::debug!(
-            "Email service not configured, verification token created for user_id: {}",
+            "Account mail not configured, verification token created for user_id: {}",
             user.id
         );
     }
@@ -880,28 +877,23 @@ pub async fn forgot_password(
         }
     };
 
-    // Send password reset email if email service is configured
-    if let Some(email_service) = state.email_service() {
-        // Build reset URL using configured base URL
-        let reset_url = format!(
+    if let Some(mail) = state.account_mail() {
+        let link = format!(
             "{}/reset-password?token={}",
             state.config().app_base_url,
             token
         );
-        let display_name = user.display_name.as_deref().unwrap_or(&user.email);
+        let name = user.display_name.as_deref().unwrap_or(&user.email);
 
-        if let Err(e) = email_service
-            .send_password_reset_email(&user.email, display_name, &reset_url)
-            .await
+        if mail
+            .dispatch(&user.email, &Template::PasswordReset { name, link: &link })
+            .is_some()
         {
-            tracing::error!("Failed to send password reset email: {}", e);
-            // Don't fail the request - token is created, user can retry
-        } else {
-            tracing::info!("Password reset email sent to user_id: {}", user.id);
+            tracing::info!("Password reset email queued for user_id: {}", user.id);
         }
     } else {
         tracing::debug!(
-            "Email service not configured, password reset token created for user_id: {}",
+            "Account mail not configured, password reset token created for user_id: {}",
             user.id
         );
     }

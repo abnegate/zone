@@ -12,8 +12,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_notify::Fanout;
 use tokio::sync::Mutex;
-use zone_notify::Fanout;
 
 use super::catchup::Catchup;
 use super::job::Failure;

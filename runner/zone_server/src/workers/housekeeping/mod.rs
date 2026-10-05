@@ -21,7 +21,7 @@
 //! - **Error isolation.** Every sweep is its own [`tokio::task`] in a
 //!   [`tokio::task::JoinSet`]. A failure is a `Result` the loop logs; a panic is
 //!   a `JoinError` mapped back to its job through the task id, the way
-//!   [`zone_notify::Fanout`] maps a panicking channel back to its notifier.
+//!   [`abnegate_notify::Fanout`] maps a panicking channel back to its notifier.
 //!   Neither reaches the loop's own stack, and neither costs a sibling its turn.
 //!
 //! # What did not move

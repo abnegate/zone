@@ -12,23 +12,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use abnegate_secret::SecretValue;
-use zone_notify::{Discord, Email, Fanout, Notifier, NotifyError, Slack, SmtpConfig};
+use abnegate_notify::Channel;
+use abnegate_notify::Discord;
+use abnegate_notify::Email;
+use abnegate_notify::Fanout;
+use abnegate_notify::Notification;
+use abnegate_notify::Notifier;
+use abnegate_notify::Slack;
+
+use crate::services::mail;
 
 const SLACK_VARIABLE: &str = "ZONE_NOTIFY_SLACK_WEBHOOK";
 const DISCORD_VARIABLE: &str = "ZONE_NOTIFY_DISCORD_WEBHOOK";
 const EMAIL_TO_VARIABLE: &str = "ZONE_NOTIFY_EMAIL_TO";
 const TIMEOUT_VARIABLE: &str = "ZONE_NOTIFY_TIMEOUT_SECONDS";
 
-const SMTP_HOST_VARIABLE: &str = "SMTP_HOST";
-const SMTP_PORT_VARIABLE: &str = "SMTP_PORT";
-const SMTP_USER_VARIABLE: &str = "SMTP_USER";
-const SMTP_PASSWORD_VARIABLE: &str = "SMTP_PASSWORD";
-const SMTP_FROM_VARIABLE: &str = "SMTP_FROM";
-const SMTP_FROM_NAME_VARIABLE: &str = "SMTP_FROM_NAME";
-
-const DEFAULT_SMTP_PORT: u16 = 587;
-const DEFAULT_FROM_NAME: &str = "Zone";
+const DISCORD_FOOTER: &str = "Zone";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 10;
 const MAXIMUM_TIMEOUT_SECONDS: u64 = 120;
 
@@ -54,12 +53,12 @@ impl NotifyEnvironment {
             discord_webhook: std::env::var(DISCORD_VARIABLE).ok(),
             email_recipients: std::env::var(EMAIL_TO_VARIABLE).ok(),
             timeout_seconds: std::env::var(TIMEOUT_VARIABLE).ok(),
-            smtp_host: std::env::var(SMTP_HOST_VARIABLE).ok(),
-            smtp_port: std::env::var(SMTP_PORT_VARIABLE).ok(),
-            smtp_user: std::env::var(SMTP_USER_VARIABLE).ok(),
-            smtp_password: std::env::var(SMTP_PASSWORD_VARIABLE).ok(),
-            smtp_from: std::env::var(SMTP_FROM_VARIABLE).ok(),
-            smtp_from_name: std::env::var(SMTP_FROM_NAME_VARIABLE).ok(),
+            smtp_host: mail::Variable::Host.read(),
+            smtp_port: mail::Variable::Port.read(),
+            smtp_user: mail::Variable::User.read(),
+            smtp_password: mail::Variable::Password.read(),
+            smtp_from: mail::Variable::From.read(),
+            smtp_from_name: mail::Variable::FromName.read(),
         }
     }
 }
@@ -128,31 +127,23 @@ fn timeout(raw: Option<&str>) -> Duration {
         .unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))
 }
 
-fn smtp(environment: &NotifyEnvironment) -> Option<SmtpConfig> {
-    Some(SmtpConfig {
-        host: trimmed(environment.smtp_host.as_deref())?,
-        port: environment
-            .smtp_port
-            .as_deref()
-            .and_then(|value| match value.trim().parse() {
-                Ok(port) => Some(port),
-                Err(_) => {
-                    tracing::warn!(
-                        value,
-                        default = DEFAULT_SMTP_PORT,
-                        "SMTP_PORT could not be read; every send will fail against the default \
-                         port and retry forever with no log naming the cause"
-                    );
-                    None
-                }
-            })
-            .unwrap_or(DEFAULT_SMTP_PORT),
-        user: trimmed(environment.smtp_user.as_deref())?,
-        password: SecretValue::new(environment.smtp_password.clone()?),
-        from_address: trimmed(environment.smtp_from.as_deref())?,
-        from_name: trimmed(environment.smtp_from_name.as_deref())
-            .unwrap_or_else(|| DEFAULT_FROM_NAME.to_string()),
-    })
+/// The relay email notices go through: the one account mail reads, except
+/// that a notice needs `SMTP_FROM` rather than falling back to a default.
+fn relay(environment: &NotifyEnvironment) -> Result<mail::Config, mail::Error> {
+    mail::Config::from_variables(
+        |variable| {
+            match variable {
+                mail::Variable::Host => &environment.smtp_host,
+                mail::Variable::Port => &environment.smtp_port,
+                mail::Variable::User => &environment.smtp_user,
+                mail::Variable::Password => &environment.smtp_password,
+                mail::Variable::From => &environment.smtp_from,
+                mail::Variable::FromName => &environment.smtp_from_name,
+            }
+            .clone()
+        },
+        mail::SenderPolicy::Required,
+    )
 }
 
 /// The channels these settings describe, each already validated.
@@ -161,43 +152,45 @@ fn smtp(environment: &NotifyEnvironment) -> Option<SmtpConfig> {
 /// the build: one malformed webhook should cost that channel, not every other
 /// one configured beside it.
 ///
-/// Call this from inside the tokio runtime. The email backend builds a pooled
-/// SMTP transport, which needs a reactor to attach its timers to and panics
-/// without one.
+/// Slack and Discord are given the fan-out's budget for their own requests
+/// too, so a timeout above the crate's default is not cut short by the client.
 pub fn channels(environment: &NotifyEnvironment) -> Vec<Arc<dyn Notifier>> {
     let settings = NotifySettings::resolve(environment);
     let mut channels: Vec<Arc<dyn Notifier>> = Vec::new();
 
     if let Some(webhook) = &settings.slack_webhook {
         match Slack::new(webhook) {
-            Ok(slack) => channels.push(Arc::new(slack)),
+            Ok(slack) => channels.push(Arc::new(slack.timeout(settings.timeout))),
             Err(error) => tracing::warn!(%error, "Slack notification channel is misconfigured"),
         }
     }
 
     if let Some(webhook) = &settings.discord_webhook {
         match Discord::new(webhook) {
-            Ok(discord) => channels.push(Arc::new(discord)),
+            Ok(discord) => channels.push(Arc::new(
+                discord.footer(DISCORD_FOOTER).timeout(settings.timeout),
+            )),
             Err(error) => tracing::warn!(%error, "Discord notification channel is misconfigured"),
         }
     }
 
     if !settings.email_recipients.is_empty() {
-        match smtp(environment) {
-            Some(config) => {
+        match relay(environment) {
+            Ok(config) => {
                 let addresses: Vec<&str> = settings
                     .email_recipients
                     .iter()
                     .map(String::as_str)
                     .collect();
-                match Email::new(config, &addresses) {
+                match Email::new(config.relay(), &addresses) {
                     Ok(email) => channels.push(Arc::new(email)),
                     Err(error) => {
                         tracing::warn!(%error, "Email notification channel is misconfigured")
                     }
                 }
             }
-            None => tracing::warn!(
+            Err(error) => tracing::warn!(
+                %error,
                 "Email recipients are configured but the SMTP relay is not; skipping email"
             ),
         }
@@ -254,16 +247,13 @@ impl ChatNotifier {
 #[async_trait::async_trait]
 impl Notifier for ChatNotifier {
     /// The custom `chat` channel.
-    fn channel(&self) -> zone_notify::Channel {
-        zone_notify::Channel::custom("chat")
+    fn channel(&self) -> Channel {
+        Channel::custom("chat")
     }
 
     /// Insert the notification as an assistant message and publish it to the open chat.
-    async fn deliver(&self, notification: &zone_notify::Notification) -> Result<(), NotifyError> {
-        let failed = |error: sqlx::Error| NotifyError::Unreachable {
-            host: "database".to_string(),
-            message: error.to_string(),
-        };
+    async fn deliver(&self, notification: &Notification) -> Result<(), abnegate_notify::Error> {
+        let failed = |error: sqlx::Error| abnegate_notify::Error::unreachable("database", error);
         let mut transaction = self.pool.begin().await.map_err(failed)?;
         let stored: serde_json::Value = sqlx::query_scalar(
             "INSERT INTO messages (chat_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3) \
@@ -371,6 +361,26 @@ mod tests {
     }
 
     #[test]
+    fn webhook_channels_are_given_the_configured_budget() {
+        let built = channels(&NotifyEnvironment {
+            slack_webhook: Some("https://hooks.slack.com/services/T/B/x".to_string()),
+            discord_webhook: Some("https://discord.com/api/webhooks/1/token".to_string()),
+            timeout_seconds: Some("45".to_string()),
+            ..NotifyEnvironment::default()
+        });
+
+        assert_eq!(built.len(), 2);
+        for channel in built {
+            assert_eq!(
+                channel.timeout(),
+                Some(Duration::from_secs(45)),
+                "{}",
+                channel.channel()
+            );
+        }
+    }
+
+    #[test]
     fn a_webhook_pointing_somewhere_else_is_refused() {
         let built = fanout(&NotifyEnvironment {
             slack_webhook: Some("https://evil.test/services/T/B/x".to_string()),
@@ -387,30 +397,95 @@ mod tests {
         assert!(built.is_empty());
     }
 
-    #[tokio::test]
-    async fn a_complete_relay_registers_the_email_channel() {
-        let built = fanout(&NotifyEnvironment {
+    #[test]
+    fn a_complete_relay_registers_the_email_channel_without_a_runtime() {
+        let built = fanout(&relay_environment());
+
+        assert_eq!(built.len(), 1);
+    }
+
+    fn relay_environment() -> NotifyEnvironment {
+        NotifyEnvironment {
             email_recipients: Some("alerts@zone.test".to_string()),
             smtp_host: Some("smtp.zone.test".to_string()),
             smtp_user: Some("zone".to_string()),
             smtp_password: Some("secret".to_string()),
             smtp_from: Some("noreply@zone.test".to_string()),
             ..NotifyEnvironment::default()
-        });
-
-        assert_eq!(built.len(), 1);
+        }
     }
 
     #[test]
     fn a_relay_missing_its_sender_leaves_email_out() {
-        assert!(
-            smtp(&NotifyEnvironment {
-                smtp_host: Some("smtp.zone.test".to_string()),
-                smtp_user: Some("zone".to_string()),
-                smtp_password: Some("secret".to_string()),
-                ..NotifyEnvironment::default()
-            })
-            .is_none()
+        for smtp_from in [None, Some("   ".to_string())] {
+            let environment = NotifyEnvironment {
+                smtp_from: smtp_from.clone(),
+                ..relay_environment()
+            };
+
+            assert!(
+                matches!(
+                    relay(&environment),
+                    Err(mail::Error::Missing(mail::Variable::From))
+                ),
+                "{smtp_from:?}"
+            );
+            assert!(fanout(&environment).is_empty(), "{smtp_from:?}");
+        }
+    }
+
+    #[test]
+    fn a_blank_host_leaves_email_out_and_is_named() {
+        let environment = NotifyEnvironment {
+            smtp_host: Some(String::new()),
+            ..relay_environment()
+        };
+
+        assert!(matches!(
+            relay(&environment),
+            Err(mail::Error::Missing(mail::Variable::Host))
+        ));
+        assert!(fanout(&environment).is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_port_falls_back_to_the_default_and_keeps_email() {
+        let environment = NotifyEnvironment {
+            smtp_port: Some("submission".to_string()),
+            ..relay_environment()
+        };
+
+        assert_eq!(
+            relay(&environment).expect("configured").relay().port,
+            mail::DEFAULT_PORT
+        );
+        assert_eq!(fanout(&environment).len(), 1);
+    }
+
+    #[test]
+    fn a_blank_password_still_registers_email() {
+        let environment = NotifyEnvironment {
+            smtp_password: Some(String::new()),
+            ..relay_environment()
+        };
+
+        assert_eq!(fanout(&environment).len(), 1);
+    }
+
+    #[test]
+    fn a_padded_relay_is_trimmed_and_a_blank_sender_name_falls_back() {
+        let environment = NotifyEnvironment {
+            smtp_port: Some(" 2525 ".to_string()),
+            smtp_from_name: Some(" ".to_string()),
+            ..relay_environment()
+        };
+        let relay = relay(&environment).expect("configured");
+
+        assert_eq!(relay.relay().host, "smtp.zone.test");
+        assert_eq!(relay.relay().port, 2525);
+        assert_eq!(
+            relay.relay().sender,
+            abnegate_notify::Sender::new("noreply@zone.test").with_name("Zone")
         );
     }
 }

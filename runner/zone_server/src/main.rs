@@ -19,6 +19,8 @@ use zone_server::services::embedding::{
     create_embedding_service, default_embedding_model, embedding_engine_from_env,
 };
 use zone_server::services::login;
+use zone_server::services::mail;
+use zone_server::services::mail::AccountMail;
 use zone_server::state::{AppState, default_adapter_registry};
 
 #[tokio::main]
@@ -153,15 +155,15 @@ async fn main() {
         }
     };
 
-    // Try to initialize email service
-    let email_service = match zone_email::EmailService::from_env() {
-        Ok(service) => {
-            tracing::info!("Email service initialized successfully");
-            Some(Arc::new(service))
+    let account_mail = match mail::Config::from_environment(mail::SenderPolicy::Default)
+        .and_then(|config| AccountMail::from_config(&config))
+    {
+        Ok(mail) => {
+            tracing::info!("Account mail configured");
+            Some(Arc::new(mail))
         }
-        Err(e) => {
-            tracing::warn!("Email service not configured: {}", e);
-            tracing::warn!("Email features will be unavailable (verification, password reset)");
+        Err(error) => {
+            tracing::warn!(%error, "Account mail is not configured; verification and password reset emails will not be sent");
             None
         }
     };
@@ -191,11 +193,10 @@ async fn main() {
             adapter_registry,
             embedding_service,
             context_service,
-            email_service,
+            account_mail,
         )
     } else {
-        // Fall back to basic state without context services
-        AppState::new(config.clone(), db, Some(cache))
+        AppState::new_with_account_mail(config.clone(), db, Some(cache), account_mail)
     };
 
     // Start background workers

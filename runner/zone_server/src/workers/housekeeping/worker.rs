@@ -36,7 +36,7 @@ struct Dispatch {
 /// worker unkillable by the work it runs: a sweep that fails is a `Result` the
 /// loop logs, a sweep that panics is a [`tokio::task::JoinError`] the loop maps
 /// back to its job through the task id, and neither reaches the loop's own
-/// stack. This is the same arrangement [`zone_notify::Fanout`] uses to keep one
+/// stack. This is the same arrangement [`abnegate_notify::Fanout`] uses to keep one
 /// broken webhook from costing a notification its other channels.
 pub struct Worker {
     registry: Registry,

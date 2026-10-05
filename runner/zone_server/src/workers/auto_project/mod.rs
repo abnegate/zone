@@ -17,10 +17,10 @@ pub mod summary;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_notify::Notifier;
 use dashmap::DashMap;
 use tokio::sync::Notify;
 use uuid::Uuid;
-use zone_notify::Notifier;
 use zone_vcs::conflict::ConflictService;
 use zone_vcs::pull_request::PrService;
 

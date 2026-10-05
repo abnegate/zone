@@ -3,6 +3,7 @@
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{OnceCell, Semaphore};
 use uuid::Uuid;
 use zone_context::adapters::{
@@ -18,10 +19,10 @@ use crate::cache::Cache;
 use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
 use crate::pull::PullRegistry;
+use crate::services::mail::AccountMail;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
 use crate::train_jobs::TrainRegistry;
-use zone_email::EmailService;
 
 /// Maximum concurrent indexing operations
 const MAX_CONCURRENT_INDEX: usize = 3;
@@ -31,6 +32,8 @@ const MAX_CONCURRENT_TRAIN: usize = 1;
 /// Clip extracts run ffmpeg and decode frames; a handful at once keeps a dump
 /// of hundreds of videos moving without stacking every clip in RAM.
 const MAX_CONCURRENT_FRAME_EXTRACT: usize = 4;
+/// Without a sweep, every client the rate limiter has ever seen stays in it.
+const RATE_LIMITER_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
 
 /// The adapters a source can be verified and fetched with.
 ///
@@ -85,7 +88,7 @@ struct AppStateInner {
     pub adapter_registry: Option<Arc<AdapterRegistry>>,
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
     pub context_service: Option<Arc<ContextService>>,
-    pub email_service: Option<Arc<EmailService>>,
+    pub account_mail: Option<Arc<AccountMail>>,
     pub rate_limiter: Arc<RateLimiter<Uuid>>,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
@@ -114,46 +117,26 @@ struct AppStateInner {
 impl AppState {
     /// Create a new application state without embedding or context services
     pub fn new(config: Config, db: PgPool, cache: Option<Cache>) -> Self {
-        // Derive encryption key from config
-        let encryption_key = crate::crypto::derive_key(config.encryption_key())
-            .expect("Encryption key should be valid (validated in Config::from_env)");
+        Self::new_with_account_mail(config, db, cache, None)
+    }
 
-        // Create rate limiter with default config (10 requests per minute)
-        let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
-
-        // Spawn background cleanup task to prevent unbounded memory growth
-        let rate_limiter_clone = rate_limiter.clone();
-        tokio::spawn(async move {
-            use std::time::Duration;
-            let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 min
-            loop {
-                interval.tick().await;
-                rate_limiter_clone.cleanup();
-                tracing::debug!("Rate limiter cleanup completed");
-            }
-        });
-
-        Self {
-            inner: Arc::new(AppStateInner {
-                config,
-                db,
-                cache,
-                adapter_registry: Some(Arc::new(default_adapter_registry())),
-                embedding_service: None,
-                context_service: None,
-                email_service: None,
-                rate_limiter,
-                sync_registry: SyncRegistry::new(),
-                pull_registry: PullRegistry::new(),
-                train_jobs: TrainRegistry::new(),
-                encryption_key,
-                index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
-                train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
-                frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
-                mcp: OnceCell::new(),
-                task_progress: task_progress::progress(),
-            }),
-        }
+    /// The state the server falls back to when the embedding service will not
+    /// start: no embedding or context services, but account mail all the same.
+    pub fn new_with_account_mail(
+        config: Config,
+        db: PgPool,
+        cache: Option<Cache>,
+        account_mail: Option<Arc<AccountMail>>,
+    ) -> Self {
+        Self::assemble(
+            config,
+            db,
+            cache,
+            Arc::new(default_adapter_registry()),
+            None,
+            None,
+            account_mail,
+        )
     }
 
     /// Create a new application state with zone_context services
@@ -165,49 +148,18 @@ impl AppState {
         embedding_service: Arc<dyn EmbeddingService>,
         context_service: Arc<ContextService>,
     ) -> Self {
-        // Derive encryption key from config
-        let encryption_key = crate::crypto::derive_key(config.encryption_key())
-            .expect("Encryption key should be valid (validated in Config::from_env)");
-
-        // Create rate limiter with default config (10 requests per minute)
-        let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
-
-        // Spawn background cleanup task to prevent unbounded memory growth
-        let rate_limiter_clone = rate_limiter.clone();
-        tokio::spawn(async move {
-            use std::time::Duration;
-            let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 min
-            loop {
-                interval.tick().await;
-                rate_limiter_clone.cleanup();
-                tracing::debug!("Rate limiter cleanup completed");
-            }
-        });
-
-        Self {
-            inner: Arc::new(AppStateInner {
-                config,
-                db,
-                cache,
-                adapter_registry: Some(adapter_registry),
-                embedding_service: Some(embedding_service),
-                context_service: Some(context_service),
-                email_service: None,
-                rate_limiter,
-                sync_registry: SyncRegistry::new(),
-                pull_registry: PullRegistry::new(),
-                train_jobs: TrainRegistry::new(),
-                encryption_key,
-                index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
-                train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
-                frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
-                mcp: OnceCell::new(),
-                task_progress: task_progress::progress(),
-            }),
-        }
+        Self::new_with_all_services(
+            config,
+            db,
+            cache,
+            adapter_registry,
+            embedding_service,
+            context_service,
+            None,
+        )
     }
 
-    /// Create a new application state with all services including email
+    /// Create a new application state with all services, account mail included
     pub fn new_with_all_services(
         config: Config,
         db: PgPool,
@@ -215,23 +167,38 @@ impl AppState {
         adapter_registry: Arc<AdapterRegistry>,
         embedding_service: Arc<dyn EmbeddingService>,
         context_service: Arc<ContextService>,
-        email_service: Option<Arc<EmailService>>,
+        account_mail: Option<Arc<AccountMail>>,
     ) -> Self {
-        // Derive encryption key from config
+        Self::assemble(
+            config,
+            db,
+            cache,
+            adapter_registry,
+            Some(embedding_service),
+            Some(context_service),
+            account_mail,
+        )
+    }
+
+    fn assemble(
+        config: Config,
+        db: PgPool,
+        cache: Option<Cache>,
+        adapter_registry: Arc<AdapterRegistry>,
+        embedding_service: Option<Arc<dyn EmbeddingService>>,
+        context_service: Option<Arc<ContextService>>,
+        account_mail: Option<Arc<AccountMail>>,
+    ) -> Self {
         let encryption_key = crate::crypto::derive_key(config.encryption_key())
             .expect("Encryption key should be valid (validated in Config::from_env)");
 
-        // Create rate limiter with default config (10 requests per minute)
         let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
-
-        // Spawn background cleanup task to prevent unbounded memory growth
-        let rate_limiter_clone = rate_limiter.clone();
+        let cleaned = Arc::clone(&rate_limiter);
         tokio::spawn(async move {
-            use std::time::Duration;
-            let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 min
+            let mut interval = tokio::time::interval(RATE_LIMITER_CLEANUP_INTERVAL);
             loop {
                 interval.tick().await;
-                rate_limiter_clone.cleanup();
+                cleaned.cleanup();
                 tracing::debug!("Rate limiter cleanup completed");
             }
         });
@@ -242,9 +209,9 @@ impl AppState {
                 db,
                 cache,
                 adapter_registry: Some(adapter_registry),
-                embedding_service: Some(embedding_service),
-                context_service: Some(context_service),
-                email_service,
+                embedding_service,
+                context_service,
+                account_mail,
                 rate_limiter,
                 sync_registry: SyncRegistry::new(),
                 pull_registry: PullRegistry::new(),
@@ -294,9 +261,9 @@ impl AppState {
         &self.inner.encryption_key
     }
 
-    /// Get the email service (if available)
-    pub fn email_service(&self) -> Option<&Arc<EmailService>> {
-        self.inner.email_service.as_ref()
+    /// The account mail sender, when an SMTP relay is configured.
+    pub fn account_mail(&self) -> Option<&Arc<AccountMail>> {
+        self.inner.account_mail.as_ref()
     }
 
     /// Get the rate limiter
@@ -427,10 +394,10 @@ pub(crate) fn test_config() -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_notify::MockMailer;
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
     use zone_core::llm::AgentKind;
-    use zone_email::EmailConfig;
 
     #[test]
     fn a_test_config_reads_agent_usage_only_from_loopback() {
@@ -606,7 +573,7 @@ mod tests {
         assert!(Arc::ptr_eq(state.adapter_registry().unwrap(), &registry));
         assert!(Arc::ptr_eq(state.embedding_service().unwrap(), &embedding));
         assert!(Arc::ptr_eq(state.context_service().unwrap(), &context));
-        assert!(state.email_service().is_none());
+        assert!(state.account_mail().is_none());
         assert_eq!(
             state.index_semaphore().available_permits(),
             MAX_CONCURRENT_INDEX
@@ -632,29 +599,34 @@ mod tests {
             state.existing_mcp().unwrap()
         ));
 
-        let email = Arc::new(
-            EmailService::new(EmailConfig {
-                smtp_host: "localhost".to_string(),
-                smtp_port: 2525,
-                smtp_user: "zone".to_string(),
-                smtp_password: "secret".to_string(),
-                from_email: "zone@example.com".to_string(),
-                from_name: "Zone".to_string(),
-            })
-            .expect("valid SMTP settings"),
-        );
-        let with_email = AppState::new_with_all_services(
+        let mail = Arc::new(AccountMail::new(Arc::new(MockMailer::new())));
+        let with_mail = AppState::new_with_all_services(
             config,
             pool,
             None,
             registry,
             embedding,
             context,
-            Some(email.clone()),
+            Some(mail.clone()),
         );
-        assert!(Arc::ptr_eq(with_email.email_service().unwrap(), &email));
-        assert_eq!(with_email.train_semaphore().available_permits(), 1);
-        assert_eq!(with_email.frame_semaphore().available_permits(), 4);
+        assert!(Arc::ptr_eq(with_mail.account_mail().unwrap(), &mail));
+        assert_eq!(with_mail.train_semaphore().available_permits(), 1);
+        assert_eq!(with_mail.frame_semaphore().available_permits(), 4);
+    }
+
+    #[tokio::test]
+    async fn the_state_without_embedding_still_carries_account_mail() {
+        let pool = PgPool::connect_lazy("postgres://localhost/state-fallback")
+            .expect("a lazy pool needs no server");
+        let mail = Arc::new(AccountMail::new(Arc::new(MockMailer::new())));
+
+        let state =
+            AppState::new_with_account_mail(create_test_config(), pool, None, Some(mail.clone()));
+
+        assert!(state.embedding_service().is_none());
+        assert!(state.context_service().is_none());
+        assert!(state.adapter_registry().is_some());
+        assert!(Arc::ptr_eq(state.account_mail().unwrap(), &mail));
     }
 
     #[tokio::test]

@@ -4,8 +4,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use abnegate_notify::Fanout;
+use abnegate_notify::Notification;
+use abnegate_notify::Notifier;
 use uuid::Uuid;
-use zone_notify::{Fanout, Notification, Notifier};
 
 use crate::config::AutoProjectConfig;
 use crate::db::auto_projects::{self, Kind, ProjectAutomation, SettledRun, Stage, TaskAutomation};
