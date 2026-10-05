@@ -9,6 +9,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::explanation::Explanation;
+
 /// The keychain service the CLI's tokens are stored under.
 const SERVICE: &str = "zone-cli";
 
@@ -27,8 +29,8 @@ pub enum AuthError {
     #[error("Invalid credentials")]
     InvalidCredentials,
 
-    #[error("Credential store error: {0}")]
-    Store(abnegate_config::Error),
+    #[error("Credential store error: {}", Explanation(.0))]
+    Store(#[source] abnegate_config::Error),
 
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
@@ -254,8 +256,6 @@ mod tests {
         assert_eq!(err.to_string(), "Not logged in");
     }
 
-    /// The keychain holding no token is how a signed-out user looks to the
-    /// store, so it has to read as not logged in rather than a store failure.
     #[test]
     fn a_missing_credential_means_not_logged_in() {
         let missing = AuthError::from(abnegate_config::Error::no_credential("access-token"));
@@ -263,6 +263,19 @@ mod tests {
 
         assert!(matches!(missing, AuthError::NotLoggedIn), "{missing:?}");
         assert!(matches!(unreadable, AuthError::Store(_)), "{unreadable:?}");
+    }
+
+    #[test]
+    fn a_store_failure_names_its_cause() {
+        let error = AuthError::from(abnegate_config::Error::write(
+            "/keychain",
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "locked"),
+        ));
+
+        assert_eq!(
+            error.to_string(),
+            "Credential store error: Failed to write '/keychain': locked"
+        );
     }
 
     #[test]

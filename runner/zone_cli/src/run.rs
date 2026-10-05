@@ -15,14 +15,21 @@ use zone_core::{
 
 use crate::auth::AuthManager;
 use crate::config::Config;
+use crate::explanation::Explanation;
 
 /// Run error
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("Not logged in. Run 'zone login <host>' first.")]
     NotLoggedIn,
-    #[error("Configuration error: {0}")]
-    Config(String),
+    #[error("Configuration error: {}", Explanation(.0))]
+    Config(#[from] abnegate_config::Error),
+    #[error("No sessions found")]
+    NoSessions,
+    #[error("Invalid session ID: {0}")]
+    InvalidSession(String),
+    #[error("Prompt error: {0}")]
+    Prompt(#[from] dialoguer::Error),
     #[error(
         "No LLM endpoint is configured. Set llm_base_url in {path} to an OpenAI-compatible base \
          URL (LiteLLM: http://localhost:4000, Ollama: http://127.0.0.1:11434/v1) and llm_api_key \
@@ -35,19 +42,6 @@ pub enum RunError {
     Session(#[from] zone_core::session::SessionError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-}
-
-impl From<abnegate_config::Error> for RunError {
-    fn from(error: abnegate_config::Error) -> Self {
-        let mut message = error.to_string();
-        let mut cause = std::error::Error::source(&error);
-        while let Some(source) = cause {
-            message.push_str(": ");
-            message.push_str(&source.to_string());
-            cause = source.source();
-        }
-        RunError::Config(message)
-    }
 }
 
 /// CLI callback for agent progress
@@ -252,16 +246,16 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
         session_store
             .most_recent()
             .await?
-            .ok_or_else(|| RunError::Config("No sessions found".to_string()))?
+            .ok_or(RunError::NoSessions)?
     } else if let Some(id) = session_id {
-        let uuid = uuid::Uuid::parse_str(id)
-            .map_err(|_| RunError::Config(format!("Invalid session ID: {}", id)))?;
+        let uuid =
+            uuid::Uuid::parse_str(id).map_err(|_| RunError::InvalidSession(id.to_string()))?;
         session_store.load(uuid).await?
     } else {
         // Interactive selection
         let summaries = session_store.list().await?;
         if summaries.is_empty() {
-            return Err(RunError::Config("No sessions found".to_string()));
+            return Err(RunError::NoSessions);
         }
 
         // Display sessions
@@ -296,8 +290,7 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
                     Err("Invalid selection")
                 }
             })
-            .interact()
-            .map_err(|e| RunError::Config(e.to_string()))?;
+            .interact()?;
 
         session_store.load(summaries[selection - 1].id).await?
     };
@@ -349,8 +342,7 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
     // Get continuation prompt
     let prompt: String = dialoguer::Input::new()
         .with_prompt("Continue with")
-        .interact_text()
-        .map_err(|e| RunError::Config(e.to_string()))?;
+        .interact_text()?;
 
     let callback = CliCallback::new(verbose);
 
@@ -525,26 +517,42 @@ mod tests {
 
     #[test]
     fn test_run_error_display() {
-        let err = RunError::NotLoggedIn;
-        assert!(err.to_string().contains("Not logged in"));
+        let error = RunError::NotLoggedIn;
+        assert!(error.to_string().contains("Not logged in"));
 
-        let err = RunError::Config("test error".to_string());
-        assert!(err.to_string().contains("Configuration error"));
-        assert!(err.to_string().contains("test error"));
+        let error = RunError::InvalidSession("not-a-uuid".to_string());
+        assert_eq!(error.to_string(), "Invalid session ID: not-a-uuid");
+
+        assert_eq!(RunError::NoSessions.to_string(), "No sessions found");
     }
 
     #[test]
     fn test_run_error_from_config_error() {
-        let run_err = RunError::from(abnegate_config::Error::NoHomeDirectory);
-        assert!(matches!(run_err, RunError::Config(_)));
+        let error = RunError::from(abnegate_config::Error::NoHomeDirectory);
+        assert!(matches!(error, RunError::Config(_)));
         assert_eq!(
-            run_err.to_string(),
+            error.to_string(),
             "Configuration error: Home directory not found"
         );
     }
 
-    /// The crate's errors keep their cause as a source rather than in their
-    /// message, and a run reports the cause too.
+    #[test]
+    fn a_configuration_error_never_quotes_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "llm_api_key = \"sk-secret\n").unwrap();
+
+        let error = RunError::from(
+            abnegate_config::Loader::at(&path)
+                .load::<Config>()
+                .unwrap_err(),
+        );
+
+        let message = error.to_string();
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(!message.contains("sk-secret"), "{message}");
+    }
+
     #[test]
     fn a_configuration_error_names_its_cause() {
         let error = RunError::from(abnegate_config::Error::write(
