@@ -300,6 +300,11 @@ async fn start(
             if let Err(e) = registry.set_process_group(&job_id, handle.process_group.clone()) {
                 tracing::warn!("Failed to store process group: {}", e);
             }
+            if let Some(stdin) = handle.stdin
+                && let Err(e) = registry.set_stdin_handle(&job_id, stdin)
+            {
+                tracing::debug!("Job finished before its stdin was stored: {}", e);
+            }
             tracing::debug!("Command spawned: job_id={}", job_id);
         }
         Err(e) => {

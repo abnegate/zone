@@ -10,6 +10,20 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+fn stdout_of(messages: &[Value]) -> String {
+    messages
+        .iter()
+        .filter(|message| message["type"] == "RunStdout")
+        .map(|message| {
+            let data = message["data"].as_str().expect("RunStdout carries data");
+            let bytes = BASE64_STANDARD
+                .decode(data)
+                .expect("RunStdout data is base64");
+            String::from_utf8(bytes).expect("the job writes UTF-8")
+        })
+        .collect()
+}
+
 /// Helper struct for managing a running daemon process
 struct DaemonProcess {
     child: Child,
@@ -37,6 +51,17 @@ impl DaemonProcess {
             stdin,
             reader,
         }
+    }
+
+    /// Complete the handshake every session starts with
+    fn handshake(&mut self) {
+        self.send(&Hello {
+            msg_type: "Hello".to_string(),
+            protocol_version: "1.0".to_string(),
+            capabilities: Some(vec!["stdin".to_string()]),
+        });
+        let acknowledgement = self.recv();
+        assert_eq!(acknowledgement["type"], "HelloAck", "{acknowledgement}");
     }
 
     /// Send a message to the daemon
@@ -115,6 +140,15 @@ struct RunStart {
 }
 
 #[derive(Serialize)]
+struct RunStdin {
+    #[serde(rename = "type")]
+    msg_type: String,
+    job_id: String,
+    data: String,
+    eof: bool,
+}
+
+#[derive(Serialize)]
 #[allow(dead_code)]
 struct RunCancel {
     #[serde(rename = "type")]
@@ -130,10 +164,6 @@ struct Ping {
     msg_type: String,
     id: String,
 }
-
-// ============================================================================
-// Basic Protocol Tests
-// ============================================================================
 
 #[test]
 fn test_handshake() {
@@ -235,10 +265,6 @@ fn test_multiple_pings() {
 
     daemon.shutdown();
 }
-
-// ============================================================================
-// Command Execution Tests
-// ============================================================================
 
 #[test]
 fn test_simple_command() {
@@ -503,10 +529,6 @@ fn test_invalid_command() {
     daemon.shutdown();
 }
 
-// ============================================================================
-// Error Handling Tests
-// ============================================================================
-
 #[test]
 fn test_message_before_handshake() {
     let mut daemon = DaemonProcess::spawn();
@@ -547,10 +569,6 @@ fn test_invalid_protocol_version() {
 
     daemon.shutdown();
 }
-
-// ============================================================================
-// Sequence Number Tests
-// ============================================================================
 
 #[test]
 fn test_sequence_numbers() {
@@ -601,10 +619,6 @@ fn test_sequence_numbers() {
     daemon.shutdown();
 }
 
-// ============================================================================
-// Graceful Shutdown Tests
-// ============================================================================
-
 #[test]
 fn test_graceful_shutdown_on_eof() {
     let daemon = DaemonProcess::spawn();
@@ -653,10 +667,6 @@ fn test_shutdown_with_running_job() {
     );
 }
 
-// ============================================================================
-// Duration Tracking Tests
-// ============================================================================
-
 #[test]
 fn test_duration_in_exit() {
     let mut daemon = DaemonProcess::spawn();
@@ -696,10 +706,6 @@ fn test_duration_in_exit() {
     daemon.shutdown();
 }
 
-// ============================================================================
-// PID Tracking Tests
-// ============================================================================
-
 #[test]
 fn test_pid_in_started() {
     let mut daemon = DaemonProcess::spawn();
@@ -731,6 +737,47 @@ fn test_pid_in_started() {
     let pid = started_msg.unwrap()["pid"].as_u64();
     assert!(pid.is_some(), "RunStarted should have pid");
     assert!(pid.unwrap() > 0, "PID should be positive");
+
+    daemon.shutdown();
+}
+
+#[test]
+fn stdin_sent_to_a_job_reaches_it() {
+    let mut daemon = DaemonProcess::spawn();
+    daemon.handshake();
+    daemon.send(&RunStart {
+        msg_type: "RunStart".to_string(),
+        job_id: "job-stdin".to_string(),
+        workspace: "/tmp".to_string(),
+        command: "cat".to_string(),
+        args: Vec::new(),
+        timeout_ms: Some(10000),
+    });
+    let started = daemon.recv_until(Duration::from_secs(5), |message| {
+        message["type"] == "RunStarted" || message["type"] == "RunError"
+    });
+    assert_eq!(
+        started.last().map(|message| &message["type"]),
+        Some(&Value::from("RunStarted")),
+        "{started:?}"
+    );
+
+    daemon.send(&RunStdin {
+        msg_type: "RunStdin".to_string(),
+        job_id: "job-stdin".to_string(),
+        data: BASE64_STANDARD.encode("piped through\n"),
+        eof: true,
+    });
+    let messages = daemon.recv_until(Duration::from_secs(10), |message| {
+        message["type"] == "RunExit" || message["type"] == "RunError"
+    });
+
+    assert_eq!(stdout_of(&messages), "piped through\n", "{messages:?}");
+    let exit = messages
+        .iter()
+        .find(|message| message["type"] == "RunExit")
+        .unwrap_or_else(|| panic!("cat never exited: {messages:?}"));
+    assert_eq!(exit["exit_code"], 0, "{exit}");
 
     daemon.shutdown();
 }
