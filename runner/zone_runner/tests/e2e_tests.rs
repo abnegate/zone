@@ -1030,3 +1030,29 @@ fn stdin_for_a_job_that_is_not_running_is_answered() {
 
     daemon.shutdown();
 }
+
+#[test]
+fn a_one_shot_command_sees_its_stdin_closed() {
+    let mut runner = runner(&[])
+        .args(["exec", "--workspace", "/tmp", "--cmd", "cat"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("zone-runner exec starts");
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = runner.try_wait().expect("zone-runner exec is waited on") {
+            break Some(status);
+        }
+        if started.elapsed() > Duration::from_secs(10) {
+            let _ = runner.kill();
+            let _ = runner.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    let status = status.expect("cat was still waiting for stdin after 10 seconds");
+    assert!(status.success(), "{status}");
+}

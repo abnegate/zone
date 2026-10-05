@@ -15,6 +15,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 use tracing_subscriber::{EnvFilter, fmt};
 
 mod exec;
@@ -125,7 +126,7 @@ async fn main() -> ExitCode {
                 workspace.display()
             );
 
-            match exec::run_once(workspace, cmd, args, timeout).await {
+            match exec::run_once(workspace, cmd, args, timeout.map(Duration::from_secs)).await {
                 Ok(code) => code,
                 Err(e) => {
                     tracing::error!("Execution error: {}", e);

@@ -5,62 +5,48 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 use abnegate_exec::{
     CommandExecutor, EnvironmentPolicy, ExecutorConfig, OutboundMessage, RunStart,
 };
+use base64::prelude::*;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 /// Run a single command and exit.
 pub async fn run_once(
     workspace: PathBuf,
     command: String,
-    args: Vec<String>,
-    timeout_secs: Option<u64>,
+    arguments: Vec<String>,
+    timeout: Option<Duration>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let config = ExecutorConfig::default()
+    let mut config = ExecutorConfig::default()
         .with_environment(EnvironmentPolicy::inherit())
         .with_proxy(zone_routing::proxy());
-    let config = match timeout_secs {
-        Some(secs) => config.with_timeout(Duration::from_secs(secs)),
-        None => config,
-    };
+    if let Some(timeout) = timeout {
+        config = config.with_timeout(timeout);
+    }
 
     let executor = CommandExecutor::with_config(config);
-    let (tx, mut rx) = mpsc::channel::<OutboundMessage>(100);
+    let (sender, mut receiver) = mpsc::channel::<OutboundMessage>(100);
+    let request = RunStart::new("exec", workspace, command).with_arguments(arguments);
 
-    let request = RunStart::new("exec", workspace, command).with_arguments(args);
+    executor.spawn(&request, sender).await?;
 
-    let _handle = executor.spawn(&request, tx).await?;
-
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
     let mut exit_code = ExitCode::SUCCESS;
-    let stdout = tokio::io::stdout();
-    let stderr = tokio::io::stderr();
 
-    use base64::prelude::*;
-    use tokio::io::AsyncWriteExt;
-
-    let mut stdout = stdout;
-    let mut stderr = stderr;
-
-    while let Some(msg) = rx.recv().await {
-        match msg {
-            OutboundMessage::RunStdout { data, .. } => {
-                if let Ok(bytes) = BASE64_STANDARD.decode(&data) {
-                    let _ = stdout.write_all(&bytes).await;
-                }
-            }
-            OutboundMessage::RunStderr { data, .. } => {
-                if let Ok(bytes) = BASE64_STANDARD.decode(&data) {
-                    let _ = stderr.write_all(&bytes).await;
-                }
-            }
+    while let Some(message) = receiver.recv().await {
+        match message {
+            OutboundMessage::RunStdout { data, .. } => forward(&mut stdout, &data).await,
+            OutboundMessage::RunStderr { data, .. } => forward(&mut stderr, &data).await,
             OutboundMessage::RunExit {
                 exit_code: code, ..
             } => {
                 exit_code = match code {
                     Some(0) => ExitCode::SUCCESS,
-                    Some(c) => ExitCode::from(c as u8),
+                    Some(code) => ExitCode::from(code as u8),
                     None => ExitCode::FAILURE,
                 };
                 break;
@@ -78,4 +64,10 @@ pub async fn run_once(
     let _ = stderr.flush().await;
 
     Ok(exit_code)
+}
+
+async fn forward(output: &mut (impl AsyncWrite + Unpin), encoded: &str) {
+    if let Ok(bytes) = BASE64_STANDARD.decode(encoded) {
+        let _ = output.write_all(&bytes).await;
+    }
 }
