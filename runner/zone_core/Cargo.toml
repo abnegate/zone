@@ -27,7 +27,7 @@ futures = { workspace = true }
 nix = { workspace = true, features = ["fs"] }
 
 # Session storage
-dirs = "=6.0.0"
+dirs = { workspace = true }
 
 abnegate-exec = { workspace = true }
 abnegate-secret = { workspace = true }
