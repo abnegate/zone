@@ -109,6 +109,7 @@ zone_context = { path = "../zone_context" }
 
 [dev-dependencies]
 zone_chat = { path = "../zone_chat" }
+zone_core = { path = "../zone_core", features = ["sqlx", "test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 http-body-util = "=0.1.5"
 tower = { workspace = true, features = ["util"] }
