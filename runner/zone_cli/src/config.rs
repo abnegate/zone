@@ -72,11 +72,6 @@ fn application() -> Result<Application, Error> {
     Ok(Application::new(APPLICATION)?)
 }
 
-fn create(directory: PathBuf) -> Result<PathBuf, Error> {
-    std::fs::create_dir_all(&directory).map_err(|error| Error::write(&directory, error))?;
-    Ok(directory)
-}
-
 impl Config {
     /// The directory the CLI keeps its files in
     pub fn directory() -> Result<PathBuf, Error> {
@@ -123,9 +118,11 @@ impl Config {
         abnegate_config::Config::new(Self::path()?, self).save()
     }
 
-    /// Ensure sessions directory exists
+    /// The directory saved sessions are kept in, created if it is missing
     pub fn ensure_sessions_directory() -> Result<PathBuf, Error> {
-        create(Self::sessions_directory()?)
+        let directory = Self::sessions_directory()?;
+        std::fs::create_dir_all(&directory).map_err(|error| Error::write(&directory, error))?;
+        Ok(directory)
     }
 }
 
@@ -272,12 +269,49 @@ mod tests {
         }
     }
 
+    const CHILD: &str = "ZONE_CLI_CONFIG_TEST_CHILD";
+
+    /// Run `test` again in a child whose only variables are `PATH`, those
+    /// coverage and backtraces need, and `variables`, since the configuration
+    /// variables are read from the process environment every test shares.
+    fn ran_in_child(test: &str, variables: &[(&str, &str)]) -> bool {
+        if std::env::var(CHILD).as_deref() == Ok(test) {
+            return false;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", test, "--nocapture", "--test-threads", "1"])
+            .env_clear()
+            .env(CHILD, test)
+            .envs(variables.iter().copied());
+        for name in ["PATH", "LLVM_PROFILE_FILE", "RUST_BACKTRACE"] {
+            if let Some(value) = std::env::var_os(name) {
+                child.env(name, value);
+            }
+        }
+        let output = child.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
     #[test]
     fn a_sessions_directory_that_cannot_be_created_names_its_path() {
+        const NAME: &str =
+            "config::tests::a_sessions_directory_that_cannot_be_created_names_its_path";
         let blocker = tempfile::NamedTempFile::new().unwrap();
-        let directory = blocker.path().join("sessions");
+        let moved = blocker.path().join("zone");
+        if ran_in_child(NAME, &[("ZONE_CONFIG_DIRECTORY", moved.to_str().unwrap())]) {
+            return;
+        }
+        let directory =
+            PathBuf::from(std::env::var("ZONE_CONFIG_DIRECTORY").unwrap()).join("sessions");
 
-        let error = create(directory.clone()).unwrap_err();
+        let error = Config::ensure_sessions_directory().unwrap_err();
 
         assert!(
             matches!(&error, Error::Write { path, .. } if *path == directory),
@@ -354,30 +388,13 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    /// The variables are read from the process environment, which every test
-    /// shares, so this runs again in a child that sets one.
     #[test]
     fn the_config_directory_variable_moves_the_file_and_the_sessions() {
         const NAME: &str =
             "config::tests::the_config_directory_variable_moves_the_file_and_the_sessions";
-        const CHILD: &str = "ZONE_CLI_CONFIG_TEST_CHILD";
         const MOVED: &str = "/nonexistent/zone-moved";
 
-        if std::env::var(CHILD).as_deref() != Ok(NAME) {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", NAME, "--nocapture", "--test-threads", "1"])
-                .env_clear()
-                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-                .env(CHILD, NAME)
-                .env("ZONE_CONFIG_DIRECTORY", MOVED)
-                .output()
-                .unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                output.status.success() && stdout.contains("1 passed"),
-                "{stdout}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if ran_in_child(NAME, &[("ZONE_CONFIG_DIRECTORY", MOVED)]) {
             return;
         }
 
