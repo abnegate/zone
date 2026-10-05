@@ -10,6 +10,7 @@ use base64::prelude::*;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 /// Run the daemon, communicating over stdio.
 pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
@@ -214,9 +215,20 @@ async fn handle_message(
             };
 
             if let Some(stdin) = registry.get_stdin(&job_id)
-                && stdin.send(bytes).await.is_err()
+                && !bytes.is_empty()
             {
-                tracing::warn!("Failed to send stdin data: job_id={}", job_id);
+                match stdin.try_send(bytes) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        sender
+                            .send(protocol_error(format!("stdin for job {job_id} is full")))
+                            .await?;
+                        return Ok(());
+                    }
+                    Err(TrySendError::Closed(_)) => {
+                        tracing::warn!("Failed to send stdin data: job_id={}", job_id);
+                    }
+                }
             }
 
             if eof {
@@ -255,6 +267,12 @@ async fn handle_message(
     }
 
     Ok(())
+}
+
+/// An error about the message itself rather than a job. It names no job, so
+/// the registry never mistakes it for the end of a running one.
+fn protocol_error(message: impl Into<String>) -> OutboundMessage {
+    OutboundMessage::error("", ErrorCode::InvalidMessage, message)
 }
 
 async fn start(

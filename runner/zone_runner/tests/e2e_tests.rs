@@ -9,7 +9,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 use zone_routing::{BYPASS, PROXY_URL_VARIABLE};
 
 const ROUTED_PROXY: &str = "http://127.0.0.1:28888";
@@ -143,11 +144,29 @@ impl DaemonProcess {
         messages
     }
 
+    /// Kill the daemon once `limit` has passed, so a daemon that stops
+    /// answering fails the test instead of hanging it. Dropping the
+    /// watchdog disarms it.
+    fn watchdog(&self, limit: Duration) -> Watchdog {
+        let pid = self.child.id().to_string();
+        let (armed, disarmed) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            if disarmed.recv_timeout(limit) == Err(mpsc::RecvTimeoutError::Timeout) {
+                let _ = Command::new("kill").args(["-KILL", &pid]).status();
+            }
+        });
+        Watchdog { _armed: armed }
+    }
+
     /// Close stdin and wait for the process to exit
     fn shutdown(mut self) -> std::process::ExitStatus {
         drop(self.stdin);
         self.child.wait().expect("Failed to wait for child")
     }
+}
+
+struct Watchdog {
+    _armed: mpsc::Sender<()>,
 }
 
 // Protocol message types for testing
@@ -183,7 +202,6 @@ struct RunStdin {
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)]
 struct RunCancel {
     #[serde(rename = "type")]
     msg_type: String,
@@ -848,4 +866,73 @@ fn a_one_shot_command_is_routed_through_the_tool_runner_proxy() {
 
     assert!(output.status.success(), "{output:?}");
     assert_routed(&String::from_utf8_lossy(&output.stdout));
+}
+
+#[test]
+fn a_job_that_never_reads_its_stdin_cannot_stall_the_daemon() {
+    let mut daemon = DaemonProcess::spawn();
+    let _watchdog = daemon.watchdog(Duration::from_secs(60));
+    daemon.handshake();
+    daemon.send(&RunStart {
+        msg_type: "RunStart".to_string(),
+        job_id: "job-sleeping".to_string(),
+        workspace: "/tmp".to_string(),
+        command: "sleep".to_string(),
+        args: vec!["30".to_string()],
+        timeout_ms: Some(60000),
+    });
+    let started = daemon.recv_until(Duration::from_secs(5), |message| {
+        message["type"] == "RunStarted" || message["type"] == "RunError"
+    });
+    assert_eq!(
+        started.last().map(|message| &message["type"]),
+        Some(&Value::from("RunStarted")),
+        "{started:?}"
+    );
+
+    let chunk = BASE64_STANDARD.encode(vec![b'x'; 64 * 1024]);
+    for _ in 0..200 {
+        daemon.send(&RunStdin {
+            msg_type: "RunStdin".to_string(),
+            job_id: "job-sleeping".to_string(),
+            data: chunk.clone(),
+            eof: false,
+        });
+    }
+    let pinged = Instant::now();
+    daemon.send(&Ping {
+        msg_type: "Ping".to_string(),
+        id: "after-stdin".to_string(),
+    });
+    let answered = daemon.recv_until(Duration::from_secs(10), |message| message["type"] == "Pong");
+
+    let pong = answered.last().expect("the daemon answered");
+    assert_eq!(pong["type"], "Pong", "{pong}");
+    assert_eq!(pong["id"], "after-stdin", "{pong}");
+    assert!(
+        pinged.elapsed() < Duration::from_secs(10),
+        "the Pong took {:?}",
+        pinged.elapsed()
+    );
+    assert!(
+        answered
+            .iter()
+            .filter(|message| message["type"] == "RunError")
+            .all(|message| message["job_id"] == "" && message["error_code"] == "invalid_message"),
+        "a refused write named the job: {answered:?}"
+    );
+
+    daemon.send(&RunCancel {
+        msg_type: "RunCancel".to_string(),
+        job_id: "job-sleeping".to_string(),
+        force: Some(true),
+    });
+    let cancelled = daemon.recv_until(Duration::from_secs(10), |message| {
+        message["type"] == "RunError" && message["job_id"] == "job-sleeping"
+    });
+    let error = cancelled.last().expect("the daemon answered the cancel");
+    assert_eq!(error["job_id"], "job-sleeping", "{error}");
+    assert_eq!(error["error_code"], "cancelled", "{error}");
+
+    daemon.shutdown();
 }
