@@ -388,7 +388,7 @@ enum Routing {
     Video(crate::config::ComfyUiConfig),
     Audio(crate::config::ComfyUiConfig),
     Upscale(crate::config::ComfyUiConfig),
-    Chat(chats::ChatRow, Route),
+    Chat(chats::ChatRow, Box<Route>),
 }
 
 /// What a provider reported when a turn failed, remedied for a coding agent's
@@ -2495,7 +2495,7 @@ async fn handle_send_message(
                         return Ok(());
                     }
                     _ = session.guard.lost() => { return Err(OWNERSHIP_LOST.into()); }
-                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, route, web_search_requested) => result?,
+                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, *route, web_search_requested) => result?,
                 };
                 handle_chat_generation(state, stream, chat_id, workspace_id, user_id, preparation, &mut request, &mut session, &mut jobs).await
             }
@@ -2666,7 +2666,9 @@ async fn prepare_message(
         }
         crate::services::image_intent::GenerationIntent::Audio => Routing::Audio(image_config),
         crate::services::image_intent::GenerationIntent::Upscale => Routing::Upscale(image_config),
-        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat, route),
+        crate::services::image_intent::GenerationIntent::Chat => {
+            Routing::Chat(chat, Box::new(route))
+        }
     })
 }
 
@@ -4569,7 +4571,7 @@ mod tests {
                 QUESTION,
                 None,
                 chat,
-                route,
+                *route,
                 false,
             )
             .await
