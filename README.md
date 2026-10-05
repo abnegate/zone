@@ -434,7 +434,6 @@ zone/
 │   │   ├── src/subject.rs   # Subject-aware framing for training crops
 │   │   └── src/caption.rs   # Vision captioning for training sets
 │   ├── zone_email/          # Transactional email over SMTP
-│   ├── zone_search/         # SearXNG web search client
 │   ├── zone_vcs/            # Local git operations and GitHub pull requests
 │   ├── zone_vision/         # Subject detection and subject-aware cropping
 │   ├── zone_server/         # HTTP/WS server

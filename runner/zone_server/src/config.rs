@@ -15,9 +15,8 @@ use zone_core::llm::{AgentKind, CodexSandbox};
 use crate::services::hosts::Hosts;
 use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME, ROOT_PATH};
 
-/// Settings live with the clients that consume them.
+pub use abnegate_search::WebSearchConfig;
 pub use zone_comfy::Config as ComfyUiConfig;
-pub use zone_search::WebSearchConfig;
 
 /// Upstream GPT4All model catalog. Tests should override `Config::gpt4all_models_url`.
 pub const DEFAULT_GPT4ALL_MODELS_URL: &str =
@@ -1148,7 +1147,7 @@ impl Config {
             cors_allow_credentials,
             app_base_url,
             github_api_url,
-            web_search: WebSearchConfig::from_env(),
+            web_search: crate::services::search::from_environment(),
             comfyui: ComfyUiConfig::from_env(),
             source_index: SourceIndexConfig::from_env(),
             monitoring: MonitoringConfig::from_env(),
@@ -1238,7 +1237,7 @@ mod tests {
             cors_allow_credentials: false,
             app_base_url: "http://localhost:3000".to_string(),
             github_api_url: DEFAULT_GITHUB_API_URL.to_string(),
-            web_search: WebSearchConfig::default(),
+            web_search: crate::services::search::defaults(),
             comfyui: ComfyUiConfig::default(),
             source_index: SourceIndexConfig::default(),
             monitoring: MonitoringConfig::default(),
@@ -1771,19 +1770,16 @@ mod tests {
 
     #[test]
     fn test_web_search_default_is_off_for_tests() {
-        let config = WebSearchConfig::default();
+        let config = create_test_config().web_search;
         assert!(!config.enabled);
-        assert_eq!(config.query_url, zone_search::DEFAULT_SEARXNG_QUERY_URL);
+        assert_eq!(config.query_url, crate::services::search::DEFAULT_QUERY_URL);
         assert_eq!(config.result_count, 5);
         assert!(!config.requested_for("hello", None));
     }
 
     #[test]
     fn test_web_search_requested_for_respects_metadata_and_intent() {
-        let config = WebSearchConfig {
-            enabled: true,
-            ..WebSearchConfig::default()
-        };
+        let config = crate::services::search::defaults().with_enabled(true);
         assert!(!config.requested_for("Explain this function", None));
         assert!(config.requested_for("What is the latest news on Rust?", None));
         assert!(config.requested_for("anything", Some(&serde_json::json!({ "web_search": true }))));
@@ -1795,20 +1791,13 @@ mod tests {
 
     #[test]
     fn test_web_search_requested_for_disabled_or_empty_url() {
-        let disabled = WebSearchConfig {
-            enabled: false,
-            ..WebSearchConfig::default()
-        };
+        let disabled = crate::services::search::defaults();
         assert!(!disabled.requested_for(
             "latest news",
             Some(&serde_json::json!({ "web_search": true }))
         ));
 
-        let empty_url = WebSearchConfig {
-            enabled: true,
-            query_url: "  ".to_string(),
-            ..WebSearchConfig::default()
-        };
+        let empty_url = WebSearchConfig::new("  ");
         assert!(!empty_url.requested_for("latest news", None));
     }
 
@@ -1840,6 +1829,8 @@ mod tests {
             "PORT",
             "PROMETHEUS_URL",
             "REDIS_URL",
+            "SEARCH_TIMEOUT_SECONDS",
+            "SEARCH_TIMEOUT_SECS",
             "SOURCE_RESYNC_ENABLED",
             "SOURCE_RESYNC_INTERVAL_SECS",
             "SOURCE_RESYNC_POLL_SECS",
@@ -1889,8 +1880,14 @@ mod tests {
             Err(ConfigError::Missing("LITELLM_KEY"))
         ));
         environment.set("LITELLM_KEY", "models-key");
+        environment.set("SEARCH_TIMEOUT_SECS", "9");
 
         let defaults = Config::from_env().expect("required values are present");
+        assert_eq!(
+            defaults.web_search.timeout,
+            Duration::from_secs(15),
+            "the retired SEARCH_TIMEOUT_SECS name must not set the search timeout"
+        );
         assert_eq!(defaults.host, "0.0.0.0");
         assert_eq!(defaults.port, 8000);
         assert_eq!(defaults.jwt_access_lifetime, 900);
@@ -1926,8 +1923,10 @@ mod tests {
         environment.set("MONITORING_GRAFANA_ADMIN_USER", "admin");
         environment.set("MONITORING_GRAFANA_ADMIN_PASSWORD", "password");
         environment.set("TRAIN_UPLOAD_LIMIT_MB", "1");
+        environment.set("SEARCH_TIMEOUT_SECONDS", "42");
 
         let configured = Config::from_env().expect("custom values are valid");
+        assert_eq!(configured.web_search.timeout, Duration::from_secs(42));
         assert_eq!(configured.host, "127.0.0.1");
         assert_eq!(configured.port, 9001);
         assert_eq!(configured.jwt_access_lifetime, 1200);

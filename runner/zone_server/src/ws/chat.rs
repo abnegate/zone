@@ -53,9 +53,9 @@ use crate::services::login::router;
 use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
+use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 use zone_chat::history::ReplayMessage;
 use zone_core::context::ContextUsage;
-use zone_search::client::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
@@ -4300,12 +4300,7 @@ mod tests {
     }
 
     fn web_hit(title: &str, url: &str) -> SearchHit {
-        SearchHit {
-            title: title.to_string(),
-            url: url.to_string(),
-            snippet: String::new(),
-            identifier: None,
-        }
+        SearchHit::new(title, url, "")
     }
 
     fn written(chat_id: Uuid, hit: &SearchHit, identifier: &str) -> chat_sources::Source {

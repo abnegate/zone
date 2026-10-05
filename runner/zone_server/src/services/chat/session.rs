@@ -8,6 +8,7 @@ pub mod tail;
 pub use generation::Generation;
 pub use pinned::Pinned;
 
+use abnegate_search::SearchContext;
 use base64::Engine;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -28,7 +29,6 @@ use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
 use crate::state::AppState;
 use zone_chat::{capacity, history};
-use zone_search::client::SearchContext;
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
 /// The id of the system entry a turn's context opens with.

@@ -66,6 +66,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "abnegate-search"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c829bfcceaef95473e00bc169119324f3ead60cbc692eaf4383b3d2f34449151"
+dependencies = [
+ "abnegate-secret",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "urlencoding",
+]
+
+[[package]]
 name = "abnegate-secret"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9957,25 +9971,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "zone_search"
-version = "0.1.0"
-dependencies = [
- "reqwest 0.13.5",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "urlencoding",
- "wiremock",
-]
-
-[[package]]
 name = "zone_server"
 version = "0.1.0"
 dependencies = [
  "abnegate-exec",
  "abnegate-http",
+ "abnegate-search",
  "abnegate-secret",
  "aes-gcm",
  "aiusg",
@@ -10030,7 +10031,6 @@ dependencies = [
  "zone_core",
  "zone_email",
  "zone_notify",
- "zone_search",
  "zone_vcs",
 ]
 

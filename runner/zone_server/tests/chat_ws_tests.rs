@@ -617,9 +617,20 @@ async fn web_search_results_reach_plain_and_agent_models_despite_prior_denial() 
             .unwrap();
         assert!(search < generation);
         let (capability, instructions) = web_instructions(&requests[0], agentic);
-        assert!(capability.contains("Zone can search the public web"));
+        assert!(capability.contains("The server can search the public web"));
         assert!(capability.contains("separate from callable tools"));
-        assert!(capability.contains("web_search"));
+        assert!(capability.contains("When a search tool is among the callable tools"));
+        if agentic {
+            let offered = requests[0]["tools"].as_array().is_some_and(|tools| {
+                tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "web_search")
+            }) || capability.contains("- web_search: ");
+            assert!(
+                offered,
+                "the agent model must be offered the search tool the capability names generically"
+            );
+        }
         for evidence in [
             "Search outcome for this turn: succeeded",
             WEATHER_TITLE,
@@ -692,7 +703,7 @@ async fn web_search_disabled_opt_out_and_unrequested_turns_do_not_claim_retrieva
             ));
             let (capability, instructions) = web_instructions(&requests[0], agentic);
             assert_eq!(
-                capability.contains("Zone can search the public web"),
+                capability.contains("The server can search the public web"),
                 !matches!(outcome, SearchOutcome::Disabled)
             );
             assert!(
