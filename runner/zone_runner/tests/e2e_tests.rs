@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-use zone_core::tools::routing::{BYPASS, PROXY_URL_VARIABLE};
+use zone_routing::{BYPASS, PROXY_URL_VARIABLE};
 
 const ROUTED_PROXY: &str = "http://127.0.0.1:28888";
 

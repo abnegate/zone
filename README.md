@@ -422,6 +422,7 @@ zone/
 │   │   ├── src/cache/       # Redis cache layer
 │   │   └── src/auth/        # JWT & password auth
 │   ├── zone_cli/            # CLI tool
+│   ├── zone_routing/        # Proxy routing for tool, MCP and command runs
 │   └── zone_runner/         # Daemon binary (command execution via abnegate-exec)
 ├── manager/                 # Manager frontend
 │   └── frontend/            # React frontend

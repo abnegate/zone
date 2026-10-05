@@ -1,4 +1,5 @@
-//! Where the HTTP clients a tool or an MCP server starts send their requests.
+//! Where the HTTP clients started by a tool, an MCP server or a command run
+//! send their requests.
 
 use std::env;
 
@@ -98,7 +99,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_documented_variable_routes_every_client_and_keeps_the_stack_direct() {
-        const NAME: &str = "tools::routing::tests::the_documented_variable_routes_every_client_and_keeps_the_stack_direct";
+        const NAME: &str =
+            "tests::the_documented_variable_routes_every_client_and_keeps_the_stack_direct";
         if ran_in_child(NAME, &[(PROXY_URL_VARIABLE, PROXY)]).await {
             return;
         }
@@ -118,7 +120,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_process_started_under_a_routed_tool_routes_its_own_children_the_same_way() {
-        const NAME: &str = "tools::routing::tests::a_process_started_under_a_routed_tool_routes_its_own_children_the_same_way";
+        const NAME: &str =
+            "tests::a_process_started_under_a_routed_tool_routes_its_own_children_the_same_way";
         let bypass = BYPASS.join(",");
         if ran_in_child(
             NAME,
@@ -140,7 +143,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_proxy_nothing_is_routed() {
-        const NAME: &str = "tools::routing::tests::without_a_proxy_nothing_is_routed";
+        const NAME: &str = "tests::without_a_proxy_nothing_is_routed";
         if ran_in_child(NAME, &[]).await {
             return;
         }

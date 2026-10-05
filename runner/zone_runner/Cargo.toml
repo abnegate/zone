@@ -26,4 +26,4 @@ futures = { workspace = true }
 bytes = { workspace = true }
 base64 = { workspace = true }
 
-zone_core = { path = "../zone_core" }
+zone_routing = { path = "../zone_routing" }
