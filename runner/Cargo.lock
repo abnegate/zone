@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "abnegate-config"
-version = "0.1.3"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd648a5fa3968334c2eaaae6c0b85b56e5b9feb7fbb124a534ce2a82d4834905"
+checksum = "fe0b813def0d6172b35f125394eda189edc7fc4ed26aa27a827bb1ee43c5b03b"
 dependencies = [
  "abnegate-secret",
  "chrono",

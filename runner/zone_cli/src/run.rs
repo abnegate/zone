@@ -14,7 +14,7 @@ use zone_core::{
 };
 
 use crate::auth::AuthManager;
-use crate::config::{Config, ConfigError};
+use crate::config::Config;
 
 /// Run error
 #[derive(Debug, Error)]
@@ -37,9 +37,16 @@ pub enum RunError {
     Io(#[from] std::io::Error),
 }
 
-impl From<ConfigError> for RunError {
-    fn from(e: ConfigError) -> Self {
-        RunError::Config(e.to_string())
+impl From<abnegate_config::Error> for RunError {
+    fn from(error: abnegate_config::Error) -> Self {
+        let mut message = error.to_string();
+        let mut cause = std::error::Error::source(&error);
+        while let Some(source) = cause {
+            message.push_str(": ");
+            message.push_str(&source.to_string());
+            cause = source.source();
+        }
+        RunError::Config(message)
     }
 }
 
@@ -166,7 +173,7 @@ fn llm_config(config: &Config) -> Result<LlmConfig, RunError> {
 
 /// Run the agent with a prompt
 pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result<(), RunError> {
-    let config = Config::load().map_err(|e| RunError::Config(e.to_string()))?;
+    let config = Config::load()?;
 
     let auth = AuthManager::new().map_err(|_| RunError::NotLoggedIn)?;
     if !auth.is_logged_in() {
@@ -237,7 +244,7 @@ pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result
 
 /// Resume a session
 pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Result<(), RunError> {
-    let config = Config::load().map_err(|e| RunError::Config(e.to_string()))?;
+    let config = Config::load()?;
     let session_store = FileSessionStore::new(Config::ensure_sessions_directory()?);
 
     // Load session
@@ -528,9 +535,27 @@ mod tests {
 
     #[test]
     fn test_run_error_from_config_error() {
-        let config_err = ConfigError::from(abnegate_config::Error::NoHomeDirectory);
-        let run_err: RunError = config_err.into();
+        let run_err = RunError::from(abnegate_config::Error::NoHomeDirectory);
         assert!(matches!(run_err, RunError::Config(_)));
+        assert_eq!(
+            run_err.to_string(),
+            "Configuration error: Home directory not found"
+        );
+    }
+
+    /// The crate's errors keep their cause as a source rather than in their
+    /// message, and a run reports the cause too.
+    #[test]
+    fn a_configuration_error_names_its_cause() {
+        let error = RunError::from(abnegate_config::Error::write(
+            "/zone/sessions",
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        ));
+
+        assert_eq!(
+            error.to_string(),
+            "Configuration error: Failed to write '/zone/sessions': denied"
+        );
     }
 
     /// A run without an endpoint says which key to set and where, rather than

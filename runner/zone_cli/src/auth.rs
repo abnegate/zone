@@ -149,19 +149,19 @@ impl AuthManager {
 
         tokens.store(&self.store)?;
 
-        let mut metadata = TokenMetadata::new(host, expires_at);
-        metadata.user_id = Some(user.id);
-        metadata.email = Some(user.email);
+        let metadata = TokenMetadata::new(host, expires_at)
+            .with_user_id(user.id)
+            .with_email(user.email);
         self.store.set_metadata(&metadata)?;
 
         match crate::config::Config::load() {
-            Ok(mut cfg) => {
-                cfg.host = Some(host.to_string());
-                if let Err(err) = cfg.save() {
-                    eprintln!("warning: could not save host to config: {err}");
+            Ok(mut config) => {
+                config.host = Some(host.to_string());
+                if let Err(error) = config.save() {
+                    eprintln!("warning: could not save host to config: {error}");
                 }
             }
-            Err(err) => eprintln!("warning: could not load config to save host: {err}"),
+            Err(error) => eprintln!("warning: could not load config to save host: {error}"),
         }
 
         Ok(metadata)
@@ -252,6 +252,17 @@ mod tests {
     fn test_auth_error_not_logged_in() {
         let err = AuthError::NotLoggedIn;
         assert_eq!(err.to_string(), "Not logged in");
+    }
+
+    /// The keychain holding no token is how a signed-out user looks to the
+    /// store, so it has to read as not logged in rather than a store failure.
+    #[test]
+    fn a_missing_credential_means_not_logged_in() {
+        let missing = AuthError::from(abnegate_config::Error::no_credential("access-token"));
+        let unreadable = AuthError::from(abnegate_config::Error::CredentialUnreadable);
+
+        assert!(matches!(missing, AuthError::NotLoggedIn), "{missing:?}");
+        assert!(matches!(unreadable, AuthError::Store(_)), "{unreadable:?}");
     }
 
     #[test]
