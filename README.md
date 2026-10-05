@@ -414,7 +414,6 @@ zone/
 │   │   ├── src/video.rs     # Training frames pulled out of a submitted clip
 │   │   ├── src/subject.rs   # Subject-aware framing for training crops
 │   │   └── src/caption.rs   # Vision captioning for training sets
-│   ├── zone_vcs/            # Local git operations and GitHub pull requests
 │   ├── zone_vision/         # Subject detection and subject-aware cropping
 │   ├── zone_server/         # HTTP/WS server
 │   │   ├── src/routes/      # API endpoints

@@ -105,7 +105,6 @@ abnegate-secret = { workspace = true, features = ["sqlx"] }
 abnegate-vcs = { workspace = true, features = ["github"] }
 zone_chat = { path = "../zone_chat" }
 zone_comfy = { path = "../zone_comfy" }
-zone_vcs = { path = "../zone_vcs" }
 zone_core = { path = "../zone_core", features = ["sqlx"] }
 zone_context = { path = "../zone_context" }
 

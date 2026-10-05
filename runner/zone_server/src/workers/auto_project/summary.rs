@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
+use abnegate_vcs::PullRequestDetail;
 use zone_core::llm::{LlmClient, Message, finish_reason};
-use zone_vcs::pull_request::PullRequestDetail;
 
 use crate::db::tasks::TaskRow;
 use crate::services::stages;
@@ -112,34 +112,26 @@ mod tests {
         INSTANCE_KEY, ORGANIZATION_KEY, Organization, SAVED_MODEL, Saved, authorization,
         completing, received,
     };
+    use abnegate_vcs::{BranchName, CommitSha};
     use serde_json::Value;
     use sqlx::PgPool;
     use uuid::Uuid;
-    use zone_vcs::pull_request::Mergeability;
 
     const SUMMARY: &str = "Shoppers can now buy several items at once.";
 
     fn cart() -> PullRequestDetail {
-        PullRequestDetail {
-            node_id: String::new(),
-            number: 1,
-            title: "(feat): add a cart".into(),
-            body: Some("## Problem\n\nShoppers cannot buy more than one item.\n\n## What changed\n\nA cart.".into()),
-            state: "open".into(),
-            draft: false,
-            merged: false,
-            merge_commit_sha: None,
-            head_sha: String::new(),
-            head_ref: String::new(),
-            base_ref: "main".into(),
-            mergeable: Mergeability::Unknown,
-            mergeable_state: None,
-            changed_files: 0,
-            additions: 0,
-            deletions: 0,
-            commits: 0,
-            html_url: String::new(),
-        }
+        PullRequestDetail::new(
+            "",
+            std::num::NonZeroU64::MIN,
+            "(feat): add a cart",
+            BranchName::parse("zone/cart").expect("a branch"),
+            CommitSha::parse(&"a".repeat(40)).expect("a commit"),
+            BranchName::parse("main").expect("a branch"),
+            "",
+        )
+        .with_body(
+            "## Problem\n\nShoppers cannot buy more than one item.\n\n## What changed\n\nA cart.",
+        )
     }
 
     async fn cart_task(pool: &PgPool, workspace: Uuid) -> TaskRow {
@@ -279,7 +271,8 @@ mod tests {
     fn the_fallback_is_the_first_prose_paragraph_or_the_title() {
         let pull = cart();
         assert_eq!(fallback(&pull), "Shoppers cannot buy more than one item.");
-        let bare = PullRequestDetail { body: None, ..pull };
+        let mut bare = pull;
+        bare.body = None;
         assert_eq!(fallback(&bare), "(feat): add a cart");
     }
 }

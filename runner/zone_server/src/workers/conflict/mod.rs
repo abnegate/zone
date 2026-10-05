@@ -10,7 +10,7 @@
 //!
 //! - **A repair that discards one side.** Every conflicted file is read before the
 //!   agent touches it and judged against that original afterwards
-//!   ([`zone_vcs::resolution::judge`]). A resolution carrying no distinctive line
+//!   ([`abnegate_vcs::resolution::judge`]). A resolution carrying no distinctive line
 //!   from one of the two branches is rejected and nothing is pushed.
 //! - **A repair applied to the wrong tree.** The checkout is built from scratch
 //!   from the two commits the caller named, both are checked against what the
@@ -25,21 +25,33 @@ pub mod scope;
 
 use std::sync::Arc;
 
-use zone_vcs::conflict::{
+use abnegate_secret::SecretValue;
+use abnegate_vcs::conflict::validate;
+use abnegate_vcs::resolution::{ResolutionVerdict, judge};
+use abnegate_vcs::{
     BranchName, CommitSha, Conflict, ConflictError, ConflictRequest, ConflictService,
-    ConflictedPath, validate,
+    ConflictedPath, RepositoryUrl,
 };
-use zone_vcs::resolution::{ResolutionVerdict, judge};
 
 use agent::{RepairAgent, RepairTask};
 use prompt::RepairBrief;
 use scope::RepairScope;
 
+const AUTHOR_NAME: &str = "Zone";
+
+const AUTHOR_EMAIL: &str = "zone@users.noreply.github.com";
+
+/// Conflicts as Zone repairs them: the refresh merge and the repair commit
+/// are both made as Zone's GitHub noreply identity.
+pub fn service() -> ConflictService {
+    ConflictService::new().with_author(AUTHOR_NAME, AUTHOR_EMAIL)
+}
+
 /// What to repair, and what the caller believes it is repairing.
 #[derive(Debug, Clone)]
 pub struct RepairRequest {
-    pub remote: String,
-    pub token: Option<String>,
+    pub remote: RepositoryUrl,
+    pub token: Option<SecretValue>,
     pub head: BranchName,
     pub base: BranchName,
     pub expected_head: Option<CommitSha>,
@@ -92,17 +104,21 @@ pub async fn repair(
     repairer: &dyn RepairAgent,
     request: &RepairRequest,
 ) -> RepairOutcome {
-    let conflict = match service
-        .reproduce(&ConflictRequest {
-            remote: request.remote.clone(),
-            token: request.token.clone(),
-            head: request.head.clone(),
-            base: request.base.clone(),
-            expected_head: request.expected_head.clone(),
-            expected_base: request.expected_base.clone(),
-        })
-        .await
-    {
+    let mut reproduction = ConflictRequest::new(
+        request.remote.clone(),
+        request.head.clone(),
+        request.base.clone(),
+    );
+    if let Some(token) = &request.token {
+        reproduction = reproduction.with_token(token.clone());
+    }
+    if let Some(commit) = &request.expected_head {
+        reproduction = reproduction.with_expected_head(commit.clone());
+    }
+    if let Some(commit) = &request.expected_base {
+        reproduction = reproduction.with_expected_base(commit.clone());
+    }
+    let conflict = match service.reproduce(&reproduction).await {
         Ok(conflict) => conflict,
         Err(ConflictError::NoConflict) => return RepairOutcome::NotConflicted,
         Err(error) => return RepairOutcome::Failed(error.to_string()),
@@ -167,15 +183,7 @@ pub async fn repair(
         Err(error) => return RepairOutcome::Failed(error.to_string()),
     };
 
-    if let Err(error) = service
-        .publish(
-            &conflict,
-            &request.remote,
-            request.token.as_deref(),
-            &request.head,
-        )
-        .await
-    {
+    if let Err(error) = service.publish(&conflict, request.token.as_ref()).await {
         return RepairOutcome::Failed(error.to_string());
     }
 
@@ -202,11 +210,11 @@ fn read_all(conflict: &Conflict) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_vcs::resolution::ConflictSide;
     use async_trait::async_trait;
     use std::path::Path;
     use std::process::Command;
     use tempfile::TempDir;
-    use zone_vcs::resolution::ConflictSide;
 
     /// The checkout is detached at the head branch and merges the base into it,
     /// so the head branch is git's "ours" and the base branch is git's "theirs".
@@ -317,7 +325,7 @@ mod tests {
 
     fn request(remote: &Path) -> RepairRequest {
         RepairRequest {
-            remote: remote.to_string_lossy().to_string(),
+            remote: RepositoryUrl::local(remote).unwrap(),
             token: None,
             head: BranchName::parse("feature").unwrap(),
             base: BranchName::parse("main").unwrap(),
@@ -340,12 +348,7 @@ mod tests {
         let origin = origin(false);
         let before = feature_head(origin.path());
 
-        let outcome = repair(
-            &ConflictService::new(),
-            &Writer(MERGED),
-            &request(origin.path()),
-        )
-        .await;
+        let outcome = repair(&service(), &Writer(MERGED), &request(origin.path())).await;
 
         assert_eq!(outcome, RepairOutcome::NotConflicted);
         assert_eq!(
@@ -360,12 +363,7 @@ mod tests {
         let origin = origin(true);
         let before = feature_head(origin.path());
 
-        let outcome = repair(
-            &ConflictService::new(),
-            &Writer(MERGED),
-            &request(origin.path()),
-        )
-        .await;
+        let outcome = repair(&service(), &Writer(MERGED), &request(origin.path())).await;
 
         match &outcome {
             RepairOutcome::Repaired { files, commit } => {
@@ -374,6 +372,14 @@ mod tests {
             }
             other => panic!("a resolvable conflict must be repaired, got {other:?}"),
         }
+        assert_eq!(
+            git(
+                origin.path(),
+                &["log", "-1", "--format=%an <%ae>|%cn <%ce>", "feature"]
+            ),
+            "Zone <zone@users.noreply.github.com>|Zone <zone@users.noreply.github.com>",
+            "a repair is authored and committed as Zone's noreply identity"
+        );
 
         assert_ne!(feature_head(origin.path()), before);
         let published = feature_value(origin.path());
@@ -390,12 +396,7 @@ mod tests {
             let origin = origin(true);
             let before = feature_head(origin.path());
 
-            let outcome = repair(
-                &ConflictService::new(),
-                &Writer(resolution),
-                &request(origin.path()),
-            )
-            .await;
+            let outcome = repair(&service(), &Writer(resolution), &request(origin.path())).await;
 
             match &outcome {
                 RepairOutcome::Rejected { path, verdict } => {
@@ -419,7 +420,7 @@ mod tests {
         let origin = origin(true);
         let before = feature_head(origin.path());
 
-        let outcome = repair(&ConflictService::new(), &Idle, &request(origin.path())).await;
+        let outcome = repair(&service(), &Idle, &request(origin.path())).await;
 
         match &outcome {
             RepairOutcome::Rejected { verdict, .. } => {
@@ -435,7 +436,7 @@ mod tests {
         let origin = origin(true);
         let before = feature_head(origin.path());
 
-        let outcome = repair(&ConflictService::new(), &Wanderer, &request(origin.path())).await;
+        let outcome = repair(&service(), &Wanderer, &request(origin.path())).await;
 
         assert_eq!(
             outcome,
@@ -452,7 +453,7 @@ mod tests {
         request.expected_head =
             Some(CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap());
 
-        let outcome = repair(&ConflictService::new(), &Writer(MERGED), &request).await;
+        let outcome = repair(&service(), &Writer(MERGED), &request).await;
 
         match outcome {
             RepairOutcome::Failed(reason) => assert!(

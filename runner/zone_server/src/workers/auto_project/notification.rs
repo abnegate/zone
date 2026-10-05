@@ -33,9 +33,13 @@ pub struct MergeReport {
     pub findings_addressed: usize,
     pub checks: String,
     pub admin_merge: bool,
-    pub merge_sha: String,
+    /// The merge commit, when GitHub named one.
+    pub merge_sha: Option<String>,
     pub post_merge: Option<String>,
 }
+
+/// What the notice says of a merge whose commit GitHub never named.
+const MERGE_NOT_RECORDED: &str = "a commit GitHub did not name";
 
 /// Paths named in the low-level summary before the rest are counted.
 const TOP_PATHS: usize = 8;
@@ -115,7 +119,10 @@ pub fn merged(report: &MergeReport) -> Notification {
         } else {
             ""
         },
-        short(&report.merge_sha)
+        report
+            .merge_sha
+            .as_deref()
+            .map_or(MERGE_NOT_RECORDED, short)
     );
     if let Some(post_merge) = &report.post_merge {
         let _ = writeln!(body, "- After merge: {post_merge}");
@@ -219,7 +226,7 @@ mod tests {
             findings_addressed: 3,
             checks: "passed".into(),
             admin_merge: true,
-            merge_sha: "0123456789abcdef0123456789abcdef01234567".into(),
+            merge_sha: Some("0123456789abcdef0123456789abcdef01234567".into()),
             post_merge: Some("deploy succeeded".into()),
         }
     }
@@ -252,6 +259,19 @@ mod tests {
         assert!(notice.body().contains("After merge: deploy succeeded"));
         assert_eq!(notice.url(), Some("https://github.com/acme/shop/pull/4"));
         assert_eq!(notice.kind(), Severity::Success);
+    }
+
+    #[test]
+    fn a_merge_without_a_named_commit_says_so_rather_than_naming_an_empty_one() {
+        let mut unnamed = report();
+        unnamed.merge_sha = None;
+        assert!(
+            merged(&unnamed)
+                .body()
+                .contains("with administrator privileges as a commit GitHub did not name"),
+            "{}",
+            merged(&unnamed).body()
+        );
     }
 
     #[test]

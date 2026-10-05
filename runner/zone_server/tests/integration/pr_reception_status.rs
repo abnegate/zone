@@ -80,6 +80,15 @@ async fn a_merged_pull_request_is_read_back_as_merged_on_its_task() {
 
     let mut config = common::test_config();
     config.github_api_url = github_with_a_merged_pull_request().await;
+    let refused = AppState::new(config.clone(), pool.clone(), None);
+    assert!(
+        matches!(
+            sync_reception(&refused, run.id, task.id).await,
+            ReceptionSyncResult::Error(_)
+        ),
+        "a plain http origin is reached only once the operator opted in to it"
+    );
+    config.github_api_allows_http = true;
     let state = AppState::new(config, pool.clone(), None);
 
     let outcome = sync_reception(&state, run.id, task.id).await;

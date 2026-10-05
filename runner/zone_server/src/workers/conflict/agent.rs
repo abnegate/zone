@@ -11,12 +11,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_vcs::conflict::Conflict;
 use async_trait::async_trait;
 use zone_core::llm::{LlmClient, Message, ToolDefinition};
 use zone_core::tools::{
     ReadFileTool, Session, Tool, ToolContext, ToolRegistry, ToolResult, WriteFileTool,
 };
-use zone_vcs::conflict::Conflict;
 
 use super::scope::{RepairScope, Scoped};
 
@@ -137,7 +137,7 @@ pub fn context(conflict: &Conflict, environment: HashMap<String, String>) -> Too
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zone_vcs::conflict::ConflictedPath;
+    use abnegate_vcs::conflict::ConflictedPath;
 
     fn registry(root: &std::path::Path, files: &[&str]) -> ToolRegistry {
         let scope = Arc::new(RepairScope::confined(

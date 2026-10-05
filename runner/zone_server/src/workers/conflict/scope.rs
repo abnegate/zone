@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
+use abnegate_vcs::conflict::{Conflict, ConflictedPath};
 use async_trait::async_trait;
 use serde_json::Value;
 use zone_core::llm::ToolDefinition;
 use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolResult};
-use zone_vcs::conflict::{Conflict, ConflictedPath};
 
 /// The parameter every file tool names its target with.
 const PATH: &str = "path";

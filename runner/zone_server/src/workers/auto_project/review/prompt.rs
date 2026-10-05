@@ -2,8 +2,8 @@
 
 use std::fmt::Write as _;
 
+use abnegate_vcs::PullRequestDetail;
 use serde_json::Value;
-use zone_vcs::pull_request::PullRequestDetail;
 
 use crate::db::auto_projects::{Finding, ReviewRow};
 use crate::db::tasks::TaskRow;
@@ -106,7 +106,7 @@ pub fn user(
     let _ = write!(
         prompt,
         "\n\nHead {} into {}; {} file(s) changed, +{} / -{}.",
-        pull.head_sha, pull.base_ref, pull.changed_files, pull.additions, pull.deletions
+        pull.head_sha, pull.base, pull.changed_files, pull.additions, pull.deletions
     );
     if !open.is_empty() {
         prompt.push_str("\n\n# Findings still open from earlier rounds\n");

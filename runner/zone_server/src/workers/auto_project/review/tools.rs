@@ -3,19 +3,22 @@
 
 use std::sync::Arc;
 
+use abnegate_secret::SecretValue;
+use abnegate_vcs::{
+    ChangedFile, CommitSha, PullRequestReference, PullRequestService, RepositoryPath,
+};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
-use zone_vcs::pull_request::{ChangedFile, PrService, PullRequestReference};
 
 /// Bytes of one file the reviewer may read at a time.
 const FILE_BYTES: usize = 40_000;
 
 pub struct Shared {
-    pub pr: PrService,
+    pub pr: PullRequestService,
     pub reference: PullRequestReference,
-    pub head: String,
-    pub token: String,
+    pub head: CommitSha,
+    pub token: SecretValue,
     pub diff: String,
     pub files: Vec<ChangedFile>,
 }
@@ -75,20 +78,25 @@ impl Tool for ReadPrFile {
             return Ok(ToolResult::error("`read_pr_file` needs a `path`."));
         };
         let shared = &self.0;
+        let file = match RepositoryPath::parse(path) {
+            Ok(file) => file,
+            Err(error) => {
+                return Ok(ToolResult::error(format!("Could not read {path}: {error}")));
+            }
+        };
         Ok(
             match shared
                 .pr
                 .fetch_file(
-                    &shared.reference.owner,
-                    &shared.reference.repository,
-                    path,
-                    &shared.head,
+                    shared.reference.repository(),
                     &shared.token,
+                    &file,
+                    &shared.head,
                     FILE_BYTES,
                 )
                 .await
             {
-                Ok(content) => ToolResult::success(content),
+                Ok(content) => ToolResult::success(content.to_string()),
                 Err(error) => ToolResult::error(format!("Could not read {path}: {error}")),
             },
         )
@@ -184,15 +192,14 @@ mod tests {
 
     #[test]
     fn the_reviewer_is_offered_only_reading_tools() {
+        let pr = PullRequestService::new().expect("GitHub's own origin");
         let shared = Arc::new(Shared {
-            pr: PrService::new(),
-            reference: PullRequestReference {
-                owner: "acme".into(),
-                repository: "shop".into(),
-                number: 1,
-            },
-            head: "abc".into(),
-            token: "token".into(),
+            reference: pr
+                .pull_request("https://github.com/acme/shop/pull/1")
+                .expect("a pull request URL"),
+            pr,
+            head: CommitSha::parse(&"a".repeat(40)).expect("a commit"),
+            token: SecretValue::new("token"),
             diff: "diff".into(),
             files: vec![],
         });

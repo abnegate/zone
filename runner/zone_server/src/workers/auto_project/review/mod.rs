@@ -17,13 +17,14 @@ pub mod verdict;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_secret::SecretValue;
+use abnegate_vcs::{ChangedFile, PullRequestDetail, PullRequestReference, PullRequestService};
 use reqwest::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
 use zone_core::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
 use zone_core::llm::{LlmBackend, LlmClient, LlmError, Message, ToolDefinition};
 use zone_core::tools::{ToolContext, ToolResult};
-use zone_vcs::pull_request::{ChangedFile, PrService, PullRequestDetail, PullRequestReference};
 
 use crate::db::auto_projects::{Finding, ReviewRow};
 use crate::db::tasks::TaskRow;
@@ -137,7 +138,7 @@ pub struct ReviewRequest<'a> {
     pub round: i32,
     pub reviewer: String,
     pub same_model: bool,
-    pub token: String,
+    pub token: SecretValue,
     pub reference: PullRequestReference,
 }
 
@@ -145,7 +146,7 @@ pub struct ReviewRequest<'a> {
 pub async fn run(
     endpoint: &Endpoint,
     backend: LlmBackend,
-    pr: PrService,
+    pr: PullRequestService,
     request: ReviewRequest<'_>,
 ) -> Result<Verdict, ReviewError> {
     let client = LlmClient::new(endpoint.llm(
@@ -239,12 +240,12 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_vcs::{BranchName, CommitSha, Mergeability};
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use uuid::Uuid;
     use zone_core::llm::{AgentKind, Limit};
-    use zone_vcs::pull_request::Mergeability;
 
     use crate::config::{Config, ModelBackend};
 
@@ -337,12 +338,10 @@ mod tests {
             round: 1,
             reviewer: reviewer.into(),
             same_model: false,
-            token: "token".into(),
-            reference: PullRequestReference {
-                owner: "acme".into(),
-                repository: "shop".into(),
-                number: 7,
-            },
+            token: SecretValue::new("token"),
+            reference: github()
+                .pull_request("https://github.com/acme/shop/pull/7")
+                .expect("a pull request URL"),
         }
     }
 
@@ -377,27 +376,25 @@ mod tests {
         }
     }
 
+    fn github() -> PullRequestService {
+        PullRequestService::new().expect("GitHub's own origin")
+    }
+
     fn pull() -> PullRequestDetail {
-        PullRequestDetail {
-            node_id: String::new(),
-            number: 7,
-            title: "(feat): add a cart".into(),
-            body: Some("Adds a cart.".into()),
-            state: "open".into(),
-            draft: false,
-            merged: false,
-            merge_commit_sha: None,
-            head_sha: "abc123".into(),
-            head_ref: "zone/cart".into(),
-            base_ref: "main".into(),
-            mergeable: Mergeability::Unknown,
-            mergeable_state: None,
-            changed_files: 1,
-            additions: 1,
-            deletions: 0,
-            commits: 1,
-            html_url: String::new(),
-        }
+        PullRequestDetail::new(
+            "",
+            std::num::NonZeroU64::new(7).expect("a pull request number"),
+            "(feat): add a cart",
+            BranchName::parse("zone/cart").expect("a branch"),
+            CommitSha::parse(&"a".repeat(40)).expect("a commit"),
+            BranchName::parse("main").expect("a branch"),
+            "",
+        )
+        .with_body("Adds a cart.")
+        .with_mergeable(Mergeability::Unknown)
+        .with_changed_files(1)
+        .with_additions(1)
+        .with_commits(1)
     }
 
     #[tokio::test]
@@ -411,7 +408,7 @@ mod tests {
         let verdict = run(
             &Endpoint::instance(&config),
             backend::instance(&config),
-            PrService::new(),
+            github(),
             request(&task, &pull, "sonnet"),
         )
         .await
@@ -449,7 +446,7 @@ mod tests {
         let error = run(
             &Endpoint::instance(&config),
             backend::instance(&config),
-            PrService::new(),
+            github(),
             request(&task, &pull, "fable"),
         )
         .await
@@ -487,7 +484,7 @@ mod tests {
         let error = run(
             &Endpoint::instance(&config),
             backend::instance(&config),
-            PrService::new(),
+            github(),
             request(&task, &pull, "sonnet"),
         )
         .await
@@ -600,7 +597,7 @@ mod tests {
         run(
             endpoint,
             LlmBackend::Http,
-            PrService::new(),
+            github(),
             request(&task, &pull, "qwen3:32b"),
         )
         .await
@@ -706,7 +703,7 @@ mod tests {
         let verdict = run(
             &venue.endpoint,
             venue.backend,
-            PrService::new(),
+            github(),
             request(&task, &pull, &reviewers[0].model),
         )
         .await

@@ -11,14 +11,14 @@
 //! would leave the project without continuous integration, without tests or
 //! without a way to ship is refused with the reason, and the model plans again.
 
+use abnegate_secret::SecretValue;
+use abnegate_vcs::{GitService, PullRequestError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
-use zone_vcs::git::GitService;
-use zone_vcs::pull_request::{PrError, PrService};
 
 use super::WorkspaceScope;
 use crate::db::auto_projects::{self, Kind, PlannedRepository, PlannedTask, ProjectPlan};
@@ -283,7 +283,7 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
 
 /// The GitHub source's token and its configured owner and repository.
 struct SourceCredential {
-    token: String,
+    token: SecretValue,
     owner: Option<String>,
     repo: Option<String>,
 }
@@ -307,7 +307,7 @@ async fn source_credential(
     let token = crate::crypto::decrypt(scope.state.encryption_key(), &encrypted)
         .map_err(|_| "The source credentials could not be decrypted.".to_string())?;
     Ok(SourceCredential {
-        token,
+        token: SecretValue::new(token),
         owner: source.config["owner"].as_str().map(str::to_string),
         repo: source.config["repo"].as_str().map(str::to_string),
     })
@@ -412,7 +412,14 @@ impl Tool for CreateRepositoryTool {
             .map(|owner| owner.trim().to_string())
             .filter(|owner| !owner.is_empty())
             .or(credential.owner.clone());
-        let service = PrService::configured(self.0.state.config().github_api_url.clone());
+        let service = match self.0.state.config().pull_requests() {
+            Ok(service) => service,
+            Err(error) => {
+                return Ok(ToolResult::error(format!(
+                    "GitHub origin is misconfigured: {error}"
+                )));
+            }
+        };
         match service
             .create_repository(
                 &credential.token,
@@ -425,18 +432,18 @@ impl Tool for CreateRepositoryTool {
         {
             Ok(created) => Ok(ToolResult::success(
                 json!({
-                    "url": created.html_url,
+                    "url": created.url,
                     "clone_url": created.clone_url,
-                    "default_branch": created.default_branch,
+                    "default_branch": created.default_branch.as_str(),
                     "source_id": arguments.source_id,
                     "message": "Repository created with an initial commit. Pass its url and this source_id to finalize_project as the repository."
                 })
                 .to_string(),
             )),
-            Err(PrError::RepositoryExists(name)) => Ok(ToolResult::error(format!(
+            Err(PullRequestError::RepositoryExists(name)) => Ok(ToolResult::error(format!(
                 "A repository named {name} already exists under that owner; pick another name or use the existing repository's URL."
             ))),
-            Err(PrError::AuthFailed) => Ok(ToolResult::error(
+            Err(PullRequestError::AuthenticationFailed | PullRequestError::Forbidden) => Ok(ToolResult::error(
                 "GitHub refused the source's credential for creating a repository; it needs repository-creation permission.",
             )),
             Err(error) => Ok(ToolResult::error(format!("GitHub refused: {error}"))),
@@ -552,7 +559,7 @@ impl Tool for FinalizeProjectTool {
                 // by the checkout and pull request code that uses it.
                 let sealed = match crate::crypto::encrypt(
                     self.0.state.encryption_key(),
-                    &credential.token,
+                    credential.token.expose(),
                 ) {
                     Ok(sealed) => sealed,
                     Err(_) => {
