@@ -8,7 +8,7 @@ use abnegate_exec::{
 };
 use base64::prelude::*;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdin, Stdout};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
@@ -38,110 +38,11 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
-    let mut hello_received = false;
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line).await?;
-
-        if bytes_read == 0 {
-            tracing::info!("EOF on stdin, shutting down");
-            break;
-        }
-
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let message: InboundMessage = match serde_json::from_str(line) {
-            Ok(message) => message,
-            Err(error) => {
-                tracing::error!("Failed to parse message: {} (line: {})", error, line);
-                sender
-                    .send(OutboundMessage::error(
-                        "",
-                        ErrorCode::InvalidMessage,
-                        format!("Failed to parse message: {}", error),
-                    ))
-                    .await?;
-                continue;
-            }
-        };
-
-        if !hello_received {
-            match message {
-                InboundMessage::Hello(Hello {
-                    protocol_version,
-                    capabilities,
-                    ..
-                }) => {
-                    tracing::info!(
-                        "Received Hello: version={}, capabilities={:?}",
-                        protocol_version,
-                        capabilities
-                    );
-
-                    if !protocol_version.starts_with("1.") {
-                        sender
-                            .send(OutboundMessage::error(
-                                "",
-                                ErrorCode::InvalidMessage,
-                                format!(
-                                    "Unsupported protocol version: {} (expected 1.x)",
-                                    protocol_version
-                                ),
-                            ))
-                            .await?;
-                        break;
-                    }
-
-                    sender.send(OutboundMessage::hello_acknowledged()).await?;
-                    hello_received = true;
-                    tracing::info!("Handshake complete");
-                }
-                _ => {
-                    sender
-                        .send(OutboundMessage::error(
-                            "",
-                            ErrorCode::InvalidMessage,
-                            "Expected Hello message",
-                        ))
-                        .await?;
-                }
-            }
-            continue;
-        }
-
-        handle_message(message, &registry, &executor, sender.clone()).await?;
-    }
-
-    loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line).await?;
-
-        if bytes_read == 0 {
-            break;
-        }
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let message: InboundMessage = match serde_json::from_str(trimmed) {
-            Ok(message) => message,
-            Err(error) => {
-                tracing::error!("Failed to parse message: {}", error);
-                continue;
-            }
-        };
-
-        if let Err(error) = handle_message(message, &registry, &executor, sender.clone()).await {
-            tracing::error!("Error handling message: {}", error);
-        }
-    }
+    let served = match handshake(&mut reader, &sender).await {
+        Ok(true) => serve(&mut reader, &registry, &executor, &sender).await,
+        Ok(false) => Ok(()),
+        Err(error) => Err(error),
+    };
 
     tracing::info!("Shutting down, cancelling {} jobs", registry.active_count());
     registry.cancel_all();
@@ -149,7 +50,92 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     drop(sender);
     writer.await?;
 
+    served
+}
+
+/// Wait for the Hello that opens a session: true once it is acknowledged,
+/// false when stdin closes first. An unsupported version is refused and
+/// ends the session, so no message after it is ever handled.
+async fn handshake(
+    reader: &mut BufReader<Stdin>,
+    sender: &mpsc::Sender<OutboundMessage>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    while let Some(message) = next_message(reader, sender).await? {
+        let InboundMessage::Hello(Hello {
+            protocol_version,
+            capabilities,
+            ..
+        }) = message
+        else {
+            sender
+                .send(protocol_error("Expected Hello message"))
+                .await?;
+            continue;
+        };
+        tracing::info!(
+            "Received Hello: version={}, capabilities={:?}",
+            protocol_version,
+            capabilities
+        );
+
+        if !protocol_version.starts_with("1.") {
+            let refusal =
+                format!("Unsupported protocol version: {protocol_version} (expected 1.x)");
+            sender.send(protocol_error(refusal.clone())).await?;
+            return Err(refusal.into());
+        }
+
+        sender.send(OutboundMessage::hello_acknowledged()).await?;
+        tracing::info!("Handshake complete");
+        return Ok(true);
+    }
+
+    tracing::info!("EOF on stdin, shutting down");
+    Ok(false)
+}
+
+async fn serve(
+    reader: &mut BufReader<Stdin>,
+    registry: &Arc<JobRegistry>,
+    executor: &Arc<CommandExecutor>,
+    sender: &mpsc::Sender<OutboundMessage>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    while let Some(message) = next_message(reader, sender).await? {
+        handle_message(message, registry, executor, sender.clone()).await?;
+    }
+
+    tracing::info!("EOF on stdin, shutting down");
     Ok(())
+}
+
+/// The next message on stdin, answering each line that is not one; `None`
+/// once stdin closes.
+async fn next_message(
+    reader: &mut BufReader<Stdin>,
+    sender: &mpsc::Sender<OutboundMessage>,
+) -> Result<Option<InboundMessage>, Box<dyn std::error::Error>> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 {
+            return Ok(None);
+        }
+
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        match serde_json::from_str(line) {
+            Ok(message) => return Ok(Some(message)),
+            Err(error) => {
+                tracing::error!("Failed to parse message: {} (line: {})", error, line);
+                sender
+                    .send(protocol_error(format!("Failed to parse message: {error}")))
+                    .await?;
+            }
+        }
+    }
 }
 
 /// Write `message` as one line of JSON, reporting whether stdout still takes

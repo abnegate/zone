@@ -654,7 +654,25 @@ fn test_invalid_protocol_version() {
     let response = daemon.recv();
     assert_eq!(response["type"], "RunError");
 
-    daemon.shutdown();
+    let _watchdog = daemon.watchdog(Duration::from_secs(15));
+    let _ = writeln!(
+        daemon.stdin,
+        r#"{{"type":"RunStart","job_id":"job-after-refusal","workspace":"/tmp","command":"echo"}}"#
+    );
+    let _ = daemon.stdin.flush();
+    let waited = Instant::now();
+    let after = daemon.recv_until(Duration::from_secs(10), |_| false);
+
+    assert!(
+        waited.elapsed() < Duration::from_secs(10),
+        "the daemon kept running after refusing the version"
+    );
+    assert!(
+        after.iter().all(|message| message["type"] != "RunStarted"),
+        "a job ran without a handshake: {after:?}"
+    );
+    let status = daemon.shutdown();
+    assert!(!status.success(), "{status}");
 }
 
 #[test]

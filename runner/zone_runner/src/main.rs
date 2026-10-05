@@ -102,9 +102,12 @@ async fn main() -> ExitCode {
                     tracing::info!("Daemon exited cleanly");
                     ExitCode::SUCCESS
                 }
-                Err(e) => {
-                    tracing::error!("Daemon error: {}", e);
-                    ExitCode::FAILURE
+                Err(error) => {
+                    tracing::error!("Daemon error: {}", error);
+                    // Tokio reads stdin on a blocking thread that runtime
+                    // shutdown waits for, so returning would hang until the
+                    // host closes stdin.
+                    std::process::exit(1)
                 }
             }
         }
