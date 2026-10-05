@@ -124,10 +124,9 @@ impl DaemonProcess {
         let mut messages = Vec::new();
 
         while start.elapsed() < timeout {
-            // Set a short read timeout using the file descriptor
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
-                Ok(0) => break, // EOF
+                Ok(0) => break,
                 Ok(_) => {
                     if let Ok(msg) = serde_json::from_str::<Value>(&line) {
                         let done = predicate(&msg);
@@ -204,7 +203,6 @@ struct Watchdog {
     _armed: mpsc::Sender<()>,
 }
 
-// Protocol message types for testing
 #[derive(Serialize)]
 struct Hello {
     #[serde(rename = "type")]
@@ -256,7 +254,6 @@ struct Ping {
 fn test_handshake() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Send Hello
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -264,7 +261,6 @@ fn test_handshake() {
     };
     daemon.send(&hello);
 
-    // Receive HelloAck
     let response = daemon.recv();
     assert_eq!(response["type"], "HelloAck");
     assert!(
@@ -300,23 +296,20 @@ fn test_handshake_with_capabilities() {
 fn test_ping_pong() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake first
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
         capabilities: None,
     };
     daemon.send(&hello);
-    daemon.recv(); // HelloAck
+    daemon.recv();
 
-    // Send Ping
     let ping = Ping {
         msg_type: "Ping".to_string(),
         id: "42".to_string(),
     };
     daemon.send(&ping);
 
-    // Receive Pong
     let response = daemon.recv();
     assert_eq!(response["type"], "Pong");
     assert_eq!(response["id"], "42");
@@ -328,7 +321,6 @@ fn test_ping_pong() {
 fn test_multiple_pings() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -337,7 +329,6 @@ fn test_multiple_pings() {
     daemon.send(&hello);
     daemon.recv();
 
-    // Send multiple pings
     for i in 1..=5 {
         let ping = Ping {
             msg_type: "Ping".to_string(),
@@ -357,7 +348,6 @@ fn test_multiple_pings() {
 fn test_simple_command() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -366,7 +356,6 @@ fn test_simple_command() {
     daemon.send(&hello);
     daemon.recv();
 
-    // Run a simple echo command
     let run = RunStart {
         msg_type: "RunStart".to_string(),
         job_id: "job-1".to_string(),
@@ -377,12 +366,10 @@ fn test_simple_command() {
     };
     daemon.send(&run);
 
-    // Collect messages until we get RunExit
     let messages = daemon.recv_until(Duration::from_secs(5), |msg| {
         msg["type"] == "RunExit" || msg["type"] == "RunError"
     });
 
-    // Verify we got the expected messages
     let types: Vec<&str> = messages
         .iter()
         .map(|m| m["type"].as_str().unwrap())
@@ -399,14 +386,12 @@ fn test_simple_command() {
         types
     );
 
-    // Check stdout content
     let stdout_msgs: Vec<&Value> = messages
         .iter()
         .filter(|m| m["type"] == "RunStdout")
         .collect();
     assert!(!stdout_msgs.is_empty(), "No stdout messages received");
 
-    // Decode and verify output
     let data = stdout_msgs[0]["data"].as_str().unwrap();
     let decoded = BASE64_STANDARD.decode(data).unwrap();
     let text = String::from_utf8(decoded).unwrap();
@@ -423,7 +408,6 @@ fn test_simple_command() {
 fn test_command_with_exit_code() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -432,7 +416,6 @@ fn test_command_with_exit_code() {
     daemon.send(&hello);
     daemon.recv();
 
-    // Run command that exits with code 42
     let run = RunStart {
         msg_type: "RunStart".to_string(),
         job_id: "job-exit".to_string(),
@@ -458,7 +441,6 @@ fn test_command_with_exit_code() {
 fn test_command_stderr() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -467,7 +449,6 @@ fn test_command_stderr() {
     daemon.send(&hello);
     daemon.recv();
 
-    // Run command that writes to stderr
     let run = RunStart {
         msg_type: "RunStart".to_string(),
         job_id: "job-stderr".to_string(),
@@ -482,7 +463,6 @@ fn test_command_stderr() {
         msg["type"] == "RunExit" || msg["type"] == "RunError"
     });
 
-    // Check stderr content
     let stderr_msgs: Vec<&Value> = messages
         .iter()
         .filter(|m| m["type"] == "RunStderr")
@@ -505,7 +485,6 @@ fn test_command_stderr() {
 fn test_multiple_jobs() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -514,7 +493,6 @@ fn test_multiple_jobs() {
     daemon.send(&hello);
     daemon.recv();
 
-    // Start multiple jobs
     for i in 1..=3 {
         let run = RunStart {
             msg_type: "RunStart".to_string(),
@@ -527,8 +505,6 @@ fn test_multiple_jobs() {
         daemon.send(&run);
     }
 
-    // Collect messages - we expect 3 RunStarted + 3 RunStdout + 3 RunExit = 9+ messages
-    // But just wait for a reasonable time
     let mut exit_count = 0;
     let messages = daemon.recv_until(Duration::from_secs(5), |msg| {
         if msg["type"] == "RunExit" {
@@ -537,7 +513,6 @@ fn test_multiple_jobs() {
         exit_count >= 3
     });
 
-    // Verify we got messages for all jobs
     let job_ids: std::collections::HashSet<&str> = messages
         .iter()
         .filter_map(|m| m["job_id"].as_str())
@@ -554,7 +529,6 @@ fn test_multiple_jobs() {
 fn test_invalid_workspace() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -563,7 +537,6 @@ fn test_invalid_workspace() {
     daemon.send(&hello);
     daemon.recv();
 
-    // Run with invalid workspace
     let run = RunStart {
         msg_type: "RunStart".to_string(),
         job_id: "job-invalid".to_string(),
@@ -587,7 +560,6 @@ fn test_invalid_workspace() {
 fn test_invalid_command() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -596,7 +568,6 @@ fn test_invalid_command() {
     daemon.send(&hello);
     daemon.recv();
 
-    // Run with invalid command
     let run = RunStart {
         msg_type: "RunStart".to_string(),
         job_id: "job-badcmd".to_string(),
@@ -620,7 +591,6 @@ fn test_invalid_command() {
 fn test_message_before_handshake() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Send a command without handshake first
     let run = RunStart {
         msg_type: "RunStart".to_string(),
         job_id: "job-early".to_string(),
@@ -631,7 +601,6 @@ fn test_message_before_handshake() {
     };
     daemon.send(&run);
 
-    // Should get an error
     let response = daemon.recv();
     assert_eq!(response["type"], "RunError");
 
@@ -642,7 +611,6 @@ fn test_message_before_handshake() {
 fn test_invalid_protocol_version() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Send Hello with unsupported version
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "99.0".to_string(),
@@ -650,7 +618,6 @@ fn test_invalid_protocol_version() {
     };
     daemon.send(&hello);
 
-    // Should get an error
     let response = daemon.recv();
     assert_eq!(response["type"], "RunError");
 
@@ -679,7 +646,6 @@ fn test_invalid_protocol_version() {
 fn test_sequence_numbers() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -688,7 +654,6 @@ fn test_sequence_numbers() {
     daemon.send(&hello);
     daemon.recv();
 
-    // Run command with multiple lines of output
     let run = RunStart {
         msg_type: "RunStart".to_string(),
         job_id: "job-seq".to_string(),
@@ -706,7 +671,6 @@ fn test_sequence_numbers() {
         msg["type"] == "RunExit" || msg["type"] == "RunError"
     });
 
-    // Check that sequence numbers are monotonically increasing
     let stdout_seqs: Vec<u64> = messages
         .iter()
         .filter(|m| m["type"] == "RunStdout")
@@ -728,10 +692,8 @@ fn test_sequence_numbers() {
 fn test_graceful_shutdown_on_eof() {
     let daemon = DaemonProcess::spawn();
 
-    // Just close stdin immediately
     let status = daemon.shutdown();
 
-    // Should exit cleanly
     assert!(status.success(), "Daemon should exit cleanly on EOF");
 }
 
@@ -739,7 +701,6 @@ fn test_graceful_shutdown_on_eof() {
 fn test_shutdown_with_running_job() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -748,7 +709,6 @@ fn test_shutdown_with_running_job() {
     daemon.send(&hello);
     daemon.recv();
 
-    // Start a long-running job
     let run = RunStart {
         msg_type: "RunStart".to_string(),
         job_id: "job-long".to_string(),
@@ -759,13 +719,10 @@ fn test_shutdown_with_running_job() {
     };
     daemon.send(&run);
 
-    // Wait for RunStarted
     let _ = daemon.recv();
 
-    // Shutdown while job is running
     let status = daemon.shutdown();
 
-    // Should still exit (after cancelling the job)
     assert!(
         status.success(),
         "Daemon should handle shutdown with running job"
@@ -776,7 +733,6 @@ fn test_shutdown_with_running_job() {
 fn test_duration_in_exit() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
@@ -785,7 +741,6 @@ fn test_duration_in_exit() {
     daemon.send(&hello);
     daemon.recv();
 
-    // Run a command that takes a measurable amount of time
     let run = RunStart {
         msg_type: "RunStart".to_string(),
         job_id: "job-duration".to_string(),
@@ -815,7 +770,6 @@ fn test_duration_in_exit() {
 fn test_pid_in_started() {
     let mut daemon = DaemonProcess::spawn();
 
-    // Handshake
     let hello = Hello {
         msg_type: "Hello".to_string(),
         protocol_version: "1.0".to_string(),
