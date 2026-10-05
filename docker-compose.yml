@@ -387,6 +387,7 @@ services:
       - VPN_OPENVPN_USER=${VPN_OPENVPN_USER:+1}
       - "SEARCH_SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL:-http://gluetun:8080/search?q=<query>&format=json}"
       - SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT:-5}
+      - SEARCH_TIMEOUT_SECONDS=${SEARCH_TIMEOUT_SECONDS:-15}
       # Belt-and-suspenders HTTP proxy. `make up-vpn` also attaches this
       # container to Gluetun's network so non-HTTP traffic uses the tunnel.
       - MODEL_SEARCH_PROXY_URL=${MODEL_SEARCH_PROXY_URL:-}
