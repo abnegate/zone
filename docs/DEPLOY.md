@@ -58,7 +58,7 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 | MQTT broker | `~/Local/mqtt` (Swoole) | OTA substrate for `ota_fleet` |
 | Appwrite | Sites, Functions, Storage, Messaging | Delivery targets + backend provisioning (v1.5) |
 | Charts, cluster | `helm/zone-apps` (`_helpers.tpl` conventions, security contexts, HPA/PDB/NetworkPolicy), `k8s/kind-config.yaml` (`zone-dev`, ports 30000-30002 pre-mapped, CNPG, HAProxy default IngressClass) | New `helm/zone-app` copies conventions; kind is the first k8s target |
-| Notifications | None in the server. `ALERT_DISCORD_WEBHOOK_URL` is consumed only by Grafana (`grafana/entrypoint.sh`); `zone_email::EmailService` has three templated senders; reminders deliver as assistant messages into a chat (`db/reminders.rs:61-90`) | New `notify` module |
+| Notifications | None in the server. `ALERT_DISCORD_WEBHOOK_URL` is consumed only by Grafana (`grafana/entrypoint.sh`); `services::mail::AccountMail` sends two templated account messages (abnegate-notify `Mailer`); reminders deliver as assistant messages into a chat (`db/reminders.rs:61-90`) | New `notify` module |
 
 **Gaps that block the feature (phase 0):**
 
@@ -639,7 +639,7 @@ Stated tradeoff: while blocked, a task holds one of `MAX_CONCURRENT_TASKS = 5` p
 `Notifier` trait with three channels, fanned out with `join_all`, failures logged and never blocking the deployment:
 
 - `DiscordWebhook` — an embed with app, target, artifact kind, digest, requester, values digest, and a deep link to `/deployments?id=…` (the desktop/mobile shell opens it too). Webhook URL from the target's `notify` block, falling back to a server-level `ALERT_DISCORD_WEBHOOK_URL` that `config.rs` now reads as well as Grafana. Webhooks are one-way; one-tap approve from Discord needs bot interactions and is a later phase.
-- `Email` — new `zone_email::send_approval_request`.
+- `Email` — a new approval-request `services::mail::Template`, sent through `AccountMail`.
 - `InApp` — an assistant message into the originating chat, the reminders pattern (`db/reminders.rs:61-90`).
 
 ### 7.6 Agent tools — `runner/zone_server/src/agent/deploy.rs`
