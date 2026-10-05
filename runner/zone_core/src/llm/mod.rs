@@ -17,8 +17,9 @@ pub use client::{ChatStream, LlmBackend, LlmClient, LlmConfig, LlmError, Request
 pub use dialect::{Budget, Dialect, TEMPLATE_STOPS};
 pub use provider::{
     AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, CodexSandbox,
-    Completion, CompletionProvider, CompletionRequest, Credential, HttpProvider, ProviderError,
-    ProviderKind, Router, SelectionStrategy, Toolset, Weighted,
+    Completion, CompletionProvider, CompletionRequest, Credential, HttpProvider, LIMIT_WORDINGS,
+    Limit, ProviderError, ProviderKind, Router, SelectionStrategy, Session, Toolset, Weighted,
+    Window,
 };
 pub use reasoning::{Effort, ReasoningEffort, classify};
 pub use types::*;

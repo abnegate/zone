@@ -10,8 +10,8 @@ use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 use zone_core::llm::{
-    AgentKind, BuiltinTools, LlmBackend, LlmClient, Message as LlmMessage, Role as LlmRole,
-    StreamToolCall, ToolCall as LlmToolCall,
+    AgentKind, BuiltinTools, Limit, LlmBackend, LlmClient, LlmError, Message as LlmMessage,
+    Role as LlmRole, StreamToolCall, ToolCall as LlmToolCall, Window,
 };
 
 use super::Citation;
@@ -165,6 +165,16 @@ pub enum AgentEvent {
         waiting: Waiting,
         spent: Spend,
     },
+    /// A coding agent reported how much of a usage window its sign-in has
+    /// spent. The turn goes on.
+    Window(Window),
+    /// A coding agent announced the id of its own session the turn runs in. The turn goes on.
+    Session(String),
+    /// A usage limit refused the turn. Its message is word for word the
+    /// [`AgentEvent::Failed`] the same refusal would have been, so a consumer
+    /// that only reports failures reads it unchanged. Anything already
+    /// streamed still stands.
+    Limited(Limit),
     /// The turn could not continue. Anything already streamed still stands.
     Failed(String),
 }
@@ -182,8 +192,14 @@ pub struct AgentRun {
 
 /// Run one agent turn, yielding events until the model produces a final answer.
 pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
-    let context = RunContext::from_messages(run.messages.clone());
-    run_with_context(run, context, true)
+    async_stream::stream! {
+        let mut context = RunContext::from_messages(run.messages.clone());
+        let events = run_with_context(run, &mut context, true);
+        futures::pin_mut!(events);
+        while let Some(event) = events.next().await {
+            yield event;
+        }
+    }
 }
 
 /// The system entry that ends a turn once tool work has stopped. The closing
@@ -202,7 +218,7 @@ fn finalizing_instruction(reason: &str) -> String {
 /// suspension point: the consumer must commit before resuming model or tool work.
 pub fn run_with_context(
     run: AgentRun,
-    mut context: RunContext,
+    context: &mut RunContext,
     agentic: bool,
 ) -> impl Stream<Item = AgentEvent> {
     async_stream::stream! {
@@ -250,7 +266,7 @@ pub fn run_with_context(
                     .take()
                     .unwrap_or_else(|| "Tool execution has ended for this turn.".into());
                 yield AgentEvent::Finalizing(reason.clone());
-                nudge(&mut context, finalizing_instruction(&reason));
+                nudge(context, finalizing_instruction(&reason));
             }
             // Recomputed each round, and owned: `load_tools` can have widened
             // the set since the last one, and the schemas it took have to be
@@ -337,12 +353,18 @@ pub fn run_with_context(
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
                     Err(error) => {
-                        yield AgentEvent::Failed(format!("Stream error: {error}"));
+                        yield halted(error);
                         return;
                     }
                 };
                 if let Some(usage) = chunk.usage {
                     yield AgentEvent::Usage(usage);
+                }
+                if let Some(window) = chunk.window {
+                    yield AgentEvent::Window(window);
+                }
+                if let Some(session) = chunk.session {
+                    yield AgentEvent::Session(session);
                 }
                 let Some(choice) = chunk.choices.first() else {
                     continue;
@@ -402,7 +424,7 @@ pub fn run_with_context(
                 }
                 TextToolCalls::Malformed if !requested.is_empty() => None,
                 TextToolCalls::Malformed if !finalizing => {
-                    nudge(&mut context, MALFORMED_CALL.to_string());
+                    nudge(context, MALFORMED_CALL.to_string());
                     continue;
                 }
                 TextToolCalls::Malformed => {
@@ -676,6 +698,15 @@ impl Parked {
             _ => return None,
         };
         Some((self.id.clone(), park))
+    }
+}
+
+/// The event a stream that broke off with `error` ends the turn on.
+fn halted(error: LlmError) -> AgentEvent {
+    let message = format!("Stream error: {error}");
+    match error {
+        LlmError::Limited { limit, .. } => AgentEvent::Limited(Limit { message, ..*limit }),
+        _ => AgentEvent::Failed(message),
     }
 }
 
@@ -1904,6 +1935,7 @@ mod tests {
         use zone_core::llm::{CliSettings, LlmConfig, Toolset};
 
         const ANSWER: &str = "Ready.";
+        const SESSION: &str = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f";
 
         /// A stand-in for an agent CLI, so no test needs one signed in on the
         /// host. Every run appends to `calls`, which is how a test tells one
@@ -1923,6 +1955,64 @@ mod tests {
                     "message": {"content": [{"type": "text", "text": ANSWER}]},
                 }),
                 result = json!({"type": "result", "subtype": "success", "is_error": false}),
+            )
+            .expect("the fake agent body");
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the fake agent to be executable");
+            path
+        }
+
+        const SESSION_LIMIT: &str = "You've hit your session limit · resets 5pm";
+
+        /// A stand-in agent that begins to answer, then is refused past the
+        /// plan's five-hour window.
+        fn limited(directory: &TempDir) -> PathBuf {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+
+            let recording = directory.path().join("recording.jsonl");
+            let lines = [
+                json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Halfway there."}]}, "parent_tool_use_id": null}),
+                json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_208_000, "rateLimitType": "five_hour", "isUsingOverage": false}}),
+                json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": SESSION_LIMIT}]}, "parent_tool_use_id": null, "error": "rate_limit", "is_api_error_message": true}),
+                json!({"type": "result", "subtype": "success", "is_error": true, "api_error_status": 429, "result": SESSION_LIMIT}),
+            ]
+            .map(|line| line.to_string());
+            std::fs::write(&recording, format!("{}\n", lines.join("\n"))).expect("the recording");
+            let path = directory.path().join("agent");
+            let mut file = std::fs::File::create(&path).expect("the fake agent");
+            writeln!(
+                file,
+                "#!/bin/sh\ncat > /dev/null\ncat '{}'",
+                recording.display()
+            )
+            .expect("the fake agent body");
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the fake agent to be executable");
+            path
+        }
+
+        /// A stand-in agent that announces the session it runs in, then answers.
+        fn announcing(directory: &TempDir) -> PathBuf {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+
+            let recording = directory.path().join("recording.jsonl");
+            let lines = [
+                json!({"type": "system", "subtype": "init", "session_id": SESSION}),
+                json!({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}, "parent_tool_use_id": null}),
+                json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER, "session_id": SESSION}),
+            ]
+            .map(|line| line.to_string());
+            std::fs::write(&recording, format!("{}\n", lines.join("\n"))).expect("the recording");
+            let path = directory.path().join("agent");
+            let mut file = std::fs::File::create(&path).expect("the fake agent");
+            writeln!(
+                file,
+                "#!/bin/sh\ncat > /dev/null\ncat '{}'",
+                recording.display()
             )
             .expect("the fake agent body");
             drop(file);
@@ -1980,8 +2070,8 @@ mod tests {
                 budget: LoopBudget::chat(),
                 approval: ApprovalPolicy::auto(),
             };
-            let context = RunContext::from_messages(run.messages.clone());
-            let events = run_with_context(run, context, true);
+            let mut context = RunContext::from_messages(run.messages.clone());
+            let events = run_with_context(run, &mut context, true);
             futures::pin_mut!(events);
             let mut collected = Vec::new();
             while let Some(event) = events.next().await {
@@ -2046,6 +2136,66 @@ mod tests {
                 1,
                 "a text-only turn spent more than the round it needed"
             );
+        }
+
+        #[tokio::test]
+        async fn a_limited_stream_is_reported_as_a_limit_after_what_was_streamed() {
+            let directory = TempDir::new().expect("a temporary directory");
+
+            let events = turn(cli(limited(&directory)), ChatTools::empty()).await;
+
+            assert_eq!(spoken(&events), "Halfway there.");
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            let Some(AgentEvent::Limited(limit)) = events.last() else {
+                panic!("expected the turn to end on a limit: {events:?}");
+            };
+            assert_eq!(
+                limit.message,
+                format!(
+                    "Stream error: claude: rate limit reached (five_hour, rejected): {SESSION_LIMIT}"
+                )
+            );
+            assert_eq!(
+                limit.resets_at,
+                chrono::DateTime::from_timestamp(1_790_208_000, 0)
+            );
+            assert!(!limit.credits);
+            assert_eq!(
+                limit.window.as_ref().map(|window| window.name.as_str()),
+                Some(Window::FIVE_HOURS)
+            );
+            let chunk = events
+                .iter()
+                .position(|event| matches!(event, AgentEvent::Chunk(_)));
+            assert!(
+                chunk.is_some_and(|chunk| chunk < events.len() - 1),
+                "{events:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn the_session_an_agent_announces_reaches_the_turn_before_its_answer() {
+            let directory = TempDir::new().expect("a temporary directory");
+
+            let events = turn(cli(announcing(&directory)), ChatTools::empty()).await;
+
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert_eq!(spoken(&events), ANSWER);
+            let announced: Vec<&str> = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::Session(id) => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(announced, [SESSION]);
+            let session = events
+                .iter()
+                .position(|event| matches!(event, AgentEvent::Session(_)));
+            let chunk = events
+                .iter()
+                .position(|event| matches!(event, AgentEvent::Chunk(_)));
+            assert!(session < chunk, "{events:?}");
         }
 
         /// The turn answers, so nothing else reports that the tools the reader

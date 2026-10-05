@@ -9,6 +9,7 @@ const agentsApi = {
   get: mock(),
   start: mock(),
   submitCode: mock(),
+  cancel: mock(),
   signOut: mock(),
 };
 
@@ -25,6 +26,7 @@ afterAll(() => {
 });
 
 const [claude, codex] = fixture.agents as AgentStatus[];
+const [account] = claude.logins;
 const authorization: Attempt = {
   login: {
     agent: 'claude',
@@ -68,6 +70,8 @@ describe('useAgentStatuses', () => {
     rerender({ enabled: true });
     await waitFor(() => expect(result.current.statuses.claude?.state).toBe('signed_in'));
     expect(result.current.statuses.codex?.state).toBe('pending');
+    expect(result.current.statuses.claude?.logins).toEqual([account]);
+    expect(result.current.statuses.codex?.logins).toEqual([]);
     expect(agentsApi.list).toHaveBeenCalledTimes(1);
     expect(agentsApi.list).toHaveBeenCalledWith('org-1');
   });
@@ -79,6 +83,19 @@ describe('useAgentStatuses', () => {
     act(() => result.current.update(signedIn));
     expect(result.current.statuses.codex).toEqual(signedIn);
     expect(result.current.statuses.claude).toEqual(claude);
+  });
+
+  it("replaces an agent's accounts with the ones its new status lists", async () => {
+    const { result } = renderHook(() => useAgentStatuses('org-1', true));
+    await waitFor(() => expect(result.current.statuses.claude).toBeDefined());
+    const second = { ...account, id: '9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a', label: 'a@b.c' };
+
+    act(() => result.current.update({ ...claude, logins: [account, second] }));
+    expect(result.current.statuses.claude?.logins).toEqual([account, second]);
+
+    act(() => result.current.update({ ...claude, logins: [second] }));
+    expect(result.current.statuses.claude?.logins).toEqual([second]);
+    expect(result.current.statuses.codex).toEqual(codex);
   });
 
   it("holds each agent's sign-in in flight until it is cleared", async () => {
@@ -125,7 +142,13 @@ describe('useAgentStatuses', () => {
   });
 
   it('drops a late write for an organization that is no longer the loaded one', async () => {
-    const second: AgentStatus = { ...claude, state: 'signed_out', source: null, label: null };
+    const second: AgentStatus = {
+      ...claude,
+      state: 'signed_out',
+      source: null,
+      label: null,
+      logins: [],
+    };
     agentsApi.list.mockResolvedValueOnce([claude, codex]).mockResolvedValueOnce([second, codex]);
     const { result, rerender } = renderHook(
       ({ organization }) => useAgentStatuses(organization, true),
@@ -160,7 +183,13 @@ describe('useAgentStatuses', () => {
         finishFirst = resolve;
       })
     );
-    const second: AgentStatus = { ...claude, state: 'signed_out', source: null, label: null };
+    const second: AgentStatus = {
+      ...claude,
+      state: 'signed_out',
+      source: null,
+      label: null,
+      logins: [],
+    };
     agentsApi.list.mockResolvedValueOnce([second, codex]);
     const { result, rerender } = renderHook(
       ({ organization }) => useAgentStatuses(organization, true),

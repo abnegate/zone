@@ -2,6 +2,7 @@
 //!
 //! Business logic and external service integrations
 
+pub mod agent;
 pub mod artifact_access;
 pub mod artifacts;
 pub mod backend;

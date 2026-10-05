@@ -46,6 +46,13 @@ impl Database {
         }
     }
 
+    async fn through(&self, version: i64) {
+        sqlx::migrate!("./migrations")
+            .run_to(version, &self.pool)
+            .await
+            .unwrap();
+    }
+
     async fn task(&self) -> Uuid {
         let organization = Uuid::new_v4();
         let workspace = Uuid::new_v4();
@@ -793,15 +800,76 @@ async fn workspace_theme_defaults_match_the_product() {
     database.cleanup().await;
 }
 
+/// 003 adds the chat's login key under the brief lock of an unvalidated
+/// constraint, and 004 proves the rows while chats stay writable. A login kept
+/// before them keeps its id, and an organization may then hold a second one.
+#[tokio::test]
+async fn the_chat_login_key_is_added_unvalidated_and_proven_after() {
+    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
+         WHERE conrelid = 'chats'::regclass AND conname = 'chats_agent_login_id_fkey'";
+    const SIGN_IN: &str =
+        "INSERT INTO agent_logins(organization_id,agent) VALUES($1,'claude') RETURNING id";
+    let database = Database::new().await;
+    database.through(2).await;
+    let (workspace, _) = database.workspace().await;
+    let organization: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id=$1")
+            .bind(workspace)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    let kept: Uuid = sqlx::query_scalar(SIGN_IN)
+        .bind(organization)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    sqlx::query(SIGN_IN)
+        .bind(organization)
+        .fetch_one(&database.pool)
+        .await
+        .expect_err("the initial schema keeps one login per agent");
+
+    database.through(3).await;
+    let added: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("003 adds the chat's login key");
+    database.through(4).await;
+    let proven: bool = sqlx::query_scalar(VALIDATED)
+        .fetch_one(&database.pool)
+        .await
+        .expect("004 keeps the chat's login key");
+
+    assert!(!added, "003 must not scan chats under its exclusive lock");
+    assert!(proven, "004 validates what 003 added");
+    let logins: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM agent_logins WHERE organization_id=$1")
+            .bind(organization)
+            .fetch_all(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(logins, [kept], "003 must keep the login saved before it");
+    sqlx::query(SIGN_IN)
+        .bind(organization)
+        .fetch_one(&database.pool)
+        .await
+        .expect("003 lets an organization keep a second login of one agent");
+    database.cleanup().await;
+}
+
 /// Every lock a later migration takes on a live table is one ordinary traffic
 /// already holds, and the boot holds sqlx's advisory lock while it queues for
 /// them: an unbounded wait wedges every other instance instead of failing with
-/// 55P03. The initial schema creates an empty database, so it is exempt.
+/// 55P03. The initial schema creates an empty database, so it is exempt. So is
+/// a migration released without the bound: every database that ran it records
+/// its checksum, and adding the bound now would stop each of them at boot.
 #[test]
 fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait() {
     const FIRST: i64 = 2;
+    const RELEASED: [&str; 1] = ["002_chat_offline.sql"];
     const BOUND: &str = "SET LOCAL lock_timeout = '5s';";
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut bounded: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&directory).expect("migrations directory is readable") {
         let path = entry.expect("migration entry is readable").path();
         if !path.extension().is_some_and(|extension| extension == "sql") {
@@ -820,6 +888,7 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             .expect("a migration name opens with its version");
         let sql = std::fs::read_to_string(&path).expect("migration is readable");
         if version < FIRST
+            || RELEASED.contains(&name.as_str())
             || sql.lines().any(|line| line.trim() == "-- no-transaction")
             || !sql.to_ascii_uppercase().contains("ALTER TABLE")
         {
@@ -835,7 +904,17 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             "{name} alters a table inside sqlx's transaction without opening on `{BOUND}`, so it \
              queues behind any conflicting lock while the boot holds the migration advisory lock"
         );
+        bounded.push(name);
     }
+    bounded.sort();
+    assert_eq!(
+        bounded,
+        [
+            "003_agent_login_usage.sql",
+            "004_agent_login_usage_validation.sql",
+        ],
+        "the set of table-altering migrations changed; a new one needs its own lock bound"
+    );
 }
 
 /// sqlx hands a `-- no-transaction` file to the server as one simple query, and

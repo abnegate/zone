@@ -47,7 +47,7 @@ dependencies = [
  "async-trait",
  "dashmap",
  "rand 0.10.2",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -148,6 +148,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "aiusg"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c671d16085d2397c98c39e437de70a8ebd68f26b7785543cc417e725939ec69f"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "chrono",
+ "dirs 7.0.0",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -356,6 +373,18 @@ dependencies = [
  "event-listener-strategy",
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "async-compression"
+version = "0.4.50"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee19bd99b43e3691acbad4e840420a4881cea6c0b66a208125a824f8fd53f5a1"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -1188,6 +1217,23 @@ dependencies = [
  "serde",
  "static_assertions",
 ]
+
+[[package]]
+name = "compression-codecs"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98fc98460ba0ad5317075d3632b8dfc45d0be8c4a49347c2a38272019717614a"
+dependencies = [
+ "compression-core",
+ "flate2",
+ "memchr",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
 name = "concurrent-queue"
@@ -5907,11 +5953,11 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
+checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "encoding_rs",
  "futures-core",
@@ -7300,7 +7346,7 @@ dependencies = [
  "percent-encoding",
  "plist",
  "raw-window-handle",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "serde_repr",
@@ -7936,12 +7982,17 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
+ "async-compression",
  "bitflags 2.13.1",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
@@ -9672,7 +9723,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "hex",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -9702,7 +9753,7 @@ dependencies = [
  "keyring",
  "keyring-core",
  "rand 0.10.2",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "tempfile",
@@ -9724,7 +9775,7 @@ dependencies = [
  "chrono",
  "image",
  "rand 0.10.2",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "tempfile",
@@ -9754,7 +9805,7 @@ dependencies = [
  "octocrab",
  "percent-encoding",
  "regex",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "scraper",
  "serde",
  "serde_json",
@@ -9804,7 +9855,7 @@ dependencies = [
  "nix",
  "once_cell",
  "rand 0.10.2",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "rmcp",
  "serde",
  "serde_json",
@@ -9850,7 +9901,7 @@ dependencies = [
  "dirs 6.0.0",
  "futures",
  "rand 0.10.2",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -9875,7 +9926,7 @@ dependencies = [
  "chrono",
  "futures",
  "lettre",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -9909,7 +9960,7 @@ dependencies = [
 name = "zone_search"
 version = "0.1.0"
 dependencies = [
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -9927,6 +9978,7 @@ dependencies = [
  "abnegate-http",
  "abnegate-secret",
  "aes-gcm",
+ "aiusg",
  "argon2",
  "async-stream",
  "async-trait",
@@ -9953,7 +10005,7 @@ dependencies = [
  "rand 0.10.2",
  "redis",
  "regex",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "rmcp",
  "scraper",
  "serde",
@@ -9989,7 +10041,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "nix",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "tempfile",

@@ -1,21 +1,32 @@
 //! What one line of a coding agent's output means.
 
+use super::limit::Limit;
+use super::window::Window;
 use crate::llm::{ToolCall, Usage};
 
 /// A normalised event, whichever agent produced it.
 ///
-/// There is deliberately no throttling variant. The task worker already owns
-/// the vocabulary that separates a throttled run from a rejected one, and it
-/// reads that vocabulary out of the failure text. A second classifier here
-/// would be a second place to keep in step with it, so a throttled agent
-/// simply becomes a [`AgentEvent::Failed`] carrying the agent's own wording.
+/// A turn a usage limit refused is [`AgentEvent::Limited`] rather than
+/// [`AgentEvent::Failed`], so whoever routes turns between sign-ins can tell
+/// an exhausted account from a broken turn without reading prose. Its message
+/// is still the agent's own wording, word for word as a failure would carry
+/// it, because the task worker's retry policy reads that wording.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     Text(String),
     Tool(ToolCall),
     Usage(Usage),
+    /// How much of a usage window the account has spent, reported while the
+    /// turn goes on.
+    Window(Window),
+    Limited(Limit),
+    /// The id of the session the agent runs this turn under, as it announced
+    /// it: the one a later turn resumes.
+    Session(String),
     Failed(String),
-    Finished { finish_reason: Option<String> },
+    Finished {
+        finish_reason: Option<String>,
+    },
 }
 
 impl AgentEvent {
@@ -25,7 +36,10 @@ impl AgentEvent {
     /// its turn, and treating that as success would hand the caller a silently
     /// truncated answer.
     pub fn terminal(&self) -> bool {
-        matches!(self, Self::Failed(_) | Self::Finished { .. })
+        matches!(
+            self,
+            Self::Failed(_) | Self::Limited(_) | Self::Finished { .. }
+        )
     }
 }
 
@@ -44,7 +58,27 @@ mod tests {
             })
             .terminal()
         );
+        assert!(
+            !AgentEvent::Window(Window {
+                name: "five_hour".to_string(),
+                used_percent: Some(43.0),
+                used: None,
+                limit: None,
+                resets_at: None,
+            })
+            .terminal()
+        );
+        assert!(!AgentEvent::Session("6f1".to_string()).terminal());
         assert!(AgentEvent::Failed("nope".to_string()).terminal());
+        assert!(
+            AgentEvent::Limited(Limit {
+                message: "You've hit your session limit".to_string(),
+                resets_at: None,
+                credits: false,
+                window: None,
+            })
+            .terminal()
+        );
         assert!(
             AgentEvent::Finished {
                 finish_reason: None

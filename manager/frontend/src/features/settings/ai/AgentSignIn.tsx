@@ -3,18 +3,31 @@ import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { AgentRequestError } from '../../../api/AgentRequestError';
 import { agentsApi, type StartRequest } from '../../../api/agents';
 import { formatDate } from '../../projects/utils/formatters';
+import { AccountList } from './AccountList';
 import { ClaudeSteps } from './ClaudeSteps';
 import { DeviceSteps } from './DeviceSteps';
 import { LoopbackSteps } from './LoopbackSteps';
 import { onThisMachine } from './onThisMachine';
 import { SignOutDialog } from './SignOutDialog';
-import type { Agent, AgentState, AgentStatus, ClaudeScope, SignInFlow } from './schemas';
+import type {
+  Agent,
+  AgentAccount,
+  AgentState,
+  AgentStatus,
+  ClaudeScope,
+  SignInFlow,
+} from './schemas';
 import type { AgentAccess, Attempt, SignInAction } from './types';
+import { accountLabel } from './usage';
 import { useExpired } from './useExpired';
 import './AgentSignIn.css';
 
 export const POLL_INTERVAL = 3000;
 export const POLL_INTERVAL_LIMIT = 30000;
+export const USAGE_POLL_INTERVAL = 60_000;
+
+const ROUTING =
+  "New chats start on the account with the most headroom and stay on it until it runs out; the other agent's accounts take over when this one is spent.";
 
 type Awaiting = 'device' | 'browser';
 type Outcome = 'waiting' | 'finished' | 'failed';
@@ -90,11 +103,15 @@ export function AgentSignIn({
   const [codeError, setCodeError] = useState<string | null>(null);
   const [busy, setBusy] = useState<SignInAction | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
-  const [confirming, setConfirming] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [confirming, setConfirming] = useState<AgentAccount | null>(null);
+  const [leaving, setLeaving] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now);
   const [focus, setFocus] = useState<FocusTarget | null>(null);
   const shown = useRef(organizationId);
   const runs = useRef(0);
   const section = useRef<HTMLElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
   const statusLine = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLInputElement>(null);
   const deviceCode = useRef<HTMLElement>(null);
@@ -114,7 +131,10 @@ export function AgentSignIn({
     setFocus(null);
     const active = document.activeElement;
     const away =
-      active?.isConnected && active !== document.body && !section.current?.contains(active);
+      active?.isConnected &&
+      !(section.current && active.contains(section.current)) &&
+      !section.current?.contains(active) &&
+      !dialog.current?.contains(active);
     if (away) return;
     const target =
       focus === 'entry'
@@ -184,6 +204,34 @@ export function AgentSignIn({
     };
   }, [awaiting, watched, organizationId, agent, onStatusChange, onAttemptChange]);
 
+  const refreshing = awaiting === null && (status?.logins.length ?? 0) > 0;
+
+  useEffect(() => {
+    if (!refreshing) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      const run = runs.current;
+      try {
+        if (document.visibilityState === 'hidden') return;
+        const next = await agentsApi.get(organizationId, agent);
+        if (!cancelled && runs.current === run) onStatusChange(next);
+      } catch {
+        return;
+      } finally {
+        if (!cancelled) {
+          setNow(Date.now());
+          timer = setTimeout(refresh, USAGE_POLL_INTERVAL);
+        }
+      }
+    };
+    timer = setTimeout(refresh, USAGE_POLL_INTERVAL);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [refreshing, organizationId, agent, onStatusChange]);
+
   const perform = async (
     action: SignInAction,
     work: (current: () => boolean) => Promise<void>,
@@ -241,28 +289,44 @@ export function AgentSignIn({
     );
   };
 
-  const signOut = () =>
+  const signOut = (account: AgentAccount) =>
     perform('signOut', async (current) => {
-      await agentsApi.signOut(organizationId, agent);
-      if (!current()) return;
-      onAttemptChange(agent, null);
-      const next = await agentsApi.get(organizationId, agent);
-      if (!current()) return;
-      onStatusChange(next);
-      setFocus('status');
+      setLeaving(account.id);
+      try {
+        await agentsApi.signOut(organizationId, agent, account.id);
+        if (!current()) return;
+        const next = await agentsApi.get(organizationId, agent);
+        if (!current()) return;
+        setNow(Date.now());
+        onStatusChange(next);
+        setFocus('status');
+      } finally {
+        setLeaving(null);
+      }
     });
 
-  const confirmSignOut = () => {
-    setConfirming(false);
-    void signOut();
+  const ask = (account: AgentAccount) => {
+    setConfirming(account);
+    setAsking(true);
   };
 
-  const cancel = () =>
+  const confirmSignOut = () => {
+    setAsking(false);
+    setFocus('status');
+    if (confirming) void signOut(confirming);
+  };
+
+  const cancel = (reread: boolean) =>
     perform('cancel', async (current) => {
       await agentsApi.cancel(organizationId, agent);
       if (!current()) return;
       onAttemptChange(agent, null);
       setCode('');
+      if (reread) {
+        const next = await agentsApi.get(organizationId, agent);
+        if (!current()) return;
+        onStatusChange(next);
+      }
       setFocus('status');
     });
 
@@ -271,12 +335,10 @@ export function AgentSignIn({
   const signingIn = usable || waiting;
   const manage = access === 'manage';
   const manageable = manage && status !== undefined;
-  const offerSignIn =
-    manageable &&
-    !authorization &&
-    !waiting &&
-    (status.state !== 'signed_in' || status.source === 'host');
-  const offerSignOut = manageable && !authorization && !waiting && status.source === 'zone';
+  const held = status?.logins ?? [];
+  const zoneSignedIn = status?.state === 'signed_in' && status.source === 'zone';
+  const another = zoneSignedIn || held.some((login) => login.state === 'signed_in');
+  const offerSignIn = manageable && !authorization && !waiting;
   const quiet = signingIn || status?.state === 'signed_in';
   const error = failure ?? (status ? (quiet ? null : status.error) : loadError);
   const state = signingIn ? 'pending' : (status?.state ?? 'signed_out');
@@ -287,18 +349,20 @@ export function AgentSignIn({
     detail = 'Approve on claude.com; Zone finishes the sign-in automatically.';
   } else if (manage && usable) {
     detail = 'Waiting for the code from claude.com.';
+  } else if (manage && authorization && expired) {
+    detail = 'The link from claude.com expired. Start again to get a new one.';
+  } else if (manage && authorization) {
+    detail = 'Start again to get a new link from claude.com.';
+  } else if (manage && waiting && codeExpired) {
+    detail = 'The one-time code expired. Cancel, then sign in again.';
+  } else if (manage && waiting) {
+    detail = 'Waiting for you to finish signing in.';
+  } else if (zoneSignedIn && held.length > 0) {
+    detail = ROUTING;
   } else if (status?.state === 'signed_in') {
     detail = signedInDetail(status, agent, lapsed);
   } else if (status && !manage) {
     detail = access === 'view' ? 'Ask an organization admin to sign in.' : null;
-  } else if (authorization && expired) {
-    detail = 'The link from claude.com expired. Start again to get a new one.';
-  } else if (authorization) {
-    detail = 'Start again to get a new link from claude.com.';
-  } else if (waiting && codeExpired) {
-    detail = 'The one-time code expired. Cancel, then sign in again.';
-  } else if (waiting) {
-    detail = 'Waiting for you to finish signing in.';
   } else if (status?.state === 'expired') {
     detail = `Sign in again to keep using ${name}.`;
   } else if (status) {
@@ -306,30 +370,18 @@ export function AgentSignIn({
   }
 
   let actions: ReactNode = null;
-  if (offerSignIn || offerSignOut) {
+  if (offerSignIn) {
     actions = (
       <div className="agent-sign-in-actions">
-        {offerSignIn && (
-          <Button
-            size="sm"
-            onClick={() => void start('start')}
-            loading={busy === 'start'}
-            disabled={busy !== null}
-          >
-            Sign in with {account}
-          </Button>
-        )}
-        {offerSignOut && (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => setConfirming(true)}
-            loading={busy === 'signOut'}
-            disabled={busy !== null}
-          >
-            Sign out
-          </Button>
-        )}
+        <Button
+          size="sm"
+          variant={another ? 'secondary' : 'default'}
+          onClick={() => void start('start')}
+          loading={busy === 'start'}
+          disabled={busy !== null}
+        >
+          {another ? `Add another ${account} account` : `Sign in with ${account}`}
+        </Button>
       </div>
     );
   }
@@ -371,7 +423,7 @@ export function AgentSignIn({
             onRestart={() => void start('restart', attempt.scope, attempt.flow)}
             onFullAccess={() => void start('full', 'full', attempt.flow)}
             onPaste={() => void start('paste', attempt.scope, 'paste')}
-            onCancel={() => void cancel()}
+            onCancel={() => void cancel(false)}
           />
         ) : (
           <ClaudeSteps
@@ -387,7 +439,7 @@ export function AgentSignIn({
             onSubmit={submit}
             onRestart={() => void start('restart', attempt.scope, attempt.flow)}
             onFullAccess={() => void start('full', 'full', attempt.flow)}
-            onCancel={() => void cancel()}
+            onCancel={() => void cancel(false)}
           />
         ))}
 
@@ -397,15 +449,29 @@ export function AgentSignIn({
           account={account}
           busy={busy}
           entry={deviceCode}
-          onCancel={() => void signOut()}
+          onCancel={() => void cancel(true)}
+        />
+      )}
+
+      {held.length > 0 && (
+        <AccountList
+          name={name}
+          accounts={held}
+          now={now}
+          manage={manageable}
+          busy={busy !== null}
+          leaving={leaving}
+          onSignOut={ask}
         />
       )}
 
       <SignOutDialog
-        open={confirming}
+        ref={dialog}
+        open={asking}
         name={name}
+        account={confirming ? accountLabel(confirming) : ''}
         onConfirm={confirmSignOut}
-        onClose={() => setConfirming(false)}
+        onClose={() => setAsking(false)}
       />
 
       {error && (

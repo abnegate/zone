@@ -20,4 +20,9 @@ macro_rules! source {
     };
 }
 
-pub const EMBEDDED: &[Source] = &[source!("001_initial_schema.sql")];
+pub const EMBEDDED: &[Source] = &[
+    source!("001_initial_schema.sql"),
+    source!("002_chat_offline.sql"),
+    source!("003_agent_login_usage.sql"),
+    source!("004_agent_login_usage_validation.sql"),
+];

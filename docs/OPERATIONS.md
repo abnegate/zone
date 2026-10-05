@@ -141,12 +141,27 @@ postgres pass restore the same way.
 ### Coding agent sign-ins in an archive
 
 The archive includes `zone_manager_agent_state`, under `manager_agent_state/`.
-It holds each organization's Claude Code and Codex state: codex's `auth.json`,
-a working ChatGPT login stored in plain form, and both CLIs' session
-transcripts. Anyone holding the archive can use those logins, so keep archives
+It holds each organization's Claude Code and Codex state, laid out as
+`ZONE_AGENT_STATE_DIR` is (see
+[CONFIGURATION.md](CONFIGURATION.md#zone_agent_state_dir)):
+
+| Path under `manager_agent_state/` | What it holds |
+|-----------------------------------|---------------|
+| `<org>/<agent>/logins/<login id>/` | One signed-in account's home: for codex its `auth.json`, a working ChatGPT login stored in plain form, and for both CLIs that account's session files, claude's under `projects/` and codex's under `sessions/` |
+| `<org>/<agent>/work/` | The working directory every account of the agent shares |
+| `<org>/codex/auth.json` | A codex login from before migration 003 that Zone has not yet moved into its account's home |
+| `<org>/claude/projects/`, `<org>/codex/sessions/` | Session transcripts from before migration 003, which nothing reads again |
+
+Each home is named by its sign-in's id in the database, so restore the
+database and the volume from the same archive: a home whose sign-in the
+database does not hold is never used, a codex sign-in whose home is missing
+has no login to run with until that account signs in again, and a chat whose
+session file is missing starts a fresh session with its whole transcript.
+
+Anyone holding the archive can use the codex logins in it, so keep archives
 private. Deleting an organization signs it out of codex and removes its
 directory from the volume, but archives taken before then still hold its
-login. The Claude tokens are not in that volume. They are in the database,
+logins. The Claude tokens are not in that volume. They are in the database,
 sealed with a key derived from `ENCRYPTION_KEY`, and a restored instance needs
 the same `ENCRYPTION_KEY` to use them: under another key, every Claude Code
 sign-in shows as expired until an organization admin signs in again.
@@ -198,6 +213,72 @@ start against the migrated database: it stops with
 `Failed to run migrations: VersionMissing(51)`. Run `make backup` before the
 upgrade. Going back to an older image means restoring that backup, and losing
 whatever changed after it was taken.
+
+## Upgrading to migration 003
+
+The first start of a server that signs an organization in to several accounts
+per agent applies migrations 003 and 004 on top of the squashed initial
+schema, `001_initial_schema.sql`, and of 002, which lets a chat stay off the
+public web. They upgrade a database those two created.
+A database migrated before the squash, with any of the old versions 002 to 055
+recorded, cannot be upgraded in place: the server stops with
+`Failed to run migrations: VersionMissing(n)` for the first old version the
+new history lacks, and only a fresh database that starts from the squashed 001
+gets past it.
+
+- 003 drops the key that allowed one sign-in per organization and agent, and
+  adds a unique index on organization, agent and account for sign-ins that
+  name an account, and an index on organization and agent. It adds the
+  columns each sign-in records its account and usage in: `account`,
+  `windows`, `headroom`, `usage_fetched_at`, `exhausted_until` and
+  `last_used_at`. It adds to `chats` the sign-in a chat runs on,
+  `agent_login_id`, and the CLI session it resumes: `agent_session_id`,
+  `agent_session_agent`, `agent_session_entry` and `agent_session_prompt`.
+- The foreign key from `chats.agent_login_id` to `agent_logins`, which clears
+  a chat's sign-in when that account is signed out, is added `NOT VALID`, so
+  003 does not read `chats`; 004 then validates it while chats stay writable.
+  `chats.agent_login_id` has no index of its own, so signing an account out
+  scans `chats` once to clear it.
+
+An image built before them cannot start against the migrated database: it
+stops with `Failed to run migrations: VersionMissing(3)`. Run `make backup`
+before the upgrade. Going back to an older image means restoring that backup,
+and losing whatever changed after it was taken.
+
+Every sign-in the organization held stays signed in, as one account, with no
+account recorded:
+
+- **Claude.** The sign-in was granted `user:inference` alone, so its profile
+  and usage cannot be read: it keeps its plan as its label and routes as usage
+  unknown. Signing in to the same account again adds a second sign-in beside
+  it, keyed by the account, rather than replacing it; sign the old one out
+  under AI Settings once the new one shows.
+- **Codex.** The login stays at `<state>/<org>/codex/auth.json` until Zone
+  first needs it, to route a turn, read its usage or record another codex
+  sign-in, and then moves into that sign-in's home,
+  `<state>/<org>/codex/logins/<login id>/auth.json`, while the organization
+  holds that one codex sign-in. Only a regular file is moved, never a link.
+  Signing in to the same ChatGPT account again then takes that sign-in over,
+  keyed by the account, rather than adding a second one beside it.
+
+The organization's existing session transcripts stay in
+`<state>/<org>/claude/projects` and `<state>/<org>/codex/sessions`, and
+nothing reads them again: each chat's next turn starts a session in its
+account's home with the whole transcript, and later turns resume that. Delete
+the old directories once the upgrade has settled to reclaim the space. Back
+up `zone_manager_agent_state` with the database, as `make backup` does, since
+each home is named by its sign-in's id; see
+*Coding agent sign-ins in an archive*.
+
+Under Helm, agent state lives in the server pod, on its claim with one
+replica or an emptyDir otherwise. A handover carries a session file only
+between homes in the same pod. On an emptyDir, replacing the pod loses every
+codex login's home and every session file: each codex account has to sign in
+again, and chats start fresh sessions with their whole transcript. Usage
+reads need egress to `api.anthropic.com` and `chatgpt.com`, or the hosts
+`ZONE_CLAUDE_API_URL` and `ZONE_CODEX_API_URL` name, when
+`networkPolicy.enabled` is on; see
+[helm/zone-apps/README.md](../helm/zone-apps/README.md).
 
 ## Pulling models into the bundled Ollama
 

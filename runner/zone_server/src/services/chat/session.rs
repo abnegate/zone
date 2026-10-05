@@ -1,20 +1,29 @@
 //! Shared preparation, projection, and durable generation boundaries for both chat modes.
 
+mod generation;
+mod pinned;
+pub mod prompt;
+pub mod tail;
+
+pub use generation::Generation;
+pub use pinned::Pinned;
+
 use base64::Engine;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
-use zone_core::llm::{LlmBackend, LlmClient, Message, Role};
+use zone_core::llm::{LlmClient, Message, Role};
 
-use crate::agent::prompt::{self, Environment};
+use crate::agent::prompt::Environment;
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
 use crate::db::chats::ChatRow;
 use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::backend;
+use crate::services::chat::handover::Handover;
 use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
 use crate::state::AppState;
@@ -22,6 +31,8 @@ use zone_chat::{capacity, history};
 use zone_search::client::SearchContext;
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
+/// The id of the system entry a turn's context opens with.
+pub const INSTRUCTIONS: &str = "instructions";
 const TEMPERATURE: f32 = 0.7;
 const SEARCH: &str = "supplement:search";
 pub const WITHHELD_IMAGE: &str = "[An image is omitted here because this model can't view images.]";
@@ -266,7 +277,7 @@ pub fn sees_images(model: &str, vision: Option<bool>) -> bool {
 pub enum Mode {
     Preview,
     /// A turn a model answers, on the backend its model was chosen for.
-    Generation(LlmBackend),
+    Generation(Generation),
 }
 
 pub struct Preparation {
@@ -295,6 +306,11 @@ pub struct Preparation {
     /// The workspace's skills index, read once here for the same reason. Empty
     /// for a chat with no `read_document`, which could open none of them.
     pub skills: String,
+    /// The coding agent session the turn runs in, on a login of the organization's.
+    pub session: Option<Pinned>,
+    /// The logins the turn may move to when the one it runs on can no longer run it: none over
+    /// HTTP, or under the instance's or the host's sign-in.
+    pub handover: Option<Handover>,
 }
 
 /// Read-only common builder. It never classifies intent, executes tools, searches, or summarizes.
@@ -357,7 +373,13 @@ pub async fn build(
     };
     let backend = match &mode {
         Mode::Preview => backend::instance(state.config()),
-        Mode::Generation(backend) => backend::bounded(backend.clone(), settings.timeout),
+        Mode::Generation(generation) => {
+            backend::bounded(generation.resolved.backend.clone(), settings.timeout)
+        }
+    };
+    let session = match &mode {
+        Mode::Preview => None,
+        Mode::Generation(generation) => Pinned::of(generation),
     };
     let tools = crate::mcp::offered(&backend, tools);
     let agentic = chat.agent_enabled && !tools.is_empty();
@@ -415,7 +437,7 @@ pub async fn build(
         String::new()
     };
     let mut entries = vec![Entry {
-        id: "instructions".into(),
+        id: INSTRUCTIONS.into(),
         message: Message::system(system_prompt(
             chat,
             &tools,
@@ -534,6 +556,8 @@ pub async fn build(
         environment,
         memory,
         skills,
+        session,
+        handover: None,
     })
 }
 
@@ -582,14 +606,14 @@ pub fn system_prompt(
         (Some(card), true) => format!(
             "{}\n\n{}",
             card.system_prompt(),
-            prompt::chat(tools, chat.auto_approve, environment)
+            crate::agent::prompt::chat(tools, chat.auto_approve, environment)
         ),
-        (Some(card), false) => match prompt::boundary() {
+        (Some(card), false) => match crate::agent::prompt::boundary() {
             boundary if boundary.is_empty() => card.system_prompt(),
             boundary => format!("{}\n\n{boundary}", card.system_prompt()),
         },
-        (None, true) => prompt::chat(tools, chat.auto_approve, environment),
-        (None, false) => prompt::plain(environment),
+        (None, true) => crate::agent::prompt::chat(tools, chat.auto_approve, environment),
+        (None, false) => crate::agent::prompt::plain(environment),
     };
     format!("{prompt}\n\n{capability}{memory}{skills}")
 }
@@ -620,6 +644,25 @@ pub(crate) fn chat_row(
         created_at: None,
         updated_at: None,
     }
+}
+
+/// The system prompt of an agentic chat composed at `at`, carrying `memory`, so prompt tests
+/// compare prompts a clock apart.
+#[cfg(test)]
+pub(crate) fn composed(at: &str, memory: &str) -> String {
+    system_prompt(
+        &chat_row(None, true, false),
+        &ChatTools::with_names(crate::agent::ToolProfile::Chat, &["read_file"], None),
+        true,
+        "Web search is unavailable this turn.",
+        &Environment::at(
+            chrono::DateTime::parse_from_rfc3339(at).expect("a timestamp"),
+            "Pacific/Auckland",
+            PathBuf::from("/srv/zone"),
+        ),
+        memory,
+        "",
+    )
 }
 
 pub fn images(metadata: Option<&Value>) -> Vec<String> {
@@ -740,6 +783,7 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zone_core::llm::LlmBackend;
 
     /// What `SearchContext::capability()` returns on its quieter arm. Non-empty
     /// on both arms, which is what keeps a memory block one blank line below it
@@ -913,7 +957,7 @@ mod tests {
             system_prompt: Some(CARD.into()),
             ..Default::default()
         };
-        let boundary = prompt::boundary();
+        let boundary = crate::agent::prompt::boundary();
         assert!(!boundary.is_empty());
 
         let plain = system_prompt(
@@ -995,27 +1039,33 @@ mod tests {
             (
                 chat_row(None, false, false),
                 false,
-                format!("{}\n\n{CAPABILITY}", prompt::plain(&environment)),
+                format!(
+                    "{}\n\n{CAPABILITY}",
+                    crate::agent::prompt::plain(&environment)
+                ),
             ),
             (
                 chat_row(None, true, false),
                 true,
                 format!(
                     "{}\n\n{CAPABILITY}",
-                    prompt::chat(&tools, false, &environment)
+                    crate::agent::prompt::chat(&tools, false, &environment)
                 ),
             ),
             (
                 chat_row(Some(card.clone()), false, false),
                 false,
-                format!("{CARD}\n\n{}\n\n{CAPABILITY}", prompt::boundary()),
+                format!(
+                    "{CARD}\n\n{}\n\n{CAPABILITY}",
+                    crate::agent::prompt::boundary()
+                ),
             ),
             (
                 chat_row(Some(card), true, false),
                 true,
                 format!(
                     "{CARD}\n\n{}\n\n{CAPABILITY}",
-                    prompt::chat(&tools, false, &environment)
+                    crate::agent::prompt::chat(&tools, false, &environment)
                 ),
             ),
         ];
@@ -1182,7 +1232,7 @@ mod tests {
             &chat,
             user,
             None,
-            Mode::Generation(LlmBackend::Http),
+            Mode::Generation(Generation::unrouted(LlmBackend::Http)),
             endpoint.clone(),
         )
         .await;

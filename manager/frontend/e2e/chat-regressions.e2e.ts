@@ -264,6 +264,151 @@ test.describe('Chat regressions', () => {
     await page.screenshot({ path: testInfo.outputPath('fenced-code-stream.png'), fullPage: true });
   });
 
+  test('a turn that moves to another account says so inside the reply', async ({ page }) => {
+    const messages: unknown[] = [];
+    await mockChatRoutes(page, messages);
+    await page.reload();
+    await page.click('a[href="/chats"]');
+    await openChat(page);
+
+    const before =
+      "Here's the deploy plan.\n\n1. Build the image on `main`.\n2. Push it to the registry.\n";
+    const after =
+      '3. Roll the stack with `docker compose up -d`.\n\nThe health check gates the switch, so a bad image never takes traffic.';
+    const notice =
+      'Switched to Codex · b@example.com — a@example.com reached its usage limit; resets in 2h 10m';
+    const handover = {
+      from: 'a@example.com',
+      to: 'b@example.com',
+      from_agent: 'claude',
+      agent: 'codex',
+      reason: 'limit',
+      resets_at: new Date(Date.now() + (2 * 60 + 10) * 60_000).toISOString(),
+      carried: false,
+      at: Array.from(before).length,
+    };
+
+    let finish: () => void = () => {};
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    socket.setOnSend(async (payload) => {
+      await socket.emit({
+        type: 'message_saved',
+        message_id: 'msg-ask',
+        role: 'user',
+        content: payload.content,
+      });
+      await socket.emit({ type: 'message_start', message_id: 'a1', role: 'assistant' });
+      await socket.emit({ type: 'chunk', content: before, index: 0 });
+      await socket.emit({ type: 'status', message: 'Switching to b@example.com…' });
+      await socket.emit({ type: 'handover', message_id: 'a1', ...handover });
+      await socket.emit({ type: 'chunk', content: after, index: 1 });
+      await finished;
+      await socket.emit({
+        type: 'message_end',
+        message_id: 'a1',
+        content: `${before}${after}`,
+        metadata: { handovers: [{ kind: 'handover', ...handover }] },
+      });
+    });
+
+    await page.fill('.message-form textarea', 'How do we deploy?');
+    await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
+
+    const answer = page.locator('.message-assistant .message-content');
+    const divider = answer.getByRole('note');
+    await expect(divider).toHaveText(notice);
+    await expect(page.getByRole('status')).toHaveText('Switching to b@example.com…');
+    finish();
+    await expect(page.getByRole('status')).toHaveCount(0);
+    await expect(divider).toHaveText(notice);
+
+    const order = await answer.innerText();
+    expect(order.indexOf('Push it to the registry.')).toBeLessThan(order.indexOf('Switched to'));
+    expect(order.indexOf('Switched to')).toBeLessThan(order.indexOf('Roll the stack'));
+    await page.mouse.move(0, 0);
+    await page.screenshot({
+      path: 'screenshots/chats-handover.png',
+      fullPage: true,
+      animations: 'disabled',
+    });
+
+    messages.push(
+      { ...userMessage, id: 'msg-ask', content: 'How do we deploy?' },
+      {
+        id: 'a1',
+        chat_id: 'chat-1',
+        role: 'assistant',
+        content: `${before}${after}`,
+        created_at: new Date().toISOString(),
+        metadata: { handovers: [{ kind: 'handover', ...handover }] },
+      }
+    );
+    await page.reload();
+    await page.click('a[href="/chats"]');
+    await openChat(page);
+    await expect(page.locator('.message-assistant .message-content').getByRole('note')).toHaveText(
+      notice
+    );
+  });
+
+  test('a replay on another account of the same agent leaves the agent unnamed', async ({
+    page,
+  }) => {
+    const messages: unknown[] = [];
+    await mockChatRoutes(page, messages);
+    await page.reload();
+    await page.click('a[href="/chats"]');
+    await openChat(page);
+
+    const before = 'The registry holds the last three images.\n';
+    const after = 'Roll back by pinning the previous tag and redeploying.';
+    const notice =
+      'Switched to b@example.com — a@example.com reached its usage limit; resets in 2h 10m';
+    const handover = {
+      from: 'a@example.com',
+      to: 'b@example.com',
+      from_agent: 'claude',
+      agent: 'claude',
+      reason: 'limit',
+      resets_at: new Date(Date.now() + (2 * 60 + 10) * 60_000).toISOString(),
+      carried: false,
+      at: Array.from(before).length,
+    };
+    socket.setOnSend(async (payload) => {
+      await socket.emit({
+        type: 'message_saved',
+        message_id: 'msg-ask',
+        role: 'user',
+        content: payload.content,
+      });
+      await socket.emit({ type: 'message_start', message_id: 'a1', role: 'assistant' });
+      await socket.emit({ type: 'chunk', content: before, index: 0 });
+      await socket.emit({ type: 'handover', message_id: 'a1', ...handover });
+      await socket.emit({ type: 'chunk', content: after, index: 1 });
+      await socket.emit({
+        type: 'message_end',
+        message_id: 'a1',
+        content: `${before}${after}`,
+        metadata: { handovers: [{ kind: 'handover', ...handover }] },
+      });
+    });
+
+    await page.fill('.message-form textarea', 'How do we roll back?');
+    await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
+
+    const divider = page.locator('.message-assistant .message-content').getByRole('note');
+    await expect(divider).toHaveText(notice);
+    await expect(divider).not.toContainText('Claude');
+    await page.mouse.move(0, 0);
+    await page.screenshot({
+      path: 'screenshots/chats-handover-same-agent.png',
+      fullPage: true,
+      animations: 'disabled',
+    });
+  });
+
   test('streams preamble that arrived after native tool deltas', async ({ page }, testInfo) => {
     await mockChatRoutes(page, []);
     await page.reload();

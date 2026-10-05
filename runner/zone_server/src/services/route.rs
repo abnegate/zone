@@ -7,8 +7,9 @@ use zone_core::llm::{AgentKind, LlmBackend};
 
 use crate::config::Config;
 use crate::db::ai_settings::{self, EffectiveAiSettings};
+use crate::db::chats::ChatSession;
 use crate::db::workspaces;
-use crate::services::backend;
+use crate::services::backend::{self, Continuation, Resolved, Routing};
 use crate::services::endpoint::{Endpoint, UrlError};
 use crate::services::stages::Preferences;
 use crate::state::AppState;
@@ -169,10 +170,82 @@ impl Route {
             .map(|saved| saved.organization)
     }
 
+    /// The backend these settings choose for a session or run starting now, on the login the
+    /// router picks: `sticky` while it can still run, never one in `exclude`, and one that lately
+    /// refused `model`, what the session runs on the configured agent, only when no other can
+    /// run it. The login picked is recorded as used. An unusable route has none.
+    pub async fn resolve(
+        &self,
+        state: &AppState,
+        exclude: &[Uuid],
+        sticky: Option<Uuid>,
+        model: Option<&str>,
+    ) -> Result<Resolved, backend::Error> {
+        self.routed(
+            state,
+            Routing {
+                exclude,
+                sticky,
+                touch: true,
+                model,
+                ..Routing::default()
+            },
+        )
+        .await
+    }
+
+    /// [`Self::resolve`] for a chat's turn running `model` on the configured agent: kept on the
+    /// login `previous`, the chat's session, runs on, and in that session while the login picked
+    /// holds it, else in a fresh one.
+    pub async fn chat(
+        &self,
+        state: &AppState,
+        exclude: &[Uuid],
+        previous: Option<&ChatSession>,
+        model: Option<&str>,
+    ) -> Result<Resolved, backend::Error> {
+        self.routed(
+            state,
+            Routing {
+                exclude,
+                sticky: previous.and_then(|session| session.login),
+                touch: true,
+                continuation: Continuation::Chat(previous),
+                model,
+            },
+        )
+        .await
+    }
+
     /// The backend these settings choose, resolved when a completion needs
-    /// one: a coding agent's sign-in is read only then. An unusable route has
-    /// none.
+    /// one: a coding agent's sign-in is read only then, and the login it runs
+    /// on is not recorded as used. An unusable route has none.
     pub async fn backend(&self, state: &AppState) -> Result<LlmBackend, backend::Error> {
+        self.backend_for(state, None).await
+    }
+
+    /// [`Self::backend`], kept on `sticky`, the login a chat runs on, while it can still run.
+    pub async fn backend_for(
+        &self,
+        state: &AppState,
+        sticky: Option<Uuid>,
+    ) -> Result<LlmBackend, backend::Error> {
+        self.routed(
+            state,
+            Routing {
+                sticky,
+                ..Routing::default()
+            },
+        )
+        .await
+        .map(|resolved| resolved.backend)
+    }
+
+    async fn routed(
+        &self,
+        state: &AppState,
+        routing: Routing<'_>,
+    ) -> Result<Resolved, backend::Error> {
         let endpoint = self.endpoint()?;
         match &self.saved {
             Some(saved) => {
@@ -181,10 +254,11 @@ impl Route {
                     saved.organization,
                     &saved.settings,
                     endpoint.origin(),
+                    routing,
                 )
                 .await
             }
-            None => Ok(backend::instance(state.config())),
+            None => Ok(Resolved::unrouted(backend::instance(state.config()))),
         }
     }
 

@@ -69,8 +69,10 @@ impl ReviewError {
         }
         let message = error.to_string();
         let words = backend::own_words(&message);
-        let unfunded = matches!(backend, LlmBackend::Cli { .. })
-            && UNFUNDED_MARKERS.iter().any(|marker| words.contains(marker));
+        let credits = matches!(&error, LlmError::Limited { limit, .. } if limit.credits);
+        let unfunded = credits
+            || matches!(backend, LlmBackend::Cli { .. })
+                && UNFUNDED_MARKERS.iter().any(|marker| words.contains(marker));
         if unfunded {
             return Self::Unfunded {
                 reviewer: reviewer.to_string(),
@@ -119,6 +121,7 @@ fn unreachable(error: &LlmError) -> bool {
         LlmError::Json(_)
         | LlmError::Stream(_)
         | LlmError::Agent(_)
+        | LlmError::Limited { .. }
         | LlmError::InvalidConfig(_) => false,
     }
 }
@@ -240,7 +243,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use uuid::Uuid;
-    use zone_core::llm::AgentKind;
+    use zone_core::llm::{AgentKind, Limit};
     use zone_vcs::pull_request::Mergeability;
 
     use crate::config::{Config, ModelBackend};
@@ -531,6 +534,54 @@ mod tests {
                 LlmError::Agent(format!(
                     "claude: {UNFUNDED_CONTEXT}: API Error: Usage credits required for 1M context"
                 ))
+            ),
+            ReviewError::Unfunded { .. }
+        ));
+    }
+
+    /// A credits limit says by its kind that the account cannot fund the
+    /// reviewer, whatever its words. Any other limit is a failed round, as
+    /// its words always made it.
+    #[test]
+    fn a_credits_limit_is_an_unfunded_reviewer_and_any_other_limit_a_model_failure() {
+        let agent = LlmBackend::cli(AgentKind::Claude, zone_core::llm::CliSettings::default());
+        let limited = |message: &str, credits: bool| LlmError::Limited {
+            provider: "claude".to_string(),
+            limit: Box::new(Limit {
+                message: message.to_string(),
+                resets_at: None,
+                credits,
+                window: None,
+            }),
+        };
+
+        let error = ReviewError::model(
+            &agent,
+            "fable",
+            limited("Usage credits are required for this request.", true),
+        );
+        let ReviewError::Unfunded { reviewer, reason } = &error else {
+            panic!("expected an unfunded reviewer, got {error:?}");
+        };
+        assert_eq!(reviewer, "fable");
+        assert_eq!(
+            reason,
+            "claude: Usage credits are required for this request."
+        );
+
+        assert!(matches!(
+            ReviewError::model(
+                &agent,
+                "sonnet",
+                limited("You've hit your session limit · resets 5pm", false)
+            ),
+            ReviewError::Model(_)
+        ));
+        assert!(matches!(
+            ReviewError::model(
+                &agent,
+                "fable",
+                limited(&format!("{UNFUNDED}: {REFUSAL}"), false)
             ),
             ReviewError::Unfunded { .. }
         ));

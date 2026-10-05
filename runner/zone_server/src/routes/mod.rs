@@ -373,6 +373,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/organizations/{org_id}/agents/{agent}/login/attempt",
             delete(agents::cancel),
         )
+        .route(
+            "/api/organizations/{org_id}/agents/{agent}/logins/{login_id}",
+            delete(agents::sign_out_login),
+        )
         // Billing routes
         .route(
             "/api/organizations/{org_id}/subscription",

@@ -261,7 +261,8 @@ impl Store {
     }
 
     /// Explicit deletion removes private evidence with its visible owner and invalidates
-    /// checkpoints. The remaining visible companion is retained at its original position.
+    /// checkpoints and the agent session that saw it. The remaining visible companion is
+    /// retained at its original position.
     pub async fn delete_message(&self, lease: &Lease, id: Uuid) -> Result<bool, Error> {
         let mut transaction = self.pool.begin().await?;
         self.lock(&mut transaction, lease).await?;
@@ -312,6 +313,7 @@ impl Store {
             .bind(self.chat_id)
             .execute(&mut *transaction)
             .await?;
+        crate::db::chats::set_session(&mut *transaction, self.chat_id, None).await?;
         sqlx::query("DELETE FROM chat_entries WHERE chat_id=$1 AND id=$2")
             .bind(self.chat_id)
             .bind(id.to_string())
@@ -552,6 +554,32 @@ impl Store {
         self.lock(&mut transaction, lease).await?;
         transaction.commit().await?;
         Ok(count)
+    }
+
+    /// The latest `chat_entries.position` of this chat, 0 when it has none.
+    pub async fn latest(&self) -> Result<i64, Error> {
+        Ok(sqlx::query_scalar(
+            "SELECT COALESCE(max(e.position), 0) FROM chat_entries e JOIN chats c ON c.id = e.chat_id \
+             WHERE e.chat_id = $1 AND c.workspace_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(self.chat_id)
+        .bind(self.workspace_id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// The ids of this chat's entries written after `position`, in order.
+    pub async fn after(&self, position: i64) -> Result<Vec<String>, Error> {
+        Ok(sqlx::query_scalar(
+            "SELECT e.id FROM chat_entries e JOIN chats c ON c.id = e.chat_id \
+             WHERE e.chat_id = $1 AND c.workspace_id IS NOT DISTINCT FROM $2 AND e.position > $3 \
+             ORDER BY e.position",
+        )
+        .bind(self.chat_id)
+        .bind(self.workspace_id)
+        .bind(position)
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     pub async fn load(&self) -> Result<History, Error> {

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import {
   ContextUsageSchema,
+  HandoverSchema,
+  HandoversSchema,
   JobExitedSchema,
   JobStartedSchema,
   QuestionsSchema,
@@ -29,6 +31,7 @@ import {
   type WaitSettled,
 } from '../types';
 import { mergeCitations } from '../utils/citations';
+import { appendHandover } from '../utils/handover';
 
 // How many frames to hold while the chat they belong to is still loading.
 const MAX_HELD_FRAMES = 1000;
@@ -40,6 +43,7 @@ const JOB_STARTED = 'job_started';
 const JOB_EXITED = 'job_exited';
 const WAIT_STARTED = 'wait_started';
 const WAIT_SETTLED = 'wait_settled';
+const HANDOVER = 'handover';
 
 const EMPTY_TOOL_CALL: Omit<ToolCallRecord, 'id'> = {
   name: '',
@@ -101,6 +105,17 @@ function mergeMetadata(
   return merged;
 }
 
+// message_end carries metadata straight from the server, so its handovers are
+// read by the schema a reload reads them by and the divider it leaves is the
+// one a reload rebuilds.
+function readHandovers(
+  metadata: MessageMetadata | null | undefined
+): MessageMetadata | null | undefined {
+  if (!metadata?.handovers) return metadata;
+  const handovers = HandoversSchema.safeParse(metadata.handovers);
+  return { ...metadata, handovers: handovers.success ? handovers.data : undefined };
+}
+
 // The server saves the user message and streams the assistant reply over
 // /ws/chats/:id. Posting to /api/chats/:id/messages only stores the user's
 // message, so sending over the socket is what produces a reply.
@@ -147,6 +162,17 @@ type ServerMessage =
   | { type: typeof JOB_EXITED; message_id: string; job: JobExited }
   | { type: typeof WAIT_STARTED; message_id: string; tool_call_id: string; waiting: Waiting }
   | { type: typeof WAIT_SETTLED; message_id: string; settled: WaitSettled }
+  | {
+      type: typeof HANDOVER;
+      message_id: string;
+      from: string;
+      to: string;
+      agent: string;
+      reason: string;
+      resets_at: string | null;
+      carried: boolean;
+      at: number;
+    }
   | {
       type: 'tool_result';
       message_id: string;
@@ -829,6 +855,17 @@ export function useChat(
         case 'action_receipt':
           appendReceipt(payload.message_id, payload.receipt);
           break;
+        case HANDOVER: {
+          if (assistantId !== payload.message_id) break;
+          const handover = HandoverSchema.safeParse(payload);
+          if (!handover.success) break;
+          assistantMetadata = {
+            ...assistantMetadata,
+            handovers: appendHandover(assistantMetadata?.handovers ?? [], handover.data),
+          };
+          upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+          break;
+        }
         case 'image':
         case 'video':
         case 'audio':
@@ -858,7 +895,7 @@ export function useChat(
             payload.message_id,
             'assistant',
             payload.content,
-            payload.metadata ?? assistantMetadata
+            readHandovers(payload.metadata) ?? assistantMetadata
           );
           assistantId = null;
           assistantContent = '';

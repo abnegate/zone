@@ -19,6 +19,7 @@ use super::credential::Credential;
 use super::environment;
 use super::error::{ExitStatus, ProviderError};
 use super::event::AgentEvent;
+use super::limit::Limit;
 use super::lines::{Frame, Lines};
 use super::settings::{CliSettings, Toolset};
 use super::transcript;
@@ -102,6 +103,7 @@ impl CliProvider {
                 self.settings.toolset.as_deref(),
                 self.settings.builtin_tools,
                 self.settings.sandbox,
+                self.settings.session.as_ref(),
             ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -215,8 +217,10 @@ impl CliProvider {
                 for event in events.drain(..) {
                     // The agent's own report of what went wrong beats an exit
                     // code, which says only that something did.
-                    if let AgentEvent::Failed(message) = &event {
-                        Err(session.fail(message).await)?;
+                    match &event {
+                        AgentEvent::Failed(message) => Err(session.fail(message).await)?,
+                        AgentEvent::Limited(limit) => Err(session.limited(limit).await)?,
+                        _ => {}
                     }
                     kept = kept.saturating_add(retained(&event));
                     if kept > output_limit {
@@ -246,6 +250,15 @@ impl CliProvider {
                 AgentEvent::Usage(counts) => usage = Some(counts),
                 AgentEvent::Tool(call) => {
                     tracing::debug!(provider = %self.name, tool = %call.function.name, "agent tool call");
+                }
+                AgentEvent::Window(window) => {
+                    tracing::debug!(provider = %self.name, window = %window.name, used_percent = ?window.used_percent, "agent usage window");
+                }
+                AgentEvent::Session(id) => {
+                    tracing::debug!(provider = %self.name, session = %id, "agent session");
+                }
+                AgentEvent::Limited(limit) => {
+                    return Err(ProviderError::limited(&self.name, limit));
                 }
                 AgentEvent::Failed(message) => {
                     return Err(ProviderError::agent(&self.name, &message));
@@ -351,6 +364,20 @@ impl Session {
         ProviderError::agent(&self.name, &failure(message, &diagnostics))
     }
 
+    /// Stop the agent, then report the limit it named, its words followed by
+    /// the end of its stderr exactly as [`Session::fail`] reports a failure.
+    async fn limited(&mut self, limit: &Limit) -> ProviderError {
+        self.halt().await;
+        let diagnostics = self.diagnostics().await;
+        ProviderError::limited(
+            &self.name,
+            Limit {
+                message: failure(&limit.message, &diagnostics),
+                ..limit.clone()
+            },
+        )
+    }
+
     /// Every abnormal end goes through here: a child left running writes into
     /// a pipe nobody is reading and blocks there until it is killed anyway.
     async fn halt(&mut self) {
@@ -445,9 +472,14 @@ fn interpret(
 /// reader.
 fn retained(event: &AgentEvent) -> usize {
     match event {
-        AgentEvent::Text(text) | AgentEvent::Failed(text) => text.len(),
+        AgentEvent::Text(text)
+        | AgentEvent::Failed(text)
+        | AgentEvent::Limited(Limit { message: text, .. }) => text.len(),
         AgentEvent::Tool(call) => call.function.name.len() + '\n'.len_utf8(),
-        AgentEvent::Usage(_) | AgentEvent::Finished { .. } => 0,
+        AgentEvent::Usage(_)
+        | AgentEvent::Window(_)
+        | AgentEvent::Session(_)
+        | AgentEvent::Finished { .. } => 0,
     }
 }
 
@@ -911,7 +943,139 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
                 !rendered.to_ascii_lowercase().contains("rate limit"),
                 "{rendered}"
             );
+            assert!(
+                matches!(&error, ProviderError::Limited { limit, .. } if limit.credits && limit.message == failure),
+                "{error:?}"
+            );
         }
+    }
+
+    const SESSION_LIMIT: &str = "You've hit your session limit · resets 5pm";
+
+    /// claude refusing the main agent's request past the plan's five-hour
+    /// window, after it had begun to answer.
+    fn refused_after_text() -> [String; 4] {
+        [
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Halfway there."}]}, "parent_tool_use_id": null}),
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_208_000, "rateLimitType": "five_hour", "isUsingOverage": false}}),
+            json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": SESSION_LIMIT}]}, "parent_tool_use_id": null, "error": "rate_limit", "is_api_error_message": true}),
+            json!({"type": "result", "subtype": "success", "is_error": true, "api_error_status": 429, "result": SESSION_LIMIT}),
+        ]
+        .map(|line| line.to_string())
+    }
+
+    async fn streamed(provider: &CliProvider) -> (Vec<AgentEvent>, Option<ProviderError>, usize) {
+        let messages = [Message::user("Carry on.")];
+        let mut events = provider
+            .stream(request(&messages))
+            .expect("a running agent");
+        let mut delivered = Vec::new();
+        let mut failure = None;
+        let mut after = 0;
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(event) if failure.is_none() => delivered.push(event),
+                Ok(_) => after += 1,
+                Err(error) => failure = Some(error),
+            }
+        }
+        (delivered, failure, after)
+    }
+
+    #[tokio::test]
+    async fn a_limited_turn_ends_the_stream_as_a_limit_error() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            settings(&directory, &replaying(&directory, &refused_after_text())),
+        );
+
+        let (delivered, failure, after) = streamed(&provider).await;
+
+        assert!(
+            matches!(delivered.as_slice(), [AgentEvent::Text(text)] if text == "Halfway there."),
+            "{delivered:?}"
+        );
+        assert_eq!(after, 0, "the stream went on past the limit");
+        let failure = failure.expect("a limited turn ends in an error");
+        let ProviderError::Limited { provider, limit } = &failure else {
+            panic!("expected a limit, got {failure:?}");
+        };
+        assert_eq!(provider, "claude");
+        assert_eq!(
+            limit.message,
+            format!("rate limit reached (five_hour, rejected): {SESSION_LIMIT}")
+        );
+        assert_eq!(
+            limit.resets_at,
+            chrono::DateTime::from_timestamp(1_790_208_000, 0)
+        );
+        assert!(!limit.credits);
+        assert_eq!(
+            failure.to_string(),
+            format!("claude: rate limit reached (five_hour, rejected): {SESSION_LIMIT}")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_report_reaches_the_consumer_without_ending_the_turn() {
+        let stream = [
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": 1_790_208_000, "rateLimitType": "five_hour", "utilization": 0.43, "isUsingOverage": false}}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}, "parent_tool_use_id": null}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": "Done."}),
+        ]
+        .map(|line| line.to_string());
+        let directory = TempDir::new().expect("a temporary directory");
+        let provider = CliProvider::agent(
+            AgentKind::Claude,
+            settings(&directory, &replaying(&directory, &stream)),
+        );
+
+        let (delivered, failure, _) = streamed(&provider).await;
+
+        assert!(failure.is_none(), "{failure:?}");
+        let [
+            AgentEvent::Window(window),
+            AgentEvent::Text(text),
+            AgentEvent::Finished { .. },
+        ] = delivered.as_slice()
+        else {
+            panic!("expected the window, then the answer: {delivered:?}");
+        };
+        assert_eq!(window.name, crate::llm::provider::Window::FIVE_HOURS);
+        assert_eq!(window.used_percent, Some(43.0));
+        assert_eq!(text, "Done.");
+
+        let completion = run(&provider, &[Message::user("Carry on.")])
+            .await
+            .expect("a window is no failure");
+        assert_eq!(completion.message.content.as_deref(), Some("Done."));
+    }
+
+    #[tokio::test]
+    async fn a_limit_carries_the_end_of_stderr_after_the_agents_words() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let script = format!(
+            "echo 'warning: the plan is spent' >&2
+{}",
+            replaying(&directory, &refused_after_text())
+        );
+        let provider = CliProvider::agent(AgentKind::Claude, settings(&directory, &script));
+
+        let error = run(&provider, &[Message::user("Carry on.")])
+            .await
+            .expect_err("a limited turn");
+
+        let ProviderError::Limited { limit, .. } = &error else {
+            panic!("expected a limit, got {error:?}");
+        };
+        assert_eq!(
+            limit.message,
+            format!(
+                "rate limit reached (five_hour, rejected): {SESSION_LIMIT}{STDERR_HEADING}warning: the plan is spent"
+            )
+        );
+        assert_eq!(error.to_string(), format!("claude: {}", limit.message));
     }
 
     /// claude hands a subagent's refusal to the main agent as the result of
@@ -1636,6 +1800,36 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 .iter()
                 .any(|argument| argument.contains("zone-turn-notarealtoken")),
             "the token reached argv: {arguments:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_session_a_turn_is_given_reaches_the_agents_command_line() {
+        let recorder = Recorder::new();
+        answered(recorder.settings().with_session(crate::llm::Session {
+            id: "5b0c1f7e-8d43-4a77-9a3e-2f0d6c1b9e42".to_string(),
+            resume: true,
+        }))
+        .await;
+
+        let arguments = recorder.arguments();
+        assert_eq!(
+            &arguments[arguments.len() - 3..],
+            [
+                "--resume",
+                "5b0c1f7e-8d43-4a77-9a3e-2f0d6c1b9e42",
+                "--print"
+            ],
+            "{arguments:?}"
+        );
+
+        answered(recorder.settings()).await;
+        let arguments = recorder.arguments();
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == "--resume" || argument == "--session-id"),
+            "a turn given no session was pinned to one: {arguments:?}"
         );
     }
 

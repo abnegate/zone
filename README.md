@@ -27,6 +27,7 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 - **Intelligent Routing**: Automatic model selection based on query complexity (LiteLLM)
 - **Zone Chat**: Built-in conversations, history, web search, and agent tools
 - **Coding Agent Providers**: An organization can run its chats and tasks on the Claude Code or Codex CLI in the manager image, signed in with its own Claude or ChatGPT subscription (see Model Backend in [docs/CONFIGURATION.md](docs/CONFIGURATION.md))
+- **Multiple Agent Accounts**: Sign an organization in to several Claude and ChatGPT accounts; each chat and task starts on the one with the most usage left, and hands over to another mid-answer when it hits a limit (see [Which account runs a chat](docs/CONFIGURATION.md#which-account-runs-a-chat))
 - **Private Web Search** (optional): VPN-protected metasearch engine; when the VPN is on, all stack internet traffic uses the same tunnel
 
 ### Platform Management
@@ -411,7 +412,7 @@ make install-cli
 
 ### Database Migrations
 
-Migrations are in `runner/zone_server/migrations/`. Fresh installs apply a single `001_initial_schema.sql`.
+Migrations are in `runner/zone_server/migrations/`. Fresh installs apply the squashed `001_initial_schema.sql`, then each later numbered migration in order.
 
 ### Project Structure
 

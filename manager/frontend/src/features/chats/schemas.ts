@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ACTION_TARGETS } from './types';
+import { ACTION_TARGETS, HANDOVER_AGENTS, HANDOVER_REASONS } from './types';
 
 export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);
 
@@ -196,6 +196,32 @@ export const ActionReceiptSchema = z.object({
   reason: statedReason,
 });
 
+const absentWhenEmpty = z
+  .string()
+  .nullish()
+  .transform((value) => value || undefined)
+  .catch(undefined);
+
+/**
+ * Read the same way from the live frame and from the stored record, so the
+ * divider a frame draws is the divider a reload rebuilds. The frame carries
+ * `type` rather than `kind`, so `kind` defaults. An unrecognised reason reads
+ * as a usage limit: the switch still happened, only its cause is unknown.
+ */
+export const HandoverSchema = z.object({
+  kind: z.literal('handover').default('handover'),
+  from: absentWhenEmpty,
+  to: z.string().min(1),
+  from_agent: z.enum(HANDOVER_AGENTS),
+  agent: z.enum(HANDOVER_AGENTS),
+  reason: z.enum(HANDOVER_REASONS).catch('limit'),
+  resets_at: absentWhenEmpty,
+  carried: z.boolean(),
+  at: z.number().int().nonnegative(),
+});
+
+export const HandoversSchema = tolerantArray(HandoverSchema);
+
 export const MessageMetadataSchema = z
   .object({
     attachments: z.array(MessageAttachmentSchema).optional(),
@@ -205,6 +231,7 @@ export const MessageMetadataSchema = z
     web_search: z.boolean().optional(),
     memory_used: z.boolean().optional().catch(undefined),
     reasoning: z.string().optional(),
+    handovers: HandoversSchema.optional().catch(undefined),
   })
   .passthrough();
 

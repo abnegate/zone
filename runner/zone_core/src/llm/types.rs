@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::provider::Window;
+
 fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -352,11 +354,23 @@ pub struct Choice {
 }
 
 /// Token usage statistics
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+}
+
+impl Usage {
+    pub fn plus(self, other: Self) -> Self {
+        Self {
+            prompt_tokens: self.prompt_tokens.saturating_add(other.prompt_tokens),
+            completion_tokens: self
+                .completion_tokens
+                .saturating_add(other.completion_tokens),
+            total_tokens: self.total_tokens.saturating_add(other.total_tokens),
+        }
+    }
 }
 
 /// Streaming chunk.
@@ -379,6 +393,13 @@ pub struct ChatStreamChunk {
     pub choices: Vec<StreamChoice>,
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// A usage window a coding agent reported spending on this chunk. No
+    /// endpoint sends one.
+    #[serde(skip)]
+    pub window: Option<Window>,
+    /// The session a coding agent announced it is running this turn under.
+    #[serde(skip)]
+    pub session: Option<String>,
 }
 
 /// Streaming choice delta
@@ -1387,5 +1408,69 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.completion_tokens, 50);
         assert_eq!(usage.total_tokens, 150);
+    }
+
+    #[test]
+    fn usage_from_two_turns_adds_up_field_by_field() {
+        let first = Usage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+        let second = Usage {
+            prompt_tokens: 7,
+            completion_tokens: 3,
+            total_tokens: 10,
+        };
+
+        assert_eq!(
+            first.plus(second),
+            Usage {
+                prompt_tokens: 107,
+                completion_tokens: 53,
+                total_tokens: 160,
+            }
+        );
+    }
+
+    #[test]
+    fn usage_that_would_overflow_stops_at_the_largest_count() {
+        let full = Usage {
+            prompt_tokens: u32::MAX,
+            completion_tokens: u32::MAX - 1,
+            total_tokens: u32::MAX,
+        };
+        let more = Usage {
+            prompt_tokens: 1,
+            completion_tokens: 5,
+            total_tokens: 2,
+        };
+
+        assert_eq!(
+            full.plus(more),
+            Usage {
+                prompt_tokens: u32::MAX,
+                completion_tokens: u32::MAX,
+                total_tokens: u32::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn usage_serialises_to_the_fields_it_was_read_from() {
+        let usage = Usage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+
+        assert_eq!(
+            serde_json::to_value(usage).unwrap(),
+            serde_json::json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+            })
+        );
     }
 }

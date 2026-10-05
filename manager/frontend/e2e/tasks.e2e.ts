@@ -295,10 +295,11 @@ test.describe('Tasks Page', () => {
     });
 
     test('displays status badge text', async ({ page }) => {
-      const taskCards = page.locator('.task-card');
-      await expect(taskCards.nth(0).locator('.task-badges')).toContainText('created');
-      await expect(taskCards.nth(1).locator('.task-badges')).toContainText('in progress');
-      await expect(taskCards.nth(2).locator('.task-badges')).toContainText('complete');
+      const statusOf = (title: string) =>
+        page.locator('.task-card', { hasText: title }).locator('.task-status');
+      await expect(statusOf('Implement login page')).toHaveText('created');
+      await expect(statusOf('Fix navigation bug')).toHaveText('in progress');
+      await expect(statusOf('Add API endpoint')).toHaveText('complete');
     });
 
     test('shows agentic badge for agentic tasks', async ({ page }) => {
