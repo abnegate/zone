@@ -11,7 +11,7 @@ use crate::inventory::{
 use crate::language;
 use crate::person;
 use crate::quality::Quality;
-use crate::recipe::{RecipeCatalog, TrainingModel, sanitize_weight_filename};
+use crate::recipe::{Recipe, RecipeCatalog, TrainingModel, sanitize_weight_filename};
 use crate::subject::{CENTRE, SaliencyMap, Subject};
 use crate::train::{Run, TrainProgress};
 use crate::video;
@@ -458,11 +458,6 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
     if config.train_command.is_none() && !config.enabled {
         return Err(TrainError::Disabled);
     }
-    if request.provider.is_runpod() && request.subject != TrainSubject::Person {
-        return Err(TrainError::Invalid(
-            "Runpod is available for Person LoRA, fine-tune, pivotal, and video.",
-        ));
-    }
     if request.subject == TrainSubject::Language {
         return validate_language(request);
     }
@@ -875,6 +870,25 @@ async fn train_with_pipeline(
     } else if matches!(model, TrainingModel::Sdxl { .. }) {
         return publish_host_person(
             config,
+            &model,
+            &request,
+            &filename,
+            trigger,
+            &attempt,
+            findings,
+            Screening {
+                kept: verdict.keep.len(),
+                dropped,
+                attempted,
+            },
+            runpod_api_key.as_deref(),
+            progress,
+        )
+        .await;
+    } else if request.provider.is_runpod() {
+        return publish_host_other(
+            config,
+            recipe,
             &model,
             &request,
             &filename,
@@ -1327,6 +1341,72 @@ async fn publish_host_person(
     }
     let finished = host_train::wait(&dir, progress).await?;
     let directory = request.method.publish_directory();
+    let published = finished.filename.as_deref().unwrap_or(filename);
+    let path = config.models_dir.join(directory).join(published);
+    if require_regular_file(&config.models_dir.join(directory), &path).is_err() {
+        return Err(TrainError::Failed(
+            "host trainer did not write a regular weight file".to_string(),
+        ));
+    }
+    Ok(TrainOutcome {
+        path,
+        quality: None,
+        dataset: findings,
+        screening,
+    })
+}
+
+async fn publish_host_other(
+    config: &Config,
+    recipe: &Recipe,
+    model: &TrainingModel,
+    request: &TrainRequest,
+    filename: &str,
+    trigger: &str,
+    attempt: &Attempt,
+    findings: Vec<crate::dataset::Finding>,
+    screening: Screening,
+    runpod_api_key: Option<&str>,
+    progress: Option<mpsc::UnboundedSender<TrainProgress>>,
+) -> Result<TrainOutcome, TrainError> {
+    let checkpoint = match model {
+        TrainingModel::Flux { checkpoint } | TrainingModel::Sdxl { checkpoint } => checkpoint,
+        TrainingModel::QwenEdit { unet, .. } => unet,
+    };
+    let adapter = recipe
+        .training_adapter()
+        .map_err(|_| TrainError::Invalid("training adapter mapping is missing"))?;
+    let mut job = host_train::HostJob::create(&request.name, "lora", trigger, checkpoint);
+    job.subject = "other".to_string();
+    job.filename = Some(filename.to_string());
+    job.recipe_id = adapter.recipe_id.clone();
+    job.hf_base = adapter.hf_base.clone();
+    job.image_count = fs::read_dir(attempt.root.join("targets"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "png")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let dir = host_train::job_dir(&config.models_dir, job.id);
+    bind_compute(&mut job, request, &dir, runpod_api_key)?;
+    host_train::stage_dataset(&attempt.root, &dir)?;
+    host_train::write_queued_progress(&dir, job.image_count)?;
+    if let Some(progress) = &progress {
+        let _ = progress.send(
+            TrainProgress::new(0, host_train::steps_for(job.image_count))
+                .phase("queued", "Waiting for the host trainer")
+                .percent(0),
+        );
+    }
+    let finished = host_train::wait(&dir, progress).await?;
+    let directory = TrainMethod::Lora.publish_directory();
     let published = finished.filename.as_deref().unwrap_or(filename);
     let path = config.models_dir.join(directory).join(published);
     if require_regular_file(&config.models_dir.join(directory), &path).is_err() {
@@ -2599,7 +2679,7 @@ mod tests {
     }
 
     #[test]
-    fn runpod_is_refused_for_language_and_other() {
+    fn runpod_is_accepted_for_language_and_other() {
         let (_root, config) = harness("unused");
         let mut language = language_request(
             "support-bot",
@@ -2610,20 +2690,10 @@ mod tests {
             )],
         );
         language.provider = TrainProvider::Runpod;
-        assert!(matches!(
-            validate_request(&config, &language),
-            Err(TrainError::Invalid(
-                "Runpod is available for Person LoRA, fine-tune, pivotal, and video."
-            ))
-        ));
+        assert!(validate_request(&config, &language).is_ok());
         let mut other = request("style", "flux-schnell", Some("ohwx"));
         other.provider = TrainProvider::Runpod;
-        assert!(matches!(
-            validate_request(&config, &other),
-            Err(TrainError::Invalid(
-                "Runpod is available for Person LoRA, fine-tune, pivotal, and video."
-            ))
-        ));
+        assert!(validate_request(&config, &other).is_ok());
     }
 
     #[tokio::test]
@@ -2647,6 +2717,144 @@ mod tests {
                 TrainError::Invalid("Save a Runpod API key in Workspace Settings.")
             ),
             "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runpod_other_without_a_key_is_refused() {
+        let (_root, config) = harness("true");
+        let mut other = request("style", "flux-schnell", Some("ohwx"));
+        other.provider = TrainProvider::Runpod;
+        let error = rejected(&config, other).await;
+        assert!(
+            matches!(
+                error,
+                TrainError::Invalid("Save a Runpod API key in Workspace Settings.")
+            ),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runpod_other_with_a_key_publishes_a_host_job() {
+        let root = tempfile::tempdir().expect("temporary ComfyUI root");
+        let models = root.path().join("models");
+        fs::create_dir(&models).expect("models directory");
+        let config = Config {
+            enabled: true,
+            base_url: "http://127.0.0.1:9".to_string(),
+            models_dir: models,
+            train_command: None,
+            train_timeout_secs: 2,
+            ..Default::default()
+        };
+        let watching = config.models_dir.clone();
+        tokio::spawn(async move {
+            for _ in 0..400 {
+                if let Some(job) = host_train::current(&watching) {
+                    let dir = host_train::job_dir(&watching, job.id);
+                    let filename = job
+                        .filename
+                        .clone()
+                        .unwrap_or_else(|| "style.safetensors".into());
+                    let loras = watching.join("loras");
+                    fs::create_dir_all(&loras).unwrap();
+                    fs::write(loras.join(&filename), b"lora").unwrap();
+                    let mut finished = host_train::read_job(&dir).unwrap();
+                    finished.status = host_train::HostStatus::Succeeded;
+                    host_train::write_job(&dir, &finished).unwrap();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        let mut other = request("style", "flux-schnell", Some("ohwx"));
+        other.provider = TrainProvider::Runpod;
+        let outcome = train_with_pipeline(
+            &config,
+            String::new(),
+            String::new(),
+            Some("rp-test-key".into()),
+            other,
+            keep_all,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let published = config.models_dir.join("loras").join("style.safetensors");
+        assert_eq!(outcome.path, published);
+        assert_eq!(fs::read(&published).unwrap(), b"lora");
+        assert!(outcome.quality.is_none());
+        let job = host_train::current(&config.models_dir).unwrap();
+        assert_eq!(job.subject, "other");
+        assert_eq!(job.provider, TrainProvider::Runpod);
+        assert_eq!(job.recipe_id, "flux-schnell-adapter");
+        assert_eq!(job.hf_base, "black-forest-labs/FLUX.1-schnell");
+        assert_eq!(job.checkpoint, "flux1-schnell-fp8.safetensors");
+        assert_eq!(job.filename.as_deref(), Some("style.safetensors"));
+        assert_eq!(job.method, "lora");
+        assert_eq!(job.trigger, "ohwx");
+        assert_eq!(job.image_count, 1);
+        let dir = host_train::job_dir(&config.models_dir, job.id);
+        assert!(dir.join("dataset/0000.png").is_file());
+        assert!(dir.join("dataset/0000.txt").is_file());
+        assert_eq!(
+            fs::read_to_string(dir.join("runpod.key")).unwrap().trim(),
+            "rp-test-key"
+        );
+    }
+
+    #[tokio::test]
+    async fn runpod_language_with_a_key_publishes_a_host_job() {
+        let (_root, config) = harness("unused");
+        let watching = config.models_dir.clone();
+        tokio::spawn(async move {
+            for _ in 0..200 {
+                if let Some(job) = host_train::current(&watching) {
+                    let dir = host_train::job_dir(&watching, job.id);
+                    let mut finished = host_train::read_job(&dir).unwrap();
+                    finished.status = host_train::HostStatus::Succeeded;
+                    host_train::write_job(&dir, &finished).unwrap();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        let mut language = language_request(
+            "support-bot",
+            "qwen2.5:7b",
+            vec![document(
+                "chat.json",
+                r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#,
+            )],
+        );
+        language.provider = TrainProvider::Runpod;
+        let outcome = train_with_pipeline(
+            &config,
+            String::new(),
+            String::new(),
+            Some("rp-test-key".into()),
+            language,
+            keep_all,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.path.file_name().unwrap(), "support-bot");
+        assert!(outcome.quality.is_none());
+        let job = host_train::current(&config.models_dir).unwrap();
+        assert_eq!(job.subject, "language");
+        assert_eq!(job.provider, TrainProvider::Runpod);
+        assert_eq!(job.recipe_id, "chat");
+        assert_eq!(job.checkpoint, "qwen2.5:7b");
+        assert_eq!(job.filename.as_deref(), Some("support-bot"));
+        let dir = host_train::job_dir(&config.models_dir, job.id);
+        assert!(dir.join("data/train.jsonl").is_file());
+        assert_eq!(
+            fs::read_to_string(dir.join("runpod.key")).unwrap().trim(),
+            "rp-test-key"
         );
     }
 
