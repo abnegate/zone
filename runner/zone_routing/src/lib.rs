@@ -62,21 +62,25 @@ mod tests {
         "all_proxy",
     ];
 
-    /// Run `test` again in a child whose only variables are `PATH` and
-    /// `variables`, since the process environment is shared by every test.
+    /// Run `test` again in a child whose only variables are `PATH`, those
+    /// coverage and backtraces need, and `variables`, since the process
+    /// environment is shared by every test.
     async fn ran_in_child(test: &str, variables: &[(&str, &str)]) -> bool {
         if env::var(CHILD).as_deref() == Ok(test) {
             return false;
         }
-        let output = Command::new(env::current_exe().expect("the test binary"))
+        let mut child = Command::new(env::current_exe().expect("the test binary"));
+        child
             .args(["--exact", test, "--nocapture", "--test-threads", "1"])
             .env_clear()
-            .env("PATH", env::var_os("PATH").unwrap_or_default())
             .env(CHILD, test)
-            .envs(variables.iter().copied())
-            .output()
-            .await
-            .expect("the test binary runs");
+            .envs(variables.iter().copied());
+        for name in ["PATH", "LLVM_PROFILE_FILE", "RUST_BACKTRACE"] {
+            if let Some(value) = env::var_os(name) {
+                child.env(name, value);
+            }
+        }
+        let output = child.output().await.expect("the test binary runs");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success() && stdout.contains("1 passed"),
