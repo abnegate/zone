@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +60,35 @@ OLLAMA_MLX = {
     'qwen3.8': 'mlx-community/Qwen3.8-27B-4bit',
 }
 SMALL_LLAMA_TAGS = {'llama3.2:1b', 'llama3.2:3b'}
+OLLAMA_HF = {
+    'llama3.2:1b': 'unsloth/Llama-3.2-1B-Instruct',
+    'llama3.2:3b': 'unsloth/Llama-3.2-3B-Instruct',
+    'llama3.2': 'unsloth/Llama-3.2-3B-Instruct',
+    'llama3.2:latest': 'unsloth/Llama-3.2-3B-Instruct',
+    'llama3.1:8b': 'unsloth/Meta-Llama-3.1-8B-Instruct',
+    'llama3.1': 'unsloth/Meta-Llama-3.1-8B-Instruct',
+    'llama3.1:latest': 'unsloth/Meta-Llama-3.1-8B-Instruct',
+    'llama3:8b': 'unsloth/Llama-3-8B-Instruct',
+    'llama3': 'unsloth/Llama-3-8B-Instruct',
+    'mistral': 'unsloth/mistral-7b-instruct-v0.3',
+    'mistral:7b': 'unsloth/mistral-7b-instruct-v0.3',
+    'mistral:latest': 'unsloth/mistral-7b-instruct-v0.3',
+    'mixtral': 'unsloth/mixtral-8x7b-instruct-v0.1',
+    'mixtral:8x7b': 'unsloth/mixtral-8x7b-instruct-v0.1',
+    'qwen2.5:0.5b': 'Qwen/Qwen2.5-0.5B-Instruct',
+    'qwen2.5:1.5b': 'Qwen/Qwen2.5-1.5B-Instruct',
+    'qwen2.5:3b': 'Qwen/Qwen2.5-3B-Instruct',
+    'qwen2.5:7b': 'Qwen/Qwen2.5-7B-Instruct',
+    'qwen2.5:14b': 'Qwen/Qwen2.5-14B-Instruct',
+    'qwen2.5:32b': 'Qwen/Qwen2.5-32B-Instruct',
+    'qwen2.5': 'Qwen/Qwen2.5-7B-Instruct',
+    'qwen2.5:latest': 'Qwen/Qwen2.5-7B-Instruct',
+    'qwen3.8:27b': 'Qwen/Qwen3-32B',
+    'qwen38u:32k': 'Qwen/Qwen3-32B',
+    'qwen3.8': 'Qwen/Qwen3-32B',
+}
+CUDA_QLORA_MILLION = 14000
+LORA_TARGETS = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
@@ -109,6 +142,43 @@ def mlx_repo(checkpoint: str) -> str:
         if mapped:
             return mapped
     raise ValueError(f'no MLX mapping for {name}')
+
+
+def hf_repo(checkpoint: str) -> str:
+    name = (checkpoint or '').strip()
+    if not name:
+        raise ValueError('missing checkpoint')
+    if '/' in name:
+        if name.lower().startswith('mlx-community/'):
+            raise ValueError(f'no Hugging Face mapping for {name}')
+        return name
+    key = name.lower()
+    mapped = OLLAMA_HF.get(key)
+    if mapped:
+        return mapped
+    base, separator, tag = key.partition(':')
+    if not separator:
+        mapped = OLLAMA_HF.get(base)
+        if mapped:
+            return mapped
+    elif tag in {'', 'latest'}:
+        mapped = OLLAMA_HF.get(base)
+        if mapped:
+            return mapped
+    raise ValueError(f'no Hugging Face mapping for {name}')
+
+
+def cuda_available() -> bool:
+    try:
+        import torch
+    except ImportError:
+        return False
+    return bool(torch.cuda.is_available())
+
+
+def publish_dir(models_dir: Path, job: dict[str, Any]) -> Path:
+    filename = published_name(str(job.get('filename') or default_filename(str(job.get('name') or 'language'))))
+    return Path(models_dir) / 'llm' / filename
 
 
 def family_name(name: str) -> str:
@@ -538,7 +608,184 @@ def ollama_create(filename: str, modelfile: Path) -> None:
     subprocess.run(['ollama', 'create', filename, '-f', str(modelfile)], check=True)
 
 
+def import_published(models_dir: Path, job: dict[str, Any]) -> None:
+    directory = publish_dir(models_dir, job)
+    modelfile = directory / 'Modelfile'
+    if not modelfile.is_file():
+        return
+    if not shutil.which('ollama'):
+        return
+    ollama_create(directory.name, modelfile)
+
+
+def example_text(example: dict[str, Any], tokenizer: Any | None = None) -> str:
+    messages = example.get('messages')
+    if isinstance(messages, list):
+        if tokenizer is not None and hasattr(tokenizer, 'apply_chat_template'):
+            try:
+                return str(
+                    tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=False
+                    )
+                )
+            except Exception:
+                pass
+        parts = []
+        for message in messages:
+            if isinstance(message, dict):
+                parts.append(str(message.get('content') or ''))
+        return '\n'.join(part for part in parts if part)
+    if 'prompt' in example or 'completion' in example:
+        return f'{example.get("prompt") or ""}{example.get("completion") or ""}'
+    return str(example.get('text') or '')
+
+
+def ensure_bitsandbytes() -> None:
+    try:
+        import bitsandbytes  # noqa: F401
+        return
+    except ImportError:
+        pass
+    subprocess.run(
+        [
+            sys.executable,
+            '-m',
+            'pip',
+            'install',
+            '--disable-pip-version-check',
+            'bitsandbytes',
+        ],
+        check=True,
+    )
+    import bitsandbytes  # noqa: F401
+
+
+def train_cuda(
+    models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str, Any]
+) -> None:
+    import torch
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    job_dir = Path(job_dir)
+    progress = train_sdxl.Progress(job_dir, 'language', 1)
+    progress.emit('converting', phase_step=0, phase_total=1)
+    data_dir, example_count, _kind = convert_dataset(job_dir, config)
+    if example_count <= 0:
+        raise RuntimeError(f'no language examples in {job_dir / "dataset"}')
+    total = steps_for(example_count, config)
+    job['image_count'] = example_count
+    job['total'] = total
+    job['step'] = job.get('step') or 0
+    job['filename'] = published_name(str(job.get('filename') or default_filename(job['name'])))
+    train_sdxl.write_job(job_dir, job)
+    progress = train_sdxl.Progress(job_dir, 'language', total)
+    progress.emit('converting', phase_step=1, phase_total=1)
+
+    repo = hf_repo(str(job['checkpoint']))
+    millions = param_millions(str(job['checkpoint']))
+    if millions is None:
+        millions = param_millions(repo)
+    load_kwargs: dict[str, Any] = {
+        'torch_dtype': torch.bfloat16,
+        'device_map': 'auto',
+    }
+    if millions is not None and millions >= CUDA_QLORA_MILLION:
+        try:
+            ensure_bitsandbytes()
+            from transformers import BitsAndBytesConfig
+
+            load_kwargs['quantization_config'] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type='nf4',
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+        except Exception as error:
+            raise RuntimeError(
+                'models ≥14B need bitsandbytes 4-bit QLoRA on CUDA; refusing to load full weights on this GPU'
+            ) from error
+
+    progress.emit('loading', phase_step=0, phase_total=1)
+    tokenizer = AutoTokenizer.from_pretrained(repo)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(repo, **load_kwargs)
+    params = config['lora_parameters']
+    model = get_peft_model(
+        model,
+        LoraConfig(
+            r=int(params['rank']),
+            lora_alpha=int(params['rank']),
+            lora_dropout=float(params['dropout']),
+            target_modules=LORA_TARGETS,
+            task_type='CAUSAL_LM',
+            bias='none',
+        ),
+    )
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=float(config['learning_rate']),
+    )
+    model.train()
+    progress.emit('loading', phase_step=1, phase_total=1)
+
+    examples = read_jsonl(data_dir / 'train.jsonl')
+    texts = [example_text(example, tokenizer) for example in examples]
+    texts = [text for text in texts if text.strip()]
+    if not texts:
+        raise RuntimeError(f'no language examples in {job_dir / "dataset"}')
+
+    progress.emit('training', phase_step=0, phase_total=total)
+    for step in range(1, total + 1):
+        encoded = tokenizer(
+            texts[(step - 1) % len(texts)],
+            return_tensors='pt',
+            truncation=True,
+            max_length=int(config.get('chunk_chars') or 2048),
+        )
+        input_ids = encoded['input_ids'].to('cuda')
+        attention_mask = encoded.get('attention_mask')
+        if attention_mask is not None:
+            attention_mask = attention_mask.to('cuda')
+        optimizer.zero_grad(set_to_none=True)
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=input_ids,
+        )
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+        job['step'] = step
+        progress.emit(
+            'training',
+            step=step,
+            phase_step=step,
+            phase_total=total,
+            loss=float(loss.detach().cpu()),
+        )
+        if step == 1 or step % 25 == 0 or step == total:
+            train_sdxl.write_job(job_dir, job)
+
+    progress.emit('publishing', step=0, phase_step=0, phase_total=1)
+    destination = publish_dir(models_dir, job)
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(destination)
+    write_modelfile(destination / 'Modelfile', str(destination))
+    write_modelfile(job_dir / 'Modelfile', str(destination))
+    if shutil.which('ollama'):
+        ollama_create(str(job['filename']), destination / 'Modelfile')
+    job['step'] = total
+    progress.emit('publishing', step=total, phase_step=1, phase_total=1)
+    train_sdxl.write_job(job_dir, job)
+
+
 def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str, Any]) -> None:
+    if cuda_available():
+        train_cuda(models_dir, job_dir, job, config)
+        return
     _ = models_dir
     job_dir = Path(job_dir)
     progress = train_sdxl.Progress(job_dir, 'language', 1)
@@ -649,3 +896,38 @@ def process_job(models_dir: Path, job_dir: Path, stub: bool) -> None:
     except Exception as error:
         train_sdxl.mark_failed(job_dir, job, error)
         raise
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description='Zone host language trainer')
+    parser.add_argument(
+        '--models-dir',
+        default=os.environ.get('COMFYUI_MODELS_DIR') or './models',
+    )
+    parser.add_argument('--once', action='store_true')
+    parser.add_argument('--stub', action='store_true')
+    args = parser.parse_args(argv)
+    models_dir = Path(args.models_dir).expanduser()
+    stub = stub_requested(args.stub)
+    while True:
+        job_dir = train_sdxl.find_job(models_dir)
+        if job_dir is None:
+            if args.once:
+                return 0
+            time.sleep(train_sdxl.WATCH_INTERVAL)
+            continue
+        try:
+            print(f'processing {job_dir}', flush=True)
+            process_job(models_dir, job_dir, stub)
+            print(f'finished {job_dir}', flush=True)
+        except Exception:
+            traceback.print_exc()
+            if args.once:
+                return 1
+        if args.once:
+            return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+

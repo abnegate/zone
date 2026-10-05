@@ -491,6 +491,12 @@ PHASE_WEIGHTS = {
         ('training', 70),
         ('publishing', 10),
     ),
+    'other': (
+        ('loading', 10),
+        ('encoding', 10),
+        ('training', 70),
+        ('publishing', 10),
+    ),
 }
 
 
@@ -535,6 +541,10 @@ def phase_message(
     if phase == 'loading':
         if method == 'language':
             return 'Loading the language model'
+        if method == 'other':
+            return 'Loading the image checkpoint'
+        if method == 'video':
+            return 'Loading the video checkpoint'
         return 'Loading the people checkpoint'
     if phase == 'class_images':
         if phase_total > 0:
@@ -897,15 +907,20 @@ def process_job(
     stub: bool,
 ) -> None:
     job = load_job(job_dir)
+    if (job.get('provider') or '') == 'runpod':
+        import train_runpod
+
+        train_runpod.process_job(models_dir, job_dir, config, stub)
+        return
     if (job.get('subject') or '') == 'language':
         import train_llm
 
         train_llm.process_job(models_dir, job_dir, stub)
         return
-    if (job.get('provider') or '') == 'runpod':
-        import train_runpod
+    if (job.get('subject') or '') == 'other':
+        import train_flux
 
-        train_runpod.process_job(models_dir, job_dir, config, stub)
+        train_flux.process_job(models_dir, job_dir, stub)
         return
     if (job.get('method') or '') == 'video':
         import train_wan

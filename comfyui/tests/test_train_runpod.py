@@ -107,6 +107,11 @@ class CatalogPickTests(unittest.TestCase):
         self.assertEqual(train_runpod.disk_size('lora'), 40)
         self.assertEqual(train_runpod.disk_size('pivotal'), 40)
         self.assertEqual(train_runpod.disk_size('video'), 40)
+        self.assertEqual(train_runpod.disk_size('lora', 'other'), 80)
+        self.assertEqual(train_runpod.disk_size('lora', 'language'), 80)
+        self.assertEqual(train_runpod.disk_size('finetune', 'language'), 150)
+        self.assertEqual(train_runpod.memory_floor('lora'), 24)
+        self.assertEqual(train_runpod.memory_floor('finetune'), 48)
 
 
 class CreateAndKeyTests(unittest.TestCase):
@@ -456,10 +461,140 @@ class PackTests(unittest.TestCase):
             self.assertIn('class/0000.png', names)
             self.assertIn('train_sdxl.py', names)
             self.assertIn('train_runpod.py', names)
+            self.assertIn('train_llm.py', names)
+            self.assertIn('train_llm_config.json', names)
+            self.assertIn('train_flux.py', names)
+            self.assertIn('train_flux_config.json', names)
             self.assertNotIn('provider', remote)
             self.assertEqual(remote['status'], 'queued')
             self.assertTrue(all('lustify' not in name for name in names))
             self.assertTrue(all('ggwp' not in name.lower() for name in names))
+
+
+class RemoteScriptTests(unittest.TestCase):
+    def test_remote_script_picks_language_other_video_person(self) -> None:
+        self.assertEqual(
+            train_runpod.remote_script({'subject': 'language', 'method': 'lora'}),
+            'train_llm.py',
+        )
+        self.assertEqual(
+            train_runpod.remote_script({'subject': 'other', 'method': 'lora'}),
+            'train_flux.py',
+        )
+        self.assertEqual(
+            train_runpod.remote_script({'method': 'video'}),
+            'train_wan.py',
+        )
+        self.assertEqual(
+            train_runpod.remote_script({'method': 'lora'}),
+            'train_sdxl.py',
+        )
+        self.assertEqual(
+            train_runpod.remote_script(
+                {'subject': 'language', 'method': 'video'}
+            ),
+            'train_llm.py',
+        )
+
+
+class DownloadBaseTests(unittest.TestCase):
+    def test_language_skips_weight_fetch(self) -> None:
+        with mock.patch.object(train_runpod, 'fetch_file') as fetch:
+            train_runpod.download_base(
+                {'subject': 'language', 'checkpoint': 'qwen2.5:7b', 'method': 'lora'},
+                Path('/tmp'),
+            )
+        fetch.assert_not_called()
+
+    def test_qwen_other_skips_weight_fetch(self) -> None:
+        with mock.patch.object(train_runpod, 'fetch_file') as fetch:
+            train_runpod.download_base(
+                {
+                    'subject': 'other',
+                    'recipe_id': 'qwen-image-edit-adapter',
+                    'hf_base': 'Qwen/Qwen-Image-Edit-2511',
+                    'method': 'lora',
+                },
+                Path('/tmp'),
+            )
+        fetch.assert_not_called()
+
+    def test_flux_fetches_comfy_org_fp8(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            with mock.patch.object(train_runpod, 'fetch_file') as fetch:
+                train_runpod.download_base(
+                    {
+                        'subject': 'other',
+                        'recipe_id': 'flux-dev-adapter',
+                        'checkpoint': 'flux1-dev-fp8.safetensors',
+                        'method': 'lora',
+                    },
+                    models,
+                )
+            fetch.assert_called_once()
+            url, dest = fetch.call_args.args
+            self.assertIn('Comfy-Org/flux1-dev', url)
+            self.assertIn('flux1-dev-fp8.safetensors', url)
+            self.assertEqual(dest, models / 'checkpoints' / 'flux1-dev-fp8.safetensors')
+
+
+class PublishedFilesTests(unittest.TestCase):
+    def test_language_packs_llm_adapter_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            dest = models / 'llm' / 'jerry'
+            dest.mkdir(parents=True)
+            (dest / 'Modelfile').write_text('FROM /workspace/models/llm/jerry\n', encoding='utf-8')
+            (dest / 'adapter_config.json').write_text('{}\n', encoding='utf-8')
+            (dest / 'adapter_model.safetensors').write_bytes(b'w')
+            files = train_runpod.published_files(
+                models,
+                {
+                    'subject': 'language',
+                    'filename': 'jerry',
+                    'name': 'jerry',
+                    'method': 'lora',
+                },
+            )
+            names = {path.name for path in files}
+            self.assertIn('Modelfile', names)
+            self.assertIn('adapter_config.json', names)
+            self.assertIn('adapter_model.safetensors', names)
+
+
+class LanguageImportTests(unittest.TestCase):
+    def test_process_job_imports_published_language_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = stage_job(
+                models,
+                extra={
+                    'subject': 'language',
+                    'checkpoint': 'qwen2.5:7b',
+                    'pod_id': 'keep-me',
+                },
+            )
+            client = mock.Mock()
+            client.get_pod.return_value = {'id': 'keep-me', 'status': 'RUNNING'}
+            with (
+                mock.patch.object(
+                    train_runpod, 'wait_ready', return_value={'status': 'running'}
+                ),
+                mock.patch.object(train_runpod, 'poll_until_done'),
+                mock.patch.object(train_runpod, 'download_artifact'),
+                mock.patch('train_llm.import_published') as imported,
+            ):
+                train_runpod.process_job(
+                    models,
+                    job_dir,
+                    train_sdxl.load_config(),
+                    client=client,
+                    sleep=lambda _interval: None,
+                    proxy_base='http://127.0.0.1:9',
+                )
+            imported.assert_called_once_with(models, mock.ANY)
+            client.delete_pod.assert_called_once_with('keep-me')
 
 
 if __name__ == '__main__':

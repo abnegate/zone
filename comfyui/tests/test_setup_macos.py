@@ -186,6 +186,8 @@ class SetupMacosTest(unittest.TestCase):
             self.assertTrue((install / "train_wan_config.json").is_file())
             self.assertTrue((install / "train_llm.py").is_file())
             self.assertTrue((install / "train_llm_config.json").is_file())
+            self.assertTrue((install / "train_flux.py").is_file())
+            self.assertTrue((install / "train_flux_config.json").is_file())
             self.assertTrue((install / "sdxl_checkpoint.py").is_file())
             self.assertTrue((install / ".venv-train-llm" / "bin" / "python").is_file())
             imported = subprocess.run(

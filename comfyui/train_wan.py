@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -366,3 +369,42 @@ def process_job(models_dir: Path, job_dir: Path, stub: bool) -> None:
     except Exception as error:
         train_sdxl.mark_failed(job_dir, job, error)
         raise
+
+
+def stub_requested(stub: bool) -> bool:
+    return bool(stub) or os.environ.get('ZONE_TRAIN_STUB', '') == '1'
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description='Zone host Wan video LoRA trainer')
+    parser.add_argument(
+        '--models-dir',
+        default=os.environ.get('COMFYUI_MODELS_DIR') or './models',
+    )
+    parser.add_argument('--once', action='store_true')
+    parser.add_argument('--stub', action='store_true')
+    args = parser.parse_args(argv)
+    models_dir = Path(args.models_dir).expanduser()
+    stub = stub_requested(args.stub)
+    while True:
+        job_dir = train_sdxl.find_job(models_dir)
+        if job_dir is None:
+            if args.once:
+                return 0
+            time.sleep(train_sdxl.WATCH_INTERVAL)
+            continue
+        try:
+            print(f'processing {job_dir}', flush=True)
+            process_job(models_dir, job_dir, stub)
+            print(f'finished {job_dir}', flush=True)
+        except Exception:
+            traceback.print_exc()
+            if args.once:
+                return 1
+        if args.once:
+            return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+

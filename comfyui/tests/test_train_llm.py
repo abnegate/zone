@@ -142,6 +142,20 @@ class MappingTests(unittest.TestCase):
             train_llm.mlx_repo('totally-unknown:7b')
         self.assertIn('no MLX mapping for totally-unknown:7b', str(raised.exception))
 
+    def test_hf_repo_maps_qwen_instruct(self) -> None:
+        self.assertEqual(train_llm.hf_repo('qwen2.5:7b'), 'Qwen/Qwen2.5-7B-Instruct')
+        self.assertEqual(train_llm.hf_repo('qwen2.5:14b'), 'Qwen/Qwen2.5-14B-Instruct')
+        self.assertEqual(train_llm.hf_repo('qwen3.8:27b'), 'Qwen/Qwen3-32B')
+        for key in train_llm.OLLAMA_MLX:
+            repo = train_llm.hf_repo(key)
+            self.assertIn('/', repo)
+            self.assertFalse(repo.startswith('mlx-community/'))
+
+    def test_hf_repo_unknown_tag_errors(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            train_llm.hf_repo('totally-unknown:7b')
+        self.assertIn('no Hugging Face mapping for totally-unknown:7b', str(raised.exception))
+
     def test_gguf_export_is_llama_mixtral_mistral_only(self) -> None:
         self.assertTrue(train_llm.exports_gguf('llama3.2:1b'))
         self.assertTrue(train_llm.exports_gguf('mistral'))
@@ -484,5 +498,52 @@ class FusePublishTests(unittest.TestCase):
             )
 
 
+class CudaPathTests(unittest.TestCase):
+    def test_train_uses_cuda_and_skips_mlx(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            write_texts(job_dir, count=1)
+            job = train_llm.normalize_job(queued_job(), job_dir)
+            with (
+                mock.patch.object(train_llm, 'cuda_available', return_value=True),
+                mock.patch.object(train_llm, 'train_cuda') as cuda,
+                mock.patch.object(train_llm, 'mlx_command') as mlx,
+                mock.patch.object(train_llm, 'require_llm_python') as require,
+            ):
+                train_llm.train(models, job_dir, job, train_llm.load_config())
+            cuda.assert_called_once()
+            mlx.assert_not_called()
+            require.assert_not_called()
+
+    def test_import_published_calls_ollama_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            dest = models / 'llm' / 'jerry'
+            dest.mkdir(parents=True)
+            (dest / 'Modelfile').write_text('FROM /x\n', encoding='utf-8')
+            with (
+                mock.patch.object(train_llm.shutil, 'which', return_value='/usr/bin/ollama'),
+                mock.patch.object(train_llm, 'ollama_create') as create,
+            ):
+                train_llm.import_published(models, {'filename': 'jerry', 'name': 'jerry'})
+            create.assert_called_once_with('jerry', dest / 'Modelfile')
+
+    def test_import_published_skips_without_ollama(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            dest = models / 'llm' / 'jerry'
+            dest.mkdir(parents=True)
+            (dest / 'Modelfile').write_text('FROM /x\n', encoding='utf-8')
+            with (
+                mock.patch.object(train_llm.shutil, 'which', return_value=None),
+                mock.patch.object(train_llm, 'ollama_create') as create,
+            ):
+                train_llm.import_published(models, {'filename': 'jerry'})
+            create.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()
+

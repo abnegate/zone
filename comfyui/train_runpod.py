@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-side Runpod REST v2 client for person train jobs."""
+"""Host-side Runpod REST v2 client for person, other, and language train jobs."""
 
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ FINETUNE_MEMORY = 48
 ADAPTER_MEMORY = 24
 FINETUNE_DISK = 150
 ADAPTER_DISK = 40
+OTHER_DISK = 80
 CATALOG_QUERY = urllib.parse.urlencode(
     {'include': 'AVAILABILITY', 'product': 'POD'}
 )
@@ -53,6 +54,10 @@ SCRIPTS = (
     'train_wan_config.json',
     'sdxl_checkpoint.py',
     'train_runpod.py',
+    'train_llm.py',
+    'train_llm_config.json',
+    'train_flux.py',
+    'train_flux_config.json',
 )
 
 BOOTSTRAP = r'''from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -233,8 +238,12 @@ def memory_floor(method: str) -> int:
     return FINETUNE_MEMORY if method == 'finetune' else ADAPTER_MEMORY
 
 
-def disk_size(method: str) -> int:
-    return FINETUNE_DISK if method == 'finetune' else ADAPTER_DISK
+def disk_size(method: str, subject: str = '') -> int:
+    if method == 'finetune':
+        return FINETUNE_DISK
+    if subject in {'other', 'language'}:
+        return OTHER_DISK
+    return ADAPTER_DISK
 
 
 def gpu_memory(gpu: dict[str, Any]) -> int:
@@ -290,12 +299,13 @@ def offers_cloud(gpu: dict[str, Any], cloud: str) -> bool:
 
 def pod_body(job: dict[str, Any], gpu: dict[str, Any], cloud: str) -> dict[str, Any]:
     method = str(job.get('method') or 'lora')
+    subject = str(job.get('subject') or '')
     return {
         'name': pod_name(job),
         'image': POD_IMAGE,
         'gpu': {'id': gpu['id'], 'count': 1},
         'cloud': cloud,
-        'disk': disk_size(method),
+        'disk': disk_size(method, subject),
         'ports': [f'{POD_PORT}/http'],
         'env': {'PYTHONUNBUFFERED': '1'},
         'args': pod_args(),
@@ -517,6 +527,7 @@ def fetch_file(url: str, dest: Path) -> None:
 
 def download_base(job: dict[str, Any], models_dir: Path) -> None:
     method = str(job.get('method') or 'lora')
+    subject = str(job.get('subject') or '')
     if method == 'video':
         import train_wan
 
@@ -530,6 +541,17 @@ def download_base(job: dict[str, Any], models_dir: Path) -> None:
         )
         for dest, filename in files:
             fetch_file(huggingface_url(repo, filename), dest)
+        return
+    if subject == 'language':
+        return
+    if subject == 'other':
+        import train_flux
+
+        if train_flux.is_qwen(job):
+            return
+        filename = str(job.get('checkpoint') or train_flux.DEFAULT_CHECKPOINT)
+        dest = Path(models_dir) / 'checkpoints' / filename
+        fetch_file(huggingface_url(train_flux.checkpoint_repo(filename), filename), dest)
         return
     filename = str(job.get('checkpoint') or train_sdxl.DEFAULT_CHECKPOINT)
     repo = str(job.get('hf_base') or train_sdxl.DEFAULT_HF_BASE)
@@ -554,10 +576,22 @@ def ensure_packages() -> None:
 def published_files(models_dir: Path, job: dict[str, Any]) -> list[Path]:
     models_dir = Path(models_dir)
     method = str(job.get('method') or 'lora')
+    subject = str(job.get('subject') or '')
+    if subject == 'language':
+        import train_llm
+
+        directory = train_llm.publish_dir(models_dir, job)
+        if not directory.is_dir():
+            return []
+        return [path for path in directory.rglob('*') if path.is_file()]
     if method == 'video':
         import train_wan
 
         weight = train_wan.publish_path(models_dir, job)
+    elif subject == 'other':
+        import train_flux
+
+        weight = train_flux.publish_path(models_dir, job)
     else:
         weight = train_sdxl.publish_path(models_dir, job)
     files = []
@@ -619,9 +653,7 @@ def run_remote(root: Path) -> None:
                 shutil.copy2(entry, models / 'loras' / entry.name)
     download_base(job, models)
     ensure_packages()
-    script = root / (
-        'train_wan.py' if str(job.get('method') or '') == 'video' else 'train_sdxl.py'
-    )
+    script = root / remote_script(job)
     subprocess.run(
         [sys.executable, str(script), '--once', '--models-dir', str(models)],
         check=True,
@@ -630,11 +662,29 @@ def run_remote(root: Path) -> None:
     write_artifact(root, models, job)
 
 
+def remote_script(job: dict[str, Any]) -> str:
+    if str(job.get('subject') or '') == 'language':
+        return 'train_llm.py'
+    if str(job.get('method') or '') == 'video':
+        return 'train_wan.py'
+    if str(job.get('subject') or '') == 'other':
+        return 'train_flux.py'
+    return 'train_sdxl.py'
+
+
 def normalize(job: dict[str, Any], job_dir: Path) -> dict[str, Any]:
     if str(job.get('method') or '') == 'video':
         import train_wan
 
         return train_wan.normalize_job(job, job_dir)
+    if str(job.get('subject') or '') == 'language':
+        import train_llm
+
+        return train_llm.normalize_job(job, job_dir)
+    if str(job.get('subject') or '') == 'other':
+        import train_flux
+
+        return train_flux.normalize_job(job, job_dir)
     return train_sdxl.normalize_job(job, job_dir)
 
 
@@ -690,6 +740,10 @@ def process_job(
             upload_bundle(base, pack_upload(models_dir, job_dir, job, config))
         poll_until_done(base, job_dir, sleep)
         download_artifact(base, Path(models_dir))
+        if str(job.get('subject') or '') == 'language':
+            import train_llm
+
+            train_llm.import_published(Path(models_dir), job)
         train_sdxl.mark_succeeded(job_dir, job)
     except Exception as error:
         train_sdxl.mark_failed(job_dir, job, error)
