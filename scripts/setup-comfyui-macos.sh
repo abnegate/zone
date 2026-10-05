@@ -160,7 +160,10 @@ install_trainer() {
     COMFY_PYTHON="$INSTALL_DIR/.venv/bin/python"
     TRAIN_VENV="$INSTALL_DIR/.venv-train"
     if [ ! -x "$TRAIN_VENV/bin/python" ]; then
-        "$COMFY_PYTHON" -m venv "$TRAIN_VENV"
+        "$COMFY_PYTHON" -m venv --without-pip "$TRAIN_VENV"
+    fi
+    if [ "${ZONE_TRAIN_SKIP_PIP:-}" != "1" ]; then
+        "$TRAIN_VENV/bin/python" -m ensurepip --upgrade
     fi
     # Nested venvs do not inherit the parent venv via --system-site-packages;
     # that flag only sees Homebrew's site. A .pth keeps Comfy's torch.
@@ -181,11 +184,13 @@ install_trainer() {
             diffusers peft accelerate transformers safetensors pillow prodigyopt
     fi
     LLM_VENV="$INSTALL_DIR/.venv-train-llm"
-    if [ ! -x "$LLM_VENV/bin/python" ]; then
-        "$COMFY_PYTHON" -m venv "$LLM_VENV"
+    LLM_PYTHON="$LLM_VENV/bin/python"
+    if [ ! -x "$LLM_PYTHON" ]; then
+        "$COMFY_PYTHON" -m venv --without-pip "$LLM_VENV"
     fi
     if [ "${ZONE_TRAIN_SKIP_PIP:-}" != "1" ]; then
-        "$LLM_VENV/bin/python" -m pip install --disable-pip-version-check "mlx-lm[train]"
+        "$LLM_PYTHON" -m ensurepip --upgrade
+        "$LLM_PYTHON" -m pip install --disable-pip-version-check "mlx-lm[train]"
     fi
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
     PLIST="$HOME/Library/LaunchAgents/ai.zone.train.plist"
