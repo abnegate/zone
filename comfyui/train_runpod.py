@@ -465,7 +465,7 @@ def upload_bundle(base: str, payload: bytes) -> None:
             'Content-Type': 'application/gzip',
             'Content-Length': str(len(payload)),
         },
-        timeout=600,
+        timeout=3600,
     )
 
 
@@ -499,7 +499,7 @@ def poll_until_done(
 
 
 def download_artifact(base: str, models_dir: Path) -> None:
-    payload = open_url(f'{base}/artifact', timeout=600)
+    payload = open_url(f'{base}/artifact', timeout=3600)
     with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
         extract_tar(archive, Path(models_dir))
 
@@ -515,7 +515,7 @@ def fetch_file(url: str, dest: Path) -> None:
         return
     temporary = dest.with_name(dest.name + '.tmp')
     call = urllib.request.Request(url, headers={'User-Agent': 'zone-train'})
-    with urllib.request.urlopen(call, timeout=600) as response:
+    with urllib.request.urlopen(call, timeout=3600) as response:
         with temporary.open('wb') as handle:
             while True:
                 chunk = response.read(1024 * 1024)

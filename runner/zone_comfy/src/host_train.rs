@@ -166,7 +166,7 @@ pub fn current_with_progress(models_dir: &Path) -> Option<HostJob> {
 }
 
 pub fn steps_for(image_count: usize) -> u32 {
-    (image_count as u32).saturating_mul(20).clamp(500, 8000)
+    (image_count as u32).saturating_mul(20).clamp(500, 40000)
 }
 
 fn overlay_progress(dir: &Path, job: &mut HostJob) {
@@ -512,7 +512,9 @@ mod tests {
         assert_eq!(steps_for(25), 500);
         assert_eq!(steps_for(26), 520);
         assert_eq!(steps_for(400), 8000);
-        assert_eq!(steps_for(500), 8000);
+        assert_eq!(steps_for(500), 10000);
+        assert_eq!(steps_for(2000), 40000);
+        assert_eq!(steps_for(2500), 40000);
     }
 
     #[test]

@@ -7,7 +7,7 @@
   "batch_size": 1,
   "passes_per_image": 20,
   "min_steps": 500,
-  "max_steps": 8000,
+  "max_steps": 40000,
   "resolution": 1024,
   "bucket_snap": 64,
   "checkpoint_every": 250,

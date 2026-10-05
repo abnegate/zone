@@ -64,8 +64,8 @@ pub fn create_router(state: AppState) -> Router {
 
     crate::metrics::init();
 
-    // Training posts a whole dataset in one body, so the 2 MB default rejects
-    // any set worth training on before a handler sees it.
+    // Training posts dataset files in batches, so the 2 MB default rejects a
+    // clip or a 24-image batch before a handler sees it.
     let uploads =
         DefaultBodyLimit::max((state.config().train_upload_limit_mb * 1024 * 1024) as usize);
     // Runs before the body is read, so a refused upload is never buffered.
@@ -308,6 +308,16 @@ pub fn create_router(state: AppState) -> Router {
                 .post(models::train)
                 .layer(uploads)
                 .layer(one_at_a_time),
+        )
+        .route(
+            "/api/models/train/uploads",
+            post(models::create_train_upload),
+        )
+        .route(
+            "/api/models/train/uploads/{id}",
+            post(models::append_train_upload)
+                .delete(models::delete_train_upload)
+                .layer(uploads),
         )
         .route("/api/models/train/bases", get(models::train_bases))
         .route(

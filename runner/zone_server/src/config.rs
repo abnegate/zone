@@ -96,10 +96,10 @@ pub struct Config {
     pub monitoring: MonitoringConfig,
     /// Chat execution and context allocations.
     pub chat: crate::services::chat::session::Settings,
-    /// Megabytes one LoRA training upload may carry. A dump of thousands of
-    /// photos or hundreds of clips is posted as multipart (JSON base64 still
-    /// works), and the whole body is held in memory while it is read, so the
-    /// ceiling is a memory budget rather than a policy.
+    /// Megabytes one LoRA training request may carry. Dataset images are posted
+    /// in batches; this bounds one batch or one clip. The body is held in
+    /// memory while it is read, so the ceiling is a memory budget rather than
+    /// a policy.
     pub train_upload_limit_mb: u64,
     /// Auto projects: what the driver admits, how it reviews, when it merges.
     pub auto: AutoProjectConfig,
@@ -1152,7 +1152,7 @@ impl Config {
             comfyui: ComfyUiConfig::from_env(),
             source_index: SourceIndexConfig::from_env(),
             monitoring: MonitoringConfig::from_env(),
-            train_upload_limit_mb: env_u64("TRAIN_UPLOAD_LIMIT_MB", 2048, 4, 8192),
+            train_upload_limit_mb: env_u64("TRAIN_UPLOAD_LIMIT_MB", 4096, 4, 65536),
             auto: AutoProjectConfig::from_env(),
             endpoint_hosts: Hosts::from_env(),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
@@ -1297,7 +1297,7 @@ mod tests {
             source_index: SourceIndexConfig::default(),
             monitoring: MonitoringConfig::default(),
             chat: Default::default(),
-            train_upload_limit_mb: 2048,
+            train_upload_limit_mb: 4096,
             endpoint_hosts: Default::default(),
             auto: Default::default(),
         }
@@ -1960,7 +1960,7 @@ mod tests {
         assert_eq!(defaults.github_api_url, DEFAULT_GITHUB_API_URL);
         assert_eq!(defaults.source_index, SourceIndexConfig::default());
         assert_eq!(defaults.monitoring, MonitoringConfig::from_env());
-        assert_eq!(defaults.train_upload_limit_mb, 2048);
+        assert_eq!(defaults.train_upload_limit_mb, 4096);
 
         Environment::set("HOST", "127.0.0.1");
         Environment::set("PORT", "9001");
@@ -2047,7 +2047,7 @@ mod tests {
         assert_eq!(fallbacks.port, 8000);
         assert!(!fallbacks.source_index.enabled);
         assert_eq!(fallbacks.source_index.poll_interval_secs, 300);
-        assert_eq!(fallbacks.train_upload_limit_mb, 2048);
+        assert_eq!(fallbacks.train_upload_limit_mb, 4096);
         assert!(fallbacks.model_search_proxy_url.is_none());
         assert_eq!(
             fallbacks.monitoring.prometheus_url,

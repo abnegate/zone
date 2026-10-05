@@ -192,29 +192,48 @@ describe('Namespaced model requests', () => {
     expect(seen[0]).toEqual({ step: 40, eta_seconds: 180 });
   });
 
-  it('posts training images and clips as multipart files', async () => {
+  it('posts training images in staged batches then trains with the upload id', async () => {
     const request = mock(async (input: RequestInfo, init?: RequestInit) => {
-      expect(init?.body).toBeInstanceOf(FormData);
-      const form = init?.body as FormData;
+      const url = String(input);
       expect((init?.headers as Record<string, string>)?.['Content-Type']).toBeUndefined();
-      if (String(input).includes('/train/frames')) {
-        expect(form.get('video')).toBeInstanceOf(Blob);
+      if (url.endsWith('/api/models/train/uploads') && init?.method === 'POST') {
+        return Response.json({ id: 'upload-1' });
+      }
+      if (url.endsWith('/api/models/train/uploads/upload-1') && init?.method === 'POST') {
+        expect(init?.body).toBeInstanceOf(FormData);
+        const form = init.body as FormData;
+        expect(form.get('image_0')).toBeInstanceOf(Blob);
+        expect(JSON.parse(String(form.get('images')))).toEqual([
+          { filename: 'shot.png', caption: 'a person' },
+        ]);
+        return Response.json({ id: 'upload-1', received: 1 });
+      }
+      if (url === '/api/models/train' && init?.method === 'POST') {
+        expect(init?.body).toBeInstanceOf(FormData);
+        const form = init.body as FormData;
+        expect(form.get('name')).toBe('portrait');
+        expect(form.get('subject')).toBe('other');
+        expect(form.get('method')).toBe('lora');
+        expect(form.get('provider')).toBe('local');
+        expect(form.get('upload_id')).toBe('upload-1');
+        expect(form.get('image_0')).toBeNull();
+        return Response.json({
+          id: 'job-1',
+          name: 'portrait',
+          status: 'succeeded',
+          filename: 'portrait.safetensors',
+          quality: null,
+          dataset: [],
+          screening: null,
+        });
+      }
+      if (url.includes('/train/frames')) {
+        const form = init?.body;
+        expect(form).toBeInstanceOf(FormData);
+        expect((form as FormData).get('video')).toBeInstanceOf(Blob);
         return Response.json({ sampled: 1, sampled_fps: 8, frames: [] });
       }
-      expect(form.get('name')).toBe('portrait');
-      expect(form.get('subject')).toBe('other');
-      expect(form.get('method')).toBe('lora');
-      expect(form.get('provider')).toBe('local');
-      expect(form.get('image_0')).toBeInstanceOf(Blob);
-      return Response.json({
-        id: 'job-1',
-        name: 'portrait',
-        status: 'succeeded',
-        filename: 'portrait.safetensors',
-        quality: null,
-        dataset: [],
-        screening: null,
-      });
+      throw new Error(`unexpected ${init?.method} ${url}`);
     });
     global.fetch = request as typeof fetch;
     const blob = new Blob(['pixels'], { type: 'image/png' });
@@ -225,7 +244,42 @@ describe('Namespaced model requests', () => {
       images: [{ filename: 'shot.png', caption: 'a person', blob }],
     });
     await modelsApi.frames({ filename: 'walk.mp4', blob: new Blob(['clip']), mirror: true });
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.map((call) => [call[1]?.method ?? 'GET', String(call[0])])).toEqual([
+      ['POST', '/api/models/train/uploads'],
+      ['POST', '/api/models/train/uploads/upload-1'],
+      ['POST', '/api/models/train'],
+      ['POST', '/api/models/train/frames'],
+    ]);
+  });
+
+  it('drops a staged upload when a later batch fails', async () => {
+    const request = mock(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/models/train/uploads') && init?.method === 'POST') {
+        return Response.json({ id: 'upload-1' });
+      }
+      if (url.endsWith('/api/models/train/uploads/upload-1') && init?.method === 'POST') {
+        return Response.json({ error: 'image is empty' }, { status: 400 });
+      }
+      if (url.endsWith('/api/models/train/uploads/upload-1') && init?.method === 'DELETE') {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected ${init?.method} ${url}`);
+    });
+    global.fetch = request as typeof fetch;
+
+    await expect(
+      modelsApi.train({
+        name: 'portrait',
+        base: 'flux-schnell',
+        images: [{ filename: 'shot.png', caption: 'a person', blob: new Blob(['pixels']) }],
+      })
+    ).rejects.toThrow('image is empty');
+    expect(request.mock.calls.map((call) => [call[1]?.method ?? 'GET', String(call[0])])).toEqual([
+      ['POST', '/api/models/train/uploads'],
+      ['POST', '/api/models/train/uploads/upload-1'],
+      ['DELETE', '/api/models/train/uploads/upload-1'],
+    ]);
   });
 
   it('posts a person fine-tune as subject and method fields', async () => {

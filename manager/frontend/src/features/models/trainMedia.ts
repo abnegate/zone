@@ -1,5 +1,5 @@
-const TRAIN_EDGE = 1024;
-const JPEG_QUALITY = 0.88;
+export const TRAIN_EDGE = 1536;
+const JPEG_QUALITY = 0.92;
 
 export const FRAME_UPLOADS = 4;
 export const CAPTION_BATCH = 24;
@@ -31,15 +31,42 @@ function jpegName(filename: string): string {
   return `${stem}.jpg`;
 }
 
-export async function prepareImage(blob: Blob, filename: string): Promise<File> {
+export function shouldRecompress(input: {
+  type?: string;
+  width: number;
+  height: number;
+  size: number;
+  clip?: boolean;
+}): boolean {
+  if (input.clip) return false;
+  const longest = Math.max(input.width, input.height);
+  const png = (input.type ?? '').toLowerCase().includes('png');
+  if (png && longest <= TRAIN_EDGE) return false;
+  if (longest <= TRAIN_EDGE && input.size < 200_000) return false;
+  return true;
+}
+
+export async function prepareImage(
+  blob: Blob,
+  filename: string,
+  options?: { clip?: boolean }
+): Promise<File> {
   try {
     const bitmap = await createImageBitmap(blob);
-    const longest = Math.max(bitmap.width, bitmap.height);
-    const scale = longest > TRAIN_EDGE ? TRAIN_EDGE / longest : 1;
-    if (scale === 1 && blob.size < 200_000) {
+    if (
+      !shouldRecompress({
+        type: blob.type,
+        width: bitmap.width,
+        height: bitmap.height,
+        size: blob.size,
+        clip: options?.clip,
+      })
+    ) {
       bitmap.close();
       return asFile(blob, filename);
     }
+    const longest = Math.max(bitmap.width, bitmap.height);
+    const scale = longest > TRAIN_EDGE ? TRAIN_EDGE / longest : 1;
     const width = Math.max(1, Math.round(bitmap.width * scale));
     const height = Math.max(1, Math.round(bitmap.height * scale));
     const canvas = document.createElement('canvas');

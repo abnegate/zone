@@ -85,7 +85,7 @@ describe('trainProgress', () => {
     ).toBeNull();
     expect(
       computeHelp({ subject: 'person', method: 'finetune', provider: 'runpod', hasKey: true })
-    ).toBe('Auto-picks a 48 GB GPU (A40 class). About 4 hours, $1–2.');
+    ).toBe('Auto-picks a 48 GB GPU (A40 class). Twenty looks per still; hours, a few dollars.');
     expect(
       computeHelp({ subject: 'person', method: 'lora', provider: 'runpod', hasKey: true })
     ).toBe(gpu24);

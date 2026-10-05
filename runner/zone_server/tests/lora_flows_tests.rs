@@ -1038,6 +1038,67 @@ async fn train_endpoint_accepts_multipart_images() {
 }
 
 #[tokio::test]
+async fn train_endpoint_accepts_a_staged_upload() {
+    use base64::Engine;
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(TINY_PNG)
+        .unwrap();
+
+    let created = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/models/train/uploads")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(created).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let created: Value = serde_json::from_slice(&body).unwrap();
+    let id = created["id"].as_str().expect("upload id");
+
+    let images = json!([{ "filename": "a.png", "caption": "a portrait" }]).to_string();
+    let (content_type, body) = multipart(
+        "ZoneTrainBoundary",
+        &[
+            ("images", None, images.as_bytes()),
+            ("image_0", Some("a.png"), &png),
+        ],
+    );
+    let (status, response) = post_multipart(
+        router.clone(),
+        &token,
+        &format!("/api/models/train/uploads/{id}"),
+        content_type,
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["received"], 1);
+
+    let (content_type, body) = multipart(
+        "ZoneTrainBoundary",
+        &[
+            ("name", None, b"studio-style"),
+            ("base", None, b"flux-schnell"),
+            ("trigger", None, b"ohwx"),
+            ("upload_id", None, id.as_bytes()),
+        ],
+    );
+    let (status, response) =
+        post_multipart(router, &token, "/api/models/train", content_type, body).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{response}");
+    assert_eq!(
+        response["error"],
+        "LoRA training is not configured on this server"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
 async fn frames_endpoint_needs_authentication() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;

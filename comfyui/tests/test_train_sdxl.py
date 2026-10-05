@@ -94,15 +94,17 @@ class StepsForTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = train_sdxl.load_config()
 
-    def test_budget_is_unique_images_times_twenty_clamped_500_8000(self) -> None:
+    def test_budget_is_unique_images_times_twenty_clamped_500_40000(self) -> None:
         self.assertEqual(self.config['passes_per_image'], 20)
         self.assertEqual(self.config['min_steps'], 500)
-        self.assertEqual(self.config['max_steps'], 8000)
+        self.assertEqual(self.config['max_steps'], 40000)
         self.assertEqual(train_sdxl.steps_for(1, self.config), 500)
         self.assertEqual(train_sdxl.steps_for(25, self.config), 500)
         self.assertEqual(train_sdxl.steps_for(26, self.config), 520)
         self.assertEqual(train_sdxl.steps_for(400, self.config), 8000)
-        self.assertEqual(train_sdxl.steps_for(500, self.config), 8000)
+        self.assertEqual(train_sdxl.steps_for(500, self.config), 10000)
+        self.assertEqual(train_sdxl.steps_for(2000, self.config), 40000)
+        self.assertEqual(train_sdxl.steps_for(2500, self.config), 40000)
 
 
 class FindJobTests(unittest.TestCase):

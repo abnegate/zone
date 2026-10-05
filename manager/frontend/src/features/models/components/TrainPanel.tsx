@@ -71,7 +71,7 @@ function trainingHelp(subject: TrainSubjectKind, method: TrainMethodKind, edit: 
     return 'Drop .jsonl, .json, .txt, or .md files, or a folder, and pick an installed chat model. Fine-tune only small chat bases (~under 8B, llama3.2 1B/3B). Large bases stay language LoRA.';
   }
   if (subject === 'person' && method === 'finetune') {
-    return 'Drop images, clips, or a folder, set a unique trigger word, and fine-tune the SDXL people checkpoint. A run takes days to weeks, writes a ~7 GB checkpoint (full UNet + CLIP-L, prior preservation), and resumes after a refresh or restart. Plan ~20 GB of disk during a run. Fine-tune from about 200 unique stills or 20 clips; 500 stills or 50 clips is the strong set for likeness, hands, and body.';
+    return 'Drop images, clips, or a folder, set a unique trigger word, and fine-tune the SDXL people checkpoint. Local Metal takes days; Runpod is hours. The run writes a ~7 GB checkpoint (full UNet + CLIP-L, prior preservation) and resumes after a refresh or restart. Plan ~20 GB of disk during a run. Fine-tune from about 200 unique stills or 20 clips; 500 stills or 50 clips is the strong set for likeness, hands, and body.';
   }
   if (subject === 'person' && method === 'pivotal') {
     return 'Drop images, clips, or a folder, set a unique trigger word, and train a rank-64 SDXL people LoRA plus a CLIP-L textual inversion of the trigger. Hours, same dump as LoRA, cleaner promptability. Face and body still come from the people bundle.';
@@ -884,14 +884,17 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
 
   const handleCaption = async () => {
     if (busy || edit || language || images.length === 0) return;
-    const requested = images.map(({ key, filename, caption, captionRevision, blob, group }) => ({
-      key,
-      filename,
-      caption,
-      captionRevision,
-      blob,
-      group,
-    }));
+    const requested = images.map(
+      ({ key, filename, caption, captionRevision, blob, group, clip }) => ({
+        key,
+        filename,
+        caption,
+        captionRevision,
+        blob,
+        group,
+        clip,
+      })
+    );
     setCaptioning(true);
     setError(null);
     const generated = new Map<string, { caption: string; revision: number }>();
@@ -909,7 +912,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         const prepared = await Promise.all(
           batch.map(async (image) => ({
             ...image,
-            blob: await prepareImage(image.blob, image.filename),
+            blob: await prepareImage(image.blob, image.filename, { clip: Boolean(image.clip) }),
           }))
         );
         const { captions } = await modelsApi.captions({
@@ -968,7 +971,9 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                 images.map(async (image) => ({
                   filename: image.filename,
                   caption: edit ? image.instruction.trim() : image.caption,
-                  blob: await prepareImage(image.blob, image.filename),
+                  blob: await prepareImage(image.blob, image.filename, {
+                    clip: Boolean(image.clip),
+                  }),
                   group: image.group,
                   before:
                     edit && image.reference

@@ -824,6 +824,64 @@ async fn runpod_key(
         .filter(|key| !key.is_empty()))
 }
 
+fn train_user_id(auth: &AuthUser) -> Result<Uuid, ServerError> {
+    auth.0
+        .user_id()
+        .map_err(|_| ServerError::Unauthorized("Invalid token subject".to_string()))
+}
+
+/// POST /api/models/train/uploads
+pub async fn create_train_upload(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> impl IntoResponse {
+    let user_id = match train_user_id(&auth) {
+        Ok(user_id) => user_id,
+        Err(error) => return error.into_response(),
+    };
+    match upload::create_staging(&state.config().comfyui.models_dir, user_id) {
+        Ok(id) => Json(serde_json::json!({ "id": id })).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// POST /api/models/train/uploads/{id}
+pub async fn append_train_upload(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+    request: Request,
+) -> impl IntoResponse {
+    let user_id = match train_user_id(&auth) {
+        Ok(user_id) => user_id,
+        Err(error) => return error.into_response(),
+    };
+    let images = match upload::append_images(request).await {
+        Ok(images) => images,
+        Err(error) => return error.into_response(),
+    };
+    match upload::append_staging(&state.config().comfyui.models_dir, id, user_id, images) {
+        Ok(received) => Json(serde_json::json!({ "id": id, "received": received })).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// DELETE /api/models/train/uploads/{id}
+pub async fn delete_train_upload(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let user_id = match train_user_id(&auth) {
+        Ok(user_id) => user_id,
+        Err(error) => return error.into_response(),
+    };
+    match upload::drop_staging(&state.config().comfyui.models_dir, id, user_id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
 /// POST /api/models/train
 pub async fn train(
     State(state): State<AppState>,
@@ -831,10 +889,21 @@ pub async fn train(
     Query(query): Query<TrainQuery>,
     request: Request,
 ) -> impl IntoResponse {
-    let request = match upload::train_request(request).await {
-        Ok(request) => request,
+    let parsed = match upload::train_request(request).await {
+        Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
+    let mut request = parsed.request;
+    if let Some(upload_id) = parsed.upload_id {
+        let user_id = match train_user_id(&auth) {
+            Ok(user_id) => user_id,
+            Err(error) => return error.into_response(),
+        };
+        match upload::take_staging(&state.config().comfyui.models_dir, upload_id, user_id) {
+            Ok(images) => request.images = images,
+            Err(error) => return error.into_response(),
+        }
+    }
     if request.subject == lora::TrainSubject::Language {
         let bases = chat_train_bases(&state).await;
         match language_train_base(&bases, request.base.trim()) {

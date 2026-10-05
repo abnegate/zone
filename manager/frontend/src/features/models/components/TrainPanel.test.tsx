@@ -1244,7 +1244,7 @@ describe('TrainPanel', () => {
     await selectOption('Compute', 'Runpod');
     await selectMethod('Fine-tune');
     expect(screen.getByText(/Auto-picks a 48 GB GPU \(A40 class\)/)).toBeInTheDocument();
-    expect(screen.getByText(/About 4 hours, \$1–2/)).toBeInTheDocument();
+    expect(screen.getByText(/Twenty looks per still; hours, a few dollars/)).toBeInTheDocument();
 
     fillIdentity();
     await addTargets(file('portrait.png', 'portrait'));

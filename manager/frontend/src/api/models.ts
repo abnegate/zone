@@ -17,6 +17,7 @@ import {
   TrainClipSchema,
   TrainJobSchema,
 } from '../features/models/schemas';
+import { captionBatches } from '../features/models/trainMedia';
 import type {
   BrowseOptions,
   BrowseResponse,
@@ -71,6 +72,141 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener('abort', abort, { once: true });
   });
+}
+
+type TrainImageUpload = {
+  filename: string;
+  caption: string;
+  blob: Blob;
+  before?: Blob;
+  group?: number;
+};
+
+type TrainBody = {
+  name: string;
+  base: string;
+  trigger?: string;
+  subject?: 'person' | 'other' | 'language';
+  method?: 'lora' | 'finetune' | 'pivotal' | 'video';
+  provider?: 'local' | 'runpod';
+  workspace_id?: string;
+  images: TrainImageUpload[];
+};
+
+function trainForm(body: TrainBody, uploadId?: string): FormData {
+  const form = new FormData();
+  form.append('name', body.name);
+  form.append('base', body.base);
+  form.append('subject', body.subject ?? 'other');
+  form.append('method', body.method ?? 'lora');
+  form.append('provider', body.provider ?? 'local');
+  if (body.trigger) form.append('trigger', body.trigger);
+  if (uploadId) {
+    form.append('upload_id', uploadId);
+    return form;
+  }
+  form.append(
+    'images',
+    JSON.stringify(
+      body.images.map(({ filename, caption, group }) => ({ filename, caption, group }))
+    )
+  );
+  body.images.forEach((image, index) => {
+    form.append(`image_${index}`, image.blob, image.filename);
+    if (image.before) form.append(`before_${index}`, image.before, `before-${image.filename}`);
+  });
+  return form;
+}
+
+function appendForm(images: TrainImageUpload[]): FormData {
+  const form = new FormData();
+  form.append(
+    'images',
+    JSON.stringify(images.map(({ filename, caption, group }) => ({ filename, caption, group })))
+  );
+  images.forEach((image, index) => {
+    form.append(`image_${index}`, image.blob, image.filename);
+    if (image.before) form.append(`before_${index}`, image.before, `before-${image.filename}`);
+  });
+  return form;
+}
+
+async function trainFailure(response: Response, fallback: string): Promise<Error> {
+  const payload = await response.json().catch(() => ({ error: fallback }));
+  return new Error(payload.error || `${fallback}: ${response.status}`);
+}
+
+async function createTrainUpload(signal?: AbortSignal): Promise<string> {
+  const response = await fetch(`${API_BASE}/api/models/train/uploads`, {
+    method: 'POST',
+    headers: bearerHeaders(),
+    signal,
+  });
+  if (!response.ok) {
+    throw await trainFailure(response, 'Training upload failed');
+  }
+  const payload = (await response.json()) as { id?: string };
+  if (!payload.id) {
+    throw new Error('Training upload failed');
+  }
+  return payload.id;
+}
+
+async function appendTrainUpload(
+  uploadId: string,
+  images: TrainImageUpload[],
+  signal?: AbortSignal
+): Promise<void> {
+  const response = await fetch(
+    `${API_BASE}/api/models/train/uploads/${encodeURIComponent(uploadId)}`,
+    {
+      method: 'POST',
+      headers: bearerHeaders(),
+      body: appendForm(images),
+      signal,
+    }
+  );
+  if (!response.ok) {
+    throw await trainFailure(response, 'Training upload failed');
+  }
+}
+
+async function dropTrainUpload(uploadId: string): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/models/train/uploads/${encodeURIComponent(uploadId)}`, {
+      method: 'DELETE',
+      headers: bearerHeaders(),
+    });
+  } catch {
+    return;
+  }
+}
+
+async function postTrain(
+  body: TrainBody,
+  uploadId: string | undefined,
+  signal: AbortSignal | undefined,
+  onProgress: ((job: TrainJob) => void) | undefined
+): Promise<TrainResult> {
+  const query = body.workspace_id ? `?workspace_id=${encodeURIComponent(body.workspace_id)}` : '';
+  const response = await fetch(`${API_BASE}/api/models/train${query}`, {
+    method: 'POST',
+    headers: bearerHeaders(),
+    body: trainForm(body, uploadId),
+    signal,
+  });
+  if (!response.ok) {
+    throw await trainFailure(response, 'Training failed');
+  }
+  const job = parse(TrainJobSchema, await response.json());
+  if (job.status === 'failed') {
+    throw new Error(job.error || 'Training failed');
+  }
+  if (job.status === 'running' || response.status === 202) {
+    onProgress?.(job);
+    return modelsApi.waitTrain(signal, onProgress);
+  }
+  return asTrainResult(job);
 }
 
 /**
@@ -252,62 +388,23 @@ export const modelsApi = {
   },
 
   async train(
-    body: {
-      name: string;
-      base: string;
-      trigger?: string;
-      subject?: 'person' | 'other' | 'language';
-      method?: 'lora' | 'finetune' | 'pivotal' | 'video';
-      provider?: 'local' | 'runpod';
-      workspace_id?: string;
-      images: Array<{
-        filename: string;
-        caption: string;
-        blob: Blob;
-        before?: Blob;
-        group?: number;
-      }>;
-    },
+    body: TrainBody,
     signal?: AbortSignal,
     onProgress?: (job: TrainJob) => void
   ): Promise<TrainResult> {
-    const form = new FormData();
-    form.append('name', body.name);
-    form.append('base', body.base);
-    form.append('subject', body.subject ?? 'other');
-    form.append('method', body.method ?? 'lora');
-    form.append('provider', body.provider ?? 'local');
-    if (body.trigger) form.append('trigger', body.trigger);
-    form.append(
-      'images',
-      JSON.stringify(
-        body.images.map(({ filename, caption, group }) => ({ filename, caption, group }))
-      )
-    );
-    body.images.forEach((image, index) => {
-      form.append(`image_${index}`, image.blob, image.filename);
-      if (image.before) form.append(`before_${index}`, image.before, `before-${image.filename}`);
-    });
-    const query = body.workspace_id ? `?workspace_id=${encodeURIComponent(body.workspace_id)}` : '';
-    const response = await fetch(`${API_BASE}/api/models/train${query}`, {
-      method: 'POST',
-      headers: bearerHeaders(),
-      body: form,
-      signal,
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({ error: 'Training failed' }));
-      throw new Error(payload.error || `Failed to train: ${response.status}`);
+    if (body.images.length === 0) {
+      return postTrain(body, undefined, signal, onProgress);
     }
-    const job = parse(TrainJobSchema, await response.json());
-    if (job.status === 'failed') {
-      throw new Error(job.error || 'Training failed');
+    const uploadId = await createTrainUpload(signal);
+    try {
+      for (const batch of captionBatches(body.images)) {
+        await appendTrainUpload(uploadId, batch, signal);
+      }
+      return await postTrain(body, uploadId, signal, onProgress);
+    } catch (error) {
+      await dropTrainUpload(uploadId);
+      throw error;
     }
-    if (job.status === 'running' || response.status === 202) {
-      onProgress?.(job);
-      return modelsApi.waitTrain(signal, onProgress);
-    }
-    return asTrainResult(job);
   },
 
   /**

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'bun:test';
-import { blobFromBase64, captionBatches, poolMap } from './trainMedia';
+import {
+  blobFromBase64,
+  captionBatches,
+  poolMap,
+  shouldRecompress,
+  TRAIN_EDGE,
+} from './trainMedia';
 
 describe('trainMedia', () => {
   it('turns frame base64 into a blob without keeping the string', () => {
@@ -22,6 +28,25 @@ describe('trainMedia', () => {
       [1, 2, 3],
       [4, 5, 6],
     ]);
+  });
+
+  it('keeps clip frames and 1536 PNGs as-is', () => {
+    expect(TRAIN_EDGE).toBe(1536);
+    expect(
+      shouldRecompress({ type: 'image/png', width: 1536, height: 1024, size: 800_000, clip: true })
+    ).toBe(false);
+    expect(shouldRecompress({ type: 'image/png', width: 1536, height: 1024, size: 800_000 })).toBe(
+      false
+    );
+    expect(shouldRecompress({ type: 'image/jpeg', width: 1024, height: 768, size: 80_000 })).toBe(
+      false
+    );
+    expect(shouldRecompress({ type: 'image/jpeg', width: 4000, height: 3000, size: 80_000 })).toBe(
+      true
+    );
+    expect(shouldRecompress({ type: 'image/jpeg', width: 1536, height: 1024, size: 400_000 })).toBe(
+      true
+    );
   });
 
   it('runs a bounded worker pool in source order', async () => {

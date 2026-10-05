@@ -128,6 +128,7 @@ pub struct TrainRequest {
     pub method: TrainMethod,
     #[serde(default)]
     pub provider: TrainProvider,
+    #[serde(default)]
     pub images: Vec<TrainImage>,
 }
 
