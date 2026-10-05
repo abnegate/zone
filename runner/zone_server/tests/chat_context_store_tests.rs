@@ -780,6 +780,7 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
 async fn catalog_pages_all_references_without_exposing_result_bodies_or_other_chats() {
     let (pool, store, chat, workspace) = fixture().await;
     let lease = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let mut guard = store.keep_alive(lease.clone(), LIFETIME).unwrap();
     let (turn, user) = begin(&store, &lease).await;
     for index in 0..40 {
         let call = format!("call-{index}");
@@ -887,6 +888,11 @@ async fn catalog_pages_all_references_without_exposing_result_bodies_or_other_ch
             .is_err(),
         "Deletion invalidates the snapshot rather than shifting pages"
     );
+    assert!(
+        !guard.is_lost(),
+        "renewal kept the lease through the whole catalog walk"
+    );
+    guard.stop().await;
     store.release(&lease).await.unwrap();
     sqlx::query("DELETE FROM chats WHERE id=$1")
         .bind(chat)
