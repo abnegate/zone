@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use abnegate_exec::{
     CommandExecutor, EnvironmentPolicy, ExecutorConfig, OutboundMessage, RunStart,
 };
+use zone_core::tools::routing;
 
 /// Run a single command and exit.
 pub async fn run_once(
@@ -18,7 +19,9 @@ pub async fn run_once(
     args: Vec<String>,
     timeout_secs: Option<u64>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let config = ExecutorConfig::default().with_environment(EnvironmentPolicy::inherit());
+    let config = ExecutorConfig::default()
+        .with_environment(EnvironmentPolicy::inherit())
+        .with_proxy(routing::proxy());
     let config = match timeout_secs {
         Some(secs) => config.with_timeout(Duration::from_secs(secs)),
         None => config,

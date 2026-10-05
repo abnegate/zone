@@ -3,12 +3,31 @@
 //! These tests spawn the actual zone-runner binary and communicate with it
 //! via the NDJSON protocol over stdin/stdout.
 
+use abnegate_exec::{PROXY_BYPASS_VARIABLE, PROXY_URL_VARIABLE as EXECUTOR_PROXY_URL_VARIABLE};
 use base64::prelude::*;
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+use zone_core::tools::routing::{BYPASS, PROXY_URL_VARIABLE};
+
+const ROUTED_PROXY: &str = "http://127.0.0.1:28888";
+
+/// Start the runner with only `variables` naming a proxy, whatever the
+/// environment running the tests routes through.
+fn runner(variables: &[(&str, &str)]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zone-runner"));
+    for name in [
+        PROXY_URL_VARIABLE,
+        EXECUTOR_PROXY_URL_VARIABLE,
+        PROXY_BYPASS_VARIABLE,
+    ] {
+        command.env_remove(name);
+    }
+    command.envs(variables.iter().copied());
+    command
+}
 
 fn stdout_of(messages: &[Value]) -> String {
     messages
@@ -24,6 +43,20 @@ fn stdout_of(messages: &[Value]) -> String {
         .collect()
 }
 
+fn assert_routed(environment: &str) {
+    let lines: Vec<&str> = environment.lines().collect();
+    for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        assert!(
+            lines.contains(&format!("{name}={ROUTED_PROXY}").as_str()),
+            "{name}: {environment}"
+        );
+    }
+    assert!(
+        lines.contains(&format!("NO_PROXY={}", BYPASS.join(",")).as_str()),
+        "{environment}"
+    );
+}
+
 /// Helper struct for managing a running daemon process
 struct DaemonProcess {
     child: Child,
@@ -34,7 +67,12 @@ struct DaemonProcess {
 impl DaemonProcess {
     /// Spawn a new daemon process
     fn spawn() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_zone-runner"))
+        Self::spawn_with(&[])
+    }
+
+    /// Spawn a new daemon process whose environment adds `variables`
+    fn spawn_with(variables: &[(&str, &str)]) -> Self {
+        let mut child = runner(variables)
             .args(["serve", "--stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -780,4 +818,38 @@ fn stdin_sent_to_a_job_reaches_it() {
     assert_eq!(exit["exit_code"], 0, "{exit}");
 
     daemon.shutdown();
+}
+
+#[test]
+fn a_job_is_routed_through_the_tool_runner_proxy() {
+    let mut daemon = DaemonProcess::spawn_with(&[(PROXY_URL_VARIABLE, ROUTED_PROXY)]);
+    daemon.handshake();
+    daemon.send(&RunStart {
+        msg_type: "RunStart".to_string(),
+        job_id: "job-routed".to_string(),
+        workspace: "/tmp".to_string(),
+        command: "env".to_string(),
+        args: Vec::new(),
+        timeout_ms: Some(5000),
+    });
+
+    let messages = daemon.recv_until(Duration::from_secs(5), |message| {
+        message["type"] == "RunExit" || message["type"] == "RunError"
+    });
+
+    assert_routed(&stdout_of(&messages));
+
+    daemon.shutdown();
+}
+
+#[test]
+fn a_one_shot_command_is_routed_through_the_tool_runner_proxy() {
+    let output = runner(&[(PROXY_URL_VARIABLE, ROUTED_PROXY)])
+        .args(["exec", "--workspace", "/tmp", "--cmd", "env"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("zone-runner exec runs");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_routed(&String::from_utf8_lossy(&output.stdout));
 }

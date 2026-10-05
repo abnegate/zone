@@ -10,6 +10,7 @@ use base64::prelude::*;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 use tokio::sync::mpsc;
+use zone_core::tools::routing;
 
 /// Run the daemon, communicating over stdio.
 pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,7 +18,9 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
 
     let registry = Arc::new(JobRegistry::new());
     let executor = Arc::new(CommandExecutor::with_config(
-        ExecutorConfig::default().with_environment(EnvironmentPolicy::inherit()),
+        ExecutorConfig::default()
+            .with_environment(EnvironmentPolicy::inherit())
+            .with_proxy(routing::proxy()),
     ));
 
     let (tx, mut rx) = mpsc::channel::<OutboundMessage>(1000);
