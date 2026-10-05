@@ -166,9 +166,9 @@ impl TestClient {
     }
 
     /// Create a test client whose state sends account mail through `mail`.
-    pub async fn with_account_mail(mail: Arc<AccountMail>) -> Self {
+    pub async fn with_mail(mail: Arc<AccountMail>) -> Self {
         let pool = create_test_pool().await;
-        let state = AppState::new_with_account_mail(test_config(), pool, None, Some(mail));
+        let state = AppState::new_with_mail(test_config(), pool, None, Some(mail));
         state.disable_mcp();
         let router = create_test_router(state.clone());
         Self {

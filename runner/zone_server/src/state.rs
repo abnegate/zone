@@ -88,7 +88,7 @@ struct AppStateInner {
     pub adapter_registry: Option<Arc<AdapterRegistry>>,
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
     pub context_service: Option<Arc<ContextService>>,
-    pub account_mail: Option<Arc<AccountMail>>,
+    pub mail: Option<Arc<AccountMail>>,
     pub rate_limiter: Arc<RateLimiter<Uuid>>,
     pub sync_registry: SyncRegistry,
     pub pull_registry: PullRegistry,
@@ -117,16 +117,16 @@ struct AppStateInner {
 impl AppState {
     /// Create a new application state without embedding or context services
     pub fn new(config: Config, db: PgPool, cache: Option<Cache>) -> Self {
-        Self::new_with_account_mail(config, db, cache, None)
+        Self::new_with_mail(config, db, cache, None)
     }
 
     /// The state the server falls back to when the embedding service will not
     /// start: no embedding or context services, but account mail all the same.
-    pub fn new_with_account_mail(
+    pub fn new_with_mail(
         config: Config,
         db: PgPool,
         cache: Option<Cache>,
-        account_mail: Option<Arc<AccountMail>>,
+        mail: Option<Arc<AccountMail>>,
     ) -> Self {
         Self::assemble(
             config,
@@ -135,7 +135,7 @@ impl AppState {
             Arc::new(default_adapter_registry()),
             None,
             None,
-            account_mail,
+            mail,
         )
     }
 
@@ -167,7 +167,7 @@ impl AppState {
         adapter_registry: Arc<AdapterRegistry>,
         embedding_service: Arc<dyn EmbeddingService>,
         context_service: Arc<ContextService>,
-        account_mail: Option<Arc<AccountMail>>,
+        mail: Option<Arc<AccountMail>>,
     ) -> Self {
         Self::assemble(
             config,
@@ -176,7 +176,7 @@ impl AppState {
             adapter_registry,
             Some(embedding_service),
             Some(context_service),
-            account_mail,
+            mail,
         )
     }
 
@@ -187,7 +187,7 @@ impl AppState {
         adapter_registry: Arc<AdapterRegistry>,
         embedding_service: Option<Arc<dyn EmbeddingService>>,
         context_service: Option<Arc<ContextService>>,
-        account_mail: Option<Arc<AccountMail>>,
+        mail: Option<Arc<AccountMail>>,
     ) -> Self {
         let encryption_key = crate::crypto::derive_key(config.encryption_key())
             .expect("Encryption key should be valid (validated in Config::from_env)");
@@ -211,7 +211,7 @@ impl AppState {
                 adapter_registry: Some(adapter_registry),
                 embedding_service,
                 context_service,
-                account_mail,
+                mail,
                 rate_limiter,
                 sync_registry: SyncRegistry::new(),
                 pull_registry: PullRegistry::new(),
@@ -262,8 +262,8 @@ impl AppState {
     }
 
     /// The account mail sender, when an SMTP relay is configured.
-    pub fn account_mail(&self) -> Option<&Arc<AccountMail>> {
-        self.inner.account_mail.as_ref()
+    pub fn mail(&self) -> Option<&Arc<AccountMail>> {
+        self.inner.mail.as_ref()
     }
 
     /// Get the rate limiter
@@ -573,7 +573,7 @@ mod tests {
         assert!(Arc::ptr_eq(state.adapter_registry().unwrap(), &registry));
         assert!(Arc::ptr_eq(state.embedding_service().unwrap(), &embedding));
         assert!(Arc::ptr_eq(state.context_service().unwrap(), &context));
-        assert!(state.account_mail().is_none());
+        assert!(state.mail().is_none());
         assert_eq!(
             state.index_semaphore().available_permits(),
             MAX_CONCURRENT_INDEX
@@ -609,24 +609,23 @@ mod tests {
             context,
             Some(mail.clone()),
         );
-        assert!(Arc::ptr_eq(with_mail.account_mail().unwrap(), &mail));
+        assert!(Arc::ptr_eq(with_mail.mail().unwrap(), &mail));
         assert_eq!(with_mail.train_semaphore().available_permits(), 1);
         assert_eq!(with_mail.frame_semaphore().available_permits(), 4);
     }
 
     #[tokio::test]
-    async fn the_state_without_embedding_still_carries_account_mail() {
+    async fn the_state_without_embedding_still_carries_mail() {
         let pool = PgPool::connect_lazy("postgres://localhost/state-fallback")
             .expect("a lazy pool needs no server");
         let mail = Arc::new(AccountMail::new(Arc::new(MockMailer::new())));
 
-        let state =
-            AppState::new_with_account_mail(create_test_config(), pool, None, Some(mail.clone()));
+        let state = AppState::new_with_mail(create_test_config(), pool, None, Some(mail.clone()));
 
         assert!(state.embedding_service().is_none());
         assert!(state.context_service().is_none());
         assert!(state.adapter_registry().is_some());
-        assert!(Arc::ptr_eq(state.account_mail().unwrap(), &mail));
+        assert!(Arc::ptr_eq(state.mail().unwrap(), &mail));
     }
 
     #[tokio::test]

@@ -155,7 +155,7 @@ async fn main() {
         }
     };
 
-    let account_mail = match mail::Config::from_environment(mail::SenderPolicy::Default)
+    let mail = match mail::Config::from_environment(mail::SenderPolicy::Default)
         .and_then(|config| AccountMail::from_config(&config))
     {
         Ok(mail) => {
@@ -193,10 +193,10 @@ async fn main() {
             adapter_registry,
             embedding_service,
             context_service,
-            account_mail,
+            mail,
         )
     } else {
-        AppState::new_with_account_mail(config.clone(), db, Some(cache), account_mail)
+        AppState::new_with_mail(config.clone(), db, Some(cache), mail)
     };
 
     // Start background workers

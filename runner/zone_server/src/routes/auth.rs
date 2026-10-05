@@ -791,7 +791,7 @@ pub async fn resend_verification(
             }
         };
 
-    if let Some(mail) = state.account_mail() {
+    if let Some(mail) = state.mail() {
         let link = verification_url(&state.config().app_base_url, &token);
         let name = user.display_name.as_deref().unwrap_or(&user.email);
 
@@ -877,7 +877,7 @@ pub async fn forgot_password(
         }
     };
 
-    if let Some(mail) = state.account_mail() {
+    if let Some(mail) = state.mail() {
         let link = format!(
             "{}/reset-password?token={}",
             state.config().app_base_url,

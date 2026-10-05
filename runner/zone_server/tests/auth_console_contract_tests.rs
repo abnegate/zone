@@ -128,7 +128,7 @@ async fn every_auth_outcome_carries_a_success_flag() {
 /// endpoint may wait on the relay before it responds.
 #[tokio::test]
 async fn a_known_address_is_answered_without_waiting_on_the_relay() {
-    let client = TestClient::with_account_mail(Arc::new(AccountMail::new(Arc::new(Silent)))).await;
+    let client = TestClient::with_mail(Arc::new(AccountMail::new(Arc::new(Silent)))).await;
     let email = test_email();
     register(&client, &email).await;
 
