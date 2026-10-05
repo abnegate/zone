@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import random
+import shutil
 import struct
 import sys
 import time
@@ -25,6 +27,7 @@ DEFAULT_HF_BASE = 'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl'
 DEFAULT_CHECKPOINT = 'lustifySDXLNSFW_ggwpV7.safetensors'
 CONFIG_PATH = Path(__file__).with_name('train_sdxl_config.json')
 TRAIN_ROOT = '.zone-train'
+LATEST_SNAPSHOT = 'latest.pt'
 STILL_METHODS = {'lora', 'finetune', 'pivotal'}
 ADAPTER_METHODS = {'lora', 'pivotal'}
 MASK_THRESHOLD = 0.2
@@ -788,6 +791,10 @@ def snapshot_path(directory: Path, step: int) -> Path:
     return directory / f'step-{step:06d}.pt'
 
 
+def latest_snapshot_file(directory: Path) -> Path:
+    return Path(directory) / LATEST_SNAPSHOT
+
+
 def snapshot_steps(directory: Path) -> list[int]:
     if not directory.is_dir():
         return []
@@ -808,6 +815,30 @@ def latest_snapshot(directory: Path) -> int | None:
     return steps[-1] if steps else None
 
 
+def resume_snapshot_path(directory: Path) -> Path | None:
+    latest = latest_snapshot_file(directory)
+    try:
+        if latest.is_file() and latest.stat().st_size > 0:
+            return latest
+    except OSError:
+        pass
+    step = latest_snapshot(directory)
+    if step is None:
+        return None
+    return snapshot_path(directory, step)
+
+
+def copy_snapshot(source: Path, destination: Path) -> None:
+    source = Path(source)
+    destination = Path(destination)
+    if source.resolve() == destination.resolve():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + '.tmp')
+    shutil.copy2(source, temporary)
+    os.replace(temporary, destination)
+
+
 def prune_snapshots(directory: Path, keep: int, best_step: int | None) -> None:
     retain = set(snapshot_steps(directory)[-max(int(keep), 0) :])
     if best_step is not None:
@@ -815,6 +846,27 @@ def prune_snapshots(directory: Path, keep: int, best_step: int | None) -> None:
     for step in snapshot_steps(directory):
         if step not in retain:
             snapshot_path(directory, step).unlink(missing_ok=True)
+
+
+def clear_incomplete_saves(*directories: Path) -> None:
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        for entry in directory.iterdir():
+            if entry.name.endswith('.tmp'):
+                entry.unlink(missing_ok=True)
+
+
+def is_transient_crash(error: BaseException) -> bool:
+    if isinstance(error, MemoryError):
+        return True
+    if isinstance(error, OSError) and getattr(error, 'errno', None) == errno.ENOMEM:
+        return True
+    if isinstance(error, RuntimeError):
+        message = str(error).lower()
+        if 'out of memory' in message or 'not enough memory' in message:
+            return True
+    return False
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -861,7 +913,8 @@ def process_job(
             train(models_dir, job_dir, job, config)
         mark_succeeded(job_dir, job)
     except Exception as error:
-        mark_failed(job_dir, job, error)
+        if not is_transient_crash(error):
+            mark_failed(job_dir, job, error)
         raise
 
 
@@ -969,6 +1022,71 @@ def encode_latents(vae: Any, path: Path, device: Any):
         latents = vae.encode(pixels).latent_dist.sample()
         latents = latents * vae.config.scaling_factor
     return latents.detach().cpu(), height, width
+
+
+def latent_sidecar(path: Path) -> Path:
+    path = Path(path)
+    return path.with_name(path.stem + '.latent.pt')
+
+
+def sidecar_is_current(sidecar: Path, image: Path) -> bool:
+    try:
+        return sidecar.is_file() and sidecar.stat().st_mtime >= image.stat().st_mtime
+    except OSError:
+        return False
+
+
+def write_latent_sidecar(path: Path, latents: Any, height: int, width: int) -> None:
+    import torch
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + '.tmp')
+    torch.save(
+        {
+            'latents': latents.detach().cpu(),
+            'height': int(height),
+            'width': int(width),
+        },
+        temporary,
+    )
+    os.replace(temporary, path)
+
+
+def read_latent_sidecar(path: Path) -> tuple[Any, int, int] | None:
+    import torch
+
+    try:
+        try:
+            payload = torch.load(path, map_location='cpu', weights_only=True)
+        except TypeError:
+            payload = torch.load(path, map_location='cpu')
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or 'latents' not in payload:
+        return None
+    try:
+        return payload['latents'], int(payload['height']), int(payload['width'])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def load_or_encode_latents(vae: Any, path: Path, device: Any):
+    sidecar = latent_sidecar(path)
+    if sidecar_is_current(sidecar, path):
+        loaded = read_latent_sidecar(sidecar)
+        if loaded is not None:
+            return loaded
+    latents, height, width = encode_latents(vae, path, device)
+    write_latent_sidecar(sidecar, latents, height, width)
+    return latents, height, width
+
+
+def release_device_cache(device: Any) -> None:
+    import torch
+
+    if getattr(device, 'type', None) == 'mps' and hasattr(torch, 'mps'):
+        torch.mps.empty_cache()
 
 
 def encode_prompt(
@@ -1252,6 +1370,51 @@ def load_base_pipeline(checkpoint: Path, hf_base: str):
     return StableDiffusionXLPipeline.from_single_file(str(checkpoint), **kwargs)
 
 
+def python_rng_state(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(python_rng_state(item) for item in value)
+    return value
+
+
+def capture_rng_state(
+    sample_rng: random.Random,
+    dropout_rng: random.Random,
+) -> dict[str, Any]:
+    import torch
+
+    payload: dict[str, Any] = {
+        'sample_rng': sample_rng.getstate(),
+        'dropout_rng': dropout_rng.getstate(),
+        'torch_rng': torch.get_rng_state(),
+    }
+    if hasattr(torch, 'mps') and hasattr(torch.mps, 'get_rng_state'):
+        try:
+            payload['torch_mps_rng'] = torch.mps.get_rng_state()
+        except (RuntimeError, AttributeError):
+            pass
+    return payload
+
+
+def apply_rng_state(
+    payload: dict[str, Any],
+    sample_rng: random.Random | None = None,
+    dropout_rng: random.Random | None = None,
+) -> None:
+    if sample_rng is not None and payload.get('sample_rng') is not None:
+        sample_rng.setstate(python_rng_state(payload['sample_rng']))
+    if dropout_rng is not None and payload.get('dropout_rng') is not None:
+        dropout_rng.setstate(python_rng_state(payload['dropout_rng']))
+    import torch
+
+    if payload.get('torch_rng') is not None:
+        torch.set_rng_state(payload['torch_rng'])
+    if payload.get('torch_mps_rng') is not None and hasattr(torch, 'mps'):
+        try:
+            torch.mps.set_rng_state(payload['torch_mps_rng'])
+        except (RuntimeError, AttributeError):
+            pass
+
+
 def save_snapshot(
     path: Path,
     *,
@@ -1264,6 +1427,8 @@ def save_snapshot(
     unet: Any,
     text_encoder: Any,
     token_id: int | None = None,
+    sample_rng: random.Random | None = None,
+    dropout_rng: random.Random | None = None,
 ) -> None:
     import torch
 
@@ -1275,6 +1440,8 @@ def save_snapshot(
         'best_step': best_step,
         'optimizer': optimizer.state_dict(),
     }
+    if sample_rng is not None and dropout_rng is not None:
+        payload.update(capture_rng_state(sample_rng, dropout_rng))
     if method in ADAPTER_METHODS:
         from peft.utils import get_peft_model_state_dict
 
@@ -1302,6 +1469,8 @@ def restore_snapshot(
     unet: Any,
     text_encoder: Any,
     token_id: int | None = None,
+    sample_rng: random.Random | None = None,
+    dropout_rng: random.Random | None = None,
 ) -> tuple[int, float, int | None]:
     import torch
 
@@ -1328,11 +1497,71 @@ def restore_snapshot(
         unet.load_state_dict(payload['unet'])
         text_encoder.load_state_dict(payload['text_encoder'])
     optimizer.load_state_dict(payload['optimizer'])
+    apply_rng_state(payload, sample_rng=sample_rng, dropout_rng=dropout_rng)
     return (
         int(payload['step']),
         float(payload.get('best_loss', payload.get('loss', float('inf')))),
         payload.get('best_step'),
     )
+
+
+def persist_training_step(
+    checkpoint_dir: Path,
+    job_dir: Path,
+    job: dict[str, Any],
+    *,
+    method: str,
+    step: int,
+    total: int,
+    loss: float,
+    best_loss: float,
+    best_step: int | None,
+    optimizer: Any,
+    unet: Any,
+    text_encoder: Any,
+    token_id: int | None,
+    sample_rng: random.Random,
+    dropout_rng: random.Random,
+    every: int,
+    keep: int,
+    pipeline: Any,
+    device: Any,
+    config: dict[str, Any],
+    progress: Progress,
+) -> None:
+    save_snapshot(
+        latest_snapshot_file(checkpoint_dir),
+        method=method,
+        step=step,
+        loss=loss,
+        best_loss=best_loss,
+        best_step=best_step,
+        optimizer=optimizer,
+        unet=unet,
+        text_encoder=text_encoder,
+        token_id=token_id,
+        sample_rng=sample_rng,
+        dropout_rng=dropout_rng,
+    )
+    job['step'] = step
+    job['total'] = total
+    write_job(job_dir, job)
+    if every and (step % every == 0 or step == total):
+        copy_snapshot(latest_snapshot_file(checkpoint_dir), snapshot_path(checkpoint_dir, step))
+        write_json(
+            checkpoint_dir / 'best.json',
+            {'step': best_step, 'loss': best_loss},
+        )
+        prune_snapshots(checkpoint_dir, keep, best_step)
+        write_snapshot_previews(
+            pipeline,
+            job_dir,
+            step,
+            str(job.get('trigger') or ''),
+            device,
+            config,
+            progress,
+        )
 
 
 def render_previews(
@@ -1446,7 +1675,10 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     job['image_count'] = len(frames)
     total = steps_for(len(frames), config)
     job['total'] = total
-    job['step'] = job.get('step') or 0
+    if resume_snapshot_path(Path(job_dir) / 'checkpoints') is None:
+        job['step'] = 0
+    else:
+        job['step'] = job.get('step') or 0
     write_job(job_dir, job)
     progress = Progress(job_dir, method, total)
     progress.emit('loading', phase_step=0, phase_total=1)
@@ -1565,9 +1797,16 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     encoded_instance: list[Any] = []
     encoded_class: list[Any] = []
     encoded = 0
+    checkpoint_dir = Path(job_dir) / 'checkpoints'
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    clear_incomplete_saves(
+        checkpoint_dir,
+        Path(job_dir) / 'dataset',
+        class_cache_path(models_dir, config) if class_pairs_list else Path(job_dir),
+    )
     progress.emit('encoding', phase_step=0, phase_total=encode_total)
     for frame in frames:
-        latents, height, width = encode_latents(vae, frame['image'], device)
+        latents, height, width = load_or_encode_latents(vae, frame['image'], device)
         mask = None
         if frame['mask'] is not None:
             mask = load_latent_mask(frame['mask'], height, width)
@@ -1575,36 +1814,11 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         encoded += 1
         progress.emit('encoding', phase_step=encoded, phase_total=encode_total)
     for path, caption in class_pairs_list:
-        encoded_class.append(encode_latents(vae, path, device) + (caption, None))
+        encoded_class.append(load_or_encode_latents(vae, path, device) + (caption, None))
         encoded += 1
         progress.emit('encoding', phase_step=encoded, phase_total=encode_total)
     vae.to('cpu')
-
-    checkpoint_dir = Path(job_dir) / 'checkpoints'
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    start_step = 1
-    best_loss = float('inf')
-    best_step: int | None = None
-    resume_step = latest_snapshot(checkpoint_dir)
-    if resume_step is not None:
-        start_step, best_loss, best_step = restore_snapshot(
-            snapshot_path(checkpoint_dir, resume_step),
-            method=method,
-            device=device,
-            optimizer=optimizer,
-            unet=unet,
-            text_encoder=text_encoder,
-            token_id=token_id,
-        )
-        start_step += 1
-        print(f'resume from step {resume_step}', flush=True)
-        progress.emit(
-            'training',
-            step=resume_step,
-            phase_step=resume_step,
-            phase_total=total,
-            loss=best_loss if best_loss < float('inf') else None,
-        )
+    release_device_cache(device)
 
     every = int(config.get('checkpoint_every') or 0)
     keep = int(config.get('keep_snapshots') or 2)
@@ -1620,6 +1834,33 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     seed = int(config.get('seed') or 0)
     sample_rng = random.Random(seed)
     dropout_rng = random.Random(seed ^ 0x9E3779B9)
+    start_step = 1
+    best_loss = float('inf')
+    best_step: int | None = None
+    resume_path = resume_snapshot_path(checkpoint_dir)
+    if resume_path is not None:
+        start_step, best_loss, best_step = restore_snapshot(
+            resume_path,
+            method=method,
+            device=device,
+            optimizer=optimizer,
+            unet=unet,
+            text_encoder=text_encoder,
+            token_id=token_id,
+            sample_rng=sample_rng,
+            dropout_rng=dropout_rng,
+        )
+        resume_step = start_step
+        start_step += 1
+        print(f'resume from step {resume_step}', flush=True)
+        progress.emit(
+            'training',
+            step=resume_step,
+            phase_step=resume_step,
+            phase_total=total,
+            loss=best_loss if best_loss < float('inf') else None,
+        )
+
     weights = pose_sample_weights(frames, config)
     te_trainable = train_text_encoder or method == 'pivotal'
     for step in range(start_step, total + 1):
@@ -1682,43 +1923,35 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         if original_embeddings is not None and token_id is not None:
             restore_frozen_embeddings(text_encoder, original_embeddings, token_id)
         value = float(loss.detach().cpu())
-        job['step'] = step
-        job['total'] = total
-        progress.emit('training', step=step, phase_step=step, phase_total=total, loss=value)
-        if step == start_step or step % 10 == 0 or step == total:
-            write_job(job_dir, job)
-            print(f'step {step}/{total} loss={value:.4f}', flush=True)
         if value < best_loss:
             best_loss = value
             best_step = step
-        if every and (step % every == 0 or step == total):
-            save_snapshot(
-                snapshot_path(checkpoint_dir, step),
-                method=method,
-                step=step,
-                loss=value,
-                best_loss=best_loss,
-                best_step=best_step,
-                optimizer=optimizer,
-                unet=unet,
-                text_encoder=text_encoder,
-                token_id=token_id,
-            )
-            write_json(
-                checkpoint_dir / 'best.json',
-                {'step': best_step, 'loss': best_loss},
-            )
-            prune_snapshots(checkpoint_dir, keep, best_step)
-            write_snapshot_previews(
-                pipeline,
-                job_dir,
-                step,
-                str(job.get('trigger') or ''),
-                device,
-                config,
-                progress,
-            )
-            progress.emit('training', step=step, phase_step=step, phase_total=total, loss=value)
+        persist_training_step(
+            checkpoint_dir,
+            job_dir,
+            job,
+            method=method,
+            step=step,
+            total=total,
+            loss=value,
+            best_loss=best_loss,
+            best_step=best_step,
+            optimizer=optimizer,
+            unet=unet,
+            text_encoder=text_encoder,
+            token_id=token_id,
+            sample_rng=sample_rng,
+            dropout_rng=dropout_rng,
+            every=every,
+            keep=keep,
+            pipeline=pipeline,
+            device=device,
+            config=config,
+            progress=progress,
+        )
+        progress.emit('training', step=step, phase_step=step, phase_total=total, loss=value)
+        if step == start_step or step % 10 == 0 or step == total:
+            print(f'step {step}/{total} loss={value:.4f}', flush=True)
 
     progress.emit('publishing', step=total, phase_step=0, phase_total=1)
     destination = publish_trained(

@@ -568,5 +568,267 @@ class StubOnceTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
 
+class CrashResumeTests(unittest.TestCase):
+    def test_latent_sidecar_sits_next_to_the_png(self) -> None:
+        self.assertEqual(
+            train_sdxl.latent_sidecar(Path('/data/0001.png')),
+            Path('/data/0001.latent.pt'),
+        )
+
+    def test_sidecar_is_current_when_sidecar_is_newer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / '0000.png'
+            sidecar = train_sdxl.latent_sidecar(image)
+            image.write_bytes(b'png')
+            sidecar.write_bytes(b'latent')
+            later = image.stat().st_mtime + 5
+            os.utime(sidecar, (later, later))
+            self.assertTrue(train_sdxl.sidecar_is_current(sidecar, image))
+            newer = sidecar.stat().st_mtime + 5
+            image.write_bytes(b'png2')
+            os.utime(image, (newer, newer))
+            self.assertFalse(train_sdxl.sidecar_is_current(sidecar, image))
+
+    def test_load_or_encode_reuses_current_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / '0000.png'
+            image.write_bytes(b'png')
+            sidecar = train_sdxl.latent_sidecar(image)
+            sidecar.write_bytes(b'latent')
+            later = image.stat().st_mtime + 5
+            os.utime(sidecar, (later, later))
+            loaded = (object(), 64, 80)
+            with mock.patch.object(train_sdxl, 'read_latent_sidecar', return_value=loaded):
+                with mock.patch.object(train_sdxl, 'encode_latents') as encode:
+                    with mock.patch.object(train_sdxl, 'write_latent_sidecar') as write:
+                        result = train_sdxl.load_or_encode_latents('vae', image, 'cpu')
+            self.assertEqual(result, loaded)
+            encode.assert_not_called()
+            write.assert_not_called()
+
+    def test_load_or_encode_writes_sidecar_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / '0000.png'
+            image.write_bytes(b'png')
+            encoded = (object(), 32, 48)
+            with mock.patch.object(train_sdxl, 'encode_latents', return_value=encoded):
+                with mock.patch.object(train_sdxl, 'write_latent_sidecar') as write:
+                    result = train_sdxl.load_or_encode_latents('vae', image, 'cpu')
+            self.assertEqual(result, encoded)
+            write.assert_called_once()
+
+    def test_stale_sidecar_reencodes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / '0000.png'
+            sidecar = train_sdxl.latent_sidecar(image)
+            sidecar.write_bytes(b'old')
+            later = sidecar.stat().st_mtime + 5
+            image.write_bytes(b'png')
+            os.utime(image, (later, later))
+            encoded = (object(), 16, 16)
+            with mock.patch.object(train_sdxl, 'encode_latents', return_value=encoded):
+                with mock.patch.object(train_sdxl, 'write_latent_sidecar') as write:
+                    with mock.patch.object(train_sdxl, 'read_latent_sidecar') as read:
+                        result = train_sdxl.load_or_encode_latents('vae', image, 'cpu')
+            self.assertEqual(result, encoded)
+            read.assert_not_called()
+            write.assert_called_once()
+
+    def test_corrupt_sidecar_reencodes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / '0000.png'
+            image.write_bytes(b'png')
+            sidecar = train_sdxl.latent_sidecar(image)
+            sidecar.write_bytes(b'not-a-tensor')
+            later = image.stat().st_mtime + 5
+            os.utime(sidecar, (later, later))
+            encoded = (object(), 8, 8)
+            with mock.patch.object(train_sdxl, 'read_latent_sidecar', return_value=None):
+                with mock.patch.object(train_sdxl, 'encode_latents', return_value=encoded):
+                    with mock.patch.object(train_sdxl, 'write_latent_sidecar') as write:
+                        result = train_sdxl.load_or_encode_latents('vae', image, 'cpu')
+            self.assertEqual(result, encoded)
+            write.assert_called_once()
+
+    def test_resume_prefers_rolling_latest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'step-000250.pt').write_bytes(b'old')
+            (path / 'latest.pt').write_bytes(b'new')
+            self.assertEqual(train_sdxl.resume_snapshot_path(path), path / 'latest.pt')
+
+    def test_resume_falls_back_to_numbered_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'step-000100.pt').write_bytes(b'a')
+            (path / 'step-000250.pt').write_bytes(b'b')
+            self.assertEqual(
+                train_sdxl.resume_snapshot_path(path),
+                train_sdxl.snapshot_path(path, 250),
+            )
+
+    def test_empty_latest_falls_back_to_numbered(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'latest.pt').write_bytes(b'')
+            (path / 'step-000010.pt').write_bytes(b'x')
+            self.assertEqual(
+                train_sdxl.resume_snapshot_path(path),
+                train_sdxl.snapshot_path(path, 10),
+            )
+
+    def test_missing_snapshots_resume_from_the_start(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(train_sdxl.resume_snapshot_path(Path(directory)))
+
+    def test_prune_keeps_rolling_latest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            latest = path / 'latest.pt'
+            latest.write_bytes(b'keep')
+            for step in (100, 200, 300, 400):
+                train_sdxl.snapshot_path(path, step).write_bytes(b'x')
+            train_sdxl.prune_snapshots(path, 2, None)
+            self.assertTrue(latest.is_file())
+            self.assertEqual(train_sdxl.snapshot_steps(path), [300, 400])
+
+    def test_clear_incomplete_saves_drops_tmp_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            keep = path / 'latest.pt'
+            tmp = path / 'latest.pt.tmp'
+            keep.write_bytes(b'keep')
+            tmp.write_bytes(b'tmp')
+            train_sdxl.clear_incomplete_saves(path)
+            self.assertTrue(keep.is_file())
+            self.assertFalse(tmp.is_file())
+
+    def test_oom_runtime_error_is_transient(self) -> None:
+        self.assertTrue(train_sdxl.is_transient_crash(MemoryError()))
+        self.assertTrue(
+            train_sdxl.is_transient_crash(RuntimeError('MPS backend out of memory'))
+        )
+        self.assertFalse(train_sdxl.is_transient_crash(ValueError('bad checkpoint')))
+
+    def test_memory_error_keeps_job_running(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            write_dataset(job_dir)
+            train_sdxl.write_job(job_dir, queued_job(method='finetune'))
+            with mock.patch.object(train_sdxl, 'train', side_effect=MemoryError('mps')):
+                with self.assertRaises(MemoryError):
+                    train_sdxl.process_job(
+                        models, job_dir, train_sdxl.load_config(), stub=False
+                    )
+            job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+            self.assertEqual(job['status'], 'running')
+
+    def test_other_errors_mark_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            write_dataset(job_dir)
+            train_sdxl.write_job(job_dir, queued_job(method='finetune'))
+            with mock.patch.object(train_sdxl, 'train', side_effect=ValueError('bad')):
+                with self.assertRaises(ValueError):
+                    train_sdxl.process_job(
+                        models, job_dir, train_sdxl.load_config(), stub=False
+                    )
+            job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+            self.assertEqual(job['status'], 'failed')
+            self.assertEqual(job['error'], 'bad')
+
+    def test_persist_writes_latest_every_step_and_numbers_on_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            checkpoint_dir = job_dir / 'checkpoints'
+            checkpoint_dir.mkdir()
+            job = queued_job(method='finetune')
+            progress = train_sdxl.Progress(job_dir, 'finetune', 10)
+            with mock.patch.object(train_sdxl, 'save_snapshot') as save:
+                with mock.patch.object(train_sdxl, 'copy_snapshot') as copy:
+                    with mock.patch.object(
+                        train_sdxl, 'write_snapshot_previews'
+                    ) as previews:
+                        train_sdxl.persist_training_step(
+                            checkpoint_dir,
+                            job_dir,
+                            job,
+                            method='finetune',
+                            step=1,
+                            total=10,
+                            loss=0.5,
+                            best_loss=0.5,
+                            best_step=1,
+                            optimizer=object(),
+                            unet=object(),
+                            text_encoder=object(),
+                            token_id=None,
+                            sample_rng=random.Random(0),
+                            dropout_rng=random.Random(1),
+                            every=250,
+                            keep=2,
+                            pipeline=object(),
+                            device='cpu',
+                            config={'preview_count': 0},
+                            progress=progress,
+                        )
+                        copy.assert_not_called()
+                        previews.assert_not_called()
+                        train_sdxl.persist_training_step(
+                            checkpoint_dir,
+                            job_dir,
+                            job,
+                            method='finetune',
+                            step=250,
+                            total=8000,
+                            loss=0.4,
+                            best_loss=0.4,
+                            best_step=250,
+                            optimizer=object(),
+                            unet=object(),
+                            text_encoder=object(),
+                            token_id=None,
+                            sample_rng=random.Random(0),
+                            dropout_rng=random.Random(1),
+                            every=250,
+                            keep=2,
+                            pipeline=object(),
+                            device='cpu',
+                            config={'preview_count': 0},
+                            progress=progress,
+                        )
+            self.assertEqual(save.call_count, 2)
+            self.assertEqual(
+                save.call_args_list[0].args[0],
+                train_sdxl.latest_snapshot_file(checkpoint_dir),
+            )
+            copy.assert_called_once()
+            previews.assert_called_once()
+            written = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+            self.assertEqual(written['step'], 250)
+
+    def test_python_rng_state_roundtrips_lists(self) -> None:
+        rng = random.Random(7)
+        state = rng.getstate()
+        as_lists = [state[0], list(state[1]), state[2]]
+        restored = random.Random()
+        restored.setstate(train_sdxl.python_rng_state(as_lists))
+        self.assertEqual(rng.random(), restored.random())
+
+    def test_copy_snapshot_replaces_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            source = path / 'latest.pt'
+            destination = path / 'step-000001.pt'
+            source.write_bytes(b'snapshot')
+            train_sdxl.copy_snapshot(source, destination)
+            self.assertEqual(destination.read_bytes(), b'snapshot')
+            self.assertFalse((path / 'step-000001.pt.tmp').exists())
+
+
 if __name__ == '__main__':
     unittest.main()
