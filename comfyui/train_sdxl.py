@@ -11,6 +11,7 @@ import random
 import shutil
 import struct
 import sys
+import threading
 import time
 import traceback
 import zlib
@@ -30,6 +31,8 @@ TRAIN_ROOT = '.zone-train'
 LATEST_SNAPSHOT = 'latest.pt'
 STILL_METHODS = {'lora', 'finetune', 'pivotal'}
 ADAPTER_METHODS = {'lora', 'pivotal'}
+FINETUNE_MIN_MEMORY = 40 * 1024**3
+ADAPTER_MIN_MEMORY = 20 * 1024**3
 MASK_THRESHOLD = 0.2
 KIND_BOOST = 1.25
 REBALANCE_SHARE = 0.40
@@ -916,6 +919,8 @@ def process_job(
         if not is_transient_crash(error):
             mark_failed(job_dir, job, error)
         raise
+    finally:
+        wait_for_latest_save()
 
 
 def watch(models_dir: Path, config: dict[str, Any], once: bool, stub: bool) -> int:
@@ -945,12 +950,43 @@ def main(argv: list[str] | None = None) -> int:
     return watch(models_dir, config, once=args.once, stub=stub_enabled(args))
 
 
-def select_device():
+def device_kind(device: Any) -> str:
+    kind = getattr(device, 'type', None)
+    if isinstance(kind, str) and kind:
+        return kind
+    text = str(device)
+    if not text:
+        return 'cpu'
+    return text.split(':', 1)[0]
+
+
+def select_device() -> Any:
     import torch
 
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        return torch.device('cuda')
     if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         return torch.device('mps')
     return torch.device('cpu')
+
+
+def assert_device_capacity(device: Any, method: str) -> None:
+    if device_kind(device) != 'cuda':
+        return
+    import torch
+
+    required = FINETUNE_MIN_MEMORY if method == 'finetune' else ADAPTER_MIN_MEMORY
+    index = getattr(device, 'index', None)
+    total = int(torch.cuda.get_device_properties(0 if index is None else index).total_memory)
+    if total >= required:
+        return
+    if method == 'finetune':
+        raise RuntimeError(
+            'this recipe needs a 48 GB card for fine-tune; refusing to drop precision'
+        )
+    raise RuntimeError('this recipe needs a 24 GB card for LoRA; refusing to drop precision')
 
 
 def matching_targets(model: Any, candidates: list[str]) -> list[str]:
@@ -1505,6 +1541,38 @@ def restore_snapshot(
     )
 
 
+_latest_save_lock = threading.Lock()
+_latest_save_thread: threading.Thread | None = None
+
+
+def wait_for_latest_save() -> None:
+    global _latest_save_thread
+    thread = _latest_save_thread
+    if thread is not None:
+        thread.join()
+    with _latest_save_lock:
+        if _latest_save_thread is thread:
+            _latest_save_thread = None
+
+
+def start_latest_save(path: Path, **kwargs: Any) -> None:
+    global _latest_save_thread
+
+    def run() -> None:
+        try:
+            save_snapshot(path, **kwargs)
+        except Exception:
+            traceback.print_exc()
+
+    with _latest_save_lock:
+        current = _latest_save_thread
+        if current is not None and current.is_alive():
+            return
+        thread = threading.Thread(target=run, name='zone-latest-pt', daemon=True)
+        _latest_save_thread = thread
+        thread.start()
+
+
 def persist_training_step(
     checkpoint_dir: Path,
     job_dir: Path,
@@ -1529,25 +1597,31 @@ def persist_training_step(
     config: dict[str, Any],
     progress: Progress,
 ) -> None:
-    save_snapshot(
-        latest_snapshot_file(checkpoint_dir),
-        method=method,
-        step=step,
-        loss=loss,
-        best_loss=best_loss,
-        best_step=best_step,
-        optimizer=optimizer,
-        unet=unet,
-        text_encoder=text_encoder,
-        token_id=token_id,
-        sample_rng=sample_rng,
-        dropout_rng=dropout_rng,
-    )
+    latest = latest_snapshot_file(checkpoint_dir)
+    numbered = bool(every) and (step % every == 0 or step == total)
+    snapshot: dict[str, Any] = {
+        'method': method,
+        'step': step,
+        'loss': loss,
+        'best_loss': best_loss,
+        'best_step': best_step,
+        'optimizer': optimizer,
+        'unet': unet,
+        'text_encoder': text_encoder,
+        'token_id': token_id,
+        'sample_rng': sample_rng,
+        'dropout_rng': dropout_rng,
+    }
+    if method == 'finetune' and device_kind(device) == 'cuda' and not numbered:
+        start_latest_save(latest, **snapshot)
+    else:
+        wait_for_latest_save()
+        save_snapshot(latest, **snapshot)
     job['step'] = step
     job['total'] = total
     write_job(job_dir, job)
-    if every and (step % every == 0 or step == total):
-        copy_snapshot(latest_snapshot_file(checkpoint_dir), snapshot_path(checkpoint_dir, step))
+    if numbered:
+        copy_snapshot(latest, snapshot_path(checkpoint_dir, step))
         write_json(
             checkpoint_dir / 'best.json',
             {'step': best_step, 'loss': best_loss},
@@ -1684,6 +1758,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     progress.emit('loading', phase_step=0, phase_total=1)
 
     device = select_device()
+    assert_device_capacity(device, method)
     print(f'device={device} method={method} steps={total} images={len(frames)}', flush=True)
     pipeline = load_base_pipeline(checkpoint, str(job.get('hf_base') or ''))
     progress.emit('loading', phase_step=1, phase_total=1)
@@ -1953,6 +2028,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         if step == start_step or step % 10 == 0 or step == total:
             print(f'step {step}/{total} loss={value:.4f}', flush=True)
 
+    wait_for_latest_save()
     progress.emit('publishing', step=total, phase_step=0, phase_total=1)
     destination = publish_trained(
         models_dir,

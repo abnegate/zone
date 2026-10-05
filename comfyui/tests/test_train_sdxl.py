@@ -6,6 +6,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -387,6 +388,67 @@ class ClassCacheTests(unittest.TestCase):
             self.assertEqual(len(again), 3)
 
 
+class DeviceSelectionTests(unittest.TestCase):
+    def fake_torch(
+        self,
+        *,
+        cuda: bool,
+        mps: bool = False,
+        memory: int | None = None,
+    ) -> mock.MagicMock:
+        module = mock.MagicMock()
+        module.cuda.is_available.return_value = cuda
+        module.backends.mps.is_available.return_value = mps
+        module.device.side_effect = lambda name: self.make_device(name)
+        if memory is not None:
+            module.cuda.get_device_properties.return_value = mock.Mock(total_memory=memory)
+        return module
+
+    def make_device(self, kind: str, index: int | None = 0) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        device.index = index
+        return device
+
+    def test_cuda_preferred_when_the_backend_reports_available(self) -> None:
+        module = self.fake_torch(cuda=True, mps=True)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            device = train_sdxl.select_device()
+        self.assertEqual(device.type, 'cuda')
+        module.device.assert_called_with('cuda')
+
+    def test_mps_selected_when_cuda_is_not(self) -> None:
+        module = self.fake_torch(cuda=False, mps=True)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            device = train_sdxl.select_device()
+        self.assertEqual(device.type, 'mps')
+        module.device.assert_called_with('mps')
+
+    def test_finetune_on_a_12gb_fake_cuda_device_raises(self) -> None:
+        module = self.fake_torch(cuda=True, memory=12 * 1024**3)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            with self.assertRaisesRegex(RuntimeError, '48 GB card for fine-tune'):
+                train_sdxl.assert_device_capacity(self.make_device('cuda'), 'finetune')
+
+    def test_lora_on_a_24gb_fake_cuda_device_passes(self) -> None:
+        module = self.fake_torch(cuda=True, memory=24 * 1024**3)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.assert_device_capacity(self.make_device('cuda'), 'lora')
+
+    def test_tf32_flags_are_cleared_when_device_is_cuda(self) -> None:
+        module = self.fake_torch(cuda=True)
+        module.backends.cuda.matmul.allow_tf32 = True
+        module.backends.cudnn.allow_tf32 = True
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.select_device()
+        self.assertFalse(module.backends.cuda.matmul.allow_tf32)
+        self.assertFalse(module.backends.cudnn.allow_tf32)
+
+    def test_cpu_and_mps_skip_vram_checks(self) -> None:
+        train_sdxl.assert_device_capacity(self.make_device('cpu'), 'finetune')
+        train_sdxl.assert_device_capacity(self.make_device('mps'), 'finetune')
+
+
 class OptimizerTests(unittest.TestCase):
     def test_prodigy_path_is_config_gated(self) -> None:
         config = train_sdxl.load_config()
@@ -741,6 +803,48 @@ class CrashResumeTests(unittest.TestCase):
             self.assertEqual(job['status'], 'failed')
             self.assertEqual(job['error'], 'bad')
 
+    def test_persist_at_step_one_writes_latest_without_numbered_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            checkpoint_dir = job_dir / 'checkpoints'
+            checkpoint_dir.mkdir()
+            job = queued_job(method='finetune')
+            progress = train_sdxl.Progress(job_dir, 'finetune', 10)
+            with mock.patch.object(train_sdxl, 'save_snapshot') as save:
+                with mock.patch.object(train_sdxl, 'copy_snapshot') as copy:
+                    with mock.patch.object(train_sdxl, 'write_snapshot_previews') as previews:
+                        train_sdxl.persist_training_step(
+                            checkpoint_dir,
+                            job_dir,
+                            job,
+                            method='finetune',
+                            step=1,
+                            total=10,
+                            loss=0.5,
+                            best_loss=0.5,
+                            best_step=1,
+                            optimizer=object(),
+                            unet=object(),
+                            text_encoder=object(),
+                            token_id=None,
+                            sample_rng=random.Random(0),
+                            dropout_rng=random.Random(1),
+                            every=250,
+                            keep=2,
+                            pipeline=object(),
+                            device='cpu',
+                            config={'preview_count': 0},
+                            progress=progress,
+                        )
+            save.assert_called_once()
+            self.assertEqual(
+                save.call_args.args[0],
+                train_sdxl.latest_snapshot_file(checkpoint_dir),
+            )
+            copy.assert_not_called()
+            previews.assert_not_called()
+            self.assertFalse(train_sdxl.snapshot_steps(checkpoint_dir))
+
     def test_persist_writes_latest_every_step_and_numbers_on_interval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job_dir = Path(directory)
@@ -810,6 +914,94 @@ class CrashResumeTests(unittest.TestCase):
             previews.assert_called_once()
             written = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
             self.assertEqual(written['step'], 250)
+
+    def persist_kwargs(self, job_dir: Path, checkpoint_dir: Path, **overrides: object) -> dict:
+        job = queued_job(method=str(overrides.get('method') or 'finetune'))
+        kwargs: dict = {
+            'checkpoint_dir': checkpoint_dir,
+            'job_dir': job_dir,
+            'job': job,
+            'method': 'finetune',
+            'step': 1,
+            'total': 10,
+            'loss': 0.5,
+            'best_loss': 0.5,
+            'best_step': 1,
+            'optimizer': object(),
+            'unet': object(),
+            'text_encoder': object(),
+            'token_id': None,
+            'sample_rng': random.Random(0),
+            'dropout_rng': random.Random(1),
+            'every': 250,
+            'keep': 2,
+            'pipeline': object(),
+            'device': 'cpu',
+            'config': {'preview_count': 0},
+            'progress': train_sdxl.Progress(job_dir, 'finetune', 10),
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_cuda_finetune_latest_save_skips_when_in_flight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            checkpoint_dir = job_dir / 'checkpoints'
+            checkpoint_dir.mkdir()
+            device = mock.Mock()
+            device.type = 'cuda'
+            started = threading.Event()
+            release = threading.Event()
+            calls = {'count': 0}
+
+            def blocking_save(*_args: object, **_kwargs: object) -> None:
+                calls['count'] += 1
+                started.set()
+                self.assertTrue(release.wait(timeout=2))
+
+            with mock.patch.object(train_sdxl, 'save_snapshot', side_effect=blocking_save):
+                with mock.patch.object(train_sdxl, 'copy_snapshot'):
+                    with mock.patch.object(train_sdxl, 'write_snapshot_previews'):
+                        try:
+                            train_sdxl.persist_training_step(
+                                **self.persist_kwargs(
+                                    job_dir, checkpoint_dir, device=device, step=1
+                                )
+                            )
+                            self.assertTrue(started.wait(timeout=2))
+                            train_sdxl.persist_training_step(
+                                **self.persist_kwargs(
+                                    job_dir, checkpoint_dir, device=device, step=2
+                                )
+                            )
+                            self.assertEqual(calls['count'], 1)
+                        finally:
+                            release.set()
+                            train_sdxl.wait_for_latest_save()
+                        self.assertEqual(calls['count'], 1)
+
+    def test_lora_latest_save_stays_synchronous_on_cuda(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            checkpoint_dir = job_dir / 'checkpoints'
+            checkpoint_dir.mkdir()
+            device = mock.Mock()
+            device.type = 'cuda'
+            with mock.patch.object(train_sdxl, 'start_latest_save') as start:
+                with mock.patch.object(train_sdxl, 'save_snapshot') as save:
+                    with mock.patch.object(train_sdxl, 'copy_snapshot'):
+                        with mock.patch.object(train_sdxl, 'write_snapshot_previews'):
+                            train_sdxl.persist_training_step(
+                                **self.persist_kwargs(
+                                    job_dir,
+                                    checkpoint_dir,
+                                    method='lora',
+                                    device=device,
+                                    progress=train_sdxl.Progress(job_dir, 'lora', 10),
+                                )
+                            )
+            start.assert_not_called()
+            save.assert_called_once()
 
     def test_python_rng_state_roundtrips_lists(self) -> None:
         rng = random.Random(7)

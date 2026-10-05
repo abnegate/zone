@@ -293,6 +293,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     progress.emit('loading', phase_step=0, phase_total=1)
 
     device = train_sdxl.select_device()
+    train_sdxl.assert_device_capacity(device, 'video')
     dtype = torch.float32
     transformer = load_transformer(models_dir, device, dtype)
     vae = load_vae(models_dir, device, dtype)
