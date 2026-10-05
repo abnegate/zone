@@ -7,27 +7,13 @@ use abnegate_exec::{
     JobRegistry, OutboundMessage, RunCancel, RunStart, RunStdin,
 };
 use base64::prelude::*;
-use serde::Serialize;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
-use tokio::sync::{Mutex, mpsc};
-
-/// The answer to a `Ping`.
-///
-/// `OutboundMessage::Pong` cannot be built outside `abnegate-exec`, so the
-/// runner writes the same wire shape itself.
-#[derive(Serialize)]
-#[serde(tag = "type")]
-struct Pong {
-    id: String,
-}
+use tokio::sync::mpsc;
 
 /// Run the daemon, communicating over stdio.
 pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
-    let stdin = tokio::io::stdin();
-    let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
-
-    let mut reader = BufReader::new(stdin);
+    let mut reader = BufReader::new(tokio::io::stdin());
 
     let registry = Arc::new(JobRegistry::new());
     let executor = Arc::new(CommandExecutor::with_config(
@@ -37,12 +23,12 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel::<OutboundMessage>(1000);
 
     let writer_handle = {
-        let stdout = Arc::clone(&stdout);
         let registry = Arc::clone(&registry);
         tokio::spawn(async move {
+            let mut stdout = tokio::io::stdout();
             while let Some(msg) = rx.recv().await {
                 registry.observe(&msg);
-                if !write_line(&stdout, &msg).await {
+                if !write_line(&mut stdout, &msg).await {
                     break;
                 }
             }
@@ -122,7 +108,7 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        handle_message(msg, &registry, &executor, &stdout, tx.clone()).await?;
+        handle_message(msg, &registry, &executor, tx.clone()).await?;
     }
 
     loop {
@@ -146,7 +132,7 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        if let Err(e) = handle_message(msg, &registry, &executor, &stdout, tx.clone()).await {
+        if let Err(e) = handle_message(msg, &registry, &executor, tx.clone()).await {
             tracing::error!("Error handling message: {}", e);
         }
     }
@@ -162,7 +148,7 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Write `message` as one line of JSON, reporting whether stdout still takes
 /// writes.
-async fn write_line(stdout: &Mutex<Stdout>, message: &impl Serialize) -> bool {
+async fn write_line(stdout: &mut Stdout, message: &OutboundMessage) -> bool {
     let json = match serde_json::to_string(message) {
         Ok(json) => json,
         Err(e) => {
@@ -171,7 +157,6 @@ async fn write_line(stdout: &Mutex<Stdout>, message: &impl Serialize) -> bool {
         }
     };
 
-    let mut stdout = stdout.lock().await;
     for bytes in [json.as_bytes(), b"\n"] {
         if let Err(e) = stdout.write_all(bytes).await {
             tracing::error!("Failed to write to stdout: {}", e);
@@ -190,7 +175,6 @@ async fn handle_message(
     msg: InboundMessage,
     registry: &Arc<JobRegistry>,
     executor: &Arc<CommandExecutor>,
-    stdout: &Mutex<Stdout>,
     tx: mpsc::Sender<OutboundMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match msg {
@@ -249,7 +233,7 @@ async fn handle_message(
 
         InboundMessage::Ping(ping) => {
             tracing::debug!("Ping: id={}", ping.id);
-            write_line(stdout, &Pong { id: ping.id }).await;
+            tx.send(OutboundMessage::pong(ping.id)).await?;
         }
 
         _ => {
@@ -335,20 +319,5 @@ mod tests {
         assert!(json.contains("protocol_version"));
         assert!(json.contains("runner_version"));
         assert!(json.contains("capabilities"));
-    }
-
-    #[test]
-    fn a_pong_reads_back_as_the_protocols_own() {
-        let written = serde_json::to_string(&Pong {
-            id: "ping-7".to_string(),
-        })
-        .unwrap();
-
-        let read: OutboundMessage = serde_json::from_str(&written).unwrap();
-
-        assert!(
-            matches!(&read, OutboundMessage::Pong { id, .. } if id == "ping-7"),
-            "{written} is not a Pong: {read:?}"
-        );
     }
 }
