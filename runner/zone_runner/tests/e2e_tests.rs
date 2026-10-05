@@ -14,8 +14,6 @@ use zone_routing::{BYPASS, PROXY_URL_VARIABLE};
 
 const ROUTED_PROXY: &str = "http://127.0.0.1:28888";
 
-/// Start the runner with only `variables` naming a proxy, whatever the
-/// environment running the tests routes through.
 fn runner(variables: &[(&str, &str)]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zone-runner"));
     for name in [
@@ -70,7 +68,6 @@ impl DaemonProcess {
         Self::spawn_with(&[])
     }
 
-    /// Spawn a new daemon process whose environment adds `variables`
     fn spawn_with(variables: &[(&str, &str)]) -> Self {
         let mut child = runner(variables)
             .args(["serve", "--stdio"])
@@ -91,7 +88,6 @@ impl DaemonProcess {
         }
     }
 
-    /// Complete the handshake every session starts with
     fn handshake(&mut self) {
         self.send(&Hello {
             msg_type: "Hello".to_string(),

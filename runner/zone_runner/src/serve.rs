@@ -22,15 +22,15 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
             .with_proxy(zone_routing::proxy()),
     ));
 
-    let (tx, mut rx) = mpsc::channel::<OutboundMessage>(1000);
+    let (sender, mut receiver) = mpsc::channel::<OutboundMessage>(1000);
 
-    let writer_handle = {
+    let writer = {
         let registry = Arc::clone(&registry);
         tokio::spawn(async move {
             let mut stdout = tokio::io::stdout();
-            while let Some(msg) = rx.recv().await {
-                registry.observe(&msg);
-                if !write_line(&mut stdout, &msg).await {
+            while let Some(message) = receiver.recv().await {
+                registry.observe(&message);
+                if !write_line(&mut stdout, &message).await {
                     break;
                 }
             }
@@ -54,22 +54,23 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let msg: InboundMessage = match serde_json::from_str(line) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!("Failed to parse message: {} (line: {})", e, line);
-                tx.send(OutboundMessage::error(
-                    "",
-                    ErrorCode::InvalidMessage,
-                    format!("Failed to parse message: {}", e),
-                ))
-                .await?;
+        let message: InboundMessage = match serde_json::from_str(line) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::error!("Failed to parse message: {} (line: {})", error, line);
+                sender
+                    .send(OutboundMessage::error(
+                        "",
+                        ErrorCode::InvalidMessage,
+                        format!("Failed to parse message: {}", error),
+                    ))
+                    .await?;
                 continue;
             }
         };
 
         if !hello_received {
-            match msg {
+            match message {
                 InboundMessage::Hello(Hello {
                     protocol_version,
                     capabilities,
@@ -82,35 +83,37 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
                     );
 
                     if !protocol_version.starts_with("1.") {
-                        tx.send(OutboundMessage::error(
-                            "",
-                            ErrorCode::InvalidMessage,
-                            format!(
-                                "Unsupported protocol version: {} (expected 1.x)",
-                                protocol_version
-                            ),
-                        ))
-                        .await?;
+                        sender
+                            .send(OutboundMessage::error(
+                                "",
+                                ErrorCode::InvalidMessage,
+                                format!(
+                                    "Unsupported protocol version: {} (expected 1.x)",
+                                    protocol_version
+                                ),
+                            ))
+                            .await?;
                         break;
                     }
 
-                    tx.send(OutboundMessage::hello_acknowledged()).await?;
+                    sender.send(OutboundMessage::hello_acknowledged()).await?;
                     hello_received = true;
                     tracing::info!("Handshake complete");
                 }
                 _ => {
-                    tx.send(OutboundMessage::error(
-                        "",
-                        ErrorCode::InvalidMessage,
-                        "Expected Hello message",
-                    ))
-                    .await?;
+                    sender
+                        .send(OutboundMessage::error(
+                            "",
+                            ErrorCode::InvalidMessage,
+                            "Expected Hello message",
+                        ))
+                        .await?;
                 }
             }
             continue;
         }
 
-        handle_message(msg, &registry, &executor, tx.clone()).await?;
+        handle_message(message, &registry, &executor, sender.clone()).await?;
     }
 
     loop {
@@ -121,29 +124,29 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        let line_trimmed = line.trim();
-        if line_trimmed.is_empty() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
 
-        let msg: InboundMessage = match serde_json::from_str(line_trimmed) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!("Failed to parse message: {}", e);
+        let message: InboundMessage = match serde_json::from_str(trimmed) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::error!("Failed to parse message: {}", error);
                 continue;
             }
         };
 
-        if let Err(e) = handle_message(msg, &registry, &executor, tx.clone()).await {
-            tracing::error!("Error handling message: {}", e);
+        if let Err(error) = handle_message(message, &registry, &executor, sender.clone()).await {
+            tracing::error!("Error handling message: {}", error);
         }
     }
 
     tracing::info!("Shutting down, cancelling {} jobs", registry.active_count());
     registry.cancel_all();
 
-    drop(tx);
-    writer_handle.await?;
+    drop(sender);
+    writer.await?;
 
     Ok(())
 }
@@ -153,43 +156,43 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
 async fn write_line(stdout: &mut Stdout, message: &OutboundMessage) -> bool {
     let json = match serde_json::to_string(message) {
         Ok(json) => json,
-        Err(e) => {
-            tracing::error!("Failed to serialize message: {}", e);
+        Err(error) => {
+            tracing::error!("Failed to serialize message: {}", error);
             return true;
         }
     };
 
     for bytes in [json.as_bytes(), b"\n"] {
-        if let Err(e) = stdout.write_all(bytes).await {
-            tracing::error!("Failed to write to stdout: {}", e);
+        if let Err(error) = stdout.write_all(bytes).await {
+            tracing::error!("Failed to write to stdout: {}", error);
             return false;
         }
     }
-    if let Err(e) = stdout.flush().await {
-        tracing::error!("Failed to flush stdout: {}", e);
+    if let Err(error) = stdout.flush().await {
+        tracing::error!("Failed to flush stdout: {}", error);
         return false;
     }
     true
 }
 
-/// Handle an inbound message.
 async fn handle_message(
-    msg: InboundMessage,
+    message: InboundMessage,
     registry: &Arc<JobRegistry>,
     executor: &Arc<CommandExecutor>,
-    tx: mpsc::Sender<OutboundMessage>,
+    sender: mpsc::Sender<OutboundMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match msg {
+    match message {
         InboundMessage::Hello(_) => {
-            tx.send(OutboundMessage::error(
-                "",
-                ErrorCode::InvalidMessage,
-                "Unexpected Hello message after handshake",
-            ))
-            .await?;
+            sender
+                .send(OutboundMessage::error(
+                    "",
+                    ErrorCode::InvalidMessage,
+                    "Unexpected Hello message after handshake",
+                ))
+                .await?;
         }
 
-        InboundMessage::RunStart(request) => start(request, registry, executor, tx).await?,
+        InboundMessage::RunStart(request) => start(request, registry, executor, sender).await?,
 
         InboundMessage::RunStdin(RunStdin {
             job_id, data, eof, ..
@@ -197,20 +200,21 @@ async fn handle_message(
             tracing::debug!("RunStdin: job_id={}, eof={}", job_id, eof);
 
             let bytes = match BASE64_STANDARD.decode(&data) {
-                Ok(b) => b,
-                Err(e) => {
-                    tx.send(OutboundMessage::error(
-                        &job_id,
-                        ErrorCode::InvalidMessage,
-                        format!("Invalid base64 data: {}", e),
-                    ))
-                    .await?;
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    sender
+                        .send(OutboundMessage::error(
+                            &job_id,
+                            ErrorCode::InvalidMessage,
+                            format!("Invalid base64 data: {}", error),
+                        ))
+                        .await?;
                     return Ok(());
                 }
             };
 
-            if let Some(stdin_tx) = registry.get_stdin(&job_id)
-                && stdin_tx.send(bytes).await.is_err()
+            if let Some(stdin) = registry.get_stdin(&job_id)
+                && stdin.send(bytes).await.is_err()
             {
                 tracing::warn!("Failed to send stdin data: job_id={}", job_id);
             }
@@ -223,28 +227,30 @@ async fn handle_message(
         InboundMessage::RunCancel(RunCancel { job_id, force, .. }) => {
             tracing::info!("RunCancel: job_id={}, force={}", job_id, force);
 
-            if let Err(e) = registry.cancel(&job_id, force) {
-                tx.send(OutboundMessage::error(
-                    &job_id,
-                    ErrorCode::JobNotFound,
-                    e.to_string(),
-                ))
-                .await?;
+            if let Err(error) = registry.cancel(&job_id, force) {
+                sender
+                    .send(OutboundMessage::error(
+                        &job_id,
+                        ErrorCode::JobNotFound,
+                        error.to_string(),
+                    ))
+                    .await?;
             }
         }
 
         InboundMessage::Ping(ping) => {
             tracing::debug!("Ping: id={}", ping.id);
-            tx.send(OutboundMessage::pong(ping.id)).await?;
+            sender.send(OutboundMessage::pong(ping.id)).await?;
         }
 
         _ => {
-            tx.send(OutboundMessage::error(
-                "",
-                ErrorCode::InvalidMessage,
-                "Unsupported message",
-            ))
-            .await?;
+            sender
+                .send(OutboundMessage::error(
+                    "",
+                    ErrorCode::InvalidMessage,
+                    "Unsupported message",
+                ))
+                .await?;
         }
     }
 
@@ -255,7 +261,7 @@ async fn start(
     request: RunStart,
     registry: &Arc<JobRegistry>,
     executor: &Arc<CommandExecutor>,
-    tx: mpsc::Sender<OutboundMessage>,
+    sender: mpsc::Sender<OutboundMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let job_id = request.job_id.clone();
     tracing::info!(
@@ -267,41 +273,43 @@ async fn start(
 
     let cancellation = match registry.register(job_id.clone()) {
         Ok(token) => token,
-        Err(e) => {
-            tx.send(OutboundMessage::error(
-                &job_id,
-                ErrorCode::InternalError,
-                format!("Failed to register job: {}", e),
-            ))
-            .await?;
+        Err(error) => {
+            sender
+                .send(OutboundMessage::error(
+                    &job_id,
+                    ErrorCode::InternalError,
+                    format!("Failed to register job: {}", error),
+                ))
+                .await?;
             return Ok(());
         }
     };
 
     match executor
-        .spawn_with_cancellation(&request, tx.clone(), cancellation)
+        .spawn_with_cancellation(&request, sender.clone(), cancellation)
         .await
     {
         Ok(handle) => {
-            if let Err(e) = registry.set_process_group(&job_id, handle.process_group.clone()) {
-                tracing::warn!("Failed to store process group: {}", e);
+            if let Err(error) = registry.set_process_group(&job_id, handle.process_group.clone()) {
+                tracing::warn!("Failed to store process group: {}", error);
             }
             if let Some(stdin) = handle.stdin
-                && let Err(e) = registry.set_stdin_handle(&job_id, stdin)
+                && let Err(error) = registry.set_stdin_handle(&job_id, stdin)
             {
-                tracing::debug!("Job finished before its stdin was stored: {}", e);
+                tracing::debug!("Job finished before its stdin was stored: {}", error);
             }
             tracing::debug!("Command spawned: job_id={}", job_id);
         }
-        Err(e) => {
-            tracing::error!("Failed to spawn command: {}", e);
+        Err(error) => {
+            tracing::error!("Failed to spawn command: {}", error);
             registry.remove(&job_id);
-            tx.send(OutboundMessage::error(
-                &job_id,
-                e.to_error_code(),
-                e.to_string(),
-            ))
-            .await?;
+            sender
+                .send(OutboundMessage::error(
+                    &job_id,
+                    error.to_error_code(),
+                    error.to_string(),
+                ))
+                .await?;
         }
     }
 
@@ -314,8 +322,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_hello_ack_format() {
-        let msg = OutboundMessage::hello_acknowledged();
-        let json = serde_json::to_string(&msg).unwrap();
+        let message = OutboundMessage::hello_acknowledged();
+        let json = serde_json::to_string(&message).unwrap();
 
         assert!(json.contains("HelloAck"));
         assert!(json.contains("protocol_version"));
