@@ -992,3 +992,23 @@ fn a_job_that_never_reads_its_stdin_cannot_stall_the_daemon() {
 
     daemon.shutdown();
 }
+
+#[test]
+fn stdin_for_a_job_that_is_not_running_is_answered() {
+    let mut daemon = DaemonProcess::spawn();
+    let _watchdog = daemon.watchdog(Duration::from_secs(60));
+    daemon.handshake();
+    daemon.start("job-finished", "true", &[]);
+    daemon.finish();
+
+    for job_id in ["job-unknown", "job-finished"] {
+        daemon.write_stdin(job_id, BASE64_STANDARD.encode("lost\n"), false);
+        let answer = daemon.recv();
+
+        assert_eq!(answer["type"], "RunError", "{answer}");
+        assert_eq!(answer["job_id"], job_id, "{answer}");
+        assert_eq!(answer["error_code"], "job_not_found", "{answer}");
+    }
+
+    daemon.shutdown();
+}

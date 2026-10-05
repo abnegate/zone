@@ -212,20 +212,23 @@ async fn handle_message(
                 }
             };
 
-            if let Some(stdin) = registry.get_stdin(&job_id)
-                && !bytes.is_empty()
-            {
-                match stdin.try_send(bytes) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_)) => {
-                        sender
-                            .send(protocol_error(format!("stdin for job {job_id} is full")))
-                            .await?;
-                        return Ok(());
-                    }
-                    Err(TrySendError::Closed(_)) => {
-                        tracing::warn!("Failed to send stdin data: job_id={}", job_id);
-                    }
+            let Some(stdin) = registry.get_stdin(&job_id) else {
+                sender.send(without_stdin(registry, &job_id)).await?;
+                return Ok(());
+            };
+            if !bytes.is_empty() {
+                let refusal = match stdin.try_send(bytes) {
+                    Ok(()) => None,
+                    Err(TrySendError::Full(_)) => Some("full"),
+                    Err(TrySendError::Closed(_)) => Some("closed"),
+                };
+                if let Some(reason) = refusal {
+                    sender
+                        .send(protocol_error(format!(
+                            "stdin for job {job_id} is {reason}"
+                        )))
+                        .await?;
+                    return Ok(());
                 }
             }
 
@@ -271,6 +274,22 @@ async fn handle_message(
 /// the registry never mistakes it for the end of a running one.
 fn protocol_error(message: impl Into<String>) -> OutboundMessage {
     OutboundMessage::error("", ErrorCode::InvalidMessage, message)
+}
+
+/// A job that is still running answers with a protocol error, since a
+/// RunError carrying its id would end it in the registry; one that is unknown
+/// or already finished answers with its id, which the registry ignores.
+fn without_stdin(registry: &JobRegistry, job_id: &str) -> OutboundMessage {
+    match registry.get_state(job_id) {
+        Some(state) if !state.is_terminal() => {
+            protocol_error(format!("stdin for job {job_id} is closed"))
+        }
+        _ => OutboundMessage::error(
+            job_id,
+            ErrorCode::JobNotFound,
+            format!("No running job {job_id}"),
+        ),
+    }
 }
 
 async fn start(
