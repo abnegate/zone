@@ -204,6 +204,7 @@ describe('Namespaced model requests', () => {
       expect(form.get('name')).toBe('portrait');
       expect(form.get('subject')).toBe('other');
       expect(form.get('method')).toBe('lora');
+      expect(form.get('provider')).toBe('local');
       expect(form.get('image_0')).toBeInstanceOf(Blob);
       return Response.json({
         id: 'job-1',
@@ -235,6 +236,7 @@ describe('Namespaced model requests', () => {
       expect(form.get('base')).toBe('sdxl-people');
       expect(form.get('subject')).toBe('person');
       expect(form.get('method')).toBe('finetune');
+      expect(form.get('provider')).toBe('local');
       expect(form.get('trigger')).toBe('zne person');
       return Response.json({
         id: 'job-1',
@@ -254,6 +256,39 @@ describe('Namespaced model requests', () => {
       trigger: 'zne person',
       subject: 'person',
       method: 'finetune',
+      images: [],
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('posts Runpod compute and the workspace on the train URL', async () => {
+    const request = mock(async (input: RequestInfo, init?: RequestInit) => {
+      expect(String(input)).toBe('/api/models/train?workspace_id=ws-1');
+      const form = init?.body as FormData;
+      expect(form.get('provider')).toBe('runpod');
+      expect(form.get('subject')).toBe('person');
+      return Response.json({
+        id: 'job-1',
+        name: 'portrait',
+        status: 'succeeded',
+        filename: 'portrait.safetensors',
+        quality: null,
+        dataset: [],
+        screening: null,
+        provider: 'runpod',
+        gpu: 'A40',
+      });
+    });
+    global.fetch = request as typeof fetch;
+
+    await modelsApi.train({
+      name: 'portrait',
+      base: 'sdxl-people',
+      trigger: 'zne person',
+      subject: 'person',
+      method: 'finetune',
+      provider: 'runpod',
+      workspace_id: 'ws-1',
       images: [],
     });
     expect(request).toHaveBeenCalledTimes(1);

@@ -22,13 +22,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use once_cell::sync::Lazy;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
 
 use super::chats::check_workspace_read_access;
 use crate::auth::AuthUser;
+use crate::db::ai_settings;
 use crate::error::ServerError;
 use crate::services::endpoint::Origin;
 use crate::services::model::Model;
@@ -38,7 +39,7 @@ use crate::train_jobs::TrainJobView;
 use types::ModelCapability;
 use zone_comfy::caption::{Captioner, Draft};
 use zone_comfy::host_train;
-use zone_comfy::lora::{self, TrainError};
+use zone_comfy::lora::{self, TrainError, TrainProvider};
 use zone_comfy::recipe::RecipeCatalog;
 use zone_comfy::video;
 
@@ -783,9 +784,23 @@ fn train_preview_response(models_dir: &std::path::Path, name: &str) -> Response 
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct TrainQuery {
+    pub workspace_id: Option<Uuid>,
+}
+
 /// GET /api/models/train
 pub async fn train_job(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
-    if let Some(job) = state.train_jobs().current() {
+    if let Some(mut job) = state.train_jobs().current() {
+        if let Some(host) = host_train::current_with_progress(&state.config().comfyui.models_dir) {
+            job.provider = Some(host.provider.as_str().to_string());
+            if host.gpu.is_some() {
+                job.gpu = host.gpu;
+            }
+            if host.pod_id.is_some() {
+                job.pod_id = host.pod_id;
+            }
+        }
         return Json(job).into_response();
     }
     match host_train::current_with_progress(&state.config().comfyui.models_dir) {
@@ -794,10 +809,28 @@ pub async fn train_job(State(state): State<AppState>, _auth: AuthUser) -> impl I
     }
 }
 
+async fn runpod_key(
+    state: &AppState,
+    auth: &AuthUser,
+    workspace_id: Option<Uuid>,
+) -> Result<Option<String>, Response> {
+    let Some(workspace_id) = workspace_id else {
+        return Ok(None);
+    };
+    check_workspace_read_access(state, auth, workspace_id)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    Ok(ai_settings::runpod_api_key(state.db(), workspace_id)
+        .await
+        .map(|key| key.expose().trim().to_string())
+        .filter(|key| !key.is_empty()))
+}
+
 /// POST /api/models/train
 pub async fn train(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
+    Query(query): Query<TrainQuery>,
     request: Request,
 ) -> impl IntoResponse {
     let request = match upload::train_request(request).await {
@@ -844,6 +877,23 @@ pub async fn train(
         }
         Ok(()) => {}
     }
+    let runpod_api_key = if request.provider == TrainProvider::Runpod {
+        match runpod_key(&state, &auth, query.workspace_id).await {
+            Ok(Some(key)) => Some(key),
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::new(
+                        "Save a Runpod API key in Workspace Settings.",
+                    )),
+                )
+                    .into_response();
+            }
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
     if host_train::busy(&state.config().comfyui.models_dir) {
         return (
             StatusCode::CONFLICT,
@@ -852,10 +902,11 @@ pub async fn train(
             .into_response();
     }
     let method = request.method.as_str();
-    let Some(job) = state
-        .train_jobs()
-        .start(request.name.clone(), Some(method.to_string()))
-    else {
+    let Some(job) = state.train_jobs().start(
+        request.name.clone(),
+        Some(method.to_string()),
+        Some(request.provider.as_str().to_string()),
+    ) else {
         return (
             StatusCode::CONFLICT,
             Json(ErrorResponse::new("a training job is already running")),
@@ -869,8 +920,14 @@ pub async fn train(
     tokio::spawn(async move {
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let reporter = job.clone();
-        let training =
-            lora::train_reporting(&comfyui, litellm_host, litellm_key, request, progress_tx);
+        let training = lora::train_reporting(
+            &comfyui,
+            litellm_host,
+            litellm_key,
+            runpod_api_key,
+            request,
+            progress_tx,
+        );
         tokio::pin!(training);
         let mut progress_open = true;
         loop {

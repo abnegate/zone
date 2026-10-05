@@ -1274,6 +1274,45 @@ pub async fn for_workspace(pool: &PgPool, workspace_id: Uuid) -> Option<Effectiv
         .ok()
 }
 
+/// Workspace Runpod key, then the organization. A missing column or row is
+/// none so Runpod trains stay refused until a key is saved.
+pub async fn runpod_api_key(pool: &PgPool, workspace_id: Uuid) -> Option<SecretValue> {
+    if let Some(key) = nonempty_secret(
+        sqlx::query_scalar::<_, Option<SecretValue>>(
+            "SELECT runpod_api_key FROM workspace_ai_settings WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten(),
+    ) {
+        return Some(key);
+    }
+    nonempty_secret(
+        sqlx::query_scalar::<_, Option<SecretValue>>(
+            r#"
+            SELECT organization_ai_settings.runpod_api_key
+            FROM workspaces
+            JOIN organization_ai_settings
+              ON organization_ai_settings.organization_id = workspaces.organization_id
+            WHERE workspaces.id = $1
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten(),
+    )
+}
+
+fn nonempty_secret(value: Option<SecretValue>) -> Option<SecretValue> {
+    value.filter(|key| !key.expose().trim().is_empty())
+}
+
 /// The ComfyUI config a workspace should actually generate with: process
 /// defaults overlaid with the models its organization and workspace pinned.
 ///

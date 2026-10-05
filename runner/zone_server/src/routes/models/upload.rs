@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use zone_comfy::caption::{CaptionImage, CaptionRequest};
-use zone_comfy::lora::{TrainImage, TrainMethod, TrainRequest, TrainSubject};
+use zone_comfy::lora::{TrainImage, TrainMethod, TrainProvider, TrainRequest, TrainSubject};
 use zone_comfy::video::FrameRequest;
 
 use super::types::ErrorResponse;
@@ -160,6 +160,10 @@ async fn multipart_train(request: Request) -> Result<TrainRequest, UploadError> 
             "pivotal" => TrainMethod::Pivotal,
             "video" => TrainMethod::Video,
             _ => TrainMethod::Lora,
+        },
+        provider: match optional_text(&parts, "provider").unwrap_or("local") {
+            "runpod" => TrainProvider::Runpod,
+            _ => TrainProvider::Local,
         },
         images,
     })

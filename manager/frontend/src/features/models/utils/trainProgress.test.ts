@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  computeHelp,
   formatEta,
   formatLoss,
   methodAdvice,
@@ -52,6 +53,43 @@ describe('trainProgress', () => {
       'Training language LoRA finished notes'
     );
     expect(trainHeadline('running', 'notes', 'finetune', 'language')).toBe('Fine-tuning notes');
+    expect(trainHeadline('running', 'jerry', 'lora', 'person', 'runpod')).toBe(
+      'Training jerry on Runpod'
+    );
+    expect(trainHeadline('running', 'jerry', 'finetune', 'person', 'runpod', 'A40')).toBe(
+      'Fine-tuning jerry on Runpod A40'
+    );
+    expect(trainHeadline('succeeded', 'jerry', 'lora', 'person', 'runpod', 'A40')).toBe(
+      'Training finished jerry on Runpod A40'
+    );
+    expect(trainHeadline('running', 'jerry', 'lora', 'person', 'local')).toBe('Training jerry');
+  });
+
+  it('quotes Runpod compute for Person trains', () => {
+    expect(
+      computeHelp({ subject: 'other', method: 'lora', provider: 'local', hasKey: false })
+    ).toBeNull();
+    expect(
+      computeHelp({ subject: 'person', method: 'lora', provider: 'local', hasKey: false })
+    ).toBe('Save a Runpod API key in Workspace Settings.');
+    expect(
+      computeHelp({ subject: 'person', method: 'lora', provider: 'local', hasKey: true })
+    ).toBeNull();
+    expect(
+      computeHelp({ subject: 'person', method: 'finetune', provider: 'runpod', hasKey: true })
+    ).toBe('Auto-picks a 48 GB GPU (A40 class). About 4 hours, $1–2.');
+    expect(
+      computeHelp({ subject: 'person', method: 'lora', provider: 'runpod', hasKey: true })
+    ).toBe('A 24 GB GPU is enough for this method.');
+    expect(
+      computeHelp({ subject: 'person', method: 'pivotal', provider: 'runpod', hasKey: true })
+    ).toBe('A 24 GB GPU is enough for this method.');
+    expect(
+      computeHelp({ subject: 'person', method: 'video', provider: 'runpod', hasKey: true })
+    ).toBe('A 24 GB GPU is enough for this method.');
+    expect(
+      computeHelp({ subject: 'language', method: 'lora', provider: 'runpod', hasKey: true })
+    ).toBeNull();
   });
 
   it('uses the phase message as the step label', () => {

@@ -258,6 +258,8 @@ export const modelsApi = {
       trigger?: string;
       subject?: 'person' | 'other' | 'language';
       method?: 'lora' | 'finetune' | 'pivotal' | 'video';
+      provider?: 'local' | 'runpod';
+      workspace_id?: string;
       images: Array<{
         filename: string;
         caption: string;
@@ -274,6 +276,7 @@ export const modelsApi = {
     form.append('base', body.base);
     form.append('subject', body.subject ?? 'other');
     form.append('method', body.method ?? 'lora');
+    form.append('provider', body.provider ?? 'local');
     if (body.trigger) form.append('trigger', body.trigger);
     form.append(
       'images',
@@ -285,7 +288,8 @@ export const modelsApi = {
       form.append(`image_${index}`, image.blob, image.filename);
       if (image.before) form.append(`before_${index}`, image.before, `before-${image.filename}`);
     });
-    const response = await fetch(`${API_BASE}/api/models/train`, {
+    const query = body.workspace_id ? `?workspace_id=${encodeURIComponent(body.workspace_id)}` : '';
+    const response = await fetch(`${API_BASE}/api/models/train${query}`, {
       method: 'POST',
       headers: bearerHeaders(),
       body: form,

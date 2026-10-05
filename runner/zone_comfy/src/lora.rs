@@ -95,6 +95,27 @@ impl TrainMethod {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainProvider {
+    #[default]
+    Local,
+    Runpod,
+}
+
+impl TrainProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Runpod => "runpod",
+        }
+    }
+
+    pub fn is_runpod(self) -> bool {
+        matches!(self, Self::Runpod)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TrainRequest {
     pub name: String,
@@ -105,6 +126,8 @@ pub struct TrainRequest {
     pub subject: TrainSubject,
     #[serde(default)]
     pub method: TrainMethod,
+    #[serde(default)]
+    pub provider: TrainProvider,
     pub images: Vec<TrainImage>,
 }
 
@@ -354,6 +377,7 @@ pub async fn train(
         config,
         litellm_host,
         litellm_key,
+        None,
         request,
         crate::screening::screen,
         None,
@@ -365,6 +389,7 @@ pub async fn train_reporting(
     config: &Config,
     litellm_host: String,
     litellm_key: String,
+    runpod_api_key: Option<String>,
     request: TrainRequest,
     progress: mpsc::UnboundedSender<TrainProgress>,
 ) -> Result<TrainOutcome, TrainError> {
@@ -372,6 +397,7 @@ pub async fn train_reporting(
         config,
         litellm_host,
         litellm_key,
+        runpod_api_key,
         request,
         crate::screening::screen,
         Some(progress),
@@ -383,6 +409,7 @@ async fn train_with_remediation(
     config: &Config,
     litellm_host: String,
     litellm_key: String,
+    runpod_api_key: Option<String>,
     request: TrainRequest,
     screening: fn(&[Vec<u8>], u32) -> crate::screening::Verdict,
     progress: Option<mpsc::UnboundedSender<TrainProgress>>,
@@ -391,6 +418,7 @@ async fn train_with_remediation(
         config,
         litellm_host,
         litellm_key,
+        runpod_api_key,
         request,
         screening,
         true,
@@ -411,6 +439,7 @@ async fn train_with_screening(
         config,
         litellm_host,
         litellm_key,
+        None,
         request,
         screening,
         false,
@@ -419,11 +448,20 @@ async fn train_with_screening(
     .await
 }
 
+fn nonempty_key(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 /// Cheap checks a caller can run before spawning the trainer, so a bad name or
 /// missing trigger is refused on the request rather than as a failed job.
 pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), TrainError> {
     if config.train_command.is_none() && !config.enabled {
         return Err(TrainError::Disabled);
+    }
+    if request.provider.is_runpod() && request.subject != TrainSubject::Person {
+        return Err(TrainError::Invalid(
+            "Runpod is available for Person LoRA, fine-tune, pivotal, and video.",
+        ));
     }
     if request.subject == TrainSubject::Language {
         return validate_language(request);
@@ -506,17 +544,23 @@ async fn train_with_pipeline(
     config: &Config,
     litellm_host: String,
     litellm_key: String,
+    runpod_api_key: Option<String>,
     request: TrainRequest,
     screening: fn(&[Vec<u8>], u32) -> crate::screening::Verdict,
     repair_rejections: bool,
     progress: Option<mpsc::UnboundedSender<TrainProgress>>,
 ) -> Result<TrainOutcome, TrainError> {
     validate_request(config, &request)?;
+    if request.provider.is_runpod() && nonempty_key(runpod_api_key.as_deref()).is_none() {
+        return Err(TrainError::Invalid(
+            "Save a Runpod API key in Workspace Settings.",
+        ));
+    }
     if request.subject == TrainSubject::Language {
-        return train_language(config, request, progress).await;
+        return train_language(config, request, runpod_api_key.as_deref(), progress).await;
     }
     if request.method == TrainMethod::Video {
-        return train_video(config, request, progress).await;
+        return train_video(config, request, runpod_api_key.as_deref(), progress).await;
     }
     let filename = final_filename(&request.name)?;
     let catalog = RecipeCatalog::load(Some(config.workflow_path.as_path()))
@@ -842,6 +886,7 @@ async fn train_with_pipeline(
                 dropped,
                 attempted,
             },
+            runpod_api_key.as_deref(),
             progress,
         )
         .await;
@@ -970,9 +1015,27 @@ fn chat_model_name(name: &str) -> Result<String, TrainError> {
     Ok(name.to_string())
 }
 
+fn bind_compute(
+    job: &mut host_train::HostJob,
+    request: &TrainRequest,
+    dir: &Path,
+    runpod_api_key: Option<&str>,
+) -> Result<(), TrainError> {
+    job.provider = request.provider;
+    host_train::write_job(dir, job)?;
+    if request.provider.is_runpod() {
+        let key = nonempty_key(runpod_api_key).ok_or(TrainError::Invalid(
+            "Save a Runpod API key in Workspace Settings.",
+        ))?;
+        host_train::write_runpod_key(dir, key)?;
+    }
+    Ok(())
+}
+
 async fn train_language(
     config: &Config,
     request: TrainRequest,
+    runpod_api_key: Option<&str>,
     progress: Option<mpsc::UnboundedSender<TrainProgress>>,
 ) -> Result<TrainOutcome, TrainError> {
     let chat_name = chat_model_name(&request.name)?;
@@ -1000,7 +1063,7 @@ async fn train_language(
     job.recipe_id = "chat".to_string();
     job.image_count = dataset.len();
     let dir = host_train::job_dir(&config.models_dir, job.id);
-    host_train::write_job(&dir, &job)?;
+    bind_compute(&mut job, &request, &dir, runpod_api_key)?;
     host_train::stage_language(&attempt.root, &dir)?;
     host_train::write_queued_language_progress(&dir, job.image_count)?;
     if let Some(progress) = &progress {
@@ -1218,6 +1281,7 @@ async fn publish_host_person(
     attempt: &Attempt,
     findings: Vec<crate::dataset::Finding>,
     screening: Screening,
+    runpod_api_key: Option<&str>,
     progress: Option<mpsc::UnboundedSender<TrainProgress>>,
 ) -> Result<TrainOutcome, TrainError> {
     let TrainingModel::Sdxl { checkpoint } = model else {
@@ -1251,7 +1315,7 @@ async fn publish_host_person(
         })
         .unwrap_or(0);
     let dir = host_train::job_dir(&config.models_dir, job.id);
-    host_train::write_job(&dir, &job)?;
+    bind_compute(&mut job, request, &dir, runpod_api_key)?;
     host_train::stage_dataset(&attempt.root, &dir)?;
     host_train::write_queued_progress(&dir, job.image_count)?;
     if let Some(progress) = &progress {
@@ -1281,6 +1345,7 @@ async fn publish_host_person(
 async fn train_video(
     config: &Config,
     request: TrainRequest,
+    runpod_api_key: Option<&str>,
     progress: Option<mpsc::UnboundedSender<TrainProgress>>,
 ) -> Result<TrainOutcome, TrainError> {
     let trigger = request.trigger.as_deref().unwrap_or_default().trim();
@@ -1333,6 +1398,7 @@ async fn train_video(
             attempted: Vec::new(),
         },
         windows.len(),
+        runpod_api_key,
         progress,
     )
     .await
@@ -1347,6 +1413,7 @@ async fn publish_host_video(
     findings: Vec<crate::dataset::Finding>,
     screening: Screening,
     window_count: usize,
+    runpod_api_key: Option<&str>,
     progress: Option<mpsc::UnboundedSender<TrainProgress>>,
 ) -> Result<TrainOutcome, TrainError> {
     let catalog = RecipeCatalog::load(Some(config.workflow_path.as_path()))
@@ -1371,7 +1438,7 @@ async fn publish_host_video(
     job.hf_base = hf_base;
     job.image_count = window_count;
     let dir = host_train::job_dir(&config.models_dir, job.id);
-    host_train::write_job(&dir, &job)?;
+    bind_compute(&mut job, request, &dir, runpod_api_key)?;
     host_train::stage_clips(&attempt.root, &dir)?;
     host_train::write_queued_video_progress(&dir, window_count)?;
     if let Some(progress) = &progress {
@@ -2312,6 +2379,7 @@ mod tests {
             trigger: Some("ohwx".to_string()),
             subject: TrainSubject::Other,
             method: TrainMethod::Lora,
+            provider: TrainProvider::Local,
             images: vec![image("target", "a portrait", None)],
         }
     }
@@ -2323,6 +2391,7 @@ mod tests {
             trigger: None,
             subject: TrainSubject::Other,
             method: TrainMethod::Lora,
+            provider: TrainProvider::Local,
             images,
         }
     }
@@ -2485,6 +2554,7 @@ mod tests {
             trigger: trigger.map(str::to_string),
             subject: TrainSubject::Other,
             method: TrainMethod::Lora,
+            provider: TrainProvider::Local,
             images: vec![upload("a portrait", None)],
         }
     }
@@ -2493,6 +2563,82 @@ mod tests {
         train(config, String::new(), String::new(), request)
             .await
             .expect_err("this request should not have trained")
+    }
+
+    #[test]
+    fn train_request_defaults_provider_to_local() {
+        assert_eq!(identity("style").provider, TrainProvider::Local);
+        assert_eq!(
+            request("style", "flux-schnell", Some("ohwx")).provider,
+            TrainProvider::Local
+        );
+        let parsed: TrainRequest = serde_json::from_value(serde_json::json!({
+            "name": "style",
+            "base": "flux-schnell",
+            "images": [],
+        }))
+        .unwrap();
+        assert_eq!(parsed.provider, TrainProvider::Local);
+        let runpod: TrainRequest = serde_json::from_value(serde_json::json!({
+            "name": "jerry",
+            "base": "sdxl-people",
+            "provider": "runpod",
+            "images": [],
+        }))
+        .unwrap();
+        assert_eq!(runpod.provider, TrainProvider::Runpod);
+    }
+
+    #[test]
+    fn runpod_is_refused_for_language_and_other() {
+        let (_root, config) = harness("unused");
+        let mut language = language_request(
+            "support-bot",
+            "qwen2.5:7b",
+            vec![document(
+                "chat.json",
+                r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#,
+            )],
+        );
+        language.provider = TrainProvider::Runpod;
+        assert!(matches!(
+            validate_request(&config, &language),
+            Err(TrainError::Invalid(
+                "Runpod is available for Person LoRA, fine-tune, pivotal, and video."
+            ))
+        ));
+        let mut other = request("style", "flux-schnell", Some("ohwx"));
+        other.provider = TrainProvider::Runpod;
+        assert!(matches!(
+            validate_request(&config, &other),
+            Err(TrainError::Invalid(
+                "Runpod is available for Person LoRA, fine-tune, pivotal, and video."
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn runpod_without_a_key_is_refused() {
+        let (_root, config) = harness("true");
+        fs::create_dir_all(config.models_dir.join("checkpoints")).unwrap();
+        fs::write(
+            config
+                .models_dir
+                .join("checkpoints/lustifySDXLNSFW_ggwpV7.safetensors"),
+            b"lustify",
+        )
+        .unwrap();
+        let mut person = request("jerry", "sdxl-people", Some("ohwx"));
+        person.subject = TrainSubject::Person;
+        person.provider = TrainProvider::Runpod;
+        let error = rejected(&config, person).await;
+        assert!(
+            matches!(
+                error,
+                TrainError::Invalid("Save a Runpod API key in Workspace Settings.")
+            ),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -3053,6 +3199,7 @@ mod tests {
             &config,
             String::new(),
             String::new(),
+            None,
             identity("repaired"),
             reject_tiny,
             None,
@@ -4005,6 +4152,7 @@ mod tests {
             trigger: None,
             subject: TrainSubject::Language,
             method: TrainMethod::Lora,
+            provider: TrainProvider::Local,
             images: documents,
         }
     }

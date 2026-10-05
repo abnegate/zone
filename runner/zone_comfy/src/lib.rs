@@ -90,8 +90,9 @@ pub use dataset::{
 };
 pub use inventory::{Identity, InventoryItem, WeightSidecar, bind_identity, identities, scan};
 pub use lora::{
-    TrainBase, TrainError, TrainImage, TrainMethod, TrainOutcome, TrainRequest, TrainSubject,
-    available_bases, identity_caption, person_caption, train, train_reporting, validate_request,
+    TrainBase, TrainError, TrainImage, TrainMethod, TrainOutcome, TrainProvider, TrainRequest,
+    TrainSubject, available_bases, identity_caption, person_caption, train, train_reporting,
+    validate_request,
 };
 pub use media::MediaType;
 pub use observe::{RequestObserver, observe_requests};

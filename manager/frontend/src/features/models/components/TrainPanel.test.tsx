@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
 
 function fluxQwenBases() {
   return [
@@ -78,6 +79,30 @@ mock.module('../../../api/models', () => ({
   },
 }));
 
+const mockGetEffectiveAiSettings = mock(() => Promise.resolve({ has_runpod_api_key: false }));
+
+mock.module('../../../api/client', () => ({
+  client: {
+    getEffectiveAiSettings: mockGetEffectiveAiSettings,
+  },
+}));
+
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    organizations: [{ id: 'org-1', name: 'Test Org' }],
+    currentOrganization: { id: 'org-1', name: 'Test Org' },
+    currentWorkspace: { id: 'ws-1', name: 'Test Workspace', organization_id: 'org-1' },
+    workspaces: [{ id: 'ws-1', name: 'Test Workspace', organization_id: 'org-1' }],
+    loading: false,
+    error: null,
+    setCurrentOrganization: mock(),
+    setCurrentWorkspace: mock(),
+    refreshOrganizations: mock(),
+    refreshWorkspaces: mock(),
+  }),
+  WorkspaceProvider: ({ children }: { children: ReactNode }) => children,
+}));
+
 let TrainPanel: typeof import('./TrainPanel').default;
 
 beforeAll(async () => {
@@ -91,6 +116,10 @@ beforeEach(() => {
   mockTrainJob.mockClear();
   mockWaitTrain.mockClear();
   mockTrainBases.mockImplementation(() => Promise.resolve(fluxQwenBases()));
+  mockGetEffectiveAiSettings.mockClear();
+  mockGetEffectiveAiSettings.mockImplementation(() =>
+    Promise.resolve({ has_runpod_api_key: false })
+  );
   mockTrain.mockImplementation(() =>
     Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
   );
@@ -284,6 +313,8 @@ describe('TrainPanel', () => {
     const kind = screen.getByLabelText('Subject').closest('.train-kind');
     expect(kind).not.toBeNull();
     expect(screen.getByLabelText('Method').closest('.train-kind')).toBe(kind);
+    expect(screen.getByLabelText('Compute').closest('.train-kind')).toBe(kind);
+    expect(screen.getByLabelText('Compute')).toHaveTextContent('Local');
     expect(screen.getByLabelText('Name').closest('.train-kind')).toBeNull();
     expect(screen.getByLabelText('Subject').closest('.train-identity')).toBeNull();
 
@@ -339,8 +370,10 @@ describe('TrainPanel', () => {
     expect(screen.getByLabelText('Base').getAttribute('role')).toBe('combobox');
     expect(screen.getByLabelText('Subject').getAttribute('role')).toBe('combobox');
     expect(screen.getByLabelText('Method').getAttribute('role')).toBe('combobox');
+    expect(screen.getByLabelText('Compute').getAttribute('role')).toBe('combobox');
     expect(screen.getByLabelText('Subject')).toHaveTextContent('Other');
     expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
+    expect(screen.getByLabelText('Compute')).toHaveTextContent('Local');
     expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
   });
 
@@ -822,6 +855,7 @@ describe('TrainPanel', () => {
       screen.getByLabelText('Name'),
       screen.getByLabelText('Subject'),
       screen.getByLabelText('Method'),
+      screen.getByLabelText('Compute'),
       screen.getByLabelText('Base'),
       screen.getByLabelText('Trigger word'),
       screen.getByLabelText('Target images'),
@@ -906,6 +940,8 @@ describe('TrainPanel', () => {
       trigger: 'zne person',
       subject: 'person',
       method: 'lora',
+      provider: 'local',
+      workspace_id: 'ws-1',
     });
   });
 
@@ -1131,6 +1167,7 @@ describe('TrainPanel', () => {
       base: 'qwen2.5:32b',
       subject: 'language',
       method: 'lora',
+      provider: 'local',
     });
     expect(request?.trigger).toBeUndefined();
     expect(request?.images).toHaveLength(1);
@@ -1180,5 +1217,87 @@ describe('TrainPanel', () => {
     await waitFor(() => expect(screen.getByText('notes.txt')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
     expect(mockTrain).not.toHaveBeenCalled();
+  });
+
+  it('disables Runpod until a Person train has a Runpod key', async () => {
+    mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    fireEvent.click(screen.getByLabelText('Compute'));
+    expect(await screen.findByRole('option', { name: 'Runpod' })).toHaveAttribute('data-disabled');
+    fireEvent.click(screen.getByRole('option', { name: 'Local' }));
+
+    await selectSubject('Person');
+    await waitFor(() => {
+      expect(screen.getByText('Save a Runpod API key in Workspace Settings.')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByLabelText('Compute'));
+    expect(await screen.findByRole('option', { name: 'Runpod' })).toHaveAttribute('data-disabled');
+    fireEvent.click(screen.getByRole('option', { name: 'Local' }));
+    expect(screen.getByLabelText('Compute')).toHaveTextContent('Local');
+  });
+
+  it('posts Runpod compute for a Person fine-tune when a key is saved', async () => {
+    mockGetEffectiveAiSettings.mockImplementation(() =>
+      Promise.resolve({ has_runpod_api_key: true })
+    );
+    mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Person');
+    await waitFor(() => {
+      expect(screen.queryByText('Save a Runpod API key in Workspace Settings.')).toBeNull();
+    });
+    await selectOption('Compute', 'Runpod');
+    await selectMethod('Fine-tune');
+    expect(screen.getByText(/Auto-picks a 48 GB GPU \(A40 class\)/)).toBeInTheDocument();
+    expect(screen.getByText(/About 4 hours, \$1–2/)).toBeInTheDocument();
+
+    fillIdentity();
+    await addTargets(file('portrait.png', 'portrait'));
+    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
+    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
+    expect(mockTrain.mock.calls[0]?.[0]).toMatchObject({
+      subject: 'person',
+      method: 'finetune',
+      provider: 'runpod',
+      workspace_id: 'ws-1',
+    });
+  });
+
+  it('quotes a 24 GB GPU for Runpod LoRA, pivotal, and video', async () => {
+    mockGetEffectiveAiSettings.mockImplementation(() =>
+      Promise.resolve({ has_runpod_api_key: true })
+    );
+    mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Person');
+    await waitFor(() => {
+      expect(screen.queryByText('Save a Runpod API key in Workspace Settings.')).toBeNull();
+    });
+    await selectOption('Compute', 'Runpod');
+    expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
+    await selectMethod('Pivotal');
+    expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
+    await selectMethod('Video');
+    expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
+  });
+
+  it('keeps Runpod disabled for language even when a key is saved', async () => {
+    mockGetEffectiveAiSettings.mockImplementation(() =>
+      Promise.resolve({ has_runpod_api_key: true })
+    );
+    mockTrainBases.mockImplementation(() => Promise.resolve(languageBases()));
+    render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectSubject('Language');
+    await waitFor(() => {
+      expect(screen.getByLabelText('Base')).toHaveTextContent('qwen2.5 32B');
+    });
+    expect(screen.getByLabelText('Compute')).toHaveTextContent('Local');
+    fireEvent.click(screen.getByLabelText('Compute'));
+    expect(await screen.findByRole('option', { name: 'Runpod' })).toHaveAttribute('data-disabled');
+    fireEvent.click(screen.getByRole('option', { name: 'Local' }));
   });
 });

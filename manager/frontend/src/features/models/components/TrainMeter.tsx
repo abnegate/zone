@@ -29,7 +29,14 @@ export default function TrainMeter({ job, detail }: { job: TrainJob; detail?: st
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percent ?? undefined}
-        aria-label={trainHeadline(job.status, job.name, job.method, job.subject)}
+        aria-label={trainHeadline(
+          job.status,
+          job.name,
+          job.method,
+          job.subject,
+          job.provider,
+          job.gpu
+        )}
       >
         <div
           className={

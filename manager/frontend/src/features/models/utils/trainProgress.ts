@@ -6,6 +6,7 @@ export const FINE_TUNE_READY_CLIPS = 50;
 
 export type TrainMethodKind = 'lora' | 'finetune' | 'pivotal' | 'video';
 export type TrainSubjectKind = 'person' | 'other' | 'language';
+export type TrainProviderKind = 'local' | 'runpod';
 
 export type TrainProgressJob = {
   status?: string;
@@ -52,7 +53,9 @@ export function trainHeadline(
   status?: string,
   name?: string | null,
   method?: string | null,
-  subject?: string | null
+  subject?: string | null,
+  provider?: string | null,
+  gpu?: string | null
 ): string {
   const verb =
     method === 'finetune'
@@ -65,9 +68,26 @@ export function trainHeadline(
             ? 'Training language LoRA'
             : 'Training';
   const suffix = name?.trim() ? ` ${name.trim()}` : '';
-  if (status === 'succeeded') return `${verb} finished${suffix}`;
-  if (status === 'failed') return `${verb} failed${suffix}`;
-  return `${verb}${suffix}`;
+  const gpuName = gpu?.trim();
+  const compute = provider === 'runpod' ? (gpuName ? ` on Runpod ${gpuName}` : ' on Runpod') : '';
+  if (status === 'succeeded') return `${verb} finished${suffix}${compute}`;
+  if (status === 'failed') return `${verb} failed${suffix}${compute}`;
+  return `${verb}${suffix}${compute}`;
+}
+
+export function computeHelp(input: {
+  subject: TrainSubjectKind;
+  method: TrainMethodKind;
+  provider: TrainProviderKind;
+  hasKey: boolean;
+}): string | null {
+  if (input.subject !== 'person') return null;
+  if (!input.hasKey) return 'Save a Runpod API key in Workspace Settings.';
+  if (input.provider !== 'runpod') return null;
+  if (input.method === 'finetune') {
+    return 'Auto-picks a 48 GB GPU (A40 class). About 4 hours, $1–2.';
+  }
+  return 'A 24 GB GPU is enough for this method.';
 }
 
 export function trainStepLabel(job: TrainProgressJob): string | null {

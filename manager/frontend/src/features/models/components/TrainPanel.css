@@ -132,7 +132,13 @@
   white-space: nowrap;
 }
 
-.train-kind,
+.train-kind {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--ui-space-3) var(--ui-space-4);
+  min-width: 0;
+}
+
 .train-identity,
 .train-drops {
   display: grid;

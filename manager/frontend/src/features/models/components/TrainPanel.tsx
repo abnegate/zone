@@ -1,6 +1,7 @@
 import { Button, Checkbox, Input, Select } from '@zone/ui';
 import { type FormEvent, type ReactElement, useEffect, useMemo, useState } from 'react';
 import { List, type RowComponentProps } from 'react-window';
+import { client } from '../../../api/client';
 import {
   type DatasetConcern,
   type DatasetFinding,
@@ -12,6 +13,7 @@ import {
   type TrainResult,
   type TrainScreening,
 } from '../../../api/models';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { isDocumentFile, isImageFile, isVideoFile } from '../dropFiles';
 import {
   blobFromBase64,
@@ -22,7 +24,13 @@ import {
   poolMap,
   prepareImage,
 } from '../trainMedia';
-import { methodAdvice, type TrainMethodKind, type TrainSubjectKind } from '../utils/trainProgress';
+import {
+  computeHelp,
+  methodAdvice,
+  type TrainMethodKind,
+  type TrainProviderKind,
+  type TrainSubjectKind,
+} from '../utils/trainProgress';
 import DropZone from './DropZone';
 import TrainMeter from './TrainMeter';
 import './TrainPanel.css';
@@ -531,9 +539,12 @@ function TrainPairRow({
 }
 
 export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
+  const { currentOrganization, currentWorkspace } = useWorkspace();
   const [bases, setBases] = useState<TrainBase[]>([]);
   const [subject, setSubject] = useState<TrainSubjectKind>('other');
   const [method, setMethod] = useState<TrainMethodKind>('lora');
+  const [provider, setProvider] = useState<TrainProviderKind>('local');
+  const [hasRunpodKey, setHasRunpodKey] = useState(false);
   const [name, setName] = useState('');
   const [base, setBase] = useState('');
   const [trigger, setTrigger] = useState('');
@@ -555,6 +566,31 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       .then(setBases)
       .catch(() => setBases([]));
   }, []);
+
+  useEffect(() => {
+    const organizationId = currentOrganization?.id;
+    const workspaceId = currentWorkspace?.id;
+    if (!organizationId || !workspaceId) {
+      setHasRunpodKey(false);
+      return;
+    }
+    let cancelled = false;
+    client
+      .getEffectiveAiSettings(organizationId, workspaceId)
+      .then((settings) => {
+        if (!cancelled) setHasRunpodKey(Boolean(settings.has_runpod_api_key));
+      })
+      .catch(() => {
+        if (!cancelled) setHasRunpodKey(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentOrganization?.id, currentWorkspace?.id]);
+
+  useEffect(() => {
+    if (subject !== 'person' || !hasRunpodKey) setProvider('local');
+  }, [subject, hasRunpodKey]);
 
   useEffect(() => {
     if (subject === 'person') {
@@ -723,12 +759,24 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     if (value === 'language') {
       setSubject('language');
       setMethod('lora');
+      setProvider('local');
       setBase(firstLanguageBase(bases));
       return;
     }
     setSubject('other');
     setMethod('lora');
+    setProvider('local');
     setBase(firstOtherBase(bases));
+  };
+
+  const handleProvider = (value: string) => {
+    if (busy) return;
+    if (value === 'runpod') {
+      if (subject !== 'person' || !hasRunpodKey) return;
+      setProvider('runpod');
+      return;
+    }
+    setProvider('local');
   };
 
   const handleMethod = (value: string) => {
@@ -908,6 +956,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           trigger: language ? undefined : trigger.trim() || undefined,
           subject,
           method,
+          provider,
+          workspace_id: currentWorkspace?.id,
           images: language
             ? images.map((image) => ({
                 filename: image.filename,
@@ -996,6 +1046,13 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     stills: images.length,
     clips: clips.length,
   });
+  const runpodDisabled = subject !== 'person' || !hasRunpodKey;
+  const computeHint = computeHelp({
+    subject,
+    method,
+    provider,
+    hasKey: hasRunpodKey,
+  });
 
   return (
     <section className="card">
@@ -1046,6 +1103,17 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
               { value: 'video', label: 'Video', disabled: subject !== 'person' },
             ]}
             disabled={busy}
+          />
+          <Select
+            label="Compute"
+            value={provider}
+            onValueChange={handleProvider}
+            options={[
+              { value: 'local', label: 'Local' },
+              { value: 'runpod', label: 'Runpod', disabled: runpodDisabled },
+            ]}
+            disabled={busy}
+            helpText={computeHint ?? undefined}
           />
         </div>
         <div className="train-identity">

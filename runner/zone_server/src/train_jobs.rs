@@ -53,6 +53,12 @@ pub struct TrainJobView {
     pub method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pod_id: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub previews: Vec<String>,
     pub started_at: DateTime<Utc>,
@@ -67,6 +73,7 @@ pub struct Job {
     id: Uuid,
     name: String,
     method: Option<String>,
+    provider: Option<String>,
     started_at: DateTime<Utc>,
     snapshot: Mutex<Snapshot>,
 }
@@ -104,7 +111,12 @@ impl TrainRegistry {
 
     /// Occupies the single training slot. `None` when a run is already in
     /// progress, so the caller attaches to `current` instead of starting two.
-    pub fn start(&self, name: String, method: Option<String>) -> Option<Arc<Job>> {
+    pub fn start(
+        &self,
+        name: String,
+        method: Option<String>,
+        provider: Option<String>,
+    ) -> Option<Arc<Job>> {
         let mut slot = self.slot.lock().expect("train job");
         if slot
             .as_ref()
@@ -112,18 +124,19 @@ impl TrainRegistry {
         {
             return None;
         }
-        let job = Job::running(name, method);
+        let job = Job::running(name, method, provider);
         *slot = Some(job.clone());
         Some(job)
     }
 }
 
 impl Job {
-    fn running(name: String, method: Option<String>) -> Arc<Self> {
+    fn running(name: String, method: Option<String>, provider: Option<String>) -> Arc<Self> {
         Arc::new(Self {
             id: Uuid::new_v4(),
             name,
             method,
+            provider,
             started_at: Utc::now(),
             snapshot: Mutex::new(Snapshot {
                 status: TrainJobStatus::Running,
@@ -174,6 +187,9 @@ impl Job {
                 }),
             method: self.method.clone(),
             subject: None,
+            provider: self.provider.clone(),
+            gpu: None,
+            pod_id: None,
             previews: snapshot.previews.clone(),
             started_at: self.started_at,
         }
@@ -264,6 +280,9 @@ impl TrainJobView {
             eta_seconds,
             method: Some(job.method),
             subject: (!job.subject.is_empty()).then_some(job.subject),
+            provider: Some(job.provider.as_str().to_string()),
+            gpu: job.gpu,
+            pod_id: job.pod_id,
             previews: job.previews,
             started_at: job.started_at,
         }
@@ -289,14 +308,14 @@ mod tests {
     fn a_running_job_refuses_a_second_start() {
         let registry = TrainRegistry::new();
         let job = registry
-            .start("jerry".into(), Some("lora".into()))
+            .start("jerry".into(), Some("lora".into()), None)
             .expect("first start");
-        assert!(registry.start("other".into(), None).is_none());
+        assert!(registry.start("other".into(), None, None).is_none());
         assert_eq!(registry.current().unwrap().name, "jerry");
         assert_eq!(registry.current().unwrap().status, TrainJobStatus::Running);
         job.fail(TrainError::Failed("stopped".into()));
         let next = registry
-            .start("other".into(), Some("finetune".into()))
+            .start("other".into(), Some("finetune".into()), None)
             .expect("finished job frees the slot");
         assert_eq!(next.view().name, "other");
         assert_eq!(next.view().status, TrainJobStatus::Running);
@@ -306,7 +325,11 @@ mod tests {
     fn progress_is_visible_on_the_running_job() {
         let registry = TrainRegistry::new();
         let job = registry
-            .start("jerry".into(), Some("finetune".into()))
+            .start(
+                "jerry".into(),
+                Some("finetune".into()),
+                Some("runpod".into()),
+            )
             .expect("start");
         job.progress(
             TrainProgress::new(0, 8000)
@@ -321,6 +344,7 @@ mod tests {
         assert_eq!(view.percent, Some(8));
         assert_eq!(view.eta_seconds, Some(14400));
         assert_eq!(view.method.as_deref(), Some("finetune"));
+        assert_eq!(view.provider.as_deref(), Some("runpod"));
         job.progress(TrainProgress::new(12, 400).loss(0.21));
         let view = registry.current().unwrap();
         assert_eq!(view.step, Some(12));
@@ -365,6 +389,30 @@ mod tests {
         assert_eq!(view.total, Some(20));
         assert_eq!(view.method.as_deref(), Some("finetune"));
         assert_eq!(view.subject, None);
+        assert_eq!(view.provider.as_deref(), Some("local"));
+        assert_eq!(view.gpu, None);
+        assert_eq!(view.pod_id, None);
+    }
+
+    #[test]
+    fn host_job_compute_is_surfaced_when_set() {
+        let mut job = zone_comfy::host_train::HostJob::create(
+            "jerry",
+            "finetune",
+            "ohwx",
+            "lustifySDXLNSFW_ggwpV7.safetensors",
+        );
+        job.provider = zone_comfy::TrainProvider::Runpod;
+        job.gpu = Some("A40".into());
+        job.pod_id = Some("pod-1".into());
+        let view = super::TrainJobView::from_host(job);
+        assert_eq!(view.provider.as_deref(), Some("runpod"));
+        assert_eq!(view.gpu.as_deref(), Some("A40"));
+        assert_eq!(view.pod_id.as_deref(), Some("pod-1"));
+        let encoded = serde_json::to_value(&view).unwrap();
+        assert_eq!(encoded["provider"], "runpod");
+        assert_eq!(encoded["gpu"], "A40");
+        assert!(encoded.get("runpod_api_key").is_none());
     }
 
     #[test]

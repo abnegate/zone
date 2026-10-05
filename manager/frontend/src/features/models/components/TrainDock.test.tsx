@@ -109,6 +109,25 @@ describe('TrainDock', () => {
     expect(images[0]).toHaveAttribute('alt', 'Training preview 1 of 4');
   });
 
+  it('names Runpod compute in the headline', () => {
+    trainState.job = {
+      id: 'job-1',
+      name: 'jerry',
+      status: 'running',
+      method: 'finetune',
+      provider: 'runpod',
+      gpu: 'A40',
+      step: 12,
+      total: 400,
+    };
+    render(<TrainDock />);
+    expect(screen.getByText('Fine-tuning jerry on Runpod A40')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar')).toHaveAttribute(
+      'aria-label',
+      'Fine-tuning jerry on Runpod A40'
+    );
+  });
+
   it('lets a finished failure be dismissed', () => {
     trainState.job = {
       id: 'job-1',

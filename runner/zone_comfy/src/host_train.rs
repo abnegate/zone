@@ -2,11 +2,12 @@
 //! container. Job state lives on the models bind-mount so a manager recreate
 //! does not cancel a week-long fine-tune.
 
-use crate::lora::TrainError;
+use crate::lora::{TrainError, TrainProvider};
 use crate::train::{TrainProgress, parse_progress};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -33,6 +34,12 @@ pub struct HostJob {
     pub subject: String,
     pub trigger: String,
     pub checkpoint: String,
+    #[serde(default)]
+    pub provider: TrainProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_id: Option<String>,
     pub status: HostStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
@@ -75,6 +82,9 @@ impl HostJob {
             subject: String::new(),
             trigger: trigger.to_string(),
             checkpoint: checkpoint.to_string(),
+            provider: TrainProvider::Local,
+            gpu: None,
+            pod_id: None,
             status: HostStatus::Queued,
             filename: None,
             recipe_id: String::new(),
@@ -223,6 +233,25 @@ pub fn write_job(dir: &Path, job: &HostJob) -> Result<(), TrainError> {
     let temporary = dir.join("job.json.tmp");
     fs::write(&temporary, encoded).map_err(|error| TrainError::Failed(error.to_string()))?;
     fs::rename(temporary, dir.join("job.json"))
+        .map_err(|error| TrainError::Failed(error.to_string()))
+}
+
+/// Write the Runpod API key beside the job. Mode 0o600, never job.json.
+pub fn write_runpod_key(dir: &Path, key: &str) -> Result<(), TrainError> {
+    fs::create_dir_all(dir).map_err(|error| TrainError::Failed(error.to_string()))?;
+    let path = dir.join("runpod.key");
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|error| TrainError::Failed(error.to_string()))?;
+    file.write_all(key.trim().as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
         .map_err(|error| TrainError::Failed(error.to_string()))
 }
 
@@ -512,6 +541,48 @@ mod tests {
         assert_eq!(loaded.subject, "");
         assert_eq!(loaded.name, "yvonne");
         assert_eq!(loaded.method, "finetune");
+    }
+
+    #[test]
+    fn host_job_defaults_provider_to_local_and_round_trips_runpod_without_a_key() {
+        let job = HostJob::create("jerry", "lora", "ohwx", "base.safetensors");
+        assert_eq!(job.provider, TrainProvider::Local);
+        let mut value = serde_json::to_value(&job).unwrap();
+        value.as_object_mut().unwrap().remove("provider");
+        let loaded: HostJob = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.provider, TrainProvider::Local);
+
+        let mut runpod = HostJob::create("jerry", "finetune", "ohwx", "base.safetensors");
+        runpod.provider = TrainProvider::Runpod;
+        runpod.gpu = Some("A40".into());
+        runpod.pod_id = Some("pod-1".into());
+        let encoded = serde_json::to_value(&runpod).unwrap();
+        assert_eq!(encoded["provider"], "runpod");
+        assert_eq!(encoded["gpu"], "A40");
+        assert_eq!(encoded["pod_id"], "pod-1");
+        assert!(encoded.get("runpod_api_key").is_none());
+        assert!(encoded.get("api_key").is_none());
+        let loaded: HostJob = serde_json::from_value(encoded).unwrap();
+        assert_eq!(loaded.provider, TrainProvider::Runpod);
+        assert_eq!(loaded.gpu.as_deref(), Some("A40"));
+        assert_eq!(loaded.pod_id.as_deref(), Some("pod-1"));
+    }
+
+    #[test]
+    fn write_runpod_key_is_one_line_and_mode_600() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("job");
+        write_runpod_key(&dir, " rp-secret \n").unwrap();
+        let path = dir.join("runpod.key");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "rp-secret\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]
