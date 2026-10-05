@@ -16,6 +16,7 @@ describe('workspace AI settings schemas', () => {
     openai_base_url: null,
     has_anthropic_api_key: false,
     anthropic_base_url: null,
+    has_runpod_api_key: false,
     bedrock_region: null,
     bedrock_use_iam_role: false,
     has_bedrock_credentials: false,
@@ -32,6 +33,15 @@ describe('workspace AI settings schemas', () => {
     expect(AiSettingsSchema.parse({ ...inherited, provider }).provider).toBe(provider);
     expect(AiSettingsResponseSchema.parse({ ...inherited, provider }).provider).toBe(provider);
     expect(UpdateAiSettingsRequestSchema.parse({ provider }).provider).toBe(provider);
+  });
+
+  it('stores a Runpod key on the request and never on the GET payload', () => {
+    expect(UpdateAiSettingsRequestSchema.parse({ runpod_api_key: 'rp-1' }).runpod_api_key).toBe(
+      'rp-1'
+    );
+    const parsed = AiSettingsResponseSchema.parse({ ...inherited, has_runpod_api_key: true });
+    expect(parsed.has_runpod_api_key).toBe(true);
+    expect(parsed).not.toHaveProperty('runpod_api_key');
   });
 });
 

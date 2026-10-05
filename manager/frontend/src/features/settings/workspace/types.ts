@@ -75,6 +75,7 @@ export interface AiSettings {
   openai_base_url: string | null;
   has_anthropic_api_key: boolean;
   anthropic_base_url: string | null;
+  has_runpod_api_key: boolean;
   bedrock_region: string | null;
   bedrock_use_iam_role: boolean;
   has_bedrock_credentials: boolean;
@@ -110,6 +111,7 @@ export interface UpdateAiSettingsRequest {
   openai_base_url?: string;
   anthropic_api_key?: string;
   anthropic_base_url?: string;
+  runpod_api_key?: string;
   bedrock_region?: string;
   bedrock_access_key?: string;
   bedrock_secret_key?: string;

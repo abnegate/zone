@@ -334,6 +334,17 @@ export function AiProviderFields({
           </div>
         </>
       )}
+
+      <Field id="runpod-key" label="Runpod" configured={configured.runpod} optional>
+        <input
+          type="password"
+          id="runpod-key"
+          value={credentials.runpodApiKey}
+          onChange={(event) => onChange('runpodApiKey', event.target.value)}
+          placeholder={configured.runpod ? MASK : 'Enter API key'}
+          className="form-input"
+        />
+      </Field>
     </div>
   );
 }

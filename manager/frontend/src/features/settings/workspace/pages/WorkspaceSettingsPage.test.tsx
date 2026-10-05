@@ -150,6 +150,7 @@ const mockAiSettings: AiSettings = {
   openai_base_url: null,
   has_anthropic_api_key: false,
   anthropic_base_url: null,
+  has_runpod_api_key: false,
   bedrock_region: null,
   bedrock_use_iam_role: false,
   has_bedrock_credentials: false,
@@ -676,6 +677,15 @@ describe('WorkspaceSettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('AI Provider Settings')).toBeInTheDocument();
       });
+    });
+
+    it('shows the Runpod train key when the workspace overrides AI settings', async () => {
+      render(<WorkspaceSettingsPage />);
+      await openAiTab(userEvent.setup());
+      expect(await screen.findByLabelText(/^Runpod/)).toHaveAttribute(
+        'placeholder',
+        'Enter API key'
+      );
     });
 
     it('renders override checkbox', async () => {

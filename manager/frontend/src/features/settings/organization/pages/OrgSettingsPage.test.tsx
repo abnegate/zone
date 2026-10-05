@@ -135,6 +135,7 @@ const mockAiSettings: AiSettings = {
   openai_base_url: null,
   has_anthropic_api_key: false,
   anthropic_base_url: null,
+  has_runpod_api_key: false,
   bedrock_region: null,
   bedrock_use_iam_role: false,
   has_bedrock_credentials: false,
@@ -586,6 +587,24 @@ describe('OrgSettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByLabelText(/LiteLLM Host/i)).toHaveValue('http://localhost:4000');
       });
+    });
+
+    it('shows the Runpod train key beside the provider credentials', async () => {
+      render(<OrgSettingsPage />);
+      expect(await screen.findByLabelText(/^Runpod/)).toHaveAttribute(
+        'placeholder',
+        'Enter API key'
+      );
+    });
+
+    it('marks the Runpod key configured when one is saved', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        has_runpod_api_key: true,
+      });
+      render(<OrgSettingsPage />);
+      expect(await screen.findByLabelText(/^Runpod/)).toHaveAttribute('placeholder', '••••••••');
+      expect(screen.getByText(/\(configured\)/i)).toBeInTheDocument();
     });
   });
 

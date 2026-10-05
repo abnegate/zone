@@ -69,6 +69,7 @@ pub struct Update<'a> {
     pub openai_base_url: Option<&'a str>,
     pub anthropic_api_key: Option<&'a str>,
     pub anthropic_base_url: Option<&'a str>,
+    pub runpod_api_key: Option<&'a str>,
     pub bedrock_region: Option<&'a str>,
     pub bedrock_access_key: Option<&'a str>,
     pub bedrock_secret_key: Option<&'a str>,
@@ -441,6 +442,7 @@ pub struct OrgAiSettingsRow {
     pub openai_base_url: Option<String>,
     pub anthropic_api_key: Option<SecretValue>,
     pub anthropic_base_url: Option<String>,
+    pub runpod_api_key: Option<SecretValue>,
     pub bedrock_region: Option<String>,
     pub bedrock_access_key: Option<SecretValue>,
     pub bedrock_secret_key: Option<SecretValue>,
@@ -470,6 +472,7 @@ pub struct WorkspaceAiSettingsRow {
     pub openai_base_url: Option<String>,
     pub anthropic_api_key: Option<SecretValue>,
     pub anthropic_base_url: Option<String>,
+    pub runpod_api_key: Option<SecretValue>,
     pub bedrock_region: Option<String>,
     pub bedrock_access_key: Option<SecretValue>,
     pub bedrock_secret_key: Option<SecretValue>,
@@ -522,6 +525,7 @@ pub struct EffectiveAiSettings {
     pub openai_base_url: Option<String>,
     pub anthropic_api_key: Option<SecretValue>,
     pub anthropic_base_url: Option<String>,
+    pub runpod_api_key: Option<SecretValue>,
     pub bedrock_region: Option<String>,
     pub bedrock_access_key: Option<SecretValue>,
     pub bedrock_secret_key: Option<SecretValue>,
@@ -575,6 +579,7 @@ where
         r#"
         SELECT id, organization_id, provider, litellm_host, litellm_key,
                openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
+               runpod_api_key,
                bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
                model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
                completions_routed, created_at, updated_at
@@ -625,6 +630,7 @@ where
             openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
             model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
+            runpod_api_key,
             completions_routed
         ) VALUES (
             $1, COALESCE($2, 'self_hosted'),
@@ -633,6 +639,7 @@ where
             $9, $10, $11, $12,
             NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), ''),
+            NULLIF(BTRIM($19), ''),
             true
         )
         ON CONFLICT (organization_id) DO UPDATE SET
@@ -703,10 +710,16 @@ where
                 WHEN BTRIM($18) = '' THEN NULL
                 ELSE $18
             END,
+            runpod_api_key = CASE
+                WHEN $19 IS NULL THEN organization_ai_settings.runpod_api_key
+                WHEN BTRIM($19) = '' THEN NULL
+                ELSE BTRIM($19)
+            END,
             completions_routed = true,
             updated_at = NOW()
         RETURNING id, organization_id, provider, litellm_host, litellm_key,
                   openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
+                  runpod_api_key,
                   bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
                   model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
                   completions_routed, created_at, updated_at
@@ -730,6 +743,7 @@ where
     .bind(update.model_image)
     .bind(update.model_video)
     .bind(update.model_audio)
+    .bind(update.runpod_api_key)
     .fetch_one(executor)
     .await?;
 
@@ -807,6 +821,7 @@ where
         r#"
         SELECT id, workspace_id, provider, litellm_host, litellm_key,
                openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
+               runpod_api_key,
                bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
                model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
                completions_routed, created_at, updated_at
@@ -889,6 +904,7 @@ where
             openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
             model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
+            runpod_api_key,
             completions_routed
         ) VALUES (
             $1, $2,
@@ -897,6 +913,7 @@ where
             $9, $10, $11, $12,
             NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), ''),
+            NULLIF(BTRIM($19), ''),
             true
         )
         ON CONFLICT (workspace_id) DO UPDATE SET
@@ -967,10 +984,16 @@ where
                 WHEN BTRIM($18) = '' THEN NULL
                 ELSE $18
             END,
+            runpod_api_key = CASE
+                WHEN $19 IS NULL THEN workspace_ai_settings.runpod_api_key
+                WHEN BTRIM($19) = '' THEN NULL
+                ELSE BTRIM($19)
+            END,
             completions_routed = true,
             updated_at = NOW()
         RETURNING id, workspace_id, provider, litellm_host, litellm_key,
                   openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
+                  runpod_api_key,
                   bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
                   model_fast, model_reasoning, model_embedding, model_image, model_video, model_audio,
                   completions_routed, created_at, updated_at
@@ -994,6 +1017,7 @@ where
     .bind(update.model_image)
     .bind(update.model_video)
     .bind(update.model_audio)
+    .bind(update.runpod_api_key)
     .fetch_one(executor)
     .await?;
 
@@ -1082,6 +1106,7 @@ fn effective(
         openai_base_url: None,
         anthropic_api_key: None,
         anthropic_base_url: None,
+        runpod_api_key: None,
         bedrock_region: None,
         bedrock_access_key: None,
         bedrock_secret_key: None,
@@ -1104,6 +1129,7 @@ fn effective(
             effective.anthropic_api_key = org.anthropic_api_key;
             effective.anthropic_base_url = org.anthropic_base_url;
         }
+        effective.runpod_api_key = org.runpod_api_key;
         effective.bedrock_region = org.bedrock_region;
         effective.bedrock_access_key = org.bedrock_access_key;
         effective.bedrock_secret_key = org.bedrock_secret_key;
@@ -1174,6 +1200,9 @@ fn effective(
         }
         if ws.model_audio.is_some() {
             effective.model_audio = ws.model_audio;
+        }
+        if ws.runpod_api_key.is_some() {
+            effective.runpod_api_key = ws.runpod_api_key;
         }
     }
 
@@ -1277,6 +1306,7 @@ mod tests {
             openai_base_url: None,
             anthropic_api_key: None,
             anthropic_base_url: None,
+            runpod_api_key: None,
             bedrock_region: None,
             bedrock_access_key: None,
             bedrock_secret_key: None,
@@ -1363,6 +1393,7 @@ mod tests {
             openai_base_url: Some("https://organization-openai.example/v1".to_string()),
             anthropic_api_key: Some(SecretValue::new("organization-anthropic-key")),
             anthropic_base_url: Some("https://organization-anthropic.example/v1".to_string()),
+            runpod_api_key: Some(SecretValue::new("organization-runpod-key")),
             bedrock_region: None,
             bedrock_access_key: None,
             bedrock_secret_key: None,
@@ -1390,6 +1421,7 @@ mod tests {
             openai_base_url: None,
             anthropic_api_key: None,
             anthropic_base_url: None,
+            runpod_api_key: None,
             bedrock_region: None,
             bedrock_access_key: None,
             bedrock_secret_key: None,
@@ -1516,6 +1548,25 @@ mod tests {
             settings.anthropic_api_key.expose_as_deref(),
             Some("organization-anthropic-key")
         );
+        assert_eq!(
+            settings.runpod_api_key.expose_as_deref(),
+            Some("organization-runpod-key")
+        );
+    }
+
+    #[test]
+    fn a_workspace_runpod_key_overrides_the_organization_key() {
+        let workspace = WorkspaceAiSettingsRow {
+            runpod_api_key: Some(SecretValue::new("workspace-runpod-key")),
+            ..workspace_row()
+        };
+
+        let settings = effective(Some(organization_row()), Some(workspace));
+
+        assert_eq!(
+            settings.runpod_api_key.expose_as_deref(),
+            Some("workspace-runpod-key")
+        );
     }
 
     #[test]
@@ -1537,6 +1588,10 @@ mod tests {
         assert_eq!(settings.openai_api_key.expose_as_deref(), None);
         assert_eq!(settings.anthropic_base_url, None);
         assert_eq!(settings.anthropic_api_key.expose_as_deref(), None);
+        assert_eq!(
+            settings.runpod_api_key.expose_as_deref(),
+            Some("organization-runpod-key")
+        );
     }
 
     #[test]

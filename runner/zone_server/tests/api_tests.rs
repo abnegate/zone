@@ -4244,6 +4244,42 @@ async fn test_org_ai_settings_upsert() {
     assert_eq!(body["model_reasoning"], "gpt-4o");
     // Should not expose the actual key
     assert!(body.get("openai_api_key").is_none());
+    assert!(body.get("runpod_api_key").is_none());
+}
+
+#[tokio::test]
+async fn test_org_ai_settings_runpod_key_is_never_returned() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let response = client
+        .post_json_auth(
+            "/api/organizations",
+            &json!({ "name": "Runpod Key Org", "slug": test_slug() }),
+            &token,
+        )
+        .await;
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
+    let path = format!("/api/organizations/{org_id}/settings/ai");
+
+    let saved = client
+        .put_json_auth(
+            &path,
+            &json!({ "runpod_api_key": "rp-test-key-123" }),
+            &token,
+        )
+        .await;
+    saved.assert_status(StatusCode::OK);
+    let body = saved.json_value();
+    assert_eq!(body["has_runpod_api_key"], true);
+    assert!(body.get("runpod_api_key").is_none());
+
+    let read = client.get_auth(&path, &token).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(read.json_value()["has_runpod_api_key"], true);
+    assert!(read.json_value().get("runpod_api_key").is_none());
 }
 
 #[tokio::test]

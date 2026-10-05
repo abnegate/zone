@@ -103,6 +103,7 @@ async fn test_get_org_ai_settings_default() {
     assert_eq!(body["has_litellm_key"], false);
     assert_eq!(body["has_openai_api_key"], false);
     assert_eq!(body["has_anthropic_api_key"], false);
+    assert_eq!(body["has_runpod_api_key"], false);
     assert_eq!(body["has_bedrock_credentials"], false);
 }
 
@@ -1507,6 +1508,115 @@ async fn test_credentials_not_exposed_in_response() {
 
     assert!(body.get("openai_api_key").is_none());
     assert!(body.get("litellm_key").is_none());
+    assert!(body.get("runpod_api_key").is_none());
+}
+
+#[tokio::test]
+async fn test_runpod_api_key_is_stored_and_never_returned() {
+    const SECRET: &str = "rp-secret-key-never-echoed";
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    for path in [&organization, &workspace] {
+        let saved = client
+            .put_json_auth(path, &json!({ "runpod_api_key": SECRET }), &token)
+            .await;
+        saved.assert_status(StatusCode::OK);
+        let body = saved.json_value();
+        assert_eq!(body["has_runpod_api_key"], true, "{path}");
+        assert!(body.get("runpod_api_key").is_none(), "{path}");
+        assert!(!saved.text().contains(SECRET), "{path}");
+
+        let read = client.get_auth(path, &token).await;
+        read.assert_status(StatusCode::OK);
+        let body = read.json_value();
+        assert_eq!(body["has_runpod_api_key"], true, "{path}");
+        assert!(body.get("runpod_api_key").is_none(), "{path}");
+        assert!(!read.text().contains(SECRET), "{path}");
+    }
+
+    let kept = client
+        .put_json_auth(
+            &organization,
+            &json!({ "model_fast": "llama3.2:3b" }),
+            &token,
+        )
+        .await;
+    kept.assert_status(StatusCode::OK);
+    assert_eq!(kept.json_value()["has_runpod_api_key"], true);
+
+    let cleared = client
+        .put_json_auth(&organization, &json!({ "runpod_api_key": "" }), &token)
+        .await;
+    cleared.assert_status(StatusCode::OK);
+    assert_eq!(cleared.json_value()["has_runpod_api_key"], false);
+    assert!(cleared.json_value().get("runpod_api_key").is_none());
+
+    let workspace_cleared = client
+        .put_json_auth(&workspace, &json!({ "runpod_api_key": "  " }), &token)
+        .await;
+    workspace_cleared.assert_status(StatusCode::OK);
+    assert_eq!(workspace_cleared.json_value()["has_runpod_api_key"], false);
+
+    let settings = ai_settings::get_effective_ai_settings(
+        client.state().db(),
+        org_id.parse().expect("organization id"),
+        ws_id.parse().expect("workspace id"),
+    )
+    .await
+    .expect("effective settings");
+    assert_eq!(settings.runpod_api_key.expose_as_deref(), None);
+}
+
+#[tokio::test]
+async fn test_workspace_runpod_key_overrides_the_organization_key() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    client
+        .put_json_auth(
+            &organization,
+            &json!({ "runpod_api_key": "rp-organization" }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let inherited = client
+        .get_auth(&format!("{workspace}/effective"), &token)
+        .await;
+    inherited.assert_status(StatusCode::OK);
+    assert_eq!(inherited.json_value()["has_runpod_api_key"], true);
+    assert!(inherited.json_value().get("runpod_api_key").is_none());
+
+    client
+        .put_json_auth(
+            &workspace,
+            &json!({ "runpod_api_key": "rp-workspace" }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let settings = ai_settings::get_effective_ai_settings(
+        client.state().db(),
+        org_id.parse().expect("organization id"),
+        ws_id.parse().expect("workspace id"),
+    )
+    .await
+    .expect("effective settings");
+    assert_eq!(
+        settings.runpod_api_key.expose_as_deref(),
+        Some("rp-workspace")
+    );
 }
 
 const ENDPOINT_PAIRS: [(&str, &str, &str); 3] = [

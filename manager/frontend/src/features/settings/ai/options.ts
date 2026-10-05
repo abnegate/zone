@@ -148,6 +148,7 @@ export interface ProviderCredentials {
   openaiBaseUrl: string;
   anthropicApiKey: string;
   anthropicBaseUrl: string;
+  runpodApiKey: string;
   bedrockRegion: string;
   bedrockAccessKey: string;
   bedrockSecretKey: string;
@@ -161,6 +162,7 @@ export const emptyCredentials: ProviderCredentials = {
   openaiBaseUrl: '',
   anthropicApiKey: '',
   anthropicBaseUrl: '',
+  runpodApiKey: '',
   bedrockRegion: 'us-east-1',
   bedrockAccessKey: '',
   bedrockSecretKey: '',
@@ -172,6 +174,7 @@ export interface ProviderConfigured {
   openai: boolean;
   anthropic: boolean;
   bedrock: boolean;
+  runpod: boolean;
 }
 
 export const nothingConfigured: ProviderConfigured = {
@@ -179,6 +182,7 @@ export const nothingConfigured: ProviderConfigured = {
   openai: false,
   anthropic: false,
   bedrock: false,
+  runpod: false,
 };
 
 export interface ModelSelection {
@@ -216,6 +220,7 @@ export function configuredFromSettings(settings: AiSettings): ProviderConfigured
     openai: settings.has_openai_api_key,
     anthropic: settings.has_anthropic_api_key,
     bedrock: settings.has_bedrock_credentials,
+    runpod: settings.has_runpod_api_key,
   };
 }
 
@@ -330,6 +335,7 @@ export function buildAiSettingsRequest(
     model_video: models.video,
     model_audio: models.audio,
   };
+  if (credentials.runpodApiKey) request.runpod_api_key = credentials.runpodApiKey;
   if (isAgentProvider(provider)) {
     return request;
   }

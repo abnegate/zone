@@ -1509,6 +1509,7 @@ describe('Client', () => {
       openai_base_url: null,
       has_anthropic_api_key: false,
       anthropic_base_url: null,
+      has_runpod_api_key: false,
       bedrock_region: null,
       bedrock_use_iam_role: false,
       has_bedrock_credentials: false,

@@ -112,6 +112,7 @@ async fn main() {
             openai_base_url: None,
             anthropic_api_key: None,
             anthropic_base_url: None,
+            runpod_api_key: None,
             bedrock_region: None,
             bedrock_access_key: None,
             bedrock_secret_key: None,

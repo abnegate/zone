@@ -16,6 +16,7 @@ const settings = {
   openai_base_url: null,
   has_anthropic_api_key: false,
   anthropic_base_url: null,
+  has_runpod_api_key: false,
   bedrock_region: null,
   bedrock_use_iam_role: false,
   has_bedrock_credentials: false,
@@ -49,5 +50,14 @@ describe('AI settings schemas', () => {
     expect(AiSettingsResponseSchema.safeParse({ ...settings, provider: 'gemini' }).success).toBe(
       false
     );
+  });
+
+  it('accepts a Runpod key on the request and a has_ flag on the GET payload', () => {
+    expect(UpdateAiSettingsRequestSchema.parse({ runpod_api_key: 'rp-1' }).runpod_api_key).toBe(
+      'rp-1'
+    );
+    expect(
+      AiSettingsResponseSchema.parse({ ...settings, has_runpod_api_key: true }).has_runpod_api_key
+    ).toBe(true);
   });
 });

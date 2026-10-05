@@ -103,9 +103,32 @@ describe('AiProviderFields', () => {
     );
     expect(screen.getByLabelText(/LiteLLM Host/).closest('.form-grid')).toBe(grid);
     expect(screen.getByLabelText(/LiteLLM API Key/).closest('.form-grid')).toBe(grid);
+    expect(screen.getByLabelText(/^Runpod/).closest('.form-grid')).toBe(grid);
     expect(screen.getByText('(configured)')).toBeInTheDocument();
     expect(container.querySelectorAll('.settings-card')).toHaveLength(0);
   });
+
+  it.each(AiProviderSchema.options)(
+    'keeps the Runpod train key on the %s provider, outside the provider dropdown',
+    (provider) => {
+      const onChange = mock();
+      render(
+        <AiProviderFields
+          level="organization"
+          provider={provider}
+          onProviderChange={() => undefined}
+          credentials={emptyCredentials}
+          configured={{ ...nothingConfigured, runpod: true }}
+          onChange={onChange}
+        />
+      );
+      const key = screen.getByLabelText(/^Runpod/) as HTMLInputElement;
+      expect(key).toHaveAttribute('placeholder', '••••••••');
+      expect(screen.getByText('(configured)')).toBeInTheDocument();
+      fireEvent.change(key, { target: { value: 'rp-1' } });
+      expect(onChange).toHaveBeenCalledWith('runpodApiKey', 'rp-1');
+    }
+  );
 
   it('reports each edit by field and hides the Bedrock keys behind the IAM toggle', () => {
     const onChange = mock();
@@ -282,6 +305,7 @@ const nothingSaved: AiSettings = {
   openai_base_url: null,
   has_anthropic_api_key: false,
   anthropic_base_url: null,
+  has_runpod_api_key: false,
   bedrock_region: null,
   bedrock_use_iam_role: false,
   has_bedrock_credentials: false,
@@ -563,5 +587,19 @@ describe('buildAiSettingsRequest', () => {
     );
     expect(request.openai_base_url).toBe('https://new.example/v1');
     expect(request).not.toHaveProperty('openai_api_key');
+  });
+
+  it('sends the Runpod key for every provider, including coding agents', () => {
+    for (const provider of AiProviderSchema.options) {
+      const request = buildAiSettingsRequest(
+        provider,
+        { ...emptyCredentials, runpodApiKey: 'rp-1' },
+        emptyModels
+      );
+      expect(request.runpod_api_key).toBe('rp-1');
+    }
+    expect(buildAiSettingsRequest('openai', emptyCredentials, emptyModels)).not.toHaveProperty(
+      'runpod_api_key'
+    );
   });
 });
