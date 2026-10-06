@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
+use abnegate_search::SearchContext;
 use zone_core::context::Entry;
 use zone_core::llm::{Message, Role};
-use zone_search::client::SearchContext;
 
 use super::{INSTRUCTIONS, RunContext, prompt};
 
@@ -66,7 +66,6 @@ pub fn assemble(context: &RunContext, unseen: &[String], note: String) -> Option
 mod tests {
     use zone_core::context::project;
     use zone_core::llm::provider::render;
-    use zone_search::client::SearchContext;
 
     use super::*;
     use crate::services::chat::session::composed;

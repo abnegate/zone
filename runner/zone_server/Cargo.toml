@@ -102,18 +102,19 @@ aiusg = { version = "=0.5.0", default-features = false }
 # Internal
 abnegate-exec = { workspace = true }
 abnegate-http = { workspace = true }
+abnegate-search = { workspace = true }
 abnegate-secret = { workspace = true, features = ["sqlx"] }
 zone_chat = { path = "../zone_chat" }
 zone_comfy = { path = "../zone_comfy" }
 zone_email = { path = "../zone_email" }
 zone_notify = { path = "../zone_notify" }
-zone_search = { path = "../zone_search" }
 zone_vcs = { path = "../zone_vcs" }
 zone_core = { path = "../zone_core", features = ["sqlx"] }
 zone_context = { path = "../zone_context" }
 
 [dev-dependencies]
 zone_chat = { path = "../zone_chat" }
+zone_core = { path = "../zone_core", features = ["sqlx", "test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 http-body-util = "=0.1.5"
 tower = { workspace = true, features = ["util"] }

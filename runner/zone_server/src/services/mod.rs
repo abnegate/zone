@@ -23,5 +23,6 @@ pub mod prioritisation;
 pub mod route;
 pub mod runner;
 pub mod schedule;
+pub mod search;
 pub mod stages;
 pub mod task_progress;

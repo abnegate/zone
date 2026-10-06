@@ -1623,7 +1623,11 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ### `SEARCH_RESULT_COUNT`
 - **Default**: `5`
-- **Description**: Number of search results supplied to chat
+- **Description**: Number of search results supplied to chat (held to 1–20).
+
+### `SEARCH_TIMEOUT_SECONDS`
+- **Default**: `15`
+- **Description**: Timeout for one SearXNG request, in whole seconds (held to 1–60).
 
 ### `SEARCH_SEARXNG_QUERY_URL`
 - **Default**: `"http://gluetun:8080/search?q=<query>&format=json"`

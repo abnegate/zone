@@ -32,6 +32,7 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::llm::AgentKind;
 use zone_core::llm::provider::UNFUNDED;
+use zone_core::variables::Variables;
 use zone_server::config::{AgentConfig, Config, ModelBackend};
 use zone_server::db::agent_logins::{self, AgentLoginRow, Insert};
 use zone_server::db::ai_settings;
@@ -141,8 +142,8 @@ const BOB: Account = Account {
 /// A turn handed over to the agent the server was not started with runs that
 /// agent by name. Each script here passes the run on to the stand-in of the
 /// test whose agent home it runs in, so no run ever reaches a real CLI. Set
-/// once for the whole binary: an environment written while another test
-/// thread reads one is why the call is unsafe at all.
+/// once for the whole binary, under the lock every test change to the
+/// environment takes.
 static STAND_INS: LazyLock<PathBuf> = LazyLock::new(|| {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("chat-handover-stand-ins");
     std::fs::create_dir_all(&directory).expect("a directory for the stand-ins on PATH");
@@ -167,7 +168,7 @@ static STAND_INS: LazyLock<PathBuf> = LazyLock::new(|| {
         std::iter::once(directory.clone()).chain(std::env::split_paths(&inherited)),
     )
     .expect("a PATH that leads with the stand-ins");
-    unsafe { std::env::set_var("PATH", searched) };
+    Variables::install("PATH", searched);
     directory
 });
 

@@ -7,8 +7,9 @@
 //! `ZONE_VPN_REQUIRED=0` allows the public internet even with credentials.
 
 use std::env;
-use std::ffi::OsString;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+
+#[cfg(any(test, feature = "test-support"))]
+use crate::variables::Variables;
 
 /// Why a public fetch refused to leave.
 pub const OFFLINE: &str = "Public web access is offline until the VPN is enabled.";
@@ -31,7 +32,6 @@ const VPN: &str = "ZONE_VPN";
 const REQUIRED: &str = "ZONE_VPN_REQUIRED";
 const WIREGUARD: &str = "VPN_WIREGUARD_PRIVATE_KEY";
 const OPENVPN: &str = "VPN_OPENVPN_USER";
-const NAMES: [&str; 4] = [VPN, REQUIRED, WIREGUARD, OPENVPN];
 
 fn truthy(name: &str) -> bool {
     match env::var(name) {
@@ -82,18 +82,12 @@ pub fn allows_public() -> bool {
     enabled() || !required()
 }
 
-static ENVIRONMENT: Mutex<()> = Mutex::new(());
+/// Holds VPN env vars in a known state for the guard's lifetime, under the
+/// lock every [`Variables`] takes.
+#[cfg(any(test, feature = "test-support"))]
+pub struct Hold(Variables);
 
-fn lock() -> MutexGuard<'static, ()> {
-    ENVIRONMENT.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Holds VPN env vars in a known state for the guard's lifetime.
-pub struct Hold {
-    _lock: MutexGuard<'static, ()>,
-    previous: [Option<OsString>; 4],
-}
-
+#[cfg(any(test, feature = "test-support"))]
 impl Hold {
     /// Tunnel on (`ZONE_VPN=1`).
     pub fn on() -> Self {
@@ -115,51 +109,31 @@ impl Hold {
         Self::apply(None, None, Some("1"), None)
     }
 
+    /// The environment this hold has locked, for changing more variables
+    /// under the same lock.
+    pub fn variables(&mut self) -> &mut Variables {
+        &mut self.0
+    }
+
     fn apply(
         vpn: Option<&str>,
         required: Option<&str>,
         wireguard: Option<&str>,
         openvpn: Option<&str>,
     ) -> Self {
-        let held = lock();
-        let previous = [
-            env::var_os(VPN),
-            env::var_os(REQUIRED),
-            env::var_os(WIREGUARD),
-            env::var_os(OPENVPN),
-        ];
-        // SAFETY: Hold owns ENVIRONMENT for the mutation and the restore.
-        unsafe {
-            for (name, value) in [
-                (VPN, vpn),
-                (REQUIRED, required),
-                (WIREGUARD, wireguard),
-                (OPENVPN, openvpn),
-            ] {
-                match value {
-                    Some(value) => env::set_var(name, value),
-                    None => env::remove_var(name),
-                }
+        let mut variables = Variables::lock();
+        for (name, value) in [
+            (VPN, vpn),
+            (REQUIRED, required),
+            (WIREGUARD, wireguard),
+            (OPENVPN, openvpn),
+        ] {
+            match value {
+                Some(value) => variables.set(name, value),
+                None => variables.remove(name),
             }
         }
-        Self {
-            _lock: held,
-            previous,
-        }
-    }
-}
-
-impl Drop for Hold {
-    fn drop(&mut self) {
-        // SAFETY: Hold still owns ENVIRONMENT while restoring.
-        unsafe {
-            for (name, previous) in NAMES.iter().zip(self.previous.iter()) {
-                match previous {
-                    Some(value) => env::set_var(name, value),
-                    None => env::remove_var(name),
-                }
-            }
-        }
+        Self(variables)
     }
 }
 
@@ -169,39 +143,39 @@ mod tests {
 
     #[test]
     fn stays_off_when_unset_or_false() {
-        let _vpn = Hold::off();
+        let mut vpn = Hold::off();
         assert!(!enabled());
         assert!(!required());
         assert!(!configured());
-        unsafe { env::set_var(VPN, "0") };
+        vpn.variables().set(VPN, "0");
         assert!(!enabled());
-        unsafe { env::set_var(VPN, "") };
+        vpn.variables().set(VPN, "");
         assert!(!enabled());
     }
 
     #[test]
     fn turns_on_for_truthy_values() {
-        let _vpn = Hold::on();
+        let mut vpn = Hold::on();
         assert!(enabled());
         for value in ["1", "true", "TRUE", "yes", "on"] {
-            unsafe { env::set_var(VPN, value) };
+            vpn.variables().set(VPN, value);
             assert!(enabled(), "{value}");
         }
     }
 
     #[test]
     fn public_web_is_allowed_when_the_vpn_is_not_configured() {
-        let _vpn = Hold::off();
+        let mut vpn = Hold::off();
         assert!(allows_public());
-        unsafe { env::set_var(REQUIRED, "0") };
+        vpn.variables().set(REQUIRED, "0");
         assert!(allows_public());
     }
 
     #[test]
     fn public_web_is_allowed_when_the_tunnel_is_on() {
-        let _vpn = Hold::required_off();
+        let mut vpn = Hold::required_off();
         assert!(!allows_public());
-        unsafe { env::set_var(VPN, "1") };
+        vpn.variables().set(VPN, "1");
         assert!(allows_public());
     }
 
@@ -215,21 +189,21 @@ mod tests {
 
     #[test]
     fn public_web_stays_offline_when_credentials_are_present_and_the_tunnel_is_down() {
-        let _vpn = Hold::configured_off();
+        let mut vpn = Hold::configured_off();
         assert!(configured());
         assert!(!enabled());
         assert!(required());
         assert!(!allows_public());
-        unsafe { env::remove_var(WIREGUARD) };
-        unsafe { env::set_var(OPENVPN, "user") };
+        vpn.variables().remove(WIREGUARD);
+        vpn.variables().set(OPENVPN, "user");
         assert!(configured());
         assert!(!allows_public());
     }
 
     #[test]
     fn public_web_is_allowed_when_required_is_off_even_with_credentials() {
-        let _vpn = Hold::configured_off();
-        unsafe { env::set_var(REQUIRED, "0") };
+        let mut vpn = Hold::configured_off();
+        vpn.variables().set(REQUIRED, "0");
         assert!(configured());
         assert!(!required());
         assert!(allows_public());
@@ -247,5 +221,11 @@ mod tests {
         let _vpn = Hold::required_off();
         assert_eq!(refusal(false), Some(OFFLINE));
         assert_eq!(refusal(true), Some(CHAT_OFFLINE));
+    }
+
+    #[test]
+    fn a_hold_takes_the_lock_every_variables_guard_takes() {
+        let _vpn = Hold::off();
+        assert!(crate::variables::held());
     }
 }

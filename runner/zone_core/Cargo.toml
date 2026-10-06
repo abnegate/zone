@@ -9,6 +9,8 @@ rust-version.workspace = true
 
 [features]
 sqlx = ["abnegate-secret/sqlx"]
+# Test-only environment guards (`variables`, `vpn::Hold`) for other crates' tests.
+test-support = []
 
 [dependencies]
 tokio = { workspace = true }

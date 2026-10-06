@@ -14,6 +14,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::{FunctionCall, LlmClient, LlmConfig, Message, Role, ToolCall};
 use zone_core::tools::job::{self, Jobs};
 use zone_core::tools::{Session, Tool};
+use zone_core::variables::Variables;
 use zone_server::agent::prompt;
 use zone_server::agent::wait::{self, KIND_JOB, WAIT_FOR};
 use zone_server::agent::{
@@ -136,13 +137,12 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
 /// nothing accumulates, and is already ignored.
 ///
 /// Set once for the whole binary rather than per test, because every tool set
-/// here is assembled through [`chat_catalog`], which forces this first: an
-/// environment written while another test thread is reading one is the reason
-/// the call is unsafe at all.
+/// here is assembled through [`chat_catalog`], which forces this first, and
+/// under the lock every test change to the environment takes.
 static CHECKOUT: LazyLock<PathBuf> = LazyLock::new(|| {
     let checkout = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("chat-agent-checkout");
     std::fs::create_dir_all(&checkout).expect("a checkout for the chat tool sets to root in");
-    unsafe { std::env::set_var("ZONE_CHAT_AGENT_CWD", &checkout) };
+    Variables::install("ZONE_CHAT_AGENT_CWD", &checkout);
     checkout
 });
 
