@@ -388,7 +388,7 @@ enum Routing {
     Video(crate::config::ComfyUiConfig),
     Audio(crate::config::ComfyUiConfig),
     Upscale(crate::config::ComfyUiConfig),
-    Chat(chats::ChatRow, Route),
+    Chat(chats::ChatRow, Box<Route>),
 }
 
 /// What a provider reported when a turn failed, remedied for a coding agent's
@@ -2473,6 +2473,7 @@ async fn handle_send_message(
                 .await
             }
             Routing::Chat(mut chat, route) => {
+                let route = *route;
                 // Cleared before the prompt is built rather than after it.
                 // `prepare_chat` renders the approval rules from this flag, so
                 // setting it on the preparation instead would gate the tools
@@ -2666,7 +2667,9 @@ async fn prepare_message(
         }
         crate::services::image_intent::GenerationIntent::Audio => Routing::Audio(image_config),
         crate::services::image_intent::GenerationIntent::Upscale => Routing::Upscale(image_config),
-        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat, route),
+        crate::services::image_intent::GenerationIntent::Chat => {
+            Routing::Chat(chat, Box::new(route))
+        }
     })
 }
 
@@ -4569,7 +4572,7 @@ mod tests {
                 QUESTION,
                 None,
                 chat,
-                route,
+                *route,
                 false,
             )
             .await
