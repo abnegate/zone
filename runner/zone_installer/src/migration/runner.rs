@@ -118,7 +118,7 @@ async fn apply(
 /// row is written. Those six cannot be edited to fix it -- both runners key a migration by
 /// a hash of its bytes and refuse to start when a recorded one changes -- so what makes the
 /// window survivable is that all six are idempotent and the re-run is a no-op. That property
-/// is held by `zone_server/tests/migration_atomicity_tests.rs`, which also stops a seventh
+/// is held by `zone_server/tests/integration/migration_atomicity.rs`, which also stops a seventh
 /// joining the set.
 async fn execute(
     connection: &mut PgConnection,

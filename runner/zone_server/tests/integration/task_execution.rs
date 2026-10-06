@@ -1,0 +1,1622 @@
+//! Task execution integration tests
+
+use crate::common;
+
+use uuid::Uuid;
+use zone_server::agent::wait::Waiting;
+use zone_server::db::tasks;
+
+/// Test helper to create a test project and workspace
+/// Returns (workspace_id, project_id)
+async fn create_test_project(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
+    // Create workspace and related data
+    let (_org_id, workspace_id, _user_id) = common::setup_test_data(pool).await;
+
+    let project_id = Uuid::new_v4();
+    let _: Uuid = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO projects (id, name, description, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(project_id)
+    .bind("Test Project")
+    .bind("A test project")
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .expect("Failed to create test project");
+
+    (workspace_id, project_id)
+}
+
+#[tokio::test]
+async fn test_create_task_run() {
+    let pool = common::create_test_pool().await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
+
+    // Create a task
+    let task = tasks::create_task(
+        &pool,
+        workspace_id,
+        &[project_id],
+        "Test Task",
+        "This is a test task",
+        Some("Should complete successfully"),
+        Some(1),
+        true,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+
+    // Create a task run
+    let run = tasks::create_task_run(&pool, task.id)
+        .await
+        .expect("Failed to create task run");
+
+    assert_eq!(run.task_id, task.id);
+    assert_eq!(run.status, "running");
+    assert!(run.started_at.is_some());
+    assert!(run.completed_at.is_none());
+}
+
+#[tokio::test]
+async fn test_update_task_run_progress() {
+    let pool = common::create_test_pool().await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
+
+    // Create task and run
+    let task = tasks::create_task(
+        &pool,
+        workspace_id,
+        &[project_id],
+        "Test Task",
+        "Test description",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+
+    let run = tasks::create_task_run(&pool, task.id)
+        .await
+        .expect("Failed to create task run");
+
+    // Update progress
+    let updated = tasks::update_task_run_progress(&pool, run.id, Some("thinking"), Some(25))
+        .await
+        .expect("Failed to update progress");
+
+    assert!(updated.is_some());
+    let updated = updated.unwrap();
+    assert_eq!(updated.current_phase, Some("thinking".to_string()));
+    assert_eq!(updated.progress_percent, Some(25));
+}
+
+#[tokio::test]
+async fn test_complete_task_run_success() {
+    let pool = common::create_test_pool().await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
+
+    // Create task and run
+    let task = tasks::create_task(
+        &pool,
+        workspace_id,
+        &[project_id],
+        "Test Task",
+        "Test description",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+
+    let run = tasks::create_task_run(&pool, task.id)
+        .await
+        .expect("Failed to create task run");
+
+    // Complete successfully
+    let completed = tasks::complete_task_run(
+        &pool,
+        run.id,
+        "completed",
+        None,
+        Some(serde_json::json!({
+            "iterations": 5,
+            "tokens_used": 1000,
+        })),
+    )
+    .await
+    .expect("Failed to complete run");
+
+    assert!(completed.is_some());
+    let completed = completed.unwrap();
+    assert_eq!(completed.status, "completed");
+    assert!(completed.completed_at.is_some());
+    assert_eq!(completed.progress_percent, Some(100));
+    assert!(completed.error_message.is_none());
+    assert!(completed.artifacts.is_some());
+}
+
+#[tokio::test]
+async fn test_complete_task_run_failure() {
+    let pool = common::create_test_pool().await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
+
+    // Create task and run
+    let task = tasks::create_task(
+        &pool,
+        workspace_id,
+        &[project_id],
+        "Test Task",
+        "Test description",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+
+    let run = tasks::create_task_run(&pool, task.id)
+        .await
+        .expect("Failed to create task run");
+
+    // Complete with failure
+    let completed = tasks::complete_task_run(
+        &pool,
+        run.id,
+        "failed",
+        Some("Agent error: max iterations exceeded"),
+        None,
+    )
+    .await
+    .expect("Failed to complete run");
+
+    assert!(completed.is_some());
+    let completed = completed.unwrap();
+    assert_eq!(completed.status, "failed");
+    assert!(completed.completed_at.is_some());
+    assert_eq!(
+        completed.error_message,
+        Some("Agent error: max iterations exceeded".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_add_task_run_log() {
+    let pool = common::create_test_pool().await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
+
+    // Create task and run
+    let task = tasks::create_task(
+        &pool,
+        workspace_id,
+        &[project_id],
+        "Test Task",
+        "Test description",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+
+    let run = tasks::create_task_run(&pool, task.id)
+        .await
+        .expect("Failed to create task run");
+
+    // Add log entry
+    let log = tasks::add_task_run_log(
+        &pool,
+        run.id,
+        "thinking",
+        "agent",
+        "info",
+        "Entering thinking phase",
+        Some(serde_json::json!({"iteration": 1})),
+    )
+    .await
+    .expect("Failed to add log");
+
+    assert_eq!(log.task_run_id, run.id);
+    assert_eq!(log.phase, "thinking");
+    assert_eq!(log.agent_type, "agent");
+    assert_eq!(log.log_level, "info");
+    assert_eq!(log.message, "Entering thinking phase");
+    assert!(log.metadata.is_some());
+}
+
+#[tokio::test]
+async fn test_get_task_run_logs() {
+    let pool = common::create_test_pool().await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
+
+    // Create task and run
+    let task = tasks::create_task(
+        &pool,
+        workspace_id,
+        &[project_id],
+        "Test Task",
+        "Test description",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+
+    let run = tasks::create_task_run(&pool, task.id)
+        .await
+        .expect("Failed to create task run");
+
+    // Add multiple log entries
+    for i in 0..5 {
+        tasks::add_task_run_log(
+            &pool,
+            run.id,
+            "thinking",
+            "agent",
+            "info",
+            &format!("Log entry {}", i),
+            None,
+        )
+        .await
+        .expect("Failed to add log");
+    }
+
+    // Get logs
+    let logs = tasks::get_task_run_logs(&pool, run.id)
+        .await
+        .expect("Failed to get logs");
+
+    assert_eq!(logs.len(), 5);
+    // Logs should be ordered by created_at ASC
+    for (i, log) in logs.iter().enumerate() {
+        assert_eq!(log.message, format!("Log entry {}", i));
+    }
+}
+
+#[tokio::test]
+async fn test_task_run_lifecycle() {
+    let pool = common::create_test_pool().await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
+
+    // Create task
+    let task = tasks::create_task(
+        &pool,
+        workspace_id,
+        &[project_id],
+        "Lifecycle Test Task",
+        "Test full lifecycle",
+        Some("Should track all phases"),
+        Some(1),
+        true,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+
+    // Create run
+    let run = tasks::create_task_run(&pool, task.id)
+        .await
+        .expect("Failed to create task run");
+
+    assert_eq!(run.status, "running");
+
+    // Simulate thinking phase
+    tasks::update_task_run_progress(&pool, run.id, Some("thinking"), Some(10))
+        .await
+        .expect("Failed to update progress");
+
+    tasks::add_task_run_log(
+        &pool,
+        run.id,
+        "thinking",
+        "agent",
+        "info",
+        "Analyzing task requirements",
+        None,
+    )
+    .await
+    .expect("Failed to add log");
+
+    // Simulate acting phase
+    tasks::update_task_run_progress(&pool, run.id, Some("acting"), Some(50))
+        .await
+        .expect("Failed to update progress");
+
+    tasks::add_task_run_log(
+        &pool,
+        run.id,
+        "acting",
+        "tool",
+        "info",
+        "Executing tool: read_file",
+        Some(serde_json::json!({"tool": "read_file"})),
+    )
+    .await
+    .expect("Failed to add log");
+
+    // Simulate responding phase
+    tasks::update_task_run_progress(&pool, run.id, Some("responding"), Some(90))
+        .await
+        .expect("Failed to update progress");
+
+    // Complete
+    let completed = tasks::complete_task_run(
+        &pool,
+        run.id,
+        "completed",
+        None,
+        Some(serde_json::json!({
+            "iterations": 3,
+            "tokens_used": 500,
+            "summary": "Task completed successfully"
+        })),
+    )
+    .await
+    .expect("Failed to complete run");
+
+    assert!(completed.is_some());
+    let completed = completed.unwrap();
+    assert_eq!(completed.status, "completed");
+    assert_eq!(completed.progress_percent, Some(100));
+
+    // Get all logs
+    let logs = tasks::get_task_run_logs(&pool, run.id)
+        .await
+        .expect("Failed to get logs");
+
+    assert!(logs.len() >= 2);
+}
+
+#[tokio::test]
+async fn test_list_task_runs() {
+    let pool = common::create_test_pool().await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
+
+    // Create task
+    let task = tasks::create_task(
+        &pool,
+        workspace_id,
+        &[project_id],
+        "Test Task",
+        "Test description",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+
+    // Create multiple runs
+    for _ in 0..3 {
+        let run = tasks::create_task_run(&pool, task.id)
+            .await
+            .expect("Failed to create task run");
+        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+            .await
+            .unwrap();
+    }
+
+    // List runs
+    let runs = tasks::list_task_runs(&pool, task.id)
+        .await
+        .expect("Failed to list runs");
+
+    assert_eq!(runs.len(), 3);
+    // All should be for the same task
+    for run in &runs {
+        assert_eq!(run.task_id, task.id);
+    }
+}
+
+#[tokio::test]
+async fn test_get_task_run() {
+    let pool = common::create_test_pool().await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
+
+    // Create task and run
+    let task = tasks::create_task(
+        &pool,
+        workspace_id,
+        &[project_id],
+        "Test Task",
+        "Test description",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+
+    let run = tasks::create_task_run(&pool, task.id)
+        .await
+        .expect("Failed to create task run");
+
+    // Get run by ID
+    let fetched = tasks::get_task_run(&pool, run.id)
+        .await
+        .expect("Failed to get run");
+
+    assert!(fetched.is_some());
+    let fetched = fetched.unwrap();
+    assert_eq!(fetched.id, run.id);
+    assert_eq!(fetched.task_id, task.id);
+    assert_eq!(fetched.status, "running");
+}
+
+#[tokio::test]
+async fn test_task_run_with_error() {
+    let pool = common::create_test_pool().await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
+
+    // Create task and run
+    let task = tasks::create_task(
+        &pool,
+        workspace_id,
+        &[project_id],
+        "Error Task",
+        "This task will fail",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .expect("Failed to create task");
+
+    let run = tasks::create_task_run(&pool, task.id)
+        .await
+        .expect("Failed to create task run");
+
+    // Add error log
+    tasks::add_task_run_log(
+        &pool,
+        run.id,
+        "error",
+        "agent",
+        "error",
+        "Tool execution failed: command not found",
+        Some(serde_json::json!({
+            "tool": "run_command",
+            "error": "command not found"
+        })),
+    )
+    .await
+    .expect("Failed to add error log");
+
+    // Complete with error
+    let completed = tasks::complete_task_run(
+        &pool,
+        run.id,
+        "failed",
+        Some("Tool execution failed: command not found"),
+        None,
+    )
+    .await
+    .expect("Failed to complete run");
+
+    assert!(completed.is_some());
+    let completed = completed.unwrap();
+    assert_eq!(completed.status, "failed");
+    assert!(completed.error_message.is_some());
+    assert!(
+        completed
+            .error_message
+            .unwrap()
+            .contains("command not found")
+    );
+}
+
+/// A run parked on `ask_user`, its worker still holding the lease.
+struct Parked {
+    pool: sqlx::PgPool,
+    client: common::TestClient,
+    token: String,
+    organization: Uuid,
+    user: Uuid,
+    run: Uuid,
+    provider: wiremock::MockServer,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl Parked {
+    async fn status(&self) -> String {
+        sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
+            .bind(self.run)
+            .fetch_one(&self.pool)
+            .await
+            .expect("the run is still readable")
+    }
+
+    async fn settles_on(&self, status: &str) {
+        for _ in 0..400 {
+            if self.status().await == status {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!(
+            "the run never reached {status}; it is {}",
+            self.status().await
+        );
+    }
+
+    /// Every completion body the provider was sent, in order.
+    async fn rounds(&self) -> Vec<serde_json::Value> {
+        self.provider
+            .received_requests()
+            .await
+            .expect("the provider recorded its requests")
+            .into_iter()
+            .filter(|request| request.url.path() == "/chat/completions")
+            .map(|request| serde_json::from_slice(&request.body).expect("a JSON completion body"))
+            .collect()
+    }
+
+    async fn answer(&self, body: serde_json::Value) -> common::TestResponse {
+        self.client
+            .post_json_auth(
+                &format!("/api/tasks/runs/{}/answers", self.run),
+                &body,
+                &self.token,
+            )
+            .await
+    }
+
+    async fn finish(self) {
+        self.worker.abort();
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(self.organization)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(self.user)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// What the asking turn streams before it stops to ask, and what the turn the
+/// answer buys streams after it.
+const BEFORE_ASKING: &str = "Checking the ledger first.";
+const AFTER_ANSWERING: &str = "Proceeding as answered.";
+
+/// Run a task whose first completion asks `questions`, and stop once it parks.
+async fn park(questions: serde_json::Value) -> Parked {
+    park_with("ask_user", questions.to_string(), false).await
+}
+
+/// One completion the scripted provider serves: a tool call, or a failure
+/// that faults the attempt so the worker retries it.
+enum Round {
+    Call(String, String),
+    Fail(u16),
+}
+
+fn call(tool: &str, arguments: serde_json::Value) -> Round {
+    Round::Call(tool.to_string(), arguments.to_string())
+}
+
+/// Run a task whose first completion calls `tool` with `arguments` and stop
+/// once it parks; `plan_approval` is the task's flag, which is what hands the
+/// run `submit_plan` at all.
+async fn park_with(tool: &str, arguments: String, plan_approval: bool) -> Parked {
+    park_scripted(
+        vec![Round::Call(tool.to_string(), arguments)],
+        plan_approval,
+    )
+    .await
+}
+
+/// Run a task whose completions follow `script`: round `i` serves the `i`th
+/// entry — a tool call as call `call-<i>`, or a failed response — and every
+/// round past the script closes with prose. Stops once the run parks.
+async fn park_scripted(script: Vec<Round>, plan_approval: bool) -> Parked {
+    use chrono::{Duration, Utc};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+    use zone_server::auth::jwt::create_session_access_token;
+    use zone_server::db::{sessions, workspace_members};
+
+    let pool = common::create_test_pool().await;
+    let (organization, workspace, user) = common::setup_test_data(&pool).await;
+    workspace_members::add_member(
+        &pool,
+        workspace,
+        user,
+        workspace_members::WorkspaceRole::Member,
+        None,
+    )
+    .await
+    .unwrap();
+    let task = tasks::create_task_as(
+        &pool,
+        workspace,
+        &[],
+        "Asks before acting",
+        "Decide the scope first",
+        None,
+        None,
+        true,
+        None,
+        Some(user),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE tasks SET model_name = 'gpt-4', require_plan_approval = $2 WHERE id = $1")
+        .bind(task.id)
+        .bind(plan_approval)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let run = tasks::create_task_run_as(&pool, task.id, Some(user))
+        .await
+        .unwrap();
+
+    let provider = MockServer::start().await;
+    let rounds = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |_: &Request| {
+        let round = rounds.fetch_add(1, Ordering::SeqCst);
+        let deltas = match script.get(round) {
+            Some(Round::Call(tool, arguments)) => vec![
+                serde_json::json!({"content": BEFORE_ASKING}),
+                serde_json::json!({"tool_calls":[{"index":0,"id":format!("call-{round}"),"type":"function","function":{"name":tool,"arguments":arguments}}]}),
+            ],
+            Some(Round::Fail(status)) => {
+                return ResponseTemplate::new(*status).set_body_string("upstream fell over");
+            }
+            None => vec![serde_json::json!({"content": AFTER_ANSWERING})],
+        };
+        let mut body = String::new();
+        for delta in deltas {
+            let chunk = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+            body.push_str(&format!("data: {chunk}\n\n"));
+        }
+        let end = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+        body.push_str(&format!("data: {end}\n\ndata: [DONE]\n\n"));
+        ResponseTemplate::new(200).insert_header("Content-Type", "text/event-stream").set_body_string(body)
+    }).mount(&provider).await;
+
+    let mut config = common::test_config();
+    config.litellm_host = provider.uri();
+    config.ollama_host = provider.uri();
+    let state = common::create_test_state(config.clone(), pool.clone());
+    let client = common::TestClient::new(common::create_test_router(state.clone()));
+
+    let session = sessions::create_session(
+        &pool,
+        user,
+        &format!("refresh-{}", Uuid::new_v4()),
+        None,
+        None,
+        None,
+        (Utc::now() + Duration::hours(1)).naive_utc(),
+    )
+    .await
+    .unwrap();
+    let token = create_session_access_token(
+        user,
+        "answers@example.com",
+        vec![],
+        vec![],
+        false,
+        session.id,
+        &config.jwt_secret,
+        Duration::minutes(5),
+    )
+    .unwrap();
+
+    let run_id = run.id;
+    let task_id = task.id;
+    let worker = tokio::spawn(async move {
+        zone_server::workers::task::execute_task_run(&state, run_id, task_id).await;
+    });
+
+    let parked = Parked {
+        pool,
+        client,
+        token,
+        organization,
+        user,
+        run: run_id,
+        provider,
+        worker,
+    };
+    parked.settles_on("waiting").await;
+    parked
+}
+
+fn optional() -> serde_json::Value {
+    serde_json::json!({"questions":[{
+        "header": "Scope",
+        "question": "How far back should the fix reach?",
+        "options": [
+            {"label":"Backfill","description":"Repair every existing row"},
+            {"label":"Forward only","description":"Leave history alone"}
+        ]
+    }]})
+}
+
+#[tokio::test]
+async fn an_optional_question_parks_the_run_until_a_member_answers_it() {
+    let parked = park(optional()).await;
+
+    let read = parked
+        .client
+        .get_auth(&format!("/api/tasks/runs/{}", parked.run), &parked.token)
+        .await;
+    read.assert_status(axum::http::StatusCode::OK);
+    let body = read.json_value();
+    assert_eq!(body["run"]["status"], "waiting");
+    let pending = &body["run"]["pending_question"];
+    assert_eq!(pending["tool_call_id"], "call-0");
+    assert_eq!(pending["questions"][0]["header"], "Scope");
+    assert_eq!(pending["questions"][0]["required"], false);
+    assert_eq!(
+        pending["questions"][0]["choices"][2]["label"], "Other",
+        "the card the console renders carries the free-text option the server appended"
+    );
+
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Forward only"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+
+    parked.settles_on("completed").await;
+    let resumed = sqlx::query_scalar::<_, Option<serde_json::Value>>(
+        "SELECT pending_question FROM task_runs WHERE id = $1",
+    )
+    .bind(parked.run)
+    .fetch_one(&parked.pool)
+    .await
+    .unwrap();
+    assert_eq!(resumed, None, "a finished run is no longer asking anything");
+
+    let rounds = parked.rounds().await;
+    assert_eq!(rounds.len(), 2, "the answer bought exactly one more turn");
+    let messages = rounds[1]["messages"].as_array().unwrap();
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"], "Scope: Forward only");
+
+    parked.finish().await;
+}
+
+/// A task that requires its plan approved is handed `submit_plan`, and a run of
+/// it changes nothing before the plan is answered: the call parks the run on one
+/// required question carrying the plan, the plan is kept on the run where a
+/// reader finds it after the question is gone, and Approve is the answer that
+/// buys the next turn.
+#[tokio::test]
+async fn a_task_that_requires_plan_approval_parks_on_its_plan_and_keeps_it() {
+    const PLAN: &str = "1. Add the column.\n2. Thread it through the API.\n3. Test the route.";
+    let parked = park_with(
+        "submit_plan",
+        serde_json::json!({"plan": PLAN}).to_string(),
+        true,
+    )
+    .await;
+    let read = parked
+        .client
+        .get_auth(&format!("/api/tasks/runs/{}", parked.run), &parked.token)
+        .await;
+    read.assert_status(axum::http::StatusCode::OK);
+    let body = read.json_value();
+    assert_eq!(body["run"]["status"], "waiting");
+    let pending = &body["run"]["pending_question"];
+    assert_eq!(pending["questions"].as_array().map(Vec::len), Some(1));
+    assert_eq!(pending["questions"][0]["header"], "Plan approval");
+    assert_eq!(pending["questions"][0]["required"], true);
+    assert_eq!(pending["questions"][0]["preview"], PLAN);
+    assert_eq!(pending["questions"][0]["choices"][0]["label"], "Approve");
+    assert_eq!(
+        body["run"]["plan"], PLAN,
+        "the run carries the plan it submitted, not only the question that asked about it"
+    );
+    let stored: Option<String> = sqlx::query_scalar("SELECT plan FROM task_runs WHERE id = $1")
+        .bind(parked.run)
+        .fetch_one(&parked.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some(PLAN));
+
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Plan approval","labels":["Approve"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+    let rounds = parked.rounds().await;
+    assert_eq!(rounds.len(), 2, "approval bought exactly one more turn");
+    let offered: Vec<&str> = rounds[0]["tools"]
+        .as_array()
+        .expect("the run is offered tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert!(offered.contains(&"submit_plan"), "{offered:?}");
+    let prompt = rounds[0]["messages"][0]["content"]
+        .as_str()
+        .expect("a system prompt");
+    assert!(
+        prompt.contains(
+            "Plan first: this task requires its plan approved, and until it is, every tool that \
+             would change something is refused."
+        ),
+        "{prompt}"
+    );
+    let last = rounds[1]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"], "Plan approval: Approve");
+    let kept: Option<String> = sqlx::query_scalar("SELECT plan FROM task_runs WHERE id = $1")
+        .bind(parked.run)
+        .fetch_one(&parked.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        kept.as_deref(),
+        Some(PLAN),
+        "the plan outlives the question that carried it"
+    );
+    parked.finish().await;
+}
+
+/// The content of the tool message a round carries for `call`, which is what
+/// the model was told the call produced.
+fn tool_result(round: &serde_json::Value, call: &str) -> String {
+    round["messages"]
+        .as_array()
+        .expect("a round carries messages")
+        .iter()
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == call)
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_else(|| panic!("no tool result for {call} in {round}"))
+        .to_string()
+}
+
+/// A task that requires its plan approved changes nothing until it is: a
+/// write before the plan is refused with the reason, the plan parks the run,
+/// and once Approve resumes it the same write goes through.
+#[tokio::test]
+async fn a_task_holding_for_its_plan_refuses_to_change_anything_until_it_is_approved() {
+    const PLAN: &str = "1. Write the note.";
+    let parked = park_scripted(
+        vec![
+            call(
+                "write_file",
+                serde_json::json!({"path": "notes.txt", "content": "before approval\n"}),
+            ),
+            call("submit_plan", serde_json::json!({"plan": PLAN})),
+            call(
+                "write_file",
+                serde_json::json!({"path": "notes.txt", "content": "after approval\n"}),
+            ),
+        ],
+        true,
+    )
+    .await;
+    let rounds = parked.rounds().await;
+    assert_eq!(rounds.len(), 2, "the refused write, then the plan");
+    let refused = tool_result(&rounds[1], "call-0");
+    assert!(
+        refused.starts_with("Error: This task requires its plan approved before anything changes."),
+        "{refused}"
+    );
+    let offered: Vec<&str> = rounds[1]["tools"]
+        .as_array()
+        .expect("the run is offered tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert!(
+        offered.contains(&"write_file"),
+        "the hold refuses the call rather than hiding the tool: {offered:?}"
+    );
+
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Plan approval","labels":["Approve"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+    let rounds = parked.rounds().await;
+    assert_eq!(
+        rounds.len(),
+        4,
+        "approval bought the write and the turn that closed the run"
+    );
+    let written = tool_result(&rounds[3], "call-2");
+    assert!(
+        !written.starts_with("Error:"),
+        "the write goes through once the plan is approved: {written}"
+    );
+    let offered: Vec<&str> = rounds[2]["tools"]
+        .as_array()
+        .expect("the run is offered tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert!(
+        !offered.contains(&"submit_plan"),
+        "an approved plan cannot be replaced while changes are allowed: {offered:?}"
+    );
+    parked.finish().await;
+}
+
+/// The artifacts describe the run, and a run that asked something ran more
+/// than the turn that answered. Reporting only the last turn hides the work
+/// every earlier one did and throws away what it said before it stopped.
+/// Anything reporting on `task_tool_calls` is blind unless every tool a run
+/// executes leaves a row there, finished with what it answered.
+#[tokio::test]
+async fn every_tool_a_run_executes_leaves_a_finished_task_tool_calls_row() {
+    use zone_server::db::task_tool_calls;
+
+    let parked = park(optional()).await;
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+
+    let mut calls = Vec::new();
+    for _ in 0..100 {
+        calls = task_tool_calls::list_for_run(&parked.pool, parked.run)
+            .await
+            .unwrap();
+        if calls
+            .iter()
+            .all(|call| call.status == task_tool_calls::STATUS_COMPLETED)
+            && !calls.is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let [call] = calls.as_slice() else {
+        panic!("the run made one tool call; rows: {calls:?}");
+    };
+    assert_eq!(call.tool_name, "ask_user");
+    assert_eq!(call.status, task_tool_calls::STATUS_COMPLETED);
+    assert_eq!(
+        call.tool_input["questions"][0]["header"], "Scope",
+        "the arguments the model sent are the row's input"
+    );
+    assert!(
+        call.tool_output
+            .as_ref()
+            .and_then(|output| output.as_str())
+            .is_some(),
+        "the tool's answer is the row's output: {:?}",
+        call.tool_output
+    );
+    assert!(call.error_message.is_none());
+    assert!(call.completed_at.is_some());
+
+    parked.finish().await;
+}
+
+#[tokio::test]
+async fn a_parked_turn_still_counts_towards_the_run_it_belongs_to() {
+    let parked = park(optional()).await;
+
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+
+    let artifacts: serde_json::Value =
+        sqlx::query_scalar("SELECT artifacts FROM task_runs WHERE id = $1")
+            .bind(parked.run)
+            .fetch_one(&parked.pool)
+            .await
+            .unwrap();
+    let summary = artifacts["summary"].as_str().expect("a recorded summary");
+    assert!(
+        summary.contains(BEFORE_ASKING),
+        "the asking turn's prose never reached the run: {summary}"
+    );
+    assert!(
+        summary.contains(AFTER_ANSWERING),
+        "the answering turn's prose never reached the run: {summary}"
+    );
+    assert_eq!(
+        artifacts["tool_calls"], 1,
+        "the question the run asked is a tool call it made"
+    );
+
+    parked.finish().await;
+}
+
+#[tokio::test]
+async fn an_answer_is_refused_unless_it_fits_the_question_that_was_asked() {
+    let parked = park(optional()).await;
+
+    let unknown = parked
+        .answer(serde_json::json!({"answers":[{"header":"Branch","labels":["main"]}]}))
+        .await;
+    unknown.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    assert!(
+        unknown.text().contains("Branch"),
+        "the rejection names the header nothing asked: {}",
+        unknown.text()
+    );
+    assert_eq!(parked.status().await, "waiting");
+
+    let blank = parked
+        .answer(
+            serde_json::json!({"answers":[{"header":"Scope","labels":["Other"],"other":"   "}]}),
+        )
+        .await;
+    blank.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        parked.status().await,
+        "waiting",
+        "a refused answer leaves the run exactly where it was"
+    );
+
+    let both = parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill","Forward only"]}]}))
+        .await;
+    both.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(parked.status().await, "waiting");
+
+    // The answer becomes an entry compaction can never shed, so a paste that
+    // fits under the body limit would still sit in the window for the rest of
+    // the run and push every later turn into a capacity failure.
+    let paste = "x".repeat(zone_server::agent::question::MAX_FREE_TEXT + 1);
+    let oversized = parked
+        .answer(
+            serde_json::json!({"answers":[{"header":"Scope","labels":["Other"],"other":paste}]}),
+        )
+        .await;
+    oversized.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    assert!(
+        oversized.text().contains("Scope"),
+        "the rejection names the question it came back on: {}",
+        oversized.text()
+    );
+    assert_eq!(parked.status().await, "waiting");
+
+    for empty in [
+        serde_json::json!({"answers":[]}),
+        serde_json::json!({"answers":[{"header":"Scope","labels":[]}]}),
+    ] {
+        let nothing = parked.answer(empty).await;
+        nothing.assert_status(axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            parked.status().await,
+            "waiting",
+            "declining is what letting the window elapse means, not an empty resume"
+        );
+    }
+
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Other"],"other":"Only the last quarter"}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+
+    let rounds = parked.rounds().await;
+    let messages = rounds[1]["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.last().unwrap()["content"],
+        "Scope: Other: Only the last quarter"
+    );
+
+    let late = parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
+        .await;
+    assert!(
+        late.status == axum::http::StatusCode::CONFLICT
+            || late.status == axum::http::StatusCode::NOT_FOUND,
+        "a run that already moved on has nothing to answer: {}",
+        late.status
+    );
+
+    parked.finish().await;
+}
+
+#[tokio::test]
+async fn a_parked_run_keeps_its_lease_and_its_admission_slot() {
+    let parked = park(optional()).await;
+
+    let owner: Uuid = sqlx::query_scalar("SELECT owner FROM task_runs WHERE id = $1")
+        .bind(parked.run)
+        .fetch_one(&parked.pool)
+        .await
+        .unwrap();
+    assert!(
+        tasks::heartbeat_task_run(&parked.pool, parked.run, owner)
+            .await
+            .unwrap(),
+        "a waiting run still refreshes the lease its worker holds"
+    );
+    tasks::sweep_task_runs(&parked.pool).await.unwrap();
+    assert_eq!(
+        parked.status().await,
+        "waiting",
+        "the sweeper has no orphan to reap while the worker keeps heartbeating"
+    );
+
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+    parked.finish().await;
+}
+
+fn required() -> serde_json::Value {
+    serde_json::json!({"questions":[{
+        "header": "Scope",
+        "question": "How far back should the fix reach?",
+        "required": true,
+        "options": [
+            {"label":"Backfill","description":"Repair every existing row"},
+            {"label":"Forward only","description":"Leave history alone"}
+        ]
+    }]})
+}
+
+/// A required question never proceeds on a default, so the only thing that ends
+/// an unanswered one is `TASK_TIMEOUT`, an hour later.
+///
+/// The hour is not waited out here. What the run must survive to reach it is
+/// the parked state itself, and what the timeout must then be able to do is end
+/// a `waiting` row terminally: the classification that decides there is no
+/// retry is asserted beside `Fault::timeout` in the worker's own tests.
+#[tokio::test]
+async fn a_required_question_waits_and_a_timeout_can_still_end_the_parked_run() {
+    let parked = park(required()).await;
+
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT pending_question FROM task_runs WHERE id = $1")
+            .bind(parked.run)
+            .fetch_one(&parked.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored["questions"][0]["required"], true);
+
+    let owner: Uuid = sqlx::query_scalar("SELECT owner FROM task_runs WHERE id = $1")
+        .bind(parked.run)
+        .fetch_one(&parked.pool)
+        .await
+        .unwrap();
+    let ended = tasks::complete_owned_task_run(
+        &parked.pool,
+        parked.run,
+        Some(owner),
+        "failed",
+        Some("Task execution timed out after 3600 seconds"),
+        Some(serde_json::json!({"attempts": 1, "classification": "terminal"})),
+    )
+    .await
+    .expect("a parked run is still the worker's to end");
+    assert!(
+        ended.is_some(),
+        "a timeout must be able to end a run that is waiting, not only one that is running"
+    );
+    let ended = ended.unwrap();
+    assert_eq!(ended.status, "failed");
+    assert_eq!(
+        ended.error_message.as_deref(),
+        Some("Task execution timed out after 3600 seconds")
+    );
+    assert_eq!(
+        ended.pending_question, None,
+        "a run nobody is waiting on any more must stop offering an answerable card"
+    );
+    assert_eq!(
+        ended.current_phase, None,
+        "a run that ended while parked must not go on reading as waiting for an answer"
+    );
+
+    parked.finish().await;
+}
+
+/// A run holding a live lease, ready to park on a wait rather than on a
+/// question.
+///
+/// The wait is injected through `park_task_run_waiting` rather than driven out
+/// of a real `wait_for` call: what these tests are about is whether the column
+/// the park writes reaches the run routes at all, and a scripted turn would put
+/// a model and a tool catalog between the two ends of that one mapping.
+struct Leased {
+    pool: sqlx::PgPool,
+    client: common::TestClient,
+    token: String,
+    organization: Uuid,
+    user: Uuid,
+    task: Uuid,
+    run: Uuid,
+    owner: Uuid,
+}
+
+impl Leased {
+    /// The run as `GET /api/tasks/runs/{id}` renders it.
+    async fn read(&self) -> serde_json::Value {
+        let response = self
+            .client
+            .get_auth(&format!("/api/tasks/runs/{}", self.run), &self.token)
+            .await;
+        response.assert_status(axum::http::StatusCode::OK);
+        response.json_value()["run"].clone()
+    }
+
+    /// The same run as the list route renders it.
+    async fn listed(&self) -> serde_json::Value {
+        let response = self
+            .client
+            .get_auth(&format!("/api/tasks/{}/runs", self.task), &self.token)
+            .await;
+        response.assert_status(axum::http::StatusCode::OK);
+        response.json_value()["runs"]
+            .as_array()
+            .expect("the list route returns an array of runs")
+            .iter()
+            .find(|run| run["id"] == self.run.to_string())
+            .expect("the run the task owns is in its own list")
+            .clone()
+    }
+
+    async fn park_on(&self, waiting: &Waiting) {
+        assert!(
+            tasks::park_task_run_waiting(
+                &self.pool,
+                self.run,
+                self.owner,
+                serde_json::to_value(waiting).expect("a wait serialises"),
+            )
+            .await
+            .expect("the claimed run parks"),
+            "a running run with a fresh lease parks on a wait"
+        );
+    }
+
+    /// What the column the park wrote holds, straight out of the table.
+    async fn stored(&self) -> Option<serde_json::Value> {
+        sqlx::query_scalar("SELECT pending_wait FROM task_runs WHERE id = $1")
+            .bind(self.run)
+            .fetch_one(&self.pool)
+            .await
+            .expect("the run is still readable")
+    }
+
+    async fn answer(&self, body: serde_json::Value) -> common::TestResponse {
+        self.client
+            .post_json_auth(
+                &format!("/api/tasks/runs/{}/answers", self.run),
+                &body,
+                &self.token,
+            )
+            .await
+    }
+
+    async fn finish(self) {
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(self.organization)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(self.user)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// A workspace member's task, one run of it, and the lease a worker would hold.
+async fn lease() -> Leased {
+    use chrono::{Duration, Utc};
+    use zone_server::auth::jwt::create_session_access_token;
+    use zone_server::db::{sessions, workspace_members};
+
+    let pool = common::create_test_pool().await;
+    let (organization, workspace, user) = common::setup_test_data(&pool).await;
+    workspace_members::add_member(
+        &pool,
+        workspace,
+        user,
+        workspace_members::WorkspaceRole::Member,
+        None,
+    )
+    .await
+    .unwrap();
+    let task = tasks::create_task_as(
+        &pool,
+        workspace,
+        &[],
+        "Waits on something",
+        "Start the runner, then wait for it",
+        None,
+        None,
+        true,
+        None,
+        Some(user),
+    )
+    .await
+    .unwrap();
+    let run = tasks::create_task_run_as(&pool, task.id, Some(user))
+        .await
+        .unwrap();
+
+    let owner = Uuid::new_v4();
+    assert!(
+        tasks::claim_task_run(&pool, run.id, owner)
+            .await
+            .expect("the new run is claimable"),
+        "a freshly admitted run takes a lease"
+    );
+
+    let config = common::test_config();
+    let client = common::TestClient::new(common::create_test_router(common::create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let session = sessions::create_session(
+        &pool,
+        user,
+        &format!("refresh-{}", Uuid::new_v4()),
+        None,
+        None,
+        None,
+        (Utc::now() + Duration::hours(1)).naive_utc(),
+    )
+    .await
+    .unwrap();
+    let token = create_session_access_token(
+        user,
+        "waits@example.com",
+        vec![],
+        vec![],
+        false,
+        session.id,
+        &config.jwt_secret,
+        Duration::minutes(5),
+    )
+    .unwrap();
+
+    Leased {
+        pool,
+        client,
+        token,
+        organization,
+        user,
+        task: task.id,
+        run: run.id,
+        owner,
+    }
+}
+
+/// The wait a job-shaped park carries, with every field the frozen shape has.
+fn waiting_on_a_job() -> Waiting {
+    Waiting {
+        kind: "job".to_string(),
+        id: "job_0123456789ab".to_string(),
+        reference: Some("cargo test --workspace".to_string()),
+        deadline: "2026-09-13T18:30:00Z".to_string(),
+    }
+}
+
+/// The console tells a question nobody has answered from a wait nobody can by
+/// which field arrived, so an absent wait has to be an absent key rather than a
+/// null: a reader holding the key knows there is a wait to describe.
+#[tokio::test]
+async fn a_wait_park_reaches_both_run_routes_and_a_running_row_carries_no_such_key() {
+    let leased = lease().await;
+
+    let running = leased.read().await;
+    assert_eq!(running["status"], "running");
+    assert!(
+        running.get("waiting_on").is_none(),
+        "a running run is not waiting on anything, and says so by omission: {running}"
+    );
+    assert!(
+        leased.listed().await.get("waiting_on").is_none(),
+        "the list route omits it on the same terms as the run route"
+    );
+
+    let waiting = waiting_on_a_job();
+    leased.park_on(&waiting).await;
+
+    for (route, run) in [
+        ("run", leased.read().await),
+        ("list", leased.listed().await),
+    ] {
+        assert_eq!(run["status"], "waiting", "{route}");
+        assert_eq!(run["current_phase"], "waiting", "{route}");
+        let waiting_on = run.get("waiting_on").unwrap_or_else(|| {
+            panic!("the {route} route sends what the run is waiting for: {run}")
+        });
+        assert_eq!(waiting_on["kind"], "job", "{route}");
+        assert_eq!(waiting_on["id"], waiting.id, "{route}");
+        assert_eq!(
+            waiting_on["reference"],
+            *waiting.reference.as_ref().unwrap(),
+            "{route}"
+        );
+        assert_eq!(waiting_on["deadline"], waiting.deadline, "{route}");
+    }
+
+    let stored = leased.stored().await;
+    let sent = leased.read().await.get("waiting_on").cloned();
+    assert_eq!(
+        stored, sent,
+        "the wire field is the column, not a second rendering of it"
+    );
+
+    leased.finish().await;
+}
+
+/// `answer_run` refuses a wait park because it checks `pending_question`, which
+/// a wait leaves NULL. Nothing about the route knows what a wait is, and that is
+/// exactly why the refusal has to be asserted: the two parks share a status.
+#[tokio::test]
+async fn an_answer_is_refused_against_a_run_parked_on_a_wait() {
+    let leased = lease().await;
+    leased.park_on(&waiting_on_a_job()).await;
+
+    let refused = leased
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
+        .await;
+    refused.assert_status(axum::http::StatusCode::CONFLICT);
+    assert_eq!(
+        refused.json_value(),
+        serde_json::json!({"error": "Task run is not waiting on a question"})
+    );
+    assert_eq!(
+        leased.read().await["status"],
+        "waiting",
+        "a refused answer leaves the wait exactly where it was"
+    );
+    assert!(
+        leased.stored().await.is_some(),
+        "and leaves the wait itself on the run"
+    );
+
+    leased.finish().await;
+}
+
+/// The field is only as durable as the column under it, and that column arrives
+/// with migration 032 rather than with the route that reads it.
+#[tokio::test]
+async fn the_wait_field_is_backed_by_the_column_migration_032_adds() {
+    let pool = common::create_test_pool().await;
+
+    let column: Option<String> = sqlx::query_scalar(
+        "SELECT data_type FROM information_schema.columns WHERE table_name = 'task_runs' AND column_name = 'pending_wait'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("the catalog is readable");
+
+    assert_eq!(
+        column.as_deref(),
+        Some("jsonb"),
+        "task_runs.pending_wait is the JSONB column 032 adds, and nothing else"
+    );
+}
+
+/// The approval is bound to `submit_plan`: the header its card is asked
+/// under is refused to `ask_user`, so a question the run asks for itself
+/// cannot be recorded as the plan or answered as its approval, and the run
+/// goes on to submit the real one.
+#[tokio::test]
+async fn a_question_headed_like_a_plan_approval_is_refused_and_records_no_plan() {
+    const PLAN: &str = "1. Write the note.";
+    let parked = park_scripted(
+        vec![
+            call(
+                "ask_user",
+                serde_json::json!({"questions":[{
+                    "header": "Plan approval",
+                    "question": "Approve this?",
+                    "options": [
+                        {"label": "Approve", "description": "Go ahead."},
+                        {"label": "Wait", "description": "Not yet."}
+                    ],
+                    "preview": "a plan nobody submitted"
+                }]}),
+            ),
+            call("submit_plan", serde_json::json!({"plan": PLAN})),
+        ],
+        true,
+    )
+    .await;
+    let rounds = parked.rounds().await;
+    assert_eq!(rounds.len(), 2, "the refused question, then the plan");
+    let refused = tool_result(&rounds[1], "call-0");
+    assert!(refused.contains("reserved for submit_plan"), "{refused}");
+    let stored: Option<String> = sqlx::query_scalar("SELECT plan FROM task_runs WHERE id = $1")
+        .bind(parked.run)
+        .fetch_one(&parked.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.as_deref(),
+        Some(PLAN),
+        "only the plan submit_plan carried is recorded"
+    );
+    parked.finish().await;
+}
+
+/// Approval is the run's, not the attempt's: an attempt that faults after
+/// the plan was approved is retried unheld, handed the approved plan and no
+/// plan phase, so the person is not asked again for what they answered.
+#[tokio::test]
+async fn an_approved_plan_survives_the_attempt_that_restarts_after_it() {
+    const PLAN: &str = "1. Write the note.";
+    let parked = park_scripted(
+        vec![
+            call("submit_plan", serde_json::json!({"plan": PLAN})),
+            Round::Fail(500),
+            call(
+                "write_file",
+                serde_json::json!({"path": "notes.txt", "content": "after approval\n"}),
+            ),
+        ],
+        true,
+    )
+    .await;
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Plan approval","labels":["Approve"]}]}))
+        .await
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on("completed").await;
+    let rounds = parked.rounds().await;
+    assert_eq!(
+        rounds.len(),
+        4,
+        "the plan, the round that faulted, then the retried attempt's write and its close"
+    );
+    let system = rounds[2]["messages"][0]["content"]
+        .as_str()
+        .expect("a system prompt");
+    assert!(
+        !system.contains("Plan first"),
+        "a retried attempt after approval is not told to plan again: {system}"
+    );
+    let user = rounds[2]["messages"][1]["content"]
+        .as_str()
+        .expect("the task prompt");
+    assert!(
+        user.contains("# Approved plan") && user.contains(PLAN),
+        "the retried attempt is handed the approved plan: {user}"
+    );
+    let offered: Vec<&str> = rounds[2]["tools"]
+        .as_array()
+        .expect("the run is offered tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect();
+    assert!(
+        !offered.contains(&"submit_plan"),
+        "nothing is left to submit: {offered:?}"
+    );
+    let written = tool_result(&rounds[3], "call-2");
+    assert!(
+        !written.starts_with("Error:"),
+        "the retried attempt is not held: {written}"
+    );
+    parked.finish().await;
+}

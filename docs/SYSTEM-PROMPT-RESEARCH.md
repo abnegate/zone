@@ -373,7 +373,7 @@ GK 29 allows disclosure on explicit request. Recommend the same: an operator-own
 
 ## 5. Suggested PR sequence
 
-1. **Prompt builder, P0 text, and the two media tool descriptions** (A1, A2, A4, B1, B4, C1 to C8, D1, D4, F1 text, F4, F5, G2, G3, H3, H5, J1, K1, K3, L2, L3, N1 to N4). One PR that restructures `agent::system_prompt`, `session::system_prompt` and `task::guidance` into named sections with snapshot tests and adds every prompt-only item. Add scripted-completion tests using the wiremock LiteLLM stub that `runner/zone_server/tests/chat_agent_tests.rs` and its siblings already use, for the behaviours that matter most: a failure reported first, no "Done." reply, no invented citation.
+1. **Prompt builder, P0 text, and the two media tool descriptions** (A1, A2, A4, B1, B4, C1 to C8, D1, D4, F1 text, F4, F5, G2, G3, H3, H5, J1, K1, K3, L2, L3, N1 to N4). One PR that restructures `agent::system_prompt`, `session::system_prompt` and `task::guidance` into named sections with snapshot tests and adds every prompt-only item. Add scripted-completion tests using the wiremock LiteLLM stub that `runner/zone_server/tests/integration/chat_agent.rs` and its siblings already use, for the behaviours that matter most: a failure reported first, no "Done." reply, no invented citation.
 2. **Repository instruction files and effort dial** (A3, A4 wiring).
 3. **Tool schema pass** (E1, E3, F1 `time_range`, F2, F3, E2 output cap). Approval card and receipts show the `description`.
 4. **Action tiers and approval preview** (B2, B3, D3 watchdog, J2 commit and PR content).

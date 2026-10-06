@@ -2496,7 +2496,7 @@ async fn handle_send_message(
                         return Ok(());
                     }
                     _ = session.guard.lost() => { return Err(OWNERSHIP_LOST.into()); }
-                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, route, web_search_requested) => result?,
+                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, *route, web_search_requested) => result?,
                 };
                 handle_chat_generation(state, stream, chat_id, workspace_id, user_id, preparation, &mut request, &mut session, &mut jobs).await
             }
