@@ -2473,7 +2473,6 @@ async fn handle_send_message(
                 .await
             }
             Routing::Chat(mut chat, route) => {
-                let route = *route;
                 // Cleared before the prompt is built rather than after it.
                 // `prepare_chat` renders the approval rules from this flag, so
                 // setting it on the preparation instead would gate the tools
