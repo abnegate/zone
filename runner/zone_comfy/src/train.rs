@@ -20,6 +20,7 @@ const MIN_WEIGHT_BYTES: usize = 10_000;
 const MANIFEST_VERSION: u32 = 1;
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const TIMED_OUT: &str = "training timed out";
 
 #[derive(Debug, Deserialize)]
 pub struct TrainConfig {
@@ -897,25 +898,17 @@ async fn wait_prompt(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if tokio::time::Instant::now() >= deadline {
-            let cleanup = cancel_and_wait(client, config, prompt, false).await;
-            return Err(WaitFailure {
-                error: TrainError::Failed("training timed out".into()),
-                cleanup,
-            });
+            return Err(abandon(client, config, prompt, timed_out()).await);
         }
-        let history = match history(client, config, prompt, deadline).await {
-            Ok(history) => history,
-            Err(error) => {
-                let cleanup = cancel_and_wait(client, config, prompt, false).await;
-                return Err(WaitFailure { error, cleanup });
-            }
+        let history = match tokio::time::timeout_at(deadline, history(client, config, prompt)).await
+        {
+            Ok(Ok(history)) => history,
+            Ok(Err(error)) => return Err(abandon(client, config, prompt, error).await),
+            Err(_) => return Err(abandon(client, config, prompt, timed_out()).await),
         };
         let entry = match exact_history(&history, prompt) {
             Ok(entry) => entry,
-            Err(error) => {
-                let cleanup = cancel_and_wait(client, config, prompt, false).await;
-                return Err(WaitFailure { error, cleanup });
-            }
+            Err(error) => return Err(abandon(client, config, prompt, error).await),
         };
         if let Some(entry) = entry {
             match train_prompt_complete(entry) {
@@ -964,20 +957,30 @@ async fn prompt_progress(
     parse_progress(&response.bytes().await.ok()?)
 }
 
+async fn abandon(
+    client: &reqwest::Client,
+    config: &Config,
+    prompt: Uuid,
+    error: TrainError,
+) -> WaitFailure {
+    let cleanup = cancel_and_wait(client, config, prompt, false).await;
+    WaitFailure { error, cleanup }
+}
+
+fn timed_out() -> TrainError {
+    TrainError::Failed(TIMED_OUT.into())
+}
+
 async fn history(
     client: &reqwest::Client,
     config: &Config,
     prompt: Uuid,
-    deadline: tokio::time::Instant,
 ) -> Result<Value, TrainError> {
-    let timeout = deadline
-        .saturating_duration_since(tokio::time::Instant::now())
-        .min(REQUEST_TIMEOUT);
     authorize(
         config,
         client
             .get(format!("{}/history/{prompt}", config.base_url))
-            .timeout(timeout),
+            .timeout(REQUEST_TIMEOUT),
     )
     .send()
     .await
@@ -1069,7 +1072,8 @@ async fn cancel_and_wait(
         if tokio::time::Instant::now() >= deadline {
             return false;
         }
-        if let Ok(history) = history(client, config, prompt, deadline).await
+        if let Ok(Ok(history)) =
+            tokio::time::timeout_at(deadline, history(client, config, prompt)).await
             && let Ok(Some(entry)) = exact_history(&history, prompt)
             && train_prompt_terminal(entry)
         {
@@ -1284,6 +1288,8 @@ fn authorize(config: &Config, request: reqwest::RequestBuilder) -> reqwest::Requ
 mod tests {
     use super::*;
     use crate::recipe::{Recipe, RecipeCatalog};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1635,26 +1641,65 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
+    struct RunningUntilCancelled {
+        prompt: Uuid,
+        delay: Duration,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl RunningUntilCancelled {
+        async fn mount(server: &MockServer, prompt: Uuid, delay: Duration) {
+            let running = Self {
+                prompt,
+                delay,
+                cancelled: Default::default(),
+            };
+            Mock::given(method("GET"))
+                .and(path(format!("/history/{prompt}")))
+                .respond_with(running.clone())
+                .mount(server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(format!("/api/jobs/{prompt}/cancel")))
+                .respond_with(Cancel(running.cancelled))
+                .mount(server)
+                .await;
+        }
+    }
+
+    impl wiremock::Respond for RunningUntilCancelled {
+        fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+            if self.cancelled.load(Ordering::SeqCst) {
+                return ResponseTemplate::new(200).set_body_json(json!({
+                    self.prompt.to_string(): {"status": {"status_str": "error"}}
+                }));
+            }
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    self.prompt.to_string(): {"status": {"status_str": "running"}}
+                }))
+                .set_delay(self.delay)
+        }
+    }
+
+    struct Cancel(Arc<AtomicBool>);
+
+    impl wiremock::Respond for Cancel {
+        fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+            self.0.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({"cancelled": true}))
+        }
+    }
+
     #[tokio::test]
     async fn a_graph_that_never_finishes_times_out() {
         let server = MockServer::start().await;
         let prompt = Uuid::new_v4();
-        uploads(&server).await;
-        queues(&server, json!({"prompt_id": prompt, "number": 1})).await;
-        Mock::given(method("GET"))
-            .and(path(format!("/history/{prompt}")))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    json!({prompt.to_string(): {"status": {"status_str": "running"}}}),
-                ),
-            )
-            .mount(&server)
-            .await;
+        RunningUntilCancelled::mount(&server, prompt, Duration::ZERO).await;
 
-        let work = dataset();
-        let client = reqwest::Client::new();
         let failure = wait_prompt(
-            &client,
+            &reqwest::Client::new(),
             &config(&server),
             prompt,
             Duration::from_millis(120),
@@ -1664,11 +1709,35 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            matches!(&failure.error, TrainError::Failed(message) if message.contains("timed out")),
+            matches!(&failure.error, TrainError::Failed(message) if message == TIMED_OUT),
             "{}",
             failure.error
         );
-        drop(work);
+        assert!(failure.cleanup, "the timed-out graph was cancelled");
+    }
+
+    #[tokio::test]
+    async fn a_comfyui_too_slow_to_answer_still_times_out_at_the_deadline() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        RunningUntilCancelled::mount(&server, prompt, Duration::from_secs(30)).await;
+
+        let failure = wait_prompt(
+            &reqwest::Client::new(),
+            &config(&server),
+            prompt,
+            Duration::from_millis(200),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&failure.error, TrainError::Failed(message) if message == TIMED_OUT),
+            "{}",
+            failure.error
+        );
+        assert!(failure.cleanup, "the timed-out graph was cancelled");
     }
 
     #[tokio::test]
@@ -2182,10 +2251,7 @@ mod tests {
         let artifact = "zone-lora-progress";
         Mock::given(method("GET"))
             .and(path(format!("/history/{prompt}")))
-            .respond_with(RunningThenDone(
-                std::sync::atomic::AtomicUsize::new(0),
-                prompt,
-            ))
+            .respond_with(RunningThenDone(AtomicUsize::new(0), prompt))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -2213,11 +2279,11 @@ mod tests {
         assert_eq!(update, TrainProgress::new(12, 400));
     }
 
-    struct RunningThenDone(std::sync::atomic::AtomicUsize, Uuid);
+    struct RunningThenDone(AtomicUsize, Uuid);
 
     impl wiremock::Respond for RunningThenDone {
         fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
-            let seen = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let seen = self.0.fetch_add(1, Ordering::SeqCst);
             let status = if seen == 0 {
                 json!({"status_str": "running"})
             } else {
