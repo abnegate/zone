@@ -457,13 +457,23 @@ impl Stage {
 
     /// Codex runs from `executable`, with its homes under a private state root.
     async fn codex(executable: &Path) -> Self {
+        Self::codex_reading_usage(
+            executable,
+            MockServer::start().await,
+            AgentConfig::default().usage_ttl,
+        )
+        .await
+    }
+
+    /// A codex server that reads its logins' usage from `api` once a reading is `ttl` old.
+    async fn codex_reading_usage(executable: &Path, api: MockServer, ttl: Duration) -> Self {
         let state = TempDir::new().expect("an agent state root");
-        let api = MockServer::start().await;
         let config = Config {
             model_backend: codex_at(executable.to_path_buf()),
             agents: AgentConfig {
                 state: state.path().join("agents"),
                 host_login: false,
+                usage_ttl: ttl,
                 claude_api_url: api.uri(),
                 codex_api_url: api.uri(),
                 ..AgentConfig::default()
@@ -3509,6 +3519,37 @@ async fn a_member_reads_every_login_and_never_a_token() {
     }
     assert!(!text.contains("credential"), "{text}");
     assert_eq!(stage.status(organization, "claude", &member).await, *claude);
+}
+
+#[tokio::test]
+async fn a_status_read_while_a_codex_sign_in_ends_never_misses_the_login_it_saved() {
+    const SLOW: Duration = Duration::from_secs(3);
+    let api = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(ResponseTemplate::new(503).set_delay(SLOW))
+        .mount(&api)
+        .await;
+    let codex = Codex::new();
+    let stage = Stage::codex_reading_usage(&codex.executable, api, Duration::ZERO).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.sign_in_codex(organization, &codex, &owner).await;
+    fs::remove_file(codex.marker(Codex::APPROVE)).expect("the first approval withdrawn");
+    codex.saves(OTHER_ACCOUNT);
+    stage.start(organization, "codex", json!({}), &owner).await;
+
+    let (status, ()) = tokio::join!(stage.status(organization, "codex", &owner), async {
+        tokio::time::sleep(SLOW / 6).await;
+        codex.approve();
+    });
+
+    let logins = status["logins"].as_array().map_or(0, Vec::len);
+    assert!(
+        status["state"] == "pending" || logins == 2,
+        "a status that is no longer pending left out the login that ended it: {status}"
+    );
+    stage.sign_out(organization, "codex", &owner).await;
 }
 
 #[tokio::test]

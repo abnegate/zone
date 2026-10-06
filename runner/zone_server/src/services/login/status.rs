@@ -80,14 +80,8 @@ impl AgentStatus {
         viewer: Viewer,
         attempt: Option<Uuid>,
     ) -> Result<Self, sqlx::Error> {
-        let logins = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
-        let snapshots = refreshed(state, &logins).await;
-        let now = Utc::now();
-        let readings: Vec<Reading> = logins
-            .iter()
-            .zip(snapshots)
-            .map(|(login, snapshot)| read(state, login, snapshot, logins.len(), now))
-            .collect();
+        // The sign-in in flight is read before the logins: a codex sign-in records its login
+        // before it drops its attempt, so a read that finds no attempt finds the login.
         let mut status = Self::signed_out(agent);
         let pending = match agent {
             AgentKind::Claude => {
@@ -97,10 +91,19 @@ impl AgentStatus {
                 None
             }
             AgentKind::Codex => {
+                let pending = devices::pending(organization);
                 status.error = devices::failure(organization);
-                devices::pending(organization)
+                pending
             }
         };
+        let logins = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
+        let snapshots = refreshed(state, &logins).await;
+        let now = Utc::now();
+        let readings: Vec<Reading> = logins
+            .iter()
+            .zip(snapshots)
+            .map(|(login, snapshot)| read(state, login, snapshot, logins.len(), now))
+            .collect();
 
         let best = readings
             .iter()
