@@ -27,7 +27,7 @@ jobs:
         working-directory: runner
 
     # zone_server's integration tests talk to real backing services: Postgres
-    # via tests/common::create_test_pool, and Valkey via cache_tests. Without
+    # via tests/integration/common::create_test_pool, and Valkey via cache::. Without
     # both, coverage fails before it can measure anything.
     services:
       postgres:

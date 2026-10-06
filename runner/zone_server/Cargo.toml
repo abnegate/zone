@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+autotests = false
 
 [features]
 default = ["local-embeddings", "saliency"]
@@ -23,6 +24,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "zone-server"
 path = "src/main.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [dependencies]
 tokio = { workspace = true }
