@@ -1,8 +1,8 @@
 //! What gets delivered.
 
+use abnegate_secret::sanitize;
 use chrono::{DateTime, Utc};
 use url::Url;
-use zone_core::tools::sanitize;
 
 use crate::field::Field;
 use crate::severity::Severity;
@@ -12,11 +12,12 @@ use crate::severity::Severity;
 /// Fields are private because the text is sanitized on the way in and that
 /// invariant has to hold for every backend. A notification body carries tool
 /// output and user data, so it passes through
-/// [`zone_core::tools::sanitize`], which strips terminal control sequences
-/// and redacts credentials. A chat channel's history is far harder to scrub
-/// than a log file, and control sequences in a message can forge output in
-/// any terminal-based reader, so sanitizing happens here, once, rather than
-/// in each backend where it could be forgotten.
+/// [`abnegate_secret::sanitize`], which strips terminal control sequences
+/// and invisible formatting characters and redacts credentials. A chat
+/// channel's history is far harder to scrub than a log file, and control
+/// sequences in a message can forge output in any terminal-based reader, so
+/// sanitizing happens here, once, rather than in each backend where it could
+/// be forgotten.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notification {
     title: String,

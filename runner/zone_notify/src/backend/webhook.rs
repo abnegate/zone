@@ -2,11 +2,11 @@
 
 use std::time::Duration;
 
+use abnegate_secret::sanitize;
 use futures::StreamExt;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Response, StatusCode};
 use serde_json::Value;
-use zone_core::tools::sanitize;
 
 use crate::endpoint::Endpoint;
 use crate::error::NotifyError;

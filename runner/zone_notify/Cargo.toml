@@ -27,7 +27,6 @@ lettre = { version = "=0.11.23", default-features = false, features = [
 ] }
 
 abnegate-secret = { workspace = true }
-zone_core = { path = "../zone_core" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
