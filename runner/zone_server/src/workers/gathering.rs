@@ -418,4 +418,4 @@ pub(crate) fn core_source_from_row(
     })
 }
 
-// Integration tests are in zone_server/tests/gathering_worker_tests.rs
+// Integration tests are in zone_server/tests/integration/gathering_worker.rs

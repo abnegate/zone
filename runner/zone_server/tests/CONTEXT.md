@@ -5,10 +5,13 @@ Run against a disposable PostgreSQL database with migrations 001 through 015 app
 ```sh
 TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:49755/zone_context_test \
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:49755/zone_context_test \
-cargo test -p zone_server --test chat_context_tests --test chat_replay_tests --test chat_context_store_tests --test chat_lifecycle_tests --no-default-features --features zone_context/test-utils
+cargo nextest run -p zone_server --test integration --no-default-features --features zone_context/test-utils \
+  -E 'test(/^(chat_context|chat_replay|chat_context_store|chat_lifecycle)::/)'
 ```
 
 The fixtures serve the real router on an ephemeral local port, authenticate through its public API, and replace inference and model metadata with deterministic Wiremock responses. They disable MCP startup and external web/image services. Tool mutations are confined to per-test temporary directories. Tests retain rows only in the disposable database; remove the database when finished.
+
+Every file under `integration/` is a module of the one `integration` test binary (`autotests = false` in `Cargo.toml`), so a new test file must be declared in `integration/main.rs`; `integration/layout.rs` fails when one is not. Shared helpers live in `integration/common/`, reached as `crate::common`. All modules share one process under plain `cargo test` and `cargo llvm-cov`, while nextest runs each test in its own.
 
 `fixtures/context.json` is checked against Rust `ContextUsage` serialization and shared with frontend E2E tests.
 

@@ -3572,7 +3572,7 @@ mod tests {
             .unwrap();
     }
 
-    // Integration tests are in zone_server/tests/task_execution_tests.rs
+    // Integration tests are in zone_server/tests/integration/task_execution.rs
 
     #[tokio::test]
     async fn task_loop_persists_workspace_receipt_before_returning() {
