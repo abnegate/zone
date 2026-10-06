@@ -1,8 +1,8 @@
 //! WebSocket boundary and lifecycle contracts that do not require a live model.
 
 use crate::common::{
-    TestClient, create_test_pool, create_test_router, create_test_state, test_config, test_email,
-    test_password,
+    MEDIA, TestClient, create_test_pool, create_test_router, create_test_state, test_config,
+    test_email, test_password,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -845,6 +845,7 @@ async fn invalid_media_clients_fail_each_direct_lane_without_model_fallback() {
 
 #[tokio::test]
 async fn queued_media_stops_when_its_chat_lease_is_fenced() {
+    let _serial = MEDIA.lock().await;
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/prompt"))

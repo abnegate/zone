@@ -1,18 +1,16 @@
 //! Generation ownership and deadline acceptance through the real authenticated router.
 
+use crate::common::MEDIA;
 use crate::common::context::{Harness, Socket, answer, finish, next, send, successful};
 use serde_json::json;
 use std::process::Command;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
 use zone_server::services::chat::session::Settings;
-
-static MEDIA: Mutex<()> = Mutex::const_new(());
 
 #[test]
 fn settings_validate_deadline_range() {

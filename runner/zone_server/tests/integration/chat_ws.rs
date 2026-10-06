@@ -11,8 +11,8 @@
 use crate::common;
 
 use crate::common::{
-    TestClient, create_test_pool, create_test_router, create_test_state, init_tracing, test_config,
-    test_email, test_password,
+    MEDIA, TestClient, create_test_pool, create_test_router, create_test_state, init_tracing,
+    test_config, test_email, test_password,
 };
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -1084,6 +1084,7 @@ async fn test_chat_ws_sends_images_to_a_vision_model() {
 
 #[tokio::test]
 async fn test_image_request_routes_directly_and_serves_protected_artifact() {
+    let _serial = MEDIA.lock().await;
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/prompt"))
@@ -1255,6 +1256,7 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
 
 #[tokio::test]
 async fn test_video_request_routes_directly_and_serves_protected_artifact() {
+    let _serial = MEDIA.lock().await;
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/prompt"))
@@ -1377,6 +1379,7 @@ async fn test_video_request_routes_directly_and_serves_protected_artifact() {
 
 #[tokio::test]
 async fn test_audio_request_routes_directly_and_serves_protected_artifact() {
+    let _serial = MEDIA.lock().await;
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/prompt"))
@@ -1503,6 +1506,7 @@ async fn test_audio_request_routes_directly_and_serves_protected_artifact() {
 
 #[tokio::test]
 async fn test_attached_image_routes_to_image_to_image() {
+    let _serial = MEDIA.lock().await;
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/upload/image"))
@@ -1624,6 +1628,7 @@ async fn test_attached_image_routes_to_image_to_image() {
 
 #[tokio::test]
 async fn test_attached_image_upscale_routes_and_serves_protected_artifact() {
+    let _serial = MEDIA.lock().await;
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/upload/image"))
@@ -1758,6 +1763,7 @@ async fn test_attached_image_upscale_routes_and_serves_protected_artifact() {
 
 #[tokio::test]
 async fn test_naming_the_video_upscales_it_past_an_attached_screenshot() {
+    let _serial = MEDIA.lock().await;
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/prompt"))

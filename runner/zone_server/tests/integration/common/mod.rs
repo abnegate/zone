@@ -28,6 +28,10 @@ use zone_server::config::Config;
 use zone_server::routes::create_router;
 use zone_server::state::AppState;
 
+/// The server runs one media generation per process. Under plain `cargo test` every module
+/// shares that process, so a test that needs the lane to itself holds this first.
+pub static MEDIA: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Send server tracing to the test's stdout. Without this the server's own
 /// logs vanish and a failing integration test says nothing about why.
 pub fn init_tracing() {

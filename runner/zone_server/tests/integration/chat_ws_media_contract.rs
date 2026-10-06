@@ -1,17 +1,16 @@
 //! Direct media generation contracts across the authenticated chat WebSocket.
 
+use crate::common::MEDIA;
 use crate::common::context::{Harness, Socket, finish, next, send};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{body_json, method, path},
 };
 
-static MEDIA: Mutex<()> = Mutex::const_new(());
 const PNG: &str = "data:image/png;base64,iVBORw0KGgo=";
 
 async fn configure(harness: &mut Harness, comfy: &MockServer, root: &Path) {
