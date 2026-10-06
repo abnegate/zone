@@ -28,6 +28,10 @@ use zone_server::config::Config;
 use zone_server::routes::create_router;
 use zone_server::state::AppState;
 
+/// Refuses every connection. A privileged port: binding port 0 never hands it
+/// out, so unlike a freed ephemeral port no parallel test's server can take it.
+pub const REFUSED_URL: &str = "http://127.0.0.1:1";
+
 /// Send server tracing to the test's stdout. Without this the server's own
 /// logs vanish and a failing integration test says nothing about why.
 pub fn init_tracing() {

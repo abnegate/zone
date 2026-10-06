@@ -234,13 +234,6 @@ async fn mock_ollama() -> String {
     format!("http://{addr}")
 }
 
-async fn dead_ollama() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    format!("http://{addr}")
-}
-
 fn plant_image_bases(models_dir: &std::path::Path) {
     fs::write(
         models_dir.join("checkpoints/flux1-schnell-fp8.safetensors"),
@@ -524,7 +517,7 @@ async fn comfy_pull_writes_lora_from_hub_origin() {
         axum::serve(listener, hub).await.unwrap();
     });
 
-    let mut config = common::test_config_with_ollama_host("http://127.0.0.1:9");
+    let mut config = common::test_config_with_ollama_host(common::REFUSED_URL);
     config.huggingface_models_url = format!("http://{hub_addr}/api/models");
     config.comfyui.models_dir = models_dir.clone();
     let pool = common::create_test_pool().await;
@@ -1476,9 +1469,9 @@ async fn train_bases_lists_chat_models_alongside_image_rows() {
 async fn train_bases_keep_image_rows_when_ollama_is_down() {
     let models_dir = temp_models();
     plant_image_bases(&models_dir);
-    let ollama = dead_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) =
+        router_with(common::REFUSED_URL, &catalog, models_dir.clone(), None).await;
     let (status, body) = get_json(router, &token, "/api/models/train/bases").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let bases = body.as_array().expect("bases list");

@@ -12,8 +12,8 @@ mod common;
 
 use base64::Engine;
 use common::{
-    TestClient, create_test_pool, create_test_router, create_test_state, init_tracing, test_config,
-    test_email, test_password,
+    REFUSED_URL, TestClient, create_test_pool, create_test_router, create_test_state, init_tracing,
+    test_config, test_email, test_password,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -1974,15 +1974,31 @@ async fn test_upscale_output_too_large_says_so_rather_than_claiming_nothing_came
 }
 
 #[tokio::test]
+async fn the_refused_url_refuses_connections_on_a_port_never_handed_out() {
+    let address: std::net::SocketAddr = REFUSED_URL.trim_start_matches("http://").parse().unwrap();
+    let connection = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    .expect("a refused connection fails at once rather than timing out");
+    assert_eq!(
+        connection.map(|_| ()).unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionRefused
+    );
+    assert!(
+        address.port() < 1024,
+        "binding port 0 hands out only unprivileged ports, so no parallel test can take this one"
+    );
+}
+
+#[tokio::test]
 async fn test_upscale_reports_an_unreachable_comfyui_without_an_empty_message() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let refused = listener.local_addr().unwrap();
-    drop(listener);
     let artifact_root =
         std::env::temp_dir().join(format!("zone-ws-upscale-refused-{}", uuid::Uuid::new_v4()));
     let mut config = test_config();
     config.comfyui.enabled = true;
-    config.comfyui.base_url = format!("http://{refused}");
+    config.comfyui.base_url = REFUSED_URL.to_string();
     config.comfyui.poll_interval_ms = 50;
     config.comfyui.artifact_root = artifact_root.clone();
     let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
@@ -2629,7 +2645,7 @@ async fn test_image_status_precedes_stalled_prompt_and_timeout_is_visible() {
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
     config.comfyui.request_timeout_secs = 1;
-    config.litellm_host = "http://127.0.0.1:9".to_string();
+    config.litellm_host = REFUSED_URL.to_string();
     let (_, _, _, mut socket) = image_socket(config).await;
     socket.send(WsMessage::Text(json!({"type":"send", "content":"Generate an image of the same rooster facing the other way"}).to_string().into())).await.unwrap();
     let mut status = false;
@@ -2660,12 +2676,9 @@ async fn test_image_status_precedes_stalled_prompt_and_timeout_is_visible() {
 
 #[tokio::test]
 async fn test_image_refused_connection_reports_error_without_empty_message() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
     let mut config = test_config();
     config.comfyui.enabled = true;
-    config.comfyui.base_url = format!("http://{address}");
+    config.comfyui.base_url = REFUSED_URL.to_string();
     let (client, token, chat_id, mut socket) = image_socket(config).await;
     socket
         .send(WsMessage::Text(
