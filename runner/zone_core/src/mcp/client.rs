@@ -230,7 +230,12 @@ mod tests {
     use crate::mcp::McpServerSpec;
     use crate::tools::{Tier, ToolContext, ToolRegistry};
     use rmcp::handler::server::wrapper::Parameters;
-    use rmcp::{ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
+    use rmcp::model::{
+        CancelledNotification, CancelledNotificationParam, ClientJsonRpcMessage, ClientRequest,
+        InitializeResult, JsonObject, ListToolsResult, ServerJsonRpcMessage,
+    };
+    use rmcp::transport::{IntoTransport, Transport};
+    use rmcp::{RoleServer, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
     use serde::Deserialize;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -379,6 +384,85 @@ mod tests {
 
         // Tools hold the session; drop them so the client tears down and the
         // server `waiting()` future can finish.
+        drop(registry);
+        drop(hub);
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_call_the_server_cancels_and_never_answers_times_out() {
+        let (server_stream, client_stream) = tokio::io::duplex(64 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            let mut server = IntoTransport::<RoleServer, _, _>::into_transport(server_stream);
+            while let Some(message) = server.receive().await {
+                let ClientJsonRpcMessage::Request(request) = message else {
+                    continue;
+                };
+                let reply = match request.request {
+                    ClientRequest::InitializeRequest(_) => ServerJsonRpcMessage::response(
+                        InitializeResult::default().into(),
+                        request.id,
+                    ),
+                    ClientRequest::ListToolsRequest(_) => ServerJsonRpcMessage::response(
+                        ListToolsResult::with_all_items(vec![Tool::new(
+                            "hang",
+                            "Cancels every call and never answers",
+                            JsonObject::new(),
+                        )])
+                        .into(),
+                        request.id,
+                    ),
+                    ClientRequest::CallToolRequest(_) => ServerJsonRpcMessage::notification(
+                        CancelledNotification::new(CancelledNotificationParam::new(
+                            Some(request.id),
+                            Some("abandoned".to_string()),
+                        ))
+                        .into(),
+                    ),
+                    _ => continue,
+                };
+                server.send(reply).await.expect("server send");
+            }
+        });
+
+        let client = ().serve(client_stream).await.expect("client serve");
+        let remote_tools = client.list_all_tools().await.expect("list tools");
+        let hub = McpHub {
+            sessions: vec![Arc::new(McpSession {
+                name: "silent".to_string(),
+                remote_tools,
+                client: Mutex::new(client),
+            })],
+        };
+        let mut registry = ToolRegistry::new();
+        assert_eq!(registry.register_mcp(&hub), 1);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            registry.execute(
+                "silent_hang",
+                serde_json::json!({}),
+                &ToolContext {
+                    command_timeout: 1,
+                    ..ToolContext::default()
+                },
+            ),
+        )
+        .await
+        .expect("the command timeout must end a call the server cancelled and never answered")
+        .expect("execute silent_hang");
+
+        assert!(!result.success, "{result:?}");
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out after 1 seconds"),
+            "a server's cancellation no longer ends the call, so the command timeout must: {result:?}"
+        );
+
         drop(registry);
         drop(hub);
         server_task.abort();
