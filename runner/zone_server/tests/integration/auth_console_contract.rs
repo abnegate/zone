@@ -4,12 +4,21 @@
 //! and the current session, and revoking the other sessions kills their
 //! refresh tokens while keeping the caller's own.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::common::mail::Silent;
 use crate::common::{TestClient, test_email, test_password};
 use zone_server::db::{email_verification, password_reset};
+use zone_server::services::mail::AccountMail;
+
+/// Far longer than a handler takes without mail, far shorter than a stalled
+/// relay holds a send open.
+const ANSWER_DEADLINE: Duration = Duration::from_secs(10);
 
 struct Login {
     access: String,
@@ -111,6 +120,27 @@ async fn every_auth_outcome_carries_a_success_flag() {
     let body = response.json_value();
     assert_eq!(body["success"], json!(true), "{body}");
     assert!(body["message"].is_string(), "{body}");
+}
+
+/// A known address must be answered as soon as an unknown one, so neither
+/// endpoint may wait on the relay before it responds.
+#[tokio::test]
+async fn a_known_address_is_answered_without_waiting_on_the_relay() {
+    let client = TestClient::with_mail(Arc::new(AccountMail::new(Arc::new(Silent)))).await;
+    let email = test_email();
+    register(&client, &email).await;
+
+    for path in ["/api/auth/resend-verification", "/api/auth/forgot-password"] {
+        let response = tokio::time::timeout(
+            ANSWER_DEADLINE,
+            client.post_json(path, &json!({ "email": email })),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{path} waited on a relay that never answers"));
+
+        response.assert_status(StatusCode::OK);
+        assert_eq!(response.json_value()["success"], json!(true), "{path}");
+    }
 }
 
 #[tokio::test]

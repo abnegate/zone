@@ -66,6 +66,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "abnegate-notify"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "541104394c2a22febfab31f003d93e073a49684afbbcabbc32eb5a27eba4adc8"
+dependencies = [
+ "abnegate-secret",
+ "async-trait",
+ "chrono",
+ "futures",
+ "lettre",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "abnegate-search"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9896,16 +9916,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zone_email"
-version = "0.1.0"
-dependencies = [
- "lettre",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "zone_installer"
 version = "0.1.0"
 dependencies = [
@@ -9929,25 +9939,6 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "zone_notify"
-version = "0.1.0"
-dependencies = [
- "abnegate-secret",
- "async-trait",
- "chrono",
- "futures",
- "lettre",
- "reqwest 0.13.5",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "url",
- "wiremock",
 ]
 
 [[package]]
@@ -9975,6 +9966,7 @@ version = "0.1.0"
 dependencies = [
  "abnegate-exec",
  "abnegate-http",
+ "abnegate-notify",
  "abnegate-search",
  "abnegate-secret",
  "aes-gcm",
@@ -9997,7 +9989,6 @@ dependencies = [
  "hyper-util",
  "iana-time-zone",
  "jsonwebtoken 11.0.0",
- "lettre",
  "metrics",
  "metrics-exporter-prometheus",
  "nix",
@@ -10028,8 +10019,6 @@ dependencies = [
  "zone_comfy",
  "zone_context",
  "zone_core",
- "zone_email",
- "zone_notify",
  "zone_vcs",
 ]
 

@@ -25,7 +25,9 @@ use crate::state::AppState;
 use crate::workers::analytics::{AgentRun, TimeWindow, load_runs};
 use crate::workers::learning::attempt::AttemptOutcome;
 use crate::workers::learning::error_category::ErrorCategory;
-use zone_notify::{Fanout, Notification, Severity};
+use abnegate_notify::Fanout;
+use abnegate_notify::Notification;
+use abnegate_notify::Severity;
 
 pub const REGRESSION_INTERVAL_SECONDS: u64 = 60 * 60;
 const MAXIMUM_TASKS_PER_WORKSPACE: i64 = 500;

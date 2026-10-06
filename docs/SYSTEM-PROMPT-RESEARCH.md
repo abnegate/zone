@@ -251,7 +251,7 @@ SOL 707-734 is a complete contract: the schedule is an iCal `VEVENT` with `RRULE
 CC 1688-1820 (Monitor: each stdout line is an event; "silence is not success" at 1738-1748 with a wrong-and-right grep example; a `gh pr checks` poller at 1717-1726; 200 ms batching; auto-stop on flood). CC 888 (a background command re-invokes the loop on exit; foreground sleep is blocked). CC 2107-2162 (self-paced wakeups sized to what is being waited for; `noop` ticks collapsed in the UI). Zone's `tail_task_log`, `get_task_run` and `get_build_status` force the model to poll and spend rounds. Build: `wait_for(target, timeout)` covering task-run completion, GitHub check completion and background job exit, implemented server-side, suspending the loop without consuming an iteration.
 
 **I3. Notification cost rule. P0 when a notify tool is exposed.**
-CC 1875-1906: err toward not sending; one line under 200 characters; lead with what the user would act on; skip when the user is present. `zone_notify` exists; apply when it becomes a tool.
+CC 1875-1906: err toward not sending; one line under 200 characters; lead with what the user would act on; skip when the user is present. `workers::notify` (abnegate-notify) exists; apply when it becomes a tool.
 
 ### 2.10 Git and task specifics
 

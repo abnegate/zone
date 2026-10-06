@@ -17,6 +17,7 @@ pub mod hosts;
 pub mod image_intent;
 pub mod knowledge;
 pub mod login;
+pub mod mail;
 pub mod media_source;
 pub mod model;
 pub mod prioritisation;

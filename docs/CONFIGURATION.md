@@ -1845,8 +1845,8 @@ Every notice — an auto-project merge, pause or completion, a regression alert,
 - **Description**: How long one channel is given per notice.
 
 ### `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_FROM_NAME`
-- **Default**: *empty* (`SMTP_PORT` 587, `SMTP_FROM_NAME` Zone)
-- **Description**: The relay notices, sign-up verification, password resets and invitations send through. `ALERT_SMTP_*` is Grafana's relay and is separate.
+- **Default**: *empty* (`SMTP_PORT` 587, `SMTP_FROM_NAME` Zone; a blank value other than `SMTP_PASSWORD` counts as unset and an unreadable `SMTP_PORT` falls back to 587; sign-up and reset mail falls back to `noreply@zone.app` when `SMTP_FROM` is unset, email notices need it set)
+- **Description**: The relay notices, sign-up verification and password resets send through. Port 465 connects with implicit TLS; any other port, 587 included, must upgrade with STARTTLS before signing in. `ALERT_SMTP_*` is Grafana's relay and is separate.
 
 ---
 

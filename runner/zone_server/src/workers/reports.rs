@@ -16,7 +16,7 @@
 //! the window to keep it tidy would drop the days nobody saw.
 //!
 //! **A dead channel is not a failed report.** Delivery goes through
-//! [`zone_notify::Fanout`], which returns a report rather than a result, so a
+//! [`abnegate_notify::Fanout`], which returns a report rather than a result, so a
 //! workspace with a stale Discord webhook still gets its digest on Slack and the
 //! slot is recorded rather than retried into a duplicate.
 //!

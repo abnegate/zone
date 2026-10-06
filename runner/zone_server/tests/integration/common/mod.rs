@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod context;
+pub mod mail;
 pub mod transcript;
 
 use axum::Router;
@@ -26,6 +27,7 @@ use zone_context::embeddings::EmbeddingService;
 use zone_server::config::AgentConfig;
 use zone_server::config::Config;
 use zone_server::routes::create_router;
+use zone_server::services::mail::AccountMail;
 use zone_server::state::AppState;
 
 /// Refuses every connection. A privileged port: binding port 0 never hands it
@@ -164,6 +166,18 @@ impl TestClient {
     pub async fn with_config(config: Config) -> Self {
         let pool = create_test_pool().await;
         let state = create_test_state(config, pool);
+        let router = create_test_router(state.clone());
+        Self {
+            router,
+            state: Some(state),
+        }
+    }
+
+    /// Create a test client whose state sends account mail through `mail`.
+    pub async fn with_mail(mail: Arc<AccountMail>) -> Self {
+        let pool = create_test_pool().await;
+        let state = AppState::new_with_mail(test_config(), pool, None, Some(mail));
+        state.disable_mcp();
         let router = create_test_router(state.clone());
         Self {
             router,

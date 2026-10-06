@@ -8,7 +8,8 @@
 
 use std::fmt::Write as _;
 
-use zone_notify::{Notification, Severity};
+use abnegate_notify::Notification;
+use abnegate_notify::Severity;
 
 /// Everything the merge notice draws on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
