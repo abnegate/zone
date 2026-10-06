@@ -121,6 +121,16 @@ cargo test
 cargo run --bin zone-server
 ```
 
+### Debug Info
+
+Dev and test builds carry line tables for workspace crates and no debuginfo
+for dependencies, so backtraces keep file and line while the build cache stays
+small. Full debuginfo for workspace crates, when a debugger needs variables:
+
+```bash
+CARGO_PROFILE_DEV_DEBUG=full cargo build -p zone_server
+```
+
 ### sqlx Offline Query Cache
 
 `runner/.cargo/config.toml` sets `SQLX_OFFLINE=true`, so every `sqlx::query!`
