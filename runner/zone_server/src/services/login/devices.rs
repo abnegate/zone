@@ -275,6 +275,9 @@ impl Devices {
 
     /// Records how attempt `id` ended, unless it is no longer the organization's current one. Who
     /// codex signed in as is read before the lock is taken, since asking codex takes a while.
+    ///
+    /// The attempt is dropped last: a status that no longer shows it pending must already find
+    /// its login or its failure, and the staging directory gone with the attempt's last handle.
     async fn complete(&self, state: AppState, organization: Uuid, id: Uuid, outcome: Outcome) {
         let ended = match outcome.await {
             Ok(staging) => {
@@ -308,9 +311,10 @@ impl Devices {
                     label.as_deref(),
                 )
                 .await;
-                self.attempts.remove(&organization);
                 match recorded {
                     Ok(login) => {
+                        drop(staging);
+                        self.attempts.remove(&organization);
                         audit::signed_in(state.db(), organization, initiator, &email, &login).await;
                     }
                     Err(error) => {
@@ -327,6 +331,8 @@ impl Devices {
                             );
                         }
                         self.failures.insert(organization, UNSAVED.to_string());
+                        drop(staging);
+                        self.attempts.remove(&organization);
                     }
                 }
             }
@@ -1164,6 +1170,61 @@ esac"#
         assert!(scene.logins().await.is_empty());
         assert_eq!(failure(scene.organization).as_deref(), Some(UNSAVED));
         assert!(pending(scene.organization).is_none());
+        scene.remove().await;
+    }
+
+    /// The first moment the attempt is no longer pending, as a status poll would catch it.
+    async fn ended(organization: Uuid) {
+        timeout(WAIT, async {
+            while pending(organization).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the sign-in to end");
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_no_longer_pending_has_its_login_and_no_staging() {
+        let scene = Scene::new(PROMPT).await;
+        let (_, completion) = scene.start().await;
+        let staging = scene
+            .home()
+            .join(".login")
+            .join(scene.attempt().expect("a sign-in in flight").to_string());
+
+        scene.touch(APPROVE);
+        ended(scene.organization).await;
+
+        assert!(
+            !staging.exists(),
+            "the staging directory outlived the attempt"
+        );
+        assert_eq!(scene.logins().await.len(), 1);
+        finished(completion).await;
+        scene.sign_out().await;
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_no_longer_pending_that_was_not_recorded_says_why() {
+        let scene = Scene::new(PROMPT).await;
+        let (_, completion) = scene.start().await;
+        let staging = scene
+            .home()
+            .join(".login")
+            .join(scene.attempt().expect("a sign-in in flight").to_string());
+
+        scene.delete_organization().await;
+        scene.touch(APPROVE);
+        ended(scene.organization).await;
+
+        assert_eq!(failure(scene.organization).as_deref(), Some(UNSAVED));
+        assert!(
+            !staging.exists(),
+            "the staging directory outlived the attempt"
+        );
+        finished(completion).await;
         scene.remove().await;
     }
 

@@ -1,6 +1,6 @@
 //! The pass that builds a digest and hands it to every channel.
 //!
-//! Delivery goes through [`zone_notify::Fanout`], which returns a report rather
+//! Delivery goes through [`abnegate_notify::Fanout`], which returns a report rather
 //! than a result. That matters here: a workspace with a stale Discord webhook
 //! and a working Slack should get its digest on Slack, and the run should be
 //! recorded as delivered rather than retried into a duplicate.
@@ -14,10 +14,11 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use abnegate_notify::Fanout;
+use abnegate_notify::Report;
 use chrono::{NaiveDateTime, Utc, Weekday};
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_notify::{Fanout, Report};
 
 use super::digest::{Digest, generate};
 use super::schedule::{Cadence, Due, Schedule, due};
@@ -337,8 +338,11 @@ pub fn announce(settings: &ReportSettings, fanout: &Fanout) {
 mod tests {
     use super::super::digest::fixtures::{digest, moment};
     use super::*;
+    use abnegate_notify::Channel;
+    use abnegate_notify::Error;
+    use abnegate_notify::Notification;
+    use abnegate_notify::Notifier;
     use std::sync::Mutex;
-    use zone_notify::{Channel, Notification, Notifier, NotifyError};
 
     fn environment(cadence: &str, hour: &str) -> ReportEnvironment {
         ReportEnvironment {
@@ -431,7 +435,7 @@ mod tests {
 
     struct Recorder {
         channel: Channel,
-        failure: Option<NotifyError>,
+        failure: Option<Error>,
         seen: Arc<Mutex<Vec<String>>>,
     }
 
@@ -447,11 +451,7 @@ mod tests {
         fn broken(channel: Channel, seen: Arc<Mutex<Vec<String>>>) -> Self {
             Self {
                 channel,
-                failure: Some(NotifyError::Rejected {
-                    host: "hooks.zone.test".to_string(),
-                    status: 404,
-                    body: "Unknown Webhook".to_string(),
-                }),
+                failure: Some(Error::rejected("hooks.zone.test", 404, "Unknown Webhook")),
                 seen,
             }
         }
@@ -463,7 +463,7 @@ mod tests {
             self.channel.clone()
         }
 
-        async fn deliver(&self, notification: &Notification) -> Result<(), NotifyError> {
+        async fn deliver(&self, notification: &Notification) -> Result<(), Error> {
             match &self.failure {
                 Some(error) => Err(error.clone()),
                 None => {

@@ -274,6 +274,7 @@ impl EmbeddingService for LocalEmbeddingProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zone_core::variables::Variables;
 
     #[test]
     fn resolves_ollama_names() {
@@ -333,20 +334,16 @@ mod tests {
 
     #[test]
     fn cache_dir_env_override() {
-        // Serialise env mutation with other tests in this module.
-        let _g = ENV_LOCK.lock().unwrap();
-        // SAFETY: test-only, guarded by ENV_LOCK.
-        unsafe { std::env::set_var(CACHE_DIR_ENV, "/tmp/zone-embed-test") };
+        let mut variables = Variables::lock();
+        variables.set(CACHE_DIR_ENV, "/tmp/zone-embed-test");
         assert_eq!(
             LocalEmbeddingProvider::default_cache_dir(),
             PathBuf::from("/tmp/zone-embed-test")
         );
-        unsafe { std::env::remove_var(CACHE_DIR_ENV) };
+        variables.remove(CACHE_DIR_ENV);
         assert_ne!(
             LocalEmbeddingProvider::default_cache_dir(),
             PathBuf::from("/tmp/zone-embed-test")
         );
     }
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 }

@@ -15,9 +15,8 @@ use zone_core::llm::{AgentKind, CodexSandbox};
 use crate::services::hosts::Hosts;
 use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME, ROOT_PATH};
 
-/// Settings live with the clients that consume them.
+pub use abnegate_search::WebSearchConfig;
 pub use zone_comfy::Config as ComfyUiConfig;
-pub use zone_search::WebSearchConfig;
 
 /// Upstream GPT4All model catalog. Tests should override `Config::gpt4all_models_url`.
 pub const DEFAULT_GPT4ALL_MODELS_URL: &str =
@@ -1148,7 +1147,7 @@ impl Config {
             cors_allow_credentials,
             app_base_url,
             github_api_url,
-            web_search: WebSearchConfig::from_env(),
+            web_search: crate::services::search::from_environment(),
             comfyui: ComfyUiConfig::from_env(),
             source_index: SourceIndexConfig::from_env(),
             monitoring: MonitoringConfig::from_env(),
@@ -1213,62 +1212,8 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
     use std::net::Ipv6Addr;
-    use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
-
-    static ENVIRONMENT: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    /// Serialises the tests that change the process environment. A test that
-    /// panics holding it has already had its variables restored, because its
-    /// `Environment` is declared after the guard and so dropped first.
-    fn lock() -> MutexGuard<'static, ()> {
-        ENVIRONMENT.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    struct Environment(Vec<(&'static str, Option<OsString>)>);
-
-    impl Environment {
-        fn isolated(names: &[&'static str]) -> Self {
-            let values = names
-                .iter()
-                .map(|name| (*name, env::var_os(name)))
-                .collect::<Vec<_>>();
-            for name in names {
-                // SAFETY: every environment-mutating test in this module holds
-                // ENVIRONMENT for the guard's lifetime.
-                unsafe { env::remove_var(name) };
-            }
-            Self(values)
-        }
-
-        fn set(name: &'static str, value: &str) {
-            // SAFETY: every environment-mutating test in this module holds
-            // ENVIRONMENT for the duration of the mutation.
-            unsafe { env::set_var(name, value) };
-        }
-
-        fn remove(name: &'static str) {
-            // SAFETY: every environment-mutating test in this module holds
-            // ENVIRONMENT for the duration of the mutation.
-            unsafe { env::remove_var(name) };
-        }
-    }
-
-    impl Drop for Environment {
-        fn drop(&mut self) {
-            for (name, value) in &self.0 {
-                // SAFETY: the caller still holds ENVIRONMENT while the saved
-                // process environment is restored.
-                unsafe {
-                    match value {
-                        Some(value) => env::set_var(name, value),
-                        None => env::remove_var(name),
-                    }
-                }
-            }
-        }
-    }
+    use zone_core::variables::Variables;
 
     fn create_test_config() -> Config {
         Config {
@@ -1292,7 +1237,7 @@ mod tests {
             cors_allow_credentials: false,
             app_base_url: "http://localhost:3000".to_string(),
             github_api_url: DEFAULT_GITHUB_API_URL.to_string(),
-            web_search: WebSearchConfig::default(),
+            web_search: crate::services::search::defaults(),
             comfyui: ComfyUiConfig::default(),
             source_index: SourceIndexConfig::default(),
             monitoring: MonitoringConfig::default(),
@@ -1460,7 +1405,6 @@ mod tests {
     /// impossible to exercise against anything but the real API.
     #[test]
     fn the_github_origin_is_configurable_and_must_be_absolute() {
-        let _lock = lock();
         let names = [
             "DATABASE_URL",
             "ENCRYPTION_KEY",
@@ -1479,20 +1423,20 @@ mod tests {
             CODEX_API_URL,
             CODEX_SANDBOX,
         ];
-        let _environment = Environment::isolated(&names);
-        Environment::set("JWT_SECRET", "12345678901234567890123456789012");
-        Environment::set("ENCRYPTION_KEY", "12345678901234567890123456789012");
-        Environment::set("DATABASE_URL", "postgres://localhost/zone");
-        Environment::set("REDIS_URL", "redis://localhost");
-        Environment::set("LITELLM_HOST", "http://localhost:4000");
-        Environment::set("LITELLM_KEY", "key");
+        let mut environment = Variables::isolated(&names);
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("ENCRYPTION_KEY", "12345678901234567890123456789012");
+        environment.set("DATABASE_URL", "postgres://localhost/zone");
+        environment.set("REDIS_URL", "redis://localhost");
+        environment.set("LITELLM_HOST", "http://localhost:4000");
+        environment.set("LITELLM_KEY", "key");
 
         assert_eq!(
             Config::from_env().expect("unset falls back").github_api_url,
             DEFAULT_GITHUB_API_URL
         );
 
-        Environment::set("GITHUB_API_URL", "https://github.example.com/api/v3/");
+        environment.set("GITHUB_API_URL", "https://github.example.com/api/v3/");
         assert_eq!(
             Config::from_env()
                 .expect("an enterprise origin is valid")
@@ -1501,7 +1445,7 @@ mod tests {
             "the trailing slash goes, because every caller joins a rooted path"
         );
 
-        Environment::set("GITHUB_API_URL", "   ");
+        environment.set("GITHUB_API_URL", "   ");
         assert_eq!(
             Config::from_env()
                 .expect("blank is not a setting")
@@ -1509,7 +1453,7 @@ mod tests {
             DEFAULT_GITHUB_API_URL
         );
 
-        Environment::set("GITHUB_API_URL", "github.example.com");
+        environment.set("GITHUB_API_URL", "github.example.com");
         assert!(
             matches!(
                 Config::from_env(),
@@ -1520,7 +1464,7 @@ mod tests {
             "a scheme-less origin would produce relative request URLs"
         );
 
-        Environment::set("GITHUB_API_URL", "ftp://github.example.com");
+        environment.set("GITHUB_API_URL", "ftp://github.example.com");
         assert!(
             matches!(
                 Config::from_env(),
@@ -1531,7 +1475,7 @@ mod tests {
             "a scheme this client cannot speak is not an origin"
         );
 
-        Environment::set("GITHUB_API_URL", "https://someone:t0ken@github.example.com");
+        environment.set("GITHUB_API_URL", "https://someone:t0ken@github.example.com");
         assert!(
             matches!(
                 Config::from_env(),
@@ -1546,7 +1490,7 @@ mod tests {
             "https://github.example.com/api/v3?access_token=t0ken",
             "https://github.example.com/api/v3#t0ken",
         ] {
-            Environment::set("GITHUB_API_URL", carrier);
+            environment.set("GITHUB_API_URL", carrier);
             assert!(
                 matches!(
                     Config::from_env(),
@@ -1558,7 +1502,7 @@ mod tests {
             );
         }
 
-        Environment::set("GITHUB_API_URL", "http://localhost:3000");
+        environment.set("GITHUB_API_URL", "http://localhost:3000");
         assert_eq!(
             Config::from_env()
                 .expect("an operator may point this at a host they run")
@@ -1688,8 +1632,7 @@ mod tests {
     /// provider of its own falls back to.
     #[test]
     fn the_model_backend_is_selected_by_the_environment() {
-        let _lock = lock();
-        let _environment = Environment::isolated(&[MODEL_BACKEND, MODEL_BACKEND_EXECUTABLE]);
+        let mut environment = Variables::isolated(&[MODEL_BACKEND, MODEL_BACKEND_EXECUTABLE]);
 
         assert_eq!(
             ModelBackend::from_env().expect("unset falls back"),
@@ -1702,7 +1645,7 @@ mod tests {
             ("codex", AgentKind::Codex),
             ("  CODEX  ", AgentKind::Codex),
         ] {
-            Environment::set(MODEL_BACKEND, value);
+            environment.set(MODEL_BACKEND, value);
             assert_eq!(
                 ModelBackend::from_env().expect("a known agent"),
                 ModelBackend::Cli {
@@ -1713,13 +1656,13 @@ mod tests {
             );
         }
 
-        Environment::set(MODEL_BACKEND, "litellm");
+        environment.set(MODEL_BACKEND, "litellm");
         assert_eq!(
             ModelBackend::from_env().expect("the HTTP backend, named"),
             ModelBackend::LiteLlm
         );
 
-        Environment::set(MODEL_BACKEND, "gemini");
+        environment.set(MODEL_BACKEND, "gemini");
         assert!(
             matches!(
                 ModelBackend::from_env(),
@@ -1730,8 +1673,8 @@ mod tests {
             "an unrecognised backend must be refused, not silently ignored"
         );
 
-        Environment::set(MODEL_BACKEND, "claude");
-        Environment::set(MODEL_BACKEND_EXECUTABLE, "  /opt/homebrew/bin/claude  ");
+        environment.set(MODEL_BACKEND, "claude");
+        environment.set(MODEL_BACKEND_EXECUTABLE, "  /opt/homebrew/bin/claude  ");
         assert_eq!(
             ModelBackend::from_env().expect("a binary that is not on PATH"),
             ModelBackend::Cli {
@@ -1740,7 +1683,7 @@ mod tests {
             }
         );
 
-        Environment::set(MODEL_BACKEND, "litellm");
+        environment.set(MODEL_BACKEND, "litellm");
         assert!(
             matches!(
                 ModelBackend::from_env(),
@@ -1752,8 +1695,8 @@ mod tests {
              believes a CLI is in use while the HTTP API is being billed"
         );
 
-        Environment::set(MODEL_BACKEND, "codex");
-        Environment::set(MODEL_BACKEND_EXECUTABLE, "   ");
+        environment.set(MODEL_BACKEND, "codex");
+        environment.set(MODEL_BACKEND_EXECUTABLE, "   ");
         assert_eq!(
             ModelBackend::from_env().expect("blank is not a path"),
             ModelBackend::Cli {
@@ -1768,7 +1711,6 @@ mod tests {
     /// that deployment impossible.
     #[test]
     fn litellm_is_required_only_by_the_http_backend() {
-        let _lock = lock();
         let names = [
             "DATABASE_URL",
             "ENCRYPTION_KEY",
@@ -1787,22 +1729,22 @@ mod tests {
             CODEX_API_URL,
             CODEX_SANDBOX,
         ];
-        let _environment = Environment::isolated(&names);
-        Environment::set("JWT_SECRET", "12345678901234567890123456789012");
-        Environment::set("ENCRYPTION_KEY", "12345678901234567890123456789012");
-        Environment::set("DATABASE_URL", "postgres://database/zone");
-        Environment::set("REDIS_URL", "redis://cache:6379");
+        let mut environment = Variables::isolated(&names);
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("ENCRYPTION_KEY", "12345678901234567890123456789012");
+        environment.set("DATABASE_URL", "postgres://database/zone");
+        environment.set("REDIS_URL", "redis://cache:6379");
 
         assert!(matches!(
             Config::from_env(),
             Err(ConfigError::Missing("LITELLM_HOST"))
         ));
-        Environment::set("LITELLM_HOST", "http://models:4000");
+        environment.set("LITELLM_HOST", "http://models:4000");
         assert!(matches!(
             Config::from_env(),
             Err(ConfigError::Missing("LITELLM_KEY"))
         ));
-        Environment::set("LITELLM_KEY", "models-key");
+        environment.set("LITELLM_KEY", "models-key");
         assert_eq!(
             Config::from_env()
                 .expect("the HTTP backend is configured")
@@ -1810,9 +1752,9 @@ mod tests {
             &ModelBackend::LiteLlm
         );
 
-        Environment::remove("LITELLM_HOST");
-        Environment::remove("LITELLM_KEY");
-        Environment::set(MODEL_BACKEND, "claude");
+        environment.remove("LITELLM_HOST");
+        environment.remove("LITELLM_KEY");
+        environment.set(MODEL_BACKEND, "claude");
         let cli = Config::from_env().expect("a CLI backend needs no LiteLLM");
         assert_eq!(
             cli.model_backend(),
@@ -1828,19 +1770,16 @@ mod tests {
 
     #[test]
     fn test_web_search_default_is_off_for_tests() {
-        let config = WebSearchConfig::default();
+        let config = create_test_config().web_search;
         assert!(!config.enabled);
-        assert_eq!(config.query_url, zone_search::DEFAULT_SEARXNG_QUERY_URL);
+        assert_eq!(config.query_url, crate::services::search::DEFAULT_QUERY_URL);
         assert_eq!(config.result_count, 5);
         assert!(!config.requested_for("hello", None));
     }
 
     #[test]
     fn test_web_search_requested_for_respects_metadata_and_intent() {
-        let config = WebSearchConfig {
-            enabled: true,
-            ..WebSearchConfig::default()
-        };
+        let config = crate::services::search::defaults().with_enabled(true);
         assert!(!config.requested_for("Explain this function", None));
         assert!(config.requested_for("What is the latest news on Rust?", None));
         assert!(config.requested_for("anything", Some(&serde_json::json!({ "web_search": true }))));
@@ -1852,26 +1791,18 @@ mod tests {
 
     #[test]
     fn test_web_search_requested_for_disabled_or_empty_url() {
-        let disabled = WebSearchConfig {
-            enabled: false,
-            ..WebSearchConfig::default()
-        };
+        let disabled = crate::services::search::defaults();
         assert!(!disabled.requested_for(
             "latest news",
             Some(&serde_json::json!({ "web_search": true }))
         ));
 
-        let empty_url = WebSearchConfig {
-            enabled: true,
-            query_url: "  ".to_string(),
-            ..WebSearchConfig::default()
-        };
+        let empty_url = WebSearchConfig::new("  ");
         assert!(!empty_url.requested_for("latest news", None));
     }
 
     #[test]
     fn environment_matrix_validates_secrets_and_loads_server_settings() {
-        let _lock = lock();
         let names = [
             "APP_BASE_URL",
             "GITHUB_API_URL",
@@ -1898,6 +1829,8 @@ mod tests {
             "PORT",
             "PROMETHEUS_URL",
             "REDIS_URL",
+            "SEARCH_TIMEOUT_SECONDS",
+            "SEARCH_TIMEOUT_SECS",
             "SOURCE_RESYNC_ENABLED",
             "SOURCE_RESYNC_INTERVAL_SECS",
             "SOURCE_RESYNC_POLL_SECS",
@@ -1912,25 +1845,25 @@ mod tests {
             CODEX_API_URL,
             CODEX_SANDBOX,
         ];
-        let _environment = Environment::isolated(&names);
+        let mut environment = Variables::isolated(&names);
 
         assert!(matches!(
             Config::from_env(),
             Err(ConfigError::Missing("JWT_SECRET"))
         ));
-        Environment::set("JWT_SECRET", "short");
+        environment.set("JWT_SECRET", "short");
         assert!(matches!(
             Config::from_env(),
             Err(ConfigError::Invalid(
                 "JWT_SECRET must be at least 32 characters"
             ))
         ));
-        Environment::set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
         assert!(matches!(
             Config::from_env(),
             Err(ConfigError::Missing("ENCRYPTION_KEY"))
         ));
-        Environment::set("ENCRYPTION_KEY", "short");
+        environment.set("ENCRYPTION_KEY", "short");
         assert!(matches!(
             Config::from_env(),
             Err(ConfigError::Invalid(
@@ -1938,17 +1871,23 @@ mod tests {
             ))
         ));
 
-        Environment::set("ENCRYPTION_KEY", "abcdefghijklmnopqrstuvwxyz123456");
-        Environment::set("DATABASE_URL", "postgres://database/zone");
-        Environment::set("REDIS_URL", "redis://cache:6379");
-        Environment::set("LITELLM_HOST", "http://models:4000");
+        environment.set("ENCRYPTION_KEY", "abcdefghijklmnopqrstuvwxyz123456");
+        environment.set("DATABASE_URL", "postgres://database/zone");
+        environment.set("REDIS_URL", "redis://cache:6379");
+        environment.set("LITELLM_HOST", "http://models:4000");
         assert!(matches!(
             Config::from_env(),
             Err(ConfigError::Missing("LITELLM_KEY"))
         ));
-        Environment::set("LITELLM_KEY", "models-key");
+        environment.set("LITELLM_KEY", "models-key");
+        environment.set("SEARCH_TIMEOUT_SECS", "9");
 
         let defaults = Config::from_env().expect("required values are present");
+        assert_eq!(
+            defaults.web_search.timeout,
+            Duration::from_secs(15),
+            "the retired SEARCH_TIMEOUT_SECS name must not set the search timeout"
+        );
         assert_eq!(defaults.host, "0.0.0.0");
         assert_eq!(defaults.port, 8000);
         assert_eq!(defaults.jwt_access_lifetime, 900);
@@ -1962,30 +1901,32 @@ mod tests {
         assert_eq!(defaults.monitoring, MonitoringConfig::from_env());
         assert_eq!(defaults.train_upload_limit_mb, 4096);
 
-        Environment::set("HOST", "127.0.0.1");
-        Environment::set("PORT", "9001");
-        Environment::set("JWT_ACCESS_LIFETIME", "1200");
-        Environment::set("JWT_REFRESH_LIFETIME", "not-a-number");
-        Environment::set("OLLAMA_HOST", "http://ollama.test:11434");
-        Environment::set("GPT4ALL_MODELS_URL", "http://catalog.test/gpt4all");
-        Environment::set("HUGGINGFACE_MODELS_URL", "http://catalog.test/huggingface");
-        Environment::set("MODEL_SEARCH_PROXY_URL", "  http://proxy.test:8080  ");
-        Environment::set("CORS_ORIGINS", " https://one.test, ,https://two.test ");
-        Environment::set("CORS_ALLOW_CREDENTIALS", "true");
-        Environment::set("APP_BASE_URL", "https://zone.test");
-        Environment::set("GITHUB_API_URL", "https://github.example.com/api/v3/");
-        Environment::set("SOURCE_RESYNC_ENABLED", "off");
-        Environment::set("SOURCE_RESYNC_POLL_SECS", "1");
-        Environment::set("SOURCE_RESYNC_INTERVAL_SECS", "9999999");
-        Environment::set("MONITORING_ENABLED", "yes");
-        Environment::set("MONITORING_PROMETHEUS_URL", "http://prometheus.test/");
-        Environment::set("MONITORING_GRAFANA_URL", "http://grafana.test///");
-        Environment::set("MONITORING_GRAFANA_TOKEN", "  ");
-        Environment::set("MONITORING_GRAFANA_ADMIN_USER", "admin");
-        Environment::set("MONITORING_GRAFANA_ADMIN_PASSWORD", "password");
-        Environment::set("TRAIN_UPLOAD_LIMIT_MB", "1");
+        environment.set("HOST", "127.0.0.1");
+        environment.set("PORT", "9001");
+        environment.set("JWT_ACCESS_LIFETIME", "1200");
+        environment.set("JWT_REFRESH_LIFETIME", "not-a-number");
+        environment.set("OLLAMA_HOST", "http://ollama.test:11434");
+        environment.set("GPT4ALL_MODELS_URL", "http://catalog.test/gpt4all");
+        environment.set("HUGGINGFACE_MODELS_URL", "http://catalog.test/huggingface");
+        environment.set("MODEL_SEARCH_PROXY_URL", "  http://proxy.test:8080  ");
+        environment.set("CORS_ORIGINS", " https://one.test, ,https://two.test ");
+        environment.set("CORS_ALLOW_CREDENTIALS", "true");
+        environment.set("APP_BASE_URL", "https://zone.test");
+        environment.set("GITHUB_API_URL", "https://github.example.com/api/v3/");
+        environment.set("SOURCE_RESYNC_ENABLED", "off");
+        environment.set("SOURCE_RESYNC_POLL_SECS", "1");
+        environment.set("SOURCE_RESYNC_INTERVAL_SECS", "9999999");
+        environment.set("MONITORING_ENABLED", "yes");
+        environment.set("MONITORING_PROMETHEUS_URL", "http://prometheus.test/");
+        environment.set("MONITORING_GRAFANA_URL", "http://grafana.test///");
+        environment.set("MONITORING_GRAFANA_TOKEN", "  ");
+        environment.set("MONITORING_GRAFANA_ADMIN_USER", "admin");
+        environment.set("MONITORING_GRAFANA_ADMIN_PASSWORD", "password");
+        environment.set("TRAIN_UPLOAD_LIMIT_MB", "1");
+        environment.set("SEARCH_TIMEOUT_SECONDS", "42");
 
         let configured = Config::from_env().expect("custom values are valid");
+        assert_eq!(configured.web_search.timeout, Duration::from_secs(42));
         assert_eq!(configured.host, "127.0.0.1");
         assert_eq!(configured.port, 9001);
         assert_eq!(configured.jwt_access_lifetime, 1200);
@@ -2036,13 +1977,13 @@ mod tests {
         assert!(monitoring.contains("grafana_token: None"));
         assert!(monitoring.contains("grafana_secret: Some(\"[REDACTED]\")"));
 
-        Environment::set("PORT", "invalid");
-        Environment::set("SOURCE_RESYNC_ENABLED", "not-truthy");
-        Environment::set("SOURCE_RESYNC_POLL_SECS", "invalid");
-        Environment::set("TRAIN_UPLOAD_LIMIT_MB", "invalid");
-        Environment::set("MODEL_SEARCH_PROXY_URL", "  ");
-        Environment::remove("MONITORING_PROMETHEUS_URL");
-        Environment::set("PROMETHEUS_URL", "http://legacy-prometheus/");
+        environment.set("PORT", "invalid");
+        environment.set("SOURCE_RESYNC_ENABLED", "not-truthy");
+        environment.set("SOURCE_RESYNC_POLL_SECS", "invalid");
+        environment.set("TRAIN_UPLOAD_LIMIT_MB", "invalid");
+        environment.set("MODEL_SEARCH_PROXY_URL", "  ");
+        environment.remove("MONITORING_PROMETHEUS_URL");
+        environment.set("PROMETHEUS_URL", "http://legacy-prometheus/");
         let fallbacks = Config::from_env().expect("invalid optional values use defaults");
         assert_eq!(fallbacks.port, 8000);
         assert!(!fallbacks.source_index.enabled);
@@ -2075,8 +2016,7 @@ mod tests {
 
     #[test]
     fn agent_settings_default_and_follow_the_environment() {
-        let _lock = lock();
-        let _environment = Environment::isolated(&AGENT_SETTINGS);
+        let mut environment = Variables::isolated(&AGENT_SETTINGS);
 
         let defaults = AgentConfig::from_env().expect("unset falls back");
         assert_eq!(
@@ -2098,12 +2038,12 @@ mod tests {
             "a server that was told no console sends no sign-in's browser anywhere"
         );
 
-        Environment::set(AGENT_STATE, "  /app/agent-state  ");
-        Environment::set(AGENT_HOST_LOGIN, " FALSE ");
-        Environment::set(CLAUDE_TOKEN_URL, " http://127.0.0.1:9100/v1/oauth/token ");
-        Environment::set(CODEX_SANDBOX, " danger-full-access ");
-        Environment::set(AGENT_CALLBACK, " http://localhost:54545 ");
-        Environment::set(CONSOLE_ORIGINS, " http://manager.localhost ");
+        environment.set(AGENT_STATE, "  /app/agent-state  ");
+        environment.set(AGENT_HOST_LOGIN, " FALSE ");
+        environment.set(CLAUDE_TOKEN_URL, " http://127.0.0.1:9100/v1/oauth/token ");
+        environment.set(CODEX_SANDBOX, " danger-full-access ");
+        environment.set(AGENT_CALLBACK, " http://localhost:54545 ");
+        environment.set(CONSOLE_ORIGINS, " http://manager.localhost ");
         assert_eq!(
             AgentConfig::from_env().expect("every value is valid"),
             AgentConfig {
@@ -2122,7 +2062,7 @@ mod tests {
         );
 
         for sandbox in CodexSandbox::ALL {
-            Environment::set(CODEX_SANDBOX, sandbox.as_str());
+            environment.set(CODEX_SANDBOX, sandbox.as_str());
             assert_eq!(
                 AgentConfig::from_env()
                     .expect("a sandbox codex has")
@@ -2139,7 +2079,7 @@ mod tests {
             ("no", false),
             ("off", false),
         ] {
-            Environment::set(AGENT_HOST_LOGIN, value);
+            environment.set(AGENT_HOST_LOGIN, value);
             assert_eq!(
                 AgentConfig::from_env().expect("a boolean").host_login,
                 expected,
@@ -2148,7 +2088,7 @@ mod tests {
         }
 
         for name in AGENT_SETTINGS {
-            Environment::set(name, "   ");
+            environment.set(name, "   ");
         }
         assert_eq!(
             AgentConfig::from_env().expect("blank is not a setting"),
@@ -2158,10 +2098,9 @@ mod tests {
 
     #[test]
     fn unreadable_agent_settings_are_refused() {
-        let _lock = lock();
-        let _environment = Environment::isolated(&AGENT_SETTINGS);
+        let mut environment = Variables::isolated(&AGENT_SETTINGS);
 
-        Environment::set(AGENT_HOST_LOGIN, "sometimes");
+        environment.set(AGENT_HOST_LOGIN, "sometimes");
         assert!(
             matches!(
                 AgentConfig::from_env(),
@@ -2171,9 +2110,9 @@ mod tests {
             ),
             "a value that is neither must not silently let organizations use the host's sign-in"
         );
-        Environment::remove(AGENT_HOST_LOGIN);
+        environment.remove(AGENT_HOST_LOGIN);
 
-        Environment::set(AGENT_STATE, "agent-state");
+        environment.set(AGENT_STATE, "agent-state");
         assert!(
             matches!(
                 AgentConfig::from_env(),
@@ -2183,10 +2122,10 @@ mod tests {
             ),
             "a relative root resolves against each agent's own working directory"
         );
-        Environment::remove(AGENT_STATE);
+        environment.remove(AGENT_STATE);
 
         for sandbox in ["read-only", "Danger-Full-Access", "none", "workspace_write"] {
-            Environment::set(CODEX_SANDBOX, sandbox);
+            environment.set(CODEX_SANDBOX, sandbox);
             assert!(
                 matches!(
                     AgentConfig::from_env(),
@@ -2197,14 +2136,14 @@ mod tests {
                 "{sandbox} is not a sandbox codex runs granted tools in"
             );
         }
-        Environment::remove(CODEX_SANDBOX);
+        environment.remove(CODEX_SANDBOX);
 
         for url in [
             "platform.claude.com/v1/oauth/token",
             "ftp://platform.claude.com/v1/oauth/token",
             "https://",
         ] {
-            Environment::set(CLAUDE_TOKEN_URL, url);
+            environment.set(CLAUDE_TOKEN_URL, url);
             assert!(
                 matches!(
                     AgentConfig::from_env(),
@@ -2220,7 +2159,7 @@ mod tests {
             "https://platform.claude.com/v1/oauth/token?key=secret",
             "https://platform.claude.com/v1/oauth/token#secret",
         ] {
-            Environment::set(CLAUDE_TOKEN_URL, url);
+            environment.set(CLAUDE_TOKEN_URL, url);
             assert!(
                 matches!(
                     AgentConfig::from_env(),
@@ -2235,8 +2174,7 @@ mod tests {
 
     #[test]
     fn the_callback_is_the_loopback_address_claude_sends_a_browser_back_to() {
-        let _lock = lock();
-        let _environment = Environment::isolated(&AGENT_SETTINGS);
+        let mut environment = Variables::isolated(&AGENT_SETTINGS);
 
         for (value, port) in [
             ("http://localhost:54545", 54_545),
@@ -2245,7 +2183,7 @@ mod tests {
             ("54545", 54_545),
             (" 60000 ", 60_000),
         ] {
-            Environment::set(AGENT_CALLBACK, value);
+            environment.set(AGENT_CALLBACK, value);
             assert_eq!(
                 AgentConfig::from_env()
                     .expect("a loopback callback")
@@ -2258,7 +2196,7 @@ mod tests {
             );
         }
 
-        Environment::set(AGENT_CALLBACK, "60000");
+        environment.set(AGENT_CALLBACK, "60000");
         for (bind, listen) in [
             (" 0.0.0.0 ", SocketAddr::new(UNSPECIFIED, 60_000)),
             (
@@ -2272,7 +2210,7 @@ mod tests {
                 SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 54_545),
             ),
         ] {
-            Environment::set(AGENT_CALLBACK_BIND, bind);
+            environment.set(AGENT_CALLBACK_BIND, bind);
             assert_eq!(
                 AgentConfig::from_env().expect("a bind address").callback,
                 Some(Callback {
@@ -2282,7 +2220,7 @@ mod tests {
                 "a bind names the listener's port only when a port mapping sits in between: {bind:?}"
             );
         }
-        Environment::remove(AGENT_CALLBACK_BIND);
+        environment.remove(AGENT_CALLBACK_BIND);
 
         for value in [
             "http://127.0.0.1:54545",
@@ -2302,7 +2240,7 @@ mod tests {
             "-1",
             "54545/",
         ] {
-            Environment::set(AGENT_CALLBACK, value);
+            environment.set(AGENT_CALLBACK, value);
             assert!(
                 matches!(
                     AgentConfig::from_env(),
@@ -2314,9 +2252,9 @@ mod tests {
             );
         }
 
-        Environment::remove(AGENT_CALLBACK);
+        environment.remove(AGENT_CALLBACK);
         for bind in ["localhost", "0.0.0.0:0", "localhost:54545", "everywhere"] {
-            Environment::set(AGENT_CALLBACK_BIND, bind);
+            environment.set(AGENT_CALLBACK_BIND, bind);
             assert!(
                 matches!(
                     AgentConfig::from_env(),
@@ -2327,7 +2265,7 @@ mod tests {
                 "{bind} is not an address a listener binds"
             );
         }
-        Environment::set(AGENT_CALLBACK_BIND, "0.0.0.0:54545");
+        environment.set(AGENT_CALLBACK_BIND, "0.0.0.0:54545");
         assert_eq!(
             AgentConfig::from_env()
                 .expect("a bind address with nothing to bind")
@@ -2339,10 +2277,9 @@ mod tests {
 
     #[test]
     fn the_consoles_are_the_origins_listed_as_a_browser_names_them() {
-        let _lock = lock();
-        let _environment = Environment::isolated(&AGENT_SETTINGS);
+        let mut environment = Variables::isolated(&AGENT_SETTINGS);
 
-        Environment::set(
+        environment.set(
             CONSOLE_ORIGINS,
             " HTTP://Manager.LocalHost , https://manager.webui.localhost:443/,, \
              http://localhost:3001 ,http://[::1]:5173, https://zone.example.com:8443 ",
@@ -2365,8 +2302,7 @@ mod tests {
 
     #[test]
     fn a_console_that_is_not_an_origin_stops_the_server_starting() {
-        let _lock = lock();
-        let _environment = Environment::isolated(&AGENT_SETTINGS);
+        let mut environment = Variables::isolated(&AGENT_SETTINGS);
 
         for entry in [
             "http://manager.localhost/console",
@@ -2383,7 +2319,7 @@ mod tests {
             "http://",
             "http://manager.localhost, /agent-sign-in",
         ] {
-            Environment::set(CONSOLE_ORIGINS, entry);
+            environment.set(CONSOLE_ORIGINS, entry);
 
             assert!(
                 matches!(
@@ -2525,15 +2461,14 @@ mod tests {
 
     #[test]
     fn the_usage_ttl_defaults_to_a_minute_and_refuses_words() {
-        let _lock = lock();
-        let _environment = Environment::isolated(&AGENT_SETTINGS);
+        let mut environment = Variables::isolated(&AGENT_SETTINGS);
 
         assert_eq!(
             AgentConfig::from_env().expect("unset falls back").usage_ttl,
             Duration::from_secs(60)
         );
         for (value, seconds) in [("300", 300), (" 15 ", 15), ("0", 0), ("   ", 60)] {
-            Environment::set(USAGE_TTL, value);
+            environment.set(USAGE_TTL, value);
             assert_eq!(
                 AgentConfig::from_env()
                     .expect("a whole number of seconds")
@@ -2543,7 +2478,7 @@ mod tests {
             );
         }
         for value in ["a minute", "60s", "1.5", "-1", "1m"] {
-            Environment::set(USAGE_TTL, value);
+            environment.set(USAGE_TTL, value);
             assert!(
                 matches!(
                     AgentConfig::from_env(),
@@ -2558,8 +2493,7 @@ mod tests {
 
     #[test]
     fn the_usage_endpoints_default_to_the_providers_and_follow_the_environment() {
-        let _lock = lock();
-        let _environment = Environment::isolated(&AGENT_SETTINGS);
+        let mut environment = Variables::isolated(&AGENT_SETTINGS);
 
         let defaults = AgentConfig::from_env().expect("unset falls back");
         assert_eq!(defaults.claude_api_url, "https://api.anthropic.com");
@@ -2570,8 +2504,8 @@ mod tests {
         );
         assert_eq!(AgentConfig::default().codex_api_url, DEFAULT_CODEX_API_URL);
 
-        Environment::set(CLAUDE_API_URL, " http://127.0.0.1:9101 ");
-        Environment::set(CODEX_API_URL, " http://127.0.0.1:9102/backend ");
+        environment.set(CLAUDE_API_URL, " http://127.0.0.1:9101 ");
+        environment.set(CODEX_API_URL, " http://127.0.0.1:9102/backend ");
         let configured = AgentConfig::from_env().expect("loopback endpoints are operator settings");
         assert_eq!(configured.claude_api_url, "http://127.0.0.1:9101");
         assert_eq!(configured.codex_api_url, "http://127.0.0.1:9102/backend");
@@ -2589,7 +2523,7 @@ mod tests {
             ),
         ] {
             for url in ["api.anthropic.com", "ftp://chatgpt.com", "https://"] {
-                Environment::set(name, url);
+                environment.set(name, url);
                 assert!(
                     matches!(AgentConfig::from_env(), Err(ConfigError::Invalid(message)) if message == unparsable),
                     "{name}={url} is not an endpoint usage can be read at"
@@ -2600,13 +2534,13 @@ mod tests {
                 "https://chatgpt.com?key=secret",
                 "https://chatgpt.com#secret",
             ] {
-                Environment::set(name, url);
+                environment.set(name, url);
                 assert!(
                     matches!(AgentConfig::from_env(), Err(ConfigError::Invalid(message)) if message == carrying),
                     "{name}={url} would reach every log that prints the config"
                 );
             }
-            Environment::remove(name);
+            environment.remove(name);
         }
     }
 
@@ -2730,7 +2664,6 @@ mod tests {
 
     #[test]
     fn the_server_config_carries_and_shows_the_agent_settings() {
-        let _lock = lock();
         let names = [
             "DATABASE_URL",
             "ENCRYPTION_KEY",
@@ -2752,19 +2685,19 @@ mod tests {
             AGENT_CALLBACK_BIND,
             CONSOLE_ORIGINS,
         ];
-        let _environment = Environment::isolated(&names);
-        Environment::set("JWT_SECRET", "12345678901234567890123456789012");
-        Environment::set("ENCRYPTION_KEY", "12345678901234567890123456789012");
-        Environment::set("DATABASE_URL", "postgres://database/zone");
-        Environment::set("REDIS_URL", "redis://cache:6379");
-        Environment::set("LITELLM_HOST", "http://models:4000");
-        Environment::set("LITELLM_KEY", "models-key");
-        Environment::set(AGENT_STATE, "/app/agent-state");
-        Environment::set(AGENT_HOST_LOGIN, "false");
-        Environment::set(CODEX_SANDBOX, "danger-full-access");
-        Environment::set(AGENT_CALLBACK, "60000");
-        Environment::set(AGENT_CALLBACK_BIND, "0.0.0.0:54545");
-        Environment::set(
+        let mut environment = Variables::isolated(&names);
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("ENCRYPTION_KEY", "12345678901234567890123456789012");
+        environment.set("DATABASE_URL", "postgres://database/zone");
+        environment.set("REDIS_URL", "redis://cache:6379");
+        environment.set("LITELLM_HOST", "http://models:4000");
+        environment.set("LITELLM_KEY", "models-key");
+        environment.set(AGENT_STATE, "/app/agent-state");
+        environment.set(AGENT_HOST_LOGIN, "false");
+        environment.set(CODEX_SANDBOX, "danger-full-access");
+        environment.set(AGENT_CALLBACK, "60000");
+        environment.set(AGENT_CALLBACK_BIND, "0.0.0.0:54545");
+        environment.set(
             CONSOLE_ORIGINS,
             "http://manager.localhost,https://manager.localhost",
         );
@@ -2796,14 +2729,14 @@ mod tests {
             "{debug}"
         );
 
-        Environment::set(CONSOLE_ORIGINS, "http://manager.localhost/agent-sign-in");
+        environment.set(CONSOLE_ORIGINS, "http://manager.localhost/agent-sign-in");
         assert!(
             matches!(Config::from_env(), Err(ConfigError::Invalid(NOT_AN_ORIGIN))),
             "a console that is not an origin must stop the server starting"
         );
-        Environment::remove(CONSOLE_ORIGINS);
+        environment.remove(CONSOLE_ORIGINS);
 
-        Environment::set(AGENT_CALLBACK, "http://0.0.0.0:54545");
+        environment.set(AGENT_CALLBACK, "http://0.0.0.0:54545");
         assert!(
             matches!(
                 Config::from_env(),
@@ -2813,9 +2746,9 @@ mod tests {
             ),
             "a callback claude.com would never send a browser to must stop the server starting"
         );
-        Environment::remove(AGENT_CALLBACK);
+        environment.remove(AGENT_CALLBACK);
 
-        Environment::set(CODEX_SANDBOX, "read-only");
+        environment.set(CODEX_SANDBOX, "read-only");
         assert!(
             matches!(
                 Config::from_env(),
@@ -2825,9 +2758,9 @@ mod tests {
             ),
             "a sandbox the server cannot give codex must stop it starting"
         );
-        Environment::remove(CODEX_SANDBOX);
+        environment.remove(CODEX_SANDBOX);
 
-        Environment::set(AGENT_HOST_LOGIN, "sometimes");
+        environment.set(AGENT_HOST_LOGIN, "sometimes");
         assert!(
             matches!(
                 Config::from_env(),

@@ -18,6 +18,8 @@ pub mod mcp;
 pub mod session;
 pub mod tools;
 pub mod types;
+#[cfg(any(test, feature = "test-support"))]
+pub mod variables;
 pub mod vpn;
 
 // Re-export commonly used types

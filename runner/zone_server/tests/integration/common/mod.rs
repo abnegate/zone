@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod context;
+pub mod mail;
 pub mod transcript;
 
 use axum::Router;
@@ -26,7 +27,12 @@ use zone_context::embeddings::EmbeddingService;
 use zone_server::config::AgentConfig;
 use zone_server::config::Config;
 use zone_server::routes::create_router;
+use zone_server::services::mail::AccountMail;
 use zone_server::state::AppState;
+
+/// Refuses every connection. A privileged port: binding port 0 never hands it
+/// out, so unlike a freed ephemeral port no parallel test's server can take it.
+pub const REFUSED_URL: &str = "http://127.0.0.1:1";
 
 /// The server runs one media generation per process. Under plain `cargo test` every module
 /// shares that process, so a test that needs the lane to itself holds this first.
@@ -82,7 +88,7 @@ pub fn test_config() -> Config {
         cors_allow_credentials: false,
         app_base_url: "http://localhost:3000".to_string(),
         github_api_url: zone_server::config::DEFAULT_GITHUB_API_URL.to_string(),
-        web_search: Default::default(),
+        web_search: zone_server::services::search::defaults(),
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),
@@ -160,6 +166,18 @@ impl TestClient {
     pub async fn with_config(config: Config) -> Self {
         let pool = create_test_pool().await;
         let state = create_test_state(config, pool);
+        let router = create_test_router(state.clone());
+        Self {
+            router,
+            state: Some(state),
+        }
+    }
+
+    /// Create a test client whose state sends account mail through `mail`.
+    pub async fn with_mail(mail: Arc<AccountMail>) -> Self {
+        let pool = create_test_pool().await;
+        let state = AppState::new_with_mail(test_config(), pool, None, Some(mail));
+        state.disable_mcp();
         let router = create_test_router(state.clone());
         Self {
             router,
@@ -433,7 +451,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         cors_allow_credentials: false,
         app_base_url: "http://localhost:3000".to_string(),
         github_api_url: zone_server::config::DEFAULT_GITHUB_API_URL.to_string(),
-        web_search: Default::default(),
+        web_search: zone_server::services::search::defaults(),
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),

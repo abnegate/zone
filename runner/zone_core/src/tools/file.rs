@@ -1178,6 +1178,34 @@ mod tests {
         assert!(!output.contains("Line 4"));
     }
 
+    /// Tool output is sanitized, so the model reads a file without its
+    /// invisible formatting characters: an emoji's variation selector and a
+    /// Persian word's zero-width non-joiner are gone from what it sees, and a
+    /// patch or rewrite built from that text does not carry them.
+    #[tokio::test]
+    async fn read_file_returns_text_without_its_invisible_formatting_characters() {
+        let dir = tempdir().unwrap();
+        let content =
+            "\u{2764}\u{FE0F} \u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}\n";
+        fs::write(dir.path().join("note.txt"), content).unwrap();
+        let context = create_test_context(dir.path());
+
+        let result = ReadFileTool
+            .execute(serde_json::json!({"path": "note.txt"}), &context)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.output.as_deref(),
+            Some("\u{2764} \u{645}\u{6CC}\u{62E}\u{648}\u{627}\u{647}\u{645}\n")
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("note.txt")).unwrap(),
+            content,
+            "reading leaves the file itself untouched"
+        );
+    }
+
     #[test]
     fn page_text_caps_and_continues_by_character() {
         let content = "α".repeat(10);

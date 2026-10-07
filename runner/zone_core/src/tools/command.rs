@@ -727,7 +727,8 @@ mod tests {
     #[tokio::test]
     async fn shelling_tools_give_the_child_only_the_context_environment() {
         const MARKER: &str = "ZONE_COMMAND_ENVIRONMENT_MARKER";
-        unsafe { std::env::set_var(MARKER, "must-not-reach-a-child") };
+        let mut variables = crate::variables::Variables::lock();
+        variables.set(MARKER, "must-not-reach-a-child");
 
         let mut context = create_test_context();
         context.env = HashMap::from([(
@@ -743,7 +744,7 @@ mod tests {
             .execute(json!({"command": "env"}), &context)
             .await
             .unwrap();
-        unsafe { std::env::remove_var(MARKER) };
+        drop(variables);
 
         for result in [command, shell] {
             assert!(result.success, "{result:?}");

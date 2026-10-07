@@ -11,8 +11,9 @@
 
 use std::fmt::Write;
 
+use abnegate_notify::Notification;
+use abnegate_notify::Severity;
 use chrono::NaiveDateTime;
-use zone_notify::{Notification, Severity};
 
 use crate::workers::analytics::{
     AgentAnalytics, SeriesPoint, TimePeriod, TimeWindow, TrendDirection,

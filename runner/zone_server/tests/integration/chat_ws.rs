@@ -11,8 +11,8 @@
 use crate::common;
 
 use crate::common::{
-    MEDIA, TestClient, create_test_pool, create_test_router, create_test_state, init_tracing,
-    test_config, test_email, test_password,
+    MEDIA, REFUSED_URL, TestClient, create_test_pool, create_test_router, create_test_state,
+    init_tracing, test_config, test_email, test_password,
 };
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -617,9 +617,20 @@ async fn web_search_results_reach_plain_and_agent_models_despite_prior_denial() 
             .unwrap();
         assert!(search < generation);
         let (capability, instructions) = web_instructions(&requests[0], agentic);
-        assert!(capability.contains("Zone can search the public web"));
+        assert!(capability.contains("The server can search the public web"));
         assert!(capability.contains("separate from callable tools"));
-        assert!(capability.contains("web_search"));
+        assert!(capability.contains("When a search tool is among the callable tools"));
+        if agentic {
+            let offered = requests[0]["tools"].as_array().is_some_and(|tools| {
+                tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "web_search")
+            }) || capability.contains("- web_search: ");
+            assert!(
+                offered,
+                "the agent model must be offered the search tool the capability names generically"
+            );
+        }
         for evidence in [
             "Search outcome for this turn: succeeded",
             WEATHER_TITLE,
@@ -692,7 +703,7 @@ async fn web_search_disabled_opt_out_and_unrequested_turns_do_not_claim_retrieva
             ));
             let (capability, instructions) = web_instructions(&requests[0], agentic);
             assert_eq!(
-                capability.contains("Zone can search the public web"),
+                capability.contains("The server can search the public web"),
                 !matches!(outcome, SearchOutcome::Disabled)
             );
             assert!(
@@ -1980,15 +1991,31 @@ async fn test_upscale_output_too_large_says_so_rather_than_claiming_nothing_came
 }
 
 #[tokio::test]
+async fn the_refused_url_refuses_connections_on_a_port_never_handed_out() {
+    let address: std::net::SocketAddr = REFUSED_URL.trim_start_matches("http://").parse().unwrap();
+    let connection = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    .expect("a refused connection fails at once rather than timing out");
+    assert_eq!(
+        connection.map(|_| ()).unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionRefused
+    );
+    assert!(
+        address.port() < 1024,
+        "binding port 0 hands out only unprivileged ports, so no parallel test can take this one"
+    );
+}
+
+#[tokio::test]
 async fn test_upscale_reports_an_unreachable_comfyui_without_an_empty_message() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let refused = listener.local_addr().unwrap();
-    drop(listener);
     let artifact_root =
         std::env::temp_dir().join(format!("zone-ws-upscale-refused-{}", uuid::Uuid::new_v4()));
     let mut config = test_config();
     config.comfyui.enabled = true;
-    config.comfyui.base_url = format!("http://{refused}");
+    config.comfyui.base_url = REFUSED_URL.to_string();
     config.comfyui.poll_interval_ms = 50;
     config.comfyui.artifact_root = artifact_root.clone();
     let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
@@ -2635,7 +2662,7 @@ async fn test_image_status_precedes_stalled_prompt_and_timeout_is_visible() {
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
     config.comfyui.request_timeout_secs = 1;
-    config.litellm_host = "http://127.0.0.1:9".to_string();
+    config.litellm_host = REFUSED_URL.to_string();
     let (_, _, _, mut socket) = image_socket(config).await;
     socket.send(WsMessage::Text(json!({"type":"send", "content":"Generate an image of the same rooster facing the other way"}).to_string().into())).await.unwrap();
     let mut status = false;
@@ -2666,12 +2693,9 @@ async fn test_image_status_precedes_stalled_prompt_and_timeout_is_visible() {
 
 #[tokio::test]
 async fn test_image_refused_connection_reports_error_without_empty_message() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
     let mut config = test_config();
     config.comfyui.enabled = true;
-    config.comfyui.base_url = format!("http://{address}");
+    config.comfyui.base_url = REFUSED_URL.to_string();
     let (client, token, chat_id, mut socket) = image_socket(config).await;
     socket
         .send(WsMessage::Text(

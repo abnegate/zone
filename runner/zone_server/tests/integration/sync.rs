@@ -69,7 +69,7 @@ async fn setup_test_state() -> AppState {
         cors_allow_credentials: false,
         app_base_url: "http://localhost:3000".to_string(),
         github_api_url: zone_server::config::DEFAULT_GITHUB_API_URL.to_string(),
-        web_search: Default::default(),
+        web_search: zone_server::services::search::defaults(),
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),

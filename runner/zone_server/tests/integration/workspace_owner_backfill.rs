@@ -4,10 +4,13 @@
 
 use axum::http::StatusCode;
 use serde_json::json;
-use sqlx::{AssertSqlSafe, PgPool, raw_sql};
+use sqlx::PgPool;
 
 use crate::common::{TestClient, create_test_pool, test_email, test_password};
 
+/// The backfill as it shipped, held to one workspace: every test shares the
+/// database, and an unscoped run seats an owner in another test's workspace
+/// between that test stripping its owner and checking the result.
 const BACKFILL: &str = "
 UPDATE workspace_members AS promoted
 SET role = 'owner', updated_at = NOW()
@@ -15,7 +18,8 @@ WHERE promoted.id IN (
     SELECT DISTINCT ON (candidate.workspace_id) candidate.id
     FROM workspace_members AS candidate
     JOIN workspaces AS workspace ON workspace.id = candidate.workspace_id
-    WHERE candidate.is_active
+    WHERE candidate.workspace_id = $1::uuid
+      AND candidate.is_active
       AND workspace.is_active
       AND NOT EXISTS (
           SELECT 1
@@ -38,8 +42,9 @@ WHERE promoted.id IN (
 );
 ";
 
-async fn apply(pool: &PgPool) {
-    raw_sql(AssertSqlSafe(BACKFILL))
+async fn apply(pool: &PgPool, workspace: &str) {
+    sqlx::query(BACKFILL)
+        .bind(workspace)
         .execute(pool)
         .await
         .expect("the backfill applies");
@@ -123,7 +128,7 @@ async fn an_ownerless_workspace_gets_its_creator_back() {
     strip_owner(&pool, &workspace).await;
     assert_eq!(role(&pool, &workspace, &creator.user).await, "admin");
 
-    apply(&pool).await;
+    apply(&pool, &workspace).await;
 
     assert_eq!(
         role(&pool, &workspace, &creator.user).await,
@@ -157,7 +162,7 @@ async fn a_workspace_that_still_has_an_owner_is_left_alone() {
         .await
         .assert_status(StatusCode::CREATED);
 
-    apply(&pool).await;
+    apply(&pool, &workspace).await;
 
     assert_eq!(role(&pool, &workspace, &creator.user).await, "owner");
     assert_eq!(
@@ -206,12 +211,35 @@ async fn the_creator_is_preferred_over_an_invited_admin() {
     .unwrap();
     strip_owner(&pool, &workspace).await;
 
-    apply(&pool).await;
+    apply(&pool, &workspace).await;
 
     assert_eq!(role(&pool, &workspace, &creator.user).await, "owner");
     assert_eq!(
         role(&pool, &workspace, &deputy.user).await,
         "admin",
         "the backfill seated two owners"
+    );
+}
+
+/// Every test shares the database, so one test's backfill must not seat an
+/// owner in a workspace another test has just stripped.
+#[tokio::test]
+async fn a_backfill_leaves_every_other_workspace_alone() {
+    let client = TestClient::with_db().await;
+    let pool = create_test_pool().await;
+    let first = account(&client).await;
+    let second = account(&client).await;
+    let (_, backfilled) = tenant(&client, &first.token).await;
+    let (_, untouched) = tenant(&client, &second.token).await;
+    strip_owner(&pool, &backfilled).await;
+    strip_owner(&pool, &untouched).await;
+
+    apply(&pool, &backfilled).await;
+
+    assert_eq!(role(&pool, &backfilled, &first.user).await, "owner");
+    assert_eq!(
+        role(&pool, &untouched, &second.user).await,
+        "admin",
+        "the backfill reached a workspace it was not run for"
     );
 }

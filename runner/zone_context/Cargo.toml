@@ -85,4 +85,5 @@ zone_core = { path = "../zone_core" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "=3.27.0"
+zone_core = { path = "../zone_core", features = ["test-support"] }
 wiremock = "=0.6.5"

@@ -15,6 +15,7 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use abnegate_search::Outcome;
 use axum::extract::Request;
 use axum::http::header;
 use axum::middleware::Next;
@@ -561,11 +562,12 @@ impl Drop for WsActiveGuard {
     }
 }
 
-pub fn record_searxng(status: &'static str, duration: Duration, results: usize) {
+pub fn record_searxng(outcome: Outcome, duration: Duration, results: usize) {
     init();
+    let status = outcome.as_str();
     counter!(SEARXNG_REQUESTS, "status" => status).increment(1);
     histogram!(SEARXNG_DURATION, "status" => status).record(duration.as_secs_f64());
-    if status == "ok" {
+    if outcome == Outcome::Succeeded {
         histogram!(SEARXNG_RESULTS).record(results as f64);
     }
 }
@@ -629,6 +631,7 @@ fn is_dynamic_segment(segment: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{SearchObs, normalize_path, record_embedding, record_searxng};
+    use abnegate_search::Outcome;
     use std::time::Duration;
 
     #[test]
@@ -680,7 +683,7 @@ mod tests {
             Duration::from_millis(12),
             1,
         );
-        record_searxng("ok", Duration::from_millis(40), 4);
+        record_searxng(Outcome::Succeeded, Duration::from_millis(40), 4);
         let body = super::handle().render();
         assert!(
             body.contains("zone_context_search_requests_total"),
@@ -688,5 +691,30 @@ mod tests {
         );
         assert!(body.contains("zone_embedding_requests_total"), "{body}");
         assert!(body.contains("zone_searxng_requests_total"), "{body}");
+    }
+
+    #[test]
+    fn searxng_outcomes_keep_their_status_labels() {
+        let labels = [
+            (Outcome::Succeeded, "ok"),
+            (Outcome::Disabled, "disabled"),
+            (Outcome::EmptyQuery, "empty_query"),
+            (Outcome::Unreachable, "http_error"),
+            (Outcome::Status, "status_error"),
+            (Outcome::Malformed, "decode_error"),
+            (Outcome::TooLarge, "too_large"),
+        ];
+        for (outcome, _) in labels {
+            record_searxng(outcome, Duration::from_millis(10), 0);
+        }
+        let body = super::handle().render();
+        for (outcome, label) in labels {
+            assert!(
+                body.contains(&format!(
+                    "zone_searxng_requests_total{{status=\"{label}\"}}"
+                )),
+                "{outcome:?} is not recorded as status=\"{label}\": {body}"
+            );
+        }
     }
 }

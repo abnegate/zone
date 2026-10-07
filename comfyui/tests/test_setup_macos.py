@@ -202,6 +202,20 @@ class SetupMacosTest(unittest.TestCase):
                 text=True,
             )
             self.assertNotEqual(mlx.returncode, 0, mlx.stdout + mlx.stderr)
+            for trainer in (".venv-train", ".venv-train-llm"):
+                trainer_site = subprocess.check_output(
+                    [
+                        str(install / trainer / "bin" / "python"),
+                        "-c",
+                        "import sysconfig; print(sysconfig.get_path('purelib'))",
+                    ],
+                    text=True,
+                ).strip()
+                with self.subTest(venv=trainer):
+                    self.assertFalse(
+                        Path(trainer_site, "pip").exists(),
+                        "a skipped pip install still bootstrapped pip into the trainer venv",
+                    )
             plist = (home / "Library/LaunchAgents/ai.zone.train.plist").read_text(
                 encoding="utf-8"
             )

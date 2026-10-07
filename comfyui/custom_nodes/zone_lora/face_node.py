@@ -11,6 +11,7 @@ import torch.nn as nn
 from comfy.ldm.modules.attention import optimized_attention
 import comfy.model_management as model_management
 import comfy.utils
+from comfy_api.latest import io
 
 PLUS_FACE = 'ip-adapter-plus-face_sdxl_vit-h.safetensors'
 
@@ -267,32 +268,30 @@ def patch_sdxl(model, ipa, cond, uncond, weight: float):
         number += 1
 
 
-class ZoneIPAdapterFace:
+class ZoneIPAdapterFace(io.ComfyNode):
     @classmethod
-    def INPUT_TYPES(cls):
-        names = folder_paths.get_filename_list('ipadapter')
-        if not names:
-            names = [PLUS_FACE]
-        return {
-            'required': {
-                'model': ('MODEL',),
-                'clip_vision': ('CLIP_VISION',),
-                'image': ('IMAGE',),
-                'ipadapter_name': (names,),
-                'strength': (
-                    'FLOAT',
-                    {'default': 0.4, 'min': 0.0, 'max': 2.0, 'step': 0.01},
-                ),
-            }
-        }
+    def define_schema(cls) -> io.Schema:
+        names = folder_paths.get_filename_list('ipadapter') or [PLUS_FACE]
+        return io.Schema(
+            node_id='ZoneIPAdapterFace',
+            display_name='Zone IP-Adapter Face',
+            category='zone',
+            inputs=[
+                io.Model.Input('model'),
+                io.ClipVision.Input('clip_vision'),
+                io.Image.Input('image'),
+                io.Combo.Input('ipadapter_name', options=names),
+                io.Float.Input('strength', default=0.4, min=0.0, max=2.0, step=0.01),
+            ],
+            outputs=[io.Model.Output()],
+        )
 
-    RETURN_TYPES = ('MODEL',)
-    FUNCTION = 'apply'
-    CATEGORY = 'zone'
-
-    def apply(self, model, clip_vision, image, ipadapter_name, strength):
+    @classmethod
+    def execute(
+        cls, model, clip_vision, image, ipadapter_name: str, strength: float
+    ) -> io.NodeOutput:
         if strength == 0:
-            return (model,)
+            return io.NodeOutput(model)
         path = folder_paths.get_full_path_or_raise('ipadapter', ipadapter_name)
         loaded = load_plus_face(path)
         if 'latents' not in loaded['image_proj']:
@@ -314,4 +313,4 @@ class ZoneIPAdapterFace:
         uncond = uncond.to(device, dtype=dtype)
         work = model.clone()
         patch_sdxl(work, ipa, cond, uncond, float(strength))
-        return (work,)
+        return io.NodeOutput(work)
