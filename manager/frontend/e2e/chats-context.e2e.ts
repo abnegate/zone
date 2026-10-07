@@ -72,7 +72,7 @@ for (const width of [1280, 390]) {
     await expect(page.locator('.chat-item')).toHaveCount(1);
     await page.locator('.chat-item').click();
     const meter = page.getByRole('button', { name: /^Context / });
-    await expect(meter).toContainText('9%');
+    await expect(meter).toContainText('3.1k / 32K');
     await page.locator('.message-form textarea').fill('Continue from the previous results.');
     await expect.poll(() => draft).toContain('Continue');
     await mkdir('/tmp/zone-context-ui-integration-artifacts', { recursive: true });
@@ -188,7 +188,7 @@ test('empty chat previews and context updates survive adversarial frame ordering
   await page.locator('.chat-item').click();
   const meter = page.getByRole('button', { name: /^Context / });
   const input = page.locator('.message-form textarea');
-  await expect(meter).toContainText('9%');
+  await expect(meter).toContainText('3.1k / 32K');
   await meter.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('region', { name: 'Context usage details' })).toBeVisible();
@@ -196,6 +196,8 @@ test('empty chat previews and context updates survive adversarial frame ordering
   await expect(meter).toBeFocused();
   const forwardTab = browserName === 'webkit' ? 'Alt+Tab' : 'Tab';
   const backTab = browserName === 'webkit' ? 'Alt+Shift+Tab' : 'Shift+Tab';
+  await page.keyboard.press(backTab);
+  await expect(page.getByRole('button', { name: /^Sources:/ })).toBeFocused();
   await page.keyboard.press(backTab);
   await expect(input).toBeFocused();
   await page.keyboard.press(backTab);
@@ -213,10 +215,10 @@ test('empty chat previews and context updates survive adversarial frame ordering
     breakdown: { ...initial.breakdown, conversation: 2200 },
   };
   await socket.emit({ type: 'context', chat_id: chat.id, message_id: null, usage });
-  await expect(meter).toContainText('12%');
+  await expect(meter).toContainText('4.1k / 32K');
   hold = false;
   await (held as unknown as Route).fulfill({ json: { context: initial } });
-  await expect(meter).toContainText('12%');
+  await expect(meter).toContainText('4.1k / 32K');
   let generation = 'first';
   socket.setOnSend(async () => {
     await socket.emit({ type: 'message_start', message_id: generation, role: 'assistant' });
@@ -290,7 +292,8 @@ test('empty chat previews and context updates survive adversarial frame ordering
     usage: { ...initial, status: 'compacting' },
   });
   await socket.disconnect();
-  await expect(meter).toContainText('Unavailable');
+  await expect(meter).not.toContainText('Compacting');
+  await expect(meter).toContainText('3.1k / 32K');
   await expect(
     page.getByText(/Connection interrupted during generation.*last observation/)
   ).toBeInViewport();
@@ -321,8 +324,8 @@ test('empty chat previews and context updates survive adversarial frame ordering
   hold = false;
   usage = initial;
   await (held as unknown as Route).fulfill({ json: { context: initial } });
-  await expect(meter).toContainText('9%');
+  await expect(meter).toContainText('3.1k / 32K');
   await expect(meter).not.toContainText('Unavailable');
   await page.reload();
-  await expect(meter).toContainText('9%');
+  await expect(meter).toContainText('3.1k / 32K');
 });

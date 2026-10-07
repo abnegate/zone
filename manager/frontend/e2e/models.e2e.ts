@@ -143,44 +143,88 @@ function parseMultipart(
   return fields;
 }
 
-function asTrainRequest(request: {
+type PostedRequest = {
   headers: () => Record<string, string>;
   postDataJSON: () => unknown;
   postDataBuffer: () => Buffer | null;
-}): TrainRequest {
+};
+
+type MultipartFields = Map<string, { filename?: string; value: Buffer }>;
+
+function multipartFields(request: PostedRequest): MultipartFields | null {
   const contentType = request.headers()['content-type'] ?? '';
-  if (!contentType.includes('multipart/form-data')) {
-    return request.postDataJSON() as TrainRequest;
-  }
+  if (!contentType.includes('multipart/form-data')) return null;
   const buffer = request.postDataBuffer();
-  if (!buffer) throw new Error('empty train post');
-  const fields = parseMultipart(buffer, contentType);
+  if (!buffer) throw new Error('empty multipart post');
+  return parseMultipart(buffer, contentType);
+}
+
+function multipartImages(fields: MultipartFields): TrainImage[] {
   const meta = JSON.parse(fields.get('images')?.value.toString('utf8') ?? '[]') as Array<{
     filename: string;
     caption: string;
   }>;
+  return meta.map((image, index) => {
+    const before = fields.get(`before_${index}`)?.value.toString('base64');
+    return {
+      filename: image.filename,
+      caption: image.caption,
+      bytes_base64: fields.get(`image_${index}`)?.value.toString('base64') ?? '',
+      ...(before ? { before_base64: before } : {}),
+    };
+  });
+}
+
+function postedImages(request: PostedRequest): TrainImage[] {
+  const fields = multipartFields(request);
+  if (!fields) return (request.postDataJSON() as { images: TrainImage[] }).images;
+  return multipartImages(fields);
+}
+
+const stagedUploads = new WeakMap<Page, Map<string, TrainImage[]>>();
+const UPLOAD_PATH = /^\/api\/models\/train\/uploads\/([^/]+)$/;
+const TRAIN_URL = /\/api\/models\/train(\?.*)?$/;
+
+/** The images the console staged under each training upload id on `page`. */
+function staged(page: Page): Map<string, TrainImage[]> {
+  const known = stagedUploads.get(page);
+  if (known) return known;
+  const uploads = new Map<string, TrainImage[]>();
+  stagedUploads.set(page, uploads);
+  page.on('request', (request) => {
+    const id = UPLOAD_PATH.exec(new URL(request.url()).pathname)?.[1];
+    if (request.method() !== 'POST' || !id) return;
+    uploads.set(id, [...(uploads.get(id) ?? []), ...postedImages(request)]);
+  });
+  return uploads;
+}
+
+function asTrainRequest(request: PostedRequest, uploads: Map<string, TrainImage[]>): TrainRequest {
+  const fields = multipartFields(request);
+  if (!fields) return request.postDataJSON() as TrainRequest;
+  const upload = fields.get('upload_id')?.value.toString('utf8');
   return {
     name: fields.get('name')?.value.toString('utf8') ?? '',
     base: fields.get('base')?.value.toString('utf8') ?? '',
     trigger: fields.get('trigger')?.value.toString('utf8') || undefined,
-    images: meta.map((image, index) => {
-      const before = fields.get(`before_${index}`)?.value.toString('base64');
-      return {
-        filename: image.filename,
-        caption: image.caption,
-        bytes_base64: fields.get(`image_${index}`)?.value.toString('base64') ?? '',
-        ...(before ? { before_base64: before } : {}),
-      };
-    }),
+    images: upload ? (uploads.get(upload) ?? []) : multipartImages(fields),
   };
 }
 
+/** WebKit reports a multipart body without its files' bytes, so only other engines show them. */
+function uploaded(image: Partial<TrainImage>, browserName: string): Partial<TrainImage> {
+  if (browserName !== 'webkit') return image;
+  const { bytes_base64: _bytes, before_base64: _before, ...described } = image;
+  return described;
+}
+
 function trainRequests(page: Page): TrainRequest[] {
+  const uploads = staged(page);
   const requests: TrainRequest[] = [];
   page.on('request', (request) => {
     if (request.method() !== 'POST') return;
     if (new URL(request.url()).pathname !== '/api/models/train') return;
-    requests.push(asTrainRequest(request));
+    requests.push(asTrainRequest(request, uploads));
   });
   return requests;
 }
@@ -189,6 +233,8 @@ function trainRequests(page: Page): TrainRequest[] {
 async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof mockBrowseModels; installedModels?: InstalledModel[] }): Promise<void> {
   const installedModels = [...(options?.installedModels ?? mockInstalledModels)];
   const browseModels = options?.browseModels ?? mockBrowseModels;
+  const uploads = staged(page);
+  let nextUpload = 0;
 
   // Use glob pattern that matches any URL containing /api/models
   await routeApi(page, '**/api/models**', (route) => {
@@ -244,16 +290,24 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
         });
       }
     } else if (method === 'POST' && url.includes('/api/models/train/captions')) {
-      const body = route.request().postDataJSON() as { images: TrainImage[] };
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          captions: body.images.map((_, index) => `a photo, frame ${index + 1}`),
+          captions: postedImages(route.request()).map((_, index) => `a photo, frame ${index + 1}`),
         }),
       });
+    } else if (method === 'POST' && new URL(url).pathname === '/api/models/train/uploads') {
+      nextUpload += 1;
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ id: `upload-${nextUpload}` }),
+      });
+    } else if (method === 'POST' && UPLOAD_PATH.test(new URL(url).pathname)) {
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
     } else if (method === 'POST' && url.includes('/api/models/train')) {
-      const body = route.request().postDataJSON() as TrainRequest;
+      const body = asTrainRequest(route.request(), uploads);
       const adapter = trainedAdapter(body.name);
       installedModels.push(adapter);
       route.fulfill({
@@ -322,7 +376,7 @@ function trainPanel(page: Page): Locator {
 }
 
 async function routeTrainResult(page: Page, result: TrainResult): Promise<void> {
-  await routeApi(page, '**/api/models/train', (route) => {
+  await routeApi(page, TRAIN_URL, (route) => {
     if (route.request().method() === 'GET') {
       route.fulfill({ status: 204, body: '' });
       return;
@@ -471,7 +525,7 @@ test.describe('Models Page', () => {
     ).toBeVisible();
   });
 
-  test('submits a LoRA and lists the trained adapter', async ({ page }) => {
+  test('submits a LoRA and lists the trained adapter', async ({ browserName, page }) => {
     const requests = trainRequests(page);
     const panel = trainPanel(page);
 
@@ -496,8 +550,9 @@ test.describe('Models Page', () => {
     expect(body.base).toBe('flux-schnell');
     expect(body.trigger).toBe('zne person');
     expect(body.images).toHaveLength(1);
-    expect(body.images[0].filename).toBe('portrait.png');
-    expect(body.images[0].bytes_base64).toBe(PNG_BASE64);
+    expect(body.images[0]).toMatchObject(
+      uploaded({ filename: 'portrait.png', bytes_base64: PNG_BASE64 }, browserName)
+    );
 
     await expect(panel.getByLabel('Name', { exact: true })).toHaveValue('');
     await expect(panel.getByLabel('Caption for portrait.png')).toHaveCount(0);
@@ -533,6 +588,7 @@ test.describe('Models Page', () => {
   });
 
   test('rejects incomplete Qwen pairs and submits complete pairs in their visible order', async ({
+    browserName,
     page,
   }) => {
     const requests = trainRequests(page);
@@ -597,7 +653,7 @@ test.describe('Models Page', () => {
     await expect.poll(() => requests.length).toBe(1);
     expect(requests[0].base).toBe('qwen-image-edit');
     expect(requests[0].trigger).toBeUndefined();
-    expect(requests[0].images).toEqual([
+    const pairs = [
       {
         filename: 'target-b.png',
         caption: 'move the subject outside',
@@ -610,7 +666,10 @@ test.describe('Models Page', () => {
         bytes_base64: Buffer.from('target a').toString('base64'),
         before_base64: Buffer.from('reference a').toString('base64'),
       },
-    ]);
+    ];
+    expect(requests[0].images.map((image) => uploaded(image, browserName))).toEqual(
+      pairs.map((image) => uploaded(image, browserName))
+    );
   });
 
   test('clears Qwen references and instructions when switching bases', async ({ page }) => {
@@ -659,8 +718,7 @@ test.describe('Models Page', () => {
     const requested = deferred<TrainImage[]>();
     const release = deferred<void>();
     await routeApi(page, '**/api/models/train/captions', async (route) => {
-      const body = route.request().postDataJSON() as { images: TrainImage[] };
-      requested.resolve(body.images);
+      requested.resolve(postedImages(route.request()));
       await release.promise;
       await route.fulfill({
         status: 200,
@@ -702,12 +760,12 @@ test.describe('Models Page', () => {
   test('freezes every draft control while a training request is in flight', async ({ page }) => {
     const requested = deferred<TrainRequest>();
     const release = deferred<void>();
-    await routeApi(page, '**/api/models/train', async (route) => {
+    await routeApi(page, TRAIN_URL, async (route) => {
       if (route.request().method() === 'GET') {
         await route.fulfill({ status: 204, body: '' });
         return;
       }
-      requested.resolve(route.request().postDataJSON() as TrainRequest);
+      requested.resolve(asTrainRequest(route.request(), staged(page)));
       await release.promise;
       await route.fulfill({
         status: 200,

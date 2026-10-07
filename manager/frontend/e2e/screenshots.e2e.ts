@@ -403,7 +403,7 @@ describeScreenshots('Screenshots - Populated States', () => {
         body: JSON.stringify([{ id: 'qwen-image-edit', label: 'Qwen Image Edit', edit: true }]),
       });
     });
-    await routeApi(page, '**/api/models/train', async (route) => {
+    await routeApi(page, /\/api\/models\/train(\?.*)?$/, async (route) => {
       if (route.request().method() === 'GET') {
         await route.fulfill({ status: 204, body: '' });
         return;
