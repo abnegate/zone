@@ -128,6 +128,18 @@ impl TrainRegistry {
         *slot = Some(job.clone());
         Some(job)
     }
+
+    /// Drops a finished in-process job so GET /train returns 204 until a new run.
+    pub fn clear_finished(&self) {
+        let mut slot = self.slot.lock().expect("train job");
+        if slot
+            .as_ref()
+            .is_some_and(|job| job.view().status == TrainJobStatus::Running)
+        {
+            return;
+        }
+        *slot = None;
+    }
 }
 
 impl Job {
@@ -319,6 +331,19 @@ mod tests {
             .expect("finished job frees the slot");
         assert_eq!(next.view().name, "other");
         assert_eq!(next.view().status, TrainJobStatus::Running);
+    }
+
+    #[test]
+    fn clear_finished_drops_a_terminal_job_and_keeps_a_running_one() {
+        let registry = TrainRegistry::new();
+        let job = registry
+            .start("yvonne".into(), Some("finetune".into()), None)
+            .expect("start");
+        registry.clear_finished();
+        assert_eq!(registry.current().unwrap().name, "yvonne");
+        job.fail(TrainError::Failed("cancelled".into()));
+        registry.clear_finished();
+        assert!(registry.current().is_none());
     }
 
     #[test]

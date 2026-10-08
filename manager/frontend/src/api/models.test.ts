@@ -107,6 +107,17 @@ describe('Namespaced model requests', () => {
     expect(request).toHaveBeenCalledWith('/api/models/train', expect.anything());
   });
 
+  it('dismisses a finished training job', async () => {
+    const request = mock(async () => new Response(null, { status: 204 }));
+    global.fetch = request as typeof fetch;
+
+    await modelsApi.dismissTrain();
+    expect(request).toHaveBeenCalledWith(
+      '/api/models/train',
+      expect.objectContaining({ method: 'DELETE' })
+    );
+  });
+
   it('polls until a 202 training job finishes', async () => {
     const running = {
       id: 'job-1',

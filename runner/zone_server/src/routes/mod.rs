@@ -306,6 +306,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/models/train",
             get(models::train_job)
                 .post(models::train)
+                .delete(models::dismiss_train)
                 .layer(uploads)
                 .layer(one_at_a_time),
         )

@@ -69,9 +69,9 @@ pub fn offered(backend: &LlmBackend, tools: ChatTools) -> ChatTools {
 mod tests {
     use super::super::testing;
     use super::*;
-    use crate::agent::WorkspaceScope;
     use crate::agent::question::ASK_USER;
     use crate::agent::wait::WAIT_FOR;
+    use crate::agent::{ToolProfile, WorkspaceScope};
     use uuid::Uuid;
     use zone_core::llm::{AgentKind, CliSettings};
     use zone_core::tools::WaitFor;
@@ -196,6 +196,10 @@ mod tests {
                     assert!(!offered.has(name), "{agent} was offered {name}");
                 }
                 assert!(offered.has("read_file"), "{:?}", offered.names());
+                if offered.profile() == ToolProfile::Chat {
+                    assert!(offered.has("start_train"), "{:?}", offered.names());
+                    assert!(offered.has("list_models"), "{:?}", offered.names());
+                }
                 assert_eq!(offered.names().len(), every.len() - 2);
             }
         }

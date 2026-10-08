@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
+import type { TrainJob } from '../../../api/models';
 
 function fluxQwenBases() {
   return [
@@ -81,6 +82,15 @@ mock.module('../../../api/models', () => ({
 
 const mockGetEffectiveAiSettings = mock(() => Promise.resolve({ has_runpod_api_key: false }));
 
+const trainState = {
+  job: null as TrainJob | null,
+  dismiss: mock(),
+};
+
+mock.module('../hooks/useTrain', () => ({
+  useTrain: () => trainState,
+}));
+
 mock.module('../../../api/client', () => ({
   client: {
     getEffectiveAiSettings: mockGetEffectiveAiSettings,
@@ -127,6 +137,8 @@ beforeEach(() => {
   mockWaitTrain.mockImplementation(() =>
     Promise.resolve({ filename: 'zoneface.safetensors', quality: null, dataset: [] })
   );
+  trainState.job = null;
+  trainState.dismiss.mockReset();
 });
 
 afterAll(() => {
@@ -901,6 +913,34 @@ describe('TrainPanel', () => {
     response.resolve({ filename: 'jerry.safetensors', quality: null, dataset: [] });
     await screen.findByText('Training finished: jerry.safetensors');
     expect(trained).toHaveBeenCalled();
+  });
+
+  it('shows a cancelled job from the trainer and drops it when that job is dismissed', async () => {
+    mockTrainJob.mockImplementationOnce(() =>
+      Promise.resolve({
+        id: 'job-1',
+        name: 'yvonne',
+        status: 'failed',
+        error: 'cancelled',
+      })
+    );
+    const { rerender } = render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(mockTrainJob).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByLabelText('Base')).toBeInTheDocument());
+    expect(screen.queryByText('cancelled')).not.toBeInTheDocument();
+
+    trainState.job = {
+      id: 'job-1',
+      name: 'yvonne',
+      status: 'failed',
+      error: 'cancelled',
+    };
+    rerender(<TrainPanel onTrained={mock()} />);
+    expect(screen.getByText('cancelled')).toBeInTheDocument();
+
+    trainState.job = null;
+    rerender(<TrainPanel onTrained={mock()} />);
+    expect(screen.queryByText('cancelled')).not.toBeInTheDocument();
   });
 
   it('trains a person LoRA on the SDXL people base and hides Flux and Qwen', async () => {

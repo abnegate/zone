@@ -771,6 +771,22 @@ async fn get_json(router: axum::Router, token: &str, uri: &str) -> (StatusCode, 
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
+async fn delete_json(router: axum::Router, token: &str, uri: &str) -> (StatusCode, Value) {
+    let request = axum::http::Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    if body.is_empty() {
+        return (status, Value::Null);
+    }
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
 async fn get_bytes(
     router: axum::Router,
     token: &str,
@@ -1317,6 +1333,83 @@ async fn train_status_reads_a_host_job_when_the_registry_is_empty() {
     assert_eq!(body["status"], "running");
     assert_eq!(body["step"], 9);
     assert_eq!(body["total"], 40);
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn dismiss_clears_a_finished_host_job() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let mut job =
+        zone_comfy::host_train::HostJob::create("yvonne", "finetune", "ohwx", "base.safetensors");
+    job.status = zone_comfy::host_train::HostStatus::Failed;
+    job.error = Some("cancelled".into());
+    let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
+    zone_comfy::host_train::write_job(&dir, &job).unwrap();
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+
+    let (status, body) = get_json(router.clone(), &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "yvonne");
+    assert_eq!(body["error"], "cancelled");
+
+    let (status, body) = delete_json(router.clone(), &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body) = get_json(router.clone(), &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body) = delete_json(router, &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn dismiss_refuses_a_running_host_job() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let mut job =
+        zone_comfy::host_train::HostJob::create("yvonne", "finetune", "ohwx", "base.safetensors");
+    job.status = zone_comfy::host_train::HostStatus::Running;
+    let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
+    zone_comfy::host_train::write_job(&dir, &job).unwrap();
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (status, body) = delete_json(router.clone(), &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "a training job is already running");
+    let (status, body) = get_json(router, &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "yvonne");
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn dismiss_clears_a_finished_in_process_job() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let request = json!({
+        "name": "studio-style",
+        "base": "flux-schnell",
+        "trigger": "ohwx",
+        "images": [{
+            "filename": "a.png",
+            "caption": "a portrait",
+            "bytes_base64": TINY_PNG
+        }]
+    });
+    let (router, token) =
+        router_with(&ollama, &catalog, models_dir.clone(), Some("exit 7".into())).await;
+    let (status, body) = post_json(router.clone(), &token, "/api/models/train", request).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let job = wait_train_job(&router, &token).await;
+    assert_eq!(job["status"], "failed", "{job}");
+    let (status, body) = delete_json(router.clone(), &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = get_json(router, &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     let _ = fs::remove_dir_all(models_dir);
 }
 

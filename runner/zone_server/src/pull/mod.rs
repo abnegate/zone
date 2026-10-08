@@ -164,6 +164,33 @@ impl PullRegistry {
             true
         })
     }
+
+    pub fn status(&self, name: &str) -> Option<PullView> {
+        let job = self.jobs.get(name)?;
+        let snapshot = job.snapshot.lock().expect("pull snapshot");
+        Some(PullView {
+            name: job.model.clone(),
+            percent: snapshot.percent,
+            completed: snapshot.completed,
+            total: snapshot.total,
+            steps: snapshot.steps.clone(),
+            terminal: snapshot.terminal.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PullView {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    pub steps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<Event>,
 }
 
 impl Default for PullRegistry {
@@ -640,6 +667,18 @@ mod tests {
             "Model download ended before installation completed"
         ));
         assert!(!retryable("pull model manifest: file does not exist"));
+    }
+
+    #[tokio::test]
+    async fn status_reads_the_live_snapshot() {
+        let registry = super::PullRegistry::new();
+        assert!(registry.status("llama3.2").is_none());
+        let _subscription =
+            registry.start_or_attach("http://127.0.0.1:1".into(), "llama3.2".into());
+        let view = registry.status("llama3.2").expect("the job is attached");
+        assert_eq!(view.name, "llama3.2");
+        assert!(view.terminal.is_none());
+        assert!(registry.cancel("llama3.2"));
     }
 
     #[test]

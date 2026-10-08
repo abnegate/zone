@@ -31,11 +31,12 @@ use super::chats::check_workspace_read_access;
 use crate::auth::AuthUser;
 use crate::db::ai_settings;
 use crate::error::ServerError;
+use crate::pull::{ComfyPull, Pull, PullStart};
 use crate::services::endpoint::Origin;
 use crate::services::model::Model;
 use crate::services::route::Route;
 use crate::state::AppState;
-use crate::train_jobs::TrainJobView;
+use crate::train_jobs::{TrainJobStatus, TrainJobView};
 use types::ModelCapability;
 use zone_comfy::caption::{Captioner, Draft};
 use zone_comfy::host_train;
@@ -101,7 +102,7 @@ static OLLAMA_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
 // Validation
 
 /// Validate model name to prevent injection attacks
-fn validate_model_name(name: &str) -> Result<(), ErrorResponse> {
+pub(crate) fn validate_model_name(name: &str) -> Result<(), ErrorResponse> {
     if name.is_empty() || name.len() > MAX_MODEL_NAME_LENGTH {
         return Err(ErrorResponse::new("Invalid model name length"));
     }
@@ -192,6 +193,59 @@ pub async fn list(
     }
 }
 
+pub(crate) async fn browse_models(
+    state: &AppState,
+    source: &str,
+    query: ListModelsQuery,
+) -> Result<BrowseResponse, String> {
+    let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE).min(MAX_PAGE_SIZE);
+    let proxy_url = state.config().model_search_proxy_url.clone();
+    let opts = query.to_browse_query(limit);
+    match source {
+        "ollama" => {
+            let provider = get_provider_with_proxy("ollama", proxy_url.as_deref())
+                .map_err(provider_message)?;
+            provider.search(opts).await.map_err(provider_message)
+        }
+        "comfy" => Ok(BrowseResponse {
+            models: list_comfy_models(state),
+            next_cursor: None,
+        }),
+        "gpt4all" => {
+            let provider = Gpt4AllProvider::with_proxy(
+                state.config().gpt4all_models_url.clone(),
+                proxy_url.as_deref(),
+            )
+            .map_err(provider_message)?;
+            provider.search(opts).await.map_err(provider_message)
+        }
+        "huggingface" => {
+            let provider = HuggingFaceProvider::with_proxy(
+                state.config().huggingface_models_url.clone(),
+                proxy_url.as_deref(),
+            )
+            .map_err(provider_message)?;
+            browse_huggingface(&provider, state, opts)
+                .await
+                .map_err(provider_message)
+        }
+        "openrouter" => {
+            let provider =
+                get_provider_with_proxy(source, proxy_url.as_deref()).map_err(provider_message)?;
+            provider.search(opts).await.map_err(provider_message)
+        }
+        other => Err(format!("Unknown source: {other}")),
+    }
+}
+
+fn provider_message(error: ProviderError) -> String {
+    match error {
+        ProviderError::HttpError(error) => format!("Failed to connect: {error}"),
+        ProviderError::ParseError(error) => format!("Failed to parse response: {error}"),
+        ProviderError::Unavailable(error) => format!("Provider unavailable: {error}"),
+    }
+}
+
 async fn browse_huggingface(
     provider: &HuggingFaceProvider,
     state: &AppState,
@@ -238,9 +292,9 @@ pub struct ProviderErrors {
 
 /// Why Ollama's inventory could not be read, with the status it earns on its own.
 #[derive(Debug)]
-struct OllamaFailure {
+pub(crate) struct OllamaFailure {
     status: StatusCode,
-    message: String,
+    pub message: String,
 }
 
 impl IntoResponse for OllamaFailure {
@@ -312,7 +366,7 @@ async fn list_installed_models(state: AppState) -> axum::response::Response {
     }
 }
 
-fn list_comfy_models(state: &AppState) -> Vec<ModelResponse> {
+pub(crate) fn list_comfy_models(state: &AppState) -> Vec<ModelResponse> {
     let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
         .or_else(|_| RecipeCatalog::packaged())
         .ok();
@@ -344,7 +398,9 @@ fn list_comfy_models(state: &AppState) -> Vec<ModelResponse> {
 }
 
 /// List models from local Ollama installation
-async fn list_ollama_model_rows(state: &AppState) -> Result<Vec<ModelResponse>, OllamaFailure> {
+pub(crate) async fn list_ollama_model_rows(
+    state: &AppState,
+) -> Result<Vec<ModelResponse>, OllamaFailure> {
     let ollama_host = &state.config().ollama_host;
 
     // Try to fetch from Ollama API
@@ -457,9 +513,57 @@ pub async fn get(
     _auth: AuthUser,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    // Validate model name
-    if let Err(e) = validate_model_name(&name) {
-        return (StatusCode::BAD_REQUEST, Json(e)).into_response();
+    match show_model(&state, &name).await {
+        Ok(info) => Json(info).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+pub(crate) enum CatalogError {
+    InvalidName(ErrorResponse),
+    NotFound(String),
+    Unavailable(String),
+    Parse(String),
+}
+
+impl CatalogError {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::InvalidName(error) => error.error.clone(),
+            Self::NotFound(name) => format!("Model not found: {name}"),
+            Self::Unavailable(message) => message.clone(),
+            Self::Parse(message) => message.clone(),
+        }
+    }
+}
+
+impl IntoResponse for CatalogError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::InvalidName(error) => (StatusCode::BAD_REQUEST, Json(error)).into_response(),
+            Self::NotFound(name) => (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new(format!("Model not found: {name}"))),
+            )
+                .into_response(),
+            Self::Unavailable(message) => {
+                (StatusCode::BAD_GATEWAY, Json(ErrorResponse::new(message))).into_response()
+            }
+            Self::Parse(message) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(message)),
+            )
+                .into_response(),
+        }
+    }
+}
+
+pub(crate) async fn show_model(
+    state: &AppState,
+    name: &str,
+) -> Result<serde_json::Value, CatalogError> {
+    if let Err(error) = validate_model_name(name) {
+        return Err(CatalogError::InvalidName(error));
     }
 
     let ollama_host = &state.config().ollama_host;
@@ -472,57 +576,43 @@ pub async fn get(
 
     match OLLAMA_HTTP_CLIENT
         .post(&url)
-        .json(&ShowRequest { name: name.clone() })
+        .json(&ShowRequest {
+            name: name.to_string(),
+        })
         .send()
         .await
     {
         Ok(response) => {
             if response.status().is_success() {
                 match response.json::<serde_json::Value>().await {
-                    Ok(info) => Json(info).into_response(),
-                    Err(e) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::new(format!(
-                            "Failed to parse response: {}",
-                            e
-                        ))),
-                    )
-                        .into_response(),
+                    Ok(info) => Ok(info),
+                    Err(error) => Err(CatalogError::Parse(format!(
+                        "Failed to parse response: {error}"
+                    ))),
                 }
             } else if response.status() == StatusCode::NOT_FOUND {
-                if let Some(info) = huggingface_details_or_none(&state, &name).await {
-                    return Json(info).into_response();
+                if let Some(info) = huggingface_details_or_none(state, name).await {
+                    return serde_json::to_value(info)
+                        .map_err(|error| CatalogError::Parse(error.to_string()));
                 }
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new(format!("Model not found: {}", name))),
-                )
-                    .into_response()
+                Err(CatalogError::NotFound(name.to_string()))
             } else {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(ErrorResponse::new("Ollama service error")),
-                )
-                    .into_response()
+                Err(CatalogError::Unavailable("Ollama service error".into()))
             }
         }
-        Err(e) => {
-            if let Some(info) = huggingface_details_or_none(&state, &name).await {
-                return Json(info).into_response();
+        Err(error) => {
+            if let Some(info) = huggingface_details_or_none(state, name).await {
+                return serde_json::to_value(info)
+                    .map_err(|error| CatalogError::Parse(error.to_string()));
             }
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse::new(format!(
-                    "Failed to connect to Ollama: {}",
-                    e
-                ))),
-            )
-                .into_response()
+            Err(CatalogError::Unavailable(format!(
+                "Failed to connect to Ollama: {error}"
+            )))
         }
     }
 }
 
-async fn huggingface_details_or_none(
+pub(crate) async fn huggingface_details_or_none(
     state: &AppState,
     name: &str,
 ) -> Option<types::HuggingFaceModelInfo> {
@@ -543,9 +633,19 @@ pub async fn delete(
     _auth: AuthUser,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    // Validate model name
-    if let Err(e) = validate_model_name(&name) {
-        return (StatusCode::BAD_REQUEST, Json(e)).into_response();
+    match delete_named(&state, &name).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+pub(crate) async fn delete_named(state: &AppState, name: &str) -> Result<(), CatalogError> {
+    if let Err(error) = validate_model_name(name) {
+        return Err(CatalogError::InvalidName(error));
+    }
+
+    if delete_comfy_weight(state, name) {
+        return Ok(());
     }
 
     let ollama_host = &state.config().ollama_host;
@@ -556,59 +656,49 @@ pub async fn delete(
         name: String,
     }
 
-    if delete_comfy_weight(&state, &name) {
-        return StatusCode::NO_CONTENT.into_response();
-    }
-
     match OLLAMA_HTTP_CLIENT
         .delete(&url)
-        .json(&DeleteRequest { name: name.clone() })
+        .json(&DeleteRequest {
+            name: name.to_string(),
+        })
         .send()
         .await
     {
         Ok(response) => {
             if response.status().is_success() {
-                StatusCode::NO_CONTENT.into_response()
+                Ok(())
             } else if response.status() == StatusCode::NOT_FOUND {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse::new(format!("Model not found: {}", name))),
-                )
-                    .into_response()
+                Err(CatalogError::NotFound(name.to_string()))
             } else {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(ErrorResponse::new("Ollama service error")),
-                )
-                    .into_response()
+                Err(CatalogError::Unavailable("Ollama service error".into()))
             }
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new(format!(
-                "Failed to connect to Ollama: {}",
-                e
-            ))),
-        )
-            .into_response(),
+        Err(error) => Err(CatalogError::Unavailable(format!(
+            "Failed to connect to Ollama: {error}"
+        ))),
     }
 }
 
 /// GET /api/models/train/bases
 pub async fn train_bases(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
-    let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()));
-    match catalog {
-        Ok(catalog) => {
-            let mut bases = lora::available_bases(&catalog, &state.config().comfyui.models_dir);
-            bases.extend(chat_train_bases(&state).await);
-            Json(bases).into_response()
-        }
-        Err(_) => (
+    match train_bases_list(&state).await {
+        Ok(bases) => Json(bases).into_response(),
+        Err(message) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("recipe catalog is not readable")),
+            Json(ErrorResponse::new(message)),
         )
             .into_response(),
     }
+}
+
+pub(crate) async fn train_bases_list(
+    state: &AppState,
+) -> Result<Vec<lora::TrainBase>, &'static str> {
+    let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
+        .map_err(|_| "recipe catalog is not readable")?;
+    let mut bases = lora::available_bases(&catalog, &state.config().comfyui.models_dir);
+    bases.extend(chat_train_bases(state).await);
+    Ok(bases)
 }
 
 async fn chat_train_bases(state: &AppState) -> Vec<lora::TrainBase> {
@@ -791,6 +881,13 @@ pub struct TrainQuery {
 
 /// GET /api/models/train
 pub async fn train_job(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
+    match current_train_job(&state) {
+        Some(job) => Json(job).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+pub(crate) fn current_train_job(state: &AppState) -> Option<TrainJobView> {
     if let Some(mut job) = state.train_jobs().current() {
         if let Some(host) = host_train::current_with_progress(&state.config().comfyui.models_dir) {
             job.provider = Some(host.provider.as_str().to_string());
@@ -801,11 +898,56 @@ pub async fn train_job(State(state): State<AppState>, _auth: AuthUser) -> impl I
                 job.pod_id = host.pod_id;
             }
         }
-        return Json(job).into_response();
+        return Some(job);
     }
-    match host_train::current_with_progress(&state.config().comfyui.models_dir) {
-        Some(job) => Json(TrainJobView::from_host(job)).into_response(),
-        None => StatusCode::NO_CONTENT.into_response(),
+    host_train::current_with_progress(&state.config().comfyui.models_dir)
+        .map(TrainJobView::from_host)
+}
+
+fn train_running() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ErrorResponse::new("a training job is already running")),
+    )
+        .into_response()
+}
+
+/// DELETE /api/models/train
+pub async fn dismiss_train(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
+    match dismiss_train_job(&state) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(DismissError::Busy) => train_running(),
+        Err(DismissError::Failed(message)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(message)),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum DismissError {
+    Busy,
+    Failed(String),
+}
+
+pub(crate) fn dismiss_train_job(state: &AppState) -> Result<(), DismissError> {
+    if state
+        .train_jobs()
+        .current()
+        .is_some_and(|job| job.status == TrainJobStatus::Running)
+    {
+        return Err(DismissError::Busy);
+    }
+    match host_train::dismiss(&state.config().comfyui.models_dir) {
+        Ok(()) => {
+            state.train_jobs().clear_finished();
+            Ok(())
+        }
+        Err(TrainError::Failed(message)) if message == "a training job is already running" => {
+            Err(DismissError::Busy)
+        }
+        Err(error) => Err(DismissError::Failed(error.to_string())),
     }
 }
 
@@ -904,69 +1046,103 @@ pub async fn train(
             Err(error) => return error.into_response(),
         }
     }
-    if request.subject == lora::TrainSubject::Language {
-        let bases = chat_train_bases(&state).await;
-        match language_train_base(&bases, request.base.trim()) {
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::new("unknown training base")),
-                )
-                    .into_response();
-            }
-            Some(base) if request.method == lora::TrainMethod::Finetune && !base.finetune => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::new(
-                        "fine-tune is only available for small chat models",
-                    )),
-                )
-                    .into_response();
-            }
-            Some(_) => {}
-        }
-    }
-    match lora::validate_request(&state.config().comfyui, &request) {
-        Err(TrainError::Disabled) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse::new(
-                    "LoRA training is not configured on this server",
-                )),
-            )
-                .into_response();
-        }
-        Err(TrainError::Invalid(message)) => {
-            return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response();
-        }
-        Err(TrainError::Failed(message)) => {
-            return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response();
-        }
-        Ok(()) => {}
-    }
     let runpod_api_key = if request.provider == TrainProvider::Runpod {
         match runpod_key(&state, &auth, query.workspace_id).await {
             Ok(Some(key)) => Some(key),
             Ok(None) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::new(
-                        "Save a Runpod API key in Workspace Settings.",
-                    )),
-                )
-                    .into_response();
+                return StartTrainError::MissingRunpodKey.into_response();
             }
             Err(error) => return error.into_response(),
         }
     } else {
         None
     };
+    match start_job(&state, request, runpod_api_key).await {
+        Ok(view) => (StatusCode::ACCEPTED, Json(view)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+pub(crate) enum StartTrainError {
+    Disabled,
+    Invalid(&'static str),
+    Failed(String),
+    Busy,
+    UnknownBase,
+    FineTuneTooLarge,
+    MissingRunpodKey,
+}
+
+impl StartTrainError {
+    fn from_train(error: TrainError) -> Self {
+        match error {
+            TrainError::Disabled => Self::Disabled,
+            TrainError::Invalid(message) => Self::Invalid(message),
+            TrainError::Failed(message) => Self::Failed(message),
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Disabled => "LoRA training is not configured on this server".to_string(),
+            Self::Invalid(message) => (*message).to_string(),
+            Self::Failed(message) => message.clone(),
+            Self::Busy => "a training job is already running".to_string(),
+            Self::UnknownBase => "unknown training base".to_string(),
+            Self::FineTuneTooLarge => {
+                "fine-tune is only available for small chat models".to_string()
+            }
+            Self::MissingRunpodKey => "Save a Runpod API key in Workspace Settings.".to_string(),
+        }
+    }
+}
+
+impl IntoResponse for StartTrainError {
+    fn into_response(self) -> Response {
+        if matches!(self, Self::Busy) {
+            return train_running();
+        }
+        let status = match self {
+            Self::Disabled => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Invalid(_)
+            | Self::Failed(_)
+            | Self::UnknownBase
+            | Self::FineTuneTooLarge
+            | Self::MissingRunpodKey => StatusCode::BAD_REQUEST,
+            Self::Busy => StatusCode::CONFLICT,
+        };
+        (status, Json(ErrorResponse::new(self.message()))).into_response()
+    }
+}
+
+pub(crate) async fn start_job(
+    state: &AppState,
+    request: lora::TrainRequest,
+    runpod_api_key: Option<String>,
+) -> Result<TrainJobView, StartTrainError> {
+    if request.subject == lora::TrainSubject::Language {
+        let bases = chat_train_bases(state).await;
+        match language_train_base(&bases, request.base.trim()) {
+            None => return Err(StartTrainError::UnknownBase),
+            Some(base) if request.method == lora::TrainMethod::Finetune && !base.finetune => {
+                return Err(StartTrainError::FineTuneTooLarge);
+            }
+            Some(_) => {}
+        }
+    }
+    lora::validate_request(&state.config().comfyui, &request)
+        .map_err(StartTrainError::from_train)?;
+    if request.provider == TrainProvider::Runpod
+        && runpod_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .is_none()
+    {
+        return Err(StartTrainError::MissingRunpodKey);
+    }
     if host_train::busy(&state.config().comfyui.models_dir) {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse::new("a training job is already running")),
-        )
-            .into_response();
+        return Err(StartTrainError::Busy);
     }
     let method = request.method.as_str();
     let Some(job) = state.train_jobs().start(
@@ -974,11 +1150,7 @@ pub async fn train(
         Some(method.to_string()),
         Some(request.provider.as_str().to_string()),
     ) else {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse::new("a training job is already running")),
-        )
-            .into_response();
+        return Err(StartTrainError::Busy);
     };
     let view = job.view();
     let comfyui = state.config().comfyui.clone();
@@ -1019,7 +1191,42 @@ pub async fn train(
             }
         }
     });
-    (StatusCode::ACCEPTED, Json(view)).into_response()
+    Ok(view)
+}
+
+pub(crate) fn catalog_pull_start(state: &AppState, request: Pull) -> PullStart {
+    let comfy = is_comfy_pull(&request).then(|| {
+        let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
+            .or_else(|_| RecipeCatalog::packaged())
+            .ok();
+        let recipe_id = request.recipe_id.clone().or_else(|| {
+            request.hf_base.as_deref().and_then(|base| {
+                catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.adapter_recipe_for_base(base))
+                    .map(|recipe| recipe.id.clone())
+            })
+        });
+        ComfyPull {
+            models_dir: state.config().comfyui.models_dir.clone(),
+            recipe_id,
+            hf_base: request.hf_base.clone(),
+            hub_origin: huggingface_hub_origin(&state.config().huggingface_models_url),
+        }
+    });
+    PullStart {
+        model: request.model,
+        ollama_host: state.config().ollama_host.clone(),
+        comfy,
+    }
+}
+
+fn is_comfy_pull(request: &Pull) -> bool {
+    request
+        .runtime
+        .as_deref()
+        .is_some_and(|runtime| runtime.eq_ignore_ascii_case("comfy"))
+        || request.model.contains(".safetensors")
 }
 
 /// GET /api/models/disk
@@ -1035,7 +1242,7 @@ pub async fn disk(_auth: AuthUser) -> impl IntoResponse {
     }
 }
 
-fn delete_comfy_weight(state: &AppState, name: &str) -> bool {
+pub(crate) fn delete_comfy_weight(state: &AppState, name: &str) -> bool {
     let Ok(filename) = zone_comfy::recipe::sanitize_weight_filename(name) else {
         return false;
     };

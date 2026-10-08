@@ -15,6 +15,7 @@ import {
 } from '../../../api/models';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { isDocumentFile, isImageFile, isVideoFile } from '../dropFiles';
+import { useTrain } from '../hooks/useTrain';
 import {
   blobFromBase64,
   captionBatches,
@@ -539,6 +540,7 @@ function TrainPairRow({
 }
 
 export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
+  const { job: trainJob } = useTrain();
   const { currentOrganization, currentWorkspace } = useWorkspace();
   const [bases, setBases] = useState<TrainBase[]>([]);
   const [subject, setSubject] = useState<TrainSubjectKind>('other');
@@ -647,8 +649,6 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             dataset: job.dataset,
             screening: job.screening ?? null,
           });
-        } else if (job.status === 'failed' && job.error) {
-          setError(job.error);
         }
       } catch (caught) {
         if (!aborted(caught) && !controller.signal.aborted) {
@@ -660,6 +660,15 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     })();
     return () => controller.abort();
   }, []);
+
+  const trainJobKey = trainJob?.id ?? null;
+  const trainJobStatus = trainJob?.status ?? null;
+
+  useEffect(() => {
+    if (!trainJobKey || trainJobStatus === 'failed') {
+      setError(null);
+    }
+  }, [trainJobKey, trainJobStatus]);
 
   useEffect(() => {
     if (!focusRequested) return;
@@ -951,6 +960,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     setError(null);
     setResult(null);
     setProgress({ name: name.trim(), status: 'running' });
+    const latest: { job: TrainJob | null } = { job: null };
     try {
       const trained = await modelsApi.train(
         {
@@ -983,7 +993,10 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
               ),
         },
         undefined,
-        setProgress
+        (job) => {
+          latest.job = job;
+          setProgress(job);
+        }
       );
       setResult(trained);
       setProgress(null);
@@ -992,8 +1005,10 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       setName('');
       onTrained();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Training failed');
       setProgress(null);
+      if (latest.job?.status !== 'failed') {
+        setError(caught instanceof Error ? caught.message : 'Training failed');
+      }
     } finally {
       setBusy(false);
     }
@@ -1051,6 +1066,9 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     stills: images.length,
     clips: clips.length,
   });
+  const failedJobError =
+    trainJob?.status === 'failed' ? (trainJob.error ?? 'Training failed') : null;
+  const shownError = failedJobError ?? error;
   const runpodDisabled = !hasRunpodKey;
   const computeHint = computeHelp({
     subject,
@@ -1064,7 +1082,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       <h2>{trainingHeading(subject, method)}</h2>
       <p className="help-text">{trainingHelp(subject, method, edit)}</p>
       {advice && <p className="help-text">{advice}</p>}
-      {error && <div className="error-placeholder">{error}</div>}
+      {shownError && <div className="error-placeholder">{shownError}</div>}
       {busy && (
         <div className="train-result" role="status">
           <h3 className="train-result-title">Training{runName ? ` ${runName}` : ''}</h3>

@@ -1025,7 +1025,9 @@ the CLI in the `ZONE_MCP_TOKEN` variable, never on its command line. The agent
 calls the tools as `mcp__zone__<name>`, Zone executes them, and every call goes
 through the approval policy a chat tool call goes through: a chat with
 Auto-approve off raises the usual card and waits for you, and a denial refuses
-the call. So retrieval, the workspace tools and citations work on these turns,
+the call. So retrieval, the workspace tools, citations, and the model catalog
+and training tools (`list_models`, `install_model`, `start_train`,
+`get_train_job`, and the rest of that set) work on these turns,
 and the console shows what the agent did the way it always does. A task run
 gets its task tools the same way, and approves every call, as task runs
 always do. Neither a chat's agent nor a task run's is offered the tools that

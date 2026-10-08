@@ -22,6 +22,13 @@ mock.module('../hooks/usePull', () => ({
   usePull: mockUsePull,
 }));
 
+mock.module('../hooks/useTrain', () => ({
+  useTrain: () => ({
+    job: null,
+    dismiss: mock(),
+  }),
+}));
+
 mock.module('../../../api/models', () => ({
   modelsApi: {
     getModelInfo: mockGetModelInfo,

@@ -604,6 +604,7 @@ impl ChatTools {
                 super::images::register(&mut registry, scope);
                 super::audio::register(&mut registry, scope);
                 super::memory::register(&mut registry, scope);
+                super::models::register(&mut registry, scope);
             }
             super::monitoring::register(&mut registry, scope);
             workspace = registry
@@ -2842,6 +2843,12 @@ mod tests {
         assert!(tools.names().contains(&"list_projects".to_string()));
         assert!(tools.names().contains(&"search_knowledge".to_string()));
         assert!(tools.names().contains(&"search_chat_history".to_string()));
+        for name in crate::agent::models::NAMES {
+            assert!(
+                tools.names().contains(&name.to_string()),
+                "{name} must be available"
+            );
+        }
         for name in [
             "run_shell",
             "run_command",
@@ -2908,6 +2915,12 @@ mod tests {
         assert!(!tools.names().contains(&"start_task".to_string()));
         assert!(!tools.names().contains(&"generate_image".to_string()));
         assert!(!tools.names().contains(&"query_prometheus".to_string()));
+        for name in crate::agent::models::NAMES {
+            assert!(
+                !tools.names().contains(&name.to_string()),
+                "{name} must stay off a background run"
+            );
+        }
         for name in memory_tools() {
             assert!(
                 !tools.names().contains(&name.to_string()),

@@ -18,6 +18,7 @@ pub mod identifier;
 pub mod images;
 pub mod integrations;
 pub mod memory;
+pub mod models;
 pub mod monitoring;
 pub mod plan;
 pub mod planner;

@@ -41,6 +41,7 @@ const ORDER: &[Section] = &[
     ("files", section::files::render),
     ("waiting", section::waiting::render),
     ("images", section::images::render),
+    ("models", section::models::render),
     ("cluster", section::cluster::render),
     ("web", section::web::render),
     ("citation", section::citation::render),
@@ -62,13 +63,11 @@ const PLAIN: &[Section] = &[
 ];
 
 /// Raised by measurement rather than by guess, the way every section that has
-/// widened this has raised it: the chat prompt with the memory and automation
-/// rules together is 22,637 characters, so the ceiling is the next round number
-/// above that and the next section to grow has to measure itself too. Neither
-/// section's own measurement was right for both — memory measured 22,395
-/// without automations, automations 21,162 without memory — which is what the
-/// rule is for.
-pub const CHAT_MAX_CHARS: usize = 22_700;
+/// widened this has raised it: the chat prompt with the models catalog/train
+/// section is 23,287 characters, so the ceiling is the next round number above
+/// that and the next section to grow has to measure itself too. Memory plus
+/// automations previously measured 22,637; models is the new occupant.
+pub const CHAT_MAX_CHARS: usize = 23_300;
 /// A planner chat adds the interview section to the chat prompt; measured
 /// the same way and rounded up the same way.
 pub const PLANNER_MAX_CHARS: usize = 26_000;
@@ -192,19 +191,26 @@ mod tests {
         "ask_user",
         "assess_pull_requests",
         "assess_release_pipelines",
+        "cancel_model_install",
         "cancel_reminder",
         "comment_on_issue",
         "create_document",
         "create_pull_request",
         "create_reminder",
         "create_task",
+        "delete_model",
+        "dismiss_train",
         "edit_image",
         "fetch_url",
         "generate_audio",
         "generate_image",
         "get_build_status",
         "get_issue",
+        "get_model",
+        "get_model_install",
         "get_task_run",
+        "get_train_job",
+        "install_model",
         "list_chats",
         "list_deployments",
         "list_documents",
@@ -212,10 +218,12 @@ mod tests {
         "list_grafana_dashboards",
         "list_issues",
         "list_members",
+        "list_models",
         "list_projects",
         "list_reminders",
         "list_sources",
         "list_tasks",
+        "list_train_bases",
         "load_tools",
         MCP_TOOL,
         "memory_append",
@@ -237,6 +245,7 @@ mod tests {
         "search_tools",
         "send_message",
         "start_task",
+        "start_train",
         "tail_job",
         "tail_task_log",
         "update_document",
@@ -395,6 +404,7 @@ mod tests {
                 "files",
                 "waiting",
                 "images",
+                "models",
                 "cluster",
                 "web",
                 "citation",

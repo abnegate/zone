@@ -367,6 +367,18 @@ export const modelsApi = {
     return parse(TrainJobSchema, await response.json());
   },
 
+  async dismissTrain(): Promise<void> {
+    const response = await fetch(`${API_BASE}/api/models/train`, {
+      method: 'DELETE',
+      headers: client.getHeaders(),
+    });
+    if (response.status === 204) return;
+    const payload = await response
+      .json()
+      .catch(() => ({ error: 'Could not dismiss training status' }));
+    throw new Error(payload.error || `Failed to dismiss training status: ${response.status}`);
+  },
+
   async waitTrain(
     signal?: AbortSignal,
     onProgress?: (job: TrainJob) => void

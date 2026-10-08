@@ -80,10 +80,14 @@ export function useTrainState(): TrainApi {
 
   const dismiss = useCallback(() => {
     clearDismissTimer();
-    if (job?.id) setDismissedId(job.id);
+    const key = job?.id ?? 'current';
+    setDismissedId(key);
+    void modelsApi.dismissTrain().catch(() => {
+      setDismissedId((current) => (current === key ? null : current));
+    });
   }, [clearDismissTimer, job?.id]);
 
-  const visible = job?.id && job.id === dismissedId ? null : job;
+  const visible = job && dismissedId && (job.id ?? 'current') === dismissedId ? null : job;
 
   return useMemo(
     () => ({

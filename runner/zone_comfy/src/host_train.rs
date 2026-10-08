@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub const ROOT: &str = ".zone-train";
+const DISMISSED: &str = "dismissed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,11 +159,33 @@ pub fn busy(models_dir: &Path) -> bool {
 }
 
 /// Latest job with `progress.json` overlaid so GET /train can survive a
-/// manager recreate.
+/// manager recreate. A dismissed finished job stays off GET until a new run.
 pub fn current_with_progress(models_dir: &Path) -> Option<HostJob> {
     let mut job = current(models_dir)?;
-    overlay_progress(&job_dir(models_dir, job.id), &mut job);
+    let dir = job_dir(models_dir, job.id);
+    if dir.join(DISMISSED).is_file() {
+        return None;
+    }
+    overlay_progress(&dir, &mut job);
     Some(job)
+}
+
+/// Hide a finished host job from GET /api/models/train. Running jobs stay.
+pub fn dismiss(models_dir: &Path) -> Result<(), TrainError> {
+    let Some(job) = current(models_dir) else {
+        return Ok(());
+    };
+    if job.busy() {
+        return Err(TrainError::Failed(
+            "a training job is already running".into(),
+        ));
+    }
+    let dir = job_dir(models_dir, job.id);
+    if dir.join(DISMISSED).is_file() {
+        return Ok(());
+    }
+    fs::create_dir_all(&dir).map_err(|error| TrainError::Failed(error.to_string()))?;
+    fs::write(dir.join(DISMISSED), b"").map_err(|error| TrainError::Failed(error.to_string()))
 }
 
 pub fn steps_for(image_count: usize) -> u32 {
@@ -398,6 +421,33 @@ mod tests {
         newer.status = HostStatus::Succeeded;
         write_job(&job_dir(models, newer.id), &newer).unwrap();
         assert!(!busy(models));
+    }
+
+    #[test]
+    fn dismiss_hides_a_finished_job_and_refuses_a_running_one() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path();
+        let mut job = HostJob::create("yvonne", "finetune", "ohwx", "base.safetensors");
+        job.status = HostStatus::Failed;
+        job.error = Some("cancelled".into());
+        write_job(&job_dir(models, job.id), &job).unwrap();
+        assert_eq!(
+            current_with_progress(models).unwrap().error.as_deref(),
+            Some("cancelled")
+        );
+        dismiss(models).unwrap();
+        assert!(current_with_progress(models).is_none());
+        assert_eq!(current(models).unwrap().name, "yvonne");
+        dismiss(models).unwrap();
+
+        let mut running = HostJob::create("jerry", "lora", "ohwx", "base.safetensors");
+        running.started_at = job.started_at + chrono::Duration::seconds(5);
+        write_job(&job_dir(models, running.id), &running).unwrap();
+        let error = dismiss(models).unwrap_err();
+        assert!(
+            matches!(error, TrainError::Failed(message) if message == "a training job is already running")
+        );
+        assert_eq!(current_with_progress(models).unwrap().name, "jerry");
     }
 
     #[test]

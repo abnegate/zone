@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { act, renderHook, waitFor } from '@testing-library/react';
 
 const mockTrainJob = mock(() => Promise.resolve(null as unknown));
+const mockDismissTrain = mock(() => Promise.resolve());
 
 let authState = {
   isAuthenticated: true,
@@ -10,6 +11,7 @@ let authState = {
 mock.module('../../../api/models', () => ({
   modelsApi: {
     trainJob: mockTrainJob,
+    dismissTrain: mockDismissTrain,
   },
 }));
 
@@ -35,6 +37,8 @@ describe('useTrain', () => {
   beforeEach(() => {
     mockTrainJob.mockReset();
     mockTrainJob.mockImplementation(() => Promise.resolve(null));
+    mockDismissTrain.mockReset();
+    mockDismissTrain.mockImplementation(() => Promise.resolve());
     authState = { isAuthenticated: true };
   });
 
@@ -75,5 +79,24 @@ describe('useTrain', () => {
       result.current.dismiss();
     });
     expect(result.current.job).toBeNull();
+    expect(mockDismissTrain).toHaveBeenCalled();
+  });
+
+  it('restores a job when dismiss fails to persist', async () => {
+    mockDismissTrain.mockImplementation(() => Promise.reject(new Error('offline')));
+    mockTrainJob.mockImplementation(() =>
+      Promise.resolve({
+        id: 'job-1',
+        name: 'yvonne',
+        status: 'failed',
+        error: 'cancelled',
+      })
+    );
+    const { result } = renderHook(() => useTrainState());
+    await waitFor(() => expect(result.current.job?.error).toBe('cancelled'));
+    act(() => {
+      result.current.dismiss();
+    });
+    await waitFor(() => expect(result.current.job?.error).toBe('cancelled'));
   });
 });
