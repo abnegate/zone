@@ -8,7 +8,7 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(dirname "$SCRIPT_DIR")
 MANIFEST="$PROJECT_DIR/comfyui/model-manifest.json"
 INSTALL_DIR=${COMFYUI_INSTALL_DIR:-"$HOME/Library/Application Support/Zone/ComfyUI"}
-MODELS_DIR=${COMFYUI_MODELS_DIR:-"$INSTALL_DIR/models"}
+MODELS_DIR=${COMFYUI_MODELS_DIRECTORY:-"$INSTALL_DIR/models"}
 PYTHON=${PYTHON_BIN:-python3}
 MODEL_ACTION=none
 MODEL_BUNDLE=image-people
@@ -79,9 +79,9 @@ Bundles are selected left to right, so the last of --bundle and any bundle
 alias on the command line wins.
 
 Environment:
-  COMFYUI_INSTALL_DIR  Runtime directory (default: $INSTALL_DIR)
-  COMFYUI_MODELS_DIR   Model directory (default: <runtime>/models)
-  PYTHON_BIN           Python 3.11-3.13 executable (default: python3)
+  COMFYUI_INSTALL_DIR       Runtime directory (default: $INSTALL_DIR)
+  COMFYUI_MODELS_DIRECTORY  Model directory (default: <runtime>/models)
+  PYTHON_BIN                Python 3.11-3.13 executable (default: python3)
 EOF
 }
 

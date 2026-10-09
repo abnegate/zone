@@ -1192,7 +1192,10 @@ impl Config {
             github_api_url,
             github_api_allows_http,
             web_search: crate::services::search::from_environment(),
-            comfyui: ComfyUiConfig::from_env(),
+            comfyui: ComfyUiConfig::from_env().map_err(|error| match error {
+                zone_comfy::Error::Configuration(message) => ConfigError::Invalid(message),
+                _ => ConfigError::Invalid("the COMFYUI_* settings could not be read"),
+            })?,
             source_index: SourceIndexConfig::from_env(),
             monitoring: MonitoringConfig::from_env(),
             train_upload_limit_mb: env_u64("TRAIN_UPLOAD_LIMIT_MB", 4096, 4, 65536),

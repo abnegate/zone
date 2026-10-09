@@ -18,13 +18,17 @@ if str(COMFYUI) not in sys.path:
 import train_lora  # noqa: E402
 
 VARIABLES = (
+    'COMFYUI_API_TOKEN',
     'COMFYUI_MODELS_DIR',
+    'COMFYUI_MODELS_DIRECTORY',
+    'COMFYUI_TOKEN_HEADER',
     'ZONE_COMFY_INPUT',
     'ZONE_TRAIN_ARCHITECTURE',
     'ZONE_TRAIN_CHECKPOINT',
     'ZONE_TRAIN_CLIP',
     'ZONE_TRAIN_DEFER_CLEANUP',
     'ZONE_TRAIN_DIR',
+    'ZONE_TRAIN_DIRECTORY',
     'ZONE_TRAIN_FOLDER',
     'ZONE_TRAIN_ARTIFACT',
     'ZONE_TRAIN_OUTPUT',
@@ -228,6 +232,32 @@ class TrainStepsTests(unittest.TestCase):
             self.assertEqual(train_lora.train_steps(8, train_lora.load_config()), 37)
 
 
+class TokenHeaderTests(unittest.TestCase):
+    def sent_headers(self, **values: str) -> dict[str, str]:
+        with (
+            environment(**values),
+            mock.patch.object(train_lora.urllib.request, 'urlopen') as urlopen,
+        ):
+            train_lora.request('http://comfy.test/prompt')
+        sent = urlopen.call_args.args[0]
+        return {name.lower(): value for name, value in sent.header_items()}
+
+    def test_the_token_goes_in_zones_header_by_default(self) -> None:
+        self.assertEqual(
+            self.sent_headers(COMFYUI_API_TOKEN='secret'),
+            {'x-zone-comfyui-token': 'secret'},
+        )
+
+    def test_the_token_goes_in_the_header_zone_names(self) -> None:
+        self.assertEqual(
+            self.sent_headers(COMFYUI_API_TOKEN='secret', COMFYUI_TOKEN_HEADER='X-Proxy-Token'),
+            {'x-proxy-token': 'secret'},
+        )
+
+    def test_no_token_sends_no_header(self) -> None:
+        self.assertEqual(self.sent_headers(COMFYUI_TOKEN_HEADER='X-Proxy-Token'), {})
+
+
 class ComfyInputDirTests(unittest.TestCase):
     def test_override_wins(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -235,7 +265,7 @@ class ComfyInputDirTests(unittest.TestCase):
             (root / 'input').mkdir(parents=True)
             with environment(
                 ZONE_COMFY_INPUT=str(root / 'input'),
-                COMFYUI_MODELS_DIR='/unused/models',
+                COMFYUI_MODELS_DIRECTORY='/unused/models',
             ):
                 self.assertEqual(train_lora.comfy_input_dir(), (root / 'input').resolve())
 
@@ -244,8 +274,17 @@ class ComfyInputDirTests(unittest.TestCase):
             root = Path(directory) / 'comfy'
             (root / 'input').mkdir(parents=True)
             (root / 'models').mkdir()
-            with environment(COMFYUI_MODELS_DIR=str(root / 'models')):
+            with environment(COMFYUI_MODELS_DIRECTORY=str(root / 'models')):
                 self.assertEqual(train_lora.comfy_input_dir(), (root / 'input').resolve())
+
+    def test_the_abbreviated_models_name_is_no_longer_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'comfy'
+            (root / 'input').mkdir(parents=True)
+            (root / 'models').mkdir()
+            with environment(COMFYUI_MODELS_DIR=str(root / 'models')):
+                with self.assertRaises(SystemExit):
+                    train_lora.comfy_input_dir()
 
     def test_requires_a_location(self) -> None:
         with environment():
@@ -447,7 +486,7 @@ class PromptLifecycleTests(unittest.TestCase):
             staged = input_directory / run.folder
             staged.mkdir()
             with (
-                environment(ZONE_TRAIN_DIR=str(root), ZONE_TRAIN_OUTPUT=str(root / 'output')),
+                environment(ZONE_TRAIN_DIRECTORY=str(root), ZONE_TRAIN_OUTPUT=str(root / 'output')),
                 mock.patch.object(train_lora, 'load_config', return_value=config),
                 mock.patch.object(
                     train_lora.TrainingModel,

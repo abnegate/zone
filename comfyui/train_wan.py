@@ -379,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description='Zone host Wan video LoRA trainer')
     parser.add_argument(
         '--models-dir',
-        default=os.environ.get('COMFYUI_MODELS_DIR') or './models',
+        default=os.environ.get('COMFYUI_MODELS_DIRECTORY') or './models',
     )
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--stub', action='store_true')

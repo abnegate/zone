@@ -1279,7 +1279,7 @@ fn validate_run_name(name: &str, prefix: &str) -> Result<(), TrainError> {
 
 fn authorize(config: &Config, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     match &config.api_token {
-        Some(token) => request.header("X-Zone-ComfyUI-Token", token),
+        Some(token) => request.header(&config.token_header, token),
         None => request,
     }
 }
@@ -1502,6 +1502,37 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(!output.exists(), "a refused download must write nothing");
+    }
+
+    #[tokio::test]
+    async fn the_token_travels_in_the_header_the_deployment_names() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        uploads(&server).await;
+        queues(&server, json!({"prompt_id": prompt, "number": 1})).await;
+        finishes(&server, prompt).await;
+        serves(&server, vec![7u8; 20_000]).await;
+        let config = Config {
+            token_header: reqwest::header::HeaderName::from_static("x-proxy-token"),
+            ..config(&server)
+        };
+
+        let work = dataset();
+        let output = work.path().join("proxied.safetensors");
+        run(&config, &base(), work.path(), &output, 2)
+            .await
+            .unwrap();
+
+        let posted = server.received_requests().await.unwrap();
+        let graph = posted
+            .iter()
+            .find(|request| request.url.path() == "/prompt")
+            .expect("the graph was never submitted");
+        assert_eq!(graph.headers.get("X-Proxy-Token").unwrap(), "secret");
+        assert!(
+            graph.headers.get("X-Zone-ComfyUI-Token").is_none(),
+            "the token goes in the configured header alone"
+        );
     }
 
     #[tokio::test]

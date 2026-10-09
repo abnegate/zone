@@ -1208,7 +1208,7 @@ when the agent knows it. With Fast on Automatic they try
 agent knows. Otherwise neither starts the agent: the message is answered as
 chat, and the edit keeps the prompt Zone writes from the words alone. The same
 happens when the agent gives no usable answer within
-`COMFYUI_CLASSIFIER_TIMEOUT_SECS` (3 seconds by default).
+`COMFYUI_CLASSIFIER_TIMEOUT_SECONDS` (3 seconds by default).
 
 ### Reviews, conflict repair and plan approval
 
@@ -1331,8 +1331,9 @@ The processes that run as that user are:
   without an approval card. `write_file` and `apply_patch` do the same once
   approved or with Auto-approve on, and `run_shell` and `run_command` then
   reach everything above;
-- configured stdio MCP servers and `COMFYUI_TRAIN_COMMAND`, which also inherit
-  the server's full environment.
+- configured stdio MCP servers, which also inherit the server's full
+  environment, and `COMFYUI_TRAIN_COMMAND`, which gets the allowlist described
+  under it.
 
 What stands in the way:
 
@@ -1340,11 +1341,10 @@ What stands in the way:
   user can read the server's own environment, which holds the database URL,
   the JWT and encryption keys and the LiteLLM key. That protects the server
   process only: any process of the same user can read a child's environment
-  while the child runs. The CLIs, Zone's shell tools, and the `rg`, `git`,
-  `ffmpeg` and `ffprobe` it runs start from an allowlisted environment,
-  without those secrets. Configured stdio MCP servers and
-  `COMFYUI_TRAIN_COMMAND` start from the server's full environment, so they
-  carry them.
+  while the child runs. The CLIs, Zone's shell tools, `COMFYUI_TRAIN_COMMAND`,
+  and the `rg`, `git`, `ffmpeg` and `ffprobe` it runs start from an
+  allowlisted environment, without those secrets. Configured stdio MCP servers
+  start from the server's full environment, so they carry them.
 - Zone's file tools, `read_file`, `list_files`, `search_code`, `write_file`
   and `apply_patch`, refuse any path under the agent state directory and any
   process's `/proc/<pid>` entry, `/proc/self` included, whatever the chat's
@@ -1505,6 +1505,25 @@ once approved, and its file tools read whatever else the server's user can.
 See [COMFYUI.md](COMFYUI.md) for model setup, hardware requirements, checksum
 details, and native macOS / bundled NVIDIA instructions.
 
+These settings were renamed, and the old names are no longer read. A `.env`
+that still sets an old name gets the default instead:
+
+| Before | After |
+|---|---|
+| `COMFYUI_CLASSIFIER_TIMEOUT_SECS` | `COMFYUI_CLASSIFIER_TIMEOUT_SECONDS` |
+| `COMFYUI_CAPTION_TIMEOUT_SECS` | `COMFYUI_CAPTION_TIMEOUT_SECONDS` |
+| `COMFYUI_REQUEST_TIMEOUT_SECS` | `COMFYUI_REQUEST_TIMEOUT_SECONDS` |
+| `COMFYUI_GENERATION_TIMEOUT_SECS` | `COMFYUI_GENERATION_TIMEOUT_SECONDS` |
+| `COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS` | `COMFYUI_VIDEO_GENERATION_TIMEOUT_SECONDS` |
+| `COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS` | `COMFYUI_AUDIO_GENERATION_TIMEOUT_SECONDS` |
+| `COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECS` | `COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECONDS` |
+| `COMFYUI_TRAIN_TIMEOUT_SECS` | `COMFYUI_TRAIN_TIMEOUT_SECONDS` |
+| `COMFYUI_POLL_INTERVAL_MS` | `COMFYUI_POLL_INTERVAL_MILLISECONDS` |
+| `COMFYUI_MODELS_DIR` | `COMFYUI_MODELS_DIRECTORY` |
+| `COMFYUI_TRAIN_FRAME_FPS` | `COMFYUI_TRAIN_FRAME_RATE` |
+| `ARTIFACT_ROOT` | `COMFYUI_ARTIFACT_ROOT` |
+| `ZONE_TRAIN_DIR` (given to `COMFYUI_TRAIN_COMMAND`) | `ZONE_TRAIN_DIRECTORY` |
+
 ### `COMFYUI_ENABLED`
 - **Default**: `false`
 - **Description**: Enables automatic image-, video-, and audio-intent routing
@@ -1519,6 +1538,19 @@ details, and native macOS / bundled NVIDIA instructions.
   `bundled-comfyui` profile
 - **Security**: ComfyUI is unauthenticated. Do not use a public URL; the bundled
   service is intentionally confined to the private Compose network.
+
+### `COMFYUI_API_TOKEN`
+- **Default**: empty
+- **Description**: Token sent with every ComfyUI request, in the header
+  `COMFYUI_TOKEN_HEADER` names. Required only when ComfyUI is reached through
+  `scripts/comfyui-loopback-bridge.py` or another proxy that checks one.
+
+### `COMFYUI_TOKEN_HEADER`
+- **Default**: `X-Zone-ComfyUI-Token`
+- **Description**: The header `COMFYUI_API_TOKEN` travels in, for a proxy
+  that checks another one. `scripts/comfyui-loopback-bridge.py` reads the same
+  variable. A value that is not a valid HTTP header name stops the server at
+  startup rather than sending the token where the proxy will not look.
 
 ### `COMFYUI_WORKFLOW_PATH`
 - **Default**: `/app/comfyui/workflows/sdxl-api.json`
@@ -1544,20 +1576,26 @@ details, and native macOS / bundled NVIDIA instructions.
   Video generation applies no identity LoRA; a trigger word in a video prompt
   passes through as plain text.
 
-### `COMFYUI_MODELS_DIR`
+### `COMFYUI_MODELS_DIRECTORY`
 - **Default**: `/app/comfyui/models`
 - **Description**: ComfyUI models root scanned for checkpoints, diffusion
   models, and LoRAs. HuggingFace adapter installs and Train output land in
   `loras/` under this directory.
+
+### `COMFYUI_ARTIFACT_ROOT`
+- **Default**: `/app/artifacts`
+- **Description**: Where generated images, videos, audio and chat attachments
+  are stored and served from. Compose mounts the `manager_artifacts` volume
+  here.
 
 ### `COMFYUI_TRAIN_COMMAND`
 - **Default**: empty (uses packaged `ZoneTrainLoRA` on the configured ComfyUI)
 - **Description**: Optional shell command used by the Models Train tab. When
   empty and `COMFYUI_ENABLED` is true, Zone posts a `ZoneTrainLoRA` graph to
   ComfyUI. The command still receives `ZONE_TRAIN_NAME`, `ZONE_TRAIN_BASE`,
-  `ZONE_TRAIN_ATTEMPT`, `ZONE_TRAIN_DIR`, `ZONE_TRAIN_OUTPUT`, `ZONE_TRAIN_TRIGGER`,
-  `ZONE_TRAIN_ARCHITECTURE`, `ZONE_TRAIN_FOLDER`, `ZONE_TRAIN_ARTIFACT`, and
-  `COMFYUI_BASE_URL` if you override it. `ZONE_TRAIN_NAME` remains the
+  `ZONE_TRAIN_ATTEMPT`, `ZONE_TRAIN_DIRECTORY`, `ZONE_TRAIN_OUTPUT`,
+  `ZONE_TRAIN_TRIGGER`, `ZONE_TRAIN_ARCHITECTURE`, `ZONE_TRAIN_FOLDER`,
+  `ZONE_TRAIN_ARTIFACT`, and `COMFYUI_BASE_URL` if you override it. `ZONE_TRAIN_NAME` remains the
   user-visible final filename. `ZONE_TRAIN_ATTEMPT`, `ZONE_TRAIN_FOLDER`, and
   `ZONE_TRAIN_ARTIFACT` identify
   isolated runtime namespaces. FLUX runs also receive `ZONE_TRAIN_CHECKPOINT`;
@@ -1573,7 +1611,21 @@ details, and native macOS / bundled NVIDIA instructions.
   uncalibrated; FLUX health bands do not apply, and live identity retention is
   not yet proven. A command that uses the packaged Python driver should also
   receive `ZONE_TRAIN_DEFER_CLEANUP=1`; Zone performs quality selection and
-  cleans that exact UUID namespace afterward. macOS apply:
+  cleans that exact UUID namespace afterward.
+- **Environment**: The command does not inherit the server's environment,
+  which holds the database URL, the signing keys and the LiteLLM key. It gets
+  exactly:
+  - `PATH`, `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `LANG`, `LC_ALL`, `TERM`,
+    `TZ` and `SSL_CERT_FILE`, with the server's values;
+  - every `ZONE_TRAIN_*` variable the server has, such as `ZONE_TRAIN_STEPS`;
+  - its run's own `ZONE_TRAIN_*` variables above and `ZONE_COMFY_INPUT`;
+  - `COMFYUI_BASE_URL`;
+  - when `COMFYUI_API_TOKEN` is set, `COMFYUI_API_TOKEN` and
+    `COMFYUI_TOKEN_HEADER`.
+
+  Anything else a trainer needs, such as `PYTHONPATH`, the command sets
+  itself or reads under a `ZONE_TRAIN_` name.
+- **macOS apply**:
   `./scripts/setup-comfyui-macos.sh --apply-nodes`. The NVIDIA image copies the
   same folder; Compose bind-mounts it over the container custom node.
 
@@ -1587,12 +1639,12 @@ details, and native macOS / bundled NVIDIA instructions.
   are never overwritten. Must be a model that accepts images. Auto-captioning
   is disabled only when no vision model is configured at all.
 
-### `COMFYUI_CAPTION_TIMEOUT_SECS`
+### `COMFYUI_CAPTION_TIMEOUT_SECONDS`
 - **Default**: `60`
 - **Description**: Per-request budget for one captioning call. A timeout leaves
   the caption as the trigger word alone rather than failing the training job.
 
-### `COMFYUI_TRAIN_TIMEOUT_SECS`
+### `COMFYUI_TRAIN_TIMEOUT_SECONDS`
 - **Default**: `3600`
 - **Description**: Wall-clock budget for a ComfyUI `ZoneTrainLoRA` job
   (FLUX/Qwen). Person SDXL jobs run on the host worker and ignore this.
@@ -1605,7 +1657,7 @@ details, and native macOS / bundled NVIDIA instructions.
   uses the current chat model or a small installed completion model. An
   organization or workspace on a saved endpoint ignores it (see *Saved
   endpoints*).
-- **Timeout**: `COMFYUI_CLASSIFIER_TIMEOUT_SECS` (default `3`, range 1–30).
+- **Timeout**: `COMFYUI_CLASSIFIER_TIMEOUT_SECONDS` (default `3`, range 1–30).
   Timeouts fall back to normal chat.
 
 ### `COMFYUI_VIDEO_WORKFLOW_PATH`
@@ -1643,7 +1695,7 @@ details, and native macOS / bundled NVIDIA instructions.
   `wan2.2_vae.safetensors` is rewritten to `wan_2.1_vae.safetensors`, the VAE
   the A14B experts decode with.
 
-### `COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS`
+### `COMFYUI_VIDEO_GENERATION_TIMEOUT_SECONDS`
 - **Default**: `7200`
 - **Description**: Wall-clock timeout for a single video generation job
   (range 10–14400)
@@ -1660,7 +1712,7 @@ details, and native macOS / bundled NVIDIA instructions.
   do not set `model_audio`. Path separators and traversal are rejected. Chat
   audio generation uses the effective `model_audio` setting when present.
 
-### `COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS`
+### `COMFYUI_AUDIO_GENERATION_TIMEOUT_SECONDS`
 - **Default**: `600` (range 10–3600, clamped)
 - **Description**: Wall-clock timeout for a single audio generation job
 
@@ -2120,10 +2172,12 @@ Need to find a specific config? Quick lookup:
   ZONE_AGENT_ENV_PASSTHROUGH, ZONE_CHAT_AGENT_CWD, ZONE_HOST_ROOT,
   ZONE_IN_CONTAINER
 - **Image, video, and audio generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
+  COMFYUI_API_TOKEN, COMFYUI_TOKEN_HEADER, COMFYUI_MODELS_DIRECTORY,
+  COMFYUI_ARTIFACT_ROOT, COMFYUI_TRAIN_COMMAND,
   COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_VIDEO_WORKFLOW_PATH,
   COMFYUI_VIDEO_UNET, COMFYUI_VIDEO_CLIP, COMFYUI_VIDEO_VAE,
-  COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS, COMFYUI_AUDIO_WORKFLOW_PATH,
-  COMFYUI_AUDIO_CHECKPOINT, COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS,
+  COMFYUI_VIDEO_GENERATION_TIMEOUT_SECONDS, COMFYUI_AUDIO_WORKFLOW_PATH,
+  COMFYUI_AUDIO_CHECKPOINT, COMFYUI_AUDIO_GENERATION_TIMEOUT_SECONDS,
   COMFYUI_COMMIT
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*

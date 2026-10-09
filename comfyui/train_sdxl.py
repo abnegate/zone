@@ -923,7 +923,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Zone host SDXL person trainer')
     parser.add_argument(
         '--models-dir',
-        default=os.environ.get('COMFYUI_MODELS_DIR') or './models',
+        default=os.environ.get('COMFYUI_MODELS_DIRECTORY') or './models',
     )
     parser.add_argument('--config', default=str(CONFIG_PATH))
     parser.add_argument('--once', action='store_true')

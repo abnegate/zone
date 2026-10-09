@@ -587,7 +587,7 @@ impl<'a> Probe<'a> {
 
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.config.api_token {
-            Some(token) => request.header("X-Zone-ComfyUI-Token", token),
+            Some(token) => request.header(&self.config.token_header, token),
             None => request,
         }
     }

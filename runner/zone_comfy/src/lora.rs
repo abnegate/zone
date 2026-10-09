@@ -14,6 +14,7 @@ use crate::quality::Quality;
 use crate::recipe::{Recipe, RecipeCatalog, TrainingModel, sanitize_weight_filename};
 use crate::subject::{CENTRE, SaliencyMap, Subject};
 use crate::train::{Run, TrainProgress};
+use abnegate_exec::EnvironmentPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -786,6 +787,7 @@ async fn train_with_pipeline(
         let run = Run::new();
         attempt.register(&run)?;
         let mut process = Command::new("sh");
+        trainer_environment(config).apply(&mut process);
         process
             .arg("-c")
             .arg(command)
@@ -793,7 +795,7 @@ async fn train_with_pipeline(
             .env("ZONE_TRAIN_FINAL_NAME", &filename)
             .env("ZONE_TRAIN_ATTEMPT", &attempt.id)
             .env("ZONE_TRAIN_BASE", &recipe.id)
-            .env("ZONE_TRAIN_DIR", &attempt.root)
+            .env("ZONE_TRAIN_DIRECTORY", &attempt.root)
             .env("ZONE_TRAIN_OUTPUT", &staged)
             .env("ZONE_TRAIN_TRIGGER", trigger)
             .env("ZONE_TRAIN_IMAGE_COUNT", survivors.len().to_string())
@@ -804,7 +806,6 @@ async fn train_with_pipeline(
             .env("ZONE_TRAIN_FOLDER", &run.folder)
             .env("ZONE_TRAIN_ARTIFACT", &run.artifact)
             .env("ZONE_TRAIN_DEFER_CLEANUP", "1")
-            .env("COMFYUI_BASE_URL", &config.base_url)
             .env("ZONE_TRAIN_TIMEOUT", config.train_timeout_secs.to_string())
             .env(
                 "ZONE_COMFY_INPUT",
@@ -945,6 +946,29 @@ async fn train_with_pipeline(
             attempted,
         },
     })
+}
+
+/// The prefix of every variable a training command is given about its run.
+const TRAINER_PREFIX: &str = "ZONE_TRAIN_";
+
+/// What a training command is given besides its run's own variables: the
+/// names in [`abnegate_exec::DEFAULT_ENVIRONMENT`], every `ZONE_TRAIN_*` this
+/// process has, and the ComfyUI server with the token and header that reach
+/// it. Nothing else of this process's environment, which holds the database
+/// URL, the signing keys and the LiteLLM key.
+fn trainer_environment(config: &Config) -> EnvironmentPolicy {
+    let settings = std::env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .filter(|name| name.starts_with(TRAINER_PREFIX));
+    let environment = EnvironmentPolicy::allowlist()
+        .allow(settings)
+        .with("COMFYUI_BASE_URL", config.base_url.as_str());
+    match &config.api_token {
+        Some(token) => environment
+            .with("COMFYUI_API_TOKEN", token.as_str())
+            .with("COMFYUI_TOKEN_HEADER", config.token_header.as_str()),
+        None => environment,
+    }
 }
 
 fn validate_pairing(images: &[TrainImage], model: &TrainingModel) -> Result<(), TrainError> {
@@ -2185,6 +2209,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::screening::{Rejection, Verdict};
+    use zone_core::variables::Variables;
 
     #[test]
     fn phase_percent_covers_a_phase_from_empty_to_done() {
@@ -2433,9 +2458,9 @@ mod tests {
         let command = r#"
             test "$ZONE_TRAIN_NAME" = "legacy-style.safetensors" || exit 11
             test "$ZONE_TRAIN_FINAL_NAME" = "$ZONE_TRAIN_NAME" || exit 12
-            test "$ZONE_TRAIN_ATTEMPT" = "$(basename "$ZONE_TRAIN_DIR")" || exit 13
+            test "$ZONE_TRAIN_ATTEMPT" = "$(basename "$ZONE_TRAIN_DIRECTORY")" || exit 13
             test "$(basename "$ZONE_TRAIN_OUTPUT")" = "$ZONE_TRAIN_ATTEMPT.safetensors" || exit 14
-            case "$ZONE_TRAIN_OUTPUT" in "$ZONE_TRAIN_DIR"/*) ;; *) exit 15 ;; esac
+            case "$ZONE_TRAIN_OUTPUT" in "$ZONE_TRAIN_DIRECTORY"/*) ;; *) exit 15 ;; esac
             printf legacy > "$ZONE_TRAIN_OUTPUT"
         "#;
         let (_root, config) = harness(command);
@@ -2452,6 +2477,55 @@ mod tests {
 
         assert_eq!(fs::read(outcome.path).unwrap(), b"legacy");
         assert!(training_entries(&config).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_external_trainer_gets_the_allowlist_and_none_of_the_servers_environment() {
+        let mut environment = Variables::lock();
+        environment.set("LITELLM_KEY", "server-secret");
+        environment.set("ZONE_TRAIN_STEPS", "37");
+        let command = r#"
+            test -z "${LITELLM_KEY+set}" || exit 61
+            test -n "$PATH" || exit 62
+            test "$COMFYUI_BASE_URL" = "http://127.0.0.1:9" || exit 63
+            test "$COMFYUI_API_TOKEN" = "trainer-token" || exit 64
+            test "$COMFYUI_TOKEN_HEADER" = "x-zone-comfyui-token" || exit 65
+            test -d "$ZONE_TRAIN_DIRECTORY" || exit 66
+            test "$ZONE_TRAIN_STEPS" = "37" || exit 67
+            printf lora > "$ZONE_TRAIN_OUTPUT"
+        "#;
+        let (_root, mut config) = harness(command);
+        config.api_token = Some("trainer-token".into());
+
+        let outcome = train(
+            &config,
+            String::new(),
+            String::new(),
+            identity("allowlisted"),
+        )
+        .await
+        .expect("the trainer finds everything it is documented to get");
+
+        assert_eq!(fs::read(outcome.path).unwrap(), b"lora");
+    }
+
+    #[tokio::test]
+    async fn an_external_trainer_is_given_no_token_when_none_is_configured() {
+        let mut environment = Variables::lock();
+        environment.set("COMFYUI_API_TOKEN", "server-token");
+        environment.set("COMFYUI_TOKEN_HEADER", "X-Server-Header");
+        let command = r#"
+            test -z "${COMFYUI_API_TOKEN+set}" || exit 71
+            test -z "${COMFYUI_TOKEN_HEADER+set}" || exit 72
+            printf lora > "$ZONE_TRAIN_OUTPUT"
+        "#;
+        let (_root, config) = harness(command);
+
+        let outcome = train(&config, String::new(), String::new(), identity("tokenless"))
+            .await
+            .expect("a ComfyUI without a token needs no header");
+
+        assert_eq!(fs::read(outcome.path).unwrap(), b"lora");
     }
 
     /// A models root with the output directory the writer needs.
@@ -3108,7 +3182,7 @@ mod tests {
             test "$ZONE_TRAIN_IMAGE_COUNT" = "2" || exit 11
             test "$ZONE_TRAIN_NAME" = "edit-style.safetensors" || exit 31
             test "$ZONE_TRAIN_FINAL_NAME" = "edit-style.safetensors" || exit 12
-            test "$ZONE_TRAIN_ATTEMPT" = "$(basename "$ZONE_TRAIN_DIR")" || exit 14
+            test "$ZONE_TRAIN_ATTEMPT" = "$(basename "$ZONE_TRAIN_DIRECTORY")" || exit 14
             test "$(basename "$ZONE_TRAIN_OUTPUT")" = "$ZONE_TRAIN_ATTEMPT.safetensors" || exit 13
             test "$ZONE_TRAIN_ARCHITECTURE" = "qwen_edit" || exit 23
             test "$ZONE_TRAIN_UNET" = "qwen_image_edit_2511_fp8mixed.safetensors" || exit 24
@@ -3120,14 +3194,14 @@ mod tests {
             test "$folder_id" != "$ZONE_TRAIN_FOLDER" || exit 28
             test "$artifact_id" != "$ZONE_TRAIN_ARTIFACT" || exit 29
             test "$folder_id" != "$artifact_id" || exit 30
-            test "$(cat "$ZONE_TRAIN_DIR/targets/0000.txt")" = "change zero" || exit 17
-            test "$(cat "$ZONE_TRAIN_DIR/targets/0001.txt")" = "change two" || exit 20
-            test ! -e "$ZONE_TRAIN_DIR/targets/0002.png" || exit 21
-            test ! -e "$ZONE_TRAIN_DIR/control_1/0002.png" || exit 22
-            cp "$ZONE_TRAIN_DIR/targets/0000.png" "KEPT/target-0.png" || exit 15
-            cp "$ZONE_TRAIN_DIR/control_1/0000.png" "KEPT/control-0.png" || exit 16
-            cp "$ZONE_TRAIN_DIR/targets/0001.png" "KEPT/target-1.png" || exit 18
-            cp "$ZONE_TRAIN_DIR/control_1/0001.png" "KEPT/control-1.png" || exit 19
+            test "$(cat "$ZONE_TRAIN_DIRECTORY/targets/0000.txt")" = "change zero" || exit 17
+            test "$(cat "$ZONE_TRAIN_DIRECTORY/targets/0001.txt")" = "change two" || exit 20
+            test ! -e "$ZONE_TRAIN_DIRECTORY/targets/0002.png" || exit 21
+            test ! -e "$ZONE_TRAIN_DIRECTORY/control_1/0002.png" || exit 22
+            cp "$ZONE_TRAIN_DIRECTORY/targets/0000.png" "KEPT/target-0.png" || exit 15
+            cp "$ZONE_TRAIN_DIRECTORY/control_1/0000.png" "KEPT/control-0.png" || exit 16
+            cp "$ZONE_TRAIN_DIRECTORY/targets/0001.png" "KEPT/target-1.png" || exit 18
+            cp "$ZONE_TRAIN_DIRECTORY/control_1/0001.png" "KEPT/control-1.png" || exit 19
             printf trained > "$ZONE_TRAIN_OUTPUT"
         "#;
         // The attempt is cleaned up when the run ends, so the images have to be
@@ -3238,7 +3312,7 @@ mod tests {
         let staged = tempfile::tempdir().expect("staged target");
         let target = staged.path().join("target.png");
         let command = format!(
-            "cp \"$ZONE_TRAIN_DIR/targets/0000.png\" \"{}\"; printf trained > \"$ZONE_TRAIN_OUTPUT\"",
+            "cp \"$ZONE_TRAIN_DIRECTORY/targets/0000.png\" \"{}\"; printf trained > \"$ZONE_TRAIN_OUTPUT\"",
             target.display()
         );
         let (_root, mut config) = harness(&command);
@@ -3565,8 +3639,8 @@ mod tests {
     #[tokio::test]
     async fn non_edit_training_rejects_controls_and_never_stages_a_control_folder() {
         let command = r#"
-            test ! -e "$ZONE_TRAIN_DIR/control_1" || exit 31
-            test "$(cat "$ZONE_TRAIN_DIR/targets/0000.txt")" = "ohwx, a portrait" || exit 32
+            test ! -e "$ZONE_TRAIN_DIRECTORY/control_1" || exit 31
+            test "$(cat "$ZONE_TRAIN_DIRECTORY/targets/0000.txt")" = "ohwx, a portrait" || exit 32
             printf trained > "$ZONE_TRAIN_OUTPUT"
         "#;
         let (_root, config) = harness(command);

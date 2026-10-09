@@ -11,6 +11,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from train_lora import TOKEN_HEADER
+
 WORKFLOWS = Path(__file__).with_name('workflows')
 PROMPT_NODE = '6'
 SAMPLER_NODE = '3'
@@ -33,7 +35,7 @@ def request(url: str, payload: dict | None = None, timeout: int = 120) -> bytes:
     call = urllib.request.Request(url, data=data, headers=headers)
     token = env('COMFYUI_API_TOKEN')
     if token:
-        call.add_header('X-Zone-ComfyUI-Token', token)
+        call.add_header(env('COMFYUI_TOKEN_HEADER').strip() or TOKEN_HEADER, token)
     with urllib.request.urlopen(call, timeout=timeout) as response:
         return response.read()
 

@@ -139,7 +139,7 @@ def detect_disk_free(path: Path) -> int:
 
 
 def default_models_dir() -> Path:
-    override = os.environ.get("COMFYUI_MODELS_DIR")
+    override = os.environ.get("COMFYUI_MODELS_DIRECTORY")
     if override:
         return Path(override).expanduser()
     if platform.system() == "Darwin":

@@ -207,6 +207,9 @@ COMFYUI_BASE_URL=http://host.docker.internal:8189
 COMFYUI_API_TOKEN=<value of COMFYUI_BRIDGE_TOKEN>
 ```
 
+The token travels in `X-Zone-ComfyUI-Token`. To use another header, set
+`COMFYUI_TOKEN_HEADER` to the same name for the bridge and in `.env`.
+
 After the runtime and checkpoint are ready, enable routing in `.env`:
 
 ```dotenv
@@ -218,7 +221,7 @@ Override installation paths when necessary:
 
 ```bash
 COMFYUI_INSTALL_DIR="$HOME/Applications/ComfyUI-Zone" \
-COMFYUI_MODELS_DIR="/Volumes/Models/ComfyUI/models" \
+COMFYUI_MODELS_DIRECTORY="/Volumes/Models/ComfyUI/models" \
 ./scripts/setup-comfyui-macos.sh --download-model --bundle image-edit
 ```
 
@@ -534,7 +537,7 @@ clips; 500 stills or 50 clips is the strong set. Install the worker with:
 ./scripts/setup-comfyui-macos.sh --download-model --bundle image-people
 ```
 
-`COMFYUI_TRAIN_TIMEOUT_SECS` does not apply to the host worker. Person LoRA
+`COMFYUI_TRAIN_TIMEOUT_SECONDS` does not apply to the host worker. Person LoRA
 is hours; fine-tune is unbounded and resumes from snapshots.
 
 For a clip the two signals are combined rather than ranked. Saliency leads, and
@@ -617,7 +620,7 @@ starts.
 A video is a worse photo set than its frame count suggests, so the frames are
 earned rather than taken:
 
-- **Sampled above the rate they are kept at.** `COMFYUI_TRAIN_FRAME_FPS` (4) is
+- **Sampled above the rate they are kept at.** `COMFYUI_TRAIN_FRAME_RATE` (4) is
   the rate that survives, but ffmpeg is asked for twice that, and each second
   keeps only its sharpest frames. Whichever frame the clock lands on is as
   likely to be smeared by motion as it is to be sharp; the sharpest of the ones
@@ -701,10 +704,10 @@ Qwen results may rank checkpoints, but are explicitly reported as
 identity retention outside its training pairs has not yet been proven.
 
 ```bash
-ZONE_TRAIN_DIR=/tmp/my-train-set \
+ZONE_TRAIN_DIRECTORY=/tmp/my-train-set \
 ZONE_TRAIN_ARCHITECTURE=flux \
 ZONE_TRAIN_CHECKPOINT=flux1-dev-fp8.safetensors \
-COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+COMFYUI_MODELS_DIRECTORY="$HOME/Library/Application Support/Zone/ComfyUI/models" \
 python3 comfyui/probe_lora.py my_lora-step150.safetensors my_lora.safetensors
 ```
 
@@ -716,10 +719,10 @@ shows up as a loss that will not move however long the descent runs.
 ```bash
 ZONE_PROBE_MODE=gradient \
 ZONE_PROBE_LEARNING_RATE=0.0001 \
-ZONE_TRAIN_DIR=/tmp/my-train-set \
+ZONE_TRAIN_DIRECTORY=/tmp/my-train-set \
 ZONE_TRAIN_ARCHITECTURE=flux \
 ZONE_TRAIN_CHECKPOINT=flux1-dev-fp8.safetensors \
-COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+COMFYUI_MODELS_DIRECTORY="$HOME/Library/Application Support/Zone/ComfyUI/models" \
 python3 comfyui/probe_lora.py
 ```
 
@@ -738,11 +741,11 @@ running:
 
 ```bash
 ZONE_TRAIN_STEPS=100 \
-ZONE_TRAIN_DIR=/tmp/my-train-set \
+ZONE_TRAIN_DIRECTORY=/tmp/my-train-set \
 ZONE_TRAIN_ARCHITECTURE=flux \
 ZONE_TRAIN_CHECKPOINT=flux1-dev-fp8.safetensors \
 ZONE_TRAIN_OUTPUT="$HOME/Library/Application Support/Zone/ComfyUI/models/loras/probe.safetensors" \
-COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+COMFYUI_MODELS_DIRECTORY="$HOME/Library/Application Support/Zone/ComfyUI/models" \
 python3 comfyui/train_lora.py
 ```
 
@@ -913,7 +916,7 @@ upscale. Chat can force the path with `metadata.upscale: true` and suppress it
 with `false`; turning every generator off still wins over either.
 
 Upscaling is GPU-bound per frame. A short 832×480 Wan clip is roughly 49 frames
-at 4x, so raise `COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECS` past its 600 second
+at 4x, so raise `COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECONDS` past its 600 second
 default before upscaling anything longer.
 
 ## Troubleshooting

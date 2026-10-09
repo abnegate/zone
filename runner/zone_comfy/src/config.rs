@@ -2,16 +2,16 @@
 
 use std::env;
 
+use reqwest::header::HeaderName;
+
 const OUTAGE_WINDOW_SECS: u64 = 120;
 const QUEUE_CHECK_INTERVAL_SECS: u64 = 30;
 
-fn env_truthy(name: &str, default: bool) -> bool {
-    truthy(env::var(name).ok(), default)
-}
+use crate::client::Error;
 
-fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
-    bounded(env::var(name).ok(), default, min, max)
-}
+/// The header a token-protected ComfyUI is sent its token in, unless
+/// `COMFYUI_TOKEN_HEADER` names another.
+pub const DEFAULT_TOKEN_HEADER: &str = "x-zone-comfyui-token";
 
 /// Reading the value is the operating system's job; deciding what it means is
 /// this crate's, so the two are separable and only one of them needs a process
@@ -27,10 +27,6 @@ fn truthy(value: Option<String>, default: bool) -> bool {
 }
 
 /// A setting that is present but blank is not a setting.
-fn env_text(name: &str) -> Option<String> {
-    text(env::var(name).ok())
-}
-
 fn text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
@@ -56,6 +52,8 @@ pub struct Config {
     pub enabled: bool,
     pub base_url: String,
     pub api_token: Option<String>,
+    /// The header [`Config::api_token`] is sent in.
+    pub token_header: HeaderName,
     pub workflow_path: std::path::PathBuf,
     pub checkpoint: String,
     pub video_workflow_path: std::path::PathBuf,
@@ -111,6 +109,7 @@ impl Default for Config {
             enabled: false,
             base_url: "http://comfyui:8188".to_string(),
             api_token: None,
+            token_header: HeaderName::from_static(DEFAULT_TOKEN_HEADER),
             workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../comfyui/workflows/sdxl-api.json"),
             checkpoint: "lustifySDXLNSFW_ggwpV7.safetensors".to_string(),
@@ -151,89 +150,131 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn from_env() -> Self {
-        let models_dir: std::path::PathBuf = env::var("COMFYUI_MODELS_DIR")
-            .unwrap_or_else(|_| "/app/comfyui/models".to_string())
+    /// Settings from this process's environment. A `COMFYUI_TOKEN_HEADER` that
+    /// is not a header name is refused rather than replaced by the default,
+    /// which a proxy checking the configured header would reject.
+    pub fn from_env() -> Result<Self, Error> {
+        Self::from_lookup(|name| env::var(name).ok())
+    }
+
+    fn from_lookup(environment: impl Fn(&str) -> Option<String>) -> Result<Self, Error> {
+        let models_dir: std::path::PathBuf = environment("COMFYUI_MODELS_DIRECTORY")
+            .unwrap_or_else(|| "/app/comfyui/models".to_string())
             .into();
-        Self {
-            enabled: env_truthy("COMFYUI_ENABLED", false),
-            base_url: env::var("COMFYUI_BASE_URL")
-                .unwrap_or_else(|_| "http://comfyui:8188".to_string())
+        let token_header = match text(environment("COMFYUI_TOKEN_HEADER")) {
+            Some(name) => HeaderName::try_from(name).map_err(|_| {
+                Error::Configuration("COMFYUI_TOKEN_HEADER is not a valid header name")
+            })?,
+            None => HeaderName::from_static(DEFAULT_TOKEN_HEADER),
+        };
+        Ok(Self {
+            enabled: truthy(environment("COMFYUI_ENABLED"), false),
+            base_url: environment("COMFYUI_BASE_URL")
+                .unwrap_or_else(|| "http://comfyui:8188".to_string())
                 .trim_end_matches('/')
                 .to_string(),
-            api_token: env::var("COMFYUI_API_TOKEN")
-                .ok()
-                .filter(|token| !token.trim().is_empty()),
-            workflow_path: env::var("COMFYUI_WORKFLOW_PATH")
-                .unwrap_or_else(|_| "/app/comfyui/workflows/sdxl-api.json".to_string())
+            api_token: environment("COMFYUI_API_TOKEN").filter(|token| !token.trim().is_empty()),
+            token_header,
+            workflow_path: environment("COMFYUI_WORKFLOW_PATH")
+                .unwrap_or_else(|| "/app/comfyui/workflows/sdxl-api.json".to_string())
                 .into(),
-            checkpoint: env::var("COMFYUI_CHECKPOINT")
-                .unwrap_or_else(|_| "lustifySDXLNSFW_ggwpV7.safetensors".to_string()),
-            video_workflow_path: env::var("COMFYUI_VIDEO_WORKFLOW_PATH")
-                .unwrap_or_else(|_| "/app/comfyui/workflows/wan2.2-a14b-t2v-api.json".to_string())
+            checkpoint: environment("COMFYUI_CHECKPOINT")
+                .unwrap_or_else(|| "lustifySDXLNSFW_ggwpV7.safetensors".to_string()),
+            video_workflow_path: environment("COMFYUI_VIDEO_WORKFLOW_PATH")
+                .unwrap_or_else(|| "/app/comfyui/workflows/wan2.2-a14b-t2v-api.json".to_string())
                 .into(),
-            video_unet: env::var("COMFYUI_VIDEO_UNET")
-                .unwrap_or_else(|_| "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors".to_string()),
-            video_clip: env::var("COMFYUI_VIDEO_CLIP")
-                .unwrap_or_else(|_| "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string()),
-            video_vae: env::var("COMFYUI_VIDEO_VAE")
-                .unwrap_or_else(|_| "wan_2.1_vae.safetensors".to_string()),
-            audio_workflow_path: env::var("COMFYUI_AUDIO_WORKFLOW_PATH")
-                .unwrap_or_else(|_| "/app/comfyui/workflows/ace-step-v1-3.5b-api.json".to_string())
+            video_unet: environment("COMFYUI_VIDEO_UNET")
+                .unwrap_or_else(|| "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors".to_string()),
+            video_clip: environment("COMFYUI_VIDEO_CLIP")
+                .unwrap_or_else(|| "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string()),
+            video_vae: environment("COMFYUI_VIDEO_VAE")
+                .unwrap_or_else(|| "wan_2.1_vae.safetensors".to_string()),
+            audio_workflow_path: environment("COMFYUI_AUDIO_WORKFLOW_PATH")
+                .unwrap_or_else(|| "/app/comfyui/workflows/ace-step-v1-3.5b-api.json".to_string())
                 .into(),
-            audio_checkpoint: env::var("COMFYUI_AUDIO_CHECKPOINT")
-                .unwrap_or_else(|_| "ace_step_v1_3.5b.safetensors".to_string()),
-            upscale_workflow_path: env::var("COMFYUI_UPSCALE_WORKFLOW_PATH")
-                .unwrap_or_else(|_| "/app/comfyui/workflows/upscale-image-api.json".to_string())
+            audio_checkpoint: environment("COMFYUI_AUDIO_CHECKPOINT")
+                .unwrap_or_else(|| "ace_step_v1_3.5b.safetensors".to_string()),
+            upscale_workflow_path: environment("COMFYUI_UPSCALE_WORKFLOW_PATH")
+                .unwrap_or_else(|| "/app/comfyui/workflows/upscale-image-api.json".to_string())
                 .into(),
-            upscale_model: env::var("COMFYUI_UPSCALE_MODEL")
-                .unwrap_or_else(|_| "RealESRGAN_x4plus.safetensors".to_string()),
-            artifact_root: env::var("ARTIFACT_ROOT")
-                .unwrap_or_else(|_| "/app/artifacts".to_string())
+            upscale_model: environment("COMFYUI_UPSCALE_MODEL")
+                .unwrap_or_else(|| "RealESRGAN_x4plus.safetensors".to_string()),
+            artifact_root: environment("COMFYUI_ARTIFACT_ROOT")
+                .unwrap_or_else(|| "/app/artifacts".to_string())
                 .into(),
-            classifier_model: env_text("COMFYUI_CLASSIFIER_MODEL")
+            classifier_model: text(environment("COMFYUI_CLASSIFIER_MODEL"))
                 .unwrap_or_else(|| "auto".to_string()),
-            classifier_timeout_secs: env_u64("COMFYUI_CLASSIFIER_TIMEOUT_SECS", 3, 1, 30),
-            caption_model: resolve_caption_model(
-                env::var("COMFYUI_CAPTION_MODEL").ok(),
-                env::var("OLLAMA_MODEL_VISION").ok(),
+            classifier_timeout_secs: bounded(
+                environment("COMFYUI_CLASSIFIER_TIMEOUT_SECONDS"),
+                3,
+                1,
+                30,
             ),
-            caption_timeout_secs: env_u64("COMFYUI_CAPTION_TIMEOUT_SECS", 60, 5, 600),
-            request_timeout_secs: env_u64("COMFYUI_REQUEST_TIMEOUT_SECS", 15, 1, 120),
-            generation_timeout_secs: env_u64("COMFYUI_GENERATION_TIMEOUT_SECS", 300, 10, 3600),
-            video_generation_timeout_secs: env_u64(
-                "COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS",
+            caption_model: resolve_caption_model(
+                environment("COMFYUI_CAPTION_MODEL"),
+                environment("OLLAMA_MODEL_VISION"),
+            ),
+            caption_timeout_secs: bounded(
+                environment("COMFYUI_CAPTION_TIMEOUT_SECONDS"),
+                60,
+                5,
+                600,
+            ),
+            request_timeout_secs: bounded(
+                environment("COMFYUI_REQUEST_TIMEOUT_SECONDS"),
+                15,
+                1,
+                120,
+            ),
+            generation_timeout_secs: bounded(
+                environment("COMFYUI_GENERATION_TIMEOUT_SECONDS"),
+                300,
+                10,
+                3600,
+            ),
+            video_generation_timeout_secs: bounded(
+                environment("COMFYUI_VIDEO_GENERATION_TIMEOUT_SECONDS"),
                 7200,
                 10,
                 14400,
             ),
-            audio_generation_timeout_secs: env_u64(
-                "COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS",
+            audio_generation_timeout_secs: bounded(
+                environment("COMFYUI_AUDIO_GENERATION_TIMEOUT_SECONDS"),
                 600,
                 10,
                 3600,
             ),
-            upscale_generation_timeout_secs: env_u64(
-                "COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECS",
+            upscale_generation_timeout_secs: bounded(
+                environment("COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECONDS"),
                 600,
                 10,
                 3600,
             ),
-            poll_interval_ms: env_u64("COMFYUI_POLL_INTERVAL_MS", 500, 50, 5000),
+            poll_interval_ms: bounded(
+                environment("COMFYUI_POLL_INTERVAL_MILLISECONDS"),
+                500,
+                50,
+                5000,
+            ),
             outage_window_secs: OUTAGE_WINDOW_SECS,
             queue_check_interval_secs: QUEUE_CHECK_INTERVAL_SECS,
-            vision_model: env_text("ZONE_VISION_MODEL")
+            vision_model: text(environment("ZONE_VISION_MODEL"))
                 .map(std::path::PathBuf::from)
                 .or_else(|| Some(models_dir.join("vision/u2net.onnx")))
                 .filter(|path| path.is_file()),
             models_dir,
-            train_command: env_text("COMFYUI_TRAIN_COMMAND"),
-            train_timeout_secs: env_u64("COMFYUI_TRAIN_TIMEOUT_SECS", 3600, 60, 14400),
-            ffmpeg: env_text("COMFYUI_FFMPEG").unwrap_or_else(|| "ffmpeg".to_string()),
-            ffprobe: env_text("COMFYUI_FFPROBE").unwrap_or_else(|| "ffprobe".to_string()),
-            frame_fps: env_u64("COMFYUI_TRAIN_FRAME_FPS", 4, 1, 30) as u32,
-            frame_limit: env_u64("COMFYUI_TRAIN_FRAME_LIMIT", 48, 1, 400) as u32,
-        }
+            train_command: text(environment("COMFYUI_TRAIN_COMMAND")),
+            train_timeout_secs: bounded(
+                environment("COMFYUI_TRAIN_TIMEOUT_SECONDS"),
+                3600,
+                60,
+                14400,
+            ),
+            ffmpeg: text(environment("COMFYUI_FFMPEG")).unwrap_or_else(|| "ffmpeg".to_string()),
+            ffprobe: text(environment("COMFYUI_FFPROBE")).unwrap_or_else(|| "ffprobe".to_string()),
+            frame_fps: bounded(environment("COMFYUI_TRAIN_FRAME_RATE"), 4, 1, 30) as u32,
+            frame_limit: bounded(environment("COMFYUI_TRAIN_FRAME_LIMIT"), 48, 1, 400) as u32,
+        })
     }
 }
 
@@ -253,16 +294,12 @@ mod tests {
         );
         assert_eq!(development.checkpoint, "lustifySDXLNSFW_ggwpV7.safetensors");
 
-        if env::var_os("COMFYUI_WORKFLOW_PATH").is_none()
-            && env::var_os("COMFYUI_CHECKPOINT").is_none()
-        {
-            let container = Config::from_env();
-            assert_eq!(
-                container.workflow_path,
-                std::path::PathBuf::from("/app/comfyui/workflows/sdxl-api.json")
-            );
-            assert_eq!(container.checkpoint, "lustifySDXLNSFW_ggwpV7.safetensors");
-        }
+        let container = configured(&[]);
+        assert_eq!(
+            container.workflow_path,
+            std::path::PathBuf::from("/app/comfyui/workflows/sdxl-api.json")
+        );
+        assert_eq!(container.checkpoint, "lustifySDXLNSFW_ggwpV7.safetensors");
     }
 
     #[test]
@@ -282,21 +319,16 @@ mod tests {
         assert_eq!(development.video_vae, "wan_2.1_vae.safetensors");
         assert_eq!(development.video_generation_timeout_secs, 7200);
 
-        if env::var_os("COMFYUI_VIDEO_WORKFLOW_PATH").is_none()
-            && env::var_os("COMFYUI_VIDEO_UNET").is_none()
-            && env::var_os("COMFYUI_VIDEO_VAE").is_none()
-        {
-            let container = Config::from_env();
-            assert_eq!(
-                container.video_workflow_path,
-                std::path::PathBuf::from("/app/comfyui/workflows/wan2.2-a14b-t2v-api.json")
-            );
-            assert_eq!(
-                container.video_unet,
-                "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
-            );
-            assert_eq!(container.video_vae, "wan_2.1_vae.safetensors");
-        }
+        let container = configured(&[]);
+        assert_eq!(
+            container.video_workflow_path,
+            std::path::PathBuf::from("/app/comfyui/workflows/wan2.2-a14b-t2v-api.json")
+        );
+        assert_eq!(
+            container.video_unet,
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
+        );
+        assert_eq!(container.video_vae, "wan_2.1_vae.safetensors");
     }
 
     #[test]
@@ -312,13 +344,111 @@ mod tests {
         assert_eq!(development.audio_checkpoint, "ace_step_v1_3.5b.safetensors");
         assert_eq!(development.audio_generation_timeout_secs, 600);
 
-        if env::var_os("COMFYUI_AUDIO_WORKFLOW_PATH").is_none() {
-            let container = Config::from_env();
-            assert_eq!(
-                container.audio_workflow_path,
-                std::path::PathBuf::from("/app/comfyui/workflows/ace-step-v1-3.5b-api.json")
-            );
-        }
+        let container = configured(&[]);
+        assert_eq!(
+            container.audio_workflow_path,
+            std::path::PathBuf::from("/app/comfyui/workflows/ace-step-v1-3.5b-api.json")
+        );
+    }
+
+    fn configured(variables: &[(&str, &str)]) -> Config {
+        Config::from_lookup(|name| {
+            variables
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .map(|(_, value)| value.to_string())
+        })
+        .expect("the settings load")
+    }
+
+    #[test]
+    fn settings_are_read_under_their_full_names() {
+        let config = configured(&[
+            ("COMFYUI_CLASSIFIER_TIMEOUT_SECONDS", "7"),
+            ("COMFYUI_CAPTION_TIMEOUT_SECONDS", "70"),
+            ("COMFYUI_REQUEST_TIMEOUT_SECONDS", "90"),
+            ("COMFYUI_GENERATION_TIMEOUT_SECONDS", "400"),
+            ("COMFYUI_VIDEO_GENERATION_TIMEOUT_SECONDS", "700"),
+            ("COMFYUI_AUDIO_GENERATION_TIMEOUT_SECONDS", "800"),
+            ("COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECONDS", "900"),
+            ("COMFYUI_TRAIN_TIMEOUT_SECONDS", "7200"),
+            ("COMFYUI_POLL_INTERVAL_MILLISECONDS", "250"),
+            ("COMFYUI_MODELS_DIRECTORY", "/srv/comfyui/models"),
+            ("COMFYUI_TRAIN_FRAME_RATE", "6"),
+            ("COMFYUI_ARTIFACT_ROOT", "/srv/artifacts"),
+            ("COMFYUI_TOKEN_HEADER", "X-Proxy-Token"),
+        ]);
+        assert_eq!(config.classifier_timeout_secs, 7);
+        assert_eq!(config.caption_timeout_secs, 70);
+        assert_eq!(config.request_timeout_secs, 90);
+        assert_eq!(config.generation_timeout_secs, 400);
+        assert_eq!(config.video_generation_timeout_secs, 700);
+        assert_eq!(config.audio_generation_timeout_secs, 800);
+        assert_eq!(config.upscale_generation_timeout_secs, 900);
+        assert_eq!(config.train_timeout_secs, 7200);
+        assert_eq!(config.poll_interval_ms, 250);
+        assert_eq!(
+            config.models_dir,
+            std::path::PathBuf::from("/srv/comfyui/models")
+        );
+        assert_eq!(config.frame_fps, 6);
+        assert_eq!(
+            config.artifact_root,
+            std::path::PathBuf::from("/srv/artifacts")
+        );
+        assert_eq!(config.token_header, "x-proxy-token");
+    }
+
+    #[test]
+    fn the_abbreviated_names_are_no_longer_read() {
+        let config = configured(&[
+            ("COMFYUI_CLASSIFIER_TIMEOUT_SECS", "7"),
+            ("COMFYUI_CAPTION_TIMEOUT_SECS", "70"),
+            ("COMFYUI_REQUEST_TIMEOUT_SECS", "90"),
+            ("COMFYUI_GENERATION_TIMEOUT_SECS", "400"),
+            ("COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS", "700"),
+            ("COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS", "800"),
+            ("COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECS", "900"),
+            ("COMFYUI_TRAIN_TIMEOUT_SECS", "7200"),
+            ("COMFYUI_POLL_INTERVAL_MS", "250"),
+            ("COMFYUI_MODELS_DIR", "/srv/comfyui/models"),
+            ("COMFYUI_TRAIN_FRAME_FPS", "6"),
+            ("ARTIFACT_ROOT", "/srv/artifacts"),
+        ]);
+        let defaults = configured(&[]);
+        assert_eq!(config, defaults, "an old name is ignored, not honoured");
+        assert_eq!(defaults.classifier_timeout_secs, 3);
+        assert_eq!(defaults.request_timeout_secs, 15);
+        assert_eq!(defaults.poll_interval_ms, 500);
+        assert_eq!(
+            defaults.models_dir,
+            std::path::PathBuf::from("/app/comfyui/models")
+        );
+        assert_eq!(defaults.frame_fps, 4);
+        assert_eq!(
+            defaults.artifact_root,
+            std::path::PathBuf::from("/app/artifacts")
+        );
+    }
+
+    #[test]
+    fn the_token_header_defaults_to_zones_and_refuses_a_name_that_is_no_header() {
+        assert_eq!(configured(&[]).token_header, DEFAULT_TOKEN_HEADER);
+        assert_eq!(
+            configured(&[("COMFYUI_TOKEN_HEADER", "  ")]).token_header,
+            DEFAULT_TOKEN_HEADER,
+            "a blank header is no setting at all"
+        );
+        let refused = Config::from_lookup(|name| {
+            (name == "COMFYUI_TOKEN_HEADER").then(|| "not a header".to_string())
+        });
+        assert!(
+            matches!(
+                refused,
+                Err(Error::Configuration(message)) if message.contains("COMFYUI_TOKEN_HEADER")
+            ),
+            "{refused:?}"
+        );
     }
 
     #[test]
@@ -397,13 +527,18 @@ mod tests {
 
     #[test]
     fn subject_detection_stays_off_until_the_weights_are_actually_there() {
-        // from_env falls back to <models>/vision/u2net.onnx, and has to check
-        // rather than assume: a path that is not a file would fail at load and
-        // cost a request its crop.
-        if env::var_os("ZONE_VISION_MODEL").is_some() || env::var_os("COMFYUI_MODELS_DIR").is_some()
-        {
-            return;
-        }
-        assert_eq!(Config::from_env().vision_model, None);
+        let models = tempfile::tempdir().expect("models directory");
+        let directory = models.path().display().to_string();
+        let without = configured(&[("COMFYUI_MODELS_DIRECTORY", &directory)]);
+        assert_eq!(
+            without.vision_model, None,
+            "a path that is not a file would fail at load and cost a request its crop"
+        );
+
+        let weights = models.path().join("vision/u2net.onnx");
+        std::fs::create_dir_all(weights.parent().unwrap()).unwrap();
+        std::fs::write(&weights, b"onnx").unwrap();
+        let with = configured(&[("COMFYUI_MODELS_DIRECTORY", &directory)]);
+        assert_eq!(with.vision_model, Some(weights));
     }
 }

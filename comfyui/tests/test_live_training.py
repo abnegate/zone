@@ -65,7 +65,7 @@ VARIABLES = (
     'ZONE_PROBE_TIMEOUT',
     'ZONE_TRAIN_CHECKPOINT',
     'ZONE_TRAIN_ARCHITECTURE',
-    'ZONE_TRAIN_DIR',
+    'ZONE_TRAIN_DIRECTORY',
     'ZONE_TRAIN_OUTPUT',
     'ZONE_TRAIN_STEPS',
     'ZONE_TRAIN_TIMEOUT',
@@ -201,7 +201,7 @@ class LiveTrainingTests(unittest.TestCase):
     def shared(self) -> dict[str, str]:
         return {
             'ZONE_COMFY_INPUT': str(self.staging),
-            'ZONE_TRAIN_DIR': str(self.workspace),
+            'ZONE_TRAIN_DIRECTORY': str(self.workspace),
             'ZONE_TRAIN_ARCHITECTURE': 'flux',
             'ZONE_TRAIN_CHECKPOINT': CHECKPOINT,
             'ZONE_PROBE_RESOLUTION': str(RESOLUTION),

@@ -10,7 +10,7 @@
 //! use tokio::sync::{broadcast, mpsc};
 //! use zone_comfy::{Client, Config};
 //!
-//! let client = Client::new(Config::from_env())?;
+//! let client = Client::new(Config::from_env()?)?;
 //! let (_stop, mut cancel) = broadcast::channel(1);
 //! let (progress, _updates) = mpsc::unbounded_channel();
 //! let images = client
@@ -29,7 +29,7 @@
 //! # async fn example(request: zone_comfy::TrainRequest) -> Result<(), Box<dyn std::error::Error>> {
 //! use zone_comfy::{Config, lora};
 //!
-//! let config = Config::from_env();
+//! let config = Config::from_env()?;
 //! let outcome = lora::train(&config, litellm_host(), litellm_key(), request).await?;
 //! # let _ = outcome;
 //! # Ok(())
@@ -48,7 +48,7 @@
 //! use zone_comfy::{Config, video};
 //!
 //! let clip = video::extract(
-//!     &Config::from_env(),
+//!     &Config::from_env()?,
 //!     &std::fs::read("subject.mp4")?,
 //!     "subject.mp4",
 //!     video::Options { fps: 4, resolution: 512, mirror: true, limit: 48 },

@@ -177,9 +177,9 @@ def dataset(model: TrainingModel) -> tuple[Run, str, bool]:
         if parsed.get('architecture') != model.architecture:
             raise SystemExit('probe manifest architecture does not match its model')
         return run, manifest, False
-    train_dir = env('ZONE_TRAIN_DIR')
+    train_dir = env('ZONE_TRAIN_DIRECTORY')
     if not train_dir:
-        raise SystemExit('ZONE_TRAIN_DIR is required when no staged probe folder is supplied')
+        raise SystemExit('ZONE_TRAIN_DIRECTORY is required when no staged probe folder is supplied')
     run = Run.create('probe')
     _, manifest = stage_dataset(Path(train_dir), comfy_input_dir() / run.folder, model)
     return run, manifest, True

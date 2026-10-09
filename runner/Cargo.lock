@@ -9360,6 +9360,7 @@ dependencies = [
 name = "zone_comfy"
 version = "0.1.0"
 dependencies = [
+ "abnegate-exec",
  "abnegate-llm",
  "base64 0.23.1",
  "bytes",
