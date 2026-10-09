@@ -464,11 +464,12 @@ services:
       - traefik.enable=true
       - traefik.docker.network=zone_edge
       - traefik.http.services.manager.loadbalancer.server.port=8000
-      - traefik.http.routers.manager.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
+      # Phone and LAN clients hit this machine by IP (or *.local). Compose $$ is a literal $.
+      - traefik.http.routers.manager.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`) || HostRegexp(`^[0-9.]+$$`) || HostRegexp(`(?i).+\.local$$`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`) || Path(`/health`))
       - traefik.http.routers.manager.entrypoints=web
       - traefik.http.routers.manager.service=manager
       - traefik.http.routers.manager.middlewares=security-headers
-      - traefik.http.routers.manager-secure.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
+      - traefik.http.routers.manager-secure.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`) || HostRegexp(`^[0-9.]+$$`) || HostRegexp(`(?i).+\.local$$`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`) || Path(`/health`))
       - traefik.http.routers.manager-secure.entrypoints=websecure
       - traefik.http.routers.manager-secure.service=manager
       - traefik.http.routers.manager-secure.middlewares=security-headers
@@ -500,12 +501,12 @@ services:
       - traefik.docker.network=zone_edge
       - traefik.http.services.console.loadbalancer.server.port=3001
       # Route all other requests to frontend (lower priority than backend routes)
-      - traefik.http.routers.console.rule=Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.console.rule=Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`) || HostRegexp(`^[0-9.]+$$`) || HostRegexp(`(?i).+\.local$$`)
       - traefik.http.routers.console.entrypoints=web
       - traefik.http.routers.console.service=console
       - traefik.http.routers.console.middlewares=security-headers
       - traefik.http.routers.console.priority=1
-      - traefik.http.routers.console-secure.rule=Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.console-secure.rule=Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`) || HostRegexp(`^[0-9.]+$$`) || HostRegexp(`(?i).+\.local$$`)
       - traefik.http.routers.console-secure.entrypoints=websecure
       - traefik.http.routers.console-secure.service=console
       - traefik.http.routers.console-secure.middlewares=security-headers

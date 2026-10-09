@@ -48,11 +48,11 @@ services:
       - traefik.enable=true
       - traefik.docker.network=zone_edge
       - traefik.http.services.manager.loadbalancer.server.port=8000
-      - traefik.http.routers.manager.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
+      - traefik.http.routers.manager.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`) || HostRegexp(`^[0-9.]+$$`) || HostRegexp(`(?i).+\.local$$`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`) || Path(`/health`))
       - traefik.http.routers.manager.entrypoints=web
       - traefik.http.routers.manager.service=manager
       - traefik.http.routers.manager.middlewares=security-headers
-      - traefik.http.routers.manager-secure.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
+      - traefik.http.routers.manager-secure.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`) || HostRegexp(`^[0-9.]+$$`) || HostRegexp(`(?i).+\.local$$`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`) || Path(`/health`))
       - traefik.http.routers.manager-secure.entrypoints=websecure
       - traefik.http.routers.manager-secure.service=manager
       - traefik.http.routers.manager-secure.middlewares=security-headers

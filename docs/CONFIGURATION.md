@@ -558,6 +558,8 @@ setting a monthly cap, at claude.ai/settings/usage.
 - **Note**: Docker cannot see the host LAN address. Set this to
   `http://<lan-ip>` (and a Tailscale IP if you use one). Each entry must
   be an `http` or `https` origin; anything else is refused at boot.
+  Traefik also matches a numeric IPv4 Host and `*.local` so the phone can
+  open that origin on port 80/443; `/health` on that Host is the manager.
 
 ### `ZONE_CODEX_SANDBOX`
 - **Default**: `workspace-write`. The manager image sets `danger-full-access`,

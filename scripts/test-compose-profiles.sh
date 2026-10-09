@@ -359,6 +359,51 @@ for name, config, consoles in (
             f"got {environment.get('ZONE_CONSOLE_ORIGINS')!r}"
         )
 
+
+def labels_of(service):
+    labels = service.get("labels") or {}
+    if isinstance(labels, dict):
+        return labels
+    parsed = {}
+    for item in labels:
+        key, _, value = str(item).partition("=")
+        parsed[key] = value
+    return parsed
+
+
+LAN_HOST = "HostRegexp(`^[0-9.]+$$`) || HostRegexp(`(?i).+\\.local$$`)"
+HEALTH_PATH = "Path(`/health`)"
+
+for name, config, manager_service in (
+    ("core", direct, "manager"),
+    ("dev+vpn+monitoring", combo, "gluetun"),
+):
+    manager_labels = labels_of(config["services"][manager_service])
+    console_labels = labels_of(config["services"]["console"])
+    for key in (
+        "traefik.http.routers.manager.rule",
+        "traefik.http.routers.manager-secure.rule",
+    ):
+        rule = manager_labels.get(key, "")
+        if LAN_HOST not in rule:
+            raise SystemExit(f"{name} {key} must match a LAN IP or *.local Host, got {rule!r}")
+        if HEALTH_PATH not in rule:
+            raise SystemExit(f"{name} {key} must route /health to manager, got {rule!r}")
+        if "PathPrefix(`/api`)" not in rule or "PathPrefix(`/ws`)" not in rule:
+            raise SystemExit(f"{name} {key} must keep /api and /ws on manager, got {rule!r}")
+    for key in (
+        "traefik.http.routers.console.rule",
+        "traefik.http.routers.console-secure.rule",
+    ):
+        rule = console_labels.get(key, "")
+        if LAN_HOST not in rule:
+            raise SystemExit(f"{name} {key} must match a LAN IP or *.local Host, got {rule!r}")
+
+for name, config in (("core", direct), ("dev+vpn+monitoring", combo)):
+    environment = config["services"]["manager"].get("environment") or {}
+    if "ZONE_CONNECT_URL" not in environment:
+        raise SystemExit(f"{name} manager must pass ZONE_CONNECT_URL")
+
 print("Compose profile combination checks passed")
 PY
 
