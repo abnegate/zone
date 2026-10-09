@@ -91,6 +91,11 @@ describe('chats layout', () => {
     expect(chats).not.toContain('.context-tokens select');
   });
 
+  it('leaves chat list width to SubNav', () => {
+    expect(rule(chats, '.chats-sidebar')).not.toContain('width:');
+    expect(rule(chats, '.chats-sidebar')).not.toContain('min-width:');
+  });
+
   it('keeps group and sort controls out of the 48px page-bar', () => {
     expect(rule(chats, '.chats-sidebar-header.page-bar')).not.toContain('chats-arrange');
     expect(rule(chats, '.chats-arrange')).toContain('flex-shrink: 0');
@@ -369,9 +374,9 @@ describe('tasks page layout', () => {
 describe('projects page layout', () => {
   const css = read(join(features, 'projects', 'pages', 'ProjectsPage.css'));
 
-  it('draws no gradient behind the page and keeps the list pane at 320', () => {
+  it('draws no gradient behind the page and leaves pane width to SubNav', () => {
     expect(css).not.toContain('radial-gradient');
-    expect(rule(css, '.projects-list-pane')).toContain('width: 20rem');
+    expect(rule(css, '.projects-list-pane')).not.toContain('width:');
   });
 
   it('makes every list card exactly 72px on 8/12 padding', () => {

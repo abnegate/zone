@@ -30,12 +30,8 @@
 }
 
 .projects-list-pane {
-  width: 20rem;
-  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--ui-border);
-  background: var(--ui-bg-base);
 }
 
 .projects-list {

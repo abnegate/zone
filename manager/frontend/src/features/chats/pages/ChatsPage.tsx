@@ -19,6 +19,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
+import SubNav from '../../../shared/components/SubNav/SubNav';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
 import { useProjects } from '../../projects/hooks';
@@ -793,7 +794,12 @@ export default function ChatsPage() {
 
   return (
     <div className={`page page--workspace chats-page ${selectedChatId ? 'has-chat' : ''}`}>
-      <div className="chats-sidebar">
+      <SubNav
+        className="chats-sidebar"
+        storageKey="manager_subnav_chats"
+        label="Resize chat list"
+        defaultWidthRem={18}
+      >
         <PageBar title="Chats" className="chats-sidebar-header">
           <Tabs
             value={showArchived ? 'archived' : 'active'}
@@ -983,7 +989,7 @@ export default function ChatsPage() {
             ))}
           </div>
         )}
-      </div>
+      </SubNav>
 
       <div className="chats-main">
         {selectedChatId && !displayedChat && (

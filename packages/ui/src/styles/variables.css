@@ -30,6 +30,9 @@
   --ui-chat-column: 47.5rem;
   --ui-sidebar-width: 14rem;
   --ui-sidebar-collapsed: 3.5rem;
+  --ui-subnav-width: 18rem;
+  --ui-subnav-min: 12rem;
+  --ui-subnav-max: 40rem;
   --ui-icon-size: 1rem;
   --ui-icon-size-sm: 0.875rem;
   --ui-empty-icon-size: 2rem;

@@ -35,6 +35,9 @@ describe('design tokens', () => {
   it('defines the frame, badge and row tokens the pages build on', () => {
     expect(token(variables, 'ui-sidebar-width')).toBe('14rem');
     expect(token(variables, 'ui-sidebar-collapsed')).toBe('3.5rem');
+    expect(token(variables, 'ui-subnav-width')).toBe('18rem');
+    expect(token(variables, 'ui-subnav-min')).toBe('12rem');
+    expect(token(variables, 'ui-subnav-max')).toBe('40rem');
     expect(token(variables, 'ui-badge-height')).toBe('1.25rem');
     expect(token(variables, 'ui-list-row')).toBe('2.5rem');
     expect(token(variables, 'ui-list-row-2')).toBe('3.5rem');

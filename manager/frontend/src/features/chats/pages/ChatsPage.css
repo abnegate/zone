@@ -9,12 +9,8 @@
 }
 
 .chats-sidebar {
-  width: 18rem;
-  min-width: 18rem;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--ui-border);
-  background: var(--ui-bg-base);
 }
 
 .chats-sidebar-header.page-bar {

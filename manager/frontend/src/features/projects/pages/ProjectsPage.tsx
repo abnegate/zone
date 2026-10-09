@@ -7,6 +7,7 @@ import { projectsApi } from '../../../api/projects';
 import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
+import SubNav from '../../../shared/components/SubNav/SubNav';
 import { getErrors } from '../../../validation';
 import {
   AutomationPanel,
@@ -483,7 +484,12 @@ export default function ProjectsPage() {
           />
         ) : (
           <>
-            <div className="projects-list-pane">
+            <SubNav
+              className="projects-list-pane"
+              storageKey="manager_subnav_projects"
+              label="Resize project list"
+              defaultWidthRem={20}
+            >
               <div className="projects-list">
                 {visibleProjects.map((project) => (
                   <div
@@ -531,7 +537,7 @@ export default function ProjectsPage() {
                   </div>
                 ))}
               </div>
-            </div>
+            </SubNav>
             {selectedProject ? (
               <aside className="project-details">
                 <div className="details-header">
