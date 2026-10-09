@@ -119,7 +119,7 @@ class SetupMacosTest(unittest.TestCase):
         message = "a bundle the legacy flags select is no longer in the manifest"
         self.assertIn("image", MANIFEST_BUNDLES, message)
         self.assertIn("video", MANIFEST_BUNDLES, message)
-        self.assertEqual(self.selected_bundle("--verify-model"), "image")
+        self.assertEqual(self.selected_bundle("--verify-model"), "image-people")
         self.assertEqual(self.selected_bundle("--verify-video-model"), "video")
         for flag in ("--download-model", "--download-video-model"):
             with self.subTest(flag=flag):

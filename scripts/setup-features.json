@@ -54,9 +54,9 @@
     {
       "id": "pictures",
       "label": "Pictures",
-      "description": "Generate stills with FLUX.1 Schnell",
-      "comfy_bundles": ["image"],
-      "licenses": ["CreativeML Open RAIL-M (FLUX uncensored LoRA)"]
+      "description": "Generate stills with SDXL people",
+      "comfy_bundles": ["image-people"],
+      "licenses": ["CreativeML Open RAIL-M (SDXL people checkpoint)"]
     },
     {
       "id": "edits",
@@ -65,7 +65,8 @@
       "comfy_bundles": ["image-edit", "image-dev"],
       "licenses": [
         "FLUX.1-dev Non-Commercial License",
-        "CreativeML Open RAIL++-M (Qwen edit LoRA)"
+        "CreativeML Open RAIL++-M (Qwen edit LoRA)",
+        "CreativeML Open RAIL-M (FLUX uncensored LoRA)"
       ]
     },
     {

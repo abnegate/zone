@@ -106,7 +106,7 @@ export function modelChoices(
   };
 }
 
-export const IMAGE_MODEL_OPTIONS = ['flux1-schnell-fp8.safetensors'];
+export const IMAGE_MODEL_OPTIONS = ['lustifySDXLNSFW_ggwpV7.safetensors'];
 export const VIDEO_MODEL_OPTIONS = ['wan2.2_ti2v_5B_fp16.safetensors'];
 export const AUDIO_MODEL_OPTIONS = ['ace_step_v1_3.5b.safetensors'];
 

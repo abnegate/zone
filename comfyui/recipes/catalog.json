@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "default_image": "flux-schnell",
+  "default_image": "sdxl-people",
   "recipes": [
     {
       "id": "flux-schnell",

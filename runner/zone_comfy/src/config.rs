@@ -102,8 +102,8 @@ impl Default for Config {
             base_url: "http://comfyui:8188".to_string(),
             api_token: None,
             workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../comfyui/workflows/flux1-schnell-fp8-api.json"),
-            checkpoint: "flux1-schnell-fp8.safetensors".to_string(),
+                .join("../../comfyui/workflows/sdxl-api.json"),
+            checkpoint: "lustifySDXLNSFW_ggwpV7.safetensors".to_string(),
             video_workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../comfyui/workflows/wan2.2-ti2v-5b-api.json"),
             video_unet: "wan2.2_ti2v_5B_fp16.safetensors".to_string(),
@@ -153,10 +153,10 @@ impl Config {
                 .ok()
                 .filter(|token| !token.trim().is_empty()),
             workflow_path: env::var("COMFYUI_WORKFLOW_PATH")
-                .unwrap_or_else(|_| "/app/comfyui/workflows/flux1-schnell-fp8-api.json".to_string())
+                .unwrap_or_else(|_| "/app/comfyui/workflows/sdxl-api.json".to_string())
                 .into(),
             checkpoint: env::var("COMFYUI_CHECKPOINT")
-                .unwrap_or_else(|_| "flux1-schnell-fp8.safetensors".to_string()),
+                .unwrap_or_else(|_| "lustifySDXLNSFW_ggwpV7.safetensors".to_string()),
             video_workflow_path: env::var("COMFYUI_VIDEO_WORKFLOW_PATH")
                 .unwrap_or_else(|_| "/app/comfyui/workflows/wan2.2-ti2v-5b-api.json".to_string())
                 .into(),
@@ -226,6 +226,30 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_defaults_cover_dev_and_container_paths() {
+        let development = Config::default();
+        assert!(
+            development
+                .workflow_path
+                .ends_with("comfyui/workflows/sdxl-api.json"),
+            "dev default must resolve the packaged people graph, got {:?}",
+            development.workflow_path
+        );
+        assert_eq!(development.checkpoint, "lustifySDXLNSFW_ggwpV7.safetensors");
+
+        if env::var_os("COMFYUI_WORKFLOW_PATH").is_none()
+            && env::var_os("COMFYUI_CHECKPOINT").is_none()
+        {
+            let container = Config::from_env();
+            assert_eq!(
+                container.workflow_path,
+                std::path::PathBuf::from("/app/comfyui/workflows/sdxl-api.json")
+            );
+            assert_eq!(container.checkpoint, "lustifySDXLNSFW_ggwpV7.safetensors");
+        }
+    }
 
     #[test]
     fn audio_defaults_cover_dev_and_container_paths() {

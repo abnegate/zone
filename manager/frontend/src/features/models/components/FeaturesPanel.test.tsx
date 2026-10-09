@@ -81,7 +81,7 @@ function plan(overrides: Partial<SetupPlan> = {}): SetupPlan {
       {
         id: 'pictures',
         label: 'Pictures',
-        description: 'Generate stills with FLUX.1 Schnell',
+        description: 'Generate stills with SDXL people',
         required: false,
         selected: true,
         blocked: false,
@@ -91,7 +91,7 @@ function plan(overrides: Partial<SetupPlan> = {}): SetupPlan {
         present_bytes: 0,
         needed_bytes: 17_900_000_000,
         ready: false,
-        licenses: ['CreativeML Open RAIL-M (FLUX uncensored LoRA)'],
+        licenses: ['CreativeML Open RAIL-M (SDXL people checkpoint)'],
       },
     ],
     wants_all: true,
@@ -112,11 +112,11 @@ function plan(overrides: Partial<SetupPlan> = {}): SetupPlan {
       short_by_bytes: 0,
       short_by_label: null,
     },
-    licenses: ['CreativeML Open RAIL-M (FLUX uncensored LoRA)'],
+    licenses: ['CreativeML Open RAIL-M (SDXL people checkpoint)'],
     artifacts: [],
     pulls: [
       { model: 'llama3.1:8b', runtime: 'ollama' },
-      { model: 'flux1-schnell-fp8', runtime: 'comfy' },
+      { model: 'lustify-sdxl-ggwp-v7', runtime: 'comfy' },
     ],
     ...overrides,
   };
@@ -170,7 +170,7 @@ describe('FeaturesPanel', () => {
     expect(screen.getByText('Free now')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Install selected' })).toBeEnabled();
     expect(screen.getByRole('list', { name: 'Licenses' })).toBeInTheDocument();
-    expect(screen.getByText('CreativeML Open RAIL-M (FLUX uncensored LoRA)')).toBeInTheDocument();
+    expect(screen.getByText('CreativeML Open RAIL-M (SDXL people checkpoint)')).toBeInTheDocument();
     expect(screen.queryByText(/Licenses:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Apache-2.0/)).not.toBeInTheDocument();
   });
@@ -329,6 +329,6 @@ describe('FeaturesPanel', () => {
     });
     await waitFor(() => expect(pull.pull).toHaveBeenCalledTimes(2));
     expect(pull.pull).toHaveBeenCalledWith('llama3.1:8b', { runtime: undefined });
-    expect(pull.pull).toHaveBeenCalledWith('flux1-schnell-fp8', { runtime: 'comfy' });
+    expect(pull.pull).toHaveBeenCalledWith('lustify-sdxl-ggwp-v7', { runtime: 'comfy' });
   });
 });

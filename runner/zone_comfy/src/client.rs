@@ -314,8 +314,9 @@ impl Client {
         self.catalog.image_recipe_for(selected)
     }
 
-    /// Schnell is the fast default for new pictures. Edits keep more identity on
-    /// Dev when those weights are installed; a Schnell LoRA stays on Schnell.
+    /// SDXL people is the default for new pictures. Edits keep more identity on
+    /// Dev when the pin is Schnell and those weights are installed; a Schnell
+    /// LoRA stays on Schnell.
     fn generation_plan(
         &self,
         has_source: bool,

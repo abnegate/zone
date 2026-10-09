@@ -1033,7 +1033,7 @@ mod tests {
                 .image_recipe_for("mystery-finetune.safetensors")
                 .unwrap()
                 .id,
-            "flux-schnell"
+            "sdxl-people"
         );
         assert_eq!(
             catalog
@@ -1060,7 +1060,7 @@ mod tests {
         // on the default image recipe instead of matching "SD 1.5".
         assert_eq!(
             catalog.image_recipe_for("SD 1.5").unwrap().id,
-            "flux-schnell"
+            "sdxl-people"
         );
     }
 

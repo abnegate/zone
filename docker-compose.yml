@@ -400,8 +400,8 @@ services:
       - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_BASE_URL=${COMFYUI_BASE_URL:-http://host.docker.internal:8188}
       - COMFYUI_API_TOKEN=${COMFYUI_API_TOKEN:-}
-      - COMFYUI_WORKFLOW_PATH=${COMFYUI_WORKFLOW_PATH:-/app/comfyui/workflows/flux1-schnell-fp8-api.json}
-      - COMFYUI_CHECKPOINT=${COMFYUI_CHECKPOINT:-flux1-schnell-fp8.safetensors}
+      - COMFYUI_WORKFLOW_PATH=${COMFYUI_WORKFLOW_PATH:-/app/comfyui/workflows/sdxl-api.json}
+      - COMFYUI_CHECKPOINT=${COMFYUI_CHECKPOINT:-lustifySDXLNSFW_ggwpV7.safetensors}
       - COMFYUI_MODELS_DIR=${COMFYUI_MODELS_DIR:-/app/comfyui/models}
       - COMFYUI_TRAIN_COMMAND=${COMFYUI_TRAIN_COMMAND:-}
       - COMFYUI_TRAIN_TIMEOUT_SECS=${COMFYUI_TRAIN_TIMEOUT_SECS:-3600}

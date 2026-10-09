@@ -1,10 +1,10 @@
-# ComfyUI, FLUX.1 Schnell, Wan 2.2 TI2V, and ACE-Step v1
+# ComfyUI, SDXL people, FLUX, Wan 2.2 TI2V, and ACE-Step v1
 
-Zone supports a pinned ComfyUI runtime with FLUX.1 Schnell FP8 for images,
-Wan 2.2 TI2V 5B for text-to-video and image-to-video, ACE-Step v1 3.5B for
-text-to-audio, and Real-ESRGAN x4plus for upscaling a picture or a clip. The
-runtime is native on Apple Silicon and an optional NVIDIA Compose profile on
-Linux.
+Zone supports a pinned ComfyUI runtime with SDXL people for stills (FLUX.1
+Schnell and Dev remain optional recipes), Wan 2.2 TI2V 5B for text-to-video
+and image-to-video, ACE-Step v1 3.5B for text-to-audio, and Real-ESRGAN
+x4plus for upscaling a picture or a clip. The runtime is native on Apple
+Silicon and an optional NVIDIA Compose profile on Linux.
 
 `./scripts/setup.sh` downloads the Comfy bundles for the features you enable
 (all on by default) and shows per-file progress. It prints each feature’s size,
@@ -123,9 +123,9 @@ specific `comfyui/requirements*.lock` files.
 - Apple Silicon (arm64); Intel Macs are not supported by this installer
 - Python 3.11 through 3.13, running as arm64
 - Git / Xcode Command Line Tools
-- At least 25 GB free disk space for the image checkpoint, about 45 GB if also
-  downloading the video bundle, a further 30 GB for the image-edit bundle, and
-  a further 8 GB for the audio bundle
+- At least 15 GB free disk space for the SDXL people checkpoint, about 35 GB if
+  also downloading the video bundle, a further 30 GB for the image-edit bundle,
+  and a further 8 GB for the audio bundle
 - 32 GB unified memory recommended; 24 GB may work with memory pressure and
   substantially lower resolutions. Video generation needs the higher figure.
 
@@ -136,7 +136,7 @@ make setup-comfyui-macos
 ```
 
 Download a bundle only when ready. `--bundle` takes any bundle declared in
-`comfyui/model-manifest.json` and defaults to `image`:
+`comfyui/model-manifest.json` and defaults to `image-people`:
 
 ```bash
 ./scripts/setup-comfyui-macos.sh --download-model
@@ -314,7 +314,7 @@ CLIP node is filled for later cfg or a pinned SDXL/Qwen recipe.
 
 Shipped image recipes:
 
-- `flux-schnell` — FLUX.1 Schnell FP8 (default, including unknown filenames)
+- `flux-schnell` — FLUX.1 Schnell FP8
 - `flux-schnell-adapter` — the same graph with a LoRA slot
 - `flux-dev` — FLUX.1 Dev FP8 (optional image-dev bundle; preferred for edits)
 - `flux-dev-adapter` — the same graph with a LoRA slot
@@ -322,7 +322,7 @@ Shipped image recipes:
 - `qwen-image-edit-adapter` — the same graph with a LoRA slot
 - `sd15` — Stable Diffusion 1.5 (512, 20 Euler steps)
 - `sdxl` — SDXL / Pony / Illustrious (1024, 25 Euler steps)
-- `sdxl-people` — open SDXL people prior (trainable)
+- `sdxl-people` — open SDXL people prior (default, including unknown filenames; trainable)
 - `sdxl-adapter` — the same graph with a LoRA slot on model and CLIP
 
 `sd15` and `sdxl` carry no weights of their own: they match a checkpoint you
@@ -412,8 +412,8 @@ is what LoRA recipes are written against.
 Dev is a 17.2 GB download and carries the FLUX.1-dev Non-Commercial License,
 where Schnell is Apache-2.0. Check that before shipping anything trained on it.
 
-Dev sits in its own `image-dev` bundle, so the default `image` download stays
-one file rather than fetching both bases:
+Dev sits in its own `image-dev` bundle, so the default `image-people` download
+stays the SDXL people checkpoint rather than fetching FLUX bases:
 
 ```bash
 ./scripts/setup-comfyui-macos.sh --download-model --bundle image-dev
@@ -698,8 +698,8 @@ For a standalone Qwen edit diagnostic, set
 
 ## Workflow contract
 
-`comfyui/workflows/flux1-schnell-fp8-api.json` is the default text-to-image
-graph (`flux-schnell`). It uses only built-in ComfyUI nodes. Integration code
+`comfyui/workflows/sdxl-api.json` is the default text-to-image graph
+(`sdxl-people`). It uses only built-in ComfyUI nodes. Integration code
 may replace only these inputs:
 
 - node `6`: positive prompt text
@@ -707,17 +707,16 @@ may replace only these inputs:
 - node `3`: seed
 - node `9`: temporary `PreviewImage` output (persistent `SaveImage` is rejected)
 
-`comfyui/workflows/flux1-schnell-fp8-img2img-api.json` is the image-to-image
-sibling. Chat uses it when the current message includes an image attachment
+`comfyui/workflows/sdxl-img2img-api.json` is the image-to-image sibling.
+Chat uses it when the current message includes an image attachment
 (a data URL or a same-chat `/api/artifacts/...` URL). The manager uploads
 that image to ComfyUI's input folder, then may also replace:
 
 - node `10`: uploaded source filename
 
 Node `11` scales the source to 1024×1024 with a centered crop. Node `12`
-VAE-encodes it. Packaged denoise is `0.6` so Schnell's four Euler/simple
-steps still apply the edit while the source latent keeps identity
-and photographic texture.
+VAE-encodes it. Packaged denoise is `0.65` over 25 Euler/normal steps at
+cfg `6` so the source latent keeps identity while the prompt applies.
 
 `comfyui/workflows/flux1-dev-fp8-img2img-api.json` (and the adapter sibling)
 uses the same LoadImage → ImageScale → VAEEncode chain on nodes `10`–`12`.

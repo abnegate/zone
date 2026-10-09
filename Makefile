@@ -53,12 +53,12 @@ setup: ## Run interactive CLI setup script
 setup-comfyui-macos: ## Install pinned native ComfyUI on Apple Silicon (model excluded)
 	@./scripts/setup-comfyui-macos.sh
 
-setup-comfyui-model: ## Explicitly download and checksum-verify FLUX.1 Schnell FP8 (~17.2 GB)
+setup-comfyui-model: ## Explicitly download and checksum-verify SDXL people (~6.9 GB)
 	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
-		--bundle image \
+		--bundle image-people \
 		$(if $(filter 1 true yes,$(FORCE)),--force,)
 
 setup-comfyui-image-edit-model: ## Explicitly download Qwen Image Edit 2511 weights (~28.2 GiB)
@@ -101,12 +101,12 @@ setup-vision-model: ## Download the U2-Net weights that frame training crops on 
 		--bundle vision \
 		$(if $(filter 1 true yes,$(FORCE)),--force,)
 
-verify-comfyui-model: ## Verify the installed FLUX.1 Schnell FP8 size and SHA-256
+verify-comfyui-model: ## Verify the installed SDXL people size and SHA-256
 	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
-		--bundle image \
+		--bundle image-people \
 		--verify-only
 
 verify-comfyui-image-edit-model: ## Verify the installed Qwen Image Edit 2511 size and SHA-256

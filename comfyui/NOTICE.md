@@ -84,7 +84,7 @@ command.
 - License text: <https://huggingface.co/spaces/CompVis/stable-diffusion-license>
 
 These weights are not included in Zone images or source distributions. They
-are downloaded only when the operator runs `--bundle image-people`.
+are the default stills download (`image-people`).
 
 ## SDXL OpenPose ControlNet
 

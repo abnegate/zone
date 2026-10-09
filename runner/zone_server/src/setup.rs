@@ -1071,21 +1071,21 @@ mod tests {
     }
 
     #[test]
-    fn pictures_plan_only_image_bundle() {
+    fn pictures_plan_only_image_people_bundle() {
         let built = plan(
             FeatureSelect::Ids(vec!["pictures".into()]),
             64 * GIB,
             500 * GB,
             "32gb",
         );
-        assert_eq!(built.comfy_bundles, vec!["image".to_string()]);
+        assert_eq!(built.comfy_bundles, vec!["image-people".to_string()]);
         let ids: Vec<_> = built
             .artifacts
             .iter()
             .map(|artifact| artifact.id.as_str())
             .collect();
-        assert!(ids.contains(&"flux1-schnell-fp8"));
-        assert!(ids.contains(&"flux-uncensored"));
+        assert!(ids.contains(&"lustify-sdxl-ggwp-v7"));
+        assert!(!ids.contains(&"flux1-schnell-fp8"));
         assert!(ids.contains(&"llama3.1:8b"));
         assert!(!ids.contains(&"llava:7b"));
         assert!(!ids.contains(&"wan2.2-ti2v-5b"));
@@ -1101,7 +1101,7 @@ mod tests {
         );
         assert_eq!(
             pictures.licenses,
-            vec!["CreativeML Open RAIL-M (FLUX uncensored LoRA)".to_string()]
+            vec!["CreativeML Open RAIL-M (SDXL people checkpoint)".to_string()]
         );
         let chat = plan(
             FeatureSelect::Ids(vec!["chat".into()]),
@@ -1121,10 +1121,10 @@ mod tests {
         assert_eq!(
             all.licenses,
             vec![
-                "CreativeML Open RAIL-M (FLUX uncensored LoRA)".to_string(),
+                "CreativeML Open RAIL-M (SDXL people checkpoint)".to_string(),
                 "FLUX.1-dev Non-Commercial License".to_string(),
                 "CreativeML Open RAIL++-M (Qwen edit LoRA)".to_string(),
-                "CreativeML Open RAIL-M (SDXL people checkpoint)".to_string(),
+                "CreativeML Open RAIL-M (FLUX uncensored LoRA)".to_string(),
             ]
         );
         assert!(
@@ -1200,7 +1200,7 @@ mod tests {
                 "deepseek-r1:32b".into(),
                 "qwen3-embedding:0.6b".into(),
             ]),
-            comfy_present: HashSet::from(["flux1-schnell-fp8".into(), "flux-uncensored".into()]),
+            comfy_present: HashSet::from(["lustify-sdxl-ggwp-v7".into()]),
         })
         .unwrap();
         assert!(missing.needed_bytes() > present.needed_bytes());
@@ -1217,13 +1217,13 @@ mod tests {
     }
 
     #[test]
-    fn all_union_needs_about_145_gb_free() {
+    fn all_union_needs_about_128_gb_free() {
         let built = plan(FeatureSelect::All, 64 * GIB, 500 * GB, "32gb");
-        assert!(built.total_bytes() > 130 * GB);
-        assert!(built.total_bytes() < 160 * GB);
+        assert!(built.total_bytes() > 110 * GB);
+        assert!(built.total_bytes() < 130 * GB);
         let required = built.required_free_bytes();
-        assert!(required > 140 * GB);
-        assert!(required < 160 * GB);
+        assert!(required > 120 * GB);
+        assert!(required < 140 * GB);
         assert_eq!(format_disk(catalog().disk_margin_bytes), "10 GB");
         assert_eq!(
             format_disk(required),

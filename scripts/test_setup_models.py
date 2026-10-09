@@ -136,14 +136,14 @@ class SetupModelsTest(unittest.TestCase):
         self.assertIn("Short by", message)
         self.assertIn("all is blocked", message)
 
-    def test_pictures_plan_only_image_bundle(self) -> None:
+    def test_pictures_plan_only_image_people_bundle(self) -> None:
         plan = self.plan(
             "pictures", ram=64 * GIB, disk=500 * GB, preset="32gb"
         )
-        self.assertEqual(plan.comfy_bundles, ("image",))
+        self.assertEqual(plan.comfy_bundles, ("image-people",))
         identifiers = [artifact.identifier for artifact in plan.artifacts]
-        self.assertIn("flux1-schnell-fp8", identifiers)
-        self.assertIn("flux-uncensored", identifiers)
+        self.assertIn("lustify-sdxl-ggwp-v7", identifiers)
+        self.assertNotIn("flux1-schnell-fp8", identifiers)
         self.assertIn("llama3.1:8b", identifiers)
         self.assertNotIn("llava:7b", identifiers)
         self.assertNotIn("wan2.2-ti2v-5b", identifiers)
@@ -169,7 +169,7 @@ class SetupModelsTest(unittest.TestCase):
             ram=64 * GIB,
             disk=500 * GB,
             preset="32gb",
-            comfy_present={"flux1-schnell-fp8", "flux-uncensored"},
+            comfy_present={"lustify-sdxl-ggwp-v7"},
             tags={"llama3.1:8b", "deepseek-r1:32b", "qwen3-embedding:0.6b"},
         )
         self.assertGreater(missing.needed_bytes, present.needed_bytes)
@@ -203,10 +203,10 @@ class SetupModelsTest(unittest.TestCase):
         self.assertEqual(
             list(plan.licenses),
             [
-                "CreativeML Open RAIL-M (FLUX uncensored LoRA)",
+                "CreativeML Open RAIL-M (SDXL people checkpoint)",
                 "FLUX.1-dev Non-Commercial License",
                 "CreativeML Open RAIL++-M (Qwen edit LoRA)",
-                "CreativeML Open RAIL-M (SDXL people checkpoint)",
+                "CreativeML Open RAIL-M (FLUX uncensored LoRA)",
             ],
         )
 
@@ -280,13 +280,16 @@ class SetupModelsTest(unittest.TestCase):
         self.assertIn("OLLAMA_MODEL_VISION=", text)
         self.assertIn("COMFYUI_ENABLED=true", text)
 
-    def test_all_union_is_every_manifest_bundle(self) -> None:
+    def test_all_union_is_every_manifest_bundle_except_optional_flux_schnell(self) -> None:
         plan = make_all_plan(self)
-        self.assertEqual(set(plan.comfy_bundles), set(self.download_models.VALID_BUNDLES))
-        self.assertGreater(plan.total_bytes, 130 * GB)
-        self.assertLess(plan.total_bytes, 160 * GB)
-        self.assertGreater(plan.required_free_bytes, 140 * GB)
-        self.assertLess(plan.required_free_bytes, 150 * GB)
+        self.assertEqual(
+            set(plan.comfy_bundles),
+            set(self.download_models.VALID_BUNDLES) - {"image"},
+        )
+        self.assertGreater(plan.total_bytes, 110 * GB)
+        self.assertLess(plan.total_bytes, 130 * GB)
+        self.assertGreater(plan.required_free_bytes, 120 * GB)
+        self.assertLess(plan.required_free_bytes, 140 * GB)
 
 
 def make_all_plan(test: SetupModelsTest) -> setup_models.Plan:

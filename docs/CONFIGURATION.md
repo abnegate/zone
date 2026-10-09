@@ -1507,7 +1507,7 @@ details, and native macOS / bundled NVIDIA instructions.
   service is intentionally confined to the private Compose network.
 
 ### `COMFYUI_WORKFLOW_PATH`
-- **Default**: `/app/comfyui/workflows/flux1-schnell-fp8-api.json`
+- **Default**: `/app/comfyui/workflows/sdxl-api.json`
 - **Description**: In-container path to a workflow file. Graphs in that
   directory overlay packaged copies of the same filename. If
   `../recipes/catalog.json` exists beside that directory, it replaces the
@@ -1517,7 +1517,7 @@ details, and native macOS / bundled NVIDIA instructions.
   `comfyui/recipes` directories here.
 
 ### `COMFYUI_CHECKPOINT`
-- **Default**: `flux1-schnell-fp8.safetensors`
+- **Default**: `lustifySDXLNSFW_ggwpV7.safetensors`
 - **Description**: Fallback ComfyUI checkpoint when org/workspace AI settings
   do not set `model_image`. Path separators and traversal are rejected.
   Chat image generation uses the effective `model_image` setting when present.

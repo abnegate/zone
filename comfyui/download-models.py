@@ -285,7 +285,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         dest="bundles",
         choices=(*sorted(VALID_BUNDLES), "all"),
-        help="download or verify this model bundle (repeatable; default: image)",
+        help="download or verify this model bundle (repeatable; default: image-people)",
     )
     parser.add_argument(
         "--progress",
@@ -355,7 +355,7 @@ def run(
 
 def main() -> int:
     args = parse_args()
-    bundles = args.bundles or ["image"]
+    bundles = args.bundles or ["image-people"]
     models = select_models(load_manifest(args.manifest), bundles, args.only)
     if not models:
         raise ValueError(f"no models declared for bundle {', '.join(bundles)}")

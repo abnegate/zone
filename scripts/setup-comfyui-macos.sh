@@ -11,7 +11,7 @@ INSTALL_DIR=${COMFYUI_INSTALL_DIR:-"$HOME/Library/Application Support/Zone/Comfy
 MODELS_DIR=${COMFYUI_MODELS_DIR:-"$INSTALL_DIR/models"}
 PYTHON=${PYTHON_BIN:-python3}
 MODEL_ACTION=none
-MODEL_BUNDLE=image
+MODEL_BUNDLE=image-people
 MANIFEST_BUNDLES=
 APPLY_NODES_ONLY=0
 INSTALL_TRAINER=0
@@ -67,7 +67,7 @@ LaunchAgent; it does not reinstall ComfyUI.
 
 Options:
   --bundle NAME           Bundle to act on: $MANIFEST_BUNDLES
-  --download-model        Download the selected bundle (default: image)
+  --download-model        Download the selected bundle (default: image-people)
   --verify-model          Verify the selected bundle without downloading
   --download-video-model  Alias for --download-model --bundle video
   --verify-video-model    Alias for --verify-model --bundle video
@@ -87,9 +87,9 @@ EOF
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --download-model) MODEL_ACTION=download; MODEL_BUNDLE=image ;;
+        --download-model) MODEL_ACTION=download; MODEL_BUNDLE=image-people ;;
         --download-video-model) MODEL_ACTION=download; MODEL_BUNDLE=video ;;
-        --verify-model) MODEL_ACTION=verify; MODEL_BUNDLE=image ;;
+        --verify-model) MODEL_ACTION=verify; MODEL_BUNDLE=image-people ;;
         --verify-video-model) MODEL_ACTION=verify; MODEL_BUNDLE=video ;;
         --bundle)
             if [ "$#" -lt 2 ]; then
