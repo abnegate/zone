@@ -25,6 +25,7 @@ Object.assign(globalThis, {
   Event: window.Event,
   CustomEvent: window.CustomEvent,
   MouseEvent: window.MouseEvent,
+  PointerEvent: window.PointerEvent,
   KeyboardEvent: window.KeyboardEvent,
   FocusEvent: window.FocusEvent,
   InputEvent: window.InputEvent,

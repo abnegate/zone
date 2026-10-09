@@ -1826,6 +1826,7 @@ describe('Client', () => {
           () => client.getEffectiveAiSettings('org-1', 'ws-1'),
           'Failed to fetch effective AI settings',
         ],
+        ['getConnectUrls', () => client.getConnectUrls(), 'Failed to fetch connect URLs'],
       ];
 
       it.each(refusals)('%s names the reason the server refused it', async (_, call, action) => {
@@ -1837,6 +1838,26 @@ describe('Client', () => {
         expect((failure as ApiError).status).toBe(400);
         expect((failure as ApiError).message).toBe(`${action}: ${refusal}`);
       });
+    });
+  });
+
+  describe('Connect API', () => {
+    it('getConnectUrls fetches advertised origins', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ urls: ['http://192.168.1.10'] }),
+      });
+
+      const result = await client.getConnectUrls();
+
+      expect(result.urls).toEqual(['http://192.168.1.10']);
+      expect(mockFetch).toHaveBeenCalledWith('/api/connect', expect.any(Object));
+    });
+
+    it('getConnectUrls throws on failed request', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 401 });
+
+      await expect(client.getConnectUrls()).rejects.toThrow('Failed to fetch connect URLs: 401');
     });
   });
 

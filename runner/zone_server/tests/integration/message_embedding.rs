@@ -60,6 +60,7 @@ fn test_config() -> Config {
         endpoint_hosts: Default::default(),
         auto: Default::default(),
         host_mounts: Default::default(),
+        connect_urls: Vec::new(),
     }
 }
 

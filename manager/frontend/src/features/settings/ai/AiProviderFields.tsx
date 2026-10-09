@@ -1,3 +1,4 @@
+import { Select } from '@zone/ui';
 import type { ReactNode } from 'react';
 import type { AiProvider, AiSettings, OrganizationKeys } from '../workspace/types';
 import {
@@ -182,18 +183,13 @@ export function AiProviderFields({
   return (
     <div className="form-grid">
       <Field id="ai-provider" label="AI Provider" full>
-        <select
+        <Select
+          compact
           id="ai-provider"
           value={provider}
-          onChange={(event) => onProviderChange(event.target.value as AiProvider)}
-          className="form-select"
-        >
-          {providerOptions.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+          onValueChange={(next) => onProviderChange(next as AiProvider)}
+          options={providerOptions}
+        />
       </Field>
 
       {provider === 'self_hosted' && (
@@ -281,18 +277,13 @@ export function AiProviderFields({
       {provider === 'bedrock' && (
         <>
           <Field id="bedrock-region" label="AWS Region">
-            <select
+            <Select
+              compact
               id="bedrock-region"
               value={credentials.bedrockRegion}
-              onChange={(event) => onChange('bedrockRegion', event.target.value)}
-              className="form-select"
-            >
-              {awsRegions.map((region) => (
-                <option key={region} value={region}>
-                  {region}
-                </option>
-              ))}
-            </select>
+              onValueChange={(next) => onChange('bedrockRegion', next)}
+              options={awsRegions.map((region) => ({ value: region, label: region }))}
+            />
           </Field>
           <div className="form-group">
             <span className="form-label">Authentication</span>

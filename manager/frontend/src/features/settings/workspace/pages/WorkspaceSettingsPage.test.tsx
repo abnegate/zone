@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { chooseSelect, openSelect, selectOptionValues } from '../../../../test/select';
 import userEvent from '@testing-library/user-event';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { ApiError } from '../../../../api/ApiError';
@@ -15,9 +16,7 @@ const mockClient = {
   updateWorkspaceAiSettings: mock(),
   resetWorkspaceAiSettings: mock(),
   getEffectiveAiSettings: mock(),
-  getHostMounts: mock(),
-  getWorkspaceHostDirectories: mock(),
-  updateWorkspaceHostDirectories: mock(),
+  getConnectUrls: mock(),
 };
 
 mock.module('../../../../api/client', () => ({
@@ -203,18 +202,7 @@ describe('WorkspaceSettingsPage', () => {
     mockClient.updateWorkspaceAiSettings.mockResolvedValue(savedAiSettings);
     mockClient.resetWorkspaceTheme.mockResolvedValue(mockTheme);
     mockClient.resetWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
-    mockClient.getHostMounts.mockResolvedValue({
-      in_container: true,
-      host_root: '/Users/jake/Local',
-      container_root: '/host',
-      ready: true,
-      hint: 'Folders must live under /Users/jake/Local.',
-    });
-    mockClient.getWorkspaceHostDirectories.mockResolvedValue({ directories: [], folders: [] });
-    mockClient.updateWorkspaceHostDirectories.mockResolvedValue({
-      directories: [],
-      folders: [],
-    });
+    mockClient.getConnectUrls.mockResolvedValue({ urls: ['http://192.168.1.10'] });
   });
 
   it('shows loading state', async () => {
@@ -236,30 +224,6 @@ describe('WorkspaceSettingsPage', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Workspace Settings' })).toBeInTheDocument();
     });
-  });
-
-  it('saves host folders from the Folders tab', async () => {
-    mockClient.getWorkspaceHostDirectories.mockResolvedValue({
-      directories: ['/Users/jake/Local/jbs'],
-      folders: [{ host: '/Users/jake/Local/jbs', mapped: '/host/jbs', exists: true }],
-    });
-    mockClient.updateWorkspaceHostDirectories.mockResolvedValue({
-      directories: ['/Users/jake/Local/jbs'],
-      folders: [{ host: '/Users/jake/Local/jbs', mapped: '/host/jbs', exists: true }],
-    });
-    const user = userEvent.setup();
-    render(<WorkspaceSettingsPage />);
-    await user.click(await screen.findByRole('tab', { name: 'Folders' }));
-    expect(await screen.findByRole('heading', { name: 'Host folders' })).toBeInTheDocument();
-    expect(await screen.findByDisplayValue('/Users/jake/Local/jbs')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Save Changes' }));
-    await waitFor(() =>
-      expect(mockClient.updateWorkspaceHostDirectories).toHaveBeenCalledWith(
-        '00000000-0000-0000-0000-000000000001',
-        '00000000-0000-0000-0000-000000000001',
-        { directories: ['/Users/jake/Local/jbs'] }
-      )
-    );
   });
 
   it('renders theme configuration section', async () => {
@@ -333,10 +297,32 @@ describe('WorkspaceSettingsPage', () => {
     });
   });
 
+  it('opens Devices without the save row and lists a connect URL', async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceSettingsPage />);
+    expect(mockClient.getConnectUrls).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole('tab', { name: 'Devices' }));
+    expect(await screen.findByRole('heading', { name: 'Connect a device' })).toBeInTheDocument();
+    expect(await screen.findByText('http://192.168.1.10')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save Changes' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reset to Defaults' })).toBeNull();
+    expect(mockClient.getConnectUrls).toHaveBeenCalled();
+  });
+
+  it('keeps the Devices tab usable while theme settings load', async () => {
+    themeLoading = true;
+    const user = userEvent.setup();
+    render(<WorkspaceSettingsPage />);
+    expect(screen.getByText('Loading theme settings...')).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: 'Devices' }));
+    expect(screen.queryByText('Loading theme settings...')).toBeNull();
+    expect(await screen.findByRole('heading', { name: 'Connect a device' })).toBeInTheDocument();
+  });
+
   it('loads and displays current theme values', async () => {
     render(<WorkspaceSettingsPage />);
     await waitFor(() => {
-      expect(screen.getByLabelText('Font Family')).toHaveValue('inter');
+      expect(screen.getByLabelText('Font Family')).toHaveTextContent('Inter');
     });
     expect(mockSetWorkspaceTheme).not.toHaveBeenCalled();
   });
@@ -347,7 +333,7 @@ describe('WorkspaceSettingsPage', () => {
     expect(mockPreviewWorkspaceTheme.mock.calls.filter(([value]) => value !== null)).toHaveLength(
       0
     );
-    fireEvent.change(screen.getByLabelText('Font Family'), { target: { value: 'roboto' } });
+    chooseSelect('Font Family', 'Roboto');
     expect(mockPreviewWorkspaceTheme).toHaveBeenLastCalledWith(
       expect.objectContaining({ font_family: 'roboto' })
     );
@@ -382,7 +368,8 @@ describe('WorkspaceSettingsPage', () => {
       border_radius: null,
     };
     render(<WorkspaceSettingsPage />);
-    fireEvent.change(await screen.findByLabelText('Font Family'), { target: { value: 'roboto' } });
+    await screen.findByLabelText('Font Family');
+    chooseSelect('Font Family', 'Roboto');
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
     await waitFor(() =>
       expect(mockClient.updateWorkspaceTheme).toHaveBeenCalledWith(
@@ -404,12 +391,14 @@ describe('WorkspaceSettingsPage', () => {
   it('directly selects explicit system font and medium radius from app defaults', async () => {
     savedTheme = { ...mockTheme, font_family: null, border_radius: null };
     render(<WorkspaceSettingsPage />);
-    expect(await screen.findByLabelText('Font Family')).toHaveValue('');
-    expect(screen.getByRole('option', { name: 'App Default' })).toBeDisabled();
+    expect(await screen.findByLabelText('Font Family')).toHaveTextContent('App Default');
+    const fontFamily = openSelect('Font Family');
+    expect(screen.getByRole('option', { name: 'App Default' })).toHaveAttribute('data-disabled');
+    fireEvent.keyDown(fontFamily, { key: 'Escape' });
     expect(screen.getByRole('radio', { name: 'App Default' })).toBeChecked();
     expect(screen.getByRole('radio', { name: 'App Default' })).toBeDisabled();
     expect(screen.getByLabelText('Medium')).not.toBeChecked();
-    fireEvent.change(screen.getByLabelText('Font Family'), { target: { value: 'system' } });
+    chooseSelect('Font Family', 'System Default');
     fireEvent.click(screen.getByLabelText('Medium'));
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
     await waitFor(() =>
@@ -423,11 +412,11 @@ describe('WorkspaceSettingsPage', () => {
 
   it('resets form values without creating a preview when saved theme becomes null', async () => {
     const { rerender } = render(<WorkspaceSettingsPage />);
-    expect(await screen.findByLabelText('Font Family')).toHaveValue('inter');
+    expect(await screen.findByLabelText('Font Family')).toHaveTextContent('Inter');
     savedTheme = null;
     mockPreviewWorkspaceTheme.mockClear();
     rerender(<WorkspaceSettingsPage />);
-    expect(screen.getByLabelText('Font Family')).toHaveValue('nunito');
+    expect(screen.getByLabelText('Font Family')).toHaveTextContent('Nunito');
     expect(screen.getByLabelText('Large')).toBeChecked();
     expect(screen.queryByRole('radio', { name: 'App Default' })).not.toBeInTheDocument();
     expect(screen.getAllByLabelText('Primary Color hex')[0]).toHaveValue('#0011d9');
@@ -442,7 +431,7 @@ describe('WorkspaceSettingsPage', () => {
   it('fills the form with product defaults when no theme is saved', async () => {
     savedTheme = null;
     render(<WorkspaceSettingsPage />);
-    expect(await screen.findByLabelText('Font Family')).toHaveValue('nunito');
+    expect(await screen.findByLabelText('Font Family')).toHaveTextContent('Nunito');
     expect(screen.getByLabelText('Large')).toBeChecked();
     expect(screen.getByText('16px')).toBeInTheDocument();
     expect(screen.getAllByLabelText('Primary Color hex')[0]).toHaveValue('#0011d9');
@@ -462,13 +451,14 @@ describe('WorkspaceSettingsPage', () => {
       })
     );
     const { rerender } = render(<WorkspaceSettingsPage />);
-    fireEvent.change(await screen.findByLabelText('Font Family'), { target: { value: 'roboto' } });
+    await screen.findByLabelText('Font Family');
+    chooseSelect('Font Family', 'Roboto');
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
     selectedWorkspace = 'workspace-2';
     savedTheme = null;
     mockPreviewWorkspaceTheme.mockClear();
     rerender(<WorkspaceSettingsPage />);
-    expect(screen.getByLabelText('Font Family')).toHaveValue('nunito');
+    expect(screen.getByLabelText('Font Family')).toHaveTextContent('Nunito');
     expect(mockPreviewWorkspaceTheme.mock.calls.filter(([value]) => value !== null)).toHaveLength(
       0
     );
@@ -486,10 +476,10 @@ describe('WorkspaceSettingsPage', () => {
       expect(screen.getByLabelText('Font Family')).toBeInTheDocument();
     });
 
-    const fontSelect = screen.getByLabelText('Font Family');
-    expect(fontSelect).toContainHTML('System Default');
-    expect(fontSelect).toContainHTML('Inter');
-    expect(fontSelect).toContainHTML('Roboto');
+    openSelect('Font Family');
+    expect(screen.getByRole('option', { name: 'System Default' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Inter' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Roboto' })).toBeInTheDocument();
   });
 
   it('renders border radius options', async () => {
@@ -608,7 +598,7 @@ describe('WorkspaceSettingsPage', () => {
       expect(screen.getByLabelText('Font Family')).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByLabelText('Font Family'), { target: { value: 'roboto' } });
+    chooseSelect('Font Family', 'Roboto');
 
     expect(mockSetWorkspaceTheme).not.toHaveBeenCalled();
   });
@@ -826,7 +816,7 @@ describe('WorkspaceSettingsPage', () => {
         expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
       });
 
-      await user.selectOptions(screen.getByLabelText('AI Provider'), 'openai');
+      chooseSelect('AI Provider', 'OpenAI');
 
       await waitFor(() => {
         // Look for OpenAI-specific content (model options change to OpenAI models)
@@ -865,7 +855,9 @@ describe('WorkspaceSettingsPage', () => {
       render(<WorkspaceSettingsPage />);
       await openAiTab(userEvent.setup());
 
-      expect(await screen.findByLabelText('AI Provider')).toHaveValue('self_hosted');
+      expect(await screen.findByLabelText('AI Provider')).toHaveTextContent(
+        'Self-Hosted (Ollama via LiteLLM)'
+      );
       expect(
         screen.getByRole('checkbox', { name: 'Override organization AI settings' })
       ).toBeChecked();
@@ -927,9 +919,11 @@ describe('WorkspaceSettingsPage', () => {
       render(<WorkspaceSettingsPage />);
       await openAiTab(user);
       await waitFor(() => {
-        expect(screen.getByLabelText('Video Model')).toHaveValue('wan2.2_ti2v_5B_fp16.safetensors');
+        expect(screen.getByLabelText('Video Model')).toHaveTextContent(
+          'wan2.2_ti2v_5B_fp16.safetensors'
+        );
       });
-      await user.selectOptions(screen.getByLabelText('Video Model'), '');
+      chooseSelect('Video Model', 'Use organization / server default');
       await user.click(screen.getByRole('button', { name: 'Save Changes' }));
       await waitFor(() => {
         expect(mockClient.updateWorkspaceAiSettings).toHaveBeenCalledWith(
@@ -945,9 +939,11 @@ describe('WorkspaceSettingsPage', () => {
       render(<WorkspaceSettingsPage />);
       await openAiTab(user);
       await waitFor(() => {
-        expect(screen.getByLabelText('Audio Model')).toHaveValue('ace_step_v1_3.5b.safetensors');
+        expect(screen.getByLabelText('Audio Model')).toHaveTextContent(
+          'ace_step_v1_3.5b.safetensors'
+        );
       });
-      await user.selectOptions(screen.getByLabelText('Audio Model'), '');
+      chooseSelect('Audio Model', 'Use organization / server default');
       await user.click(screen.getByRole('button', { name: 'Save Changes' }));
       await waitFor(() => {
         expect(mockClient.updateWorkspaceAiSettings).toHaveBeenCalledWith(
@@ -999,7 +995,9 @@ describe('WorkspaceSettingsPage', () => {
         render(<WorkspaceSettingsPage />);
         await openAiTab(userEvent.setup());
 
-        expect(await screen.findByLabelText('AI Provider')).toHaveValue('codex');
+        expect(await screen.findByLabelText('AI Provider')).toHaveTextContent(
+          'Codex (ChatGPT subscription)'
+        );
         expect(
           screen.getByRole('checkbox', { name: 'Override organization AI settings' })
         ).toBeChecked();
@@ -1008,12 +1006,12 @@ describe('WorkspaceSettingsPage', () => {
         ).toBeInTheDocument();
         expect(agentsApi.list).toHaveBeenCalledWith('00000000-0000-0000-0000-000000000001');
         await waitFor(() =>
-          expect(
-            Array.from(
-              (screen.getByLabelText('Fast Model') as HTMLSelectElement).options,
-              (option) => option.value
-            )
-          ).toEqual(['', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'])
+          expect(selectOptionValues('Fast Model')).toEqual([
+            '',
+            'gpt-6-astra',
+            'gpt-6-sol',
+            'gpt-6-luna',
+          ])
         );
       });
 
@@ -1023,7 +1021,7 @@ describe('WorkspaceSettingsPage', () => {
         await openAiTab(userEvent.setup());
 
         const hint = (label: string) =>
-          screen.getByLabelText(label).closest('.form-group')?.querySelector('.form-hint')
+          screen.getByLabelText(label).closest('.form-group')?.querySelector('.ui-select-help-text')
             ?.textContent;
         await screen.findByLabelText('Fast Model');
         expect(hint('Fast Model')).toBe(
@@ -1099,7 +1097,7 @@ describe('WorkspaceSettingsPage', () => {
             'Failed to cancel the codex sign-in: 500'
           );
 
-          await user.selectOptions(screen.getByLabelText('AI Provider'), 'claude_code');
+          chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
 
           const panel = screen.getByRole('region', { name: 'Claude Code sign-in' });
           expect(within(panel).getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
@@ -1135,7 +1133,7 @@ describe('WorkspaceSettingsPage', () => {
           await user.click(screen.getByRole('button', { name: 'Submit code' }));
           expect(await screen.findByRole('alert')).toHaveTextContent('Claude rejected the code');
 
-          await user.selectOptions(screen.getByLabelText('AI Provider'), 'codex');
+          chooseSelect('AI Provider', 'Codex (ChatGPT subscription)');
 
           const panel = screen.getByRole('region', { name: 'Codex sign-in' });
           expect(within(panel).getByRole('button', { name: 'Sign in with ChatGPT' })).toBeEnabled();
@@ -1189,7 +1187,7 @@ describe('WorkspaceSettingsPage', () => {
         await user.click(
           await screen.findByRole('checkbox', { name: 'Override organization AI settings' })
         );
-        await user.selectOptions(screen.getByLabelText('AI Provider'), 'claude_code');
+        chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
 
         expect(await screen.findByText('Save Changes to use this provider.')).toBeInTheDocument();
       });
@@ -1238,9 +1236,11 @@ describe('WorkspaceSettingsPage', () => {
         const user = userEvent.setup();
         render(<WorkspaceSettingsPage />);
         await openAiTab(user);
-        await waitFor(() => expect(screen.getByLabelText('Fast Model')).toHaveValue('llama3.1:8b'));
+        await waitFor(() =>
+          expect(screen.getByLabelText('Fast Model')).toHaveTextContent('llama3.1:8b')
+        );
 
-        await user.selectOptions(screen.getByLabelText('AI Provider'), 'codex');
+        chooseSelect('AI Provider', 'Codex (ChatGPT subscription)');
         await user.click(screen.getByRole('button', { name: 'Save Changes' }));
 
         await waitFor(() => expect(mockClient.updateWorkspaceAiSettings).toHaveBeenCalled());

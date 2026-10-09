@@ -74,6 +74,7 @@ import {
   AiSettingsResponseSchema,
   AuditLogSchema,
   AuditLogsResponseSchema,
+  ConnectResponseSchema,
   DevicePolicySchema,
   DevicesResponseSchema,
   ForgotPasswordResponseSchema,
@@ -670,6 +671,16 @@ class Client {
       throw await ApiError.from(response, 'Failed to fetch effective AI settings');
     }
     return parse(AiSettingsResponseSchema, await response.json());
+  }
+
+  async getConnectUrls(): Promise<{ urls: string[] }> {
+    const response = await fetch(`${API_BASE}/api/connect`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to fetch connect URLs');
+    }
+    return parse(ConnectResponseSchema, await response.json());
   }
 
   // Email Verification & Password Reset API

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
+import { chooseSelect, openSelect } from '../../../test/select';
 
 // Create mock functions
 const mockUseModels = mock();
@@ -725,6 +726,7 @@ describe('ModelsPage', () => {
       expect(screen.getByRole('button', { name: 'Tools' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Llama' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: '≤3B' })).toBeInTheDocument();
+      openSelect('Sort models');
       expect(screen.getByRole('option', { name: 'Most downloads' })).toBeInTheDocument();
       expect(screen.getByRole('option', { name: 'Fewest downloads' })).toBeInTheDocument();
     });
@@ -744,12 +746,10 @@ describe('ModelsPage', () => {
         expect(screen.getByLabelText('Sort models')).toBeInTheDocument();
       });
 
-      fireEvent.change(screen.getByLabelText('Sort models'), { target: { value: 'name_asc' } });
+      chooseSelect('Sort models', 'Name A–Z');
       expect(setSortMock).toHaveBeenCalledWith('name_asc');
 
-      fireEvent.change(screen.getByLabelText('Sort models'), {
-        target: { value: 'downloads_desc' },
-      });
+      chooseSelect('Sort models', 'Most downloads');
       expect(setSortMock).toHaveBeenCalledWith('downloads_desc');
     });
 

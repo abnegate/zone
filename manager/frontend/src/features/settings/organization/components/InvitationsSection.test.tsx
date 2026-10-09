@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { chooseSelect } from '../../../../test/select';
 import type { Invitation, Workspace } from '../types';
 
 const mockGetInvitations = mock();
@@ -149,9 +150,7 @@ describe('InvitationsSection', () => {
     fireEvent.change(screen.getByLabelText(/email address/i), {
       target: { value: 'newuser@test.com' },
     });
-    fireEvent.change(screen.getByLabelText(/organization role/i), {
-      target: { value: 'admin' },
-    });
+    chooseSelect(/organization role/i, 'Admin');
 
     // Submit
     fireEvent.submit(screen.getByRole('button', { name: /send invitation/i }).closest('form')!);
@@ -186,21 +185,15 @@ describe('InvitationsSection', () => {
     fireEvent.change(screen.getByLabelText(/email address/i), {
       target: { value: 'dev@test.com' },
     });
-    fireEvent.change(screen.getByLabelText(/organization role/i), {
-      target: { value: 'member' },
-    });
-    fireEvent.change(screen.getByLabelText(/^workspace\s+optional$/i), {
-      target: { value: 'ws-1' },
-    });
+    chooseSelect(/organization role/i, 'Member');
+    chooseSelect(/^workspace\s+optional$/i, 'Engineering');
 
     // Workspace role field should appear
     await waitFor(() => {
       expect(screen.getByLabelText(/workspace role/i)).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByLabelText(/workspace role/i), {
-      target: { value: 'admin' },
-    });
+    chooseSelect(/workspace role/i, 'Admin');
 
     // Submit
     fireEvent.submit(screen.getByRole('button', { name: /send invitation/i }).closest('form')!);

@@ -1,3 +1,4 @@
+import { Select } from '@zone/ui';
 import type { AiProvider } from '../workspace/types';
 import {
   AUDIO_MODEL_OPTIONS,
@@ -63,23 +64,15 @@ function ModelSelect({
   full?: boolean;
 }) {
   return (
-    <div className={full ? 'form-group form-group--full' : 'form-group'}>
-      <label htmlFor={id}>{label}</label>
-      <select
-        id={id}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="form-select"
-      >
-        <option value="">{blankLabel}</option>
-        {options.map((option) => (
-          <option key={option.value} value={option.value} disabled={option.disabled}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-      <p className="form-hint">{hint}</p>
-    </div>
+    <Select
+      id={id}
+      label={label}
+      value={value}
+      onValueChange={onChange}
+      helpText={hint}
+      wrapperClassName={full ? 'form-group form-group--full' : 'form-group'}
+      options={[{ value: '', label: blankLabel }, ...options]}
+    />
   );
 }
 

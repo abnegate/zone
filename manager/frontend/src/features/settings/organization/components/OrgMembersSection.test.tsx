@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { chooseSelectElement } from '../../../../test/select';
 import type { OrganizationMember, OrgRole } from '../types';
 
 // Mock client
@@ -117,9 +118,16 @@ const roleBadgeFor = (email: string): HTMLElement => {
 };
 
 const rolesOfferedForNewMember = (): string[] => {
-  const field = screen.getByRole('combobox', { name: 'Role' }).closest('.ui-select-wrapper');
-  if (!field) throw new Error('no role field in the add member modal');
-  return Array.from(field.querySelectorAll('option')).map((option) => option.value);
+  const dialog = screen.getByRole('dialog');
+  const trigger = within(dialog).getByRole('combobox', { name: 'Role', hidden: true });
+  if (trigger.getAttribute('data-state') !== 'open') {
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+  }
+  const values = screen
+    .getAllByRole('option')
+    .map((option) => option.getAttribute('data-value') ?? '');
+  fireEvent.keyDown(trigger, { key: 'Escape' });
+  return values;
 };
 
 describe('OrgMembersSection', () => {
@@ -178,8 +186,8 @@ describe('OrgMembersSection', () => {
         expect(screen.getByText('Test Owner')).toBeInTheDocument();
       });
       expect(roleBadgeFor('owner@test.com')).toHaveClass('role-badge-owner');
-      expect(roleSelectFor('admin@test.com')).toHaveValue('admin');
-      expect(roleSelectFor('member@test.com')).toHaveValue('member');
+      expect(roleSelectFor('admin@test.com')).toHaveTextContent('Admin');
+      expect(roleSelectFor('member@test.com')).toHaveTextContent('Member');
       expect(document.querySelectorAll('.role-badge')).toHaveLength(1);
     });
 
@@ -227,7 +235,7 @@ describe('OrgMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('member@test.com');
         });
-        fireEvent.change(memberRoleSelect!, { target: { value: 'admin' } });
+        chooseSelectElement(memberRoleSelect!, 'Admin');
       });
       // During the update, the loading spinner should have aria-live
       // This is difficult to test precisely without delaying the API response
@@ -288,11 +296,17 @@ describe('OrgMembersSection', () => {
         user: { id: 'user-1', email: 'owner@test.com' },
       });
 
-    const selectFor = (label: string) =>
-      screen.getByLabelText(`Change role for ${label}`) as HTMLSelectElement;
+    const selectFor = (label: string) => screen.getByLabelText(`Change role for ${label}`);
 
-    const optionsFor = (label: string) =>
-      Array.from(selectFor(label).options).map((option) => option.value);
+    const optionsFor = (label: string) => {
+      const trigger = selectFor(label);
+      fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+      const values = screen
+        .getAllByRole('option')
+        .map((option) => option.getAttribute('data-value') ?? '');
+      fireEvent.keyDown(trigger, { key: 'Escape' });
+      return values;
+    };
 
     it('offers an admin no way to seat or unseat another admin', async () => {
       asAdmin();
@@ -344,7 +358,7 @@ describe('OrgMembersSection', () => {
           new Promise((resolve) => setTimeout(() => resolve({ ...mockAdmin, role: 'member' }), 100))
       );
 
-      fireEvent.change(adminRoleSelect!, { target: { value: 'member' } });
+      chooseSelectElement(adminRoleSelect!, 'Member');
 
       // Select should be disabled during update
       await waitFor(
@@ -383,7 +397,7 @@ describe('OrgMembersSection', () => {
       });
 
       // Start first update - this will show confirmation modal
-      fireEvent.change(memberRoleSelect!, { target: { value: 'admin' } });
+      chooseSelectElement(memberRoleSelect!, 'Admin');
 
       // Confirm the role change
       await waitFor(() => {
@@ -417,7 +431,7 @@ describe('OrgMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('member@test.com');
         });
-        fireEvent.change(memberRoleSelect!, { target: { value: 'admin' } });
+        chooseSelectElement(memberRoleSelect!, 'Admin');
       });
 
       await waitFor(() => {
@@ -434,7 +448,7 @@ describe('OrgMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('member@test.com');
         });
-        fireEvent.change(memberRoleSelect!, { target: { value: 'owner' } });
+        chooseSelectElement(memberRoleSelect!, 'Owner');
       });
 
       await waitFor(() => {
@@ -451,7 +465,7 @@ describe('OrgMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('member@test.com');
         });
-        fireEvent.change(memberRoleSelect!, { target: { value: 'owner' } });
+        chooseSelectElement(memberRoleSelect!, 'Owner');
       });
 
       await waitFor(() => {
@@ -467,7 +481,7 @@ describe('OrgMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('admin@test.com');
         });
-        fireEvent.change(adminRoleSelect!, { target: { value: 'member' } });
+        chooseSelectElement(adminRoleSelect!, 'Member');
       });
 
       // Should update immediately without confirmation
@@ -492,7 +506,7 @@ describe('OrgMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('member@test.com');
         });
-        fireEvent.change(memberRoleSelect!, { target: { value: 'admin' } });
+        chooseSelectElement(memberRoleSelect!, 'Admin');
       });
 
       await waitFor(() => {
@@ -518,7 +532,7 @@ describe('OrgMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('member@test.com');
         });
-        fireEvent.change(memberRoleSelect!, { target: { value: 'admin' } });
+        chooseSelectElement(memberRoleSelect!, 'Admin');
       });
 
       await waitFor(() => {
@@ -611,7 +625,7 @@ describe('OrgMembersSection', () => {
         return row?.textContent?.includes('admin@test.com') && row?.textContent?.includes('Admin');
       });
 
-      fireEvent.change(adminRoleSelect as Element, { target: { value: 'member' } });
+      chooseSelectElement(adminRoleSelect as HTMLElement, 'Member');
 
       await waitFor(() => {
         expect(mockClient.updateOrgMemberRole).toHaveBeenCalledWith('org-123', 'user-2', {

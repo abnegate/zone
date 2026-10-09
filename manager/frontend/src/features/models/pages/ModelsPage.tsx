@@ -1,4 +1,4 @@
-import { Badge, Button, EmptyState, Modal, Tabs, TabsList, TabsTrigger } from '@zone/ui';
+import { Badge, Button, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
@@ -452,20 +452,16 @@ export default function ModelsPage() {
                 </Button>
               </form>
 
-              <label className="browse-sort">
+              <div className="browse-sort">
                 <span>Sort</span>
-                <select
+                <Select
+                  compact
                   aria-label="Sort models"
                   value={browse.sort}
-                  onChange={(e) => browse.setSort(e.target.value as ModelSort)}
-                >
-                  {MODEL_SORT_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  onValueChange={(next) => browse.setSort(next as ModelSort)}
+                  options={MODEL_SORT_OPTIONS}
+                />
+              </div>
             </div>
 
             <div className="browse-filters">

@@ -6,10 +6,12 @@ use std::path::PathBuf;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use zone_installer::client::{ClientPlatform, ManagerDirInputs};
+use zone_installer::client::{ClientPlatform, ManagerDirInputs, WEBVIEW_BIND};
 use zone_installer::frontend::{self, AppMode};
 use zone_installer::serve::AppState;
 use zone_installer::{ServeKind, bind, config_path, resolve_manager_dir, router};
+
+mod manager_bundle;
 
 struct ClientState {
     server: AppState,
@@ -67,17 +69,17 @@ async fn setup_client(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         state.set_mode(AppMode::Setup);
     }
 
+    let (listener, bound) = bind(WEBVIEW_BIND).await?;
+    let url = format!("http://{bound}/");
     tracing::info!(
         manager = %manager_dir.display(),
         config = %config_path.display(),
         %proxy_target,
         effective_proxy_target = %zone_installer::proxy::effective_proxy_target(&proxy_target),
         configured = frontend::is_configured_at(&config_path),
+        %bound,
         "Starting Zone client server"
     );
-
-    let (listener, bound) = bind("127.0.0.1:0").await?;
-    let url = format!("http://{bound}/");
     let router = router(ServeKind::Desktop, state.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(err) = zone_installer::serve::serve(listener, router).await {
@@ -105,6 +107,9 @@ fn client_config_path(app: &AppHandle) -> PathBuf {
 }
 
 fn open_window(app: &AppHandle, url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if app.get_webview_window("main").is_some() {
+        return Ok(());
+    }
     let builder =
         WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse()?)).title("Zone");
 
@@ -142,10 +147,23 @@ fn reload_main(app: &AppHandle) {
 }
 
 fn manager_dir(app: &AppHandle) -> PathBuf {
+    let app_data_dir = app.path().app_data_dir().ok();
+    if ClientPlatform::current().is_mobile()
+        && let Some(data) = &app_data_dir
+    {
+        let dest = data.join("manager");
+        if let Err(error) = manager_bundle::materialize(&dest) {
+            tracing::error!(
+                %error,
+                dest = %dest.display(),
+                "Failed to unpack manager UI"
+            );
+        }
+    }
     resolve_manager_dir(ManagerDirInputs {
         platform: ClientPlatform::current(),
         resource_dir: app.path().resource_dir().ok(),
-        app_data_dir: app.path().app_data_dir().ok(),
+        app_data_dir,
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         system_share_dir: Some(PathBuf::from("/usr/share/zone/manager")),
     })

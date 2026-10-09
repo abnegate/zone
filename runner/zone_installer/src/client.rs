@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 use crate::frontend::{self, FrontendKind};
 
+/// Loopback the Tauri WebView loads. JWT is stored in origin-scoped localStorage,
+/// so this address must stay the same across launches.
+pub const WEBVIEW_BIND: &str = "127.0.0.1:24727";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientPlatform {
     Desktop,
@@ -26,14 +30,6 @@ impl ClientPlatform {
 
     pub fn is_mobile(self) -> bool {
         matches!(self, Self::Android | Self::Ios)
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Android => "android",
-            Self::Ios => "ios",
-            Self::Desktop => "desktop",
-        }
     }
 
     pub fn uses_system_share_dir(self) -> bool {
@@ -68,11 +64,16 @@ pub struct ManagerDirInputs {
     pub system_share_dir: Option<PathBuf>,
 }
 
+fn is_filesystem_root(path: &std::path::Path) -> bool {
+    let value = path.to_string_lossy();
+    !(value.starts_with("asset:") || value.starts_with("content:"))
+}
+
 /// Locate the bundled manager SPA for the Tauri client.
 pub fn resolve_manager_dir(inputs: ManagerDirInputs) -> PathBuf {
-    if let Some(dir) = inputs.resource_dir {
+    if let Some(dir) = inputs.resource_dir.filter(|path| is_filesystem_root(path)) {
         for candidate in [dir.join("manager"), dir.clone()] {
-            if candidate.join("index.html").exists() {
+            if candidate.join("index.html").is_file() {
                 return candidate;
             }
         }
@@ -80,14 +81,14 @@ pub fn resolve_manager_dir(inputs: ManagerDirInputs) -> PathBuf {
 
     if let Some(dir) = inputs.app_data_dir {
         let manager = dir.join("manager");
-        if manager.join("index.html").exists() {
+        if manager.join("index.html").is_file() {
             return manager;
         }
     }
 
     if inputs.platform.uses_system_share_dir()
         && let Some(share) = inputs.system_share_dir
-        && share.join("index.html").exists()
+        && share.join("index.html").is_file()
     {
         return share;
     }
@@ -98,7 +99,7 @@ pub fn resolve_manager_dir(inputs: ManagerDirInputs) -> PathBuf {
         inputs.cwd.join("../.."),
     ] {
         let manager = root.join("manager/frontend/build");
-        if manager.join("index.html").exists() {
+        if manager.join("index.html").is_file() {
             return manager;
         }
     }
@@ -128,12 +129,15 @@ mod tests {
     }
 
     #[test]
+    fn webview_bind_is_a_stable_loopback() {
+        assert_eq!(WEBVIEW_BIND, "127.0.0.1:24727");
+        assert!(!WEBVIEW_BIND.ends_with(":0"));
+    }
+
+    #[test]
     fn maps_os_names_to_platforms() {
         assert_eq!(ClientPlatform::from_os("android"), ClientPlatform::Android);
         assert_eq!(ClientPlatform::from_os("ios"), ClientPlatform::Ios);
-        assert_eq!(ClientPlatform::Android.as_str(), "android");
-        assert_eq!(ClientPlatform::Ios.as_str(), "ios");
-        assert_eq!(ClientPlatform::Desktop.as_str(), "desktop");
         assert_eq!(ClientPlatform::from_os("macos"), ClientPlatform::Desktop);
         assert_eq!(ClientPlatform::from_os("linux"), ClientPlatform::Desktop);
         assert_eq!(ClientPlatform::from_os("windows"), ClientPlatform::Desktop);
@@ -243,6 +247,21 @@ mod tests {
             system_share_dir: None,
         });
         assert_eq!(resolved, resource);
+    }
+
+    #[test]
+    fn android_asset_uri_is_not_a_filesystem_root() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data/manager");
+        write_index(&data);
+        let resolved = resolve_manager_dir(ManagerDirInputs {
+            platform: ClientPlatform::Android,
+            resource_dir: Some(PathBuf::from("asset://localhost/")),
+            app_data_dir: Some(root.path().join("data")),
+            cwd: root.path().to_path_buf(),
+            system_share_dir: None,
+        });
+        assert_eq!(resolved, data);
     }
 
     #[test]

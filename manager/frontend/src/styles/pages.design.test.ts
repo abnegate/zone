@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
-import { read, rule } from '../test/css';
+import { media, read, rule } from '../test/css';
 
 const features = join(import.meta.dir, '..', 'features');
 
@@ -80,11 +80,26 @@ describe('chats layout', () => {
     expect(rule(chats, '.chat-group')).not.toContain('overflow');
   });
 
+  it('uses the shared select trigger for chat header context and reasoning', () => {
+    const trigger = rule(
+      chats,
+      '.reasoning-effort.ui-select-trigger, .context-tokens.ui-select-trigger'
+    );
+    expect(trigger).toContain('height: var(--ui-control-height-sm)');
+    expect(trigger).toContain('border-radius: var(--ui-radius-full)');
+    expect(chats).not.toContain('.reasoning-effort select');
+    expect(chats).not.toContain('.context-tokens select');
+  });
+
   it('keeps group and sort controls out of the 48px page-bar', () => {
     expect(rule(chats, '.chats-sidebar-header.page-bar')).not.toContain('chats-arrange');
     expect(rule(chats, '.chats-arrange')).toContain('flex-shrink: 0');
-    expect(rule(chats, '.chats-arrange select')).toContain('height: var(--ui-control-height-sm)');
-    expect(rule(chats, '.chats-arrange select')).toContain('font-size: var(--ui-text-xs)');
+    expect(rule(chats, '.chats-arrange .ui-select-trigger')).toContain(
+      'height: var(--ui-control-height-sm)'
+    );
+    expect(rule(chats, '.chats-arrange .ui-select-trigger')).toContain(
+      'font-size: var(--ui-text-xs)'
+    );
   });
 
   it('sets a search result to the 56px two-line row: 4 + 16 title + 32 snippet + 4', () => {
@@ -112,6 +127,17 @@ describe('chats layout', () => {
     expect(header).toContain('flex-wrap: nowrap');
     expect(header).toContain('height: var(--ui-header-height)');
     expect(rule(chats, '.chat-header-info h3')).toContain('white-space: nowrap');
+  });
+
+  it('wraps the conversation header under the title on a phone', () => {
+    const phone = media(chats, '(max-width: 768px)');
+    expect(rule(phone, '.chat-header')).toContain('flex-wrap: wrap');
+    expect(rule(phone, '.chat-header')).toContain('height: auto');
+    expect(rule(phone, '.chat-back')).toContain('display: inline-flex');
+    expect(rule(phone, '.chat-header-info')).toContain('flex: 1 1 100%');
+    expect(rule(phone, '.chat-header-info')).toContain('flex-wrap: wrap');
+    expect(rule(phone, '.chat-header-actions')).toContain('flex-wrap: wrap');
+    expect(rule(phone, '.chat-header-actions')).toContain('flex: 1 1 100%');
   });
 
   it('draws the reader bubble at most 72% wide with the time outside it', () => {
@@ -314,6 +340,12 @@ describe('tasks page layout', () => {
     expect(branch).toContain('text-overflow: ellipsis');
     expect(branch).not.toContain('max-width: 50%');
     expect(branch).not.toContain('flex:');
+  });
+
+  it('wraps the task filters instead of shrinking them off the page bar', () => {
+    const phone = media(css, '(max-width: 768px)');
+    expect(rule(phone, '.tasks-filters')).toContain('flex-wrap: wrap');
+    expect(rule(phone, '.tasks-filters .ui-select-trigger')).toContain('width: auto');
   });
 
   it('lets a wizard toggle keep its description on the line under the title', () => {

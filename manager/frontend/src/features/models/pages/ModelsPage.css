@@ -223,7 +223,7 @@
   color: var(--ui-text-muted);
 }
 
-.browse-sort select {
+.browse-sort .ui-select-trigger {
   width: 10rem;
 }
 

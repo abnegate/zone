@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
+import { chooseSelect, openSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
 import type { Task, TaskRun, TaskRunLog } from '../types';
@@ -258,9 +259,7 @@ describe('TasksPage', () => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by status' }), {
-      target: { value: 'blocked' },
-    });
+    chooseSelect('Filter by status', 'Blocked');
 
     await waitFor(() => {
       expect(screen.getByText('No tasks match')).toBeInTheDocument();
@@ -273,7 +272,9 @@ describe('TasksPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
-    expect(screen.getByRole('combobox', { name: 'Filter by status' })).toHaveValue('');
+    expect(screen.getByRole('combobox', { name: 'Filter by status' })).toHaveTextContent(
+      'All Statuses'
+    );
   });
 
   it('renders tasks list', async () => {
@@ -532,9 +533,7 @@ describe('TasksPage', () => {
       expect(screen.getByRole('combobox', { name: 'Filter by project' })).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by project' }), {
-      target: { value: 'proj-1' },
-    });
+    chooseSelect('Filter by project', 'Project Alpha');
 
     await waitFor(() => {
       expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', undefined);
@@ -547,9 +546,7 @@ describe('TasksPage', () => {
       expect(screen.getByRole('combobox', { name: 'Filter by status' })).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Filter by status' }), {
-      target: { value: 'complete' },
-    });
+    chooseSelect('Filter by status', 'Complete');
 
     await waitFor(() => {
       expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', undefined, 'complete');
@@ -849,11 +846,11 @@ describe('TasksPage', () => {
       expect(screen.getByRole('combobox', { name: 'Filter by status' })).toBeInTheDocument();
     });
 
-    const statusSelect = screen.getByRole('combobox', { name: 'Filter by status' });
-    expect(statusSelect).toContainHTML('All Statuses');
-    expect(statusSelect).toContainHTML('Created');
-    expect(statusSelect).toContainHTML('In Progress');
-    expect(statusSelect).toContainHTML('Complete');
+    openSelect('Filter by status');
+    expect(screen.getByRole('option', { name: 'All Statuses' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Created' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'In Progress' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Complete' })).toBeInTheDocument();
   });
 
   it('does not show fictional phases or logs after a failed start', async () => {

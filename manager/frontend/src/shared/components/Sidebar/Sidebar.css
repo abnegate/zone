@@ -254,8 +254,8 @@ a.change-server-btn:hover {
 .mobile-menu-btn {
   display: none;
   position: fixed;
-  top: var(--ui-space-2);
-  left: var(--ui-space-3);
+  top: calc(var(--ui-space-2) + var(--ui-safe-top));
+  left: calc(var(--ui-space-3) + var(--ui-safe-left));
   z-index: 101;
   width: var(--ui-control-height);
   height: var(--ui-control-height);
@@ -287,6 +287,8 @@ a.change-server-btn:hover {
   .sidebar {
     transform: translateX(-100%);
     box-shadow: var(--ui-shadow-2xl);
+    padding-top: var(--ui-safe-top);
+    padding-bottom: var(--ui-safe-bottom);
   }
 
   .sidebar.open {
@@ -294,7 +296,9 @@ a.change-server-btn:hover {
   }
 
   .sidebar.open .sidebar-header {
-    padding-left: calc(var(--ui-space-3) + var(--ui-control-height) + var(--ui-space-2));
+    padding-left: calc(
+      var(--ui-space-3) + var(--ui-control-height) + var(--ui-space-2) + var(--ui-safe-left)
+    );
   }
 
   .sidebar.collapsed {

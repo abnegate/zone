@@ -1,0 +1,7 @@
+{
+  "name": "zone-desktop",
+  "private": true,
+  "scripts": {
+    "tauri": "bun x --bun @tauri-apps/cli@2"
+  }
+}

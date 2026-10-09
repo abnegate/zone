@@ -100,6 +100,14 @@ describe('settings surfaces', () => {
     expect(rule(members, '.role-select')).toContain('height: var(--ui-control-height-sm)');
   });
 
+  it('sets connect URLs in the body face at the control height', () => {
+    const css = read(join(settings, 'workspace', 'components', 'ConnectDevicesSection.css'));
+    expect(css).not.toMatch(/#[0-9a-f]{3,6}\b/i);
+    expect(css).not.toContain('rgba(');
+    expect(rule(css, '.connect-url')).toContain('font-family: var(--ui-font-mono)');
+    expect(rule(css, '.connect-url-row')).toContain('min-height: var(--ui-control-height)');
+  });
+
   it('keeps metric values at 18 or below', () => {
     const billing = read(join(settings, 'organization', 'components', 'BillingSection.css'));
     expect(rule(billing, '.metric-value')).toContain('font-size: var(--ui-text-lg)');

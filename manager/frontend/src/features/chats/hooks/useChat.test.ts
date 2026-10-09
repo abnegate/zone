@@ -55,6 +55,7 @@ mock.module('../../../api/chats', () => ({
       return lastSocket;
     },
     chatAccessToken: () => 'test-token',
+    ensureAccessToken: async () => 'test-token',
   },
 }));
 
@@ -1755,6 +1756,47 @@ describe('useChat', () => {
     });
     expect(lastSocket?.sent.some((frame) => frame.includes('After reconnect'))).toBe(true);
     unmount();
+  });
+
+  it('retries Authentication failed without showing it', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+    const first = lastSocket;
+    act(() => first?.onopen?.());
+    act(() => first?.emit({ type: 'error', message: 'Authentication failed' }));
+    act(() => first?.onclose?.());
+    await waitFor(() => expect(lastSocket).not.toBe(first));
+    expect(result.current.error).toBeNull();
+    unmount();
+  });
+
+  it('does not reopen the socket while the page is hidden', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(lastSocket).not.toBeNull());
+    const hidden = lastSocket;
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    });
+    act(() => hidden?.onclose?.());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(lastSocket, 'a hidden page must not reconnect').toBe(hidden);
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    await waitFor(() => expect(lastSocket).not.toBe(hidden));
+    unmount();
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
   });
 
   it('a socket the server refuses before init is not reopened', async () => {

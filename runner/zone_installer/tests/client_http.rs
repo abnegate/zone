@@ -82,6 +82,12 @@ async fn request(
 
 async fn start_upstream() -> (String, tokio::task::JoinHandle<()>) {
     let app = axum::Router::new()
+        .route(
+            "/health",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "status": "healthy", "version": "test" }))
+            }),
+        )
         .route("/api/health", axum::routing::get(|| async { "ok" }))
         .route(
             "/api/echo",
@@ -139,14 +145,6 @@ async fn run_lifecycle(platform: Platform) {
         json!("https://manager.localhost"),
         "{platform:?}"
     );
-    let device_id = info["device_id"].as_str().expect("device_id");
-    assert_eq!(device_id.split('-').count(), 5, "{platform:?} {device_id}");
-    assert!(
-        info["platform"]
-            .as_str()
-            .is_some_and(|platform| { matches!(platform, "android" | "ios" | "desktop") }),
-        "{platform:?}"
-    );
 
     let (status, body) = request(&app, "POST", "/api/setup", Some(r#"{"host":"not-a-url"}"#)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{platform:?}");
@@ -154,14 +152,9 @@ async fn run_lifecycle(platform: Platform) {
         body.contains("http://") || body.contains("https://"),
         "{platform:?}"
     );
-    let after_invalid = fs::read_to_string(&config_path).unwrap_or_default();
     assert!(
-        !after_invalid.contains("not-a-url"),
+        !config_path.exists(),
         "{platform:?} must not write on invalid setup"
-    );
-    assert!(
-        !after_invalid.contains("host ="),
-        "{platform:?} must not write a host on invalid setup: {after_invalid}"
     );
 
     let (status, _) = request(&app, "POST", "/api/setup", Some(r#"{"host":""}"#)).await;
@@ -300,15 +293,60 @@ async fn setup_write_failure_is_internal_error() {
     let blocked = root.path().join("blocked-file");
     fs::write(&blocked, "not a directory").unwrap();
     let config_path = blocked.join("nested/config.toml");
+    let (upstream, upstream_task) = start_upstream().await;
     let app = desktop_app(manager, config_path, "https://manager.localhost".into()).await;
+
+    let payload = json!({ "host": upstream }).to_string();
+    let (status, body) = request(&app, "POST", "/api/setup", Some(&payload)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(body.contains("Could not save server URL"));
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn setup_probe_refuses_an_unreachable_host() {
+    let root = tempfile::tempdir().unwrap();
+    let manager = write_manager(root.path());
+    let config_path = root.path().join("home/.zone/config.toml");
+    let app = desktop_app(
+        manager,
+        config_path.clone(),
+        "https://manager.localhost".into(),
+    )
+    .await;
 
     let (status, body) = request(
         &app,
         "POST",
         "/api/setup",
-        Some(r#"{"host":"https://zone.example.com"}"#),
+        Some(r#"{"host":"http://127.0.0.1:1"}"#),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(body.contains("Could not save server URL"));
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Could not reach Zone at http://127.0.0.1:1"));
+    assert!(!config_path.exists());
+}
+
+#[tokio::test]
+async fn setup_probe_refuses_html_at_health() {
+    let root = tempfile::tempdir().unwrap();
+    let manager = write_manager(root.path());
+    let config_path = root.path().join("home/.zone/config.toml");
+    let app = axum::Router::new().route(
+        "/health",
+        axum::routing::get(|| async { "<!DOCTYPE html><html></html>" }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let host = format!("http://{addr}");
+    let client = desktop_app(manager, config_path.clone(), host.clone()).await;
+    let payload = json!({ "host": host }).to_string();
+    let (status, body) = request(&client, "POST", "/api/setup", Some(&payload)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Could not reach Zone"));
+    assert!(!config_path.exists());
+    handle.abort();
 }

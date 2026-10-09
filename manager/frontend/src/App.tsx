@@ -1,4 +1,5 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { useEffect, useLayoutEffect, useState } from 'react';
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import {
   AuthProvider,
   EmailVerificationPage,
@@ -20,8 +21,34 @@ import UnauthorizedPage from './pages/UnauthorizedPage';
 import { Layout, ProtectedRoute } from './shared/components';
 import { ThemeProvider, WorkspaceProvider } from './shared/context';
 import { WorkspaceTheme } from './shared/context/WorkspaceTheme';
+import { lastPathToRestore, persistLastPath } from './shared/lastPath';
 import { PERMISSIONS } from './shared/types/permissions';
 import './App.css';
+
+function LocationSync() {
+  const { pathname, search, hash } = useLocation();
+  const navigate = useNavigate();
+  const href = `${pathname}${search}${hash}`;
+  const [bootRestore] = useState(() => lastPathToRestore(href));
+  const [didRestore, setDidRestore] = useState(() => bootRestore === null);
+
+  useLayoutEffect(() => {
+    if (!bootRestore || didRestore) {
+      return;
+    }
+    navigate(bootRestore, { replace: true });
+    setDidRestore(true);
+  }, [bootRestore, didRestore, navigate]);
+
+  useEffect(() => {
+    if (!didRestore) {
+      return;
+    }
+    persistLastPath(href);
+  }, [didRestore, href]);
+
+  return null;
+}
 
 function App() {
   return (
@@ -32,6 +59,7 @@ function App() {
             <TrainProvider>
               <WorkspaceTheme />
               <BrowserRouter>
+                <LocationSync />
                 <Routes>
                   <Route path="/login" element={<LoginPage />} />
                   <Route path="/register" element={<RegisterPage />} />

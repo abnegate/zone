@@ -1,4 +1,4 @@
-import { Button, EmptyState } from '@zone/ui';
+import { Button, EmptyState, Select } from '@zone/ui';
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { AUDIT_ACTIONS, AUDIT_RESOURCE_TYPES } from '../schemas';
@@ -209,39 +209,29 @@ export function AuditLogsSection({ orgId }: AuditLogsSectionProps) {
       {showFilters && (
         <div className="audit-logs-filters">
           <div className="filter-grid">
-            <div className="form-group">
-              <label htmlFor="action-filter">Action</label>
-              <select
-                id="action-filter"
-                value={action}
-                onChange={(e) => setAction(e.target.value as AuditAction | '')}
-                className="form-select"
-              >
-                <option value="">All Actions</option>
-                {ACTIONS.map((a) => (
-                  <option key={a} value={a}>
-                    {a}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <Select
+              id="action-filter"
+              label="Action"
+              value={action}
+              onValueChange={(next) => setAction(next as AuditAction | '')}
+              wrapperClassName="form-group"
+              options={[
+                { value: '', label: 'All Actions' },
+                ...ACTIONS.map((item) => ({ value: item, label: item })),
+              ]}
+            />
 
-            <div className="form-group">
-              <label htmlFor="resource-type-filter">Resource Type</label>
-              <select
-                id="resource-type-filter"
-                value={resourceType}
-                onChange={(e) => setResourceType(e.target.value as AuditResourceType | '')}
-                className="form-select"
-              >
-                <option value="">All Types</option>
-                {RESOURCE_TYPES.map((type) => (
-                  <option key={type} value={type}>
-                    {type}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <Select
+              id="resource-type-filter"
+              label="Resource Type"
+              value={resourceType}
+              onValueChange={(next) => setResourceType(next as AuditResourceType | '')}
+              wrapperClassName="form-group"
+              options={[
+                { value: '', label: 'All Types' },
+                ...RESOURCE_TYPES.map((type) => ({ value: type, label: type })),
+              ]}
+            />
 
             <div className="form-group">
               <label htmlFor="actor-filter">Actor (User ID)</label>

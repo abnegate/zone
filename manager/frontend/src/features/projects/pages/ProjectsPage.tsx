@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Badge, Button, EmptyState, Modal, Tabs, TabsList, TabsTrigger } from '@zone/ui';
+import { Badge, Button, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
@@ -785,18 +785,18 @@ export default function ProjectsPage() {
               rows={3}
             />
           </div>
-          <div className="form-group">
-            <label htmlFor="edit-status">Status</label>
-            <select
-              id="edit-status"
-              value={formStatus}
-              onChange={(e) => setFormStatus(e.target.value as ProjectStatus)}
-            >
-              <option value="active">Active</option>
-              <option value="on_hold">On Hold</option>
-              <option value="cancelled">Cancelled</option>
-            </select>
-          </div>
+          <Select
+            id="edit-status"
+            label="Status"
+            value={formStatus}
+            onValueChange={(next) => setFormStatus(next as ProjectStatus)}
+            wrapperClassName="form-group"
+            options={[
+              { value: 'active', label: 'Active' },
+              { value: 'on_hold', label: 'On Hold' },
+              { value: 'cancelled', label: 'Cancelled' },
+            ]}
+          />
           {operationError && (
             <div className="form-error" role="alert">
               {operationError}
@@ -850,27 +850,28 @@ export default function ProjectsPage() {
         title="Link Source"
       >
         <form onSubmit={handleLinkSource}>
-          <div className="form-group">
-            <label htmlFor="source-select">Source</label>
-            <select
-              id="source-select"
-              value={formSourceId}
-              onChange={(e) => setFormSourceId(e.target.value)}
-              required
-            >
-              <option value="">Select a source...</option>
-              {sources
-                .filter((s) => s.is_active)
-                .map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} ({s.source_type})
-                  </option>
-                ))}
-            </select>
-            {sources.length === 0 && (
-              <span className="form-hint">No sources configured. Add one in the Sources page.</span>
-            )}
-          </div>
+          <Select
+            id="source-select"
+            label="Source"
+            value={formSourceId}
+            onValueChange={setFormSourceId}
+            required
+            wrapperClassName="form-group"
+            helpText={
+              sources.length === 0
+                ? 'No sources configured. Add one in the Sources page.'
+                : undefined
+            }
+            options={[
+              { value: '', label: 'Select a source...' },
+              ...sources
+                .filter((source) => source.is_active)
+                .map((source) => ({
+                  value: source.id,
+                  label: `${source.name} (${source.source_type})`,
+                })),
+            ]}
+          />
           {operationError && (
             <div className="form-error" role="alert">
               {operationError}
@@ -894,29 +895,29 @@ export default function ProjectsPage() {
       >
         <form onSubmit={handleCreateSyncConfig}>
           <div className="form-row">
-            <div className="form-group">
-              <label htmlFor="sync-provider">Provider</label>
-              <select
-                id="sync-provider"
-                value={formSyncProvider}
-                onChange={(e) => setFormSyncProvider(e.target.value as SyncProvider)}
-              >
-                <option value="github">GitHub</option>
-                <option value="linear">Linear</option>
-              </select>
-            </div>
-            <div className="form-group">
-              <label htmlFor="sync-direction">Direction</label>
-              <select
-                id="sync-direction"
-                value={formSyncDirection}
-                onChange={(e) => setFormSyncDirection(e.target.value as SyncDirection)}
-              >
-                <option value="inbound">Inbound (External to Zone)</option>
-                <option value="outbound">Outbound (Zone to External)</option>
-                <option value="bidirectional">Bidirectional</option>
-              </select>
-            </div>
+            <Select
+              id="sync-provider"
+              label="Provider"
+              value={formSyncProvider}
+              onValueChange={(next) => setFormSyncProvider(next as SyncProvider)}
+              wrapperClassName="form-group"
+              options={[
+                { value: 'github', label: 'GitHub' },
+                { value: 'linear', label: 'Linear' },
+              ]}
+            />
+            <Select
+              id="sync-direction"
+              label="Direction"
+              value={formSyncDirection}
+              onValueChange={(next) => setFormSyncDirection(next as SyncDirection)}
+              wrapperClassName="form-group"
+              options={[
+                { value: 'inbound', label: 'Inbound (External to Zone)' },
+                { value: 'outbound', label: 'Outbound (Zone to External)' },
+                { value: 'bidirectional', label: 'Bidirectional' },
+              ]}
+            />
           </div>
           {formSyncProvider === 'github' && (
             <div className="form-group">

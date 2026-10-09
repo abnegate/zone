@@ -216,7 +216,12 @@ export const WorkspaceAiSettingsResponseSchema = AiSettingsResponseSchema.extend
   organization_keys: OrganizationKeysSchema,
 });
 
+export const ConnectResponseSchema = z.object({
+  urls: z.array(z.string().min(1)),
+});
+
 export type WorkspaceZ = z.infer<typeof WorkspaceSchema>;
+export type ConnectResponse = z.infer<typeof ConnectResponseSchema>;
 export type WorkspaceMemberZ = z.infer<typeof WorkspaceMemberSchema>;
 export type WorkspaceMembersResponse = z.infer<typeof WorkspaceMembersResponseSchema>;
 export type WorkspaceThemeZ = z.infer<typeof WorkspaceThemeSchema>;

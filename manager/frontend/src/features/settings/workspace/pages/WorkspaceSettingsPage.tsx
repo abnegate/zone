@@ -1,4 +1,4 @@
-import { Button, TabsContent, TabsList, TabsTrigger } from '@zone/ui';
+import { Button, Select, TabsContent, TabsList, TabsTrigger } from '@zone/ui';
 import {
   type CSSProperties,
   type FormEvent,
@@ -35,7 +35,7 @@ import {
   useAgentStatuses,
 } from '../../ai';
 import { SettingsPage } from '../../components';
-import { HostFoldersPanel, WorkspaceMembersSection } from '../components';
+import { ConnectDevicesSection, HostFoldersPanel, WorkspaceMembersSection } from '../components';
 import { UpdateWorkspaceThemeRequestSchema } from '../schemas';
 import type {
   AiProvider,
@@ -48,7 +48,7 @@ import type {
 } from '../types';
 import './WorkspaceSettingsPage.css';
 
-type Tab = 'theme' | 'ai' | 'folders' | 'members';
+type Tab = 'theme' | 'ai' | 'folders' | 'members' | 'devices';
 
 const TITLE = 'Workspace Settings';
 
@@ -139,7 +139,7 @@ export default function WorkspaceSettingsPage() {
   const currentScope = useRef<string | null>(scope);
   currentScope.current = scope;
   const loading =
-    activeTab === 'theme' ? workspaceThemeLoading : activeTab === 'ai' ? aiLoading : false;
+    (activeTab === 'theme' && workspaceThemeLoading) || (activeTab === 'ai' && aiLoading);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -441,6 +441,7 @@ export default function WorkspaceSettingsPage() {
       <TabsTrigger value="ai">AI Settings</TabsTrigger>
       <TabsTrigger value="folders">Folders</TabsTrigger>
       <TabsTrigger value="members">Members</TabsTrigger>
+      <TabsTrigger value="devices">Devices</TabsTrigger>
     </TabsList>
   );
   const selectTab = (value: string) => setActiveTab(value as Tab);
@@ -507,6 +508,10 @@ export default function WorkspaceSettingsPage() {
         <HostFoldersPanel workspaceId={workspaceId} orgId={orgId} />
       </TabsContent>
 
+      <TabsContent value="devices">
+        <ConnectDevicesSection />
+      </TabsContent>
+
       <TabsContent value="theme">
         <form
           onSubmit={handleSave}
@@ -568,27 +573,19 @@ export default function WorkspaceSettingsPage() {
           <div className="settings-card">
             <h3 className="card-title">Typography &amp; shape</h3>
             <div className="form-grid">
-              <div className="form-group">
-                <label htmlFor="font-family">Font Family</label>
-                <select
-                  id="font-family"
-                  value={fontFamily ?? ''}
-                  onChange={(event) => {
-                    touched.current.add('font_family');
-                    setFontFamily(event.target.value as FontFamily);
-                  }}
-                  className="form-select"
-                >
-                  <option value="" disabled>
-                    App Default
-                  </option>
-                  {fontOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <Select
+                id="font-family"
+                label="Font Family"
+                value={fontFamily ?? ''}
+                onValueChange={(next) => {
+                  touched.current.add('font_family');
+                  edited.current = true;
+                  setDirty(true);
+                  setFontFamily(next as FontFamily);
+                }}
+                wrapperClassName="form-group"
+                options={[{ value: '', label: 'App Default', disabled: true }, ...fontOptions]}
+              />
               <div className="form-group">
                 <label htmlFor="font-size">Base Font Size</label>
                 <div className="slider-input-wrapper">

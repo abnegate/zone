@@ -10,6 +10,7 @@ import {
   setSystemTime,
 } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { chooseSelect, selectOptionValues } from '../../../../test/select';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { ApiError } from '../../../../api/ApiError';
 import type { AiSettings, OrgRole } from '../types';
@@ -45,9 +46,6 @@ mock.module('../components', () => ({
   ),
   OrgMembersSection: ({ orgId }: { orgId: string }) => (
     <div data-testid="org-members-section">OrgMembersSection: {orgId}</div>
-  ),
-  DevicesSection: ({ orgId }: { orgId: string }) => (
-    <div data-testid="org-devices-section">DevicesSection: {orgId}</div>
   ),
   InvitationsSection: ({ orgId, workspaces }: { orgId: string; workspaces: unknown[] }) => (
     <div data-testid="invitations-section">
@@ -206,7 +204,7 @@ describe('OrgSettingsPage', () => {
       render(<OrgSettingsPage />);
       await waitFor(() => {
         const select = screen.getByLabelText('AI Provider');
-        expect(select).toHaveValue('self_hosted');
+        expect(select).toHaveTextContent('Self-Hosted (Ollama via LiteLLM)');
       });
     });
 
@@ -216,11 +214,8 @@ describe('OrgSettingsPage', () => {
         expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
       });
 
-      const select = screen.getByLabelText('AI Provider');
-      fireEvent.change(select, { target: { value: 'openai' } });
-
-      // The select should update immediately since it's controlled
-      expect(select).toHaveValue('openai');
+      chooseSelect('AI Provider', 'OpenAI');
+      expect(screen.getByLabelText('AI Provider')).toHaveTextContent('OpenAI');
     });
 
     it('shows all provider options', async () => {
@@ -229,9 +224,7 @@ describe('OrgSettingsPage', () => {
         expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
       });
 
-      const select = screen.getByLabelText('AI Provider');
-      const options = select.querySelectorAll('option');
-      expect(Array.from(options, (option) => option.value)).toEqual([
+      expect(selectOptionValues('AI Provider')).toEqual([
         'self_hosted',
         'openai',
         'anthropic',
@@ -262,11 +255,11 @@ describe('OrgSettingsPage', () => {
     it('asks for sign-in status only once a coding agent is chosen', async () => {
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
       render(<OrgSettingsPage />);
-      const select = await screen.findByLabelText('AI Provider');
+      await screen.findByLabelText('AI Provider');
       expect(agentsApi.list).not.toHaveBeenCalled();
       expect(screen.queryByText('Claude Code sign-in')).toBeNull();
 
-      fireEvent.change(select, { target: { value: 'claude_code' } });
+      chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
 
       expect(
         await screen.findByRole('heading', { name: 'Claude Code sign-in', level: 4 })
@@ -276,7 +269,7 @@ describe('OrgSettingsPage', () => {
       expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
       expect(screen.getByText('jake@example.com')).toBeInTheDocument();
 
-      fireEvent.change(select, { target: { value: 'codex' } });
+      chooseSelect('AI Provider', 'Codex (ChatGPT subscription)');
 
       expect(await screen.findByText('Codex sign-in')).toBeInTheDocument();
       expect(screen.getByText('ABCD-EFGHI')).toBeInTheDocument();
@@ -297,20 +290,10 @@ describe('OrgSettingsPage', () => {
       render(<OrgSettingsPage />);
 
       await waitFor(() =>
-        expect(
-          Array.from(
-            (screen.getByLabelText('Fast Model') as HTMLSelectElement).options,
-            (option) => option.value
-          )
-        ).toEqual(['', 'sonnet', 'opus', 'haiku'])
+        expect(selectOptionValues('Fast Model')).toEqual(['', 'sonnet', 'opus', 'haiku'])
       );
-      expect(
-        Array.from(
-          (screen.getByLabelText('Reasoning Model') as HTMLSelectElement).options,
-          (option) => option.value
-        )
-      ).toEqual(['', 'sonnet', 'opus', 'haiku']);
-      expect(screen.getByLabelText('Reasoning Model')).toHaveValue('opus');
+      expect(selectOptionValues('Reasoning Model')).toEqual(['', 'sonnet', 'opus', 'haiku']);
+      expect(screen.getByLabelText('Reasoning Model')).toHaveTextContent('opus');
       expect(screen.getByText(/this server's own embedding engine/)).toBeInTheDocument();
     });
 
@@ -331,25 +314,22 @@ describe('OrgSettingsPage', () => {
       render(<OrgSettingsPage />);
 
       await waitFor(() =>
-        expect(screen.getByLabelText('Fast Model')).toHaveValue('claude-sonnet-4-5')
+        expect(screen.getByLabelText('Fast Model')).toHaveTextContent('claude-sonnet-4-5')
       );
     });
 
     it('saves a coding agent provider without any credentials, its models back on Automatic', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
       render(<OrgSettingsPage />);
-      const select = await screen.findByLabelText('AI Provider');
-      expect(screen.getByLabelText('Fast Model')).toHaveValue('llama3.1:8b');
-      fireEvent.change(select, { target: { value: 'claude_code' } });
+      await screen.findByLabelText('AI Provider');
+      expect(screen.getByLabelText('Fast Model')).toHaveTextContent('llama3.1:8b');
+      chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
 
-      await waitFor(() => expect(screen.getByLabelText('Fast Model')).toHaveValue(''));
-      expect(screen.getByLabelText('Reasoning Model')).toHaveValue('');
-      expect(
-        Array.from(
-          (screen.getByLabelText('Fast Model') as HTMLSelectElement).options,
-          (option) => option.value
-        )
-      ).toEqual(['', 'sonnet', 'opus', 'haiku']);
+      await waitFor(() =>
+        expect(screen.getByLabelText('Fast Model')).toHaveTextContent('Automatic')
+      );
+      expect(screen.getByLabelText('Reasoning Model')).toHaveTextContent('Automatic');
+      expect(selectOptionValues('Fast Model')).toEqual(['', 'sonnet', 'opus', 'haiku']);
       fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
 
       await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalled());
@@ -389,9 +369,11 @@ describe('OrgSettingsPage', () => {
       mockClient.updateOrgAiSettings.mockResolvedValue({ ...agentSettings, model_reasoning: null });
       render(<OrgSettingsPage />);
 
-      const reasoning = await screen.findByLabelText('Reasoning Model');
-      await waitFor(() => expect(reasoning).toHaveValue('opus'));
-      fireEvent.change(reasoning, { target: { value: '' } });
+      await screen.findByLabelText('Reasoning Model');
+      await waitFor(() =>
+        expect(screen.getByLabelText('Reasoning Model')).toHaveTextContent('opus')
+      );
+      chooseSelect('Reasoning Model', 'Automatic');
       fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
 
       await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalled());
@@ -406,13 +388,13 @@ describe('OrgSettingsPage', () => {
       render(<OrgSettingsPage />);
 
       const fast = await screen.findByLabelText('Fast Model');
-      expect(fast.closest('.form-group')?.querySelector('.form-hint')?.textContent).toBe(
+      expect(fast.closest('.form-group')?.querySelector('.ui-select-help-text')?.textContent).toBe(
         'Automatic lets the agent choose; titles, PR subjects and summaries use it too.'
       );
       const reasoning = screen.getByLabelText('Reasoning Model');
-      expect(reasoning.closest('.form-group')?.querySelector('.form-hint')?.textContent).toBe(
-        'Harder questions; empty lets the agent choose.'
-      );
+      expect(
+        reasoning.closest('.form-group')?.querySelector('.ui-select-help-text')?.textContent
+      ).toBe('Harder questions; empty lets the agent choose.');
     });
 
     describe('after the provider changes', () => {
@@ -453,9 +435,7 @@ describe('OrgSettingsPage', () => {
           'Failed to cancel the codex sign-in: 500'
         );
 
-        fireEvent.change(screen.getByLabelText('AI Provider'), {
-          target: { value: 'claude_code' },
-        });
+        chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
 
         const panel = screen.getByRole('region', { name: 'Claude Code sign-in' });
         expect(within(panel).getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
@@ -485,7 +465,7 @@ describe('OrgSettingsPage', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
         expect(await screen.findByRole('alert')).toHaveTextContent('Claude rejected the code');
 
-        fireEvent.change(screen.getByLabelText('AI Provider'), { target: { value: 'codex' } });
+        chooseSelect('AI Provider', 'Codex (ChatGPT subscription)');
 
         const panel = screen.getByRole('region', { name: 'Codex sign-in' });
         expect(within(panel).getByRole('button', { name: 'Sign in with ChatGPT' })).toBeEnabled();
@@ -500,9 +480,8 @@ describe('OrgSettingsPage', () => {
       mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
       render(<OrgSettingsPage />);
 
-      fireEvent.change(await screen.findByLabelText('AI Provider'), {
-        target: { value: 'claude_code' },
-      });
+      await screen.findByLabelText('AI Provider');
+      chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
       expect(await screen.findByText('Save Changes to use this provider.')).toBeInTheDocument();
 
       fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
@@ -731,9 +710,9 @@ describe('OrgSettingsPage', () => {
     it('displays current model values', async () => {
       render(<OrgSettingsPage />);
       await waitFor(() => {
-        expect(screen.getByLabelText('Fast Model')).toHaveValue('llama3.1:8b');
-        expect(screen.getByLabelText('Reasoning Model')).toHaveValue('deepseek-r1:7b');
-        expect(screen.getByLabelText('Embedding Model')).toHaveValue('nomic-embed-text');
+        expect(screen.getByLabelText('Fast Model')).toHaveTextContent('llama3.1:8b');
+        expect(screen.getByLabelText('Reasoning Model')).toHaveTextContent('deepseek-r1:7b');
+        expect(screen.getByLabelText('Embedding Model')).toHaveTextContent('nomic-embed-text');
       });
     });
   });
@@ -763,10 +742,12 @@ describe('OrgSettingsPage', () => {
 
       render(<OrgSettingsPage />);
       await waitFor(() => {
-        expect(screen.getByLabelText('Video Model')).toHaveValue('wan2.2_ti2v_5B_fp16.safetensors');
+        expect(screen.getByLabelText('Video Model')).toHaveTextContent(
+          'wan2.2_ti2v_5B_fp16.safetensors'
+        );
       });
 
-      fireEvent.change(screen.getByLabelText('Video Model'), { target: { value: '' } });
+      chooseSelect('Video Model', 'Use server default');
       fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
 
       await waitFor(() => {
@@ -785,10 +766,12 @@ describe('OrgSettingsPage', () => {
 
       render(<OrgSettingsPage />);
       await waitFor(() => {
-        expect(screen.getByLabelText('Audio Model')).toHaveValue('ace_step_v1_3.5b.safetensors');
+        expect(screen.getByLabelText('Audio Model')).toHaveTextContent(
+          'ace_step_v1_3.5b.safetensors'
+        );
       });
 
-      fireEvent.change(screen.getByLabelText('Audio Model'), { target: { value: '' } });
+      chooseSelect('Audio Model', 'Use server default');
       fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
 
       await waitFor(() => {
@@ -956,21 +939,6 @@ describe('OrgSettingsPage', () => {
       });
     });
 
-    it('switches to Devices tab', async () => {
-      render(<OrgSettingsPage />);
-      await waitFor(() => {
-        expect(screen.getByRole('tab', { name: 'Devices' })).toBeInTheDocument();
-      });
-
-      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Devices' }), {
-        button: 0,
-        ctrlKey: false,
-      });
-
-      expect(screen.getByTestId('org-devices-section')).toBeInTheDocument();
-      expect(screen.queryByText('AI Provider Configuration')).not.toBeInTheDocument();
-    });
-
     it('switches to Members tab', async () => {
       render(<OrgSettingsPage />);
       await waitFor(() => {
@@ -1039,7 +1007,6 @@ describe('OrgSettingsPage', () => {
 
       expect(screen.getByRole('tab', { name: 'AI Settings' })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: 'Members' })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: 'Devices' })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: 'Invitations' })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: 'Billing' })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: 'Audit Logs' })).toBeInTheDocument();

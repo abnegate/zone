@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { chooseSelectElement } from '../../../../test/select';
 import userEvent from '@testing-library/user-event';
 import type { OrganizationMember, WorkspaceMember, WorkspaceRole } from '../types';
 
@@ -140,9 +141,16 @@ const roleBadgeFor = (email: string): HTMLElement => {
 };
 
 const rolesOfferedForNewMember = (): string[] => {
-  const field = screen.getByRole('combobox', { name: 'Role' }).closest('.ui-select-wrapper');
-  if (!field) throw new Error('no role field in the add member modal');
-  return Array.from(field.querySelectorAll('option')).map((option) => option.value);
+  const dialog = screen.getByRole('dialog');
+  const trigger = within(dialog).getByRole('combobox', { name: 'Role', hidden: true });
+  if (trigger.getAttribute('data-state') !== 'open') {
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+  }
+  const values = screen
+    .getAllByRole('option')
+    .map((option) => option.getAttribute('data-value') ?? '');
+  fireEvent.keyDown(trigger, { key: 'Escape' });
+  return values;
 };
 
 describe('WorkspaceMembersSection', () => {
@@ -267,9 +275,9 @@ describe('WorkspaceMembersSection', () => {
         expect(screen.getByText('Test Owner')).toBeInTheDocument();
       });
       expect(roleBadgeFor('owner@test.com')).toHaveClass('role-badge-owner');
-      expect(roleSelectFor('admin@test.com')).toHaveValue('admin');
-      expect(roleSelectFor('member@test.com')).toHaveValue('member');
-      expect(roleSelectFor('viewer@test.com')).toHaveValue('viewer');
+      expect(roleSelectFor('admin@test.com')).toHaveTextContent('Admin');
+      expect(roleSelectFor('member@test.com')).toHaveTextContent('Member');
+      expect(roleSelectFor('viewer@test.com')).toHaveTextContent('Viewer');
       expect(document.querySelectorAll('.role-badge')).toHaveLength(1);
     });
 
@@ -412,7 +420,7 @@ describe('WorkspaceMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('member@test.com');
         });
-        fireEvent.change(memberRoleSelect!, { target: { value: 'admin' } });
+        chooseSelectElement(memberRoleSelect!, 'Admin');
       });
 
       await waitFor(() => {
@@ -429,7 +437,7 @@ describe('WorkspaceMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('member@test.com');
         });
-        fireEvent.change(memberRoleSelect!, { target: { value: 'owner' } });
+        chooseSelectElement(memberRoleSelect!, 'Owner');
       });
 
       await waitFor(() => {
@@ -445,7 +453,7 @@ describe('WorkspaceMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('admin@test.com');
         });
-        fireEvent.change(adminRoleSelect!, { target: { value: 'viewer' } });
+        chooseSelectElement(adminRoleSelect!, 'Viewer');
       });
 
       // Should update immediately without confirmation
@@ -470,7 +478,7 @@ describe('WorkspaceMembersSection', () => {
           const row = select.closest('tr');
           return row?.textContent?.includes('member@test.com');
         });
-        fireEvent.change(memberRoleSelect!, { target: { value: 'admin' } });
+        chooseSelectElement(memberRoleSelect!, 'Admin');
       });
 
       await waitFor(() => {
@@ -673,7 +681,7 @@ describe('WorkspaceMembersSection', () => {
           )
       );
 
-      fireEvent.change(viewerRoleSelect!, { target: { value: 'member' } });
+      chooseSelectElement(viewerRoleSelect!, 'Member');
 
       // Select should be disabled during update
       await waitFor(

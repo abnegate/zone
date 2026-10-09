@@ -10,6 +10,7 @@ import {
   spyOn,
 } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { chooseSelect } from '../../../../test/select';
 import type { AuditLog, AuditLogsResponse } from '../types';
 
 const mockGetAuditLogs = mock();
@@ -393,7 +394,7 @@ describe('AuditLogsSection', () => {
         expect(screen.getByLabelText('Action')).toBeInTheDocument();
       });
 
-      const actionSelect = screen.getByLabelText('Action') as HTMLSelectElement;
+      await screen.findByLabelText('Action');
 
       // Set up the mock response
       mockGetAuditLogs.mockResolvedValue({
@@ -402,10 +403,12 @@ describe('AuditLogsSection', () => {
       });
 
       // Test with single filter to avoid component limitations with multiple simultaneous filter changes
-      fireEvent.change(actionSelect, { target: { value: 'member.added' } });
+      chooseSelect('Action', 'member.added');
 
       // Wait for React to process this state update and useEffect to trigger
-      await waitFor(() => expect(actionSelect.value).toBe('member.added'));
+      await waitFor(() =>
+        expect(screen.getByLabelText('Action')).toHaveTextContent('member.added')
+      );
 
       // Wait for automatic reload to complete
       await waitFor(
@@ -471,7 +474,7 @@ describe('AuditLogsSection', () => {
         expect(screen.getByLabelText('Action')).toBeInTheDocument();
       });
 
-      const actionSelect = screen.getByLabelText('Action') as HTMLSelectElement;
+      await screen.findByLabelText('Action');
 
       // Set up mock to handle automatic reload when filter changes
       mockGetAuditLogs.mockResolvedValue({
@@ -479,10 +482,10 @@ describe('AuditLogsSection', () => {
         total: 3,
       });
 
-      fireEvent.change(actionSelect, { target: { value: 'member.added' } });
+      chooseSelect('Action', 'member.added');
 
       await waitFor(() => {
-        expect(actionSelect.value).toBe('member.added');
+        expect(screen.getByLabelText('Action')).toHaveTextContent('member.added');
       });
 
       // Wait for automatic reload to complete
@@ -503,8 +506,7 @@ describe('AuditLogsSection', () => {
       // Re-query the select element to get the updated value
       await waitFor(
         () => {
-          const updatedActionSelect = screen.getByLabelText('Action') as HTMLSelectElement;
-          expect(updatedActionSelect.value).toBe('');
+          expect(screen.getByLabelText('Action')).toHaveTextContent('All Actions');
         },
         { timeout: 3000 }
       );
@@ -719,8 +721,7 @@ describe('AuditLogsSection', () => {
         expect(screen.getByLabelText('Action')).toBeInTheDocument();
       });
 
-      const actionSelect = screen.getByLabelText('Action') as HTMLSelectElement;
-      fireEvent.change(actionSelect, { target: { value: 'member.added' } });
+      chooseSelect('Action', 'member.added');
 
       await waitFor(() => {
         expect(screen.getByText('Export CSV')).toBeInTheDocument();
@@ -855,8 +856,7 @@ describe('AuditLogsSection', () => {
         expect(screen.getByLabelText('Action')).toBeInTheDocument();
       });
 
-      const actionSelect = screen.getByLabelText('Action') as HTMLSelectElement;
-      fireEvent.change(actionSelect, { target: { value: 'member.added' } });
+      chooseSelect('Action', 'member.added');
 
       mockGetAuditLogs.mockClear();
       mockGetAuditLogs.mockResolvedValue({

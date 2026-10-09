@@ -1,5 +1,7 @@
 //! First-launch desktop configurator.
 
+use std::time::Duration;
+
 use axum::{
     extract::{Json, State},
     http::StatusCode,
@@ -12,6 +14,7 @@ use crate::frontend::{self, AppMode};
 use crate::serve::AppState;
 
 const SETUP_HTML: &str = include_str!("setup.html");
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
 pub struct SetupRequest {
@@ -37,6 +40,10 @@ pub async fn handle_setup(
         }
     };
 
+    if let Err(error) = probe_health(&state.http, &host).await {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response();
+    }
+
     if let Err(err) = frontend::write_host_to(&state.config_path, &host) {
         tracing::error!(error = %err, path = %state.config_path.display(), "Failed to write Zone host");
         return (
@@ -51,15 +58,36 @@ pub async fn handle_setup(
     Json(json!({ "ok": true })).into_response()
 }
 
+async fn probe_health(client: &reqwest::Client, host: &str) -> Result<(), String> {
+    let url = format!("{host}/health");
+    let unreachable = || format!("Could not reach Zone at {host}");
+    let response = client
+        .get(&url)
+        .timeout(HEALTH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %error, url, "Zone health probe failed");
+            unreachable()
+        })?;
+    if !response.status().is_success() {
+        return Err(unreachable());
+    }
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| unreachable())?;
+    if body.get("status").and_then(|status| status.as_str()) == Some("healthy") {
+        Ok(())
+    } else {
+        Err(unreachable())
+    }
+}
+
 pub async fn client_info(State(state): State<AppState>) -> Response {
-    let device_id = frontend::ensure_device_id_at(&state.config_path)
-        .ok()
-        .map(|id| id.to_string());
     Json(json!({
         "client": true,
         "host": state.proxy_target(),
-        "device_id": device_id,
-        "platform": crate::client::ClientPlatform::current().as_str(),
     }))
     .into_response()
 }
@@ -89,6 +117,9 @@ mod tests {
         assert!(html.contains("Android and iOS"));
         assert!(html.contains("Zone menu on desktop"));
         assert!(html.contains(r#"id="host""#));
-        assert!(html.contains("http://manager.localhost"));
+        assert!(html.contains("http://192.168.0.10"));
+        assert!(html.contains("localStorage.clear"));
+        assert!(html.contains("Tailscale"));
+        assert!(!html.contains("value=\"http://manager.localhost\""));
     }
 }

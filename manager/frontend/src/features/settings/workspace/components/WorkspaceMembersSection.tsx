@@ -333,21 +333,17 @@ export default function WorkspaceMembersSection({
                     </td>
                     <td>
                       {editable ? (
-                        <select
+                        <Select
+                          compact
                           value={member.role}
-                          onChange={(e) =>
-                            handleRoleChangeRequest(member, e.target.value as WorkspaceRole)
+                          onValueChange={(next) =>
+                            handleRoleChangeRequest(member, next as WorkspaceRole)
                           }
                           disabled={isUpdating}
                           className="role-select"
                           aria-label={`Change role for ${memberLabel(member)}`}
-                        >
-                          {availableRoles.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
+                          options={availableRoles}
+                        />
                       ) : (
                         <span className={getRoleBadgeClass(member.role)}>
                           {member.role.charAt(0).toUpperCase() + member.role.slice(1)}

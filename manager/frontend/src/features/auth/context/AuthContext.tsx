@@ -11,8 +11,8 @@ import {
 } from 'react';
 import * as authApi from '../../../api/auth';
 import { RefreshError } from '../../../api/auth';
+import { chatsApi } from '../../../api/chats';
 import { client } from '../../../api/client';
-import { ensureDevice } from '../../../api/device';
 import type { AuthResponse, JwtPayload, LoginRequest, RegisterRequest, User } from '../types';
 
 interface AuthState {
@@ -108,6 +108,7 @@ export function AuthProvider({
 
   const refreshTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const scheduleRefreshRef = useRef<((expiresIn: number) => void) | null>(null);
+  const refreshInFlight = useRef<Promise<string | null> | null>(null);
 
   // Update API client token whenever it changes
   useEffect(() => {
@@ -197,55 +198,89 @@ export function AuthProvider({
     scheduleRefreshRef.current = scheduleRefresh;
   }, [scheduleRefresh]);
 
-  // Verify/refresh token on mount
+  const ensureFresh = useCallback(async (): Promise<string | null> => {
+    const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
+    if (!refreshToken) {
+      return null;
+    }
+    const accessToken = storage.getItem(ACCESS_TOKEN_KEY);
+    if (accessToken && !isTokenExpired(accessToken)) {
+      const payload = decodeJwt(accessToken);
+      if (payload) {
+        scheduleRefresh(payload.exp - Math.floor(Date.now() / 1000));
+      }
+      apiClient.setAccessToken(accessToken);
+      return accessToken;
+    }
+    if (refreshInFlight.current) {
+      return refreshInFlight.current;
+    }
+    const pending = (async () => {
+      try {
+        const currentRefreshToken = storage.getItem(REFRESH_TOKEN_KEY);
+        if (!currentRefreshToken) {
+          return null;
+        }
+        const response = await auth.refreshToken(currentRefreshToken);
+        handleAuthResponse(response);
+        return response.access_token;
+      } catch (err) {
+        if (err instanceof RefreshError && !err.credentialRejected) {
+          scheduleRefreshRef.current?.(RETRY_REFRESH_SECONDS);
+          return null;
+        }
+        handleLogout();
+        return null;
+      } finally {
+        refreshInFlight.current = null;
+      }
+    })();
+    refreshInFlight.current = pending;
+    return pending;
+  }, [apiClient, auth, handleAuthResponse, handleLogout, scheduleRefresh, storage]);
+
+  useLayoutEffect(() => {
+    chatsApi.setEnsureAccessToken(() => ensureFresh());
+    return () => {
+      chatsApi.setEnsureAccessToken(null);
+    };
+  }, [ensureFresh]);
+
+  // Verify/refresh token on mount and whenever the page is shown again.
+  // Backgrounding freezes the refresh timer, so a resume must not send the
+  // expired access token on the chat socket.
   useEffect(() => {
     const verify = async () => {
-      await ensureDevice();
-      const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
-      const accessToken = storage.getItem(ACCESS_TOKEN_KEY);
-
-      if (!refreshToken) {
+      if (!storage.getItem(REFRESH_TOKEN_KEY)) {
         handleLogout();
         return;
       }
-
-      if (accessToken && !isTokenExpired(accessToken)) {
-        const payload = decodeJwt(accessToken);
-        if (payload) {
-          const remainingTime = payload.exp - Math.floor(Date.now() / 1000);
-          scheduleRefresh(remainingTime);
-          setState((s) => ({ ...s, isLoading: false }));
-          return;
-        }
-      }
-
-      // Access token expired or invalid, try refresh
-      try {
-        const response = await auth.refreshToken(refreshToken);
-        handleAuthResponse(response);
-      } catch (err) {
-        if (err instanceof RefreshError && !err.credentialRejected) {
-          // Keep the stored session and retry: the server never said no.
-          setState((s) => ({ ...s, isLoading: false }));
-          scheduleRefreshRef.current?.(RETRY_REFRESH_SECONDS);
-          return;
-        }
-        handleLogout();
-      }
+      await ensureFresh();
+      setState((s) => ({ ...s, isLoading: false }));
     };
 
-    verify();
+    void verify();
+
+    const onVisible = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      void ensureFresh();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onVisible);
 
     return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onVisible);
       if (refreshTimeoutRef.current) {
         clearTimeout(refreshTimeoutRef.current);
       }
     };
-  }, [auth, handleAuthResponse, handleLogout, scheduleRefresh, storage]);
+  }, [ensureFresh, handleLogout, storage]);
 
   const login = useCallback(
     async (request: LoginRequest) => {
-      await ensureDevice();
       const response = await auth.login(request);
       handleAuthResponse(response);
     },
@@ -254,7 +289,6 @@ export function AuthProvider({
 
   const register = useCallback(
     async (request: RegisterRequest) => {
-      await ensureDevice();
       const response = await auth.register(request);
       handleAuthResponse(response);
     },

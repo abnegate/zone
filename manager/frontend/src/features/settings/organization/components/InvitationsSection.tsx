@@ -1,4 +1,4 @@
-import { Button, EmptyState, Modal } from '@zone/ui';
+import { Button, EmptyState, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import type { Workspace, WorkspaceRole } from '../../workspace/types';
@@ -207,54 +207,52 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
             />
           </div>
 
-          <div className="form-group">
-            <label htmlFor="org-role">Organization Role</label>
-            <select
-              id="org-role"
-              value={orgRole}
-              onChange={(e) => setOrgRole(e.target.value as OrgRole)}
-              className="form-select"
-            >
-              <option value="member">Member</option>
-              <option value="admin">Admin</option>
-              <option value="owner">Owner</option>
-            </select>
-          </div>
+          <Select
+            id="org-role"
+            label="Organization Role"
+            value={orgRole}
+            onValueChange={(next) => setOrgRole(next as OrgRole)}
+            wrapperClassName="form-group"
+            options={[
+              { value: 'member', label: 'Member' },
+              { value: 'admin', label: 'Admin' },
+              { value: 'owner', label: 'Owner' },
+            ]}
+          />
 
           <div className="form-group">
             <label htmlFor="workspace">
               Workspace <span className="label-optional">optional</span>
             </label>
-            <select
+            <Select
+              compact
               id="workspace"
               value={workspaceId}
-              onChange={(e) => setWorkspaceId(e.target.value)}
-              className="form-select"
-            >
-              <option value="">None - Org only</option>
-              {workspaces.map((ws) => (
-                <option key={ws.id} value={ws.id}>
-                  {ws.name}
-                </option>
-              ))}
-            </select>
+              onValueChange={setWorkspaceId}
+              options={[
+                { value: '', label: 'None - Org only' },
+                ...workspaces.map((workspace) => ({
+                  value: workspace.id,
+                  label: workspace.name,
+                })),
+              ]}
+            />
           </div>
 
           {workspaceId && (
-            <div className="form-group">
-              <label htmlFor="workspace-role">Workspace Role</label>
-              <select
-                id="workspace-role"
-                value={workspaceRole}
-                onChange={(e) => setWorkspaceRole(e.target.value as WorkspaceRole)}
-                className="form-select"
-              >
-                <option value="viewer">Viewer</option>
-                <option value="member">Member</option>
-                <option value="admin">Admin</option>
-                <option value="owner">Owner</option>
-              </select>
-            </div>
+            <Select
+              id="workspace-role"
+              label="Workspace Role"
+              value={workspaceRole}
+              onValueChange={(next) => setWorkspaceRole(next as WorkspaceRole)}
+              wrapperClassName="form-group"
+              options={[
+                { value: 'viewer', label: 'Viewer' },
+                { value: 'member', label: 'Member' },
+                { value: 'admin', label: 'Admin' },
+                { value: 'owner', label: 'Owner' },
+              ]}
+            />
           )}
 
           <div className="modal-actions">

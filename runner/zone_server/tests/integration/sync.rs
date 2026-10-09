@@ -78,6 +78,7 @@ async fn setup_test_state() -> AppState {
         endpoint_hosts: Default::default(),
         auto: Default::default(),
         host_mounts: Default::default(),
+        connect_urls: Vec::new(),
     };
 
     AppState::new(config, pool.inner().clone(), None)

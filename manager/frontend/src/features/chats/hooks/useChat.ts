@@ -36,6 +36,14 @@ import { appendHandover } from '../utils/handover';
 // How many frames to hold while the chat they belong to is still loading.
 const MAX_HELD_FRAMES = 1000;
 
+function pageIsHidden(): boolean {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
+
+function isRetryableHandshake(message: string): boolean {
+  return message === 'Authentication failed' || message.startsWith('Authentication timeout');
+}
+
 // The frames a background job and a wait arrive on. An exit carries no call
 // id, only the job's own, so it is matched to the call that started the job
 // rather than addressed to one.
@@ -583,6 +591,7 @@ export function useChat(
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempt = 0;
+    let pendingVisibleReconnect = false;
     let assistantId: string | null = null;
     let generationSeen = false;
     const completed = new Set<string>();
@@ -970,6 +979,17 @@ export function useChat(
       for (const payload of held.splice(0)) apply(payload);
     };
 
+    const openSocket = () => {
+      if (disposed) {
+        return;
+      }
+      if (pageIsHidden()) {
+        pendingVisibleReconnect = true;
+        return;
+      }
+      bindSocket(chatsApi.createChatWebSocket(chatId));
+    };
+
     const bindSocket = (socket: WebSocket) => {
       socketRef.current = socket;
       held.length = 0;
@@ -981,10 +1001,17 @@ export function useChat(
       let announced = false;
       let refused = false;
       socket.onopen = () => {
-        const token = chatsApi.chatAccessToken();
-        if (token) {
+        void (async () => {
+          const token = await chatsApi.ensureAccessToken();
+          if (socket !== socketRef.current || socket.readyState !== 1) {
+            return;
+          }
+          if (!token) {
+            socket.close();
+            return;
+          }
           socket.send(JSON.stringify({ type: 'auth', token }));
-        }
+        })();
       };
 
       socket.onmessage = (event) => {
@@ -999,6 +1026,9 @@ export function useChat(
           announced = true;
           reconnectAttempt = 0;
         } else if (payload.type === 'error' && !announced) {
+          if (isRetryableHandshake(payload.message)) {
+            return;
+          }
           refused = true;
         }
         receive(payload);
@@ -1046,18 +1076,29 @@ export function useChat(
         const delay =
           reconnectAttempt === 0 ? 0 : Math.min(500 * 2 ** (reconnectAttempt - 1), 8000);
         reconnectAttempt += 1;
-        reconnectTimer = setTimeout(() => {
-          if (disposed) return;
-          bindSocket(chatsApi.createChatWebSocket(chatId));
-        }, delay);
+        reconnectTimer = setTimeout(openSocket, delay);
       };
     };
 
-    bindSocket(chatsApi.createChatWebSocket(chatId));
+    const onVisible = () => {
+      if (disposed || pageIsHidden() || !pendingVisibleReconnect) {
+        return;
+      }
+      pendingVisibleReconnect = false;
+      openSocket();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onVisible);
+    window.addEventListener('focus', onVisible);
+
+    openSocket();
 
     return () => {
       disposed = true;
       drainFrames.current = null;
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onVisible);
+      window.removeEventListener('focus', onVisible);
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
       }

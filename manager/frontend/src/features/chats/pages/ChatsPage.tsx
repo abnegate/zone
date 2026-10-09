@@ -5,6 +5,11 @@ import {
   EmptyState,
   Modal,
   Select,
+  SelectContent,
+  SelectItem,
+  SelectRoot,
+  SelectTrigger,
+  SelectValue,
   Tabs,
   TabsList,
   TabsTrigger,
@@ -82,6 +87,53 @@ import './ChatsPage.css';
 
 const UNTITLED_CHAT_TITLE = 'Untitled chat';
 const NO_PROJECT = 'none';
+
+function HeaderSelect({
+  className,
+  label,
+  value,
+  onValueChange,
+  options,
+  testId,
+  title,
+  ariaLabel,
+}: {
+  className: string;
+  label: string;
+  value: string;
+  onValueChange: (value: string) => void;
+  options: Array<{ value: string; label: string }>;
+  testId: string;
+  title: string;
+  ariaLabel: string;
+}) {
+  return (
+    <SelectRoot
+      value={value}
+      onValueChange={(nextValue) => {
+        if (nextValue === '') return;
+        onValueChange(nextValue);
+      }}
+    >
+      <SelectTrigger
+        className={className}
+        aria-label={ariaLabel}
+        data-testid={testId}
+        title={title}
+      >
+        <span className="chat-header-select-label">{label}</span>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {options.map((option) => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </SelectRoot>
+  );
+}
 
 export default function ChatsPage() {
   const { isAuthenticated } = useAuth();
@@ -817,28 +869,20 @@ export default function ChatsPage() {
 
         {!showSearchResults && chats.length > 0 && (
           <div className="chats-arrange">
-            <select
+            <Select
+              compact
               value={groupBy}
-              onChange={(event) => handleGroupBy(event.target.value)}
+              onValueChange={handleGroupBy}
               aria-label="Group chats"
-            >
-              {CHAT_GROUP_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <select
+              options={[...CHAT_GROUP_OPTIONS]}
+            />
+            <Select
+              compact
               value={sort}
-              onChange={(event) => handleSort(event.target.value)}
+              onValueChange={handleSort}
               aria-label="Sort chats"
-            >
-              {CHAT_SORT_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+              options={[...CHAT_SORT_OPTIONS]}
+            />
           </div>
         )}
 
@@ -1011,46 +1055,32 @@ export default function ChatsPage() {
               </div>
               <div className="chat-header-actions">
                 {showChatContext && (
-                  <label className="context-tokens">
-                    <span>Context</span>
-                    <select
-                      aria-label="Context size"
-                      data-testid="context-tokens"
-                      value={String(
-                        selectedContextTokens(displayedChat.context_tokens, chatNative)
-                      )}
-                      title="How much context this local model loads. Larger windows use more RAM."
-                      onChange={(event) => {
-                        void handleContextTokens(Number(event.target.value));
-                      }}
-                    >
-                      {contextTokenOptions(chatNative).map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <HeaderSelect
+                    className="context-tokens"
+                    label="Context"
+                    ariaLabel="Context size"
+                    testId="context-tokens"
+                    title="How much context this local model loads. Larger windows use more RAM."
+                    value={String(selectedContextTokens(displayedChat.context_tokens, chatNative))}
+                    options={contextTokenOptions(chatNative)}
+                    onValueChange={(value) => {
+                      void handleContextTokens(Number(value));
+                    }}
+                  />
                 )}
                 {showReasoning && (
-                  <label className="reasoning-effort">
-                    <span>Reasoning</span>
-                    <select
-                      aria-label="Reasoning effort"
-                      data-testid="reasoning-effort"
-                      value={displayedChat.reasoning_effort ?? 'auto'}
-                      title="How much the model thinks before answering. Auto matches the request."
-                      onChange={(event) => {
-                        void handleReasoningEffort(event.target.value as ReasoningEffort);
-                      }}
-                    >
-                      {REASONING_EFFORT_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <HeaderSelect
+                    className="reasoning-effort"
+                    label="Reasoning"
+                    ariaLabel="Reasoning effort"
+                    testId="reasoning-effort"
+                    title="How much the model thinks before answering. Auto matches the request."
+                    value={displayedChat.reasoning_effort ?? 'auto'}
+                    options={REASONING_EFFORT_OPTIONS}
+                    onValueChange={(value) => {
+                      void handleReasoningEffort(value as ReasoningEffort);
+                    }}
+                  />
                 )}
                 {displayedChat.agent_enabled && (
                   <button

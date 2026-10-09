@@ -97,6 +97,7 @@ pub fn test_config() -> Config {
         endpoint_hosts: Default::default(),
         auto: Default::default(),
         host_mounts: Default::default(),
+        connect_urls: Vec::new(),
     }
 }
 
@@ -461,6 +462,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         endpoint_hosts: Default::default(),
         auto: Default::default(),
         host_mounts: Default::default(),
+        connect_urls: Vec::new(),
     }
 }
 

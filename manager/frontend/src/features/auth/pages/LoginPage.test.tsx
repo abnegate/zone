@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
-import { AuthRequestError } from '../../../api/auth';
+import { LAST_PATH_KEY, persistLastPath } from '../../../shared/lastPath';
 
 const mockUseAuth = mock();
 
@@ -52,6 +52,15 @@ describe('LoginPage', () => {
 
   beforeEach(() => {
     mock.clearAllMocks();
+    persistLastPath('/__reset__');
+    localStorage.removeItem(LAST_PATH_KEY);
+    mockUseLocation.mockReturnValue({
+      state: null,
+      pathname: '/login',
+      search: '',
+      hash: '',
+      key: '',
+    });
     mockUseAuth.mockReturnValue({
       isAuthenticated: false,
       isLoading: false,
@@ -198,24 +207,7 @@ describe('LoginPage', () => {
       await userEvent.click(screen.getByRole('button', { name: /sign in/i }));
 
       await waitFor(() => {
-        expect(mockNavigate).toHaveBeenCalledWith('/');
-      });
-    });
-
-    it('shows pending copy when this device is waiting', async () => {
-      mockLogin.mockRejectedValue(
-        new AuthRequestError('This device is waiting for an admin to allow it', 'device_pending')
-      );
-      renderLoginPage();
-
-      await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com');
-      await userEvent.type(screen.getByLabelText(/password/i), 'password123');
-      await userEvent.click(screen.getByRole('button', { name: /sign in/i }));
-
-      await waitFor(() => {
-        expect(
-          screen.getByText('This device is waiting for an admin to allow it')
-        ).toBeInTheDocument();
+        expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true });
       });
     });
 
@@ -264,10 +256,79 @@ describe('LoginPage', () => {
 
   describe('Redirect Logic', () => {
     it('redirects to original destination from state', async () => {
-      // Note: This test requires re-rendering with different location state
-      // which is complex with our mock setup. The functionality is tested
-      // through E2E tests instead.
-      expect(true).toBe(true);
+      mockUseLocation.mockReturnValue({
+        state: { from: { pathname: '/chats', search: '?id=chat-1', hash: '' } },
+        pathname: '/login',
+        search: '',
+        hash: '',
+        key: '',
+      });
+      mockUseAuth.mockReturnValue({
+        isAuthenticated: true,
+        isLoading: false,
+        user: {
+          id: '1',
+          email: 'test@test.com',
+          display_name: null,
+          is_active: true,
+          email_verified: true,
+          is_admin: false,
+          created_at: '',
+          updated_at: '',
+          last_login_at: null,
+        },
+        accessToken: 'token',
+        refreshToken: 'refresh',
+        roles: [],
+        permissions: [],
+        login: mockLogin,
+        register: mock(),
+        logout: mock(),
+        hasPermission: mock(),
+        hasAnyPermission: mock(),
+        hasAllPermissions: mock(),
+        hasRole: mock(),
+      });
+      renderLoginPage();
+
+      await waitFor(() => {
+        expect(mockNavigate).toHaveBeenCalledWith('/chats?id=chat-1', { replace: true });
+      });
+    });
+
+    it('redirects to the saved chat when already authenticated', async () => {
+      localStorage.setItem(LAST_PATH_KEY, '/?id=chat-9');
+      mockUseAuth.mockReturnValue({
+        isAuthenticated: true,
+        isLoading: false,
+        user: {
+          id: '1',
+          email: 'test@test.com',
+          display_name: null,
+          is_active: true,
+          email_verified: true,
+          is_admin: false,
+          created_at: '',
+          updated_at: '',
+          last_login_at: null,
+        },
+        accessToken: 'token',
+        refreshToken: 'refresh',
+        roles: [],
+        permissions: [],
+        login: mockLogin,
+        register: mock(),
+        logout: mock(),
+        hasPermission: mock(),
+        hasAnyPermission: mock(),
+        hasAllPermissions: mock(),
+        hasRole: mock(),
+      });
+      renderLoginPage();
+
+      await waitFor(() => {
+        expect(mockNavigate).toHaveBeenCalledWith('/?id=chat-9', { replace: true });
+      });
     });
 
     it('redirects to home when already authenticated', async () => {

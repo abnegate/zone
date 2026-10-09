@@ -10,6 +10,7 @@ pub mod auth;
 pub mod billing;
 pub mod chats;
 pub mod common;
+pub mod connect;
 pub mod context;
 pub mod devices;
 pub mod error;
@@ -124,6 +125,7 @@ pub fn create_router(state: AppState) -> Router {
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
+        .route("/api/connect", get(connect::get))
         .route("/api/auth/logout", post(auth::logout))
         // Session management
         .route(

@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import type React from 'react';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { chooseSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project, ProjectAutomation } from '../types';
 
@@ -689,7 +690,7 @@ describe('ProjectsPage', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Link Source' }));
-    fireEvent.change(screen.getByLabelText('Source'), { target: { value: 'src-1' } });
+    chooseSelect('Source', 'GitHub Repo (github)');
 
     const linkButtons = screen.getAllByRole('button', { name: /Link Source/i });
     fireEvent.click(linkButtons[linkButtons.length - 1]); // Click the submit button

@@ -339,6 +339,9 @@ services:
       # browser names them: Traefik serves the console over http and https on
       # both hosts. A list in .env replaces this one; empty turns it off.
       - ZONE_CONSOLE_ORIGINS=${ZONE_CONSOLE_ORIGINS-http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
+      # Origins a phone types into the Zone app. Docker cannot see the host
+      # LAN address, so set this to http://<lan-ip> (comma-separated).
+      - ZONE_CONNECT_URL=${ZONE_CONNECT_URL:-}
       - ZONE_AUTO_ENABLED=${ZONE_AUTO_ENABLED:-true}
       - ZONE_AUTO_TICK_SECS=${ZONE_AUTO_TICK_SECS:-15}
       - ZONE_AUTO_PARALLEL_TASKS=${ZONE_AUTO_PARALLEL_TASKS:-3}

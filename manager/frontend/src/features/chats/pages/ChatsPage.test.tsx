@@ -12,6 +12,7 @@ import {
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import type { Chat, ChatSearchResult, ChatWithMessages, Message } from '../types';
+import { chooseSelect } from '../../../test/select';
 import { CHAT_GROUP_STORAGE_KEY, CHAT_SORT_STORAGE_KEY } from '../utils/arrange';
 
 // Create mock functions
@@ -66,6 +67,7 @@ mock.module('../../../api/chats', () => ({
     updateChat: mockUpdateChat,
     deleteMessage: mock(),
     chatAccessToken: () => 'test-token',
+    ensureAccessToken: async () => 'test-token',
     createChatWebSocket: () => {
       socket = new FakeSocket();
       return socket;
@@ -357,6 +359,13 @@ const mockChatWithSystemMessage: ChatWithMessages = {
 };
 
 const newChatButtons = () => screen.getAllByRole('button', { name: 'New chat' });
+
+function chooseSelectOption(testId: string, optionName: string) {
+  const trigger = screen.getByTestId(testId);
+  expect(trigger.tagName).toBe('BUTTON');
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+  fireEvent.click(screen.getByRole('option', { name: optionName }));
+}
 
 const renderChatsPage = () => {
   return render(
@@ -2419,7 +2428,7 @@ describe('ChatsPage', () => {
     await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
     fireEvent.click(screen.getByText('Chat 1'));
     await waitFor(() => expect(screen.getByTestId('reasoning-effort')).toBeInTheDocument());
-    fireEvent.change(screen.getByTestId('reasoning-effort'), { target: { value: 'high' } });
+    chooseSelectOption('reasoning-effort', 'High');
     await waitFor(() => {
       expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { reasoning_effort: 'high' });
     });
@@ -2450,7 +2459,7 @@ describe('ChatsPage', () => {
     await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
     fireEvent.click(screen.getByText('Chat 1'));
     await waitFor(() => expect(screen.getByTestId('context-tokens')).toBeInTheDocument());
-    fireEvent.change(screen.getByTestId('context-tokens'), { target: { value: '8192' } });
+    chooseSelectOption('context-tokens', '8K tokens');
     await waitFor(() => {
       expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 8192 });
     });
@@ -2471,7 +2480,7 @@ describe('ChatsPage', () => {
     fireEvent.click(screen.getByText('Chat 1'));
     await waitFor(() => expect(screen.getByTestId('context-tokens')).toBeInTheDocument());
     expect(document.querySelector('.context-usage-toggle')?.textContent).toContain('0 / 32K');
-    fireEvent.change(screen.getByTestId('context-tokens'), { target: { value: '131072' } });
+    chooseSelectOption('context-tokens', '128K tokens');
     await waitFor(() => {
       expect(document.querySelector('.context-usage-toggle')?.textContent).toContain('0 / 128K');
     });
@@ -3355,12 +3364,9 @@ describe('ChatsPage', () => {
       ]);
 
       renderChatsPage();
-      fireEvent.change(await screen.findByRole('combobox', { name: 'Group chats' }), {
-        target: { value: 'project' },
-      });
-      fireEvent.change(screen.getByRole('combobox', { name: 'Sort chats' }), {
-        target: { value: 'title_asc' },
-      });
+      await screen.findByRole('combobox', { name: 'Group chats' });
+      chooseSelect('Group chats', 'Project');
+      chooseSelect('Sort chats', 'Title A-Z');
 
       const headers = screen.getAllByRole('heading', { level: 2 }).map((node) => node.textContent);
       expect(headers).toEqual(['Alpha', 'Zeta', 'Unknown project', 'No project']);
@@ -3382,9 +3388,8 @@ describe('ChatsPage', () => {
       ]);
 
       renderChatsPage();
-      fireEvent.change(await screen.findByRole('combobox', { name: 'Group chats' }), {
-        target: { value: 'date' },
-      });
+      await screen.findByRole('combobox', { name: 'Group chats' });
+      chooseSelect('Group chats', 'Date');
 
       expect(screen.getByRole('heading', { name: 'Today' })).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: 'Yesterday' })).toBeInTheDocument();

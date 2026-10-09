@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   AiSettingsResponseSchema,
   AiSettingsSchema,
+  ConnectResponseSchema,
   UpdateAiSettingsRequestSchema,
   WorkspaceMemberSchema,
   WorkspaceMembersResponseSchema,
@@ -42,6 +43,20 @@ describe('workspace AI settings schemas', () => {
     const parsed = AiSettingsResponseSchema.parse({ ...inherited, has_runpod_api_key: true });
     expect(parsed.has_runpod_api_key).toBe(true);
     expect(parsed).not.toHaveProperty('runpod_api_key');
+  });
+});
+
+describe('connect response schema', () => {
+  it('accepts advertised origins', () => {
+    expect(
+      ConnectResponseSchema.parse({
+        urls: ['http://192.168.1.10', 'http://100.64.1.2'],
+      }).urls
+    ).toEqual(['http://192.168.1.10', 'http://100.64.1.2']);
+  });
+
+  it('accepts an empty list', () => {
+    expect(ConnectResponseSchema.parse({ urls: [] }).urls).toEqual([]);
   });
 });
 

@@ -8,6 +8,8 @@ pub mod serve;
 
 mod setup;
 
-pub use client::{ClientPlatform, ManagerDirInputs, config_path, resolve_manager_dir};
+pub use client::{
+    ClientPlatform, ManagerDirInputs, WEBVIEW_BIND, config_path, resolve_manager_dir,
+};
 pub use frontend::{AppMode, FrontendKind};
 pub use serve::{ServeKind, bind, router};

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Badge, Button, EmptyState } from '@zone/ui';
+import { Badge, Button, EmptyState, Select } from '@zone/ui';
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
@@ -163,33 +163,33 @@ export default function TasksPage() {
         {listing ? (
           <>
             <div className="tasks-filters">
-              <select
+              <Select
+                compact
                 value={filterProject}
-                onChange={(e) => setFilterProject(e.target.value)}
+                onValueChange={setFilterProject}
                 aria-label="Filter by project"
                 disabled={loading}
-              >
-                <option value="">All Projects</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-              <select
+                options={[
+                  { value: '', label: 'All Projects' },
+                  ...projects.map((project) => ({ value: project.id, label: project.name })),
+                ]}
+              />
+              <Select
+                compact
                 value={filterStatus}
-                onChange={(e) => setFilterStatus(e.target.value)}
+                onValueChange={setFilterStatus}
                 aria-label="Filter by status"
                 disabled={loading}
-              >
-                <option value="">All Statuses</option>
-                <option value="created">Created</option>
-                <option value="queued">Queued</option>
-                <option value="in_progress">In Progress</option>
-                <option value="blocked">Blocked</option>
-                <option value="review">Review</option>
-                <option value="complete">Complete</option>
-              </select>
+                options={[
+                  { value: '', label: 'All Statuses' },
+                  { value: 'created', label: 'Created' },
+                  { value: 'queued', label: 'Queued' },
+                  { value: 'in_progress', label: 'In Progress' },
+                  { value: 'blocked', label: 'Blocked' },
+                  { value: 'review', label: 'Review' },
+                  { value: 'complete', label: 'Complete' },
+                ]}
+              />
             </div>
             <Button
               onClick={() => setShowCreateModal(true)}

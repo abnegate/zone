@@ -3,7 +3,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--ui-gutter);
+  padding: calc(var(--ui-gutter) + var(--ui-safe-top)) var(--ui-gutter)
+    calc(var(--ui-gutter) + var(--ui-safe-bottom));
   background: var(--ui-bg-base);
 }
 

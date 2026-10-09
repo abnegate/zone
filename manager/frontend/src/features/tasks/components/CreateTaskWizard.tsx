@@ -1,4 +1,4 @@
-import type { WizardStep } from '@zone/ui';
+import { Select, type WizardStep } from '@zone/ui';
 import { useCallback, useMemo, useState } from 'react';
 import { Wizard } from '../../../components';
 import type { Source } from '../../../types';
@@ -323,24 +323,24 @@ export function CreateTaskWizard({
 
             {isAgentic && (
               <div className="form-group">
-                <label htmlFor="task-source">Code Source</label>
-                <select
+                <Select
                   id="task-source"
+                  label="Code Source"
                   value={sourceId}
-                  onChange={(e) => setSourceId(e.target.value)}
-                  className="ui-select"
-                >
-                  <option value="">
-                    {projectSource
-                      ? `Use project source (${projectSource.name})`
-                      : 'Select a source...'}
-                  </option>
-                  {activeSources.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} ({s.source_type})
-                    </option>
-                  ))}
-                </select>
+                  onValueChange={setSourceId}
+                  options={[
+                    {
+                      value: '',
+                      label: projectSource
+                        ? `Use project source (${projectSource.name})`
+                        : 'Select a source...',
+                    },
+                    ...activeSources.map((source) => ({
+                      value: source.id,
+                      label: `${source.name} (${source.source_type})`,
+                    })),
+                  ]}
+                />
                 {projectSource && (
                   <span className="form-hint">
                     Project uses: {projectSource.name} ({projectSource.source_type})

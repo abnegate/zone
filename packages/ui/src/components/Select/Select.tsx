@@ -1,4 +1,4 @@
-import React, { forwardRef, useCallback } from 'react';
+import React, { forwardRef, useCallback, useRef } from 'react';
 import * as SelectPrimitive from '@radix-ui/react-select';
 import { cn } from '../../lib/utils';
 import { Label } from '../Label';
@@ -131,11 +131,28 @@ const SelectSeparator = forwardRef<
 SelectSeparator.displayName = SelectPrimitive.Separator.displayName;
 
 const SelectValue = SelectPrimitive.Value;
+const SelectRoot = SelectPrimitive.Root;
 
 export interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+}
+
+const SELECT_EMPTY_VALUE = '__empty__';
+
+function encodeOptionValue(value: string): string {
+  return value === '' ? SELECT_EMPTY_VALUE : value;
+}
+
+function decodeSelectValue(value: string): string {
+  return value === SELECT_EMPTY_VALUE ? '' : value;
+}
+
+function encodeRootValue(value: string | undefined, hasEmptyOption: boolean): string | undefined {
+  if (value === undefined) return undefined;
+  if (value === '') return hasEmptyOption ? SELECT_EMPTY_VALUE : '';
+  return value;
 }
 
 export interface SelectProps
@@ -152,6 +169,8 @@ export interface SelectProps
   onChange?: (event: React.ChangeEvent<HTMLSelectElement>) => void;
   onValueChange?: (value: string) => void;
   placeholder?: string;
+  compact?: boolean;
+  wrapperClassName?: string;
 }
 
 const Select = forwardRef<HTMLButtonElement, SelectProps>(
@@ -171,12 +190,19 @@ const Select = forwardRef<HTMLButtonElement, SelectProps>(
       disabled,
       required,
       placeholder,
+      compact = false,
+      wrapperClassName,
+      title,
+      'aria-label': ariaLabel,
     },
     ref
   ) => {
     const selectId =
       id || (label ? label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') : undefined);
     const placeholderText = placeholder ?? 'Select an option';
+    const hasEmptyOption = options.some((option) => option.value === '');
+    const valueRef = useRef(value);
+    valueRef.current = value;
 
     const handleValueChange = useCallback(
       (nextValue: string) => {
@@ -185,11 +211,13 @@ const Select = forwardRef<HTMLButtonElement, SelectProps>(
         // item can hold an empty value, so an empty change is only ever that
         // echo, and forwarding it would clobber a value set while options load.
         if (nextValue === '') return;
-        onValueChange?.(nextValue);
+        const decoded = decodeSelectValue(nextValue);
+        if (valueRef.current !== undefined && decoded === valueRef.current) return;
+        onValueChange?.(decoded);
         if (onChange) {
           const syntheticEvent = {
-            target: { value: nextValue, name },
-            currentTarget: { value: nextValue, name },
+            target: { value: decoded, name },
+            currentTarget: { value: decoded, name },
           } as React.ChangeEvent<HTMLSelectElement>;
           onChange(syntheticEvent);
         }
@@ -197,12 +225,17 @@ const Select = forwardRef<HTMLButtonElement, SelectProps>(
       [name, onChange, onValueChange]
     );
 
-    return (
-      <div className="ui-select-wrapper">
-        {label && <Label htmlFor={selectId}>{label}</Label>}
+    const suppressNativeChange = useCallback((event: React.ChangeEvent<HTMLDivElement>) => {
+      // Hidden form-bubble <select> fires change when the controlled value is
+      // set; that is not a user edit of a parent <form onChange>.
+      event.stopPropagation();
+    }, []);
+
+    const control = (
+      <div className="ui-select-control" onChange={suppressNativeChange}>
         <SelectPrimitive.Root
-          value={value}
-          defaultValue={defaultValue}
+          value={encodeRootValue(value, hasEmptyOption)}
+          defaultValue={encodeRootValue(defaultValue, hasEmptyOption)}
           onValueChange={handleValueChange}
           name={name}
           disabled={disabled}
@@ -212,19 +245,35 @@ const Select = forwardRef<HTMLButtonElement, SelectProps>(
             id={selectId}
             ref={ref}
             className={cn(error && 'ui-select-trigger-error', className)}
+            aria-label={ariaLabel}
+            title={title}
           >
             <SelectValue placeholder={placeholderText} />
           </SelectTrigger>
           <SelectContent>
-            {options
-              .filter((option) => option.value !== '')
-              .map((option) => (
-                <SelectItem key={option.value} value={option.value} disabled={option.disabled}>
-                  {option.label}
-                </SelectItem>
-              ))}
+            {options.map((option) => (
+              <SelectItem
+                key={option.value === '' ? SELECT_EMPTY_VALUE : option.value}
+                value={encodeOptionValue(option.value)}
+                disabled={option.disabled}
+                data-value={option.value}
+              >
+                {option.label}
+              </SelectItem>
+            ))}
           </SelectContent>
         </SelectPrimitive.Root>
+      </div>
+    );
+
+    if (compact) {
+      return control;
+    }
+
+    return (
+      <div className={cn('ui-select-wrapper', wrapperClassName)}>
+        {label && <Label htmlFor={selectId}>{label}</Label>}
+        {control}
         {error && <p className="ui-select-error-text">{error}</p>}
         {helpText && !error && <p className="ui-select-help-text">{helpText}</p>}
       </div>
@@ -236,11 +285,11 @@ Select.displayName = 'Select';
 
 export {
   Select,
-  SelectTrigger,
   SelectContent,
   SelectItem,
   SelectLabel,
+  SelectRoot,
   SelectSeparator,
+  SelectTrigger,
   SelectValue,
-  SelectPrimitive,
 };

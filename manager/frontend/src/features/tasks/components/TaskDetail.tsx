@@ -1,4 +1,4 @@
-import { Button } from '@zone/ui';
+import { Button, Select } from '@zone/ui';
 import { useEffect, useMemo, useState } from 'react';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
@@ -195,23 +195,16 @@ export function TaskDetail({
         </div>
 
         <div className="form-row">
-          <div className="form-group">
-            <label htmlFor="task-detail-status">Status</label>
-            <select
-              id="task-detail-status"
-              className="ui-select"
-              value={draft.status}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, status: event.target.value as TaskStatus }))
-              }
-            >
-              {STATUSES.map((status) => (
-                <option key={status.value} value={status.value}>
-                  {status.label}
-                </option>
-              ))}
-            </select>
-          </div>
+          <Select
+            id="task-detail-status"
+            label="Status"
+            value={draft.status}
+            onValueChange={(next) =>
+              setDraft((current) => ({ ...current, status: next as TaskStatus }))
+            }
+            wrapperClassName="form-group"
+            options={STATUSES}
+          />
 
           <div className="form-group">
             <span id="task-detail-priority-label" className="form-label">
@@ -312,24 +305,20 @@ export function TaskDetail({
               </label>
             </div>
 
-            <div className="form-group">
-              <label htmlFor="task-detail-source">Code Source</label>
-              <select
-                id="task-detail-source"
-                className="ui-select"
-                value={draft.source_id}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, source_id: event.target.value }))
-                }
-              >
-                <option value="">Select a source...</option>
-                {sources.map((source) => (
-                  <option key={source.id} value={source.id}>
-                    {source.name} ({source.source_type})
-                  </option>
-                ))}
-              </select>
-            </div>
+            <Select
+              id="task-detail-source"
+              label="Code Source"
+              value={draft.source_id}
+              onValueChange={(next) => setDraft((current) => ({ ...current, source_id: next }))}
+              wrapperClassName="form-group"
+              options={[
+                { value: '', label: 'Select a source...' },
+                ...sources.map((source) => ({
+                  value: source.id,
+                  label: `${source.name} (${source.source_type})`,
+                })),
+              ]}
+            />
           </>
         )}
       </div>

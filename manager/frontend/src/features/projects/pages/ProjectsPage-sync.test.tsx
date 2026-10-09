@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { chooseSelect } from '../../../test/select';
 import type { Project, SyncConfig } from '../types';
 
 const mockGetProjects = mock();
@@ -292,8 +293,7 @@ describe('ProjectsPage - Sync Configuration', () => {
     const addButton = screen.getByText('+ Add Sync');
     fireEvent.click(addButton);
 
-    const providerSelect = screen.getByLabelText('Provider') as HTMLSelectElement;
-    fireEvent.change(providerSelect, { target: { value: 'linear' } });
+    chooseSelect('Provider', 'Linear');
 
     await waitFor(() => {
       expect(screen.getByLabelText('Project ID')).toBeInTheDocument();
@@ -594,7 +594,7 @@ describe('ProjectsPage - Sync Configuration', () => {
     it('tells a Linear sync that the project ID is the Linear project UUID', async () => {
       await openProject();
       fireEvent.click(await screen.findByText('+ Add Sync'));
-      fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'linear' } });
+      chooseSelect('Provider', 'Linear');
 
       expect(await screen.findByText(/Linear project's ID \(a UUID\)/)).toBeInTheDocument();
     });

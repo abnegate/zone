@@ -3,20 +3,32 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { Button, Input } from '@zone/ui';
 import { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import type { z } from 'zod';
-import { AuthRequestError } from '../../../api/auth';
-import { ensureDevice } from '../../../api/device';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
+import { type PathLike, pathAfterAuth } from '../../../shared/lastPath';
 import { useAuth } from '../hooks';
 import { LoginRequestSchema } from '../schemas';
 
 type LoginForm = z.infer<typeof LoginRequestSchema>;
 
+function fromLocation(state: unknown): PathLike | null {
+  if (!state || typeof state !== 'object' || !('from' in state)) {
+    return null;
+  }
+  const from = (state as { from?: PathLike }).from;
+  if (!from || typeof from.pathname !== 'string') {
+    return null;
+  }
+  return from;
+}
+
 export default function LoginPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { login, isAuthenticated, isLoading: authLoading } = useAuth();
+  const next = pathAfterAuth(fromLocation(location.state));
 
   const {
     register,
@@ -32,29 +44,18 @@ export default function LoginPage() {
   });
 
   useEffect(() => {
-    void ensureDevice();
-  }, []);
-
-  useEffect(() => {
     if (isAuthenticated && !authLoading) {
-      navigate('/', { replace: true });
+      navigate(next, { replace: true });
     }
-  }, [isAuthenticated, authLoading, navigate]);
+  }, [isAuthenticated, authLoading, navigate, next]);
 
   const onSubmit = async (data: LoginForm) => {
     try {
       await login(data);
-      navigate('/');
+      navigate(next, { replace: true });
       toast.success('Successfully logged in');
     } catch (err) {
-      const message =
-        err instanceof AuthRequestError && err.code === 'device_pending'
-          ? 'This device is waiting for an admin to allow it'
-          : err instanceof AuthRequestError && err.code === 'device_blocked'
-            ? 'This device is blocked'
-            : err instanceof Error
-              ? err.message
-              : 'Login failed';
+      const message = err instanceof Error ? err.message : 'Login failed';
       toast.error(message);
       setError('root', { message });
     }

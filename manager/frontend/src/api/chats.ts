@@ -26,9 +26,21 @@ import { deviceHeaders } from './device';
 
 class ChatsApi {
   private getAccessToken: () => string | null = () => null;
+  private ensureAccessTokenFn: (() => Promise<string | null>) | null = null;
 
   setGetAccessToken(fn: () => string | null) {
     this.getAccessToken = fn;
+  }
+
+  setEnsureAccessToken(fn: (() => Promise<string | null>) | null) {
+    this.ensureAccessTokenFn = fn;
+  }
+
+  async ensureAccessToken(): Promise<string | null> {
+    if (this.ensureAccessTokenFn) {
+      return this.ensureAccessTokenFn();
+    }
+    return this.getAccessToken();
   }
 
   private getHeaders(): HeadersInit {

@@ -602,6 +602,11 @@
     min-width: 0;
   }
 
+  .ui-select-control {
+    min-width: 0;
+    width: 100%;
+  }
+
   .ui-select-trigger {
     display: flex;
     height: var(--ui-control-height);

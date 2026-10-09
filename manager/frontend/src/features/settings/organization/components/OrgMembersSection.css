@@ -147,7 +147,7 @@
   width: auto;
   min-width: 7rem;
   height: var(--ui-control-height-sm);
-  padding-right: var(--ui-space-6);
+  padding: 0 var(--ui-space-2);
   font-size: var(--ui-text-xs);
   color: var(--ui-text-primary);
 }

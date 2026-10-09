@@ -17,7 +17,7 @@
 	test-runner-coverage-html test-runner-coverage-json test-runner-coverage-text \
 	install-runner install-cli \
 	desktop android-init ios-init android ios test-client \
-	sync-tauri-ui setup-mobile \
+	sync-tauri-ui setup-mobile icons \
 	build-dev-cli install-dev-cli dev-format dev-format-check dev-lint dev-test dev-coverage dev-check \
 	kind-create kind-delete tilt-up tilt-down kind-status helm-lint \
 
@@ -748,9 +748,12 @@ install-cli: ## Install zone CLI to /usr/local/bin
 
 ##@ Desktop & Mobile
 
+icons: ## Rasterize light/night theme-blue launcher icons into Tauri desktop/Android sets
+	@./scripts/generate-tauri-icons.sh
+
 sync-tauri-ui: ## Build the manager UI and copy it into the Tauri client
 	@echo "$(BLUE)Building manager frontend for the Zone client...$(NC)"
-	bun run --filter ./manager/frontend build
+	VITE_DISABLE_PWA=1 bun run --filter ./manager/frontend build
 	@rm -rf runner/zone_desktop/manager
 	@mkdir -p runner/zone_desktop/manager
 	@cp -R manager/frontend/build/. runner/zone_desktop/manager/
@@ -773,7 +776,7 @@ setup-mobile: ## Install Rust Android/iOS targets for the Tauri client
 
 android-init: setup-mobile ## Generate the Android project for the Tauri client
 	@echo "$(BLUE)Initializing Tauri Android project...$(NC)"
-	cd runner/zone_desktop && bunx --bun @tauri-apps/cli@2 android init --ci --skip-targets-install
+	cd runner/zone_desktop && PATH="$(HOME)/.cargo/bin:$$PATH" bunx --bun @tauri-apps/cli@2 android init --ci --skip-targets-install
 	@$(MAKE) sync-tauri-ui
 	@./scripts/patch-tauri-android.sh
 	@echo "$(GREEN)Android project ready. Run: make android$(NC)"
@@ -782,6 +785,7 @@ ios-init: setup-mobile ## Generate the iOS project for the Tauri client
 	@echo "$(BLUE)Initializing Tauri iOS project...$(NC)"
 	cd runner/zone_desktop && bunx --bun @tauri-apps/cli@2 ios init --ci --skip-targets-install
 	@$(MAKE) sync-tauri-ui
+	@./scripts/patch-tauri-ios.sh
 	@echo "$(GREEN)iOS project ready. Run: make ios$(NC)"
 
 android: sync-tauri-ui ## Run the Zone client on an Android emulator or device
@@ -789,7 +793,7 @@ android: sync-tauri-ui ## Run the Zone client on an Android emulator or device
 		echo "$(YELLOW)Android project missing. Running make android-init...$(NC)"; \
 		$(MAKE) android-init; \
 	fi
-	cd runner/zone_desktop && bunx --bun @tauri-apps/cli@2 android dev
+	cd runner/zone_desktop && PATH="$(HOME)/.cargo/bin:$$PATH" bunx --bun @tauri-apps/cli@2 android dev
 
 test-client: ## Run Zone desktop/Android/iOS client unit, integration, and e2e tests
 	@echo "$(BLUE)Running Zone client Rust tests...$(NC)"
@@ -899,6 +903,10 @@ urls: ## Show access URLs for services
 		. ./.env; \
 		echo "  Zone chat:    https://manager.localhost/chats"; \
 		echo "  Manager (alt): https://manager.$$DOMAIN_HOST_WEBUI"; \
+		lan=$$(ipconfig getifaddr en0 2>/dev/null || true); \
+		if [ -n "$$lan" ]; then \
+			echo "  Phone app:     http://$$lan"; \
+		fi; \
 		echo "  LiteLLM:      https://litellm.$$DOMAIN_HOST_WEBUI"; \
 		echo "  Traefik:      https://traefik.$$DOMAIN_HOST_WEBUI"; \
 		echo "  Grafana:      https://grafana.$$DOMAIN_HOST_WEBUI (monitoring profile)"; \

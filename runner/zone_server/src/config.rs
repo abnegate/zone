@@ -107,6 +107,8 @@ pub struct Config {
     pub endpoint_hosts: Hosts,
     /// Host folders bind-mounted into the manager for chat tools.
     pub host_mounts: crate::host_mounts::HostMounts,
+    /// Origins a phone can type into the Zone app (`ZONE_CONNECT_URL`).
+    pub connect_urls: Vec<String>,
 }
 
 /// The instance-wide default backend.
@@ -206,6 +208,9 @@ const AGENT_CALLBACK_BIND: &str = "ZONE_AGENT_CALLBACK_BIND";
 
 /// The consoles, as exact origins, a sign-in returned to the callback sends its browser on to.
 const CONSOLE_ORIGINS: &str = "ZONE_CONSOLE_ORIGINS";
+
+/// Origins a phone should type into the Zone app.
+const CONNECT_URLS: &str = "ZONE_CONNECT_URL";
 
 const DEFAULT_CALLBACK_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -618,6 +623,22 @@ fn consoles(value: Option<String>) -> Result<Vec<String>, ConfigError> {
             console_origin(entry).ok_or(ConfigError::Invalid(
                 "ZONE_CONSOLE_ORIGINS must list http or https origins, such as \
                  http://manager.localhost, with no credentials, path, query or fragment",
+            ))
+        })
+        .collect()
+}
+
+/// Origins a phone should type, comma separated, each an `http` or `https` origin.
+fn connect_urls(value: Option<String>) -> Result<Vec<String>, ConfigError> {
+    value
+        .iter()
+        .flat_map(|list| list.split(','))
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            console_origin(entry).ok_or(ConfigError::Invalid(
+                "ZONE_CONNECT_URL must list http or https origins, such as \
+                 http://192.168.1.10, with no credentials, path, query or fragment",
             ))
         })
         .collect()
@@ -1157,6 +1178,7 @@ impl Config {
             auto: AutoProjectConfig::from_env(),
             endpoint_hosts: Hosts::from_env(),
             host_mounts: crate::host_mounts::HostMounts::from_env(),
+            connect_urls: connect_urls(env::var(CONNECT_URLS).ok())?,
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1200,6 +1222,7 @@ impl std::fmt::Debug for Config {
             .field("auto", &self.auto)
             .field("endpoint_hosts", &self.endpoint_hosts)
             .field("host_mounts", &self.host_mounts)
+            .field("connect_urls", &self.connect_urls)
             .finish()
     }
 }
@@ -1250,6 +1273,7 @@ mod tests {
             endpoint_hosts: Default::default(),
             auto: Default::default(),
             host_mounts: Default::default(),
+            connect_urls: Vec::new(),
         }
     }
 
@@ -1813,6 +1837,7 @@ mod tests {
             "GITHUB_API_URL",
             "CORS_ALLOW_CREDENTIALS",
             "CORS_ORIGINS",
+            CONNECT_URLS,
             "DATABASE_URL",
             "ENCRYPTION_KEY",
             "GPT4ALL_MODELS_URL",
@@ -1905,6 +1930,7 @@ mod tests {
         assert_eq!(defaults.source_index, SourceIndexConfig::default());
         assert_eq!(defaults.monitoring, MonitoringConfig::from_env());
         assert_eq!(defaults.train_upload_limit_mb, 4096);
+        assert!(defaults.connect_urls.is_empty());
 
         environment.set("HOST", "127.0.0.1");
         environment.set("PORT", "9001");
@@ -1915,6 +1941,10 @@ mod tests {
         environment.set("HUGGINGFACE_MODELS_URL", "http://catalog.test/huggingface");
         environment.set("MODEL_SEARCH_PROXY_URL", "  http://proxy.test:8080  ");
         environment.set("CORS_ORIGINS", " https://one.test, ,https://two.test ");
+        environment.set(
+            "ZONE_CONNECT_URL",
+            " http://192.168.1.10/, ,http://100.64.1.2 ",
+        );
         environment.set("CORS_ALLOW_CREDENTIALS", "true");
         environment.set("APP_BASE_URL", "https://zone.test");
         environment.set("GITHUB_API_URL", "https://github.example.com/api/v3/");
@@ -1949,6 +1979,10 @@ mod tests {
         assert_eq!(
             configured.cors_origins,
             ["https://one.test", "https://two.test"]
+        );
+        assert_eq!(
+            configured.connect_urls,
+            ["http://192.168.1.10", "http://100.64.1.2"]
         );
         assert!(configured.cors_allow_credentials);
         assert_eq!(configured.app_base_url, "https://zone.test");
@@ -1999,6 +2033,15 @@ mod tests {
             fallbacks.monitoring.prometheus_url,
             "http://legacy-prometheus"
         );
+
+        environment.set(CONNECT_URLS, "ftp://192.168.1.10");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid(
+                "ZONE_CONNECT_URL must list http or https origins, such as \
+                 http://192.168.1.10, with no credentials, path, query or fragment"
+            ))
+        ));
     }
 
     const AGENT_SETTINGS: [&str; 10] = [

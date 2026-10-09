@@ -322,6 +322,7 @@ export type {
   AiProviderZ,
   AiSettingsResponse,
   AiSettingsZ,
+  ConnectResponse,
   WorkspaceMembersResponse,
   WorkspaceMemberZ,
 } from '../features/settings/workspace/schemas';
@@ -330,6 +331,7 @@ export {
   AiProviderSchema,
   AiSettingsResponseSchema,
   AiSettingsSchema,
+  ConnectResponseSchema,
   OrganizationAiSettingsResetSchema,
   OrganizationAiSettingsSaveSchema,
   UpdateAiSettingsRequestSchema,

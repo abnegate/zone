@@ -547,6 +547,18 @@ setting a monthly cap, at claude.ai/settings/usage.
   `http://127.0.0.1` on a port of their own and never pass that origin on, so
   their sign-ins paste the code wherever the server runs.
 
+### `ZONE_CONNECT_URL`
+- **Default**: empty. Compose leaves it empty unless `.env` sets it.
+- **Description**: Origins a phone should type into the Zone app, comma
+  separated, each `scheme://host[:port]` with no path, query, fragment or
+  credentials. `GET /api/connect` returns this list, then the request's
+  forwarded host when that host is a non-loopback IPv4 address or a
+  Bonjour `*.local` name. `manager.localhost` is never advertised; the
+  phone cannot open it.
+- **Note**: Docker cannot see the host LAN address. Set this to
+  `http://<lan-ip>` (and a Tailscale IP if you use one). Each entry must
+  be an `http` or `https` origin; anything else is refused at boot.
+
 ### `ZONE_CODEX_SANDBOX`
 - **Default**: `workspace-write`. The manager image sets `danger-full-access`,
   which compose and the Helm chart keep.

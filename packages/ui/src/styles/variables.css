@@ -13,6 +13,10 @@
   --ui-control-height-lg: 2.25rem;
   --ui-header-height: 3rem;
   --ui-toolbar-height: 3rem;
+  --ui-safe-top: env(safe-area-inset-top, 0px);
+  --ui-safe-right: env(safe-area-inset-right, 0px);
+  --ui-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --ui-safe-left: env(safe-area-inset-left, 0px);
   --ui-gutter: 1.25rem;
   --ui-panel-padding: 1rem;
   --ui-card-padding: 1rem;

@@ -21,6 +21,7 @@ export default defineConfig(({ command }) => {
       react(),
       tailwind(),
       VitePWA({
+        disable: process.env.VITE_DISABLE_PWA === '1',
         registerType: 'autoUpdate',
         includeAssets: ['favicon.ico', 'logo192.png', 'logo512.png'],
         manifest: {

@@ -405,4 +405,58 @@ describe('AuthContext', () => {
       expect(result.current.isAuthenticated).toBe(false);
     });
   });
+
+  describe('resume', () => {
+    const mockUser = {
+      id: '1',
+      email: 'test@test.com',
+      display_name: 'Test',
+      is_admin: false,
+      is_active: true,
+      email_verified: true,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      last_login_at: null,
+    };
+
+    const tokenWithExp = (exp: number) => {
+      const payload = {
+        sub: '1',
+        email: 'test@test.com',
+        roles: ['user'],
+        permissions: ['chats:read'],
+        exp,
+      };
+      return `header.${btoa(JSON.stringify(payload))}.signature`;
+    };
+
+    it('refreshes an expired access token when the page becomes visible', async () => {
+      storage.setItem('manager_access_token', tokenWithExp(Math.floor(Date.now() / 1000) + 3600));
+      storage.setItem('manager_refresh_token', 'refresh-token');
+      storage.setItem('manager_user', JSON.stringify(mockUser));
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      });
+
+      storage.setItem('manager_access_token', tokenWithExp(Math.floor(Date.now() / 1000) - 60));
+      refreshTokenImpl = async () => ({
+        access_token: 'resumed-access-token',
+        refresh_token: 'resumed-refresh-token',
+        expires_in: 900,
+        user: mockUser,
+        roles: ['user'],
+        permissions: ['chats:read'],
+      });
+
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+
+      await waitFor(() => {
+        expect(result.current.accessToken).toBe('resumed-access-token');
+      });
+    });
+  });
 });

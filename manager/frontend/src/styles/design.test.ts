@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
-import { read, rule, token } from '../test/css';
+import { media, read, rule, token } from '../test/css';
 
 const styles = join(import.meta.dir);
 const kit = join(import.meta.dir, '..', '..', '..', '..', 'packages', 'ui', 'src', 'styles');
@@ -18,6 +18,13 @@ describe('design tokens', () => {
     expect(token(variables, 'ui-header-height')).toBe('3rem');
     expect(token(variables, 'ui-gutter')).toBe('1.25rem');
     expect(token(variables, 'ui-panel-padding')).toBe('1rem');
+  });
+
+  it('exposes system safe-area insets for edge-to-edge clients', () => {
+    expect(token(variables, 'ui-safe-top')).toBe('env(safe-area-inset-top, 0px)');
+    expect(token(variables, 'ui-safe-right')).toBe('env(safe-area-inset-right, 0px)');
+    expect(token(variables, 'ui-safe-bottom')).toBe('env(safe-area-inset-bottom, 0px)');
+    expect(token(variables, 'ui-safe-left')).toBe('env(safe-area-inset-left, 0px)');
   });
 
   it('caps titles at 18 and headings at 16', () => {
@@ -112,6 +119,18 @@ describe('shared surfaces', () => {
     expect(rule(layout, '.page-bar-actions .ui-tabs-list')).toContain('overflow-x: auto');
   });
 
+  it('stacks the title over the tab list on a phone and wraps the other actions', () => {
+    const layout = read(join(styles, '..', 'shared', 'components', 'Layout', 'Layout.css'));
+    const phone = media(layout, '(max-width: 768px)');
+    expect(rule(phone, '.page-bar-title')).toContain('flex: 1 1 100%');
+    expect(rule(phone, '.page-bar-actions')).toContain('flex-wrap: wrap');
+    expect(rule(phone, '.page-bar-actions')).toContain('flex: 1 1 100%');
+    expect(phone).toMatch(
+      /\.page-bar-actions > \.ui-tabs-list,\s*\.page-bar-actions > :has\(> \.ui-tabs-list\)\s*\{[^}]*order:\s*-1/
+    );
+    expect(rule(phone, '.page-bar-actions > .page-search')).toContain('max-width: none');
+  });
+
   it('never lets the document itself scroll behind a workspace page', () => {
     const layout = read(join(styles, '..', 'shared', 'components', 'Layout', 'Layout.css'));
     expect(rule(layout, 'html:has(.page--workspace),\nbody:has(.page--workspace)')).toContain(
@@ -203,6 +222,28 @@ describe('page chrome', () => {
     expect(rule(css, '.org-name')).toContain('line-height: 0.75rem');
     expect(rule(css, '.ws-name')).toContain('line-height: 1rem');
     expect(rule(css, '.context-label')).not.toContain('gap');
+  });
+
+  it('clears the status bar for the mobile menu button', () => {
+    const sidebar = read(join(app, 'shared', 'components', 'Sidebar', 'Sidebar.css'));
+    expect(rule(sidebar, '.mobile-menu-btn')).toContain(
+      'top: calc(var(--ui-space-2) + var(--ui-safe-top))'
+    );
+    expect(rule(sidebar, '.mobile-menu-btn')).toContain(
+      'left: calc(var(--ui-space-3) + var(--ui-safe-left))'
+    );
+    const mobile = media(sidebar, '(max-width: 768px)');
+    expect(rule(mobile, '.sidebar')).toContain('padding-top: var(--ui-safe-top)');
+    expect(rule(mobile, '.sidebar')).toContain('padding-bottom: var(--ui-safe-bottom)');
+
+    const layout = read(join(app, 'shared', 'components', 'Layout', 'Layout.css'));
+    const layoutMobile = media(layout, '(max-width: 768px)');
+    expect(rule(layoutMobile, '.main-content')).toContain(
+      'padding-top: calc(var(--ui-gutter) + var(--ui-header-height) + var(--ui-safe-top))'
+    );
+    expect(rule(layoutMobile, '.main-content:has(.page--workspace)')).toContain(
+      'padding-top: calc(var(--ui-header-height) + var(--ui-safe-top))'
+    );
   });
 
   it('seats train progress in the sidebar above the footer', () => {
