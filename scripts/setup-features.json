@@ -56,10 +56,7 @@
       "label": "Pictures",
       "description": "Generate stills with FLUX.1 Schnell",
       "comfy_bundles": ["image"],
-      "licenses": [
-        "Apache-2.0 (FLUX.1 Schnell)",
-        "CreativeML Open RAIL-M (FLUX uncensored LoRA)"
-      ]
+      "licenses": ["CreativeML Open RAIL-M (FLUX uncensored LoRA)"]
     },
     {
       "id": "edits",
@@ -67,7 +64,6 @@
       "description": "Qwen Image Edit and FLUX.1 Dev img2img / LoRA training base",
       "comfy_bundles": ["image-edit", "image-dev"],
       "licenses": [
-        "Apache-2.0 (Qwen Image Edit)",
         "FLUX.1-dev Non-Commercial License",
         "CreativeML Open RAIL++-M (Qwen edit LoRA)"
       ]
@@ -76,22 +72,19 @@
       "id": "video",
       "label": "Video",
       "description": "Text-to-video and image-to-video with Wan 2.2 TI2V 5B",
-      "comfy_bundles": ["video"],
-      "licenses": ["Apache-2.0 (Wan 2.2 TI2V)"]
+      "comfy_bundles": ["video"]
     },
     {
       "id": "audio",
       "label": "Audio",
       "description": "Text-to-audio with ACE-Step v1 3.5B",
-      "comfy_bundles": ["audio"],
-      "licenses": ["Apache-2.0 (ACE-Step)"]
+      "comfy_bundles": ["audio"]
     },
     {
       "id": "upscale",
       "label": "Upscale",
       "description": "4x upscale for pictures and clips",
-      "comfy_bundles": ["upscale"],
-      "licenses": ["BSD-3-Clause (Real-ESRGAN x4plus)"]
+      "comfy_bundles": ["upscale"]
     },
     {
       "id": "train",
@@ -100,10 +93,7 @@
       "comfy_bundles": ["image-people", "image-people-control", "vision"],
       "comfy_bundles_unless": { "edits": ["image-dev"] },
       "install_trainer": true,
-      "licenses": [
-        "CreativeML Open RAIL-M (SDXL people checkpoint)",
-        "Apache-2.0 (OpenPose, IP-Adapter, U2-Net)"
-      ]
+      "licenses": ["CreativeML Open RAIL-M (SDXL people checkpoint)"]
     }
   ]
 }

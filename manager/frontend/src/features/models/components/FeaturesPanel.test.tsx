@@ -91,7 +91,7 @@ function plan(overrides: Partial<SetupPlan> = {}): SetupPlan {
         present_bytes: 0,
         needed_bytes: 17_900_000_000,
         ready: false,
-        licenses: ['Apache-2.0 (FLUX.1 Schnell)'],
+        licenses: ['CreativeML Open RAIL-M (FLUX uncensored LoRA)'],
       },
     ],
     wants_all: true,
@@ -112,7 +112,7 @@ function plan(overrides: Partial<SetupPlan> = {}): SetupPlan {
       short_by_bytes: 0,
       short_by_label: null,
     },
-    licenses: ['Apache-2.0 (FLUX.1 Schnell)'],
+    licenses: ['CreativeML Open RAIL-M (FLUX uncensored LoRA)'],
     artifacts: [],
     pulls: [
       { model: 'llama3.1:8b', runtime: 'ollama' },
@@ -170,8 +170,16 @@ describe('FeaturesPanel', () => {
     expect(screen.getByText('Free now')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Install selected' })).toBeEnabled();
     expect(screen.getByRole('list', { name: 'Licenses' })).toBeInTheDocument();
-    expect(screen.getByText('Apache-2.0 (FLUX.1 Schnell)')).toBeInTheDocument();
+    expect(screen.getByText('CreativeML Open RAIL-M (FLUX uncensored LoRA)')).toBeInTheDocument();
     expect(screen.queryByText(/Licenses:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Apache-2.0/)).not.toBeInTheDocument();
+  });
+
+  it('hides licenses when the plan has none', async () => {
+    mockGetSetup.mockResolvedValue(plan({ licenses: [] }));
+    render(<FeaturesPanel pull={pull} onInstalled={mock()} />);
+    expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Licenses' })).not.toBeInTheDocument();
   });
 
   it('marks installed features and remaining download on each row', async () => {

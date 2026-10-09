@@ -1092,6 +1092,49 @@ mod tests {
     }
 
     #[test]
+    fn plan_lists_only_restricted_licenses() {
+        let pictures = plan(
+            FeatureSelect::Ids(vec!["pictures".into()]),
+            64 * GIB,
+            500 * GB,
+            "32gb",
+        );
+        assert_eq!(
+            pictures.licenses,
+            vec!["CreativeML Open RAIL-M (FLUX uncensored LoRA)".to_string()]
+        );
+        let chat = plan(
+            FeatureSelect::Ids(vec!["chat".into()]),
+            8 * GIB,
+            500 * GB,
+            "8gb",
+        );
+        assert!(chat.licenses.is_empty());
+        let video = plan(
+            FeatureSelect::Ids(vec!["video".into()]),
+            64 * GIB,
+            500 * GB,
+            "32gb",
+        );
+        assert!(video.licenses.is_empty());
+        let all = plan(FeatureSelect::All, 64 * GIB, 500 * GB, "32gb");
+        assert_eq!(
+            all.licenses,
+            vec![
+                "CreativeML Open RAIL-M (FLUX uncensored LoRA)".to_string(),
+                "FLUX.1-dev Non-Commercial License".to_string(),
+                "CreativeML Open RAIL++-M (Qwen edit LoRA)".to_string(),
+                "CreativeML Open RAIL-M (SDXL people checkpoint)".to_string(),
+            ]
+        );
+        assert!(
+            all.licenses
+                .iter()
+                .all(|license| license.contains("RAIL") || license.contains("Non-Commercial"))
+        );
+    }
+
+    #[test]
     fn edits_and_train_share_dev_once() {
         let built = plan(
             FeatureSelect::Ids(vec!["edits".into(), "train".into()]),

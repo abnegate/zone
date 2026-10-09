@@ -187,6 +187,28 @@ class SetupModelsTest(unittest.TestCase):
         self.assertIn("16 GB RAM", text)
         self.assertNotIn("FLUX.1-dev Non-Commercial License", text)
         self.assertIn("CreativeML Open RAIL-M", text)
+        self.assertNotIn("Apache-2.0", text)
+
+    def test_format_plan_only_lists_restricted_licenses(self) -> None:
+        plan = self.plan("all", ram=64 * GIB, disk=500 * GB, preset="32gb")
+        text = setup_models.format_plan(
+            plan, self.catalog, self.download_models, self.manifest
+        )
+        self.assertNotIn("Apache-2.0", text)
+        self.assertNotIn("BSD-3-Clause", text)
+        self.assertIn("FLUX.1-dev Non-Commercial License", text)
+        self.assertIn("CreativeML Open RAIL-M (FLUX uncensored LoRA)", text)
+        self.assertIn("CreativeML Open RAIL++-M (Qwen edit LoRA)", text)
+        self.assertIn("CreativeML Open RAIL-M (SDXL people checkpoint)", text)
+        self.assertEqual(
+            list(plan.licenses),
+            [
+                "CreativeML Open RAIL-M (FLUX uncensored LoRA)",
+                "FLUX.1-dev Non-Commercial License",
+                "CreativeML Open RAIL++-M (Qwen edit LoRA)",
+                "CreativeML Open RAIL-M (SDXL people checkpoint)",
+            ],
+        )
 
     def test_pick_preset_follows_ram(self) -> None:
         self.assertEqual(setup_models.pick_preset(self.catalog, 8 * GIB)["id"], "8gb")
