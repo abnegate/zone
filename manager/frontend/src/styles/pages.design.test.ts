@@ -482,3 +482,11 @@ describe('first-run feature setup', () => {
     );
   });
 });
+
+describe('setup license list', () => {
+  it('stacks each license on its own line', () => {
+    const panel = read(join(features, 'models', 'components', 'FeaturesPanel.css'));
+    expect(rule(panel, '.models-setup-licenses ul')).toContain('list-style: none');
+    expect(rule(panel, '.models-setup-licenses li')).toContain('overflow-wrap: anywhere');
+  });
+});

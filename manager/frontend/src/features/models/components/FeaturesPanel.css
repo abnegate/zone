@@ -81,7 +81,28 @@
 }
 
 .models-setup-licenses {
-  white-space: normal;
+  margin: 0;
+}
+
+.models-setup-licenses h3 {
+  margin: 0 0 var(--ui-space-1);
+  font-size: var(--ui-text-2xs);
+  font-weight: 500;
+  line-height: var(--ui-space-4);
+  color: var(--ui-text-muted);
+}
+
+.models-setup-licenses ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.models-setup-licenses li {
+  font-size: var(--ui-text-2xs);
+  line-height: var(--ui-space-4);
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
 }
 
 .models-setup-actions {

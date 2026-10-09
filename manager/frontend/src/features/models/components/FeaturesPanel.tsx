@@ -305,7 +305,14 @@ export default function FeaturesPanel({
       )}
 
       {plan.licenses.length > 0 && (
-        <p className="help-text models-setup-licenses">Licenses: {plan.licenses.join(' · ')}</p>
+        <section className="models-setup-licenses">
+          <h3 id="models-setup-licenses-heading">Licenses</h3>
+          <ul aria-labelledby="models-setup-licenses-heading">
+            {plan.licenses.map((license) => (
+              <li key={license}>{license}</li>
+            ))}
+          </ul>
+        </section>
       )}
 
       {!(variant === 'setup' && upToDate) && (

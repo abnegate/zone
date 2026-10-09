@@ -169,6 +169,9 @@ describe('FeaturesPanel', () => {
     expect(screen.getByText('58 GB')).toBeInTheDocument();
     expect(screen.getByText('Free now')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Install selected' })).toBeEnabled();
+    expect(screen.getByRole('list', { name: 'Licenses' })).toBeInTheDocument();
+    expect(screen.getByText('Apache-2.0 (FLUX.1 Schnell)')).toBeInTheDocument();
+    expect(screen.queryByText(/Licenses:/)).not.toBeInTheDocument();
   });
 
   it('marks installed features and remaining download on each row', async () => {
