@@ -472,8 +472,15 @@ describe('first-run feature setup', () => {
     expect(app).toContain('<SetupGate>');
     expect(app).toContain('<SetupPage');
     expect(setup).toContain('<FeaturesPanel');
+    expect(setup).toContain('HostFoldersPanel');
+    expect(
+      rule(
+        read(join(features, 'settings', 'workspace', 'components', 'HostFoldersPanel.css')),
+        '.host-folders--setup .section-row, .host-folders--setup .section-row-copy'
+      )
+    ).toContain('flex-direction: column');
     expect(setup).toContain('Skip for now');
-    expect(setup).toContain('Continue to Zone');
+    expect(setup).toContain('Continue');
     expect(css).not.toContain('.card');
     expect(rule(css, '.setup-page')).toContain('min-height: 100dvh');
     expect(rule(css, '.setup-footer')).toContain('border-top: 1px solid var(--ui-border)');

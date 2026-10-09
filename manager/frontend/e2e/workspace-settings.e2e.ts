@@ -113,6 +113,16 @@ test.describe('Workspace Settings Page', () => {
     });
   });
 
+  test.describe('Folders', () => {
+    test('saves a host folder', async ({ page }) => {
+      await page.getByRole('tab', { name: 'Folders' }).click();
+      await expect(page.getByRole('heading', { name: 'Host folders' })).toBeVisible();
+      await page.getByLabel('Folder 1').fill('/Users/you/Local/jbs');
+      await page.getByRole('button', { name: 'Save Changes' }).click();
+      await expect(page.getByText('Folders saved')).toBeVisible();
+    });
+  });
+
   test.describe('Theme Configuration Section', () => {
     test('displays theme configuration section', async ({ page }) => {
       await expect(page.locator('.section-title')).toContainText('Theme Configuration');

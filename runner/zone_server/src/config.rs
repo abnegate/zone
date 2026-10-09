@@ -105,6 +105,8 @@ pub struct Config {
     /// The hosts organizations and workspaces may save endpoints on
     /// (`ZONE_ENDPOINT_HOSTS`); every host when empty.
     pub endpoint_hosts: Hosts,
+    /// Host folders bind-mounted into the manager for chat tools.
+    pub host_mounts: crate::host_mounts::HostMounts,
 }
 
 /// The instance-wide default backend.
@@ -1154,6 +1156,7 @@ impl Config {
             train_upload_limit_mb: env_u64("TRAIN_UPLOAD_LIMIT_MB", 4096, 4, 65536),
             auto: AutoProjectConfig::from_env(),
             endpoint_hosts: Hosts::from_env(),
+            host_mounts: crate::host_mounts::HostMounts::from_env(),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1196,6 +1199,7 @@ impl std::fmt::Debug for Config {
             .field("monitoring", &self.monitoring)
             .field("auto", &self.auto)
             .field("endpoint_hosts", &self.endpoint_hosts)
+            .field("host_mounts", &self.host_mounts)
             .finish()
     }
 }
@@ -1245,6 +1249,7 @@ mod tests {
             train_upload_limit_mb: 4096,
             endpoint_hosts: Default::default(),
             auto: Default::default(),
+            host_mounts: Default::default(),
         }
     }
 

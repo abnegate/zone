@@ -94,6 +94,12 @@ spec:
               value: /app/agent-state
             - name: ZONE_CHAT_AGENT_CWD
               value: /app/workspace
+            {{- if .Values.server.hostRoot }}
+            - name: ZONE_HOST_ROOT
+              value: {{ .Values.server.hostRoot | quote }}
+            - name: ZONE_IN_CONTAINER
+              value: "true"
+            {{- end }}
             {{- range $key, $value := .Values.server.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
@@ -168,6 +174,10 @@ spec:
               mountPath: /app/workspace
             - name: agent-state
               mountPath: /app/agent-state
+            {{- if .Values.server.hostRoot }}
+            - name: host
+              mountPath: /host
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -186,6 +196,12 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.server.hostRoot }}
+        - name: host
+          hostPath:
+            path: {{ .Values.server.hostRoot | quote }}
+            type: Directory
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

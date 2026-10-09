@@ -35,7 +35,7 @@ import {
   useAgentStatuses,
 } from '../../ai';
 import { SettingsPage } from '../../components';
-import { WorkspaceMembersSection } from '../components';
+import { HostFoldersPanel, WorkspaceMembersSection } from '../components';
 import { UpdateWorkspaceThemeRequestSchema } from '../schemas';
 import type {
   AiProvider,
@@ -48,7 +48,7 @@ import type {
 } from '../types';
 import './WorkspaceSettingsPage.css';
 
-type Tab = 'theme' | 'ai' | 'members';
+type Tab = 'theme' | 'ai' | 'folders' | 'members';
 
 const TITLE = 'Workspace Settings';
 
@@ -138,7 +138,8 @@ export default function WorkspaceSettingsPage() {
   const scope = `${orgId}/${workspaceId}`;
   const currentScope = useRef<string | null>(scope);
   currentScope.current = scope;
-  const loading = activeTab === 'theme' ? workspaceThemeLoading : aiLoading;
+  const loading =
+    activeTab === 'theme' ? workspaceThemeLoading : activeTab === 'ai' ? aiLoading : false;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -438,6 +439,7 @@ export default function WorkspaceSettingsPage() {
     <TabsList aria-label="Workspace settings">
       <TabsTrigger value="theme">Theme</TabsTrigger>
       <TabsTrigger value="ai">AI Settings</TabsTrigger>
+      <TabsTrigger value="folders">Folders</TabsTrigger>
       <TabsTrigger value="members">Members</TabsTrigger>
     </TabsList>
   );
@@ -499,6 +501,10 @@ export default function WorkspaceSettingsPage() {
 
       <TabsContent value="members">
         <WorkspaceMembersSection workspaceId={workspaceId} orgId={orgId} />
+      </TabsContent>
+
+      <TabsContent value="folders">
+        <HostFoldersPanel workspaceId={workspaceId} orgId={orgId} />
       </TabsContent>
 
       <TabsContent value="theme">

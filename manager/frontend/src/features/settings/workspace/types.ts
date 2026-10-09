@@ -27,6 +27,29 @@ export interface UpdateWorkspaceRequest {
   is_active?: boolean;
 }
 
+export interface HostMounts {
+  in_container: boolean;
+  host_root: string | null;
+  container_root: string | null;
+  ready: boolean;
+  hint: string;
+}
+
+export interface MappedFolder {
+  host: string;
+  mapped: string | null;
+  exists: boolean;
+}
+
+export interface HostDirectories {
+  directories: string[];
+  folders: MappedFolder[];
+}
+
+export interface UpdateHostDirectoriesRequest {
+  directories: string[];
+}
+
 export interface WorkspaceMember {
   id: string;
   user_id: string;

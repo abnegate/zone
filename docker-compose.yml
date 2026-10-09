@@ -315,6 +315,8 @@ services:
       - ZONE_CHAT_OUTPUT_TOKENS=${ZONE_CHAT_OUTPUT_TOKENS:-4096}
       - ZONE_CHAT_CONTEXT_TOKENS=${ZONE_CHAT_CONTEXT_TOKENS:-32768}
       - ZONE_CHAT_AGENT_CWD=${ZONE_CHAT_AGENT_CWD:-/app/workspace}
+      - ZONE_HOST_ROOT=${ZONE_HOST_ROOT:-}
+      - ZONE_IN_CONTAINER=1
       - ZONE_LLM_BACKEND=${ZONE_LLM_BACKEND:-litellm}
       - ZONE_AGENT_STATE_DIR=/app/agent-state
       - ZONE_AGENT_HOST_LOGIN=${ZONE_AGENT_HOST_LOGIN:-false}
@@ -445,6 +447,7 @@ services:
       - comfyui_models:/app/comfyui/models
       - ./comfyui/workflows:/app/comfyui/workflows:ro
       - ./comfyui/recipes:/app/comfyui/recipes:ro
+      - ${ZONE_HOST_ROOT:-./.zone/host-empty}:/host
     ports:
       # The Claude sign-in callback, for a browser on this machine only. With
       # the callback off, Docker picks a spare port instead of taking 54545.

@@ -231,6 +231,8 @@ run_compose() {
     profiles=$1
     shift
 
+    mkdir -p "$root/.zone/host-empty"
+
     reversed_files=''
     for file in $(compose_files "$profiles"); do
         reversed_files="$file $reversed_files"

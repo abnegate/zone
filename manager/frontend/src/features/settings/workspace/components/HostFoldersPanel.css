@@ -1,0 +1,132 @@
+.host-folders {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4);
+  min-width: 0;
+}
+
+.host-folders .section-title {
+  margin: 0;
+  font-family: var(--ui-font-body);
+  font-size: var(--ui-text-md);
+  font-weight: 600;
+  color: var(--ui-text-primary);
+  white-space: nowrap;
+}
+
+.host-folders .section-description {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+  color: var(--ui-text-secondary);
+}
+
+.host-folders--setup .section-row,
+.host-folders--setup .section-row-copy {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ui-space-1);
+}
+
+.host-folders-status {
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text-secondary);
+}
+
+.host-folders-hint {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+  color: var(--ui-text-secondary);
+}
+
+.host-folders-hint--warn {
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-error-muted);
+  color: var(--ui-error-600);
+}
+
+.host-folders-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.host-folders-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--ui-space-2);
+  align-items: start;
+}
+
+.host-folders-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.host-folders-label {
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
+}
+
+.host-folders-field input {
+  width: 100%;
+  height: var(--ui-control-height);
+  padding: 0 var(--ui-space-3);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-bg-base);
+  color: var(--ui-text-primary);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-sm);
+}
+
+.host-folders-mapped {
+  grid-column: 1;
+  margin: 0;
+  font-size: var(--ui-text-2xs);
+  color: var(--ui-text-muted);
+}
+
+.host-folders-mapped code {
+  font-family: var(--ui-font-mono);
+}
+
+.host-folders-toolbar {
+  display: flex;
+}
+
+.host-folders-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ui-space-3);
+}
+
+.host-folders-actions .ui-btn-primary {
+  min-width: 8rem;
+}
+
+.setup-page .host-folders-actions {
+  flex-direction: column-reverse;
+  align-items: stretch;
+}
+
+.setup-page .host-folders-actions .ui-btn-primary {
+  width: 100%;
+  height: var(--ui-control-height-lg);
+}
+
+.setup-page .host-folders-actions .ui-btn-link {
+  height: auto;
+  padding: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+}

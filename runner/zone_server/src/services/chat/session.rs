@@ -336,11 +336,12 @@ pub async fn build(
         offline: chat.offline,
     };
     let catalog = async {
-        if matches!(mode, Mode::Generation(_)) && chat.agent_enabled {
+        let tools = if matches!(mode, Mode::Generation(_)) && chat.agent_enabled {
             ChatTools::build(scope).await
         } else {
             ChatTools::preview(scope).await
-        }
+        };
+        tools.using_workspace_directories().await
     };
     let resolver = endpoint.capacity(state.config());
     let requested = chat
@@ -392,7 +393,8 @@ pub async fn build(
         .reasoning
         .then(|| chat.reasoning_effort.resolve(&request))
         .flatten();
-    let mut environment = Environment::here();
+    let mut environment =
+        Environment::here().with_directory(tools.working_directory().to_path_buf());
     if let Some(effort) = effort {
         environment = environment.with_effort(effort);
     }

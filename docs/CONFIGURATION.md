@@ -600,7 +600,28 @@ setting a monthly cap, at claude.ai/settings/usage.
   chats share it. It is not where a CLI runs: on Claude Code or Codex, that is
   the organization's `work` directory for the agent.
 - **Note**: `/app` is root-owned in the manager image, so the tools need a
-  directory the `zone` user can write, and `/app/workspace` is one.
+  directory the `zone` user can write, and `/app/workspace` is one. A
+  workspace **Folders** list overrides this for that workspace: the first
+  selected host directory that exists inside the manager becomes the working
+  directory.
+
+### `ZONE_HOST_ROOT`
+- **Default**: empty. Compose then bind-mounts `./.zone/host-empty` at
+  `/host` so the container always has that path.
+- **Description**: Absolute host directory mounted at `/host` in the manager.
+  Setup and **Workspace Settings → Folders** store host paths under this
+  root; the server maps them to `/host/...` when `ZONE_IN_CONTAINER` is set
+  (compose always sets it). Recreate the manager after changing this value.
+  A typical value is `$HOME` or a parent such as `~/Local`.
+- **Note**: Mounting `$HOME` lets every chat in every workspace reach any
+  file under home, subject to the `zone` user's permissions. Pick the
+  smallest parent that covers the folders you will select.
+
+### `ZONE_IN_CONTAINER`
+- **Default**: unset (native). Compose sets `1`.
+- **Description**: When set, host folders are mapped through `/host` using
+  `ZONE_HOST_ROOT`. When unset, stored paths are used as they are on this
+  machine.
 
 ### Signing in
 
@@ -1374,6 +1395,8 @@ once approved, and its file tools read whatever else the server's user can.
   at `/app/agent-state` and passes `ZONE_AGENT_STATE_DIR`,
   `ZONE_AGENT_HOST_LOGIN` (default `false`), `ZONE_LLM_BACKEND` (default
   `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`),
+  `ZONE_HOST_ROOT` (empty by default, mounted at `/host`),
+  `ZONE_IN_CONTAINER` (`1`),
   `ZONE_AGENT_ENV_PASSTHROUGH`, `ZONE_CODEX_SANDBOX` (default
   `danger-full-access`), `ZONE_CLAUDE_TOKEN_URL` (empty by default, which
   keeps Claude's own endpoint), `ZONE_AGENT_CALLBACK`,
@@ -2048,7 +2071,8 @@ Need to find a specific config? Quick lookup:
   ZONE_CLAUDE_TOKEN_URL, ZONE_AGENT_USAGE_TTL_SECONDS, ZONE_CLAUDE_API_URL,
   ZONE_CODEX_API_URL, ZONE_AGENT_CALLBACK, ZONE_AGENT_CALLBACK_BIND,
   ZONE_AGENT_CALLBACK_PORT, ZONE_CONSOLE_ORIGINS, ZONE_CODEX_SANDBOX,
-  ZONE_AGENT_ENV_PASSTHROUGH, ZONE_CHAT_AGENT_CWD
+  ZONE_AGENT_ENV_PASSTHROUGH, ZONE_CHAT_AGENT_CWD, ZONE_HOST_ROOT,
+  ZONE_IN_CONTAINER
 - **Image, video, and audio generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
   COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_VIDEO_WORKFLOW_PATH,
   COMFYUI_VIDEO_UNET, COMFYUI_VIDEO_CLIP, COMFYUI_VIDEO_VAE,

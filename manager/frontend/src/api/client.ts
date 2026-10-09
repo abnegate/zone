@@ -36,6 +36,8 @@ import type {
   CreateWorkspaceRequest,
   DevicePolicy,
   DevicesResponse,
+  HostDirectories,
+  HostMounts,
   Invitation,
   InvitationDetails,
   InvitationsResponse,
@@ -54,6 +56,7 @@ import type {
   UpdateAiSettingsRequest,
   UpdateChatRequest,
   UpdateDeviceRequest,
+  UpdateHostDirectoriesRequest,
   UpdateOrganizationRequest,
   UpdateOrgMemberRequest,
   UpdateWorkspaceMemberRequest,
@@ -528,6 +531,42 @@ class Client {
       throw new Error(`Failed to reset workspace theme: ${response.status}`);
     }
     return null;
+  }
+
+  async getHostMounts(): Promise<HostMounts> {
+    const response = await fetch(`${API_BASE}/api/host-mounts`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load host mounts');
+    }
+    return (await response.json()) as HostMounts;
+  }
+
+  async getWorkspaceHostDirectories(_orgId: string, wsId: string): Promise<HostDirectories> {
+    const response = await fetch(`${API_BASE}/api/workspaces/${wsId}/host-directories`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load host folders');
+    }
+    return (await response.json()) as HostDirectories;
+  }
+
+  async updateWorkspaceHostDirectories(
+    _orgId: string,
+    wsId: string,
+    request: UpdateHostDirectoriesRequest
+  ): Promise<HostDirectories> {
+    const response = await fetch(`${API_BASE}/api/workspaces/${wsId}/host-directories`, {
+      method: 'PUT',
+      headers: this.getHeaders(),
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to save host folders');
+    }
+    return (await response.json()) as HostDirectories;
   }
 
   // Organization AI Settings API

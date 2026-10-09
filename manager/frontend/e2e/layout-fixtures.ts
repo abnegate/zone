@@ -360,7 +360,29 @@ export async function setupCommonRoutes(
       await route.fulfill({ status: 404, json: { error: 'Theme not found' } });
       return;
     }
-    if (path.endsWith('/members'))
+    if (path === '/api/host-mounts') {
+      body = {
+        in_container: true,
+        host_root: '/Users/you',
+        container_root: '/host',
+        ready: true,
+        hint: 'Folders must live under /Users/you.',
+      };
+    } else if (path.endsWith('/host-directories')) {
+      if (route.request().method() === 'PUT') {
+        const posted = route.request().postDataJSON() as { directories?: string[] } | null;
+        const directories = posted?.directories ?? [];
+        await route.fulfill({
+          status: 200,
+          json: {
+            directories,
+            folders: directories.map((host) => ({ host, mapped: `/host${host}`, exists: true })),
+          },
+        });
+        return;
+      }
+      body = { directories: [], folders: [] };
+    } else if (path.endsWith('/members'))
       body = { members: populated ? mockMembers : [] };
     else if (path.endsWith('/devices')) body = { devices: [] };
     else if (path.endsWith('/device-policy')) body = { mode: 'open' };

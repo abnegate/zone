@@ -310,6 +310,34 @@ impl ChatTools {
         Self::assemble(Some(scope), ToolProfile::Chat, None, false, denied).await
     }
 
+    /// Point relative paths at the first host folder this workspace mounted
+    /// that exists here. Falls back to [`host_root`] when none do.
+    pub async fn using_workspace_directories(mut self) -> Self {
+        let Some(scope) = self.scope.clone() else {
+            return self;
+        };
+        let directories =
+            match crate::db::workspace_host_directories::list(scope.state.db(), scope.workspace_id)
+                .await
+            {
+                Ok(directories) => directories,
+                Err(error) => {
+                    tracing::debug!(%error, "Could not load workspace host directories");
+                    return self;
+                }
+            };
+        self.context.cwd = scope
+            .state
+            .config()
+            .host_mounts
+            .chat_cwd(&directories, host_root());
+        self
+    }
+
+    pub fn working_directory(&self) -> &std::path::Path {
+        &self.context.cwd
+    }
+
     /// Whether this chat opted out of public web (search, page fetch, curl/wget).
     pub fn offline(&self) -> bool {
         self.context.offline

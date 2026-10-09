@@ -39,6 +39,7 @@ pub mod task_tool_calls;
 pub mod tasks;
 pub mod usage;
 pub mod users;
+pub mod workspace_host_directories;
 pub mod workspace_members;
 pub mod workspace_themes;
 pub mod workspaces;

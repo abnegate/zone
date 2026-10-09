@@ -15,6 +15,9 @@ const mockClient = {
   updateWorkspaceAiSettings: mock(),
   resetWorkspaceAiSettings: mock(),
   getEffectiveAiSettings: mock(),
+  getHostMounts: mock(),
+  getWorkspaceHostDirectories: mock(),
+  updateWorkspaceHostDirectories: mock(),
 };
 
 mock.module('../../../../api/client', () => ({
@@ -200,6 +203,18 @@ describe('WorkspaceSettingsPage', () => {
     mockClient.updateWorkspaceAiSettings.mockResolvedValue(savedAiSettings);
     mockClient.resetWorkspaceTheme.mockResolvedValue(mockTheme);
     mockClient.resetWorkspaceAiSettings.mockResolvedValue(inheritedAiSettings);
+    mockClient.getHostMounts.mockResolvedValue({
+      in_container: true,
+      host_root: '/Users/jake/Local',
+      container_root: '/host',
+      ready: true,
+      hint: 'Folders must live under /Users/jake/Local.',
+    });
+    mockClient.getWorkspaceHostDirectories.mockResolvedValue({ directories: [], folders: [] });
+    mockClient.updateWorkspaceHostDirectories.mockResolvedValue({
+      directories: [],
+      folders: [],
+    });
   });
 
   it('shows loading state', async () => {
@@ -221,6 +236,30 @@ describe('WorkspaceSettingsPage', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Workspace Settings' })).toBeInTheDocument();
     });
+  });
+
+  it('saves host folders from the Folders tab', async () => {
+    mockClient.getWorkspaceHostDirectories.mockResolvedValue({
+      directories: ['/Users/jake/Local/jbs'],
+      folders: [{ host: '/Users/jake/Local/jbs', mapped: '/host/jbs', exists: true }],
+    });
+    mockClient.updateWorkspaceHostDirectories.mockResolvedValue({
+      directories: ['/Users/jake/Local/jbs'],
+      folders: [{ host: '/Users/jake/Local/jbs', mapped: '/host/jbs', exists: true }],
+    });
+    const user = userEvent.setup();
+    render(<WorkspaceSettingsPage />);
+    await user.click(await screen.findByRole('tab', { name: 'Folders' }));
+    expect(await screen.findByRole('heading', { name: 'Host folders' })).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('/Users/jake/Local/jbs')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }));
+    await waitFor(() =>
+      expect(mockClient.updateWorkspaceHostDirectories).toHaveBeenCalledWith(
+        '00000000-0000-0000-0000-000000000001',
+        '00000000-0000-0000-0000-000000000001',
+        { directories: ['/Users/jake/Local/jbs'] }
+      )
+    );
   });
 
   it('renders theme configuration section', async () => {

@@ -52,6 +52,17 @@
   color: var(--ui-text-secondary);
 }
 
+.setup-steps {
+  margin-top: var(--ui-space-2);
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
+}
+
+.setup-step--current {
+  color: var(--ui-text-primary);
+  font-weight: 600;
+}
+
 .setup-page .models-features-panel {
   gap: var(--ui-space-4);
 }

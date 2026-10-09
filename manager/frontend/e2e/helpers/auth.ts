@@ -281,4 +281,47 @@ export async function mockCommonEndpoints(page: Page): Promise<void> {
       body: JSON.stringify(workspaceResponse),
     });
   });
+
+  await routeApi(page, '**/api/host-mounts', (route) => {
+    if (!isApiEndpoint(route.request().url())) {
+      route.continue();
+      return;
+    }
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        in_container: true,
+        host_root: '/Users/you',
+        container_root: '/host',
+        ready: true,
+        hint: 'Folders must live under /Users/you.',
+      }),
+    });
+  });
+
+  await routeApi(page, '**/api/workspaces/*/host-directories', (route) => {
+    if (!isApiEndpoint(route.request().url())) {
+      route.continue();
+      return;
+    }
+    if (route.request().method() === 'PUT') {
+      const posted = route.request().postDataJSON() as { directories?: string[] } | null;
+      const directories = posted?.directories ?? [];
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          directories,
+          folders: directories.map((host) => ({ host, mapped: `/host${host}`, exists: true })),
+        }),
+      });
+      return;
+    }
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ directories: [], folders: [] }),
+    });
+  });
 }

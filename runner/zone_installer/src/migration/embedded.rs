@@ -28,4 +28,5 @@ pub const EMBEDDED: &[Source] = &[
     source!("005_agent_login_usage_validation.sql"),
     source!("006_runpod_api_key.sql"),
     source!("007_devices.sql"),
+    source!("008_workspace_host_directories.sql"),
 ];

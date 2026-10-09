@@ -24,9 +24,28 @@ mock.module('../../../api/models', () => ({
   },
 }));
 
+const mockGetHostMounts = mock();
+const mockGetWorkspaceHostDirectories = mock();
+const mockUpdateWorkspaceHostDirectories = mock();
+
+mock.module('../../../api/client', () => ({
+  client: {
+    getHostMounts: mockGetHostMounts,
+    getWorkspaceHostDirectories: mockGetWorkspaceHostDirectories,
+    updateWorkspaceHostDirectories: mockUpdateWorkspaceHostDirectories,
+  },
+}));
+
 mock.module('../../auth', () => ({
   useAuth: () => ({
     user: { id: 'user-1' },
+  }),
+}));
+
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentOrganization: { id: 'org-1' },
+    currentWorkspace: { id: 'ws-1' },
   }),
 }));
 
@@ -162,6 +181,18 @@ describe('SetupPage', () => {
     mockPull.mockImplementation(() => Promise.resolve(true));
     pull.jobs = [];
     mockGetSetup.mockResolvedValue(plan());
+    mockGetHostMounts.mockReset();
+    mockGetWorkspaceHostDirectories.mockReset();
+    mockUpdateWorkspaceHostDirectories.mockReset();
+    mockGetHostMounts.mockResolvedValue({
+      in_container: true,
+      host_root: '/Users/jake/Local',
+      container_root: '/host',
+      ready: true,
+      hint: 'Folders must live under /Users/jake/Local.',
+    });
+    mockGetWorkspaceHostDirectories.mockResolvedValue({ directories: [], folders: [] });
+    mockUpdateWorkspaceHostDirectories.mockResolvedValue({ directories: [], folders: [] });
   });
 
   it('lets the user pick features and skip into the app', async () => {
@@ -171,6 +202,9 @@ describe('SetupPage', () => {
     expect(screen.getByRole('checkbox', { name: 'Vision' })).toBeChecked();
     expect(screen.getByText('Free required')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Install selected' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
+    expect(await screen.findByRole('heading', { name: 'Host folders' })).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
     expect(localStorage.getItem(setupCompleteKey('user-1'))).toBe('1');
     expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true });
@@ -197,9 +231,10 @@ describe('SetupPage', () => {
     mockStartSetup.mockResolvedValue(plan({ pulls: [] }));
     mockGetSetup.mockResolvedValue(plan({ pulls: [] }));
     render(<SetupPage />);
-    expect(await screen.findByRole('button', { name: 'Continue to Zone' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Continue to Zone' }));
-    expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true });
+    expect(await screen.findByRole('button', { name: 'Continue' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByRole('heading', { name: 'Host folders' })).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 
   it('starts downloads from install selected', async () => {

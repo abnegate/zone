@@ -1170,6 +1170,43 @@ describe('Client', () => {
       expect(result.primary_color_light).toBe('#007bff');
     });
 
+    it('getHostMounts fetches the instance mapping', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          in_container: true,
+          host_root: '/Users/jake/Local',
+          container_root: '/host',
+          ready: true,
+          hint: 'Folders must live under /Users/jake/Local.',
+        }),
+      });
+
+      const result = await client.getHostMounts();
+
+      expect(result.host_root).toBe('/Users/jake/Local');
+      expect(mockFetch).toHaveBeenCalledWith('/api/host-mounts', expect.any(Object));
+    });
+
+    it('updateWorkspaceHostDirectories saves folders', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          directories: ['/Users/jake/Local/jbs'],
+          folders: [{ host: '/Users/jake/Local/jbs', mapped: '/host/jbs', exists: true }],
+        }),
+      });
+
+      await client.updateWorkspaceHostDirectories('org-1', 'ws-1', {
+        directories: ['/Users/jake/Local/jbs'],
+      });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        '/api/workspaces/ws-1/host-directories',
+        expect.objectContaining({ method: 'PUT' })
+      );
+    });
+
     it('updateWorkspaceTheme updates theme', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,

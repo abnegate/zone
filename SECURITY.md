@@ -1,5 +1,15 @@
 # Security Considerations for Zone AI Stack
 
+## Host folder mounts
+
+Compose bind-mounts `ZONE_HOST_ROOT` at `/host` in the manager. Workspace
+**Folders** (and the first-run setup step) store host paths under that root;
+chat tools then open the matching `/host/...` path as the `zone` user. Mounting
+`$HOME` makes every file under home reachable from any chat in any workspace.
+Pick the smallest parent that covers the folders you will select. Recreate the
+manager after changing `ZONE_HOST_ROOT`. An empty value mounts
+`./.zone/host-empty`, so nothing on the host is visible until a root is set.
+
 ## Docker Socket Access (Traefik)
 
 ### Risk Assessment

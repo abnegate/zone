@@ -20,7 +20,7 @@ export const filesystemSource: SourceDefinition = {
       placeholder: '/home/user/projects/my-app',
       required: true,
       monospace: true,
-      hint: 'Absolute path to the project directory on the server',
+      hint: 'Absolute path on the server. For a host folder mounted in Docker, use the container path shown under Workspace Settings → Folders.',
     },
     {
       id: 'fsAllowWrites',

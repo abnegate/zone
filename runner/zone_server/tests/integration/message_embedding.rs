@@ -59,6 +59,7 @@ fn test_config() -> Config {
         train_upload_limit_mb: 512,
         endpoint_hosts: Default::default(),
         auto: Default::default(),
+        host_mounts: Default::default(),
     }
 }
 

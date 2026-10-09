@@ -38,6 +38,8 @@ test.describe('First-run feature setup', () => {
     await expect(page.getByText('Free required')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Install selected' })).toBeEnabled();
     await expect(page.getByRole('button', { name: 'Skip for now' })).toBeVisible();
+    await expect(page.getByText('1 Features')).toBeVisible();
+    await expect(page.getByText('2 Folders')).toBeVisible();
     await expect(page.locator('.sidebar')).toHaveCount(0);
     await page.getByRole('combobox', { name: 'Chat models' }).click();
     await expect(page.getByRole('option', { name: '32 GB+ RAM' })).toBeVisible();
@@ -49,6 +51,9 @@ test.describe('First-run feature setup', () => {
     await page.goto('/');
     await expect(page.getByRole('heading', { name: 'Set up Zone' })).toBeVisible();
     await page.getByRole('button', { name: 'Skip for now' }).click();
+    await expect(page.getByRole('heading', { name: 'Host folders' })).toBeVisible();
+    await expect(page).toHaveURL(/\/setup$/);
+    await page.getByRole('button', { name: 'Skip for now' }).click();
     await expect(page).toHaveURL('/');
     await expect(page.locator('.sidebar')).toBeVisible();
     await page.reload();
@@ -57,5 +62,15 @@ test.describe('First-run feature setup', () => {
     await expect(page.getByRole('heading', { name: 'Set up Zone' })).toHaveCount(0);
     await page.goto('/models');
     await expect(page.getByRole('tab', { name: 'Features' })).toBeVisible();
+  });
+
+  test('saving host folders finishes setup', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Skip for now' }).click();
+    await expect(page.getByRole('heading', { name: 'Host folders' })).toBeVisible();
+    await page.getByLabel('Folder 1').fill('/Users/you/Local/jbs');
+    await page.getByRole('button', { name: 'Save and continue' }).click();
+    await expect(page).toHaveURL('/');
+    await expect(page.locator('.sidebar')).toBeVisible();
   });
 });

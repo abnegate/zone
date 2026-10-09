@@ -74,6 +74,11 @@ impl Environment {
         self
     }
 
+    pub fn with_directory(mut self, directory: PathBuf) -> Self {
+        self.directory = directory;
+        self
+    }
+
     pub fn with_effort(mut self, effort: Effort) -> Self {
         self.effort = Some(effort);
         self

@@ -1811,6 +1811,7 @@ async fn handle_image_generation(
         client.generate(
             &generation_prompt,
             source.as_ref(),
+            None,
             &mut generation.cancel,
             progress_tx,
         ),
@@ -3777,6 +3778,8 @@ async fn handle_chat_generation(
             user_id,
             offline,
         })
+        .await
+        .using_workspace_directories()
         .await;
         // A planner chat keeps its two closing calls across a rebuilt
         // catalog, as `session::build` gave them to the first turn.

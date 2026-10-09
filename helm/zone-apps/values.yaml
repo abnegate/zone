@@ -121,6 +121,10 @@ server:
     ZONE_CONSOLE_ORIGINS: ""
     ZONE_AGENT_USAGE_TTL_SECONDS: "60"
 
+  # Absolute host directory bind-mounted at /host. Empty leaves chat tools on
+  # the pod's /app/workspace. Recreate the deployment after changing it.
+  hostRoot: ""
+
   # Per organization and agent: every sign-in's own claude or codex home
   # under <state>/<org>/<agent>/logins/<id>, holding codex's auth.json and
   # the CLI's session files under its projects/ or sessions/, beside the

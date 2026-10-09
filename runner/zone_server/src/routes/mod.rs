@@ -14,6 +14,7 @@ pub mod context;
 pub mod devices;
 pub mod error;
 pub mod health;
+pub mod host_mounts;
 pub mod invitations;
 pub mod models;
 pub mod organizations;
@@ -195,6 +196,11 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/members/{user_id}",
             patch(workspaces::update_member_role).delete(workspaces::remove_member),
+        )
+        .route("/api/host-mounts", get(host_mounts::instance))
+        .route(
+            "/api/workspaces/{workspace_id}/host-directories",
+            get(host_mounts::get).put(host_mounts::put),
         )
         // Projects
         .route(

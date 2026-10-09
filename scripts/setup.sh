@@ -21,8 +21,10 @@ readonly SETUP_MODELS="${PROJECT_ROOT}/scripts/setup-models.py"
 PYTHON="${PYTHON_BIN:-python3}"
 YES=0
 SKIP_MODELS=0
+SKIP_HOST_ROOT=0
 FEATURES=""
 CHAT_PRESET=""
+HOST_ROOT=""
 
 # Colors
 readonly RED='\033[0;31m'
@@ -182,6 +184,78 @@ setup_env_file() {
     log_warn "  - Domain name (DOMAIN_HOST_WEBUI)"
     log_warn "  - VPN credentials (VPN_OPENVPN_USER, VPN_OPENVPN_PASSWORD)"
     log_warn "  - ACME email (ADVANCED_ACME_EMAIL)"
+}
+
+upsert_env() {
+    local key="$1"
+    local value="$2"
+    local temporary
+    temporary=$(mktemp "${ENV_FILE}.XXXXXX")
+    awk -v name="${key}" -v val="${value}" '
+        $0 ~ "^[[:space:]]*(export[[:space:]]+)?" name "[[:space:]]*=" {
+            if (!written) print name "=" val
+            written = 1
+            next
+        }
+        { print }
+        END {
+            if (!written) print name "=" val
+        }
+    ' "${ENV_FILE}" > "${temporary}"
+    mv "${temporary}" "${ENV_FILE}"
+}
+
+setup_host_root() {
+    if [ "${SKIP_HOST_ROOT}" -eq 1 ]; then
+        log_info "Skipping host folder root (--skip-host-root)"
+        return 0
+    fi
+
+    if [ ! -f "${ENV_FILE}" ]; then
+        log_error ".env not found at ${ENV_FILE}"
+        exit 1
+    fi
+
+    local current default chosen
+    current=$(awk -F= '
+        $0 ~ "^[[:space:]]*ZONE_HOST_ROOT[[:space:]]*=" {
+            value = $0
+            sub(/^[[:space:]]*ZONE_HOST_ROOT[[:space:]]*=/, "", value)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            gsub(/^["'\'']|["'\'']$/, "", value)
+            found = value
+        }
+        END { if (found != "") print found }
+    ' "${ENV_FILE}")
+    default="${current:-${HOME}}"
+
+    log_step "Host folders"
+    echo "Chat tools run inside Docker. A host folder root is bind-mounted at /host"
+    echo "so Setup and Workspace Settings can pick directories under it."
+
+    if [ -n "${HOST_ROOT}" ]; then
+        chosen="${HOST_ROOT}"
+    elif [ "${YES}" -eq 1 ]; then
+        chosen="${default}"
+    else
+        read -r -p "Host folder root [${default}]: " chosen
+        chosen="${chosen:-${default}}"
+    fi
+
+    if [ -z "${chosen}" ]; then
+        log_info "Leaving ZONE_HOST_ROOT empty"
+        return 0
+    fi
+
+    if [ ! -d "${chosen}" ]; then
+        log_error "Host folder root is not a directory: ${chosen}"
+        exit 1
+    fi
+
+    chosen="$(cd "${chosen}" && pwd)"
+    upsert_env ZONE_HOST_ROOT "${chosen}"
+    log_info "ZONE_HOST_ROOT=${chosen}"
+    log_warn "Recreate the manager after changing this (compose up --force-recreate manager)."
 }
 
 run_model_setup() {
@@ -393,6 +467,7 @@ print_next_steps() {
 full_setup() {
     check_prerequisites
     setup_env_file
+    setup_host_root
     setup_basic_auth
     run_model_setup
     validate_config
@@ -406,12 +481,14 @@ Usage: $0 [options]
   --yes              Accept feature defaults, licenses, and start downloads
   --features LIST    Comma-separated features, or all (default: all)
   --chat-preset ID   8gb, 16gb, or 32gb (default: detected RAM)
+  --host-root PATH   Host folder bind-mounted at /host (default: \$HOME)
+  --skip-host-root   Leave ZONE_HOST_ROOT unset
   --skip-models      Write secrets and auth only
   --help             Show this help
 
 Features: chat, vision, pictures, edits, video, audio, upscale, train
 Vision and all require 16 GB RAM. all also needs enough free disk for
-every selected model plus 10 GB working space (~145 GB for a full 32 GB
+every selected model plus 10 GB working space (~128 GB for a full 32 GB
 preset install).
 
 Examples:
@@ -467,6 +544,15 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --yes|-y) YES=1 ;;
         --skip-models) SKIP_MODELS=1 ;;
+        --skip-host-root) SKIP_HOST_ROOT=1 ;;
+        --host-root)
+            if [ "$#" -lt 2 ]; then
+                log_error "--host-root requires a value"
+                exit 2
+            fi
+            HOST_ROOT=$2
+            shift
+            ;;
         --features)
             if [ "$#" -lt 2 ]; then
                 log_error "--features requires a value"
@@ -496,7 +582,7 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
-if [ "${YES}" -eq 1 ] || [ "${SKIP_MODELS}" -eq 1 ] || [ -n "${FEATURES}" ] || [ -n "${CHAT_PRESET}" ]; then
+if [ "${YES}" -eq 1 ] || [ "${SKIP_MODELS}" -eq 1 ] || [ "${SKIP_HOST_ROOT}" -eq 1 ] || [ -n "${HOST_ROOT}" ] || [ -n "${FEATURES}" ] || [ -n "${CHAT_PRESET}" ]; then
     full_setup
 else
     main_menu

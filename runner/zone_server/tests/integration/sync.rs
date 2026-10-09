@@ -77,6 +77,7 @@ async fn setup_test_state() -> AppState {
         train_upload_limit_mb: 512,
         endpoint_hosts: Default::default(),
         auto: Default::default(),
+        host_mounts: Default::default(),
     };
 
     AppState::new(config, pool.inner().clone(), None)
