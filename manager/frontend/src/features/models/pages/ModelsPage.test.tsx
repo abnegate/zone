@@ -32,8 +32,54 @@ mock.module('../hooks/useTrain', () => ({
 mock.module('../../../api/models', () => ({
   modelsApi: {
     getModelInfo: mockGetModelInfo,
+    getSetup: mock(() =>
+      Promise.resolve({
+        ram_bytes: 1,
+        ram_label: '64 GB',
+        disk_free_bytes: 1,
+        disk_free_label: '500 GB',
+        vision_min_ram_bytes: 1,
+        disk_margin_bytes: 1,
+        chat_preset: '32gb',
+        recommended_preset: '32gb',
+        chat_presets: [],
+        features: [],
+        wants_all: true,
+        gate: null,
+        totals: {
+          size_bytes: 0,
+          size_label: '0 B',
+          present_bytes: 0,
+          present_label: '0 B',
+          needed_bytes: 0,
+          needed_label: '0 B',
+          working_space_bytes: 0,
+          working_space_label: '0 B',
+          required_free_bytes: 0,
+          required_free_label: '0 B',
+          free_now_bytes: 0,
+          free_now_label: '0 B',
+          short_by_bytes: 0,
+          short_by_label: null,
+        },
+        licenses: [],
+        artifacts: [],
+        pulls: [],
+      })
+    ),
+    startSetup: mock(),
     trainBases: mock(() => Promise.resolve([])),
     train: mock(),
+  },
+  SetupError: class SetupError extends Error {
+    code: string;
+    plan: unknown;
+    constructor(refusal: { error: string; code: string; plan: unknown }) {
+      super(refusal.error);
+      this.name = 'SetupError';
+      this.code = refusal.code;
+      this.plan = refusal.plan;
+    }
   },
 }));
 
@@ -216,7 +262,17 @@ describe('ModelsPage', () => {
     it('renders main tabs', () => {
       renderModelsPage();
       expect(screen.getByRole('tab', { name: /Installed/i })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'Features' })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: 'Browse' })).toBeInTheDocument();
+    });
+
+    it('opens the features picker', async () => {
+      renderModelsPage();
+      const tab = screen.getByRole('tab', { name: 'Features' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+      expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
     });
 
     it('shows installed tab by default with an inline add-model row', () => {
@@ -307,6 +363,17 @@ describe('ModelsPage', () => {
       mockUseModels.mockReturnValue({ ...defaultModelsHook, models: [] });
       renderModelsPage();
       expect(screen.getByText('No models installed')).toBeInTheDocument();
+    });
+
+    it('opens feature setup from the empty state', async () => {
+      mockUseModels.mockReturnValue({ ...defaultModelsHook, models: [] });
+      renderModelsPage();
+      fireEvent.click(screen.getByRole('button', { name: 'Install features' }));
+      expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'Features' })).toHaveAttribute(
+        'aria-selected',
+        'true'
+      );
     });
 
     it('displays installed models', () => {

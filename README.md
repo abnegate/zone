@@ -65,14 +65,19 @@ flowchart TD
 
 ## Quick Start
 
-**Zero configuration required!** Install Ollama, copy `.env.example` to `.env`, create basic auth, and start:
+Install Ollama, then run setup. It asks which features to enable (all on by default), shows how much disk each one needs, and downloads those models with progress.
 
 ```bash
-# Host Ollama is the default engine (Apple GPU / Docker Desktop)
 ollama serve
-cp .env.example .env
-mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
+./scripts/setup.sh --yes
 make up
+```
+
+`--yes` accepts every feature. That needs **16 GB RAM** (for `llava:7b`) and about **145 GB free disk** (135 GB of models plus 10 GB working space). Setup refuses `all` when RAM or disk cannot cover that full set — pass a smaller list instead of hoping it will trim itself:
+
+```bash
+./scripts/setup.sh --yes --features chat --chat-preset 8gb
+./scripts/setup.sh --yes --features chat,vision,pictures --chat-preset 16gb
 ```
 
 Access the services:
@@ -84,39 +89,26 @@ Access the services:
 
 - **Ollama** installed and listening on port 11434 (host daemon is the default engine)
 - **Docker** (20.10+) and **Docker Compose** (v2.0+)
-- **8GB+ RAM** (16GB+ recommended for larger models)
-- **50GB+ free disk space** (models can be large)
+- **8 GB RAM** for chat only; **16 GB** for vision (`llava:7b`); **32 GB** recommended for video
+- **145 GB free disk** for every feature; a chat-only install is a few GB
 - **NVIDIA GPU** (optional, only for `--profile bundled-ollama`)
 - **VPN subscription** (optional; when enabled, all stack internet traffic uses the tunnel)
 
 ### Installation
 
-Choose your preferred installation method:
-
-#### Option 1: Quick Start
-
 ```bash
 git clone <repository-url>
 cd zone
 ollama serve
-cp .env.example .env
-mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
+./scripts/setup.sh
 make up
 ```
 
-Uses insecure defaults (fine for development). Host Ollama is the engine.
-
-#### Option 2: CLI Setup Script
-
-```bash
-./scripts/setup.sh
-```
-
-Interactive command-line wizard for terminal users.
+`cp .env.example .env` still works as a secrets-only shortcut and does not download models.
 
 ### Local Ollama (default)
 
-Zone talks to the Ollama daemon on the host so Docker Desktop can use the Apple GPU. Keep it running on port 11434, then pull models with `make pull-models`.
+Zone talks to the Ollama daemon on the host so Docker Desktop can use the Apple GPU. Keep it running on port 11434. Setup pulls the models for the features you enabled; `make pull-models` re-pulls the tags in `.env`.
 
 To run Ollama inside Docker instead (Linux with NVIDIA GPU passthrough):
 
@@ -126,21 +118,10 @@ OLLAMA_BASE_URL=http://ollama:11434
 ./scripts/compose.sh --profile bundled-ollama up -d
 ```
 
-### Post-Installation
+### After setup
 
-1. **Pull models into host Ollama** (if they are not already local)
-
-   ```bash
-   make pull-models
-   make list-models
-   ```
-
-   Wait for models to download (10-30 minutes depending on your connection).
-
-2. **Access the services**
-
-   - Console: `https://manager.localhost` - Manage workspaces, projects, tasks
-   - Chat: `https://manager.localhost/chats` - Chat with AI models
+- Console: `https://manager.localhost` — workspaces, projects, tasks
+- Chat: `https://manager.localhost/chats`
 
 ## Services
 
@@ -180,11 +161,11 @@ make up PROFILES=dev,vpn,monitoring
 
 Configure models in `.env` based on your hardware:
 
-| Hardware | Fast Model | Reasoning Model | Embedding Model |
-|----------|-----------|----------------|-----------------|
-| 8GB RAM | `llama3.2:3b` | `deepseek-r1:7b` | `nomic-embed-text` |
-| 16GB RAM | `llama3.1:8b` | `deepseek-r1:14b` | `nomic-embed-text` |
-| 32GB RAM | `llama3.1:70b` | `deepseek-r1:32b` | `mxbai-embed-large` |
+| Hardware | Fast Model | Reasoning Model | Embedding Model | Vision |
+|----------|-----------|----------------|-----------------|--------|
+| 8 GB RAM (chat only) | `llama3.2:3b` | `deepseek-r1:7b` | `qwen3-embedding:0.6b` | none (`llava:7b` needs 16 GB) |
+| 16 GB RAM | `llama3.1:8b` | `deepseek-r1:14b` | `qwen3-embedding:0.6b` | `llava:7b` |
+| 32 GB+ RAM | `llama3.1:8b` | `deepseek-r1:32b` | `qwen3-embedding:0.6b` | `llava:7b` |
 
 Browse more models at [Ollama Library](https://ollama.com/library).
 
@@ -482,15 +463,16 @@ zone/
 ### Minimum
 
 - 4 CPU cores
-- 8GB RAM
-- 50GB disk space
+- 8 GB RAM (chat only)
+- A few GB of disk for chat-only models
 - Docker 20.10+
 
 ### Recommended
 
 - 8+ CPU cores
-- 16GB+ RAM
-- 100GB+ SSD
+- 16 GB RAM (required for vision / `all`)
+- 32 GB RAM for video
+- 145 GB free disk for every feature (135 GB models + 10 GB working space)
 - NVIDIA GPU (6GB+ VRAM)
 - Docker 24.0+
 

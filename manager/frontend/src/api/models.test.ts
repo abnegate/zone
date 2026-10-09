@@ -77,6 +77,97 @@ describe('Namespaced model requests', () => {
     expect(request).toHaveBeenCalledWith('/api/models/disk', expect.anything());
   });
 
+  it('loads a feature setup plan', async () => {
+    const setup = {
+      ram_bytes: 1,
+      ram_label: '64 GB',
+      disk_free_bytes: 1,
+      disk_free_label: '500 GB',
+      vision_min_ram_bytes: 1,
+      disk_margin_bytes: 1,
+      chat_preset: '32gb',
+      recommended_preset: '32gb',
+      chat_presets: [],
+      features: [],
+      wants_all: true,
+      gate: null,
+      totals: {
+        size_bytes: 0,
+        size_label: '0 B',
+        present_bytes: 0,
+        present_label: '0 B',
+        needed_bytes: 0,
+        needed_label: '0 B',
+        working_space_bytes: 0,
+        working_space_label: '0 B',
+        required_free_bytes: 0,
+        required_free_label: '0 B',
+        free_now_bytes: 0,
+        free_now_label: '0 B',
+        short_by_bytes: 0,
+        short_by_label: null,
+      },
+      licenses: [],
+      artifacts: [],
+      pulls: [],
+    };
+    const request = mock(async () => Response.json(setup));
+    global.fetch = request as typeof fetch;
+
+    expect(await modelsApi.getSetup({ features: ['chat'], chatPreset: '8gb' })).toEqual(setup);
+    expect(request).toHaveBeenCalledWith(
+      '/api/models/setup?features=chat&chat_preset=8gb',
+      expect.anything()
+    );
+  });
+
+  it('posts the selected features to start setup', async () => {
+    const setup = {
+      ram_bytes: 1,
+      ram_label: '8 GB',
+      disk_free_bytes: 1,
+      disk_free_label: '20 GB',
+      vision_min_ram_bytes: 1,
+      disk_margin_bytes: 1,
+      chat_preset: '8gb',
+      recommended_preset: '8gb',
+      chat_presets: [],
+      features: [],
+      wants_all: false,
+      gate: null,
+      totals: {
+        size_bytes: 0,
+        size_label: '0 B',
+        present_bytes: 0,
+        present_label: '0 B',
+        needed_bytes: 0,
+        needed_label: '0 B',
+        working_space_bytes: 0,
+        working_space_label: '0 B',
+        required_free_bytes: 0,
+        required_free_label: '0 B',
+        free_now_bytes: 0,
+        free_now_label: '0 B',
+        short_by_bytes: 0,
+        short_by_label: null,
+      },
+      licenses: [],
+      artifacts: [],
+      pulls: [{ model: 'llama3.2:3b', runtime: 'ollama' }],
+    };
+    const request = mock(async () => Response.json(setup));
+    global.fetch = request as typeof fetch;
+
+    expect(await modelsApi.startSetup({ features: ['chat'], chatPreset: '8gb' })).toEqual(setup);
+    expect(request).toHaveBeenCalledWith(
+      '/api/models/setup',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ features: ['chat'], chat_preset: '8gb' }),
+      })
+    );
+  });
+
   it('validates the structured training response', async () => {
     global.fetch = mock(async () =>
       Response.json({

@@ -1,0 +1,183 @@
+.setup-page {
+  min-height: 100dvh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--ui-space-8) var(--ui-gutter);
+  background: var(--ui-bg-base);
+  overflow-y: auto;
+}
+
+.setup-panel {
+  width: 100%;
+  max-width: 36rem;
+  min-width: 0;
+  margin: auto 0;
+  padding: var(--ui-space-8) var(--ui-space-6);
+  background: var(--ui-bg-elevated);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-card);
+  box-shadow: var(--ui-shadow-sm);
+}
+
+.setup-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ui-space-1);
+  margin-bottom: var(--ui-space-6);
+  text-align: center;
+}
+
+.setup-header .zone-logo__icon {
+  width: var(--ui-control-height-sm);
+  height: var(--ui-control-height-sm);
+}
+
+.setup-header h1 {
+  margin: 0;
+  font-family: var(--ui-font-display);
+  font-size: var(--ui-text-xl);
+  font-weight: 600;
+  line-height: var(--ui-leading-tight);
+  letter-spacing: var(--ui-tracking-tight);
+  color: var(--ui-text-primary);
+}
+
+.setup-header p {
+  margin: 0;
+  max-width: 24rem;
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+  color: var(--ui-text-secondary);
+}
+
+.setup-page .models-features-panel {
+  gap: var(--ui-space-4);
+}
+
+.setup-page .models-setup-facts {
+  text-align: center;
+}
+
+.setup-page .models-features-panel--setup .ui-select-trigger {
+  height: var(--ui-control-height-lg);
+}
+
+.setup-page .models-feature {
+  padding: var(--ui-space-3) 0;
+}
+
+.setup-page .models-feature-size {
+  display: inline-flex;
+  align-items: center;
+  height: var(--ui-badge-height);
+  margin-top: var(--ui-space-0-5);
+  padding: 0 var(--ui-space-2);
+  border-radius: var(--ui-radius-full);
+  background: var(--ui-bg-base);
+  font-weight: 500;
+}
+
+.setup-page .models-feature-size--ready {
+  background: color-mix(in srgb, var(--ui-success-500) 14%, transparent);
+  color: var(--ui-success-600);
+}
+
+.setup-page .models-setup-totals {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--ui-space-3) var(--ui-space-2);
+  padding: var(--ui-space-4);
+  background: var(--ui-bg-base);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+}
+
+.setup-page .models-setup-totals > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-0-5);
+  min-width: 0;
+}
+
+.setup-page .models-setup-totals dt {
+  font-size: var(--ui-text-2xs);
+  line-height: var(--ui-space-4);
+  color: var(--ui-text-muted);
+}
+
+.setup-page .models-setup-totals dd {
+  text-align: left;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-primary);
+}
+
+.setup-page .models-setup-gate {
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-error-muted);
+  color: var(--ui-error-600);
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+}
+
+.setup-page .models-setup-actions {
+  width: 100%;
+  min-height: var(--ui-control-height-lg);
+}
+
+.setup-page .models-setup-actions .ui-btn:not(.ui-btn-icon) {
+  width: 100%;
+}
+
+.setup-downloads {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  margin-top: var(--ui-space-4);
+  padding: var(--ui-space-4);
+  background: var(--ui-bg-base);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+}
+
+.setup-downloads h2 {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  color: var(--ui-text-primary);
+}
+
+.setup-continue {
+  margin-top: var(--ui-space-4);
+}
+
+.setup-continue .ui-btn {
+  width: 100%;
+  height: var(--ui-control-height-lg);
+  font-size: var(--ui-text-md);
+  font-weight: 600;
+}
+
+.setup-footer {
+  margin-top: var(--ui-space-4);
+  padding-top: var(--ui-space-4);
+  border-top: 1px solid var(--ui-border);
+  text-align: center;
+}
+
+.setup-footer .ui-btn {
+  height: auto;
+  padding: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+}
+
+@media (max-width: 30rem) {
+  .setup-page .models-setup-totals {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

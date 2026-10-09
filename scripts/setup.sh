@@ -7,6 +7,7 @@ set -euo pipefail
 # 2. Generating secure secrets
 # 3. Creating basic auth credentials
 # 4. Setting up your .env file
+# 5. Choosing features and downloading their models
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -16,6 +17,12 @@ readonly ENV_FILE="${PROJECT_ROOT}/.env"
 readonly ENV_EXAMPLE="${PROJECT_ROOT}/.env.example"
 readonly AUTH_DIR="${PROJECT_ROOT}/auth"
 readonly AUTH_FILE="${AUTH_DIR}/users.htpasswd"
+readonly SETUP_MODELS="${PROJECT_ROOT}/scripts/setup-models.py"
+PYTHON="${PYTHON_BIN:-python3}"
+YES=0
+SKIP_MODELS=0
+FEATURES=""
+CHAT_PRESET=""
 
 # Colors
 readonly RED='\033[0;31m'
@@ -175,7 +182,33 @@ setup_env_file() {
     log_warn "  - Domain name (DOMAIN_HOST_WEBUI)"
     log_warn "  - VPN credentials (VPN_OPENVPN_USER, VPN_OPENVPN_PASSWORD)"
     log_warn "  - ACME email (ADVANCED_ACME_EMAIL)"
-    log_warn "  - Model choices (OLLAMA_MODEL_*)"
+}
+
+run_model_setup() {
+    if [ "${SKIP_MODELS}" -eq 1 ]; then
+        log_info "Skipping model download (--skip-models)"
+        return 0
+    fi
+
+    if ! command_exists "${PYTHON}"; then
+        log_error "${PYTHON} was not found. Install Python 3.11+ or set PYTHON_BIN."
+        exit 1
+    fi
+
+    log_step "Selecting features and downloading models..."
+
+    set -- --env "${ENV_FILE}"
+    if [ "${YES}" -eq 1 ]; then
+        set -- "$@" --yes
+    fi
+    if [ -n "${FEATURES}" ]; then
+        set -- "$@" --features "${FEATURES}"
+    fi
+    if [ -n "${CHAT_PRESET}" ]; then
+        set -- "$@" --chat-preset "${CHAT_PRESET}"
+    fi
+
+    "${PYTHON}" "${SETUP_MODELS}" "$@"
 }
 
 # Setup basic auth
@@ -347,26 +380,45 @@ print_next_steps() {
     echo -e "  1. Review your .env file:"
     echo -e "     ${BLUE}nano ${ENV_FILE}${NC}"
     echo -e ""
-    echo -e "  2. Update VPN credentials (if using VPN):"
-    echo -e "     ${BLUE}VPN_OPENVPN_USER${NC} and ${BLUE}VPN_OPENVPN_PASSWORD${NC}"
-    echo -e ""
-    echo -e "  3. Update domain name for your setup:"
-    echo -e "     ${BLUE}DOMAIN_HOST_WEBUI${NC}"
-    echo -e ""
-    echo -e "  4. Start host Ollama (default engine), then the stack:"
+    echo -e "  2. Keep host Ollama running, then start the stack:"
     echo -e "     ${BLUE}ollama serve${NC}"
     echo -e "     ${BLUE}make up${NC} or ${BLUE}make up PROFILES=dev,vpn,monitoring${NC}"
     echo -e ""
-    echo -e "  5. Check logs:"
-    echo -e "     ${BLUE}make logs${NC} or ${BLUE}docker compose logs -f${NC}"
-    echo -e ""
-    echo -e "  6. Access the web UI:"
-    echo -e "     ${BLUE}https://webui.localhost${NC}"
-    echo -e ""
-    echo -e "  7. Access the manager (use SECURITY_MANAGER_API_KEY to login):"
-    echo -e "     ${BLUE}https://manager.webui.localhost${NC}"
+    echo -e "  3. Access the console:"
+    echo -e "     ${BLUE}https://manager.localhost${NC}"
     echo -e ""
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}\n"
+}
+
+full_setup() {
+    check_prerequisites
+    setup_env_file
+    setup_basic_auth
+    run_model_setup
+    validate_config
+    print_next_steps
+}
+
+usage() {
+    cat <<EOF
+Usage: $0 [options]
+
+  --yes              Accept feature defaults, licenses, and start downloads
+  --features LIST    Comma-separated features, or all (default: all)
+  --chat-preset ID   8gb, 16gb, or 32gb (default: detected RAM)
+  --skip-models      Write secrets and auth only
+  --help             Show this help
+
+Features: chat, vision, pictures, edits, video, audio, upscale, train
+Vision and all require 16 GB RAM. all also needs enough free disk for
+every selected model plus 10 GB working space (~145 GB for a full 32 GB
+preset install).
+
+Examples:
+  $0 --yes
+  $0 --yes --features chat --chat-preset 8gb
+  $0 --skip-models
+EOF
 }
 
 # Main menu
@@ -386,11 +438,7 @@ main_menu() {
 
     case $choice in
         1)
-            check_prerequisites
-            setup_env_file
-            setup_basic_auth
-            validate_config
-            print_next_steps
+            full_setup
             ;;
         2)
             setup_env_file
@@ -415,5 +463,41 @@ main_menu() {
     esac
 }
 
-# Run main menu
-main_menu
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --yes|-y) YES=1 ;;
+        --skip-models) SKIP_MODELS=1 ;;
+        --features)
+            if [ "$#" -lt 2 ]; then
+                log_error "--features requires a value"
+                exit 2
+            fi
+            FEATURES=$2
+            shift
+            ;;
+        --chat-preset)
+            if [ "$#" -lt 2 ]; then
+                log_error "--chat-preset requires a value"
+                exit 2
+            fi
+            CHAT_PRESET=$2
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            log_error "Unknown argument: $1"
+            usage >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+if [ "${YES}" -eq 1 ] || [ "${SKIP_MODELS}" -eq 1 ] || [ -n "${FEATURES}" ] || [ -n "${CHAT_PRESET}" ]; then
+    full_setup
+else
+    main_menu
+fi

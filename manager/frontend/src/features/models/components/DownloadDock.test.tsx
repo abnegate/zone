@@ -42,6 +42,24 @@ describe('DownloadDock', () => {
     pullState.setMinimized.mockReset();
   });
 
+  it('hides on the setup screen', () => {
+    locationPath = '/setup';
+    pullState.jobs = [
+      {
+        id: '1',
+        modelName: 'llama2',
+        pulling: true,
+        progress: 20,
+        steps: [],
+        result: null,
+      },
+    ];
+    pullState.activeCount = 1;
+    pullState.minimized = false;
+    const { container } = render(<DownloadDock />);
+    expect(container.firstChild).toBeNull();
+  });
+
   it('hides on the models screen', () => {
     locationPath = '/models';
     pullState.jobs = [

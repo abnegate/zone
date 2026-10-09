@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { createMockJwt, routeApi } from '../test-utils';
+import { createMockJwt, EMPTY_SETUP_PLAN, routeApi } from '../test-utils';
 
 function buildAuthState(isAdmin: boolean) {
   const permissions = isAdmin
@@ -93,13 +93,22 @@ function buildAuthState(isAdmin: boolean) {
  * Registers an init script so the next navigation (or reload) boots already signed in.
  * Prefer calling this before page.goto(target) so protected routes are not bounced to /login.
  */
-export async function setupAuth(page: Page, options: { isAdmin?: boolean } = {}): Promise<void> {
-  const authState = buildAuthState(options.isAdmin || false);
+export async function setupAuth(
+  page: Page,
+  options: { isAdmin?: boolean; setupComplete?: boolean } = {}
+): Promise<void> {
+  const authState = {
+    ...buildAuthState(options.isAdmin || false),
+    setupComplete: options.setupComplete !== false,
+  };
 
   await page.addInitScript((state) => {
     localStorage.setItem('manager_access_token', state.accessToken);
     localStorage.setItem('manager_refresh_token', 'mock-refresh-token');
     localStorage.setItem('manager_user', JSON.stringify(state.user));
+    if (state.setupComplete) {
+      localStorage.setItem(`manager_setup_complete:${state.user.id}`, '1');
+    }
   }, authState);
 
   const url = page.url();
@@ -108,6 +117,9 @@ export async function setupAuth(page: Page, options: { isAdmin?: boolean } = {})
       localStorage.setItem('manager_access_token', state.accessToken);
       localStorage.setItem('manager_refresh_token', 'mock-refresh-token');
       localStorage.setItem('manager_user', JSON.stringify(state.user));
+      if (state.setupComplete) {
+        localStorage.setItem(`manager_setup_complete:${state.user.id}`, '1');
+      }
     }, authState);
   }
 }
@@ -153,6 +165,14 @@ export async function mockCommonEndpoints(page: Page): Promise<void> {
       return;
     }
     const url = new URL(route.request().url());
+    if (url.pathname.endsWith('/api/models/setup')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(EMPTY_SETUP_PLAN),
+      });
+      return;
+    }
     if (url.pathname.endsWith('/api/models/disk')) {
       route.fulfill({
         status: 200,

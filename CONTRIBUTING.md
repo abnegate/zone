@@ -66,7 +66,7 @@ Be respectful, professional, and constructive in all interactions. We aim to mai
 2. **Generate test credentials**
 
    ```bash
-   ./scripts/setup.sh
+   ./scripts/setup.sh --yes --features chat --chat-preset 8gb
    ```
 
 3. **Start development stack**
@@ -435,7 +435,9 @@ zone/
 │   └── settings.yml          # Search engine settings
 │
 ├── scripts/                  # Utility scripts
-│   └── setup.sh              # Interactive setup
+│   ├── setup.sh              # Interactive setup and model downloads
+│   ├── setup-models.py       # Feature plan, RAM/disk gates, progress
+│   └── setup-features.json   # Feature-to-model catalog
 │
 └── backups/                  # Backup directory (gitignored)
 ```

@@ -7,7 +7,7 @@ export default function DownloadDock() {
   const { jobs, activeCount, minimized, setMinimized, cancel, dismiss } = usePull();
   const { pathname } = useLocation();
 
-  if (pathname === '/models' || jobs.length === 0) return null;
+  if (pathname === '/models' || pathname === '/setup' || jobs.length === 0) return null;
 
   if (minimized) {
     const label =

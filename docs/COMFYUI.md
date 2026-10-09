@@ -6,10 +6,14 @@ text-to-audio, and Real-ESRGAN x4plus for upscaling a picture or a clip. The
 runtime is native on Apple Silicon and an optional NVIDIA Compose profile on
 Linux.
 
-Weights are **not** downloaded during a build or normal startup. Model setup is
-an explicit operation and verifies both the exact byte count and SHA-256 before
-a file is accepted. Image, image-edit, video, audio, and upscale weights are
-separate bundles so operators can install only what they need.
+`./scripts/setup.sh` downloads the Comfy bundles for the features you enable
+(all on by default) and shows per-file progress. It prints each feature’s size,
+already-installed bytes, still-to-download, 10 GB working space, and free disk,
+and refuses `all` when free space cannot cover the full set. Weights are also
+an explicit `download-models.py` / `--download-model` operation and are verified
+by byte count and SHA-256 before a file is accepted. Image, image-edit, video,
+audio, people, and upscale weights stay separate bundles so operators can
+install only what they need.
 
 LoRA training lives in `comfyui/custom_nodes/zone_lora/` (identity defaults in
 `train_config.json`). The macOS installer copies that folder after the pinned
@@ -301,8 +305,12 @@ and runs the matching graph:
   on Schnell.
 
 Each recipe declares the only slots integration code may write: positive
-prompt, seed, checkpoint filename, and (for edits) the uploaded source
-filename. Sampler, steps, CFG, size, and negative prompt stay packaged.
+prompt, optional negative prompt, seed, checkpoint filename, and (for edits)
+the uploaded source filename. Sampler, steps, CFG, and size stay packaged.
+Omitting the negative keeps the packaged CLIP text (empty on FLUX, a quality
+list on SDXL/SD1.5, a single space on Qwen Image Edit). An empty negative
+clears that packaged text. FLUX Schnell/Dev keep `cfg: 1`, so the negative
+CLIP node is filled for later cfg or a pinned SDXL/Qwen recipe.
 
 Shipped image recipes:
 

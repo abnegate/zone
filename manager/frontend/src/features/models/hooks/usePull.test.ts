@@ -192,6 +192,25 @@ describe('usePull', () => {
     expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({ model: 'llama2' }));
   });
 
+  it('sends a comfy runtime for manifest weights', async () => {
+    const mockWs = createMockWebSocket();
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+
+    const { result } = renderHook(() => usePullState());
+
+    act(() => {
+      result.current.pull('flux1-schnell-fp8', { runtime: 'comfy' });
+    });
+
+    act(() => {
+      mockWs.onmessage?.({ data: JSON.stringify({ type: 'authenticated' }) } as MessageEvent);
+    });
+
+    expect(mockWs.send).toHaveBeenCalledWith(
+      JSON.stringify({ model: 'flux1-schnell-fp8', runtime: 'comfy' })
+    );
+  });
+
   it('handles progress message', async () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);

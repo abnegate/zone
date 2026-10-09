@@ -438,6 +438,7 @@ describe('models page layout', () => {
   it('lists installed models and the catalog without content cards', () => {
     expect(css).not.toContain('.card.models-list-panel');
     expect(css).not.toContain('.card.models-browse-panel');
+    expect(page).toContain('value="features"');
     expect(rule(css, '.models-section-head')).toContain('height: var(--ui-control-height-sm)');
     expect(rule(css, '.browse-filters .filter-pill')).toContain('height: var(--ui-space-6)');
   });
@@ -451,5 +452,33 @@ describe('models page layout', () => {
   it('keeps a pull job to a 40px row with a 4px bar', () => {
     expect(rule(pulls, '.pull-job')).toContain('min-height: var(--ui-list-row)');
     expect(rule(pulls, '.pull-job-row')).toContain('height: var(--ui-space-5)');
+  });
+
+  it('keeps feature setup on the models page without a content card', () => {
+    const panel = read(join(features, 'models', 'components', 'FeaturesPanel.css'));
+    expect(panel).not.toContain('.card');
+    expect(rule(panel, '.models-feature')).toContain('border-bottom: 1px solid var(--ui-border)');
+    expect(page).toContain('<FeaturesPanel');
+  });
+});
+
+describe('first-run feature setup', () => {
+  const app = read(join(import.meta.dir, '..', 'App.tsx'));
+  const setup = read(join(features, 'models', 'pages', 'SetupPage.tsx'));
+  const css = read(join(features, 'models', 'pages', 'SetupPage.css'));
+
+  it('is a setup step after login that reuses the features picker', () => {
+    expect(app).toContain('path="/setup"');
+    expect(app).toContain('<SetupGate>');
+    expect(app).toContain('<SetupPage');
+    expect(setup).toContain('<FeaturesPanel');
+    expect(setup).toContain('Skip for now');
+    expect(setup).toContain('Continue to Zone');
+    expect(css).not.toContain('.card');
+    expect(rule(css, '.setup-page')).toContain('min-height: 100dvh');
+    expect(rule(css, '.setup-footer')).toContain('border-top: 1px solid var(--ui-border)');
+    expect(rule(css, '.setup-page .models-feature-size--ready')).toContain(
+      'color: var(--ui-success-600)'
+    );
   });
 });

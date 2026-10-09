@@ -14,6 +14,8 @@ import {
   BrowseResponseSchema,
   DiskUsageSchema,
   ModelsResponseSchema,
+  SetupPlanSchema,
+  SetupRefusalSchema,
   TrainClipSchema,
   TrainJobSchema,
 } from '../features/models/schemas';
@@ -49,6 +51,20 @@ export type TrainRemediation = z.infer<typeof TrainRemediationSchema>;
 export type TrainScreening = z.infer<typeof TrainScreeningSchema>;
 export type TrainResult = z.infer<typeof TrainResultSchema>;
 export type TrainJob = z.infer<typeof TrainJobSchema>;
+export type SetupPlan = z.infer<typeof SetupPlanSchema>;
+export type SetupRefusal = z.infer<typeof SetupRefusalSchema>;
+
+export class SetupError extends Error {
+  code: string;
+  plan: SetupPlan;
+
+  constructor(refusal: SetupRefusal) {
+    super(refusal.error);
+    this.name = 'SetupError';
+    this.code = refusal.code;
+    this.plan = refusal.plan;
+  }
+}
 
 function asTrainResult(job: TrainJob): TrainResult {
   return {
@@ -323,6 +339,43 @@ export const modelsApi = {
       throw new Error(`Failed to fetch disk usage: ${response.status}`);
     }
     return parse(DiskUsageSchema, await response.json());
+  },
+
+  async getSetup(options: { features?: string[]; chatPreset?: string } = {}): Promise<SetupPlan> {
+    const params = new URLSearchParams();
+    if (options.features?.length) {
+      params.set('features', options.features.join(','));
+    }
+    if (options.chatPreset) {
+      params.set('chat_preset', options.chatPreset);
+    }
+    const query = params.toString();
+    const response = await fetch(`${API_BASE}/api/models/setup${query ? `?${query}` : ''}`, {
+      headers: client.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load feature setup');
+    }
+    return parse(SetupPlanSchema, await response.json());
+  },
+
+  async startSetup(body: { features: string[]; chatPreset?: string }): Promise<SetupPlan> {
+    const response = await fetch(`${API_BASE}/api/models/setup`, {
+      method: 'POST',
+      headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        features: body.features,
+        chat_preset: body.chatPreset,
+      }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (response.status === 409 && payload) {
+      throw new SetupError(parse(SetupRefusalSchema, payload));
+    }
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to start feature setup');
+    }
+    return parse(SetupPlanSchema, payload);
   },
 
   async captions(body: {

@@ -165,6 +165,9 @@ validate: ## Validate configuration
 		sh scripts/test-compose-profiles.sh; \
 		sh scripts/test-dockerfile-members.sh; \
 		sh scripts/test-pull-models.sh; \
+		sh scripts/test-setup.sh; \
+		python3 -m unittest -v scripts/test_setup_models.py; \
+		( cd comfyui && python3 -m unittest -v tests.test_download_models ); \
 	else \
 		echo "$(RED)✗ Missing .env or auth/users.htpasswd. Run 'make setup' first.$(NC)"; \
 		exit 1; \
@@ -297,7 +300,8 @@ pull-models: ## Pull models into the host Ollama daemon
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	ollama pull $${OLLAMA_MODEL_FAST:-llama3.1:8b}; \
 	ollama pull $${OLLAMA_MODEL_REASON:-deepseek-r1:32b}; \
-	ollama pull $${OLLAMA_MODEL_EMBED:-nomic-embed-text}; \
+	ollama pull $${OLLAMA_MODEL_EMBED:-qwen3-embedding:0.6b}; \
+	if [ -n "$${OLLAMA_MODEL_VISION:-}" ]; then ollama pull $${OLLAMA_MODEL_VISION}; fi; \
 	echo "$(GREEN)Models pulled.$(NC)"
 
 list-models: ## List downloaded Ollama models

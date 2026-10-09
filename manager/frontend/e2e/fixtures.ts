@@ -73,6 +73,50 @@ export const test = base.extend({
     // Endpoints the shell asks for on every page, so no test has to mock them
     // to reach the page it is about. A workspace with no theme override has no
     // stored row, which is the 404 the console is written against.
+    await context.route(/\/api\/models\/setup(\?|$)/, (route) => {
+      const type = route.request().resourceType();
+      if (type !== 'xhr' && type !== 'fetch') {
+        return route.continue();
+      }
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ram_bytes: 68719476736,
+          ram_label: '64 GB',
+          disk_free_bytes: 500000000000,
+          disk_free_label: '500 GB',
+          vision_min_ram_bytes: 17179869184,
+          disk_margin_bytes: 10000000000,
+          chat_preset: '32gb',
+          recommended_preset: '32gb',
+          chat_presets: [],
+          features: [],
+          wants_all: true,
+          gate: null,
+          totals: {
+            size_bytes: 0,
+            size_label: '0 B',
+            present_bytes: 0,
+            present_label: '0 B',
+            needed_bytes: 0,
+            needed_label: '0 B',
+            working_space_bytes: 0,
+            working_space_label: '0 B',
+            required_free_bytes: 0,
+            required_free_label: '0 B',
+            free_now_bytes: 0,
+            free_now_label: '0 B',
+            short_by_bytes: 0,
+            short_by_label: null,
+          },
+          licenses: [],
+          artifacts: [],
+          pulls: [],
+        }),
+      });
+    });
+
     await context.route(/\/api\/models\/disk$/, (route) => {
       const type = route.request().resourceType();
       if (type !== 'xhr' && type !== 'fetch') {

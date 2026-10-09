@@ -22,10 +22,13 @@ ARG TARGETVARIANT
 # every member stays covered.
 COPY runner/ ./
 
-# Packaged recipes and workflows are compiled into zone_server via include_str!
+# Packaged recipes, workflows, and the setup catalog are compiled into
+# zone_server via include_str!
 COPY comfyui/workflows /build/comfyui/workflows
 COPY comfyui/recipes /build/comfyui/recipes
 COPY comfyui/custom_nodes /build/comfyui/custom_nodes
+COPY comfyui/model-manifest.json /build/comfyui/model-manifest.json
+COPY scripts/setup-features.json /build/scripts/setup-features.json
 
 ENV SQLX_OFFLINE=true
 # Source mtimes can precede cached artifacts after a checkout or file restore.

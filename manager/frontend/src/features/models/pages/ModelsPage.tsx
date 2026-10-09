@@ -5,6 +5,7 @@ import { modelsApi } from '../../../api/models';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import Capabilities from '../components/Capabilities';
 import DownloadOptions from '../components/DownloadOptions';
+import FeaturesPanel from '../components/FeaturesPanel';
 import PullJobs from '../components/PullJobs';
 import TrainPanel from '../components/TrainPanel';
 import VirtualBrowseList from '../components/VirtualBrowseList';
@@ -32,7 +33,7 @@ import {
 } from '../utils';
 import './ModelsPage.css';
 
-type Tab = 'installed' | 'browse' | 'train';
+type Tab = 'installed' | 'features' | 'browse' | 'train';
 
 const DISK_WARNING_PERCENT = 80;
 const DISK_ERROR_PERCENT = 90;
@@ -221,6 +222,7 @@ export default function ModelsPage() {
               Installed
               {models.length > 0 && <Badge variant="neutral">{models.length}</Badge>}
             </TabsTrigger>
+            <TabsTrigger value="features">Features</TabsTrigger>
             <TabsTrigger value="browse">Browse</TabsTrigger>
             <TabsTrigger value="train">Train</TabsTrigger>
           </TabsList>
@@ -325,8 +327,10 @@ export default function ModelsPage() {
                     </svg>
                   }
                   title="No models installed"
-                  description="Browse and install models to get started"
-                  action={<Button onClick={() => setActiveTab('browse')}>Browse Models</Button>}
+                  description="Pick the product features to download, or browse the catalog."
+                  action={
+                    <Button onClick={() => setActiveTab('features')}>Install features</Button>
+                  }
                 />
               ) : (
                 <>
@@ -534,6 +538,8 @@ export default function ModelsPage() {
             )}
           </section>
         )}
+
+        {activeTab === 'features' && <FeaturesPanel pull={pull} onInstalled={refresh} />}
 
         {activeTab === 'train' && <TrainPanel onTrained={refresh} />}
       </div>

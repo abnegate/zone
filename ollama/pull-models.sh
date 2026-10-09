@@ -141,6 +141,9 @@ main() (
     log_info "  Fast Model:      ${OLLAMA_MODEL_FAST}"
     log_info "  Reasoning Model: ${OLLAMA_MODEL_REASON}"
     log_info "  Embedding Model: ${OLLAMA_MODEL_EMBED}"
+    if [ -n "${OLLAMA_MODEL_VISION:-}" ]; then
+        log_info "  Vision Model:    ${OLLAMA_MODEL_VISION}"
+    fi
     printf '\n'
 
     failed=0
@@ -148,6 +151,9 @@ main() (
     pull_model "${OLLAMA_MODEL_FAST}" "FAST" || failed=1
     pull_model "${OLLAMA_MODEL_REASON}" "REASONING" || failed=1
     pull_model "${OLLAMA_MODEL_EMBED}" "EMBEDDING" || failed=1
+    if [ -n "${OLLAMA_MODEL_VISION:-}" ]; then
+        pull_model "${OLLAMA_MODEL_VISION}" "VISION" || failed=1
+    fi
 
     printf '\n'
 

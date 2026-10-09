@@ -303,6 +303,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models", get(models::list))
         .route("/api/models/disk", get(models::disk))
         .route(
+            "/api/models/setup",
+            get(models::get_setup).post(models::start_setup),
+        )
+        .route(
             "/api/models/train",
             get(models::train_job)
                 .post(models::train)

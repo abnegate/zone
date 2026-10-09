@@ -3,6 +3,7 @@
 //! Handles listing, pulling, and deleting models from various sources.
 
 mod providers;
+mod setup;
 mod types;
 mod upload;
 
@@ -10,6 +11,7 @@ pub use providers::{
     DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider, MAX_PAGE_SIZE, ModelProvider,
     ProviderError, get_provider, get_provider_with_proxy, huggingface_hub_origin,
 };
+pub use setup::{get_setup, start_setup};
 pub use types::{
     BrowseQuery, BrowseResponse, DiskUsage, ErrorResponse, ListModelsQuery, ModelDetails,
     ModelMediumFilter, ModelResponse, ModelSizeFilter, ModelSort,
@@ -31,7 +33,7 @@ use super::chats::check_workspace_read_access;
 use crate::auth::AuthUser;
 use crate::db::ai_settings;
 use crate::error::ServerError;
-use crate::pull::{ComfyPull, Pull, PullStart};
+use crate::pull::{ComfyPull, ManifestFile, Pull, PullStart};
 use crate::services::endpoint::Origin;
 use crate::services::model::Model;
 use crate::services::route::Route;
@@ -1195,7 +1197,13 @@ pub(crate) async fn start_job(
 }
 
 pub(crate) fn catalog_pull_start(state: &AppState, request: Pull) -> PullStart {
-    let comfy = is_comfy_pull(&request).then(|| {
+    let manifest = crate::setup::manifest_weight(&request.model).map(|weight| ManifestFile {
+        url: weight.url.clone(),
+        relative_path: weight.relative_path.clone(),
+        size_bytes: weight.size_bytes,
+        sha256: weight.sha256.clone(),
+    });
+    let comfy = (manifest.is_some() || is_comfy_pull(&request)).then(|| {
         let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
             .or_else(|_| RecipeCatalog::packaged())
             .ok();
@@ -1212,6 +1220,7 @@ pub(crate) fn catalog_pull_start(state: &AppState, request: Pull) -> PullStart {
             recipe_id,
             hf_base: request.hf_base.clone(),
             hub_origin: huggingface_hub_origin(&state.config().huggingface_models_url),
+            manifest,
         }
     });
     PullStart {
@@ -1227,6 +1236,7 @@ fn is_comfy_pull(request: &Pull) -> bool {
         .as_deref()
         .is_some_and(|runtime| runtime.eq_ignore_ascii_case("comfy"))
         || request.model.contains(".safetensors")
+        || crate::setup::is_manifest_id(&request.model)
 }
 
 /// GET /api/models/disk

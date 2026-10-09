@@ -11,7 +11,7 @@ import {
 } from './features/auth';
 import { ChatsPage } from './features/chats';
 import { WikiPage } from './features/knowledge';
-import { ModelsPage, PullProvider, TrainProvider } from './features/models';
+import { ModelsPage, PullProvider, SetupGate, SetupPage, TrainProvider } from './features/models';
 import { ProjectsPage } from './features/projects';
 import { AgentSignInPage, OrgSettingsPage, WorkspaceSettingsPage } from './features/settings';
 import { SourcesPage } from './features/sources';
@@ -50,10 +50,20 @@ function App() {
                     }
                   />
                   <Route
+                    path="/setup"
+                    element={
+                      <ProtectedRoute requiredPermission={PERMISSIONS.MODELS.READ}>
+                        <SetupPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
                     path="/"
                     element={
                       <ProtectedRoute>
-                        <Layout />
+                        <SetupGate>
+                          <Layout />
+                        </SetupGate>
                       </ProtectedRoute>
                     }
                   >

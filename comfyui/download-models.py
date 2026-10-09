@@ -8,13 +8,16 @@ import hashlib
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 CHUNK_SIZE = 8 * 1024 * 1024
 USER_AGENT = "zone-comfyui-model-setup/1"
+ProgressFn = Callable[[dict[str, Any]], None]
 
 
 VALID_BUNDLES = {
@@ -62,7 +65,9 @@ def model_bundles(model: dict[str, Any]) -> set[str]:
 
 
 def select_models(
-    models: list[dict[str, Any]], bundle: str, only: str | None = None
+    models: list[dict[str, Any]],
+    bundle: str | list[str],
+    only: str | None = None,
 ) -> list[dict[str, Any]]:
     if only:
         chosen = [model for model in models if model.get("id") == only]
@@ -70,11 +75,26 @@ def select_models(
             known = ", ".join(sorted(str(model.get("id")) for model in models))
             raise ValueError(f"unknown model id: {only} (known: {known})")
         return chosen
-    if bundle == "all":
+    requested = [bundle] if isinstance(bundle, str) else list(bundle)
+    if not requested:
+        raise ValueError("at least one bundle is required")
+    if "all" in requested:
         return models
-    if bundle not in VALID_BUNDLES:
-        raise ValueError(f"unsupported bundle filter: {bundle}")
-    return [model for model in models if bundle in model_bundles(model)]
+    unknown = [name for name in requested if name not in VALID_BUNDLES]
+    if unknown:
+        raise ValueError(f"unsupported bundle filter: {unknown[0]}")
+    wanted = set(requested)
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for model in models:
+        if wanted.isdisjoint(model_bundles(model)):
+            continue
+        identifier = str(model.get("id"))
+        if identifier in seen:
+            continue
+        seen.add(identifier)
+        selected.append(model)
+    return selected
 
 
 def checked_target(models_dir: Path, relative_path: str) -> Path:
@@ -107,7 +127,71 @@ def verify(path: Path, model: dict[str, Any]) -> tuple[bool, str]:
     return True, "verified"
 
 
-def download(model: dict[str, Any], target: Path) -> None:
+def progress_event(
+    model: dict[str, Any],
+    downloaded: int,
+    total: int,
+    *,
+    index: int,
+    count: int,
+    started_at: float,
+    origin_bytes: int,
+    now: float | None = None,
+) -> dict[str, Any]:
+    moment = time.monotonic() if now is None else now
+    elapsed = max(moment - started_at, 1e-6)
+    transferred = max(downloaded - origin_bytes, 0)
+    rate = transferred / elapsed
+    remaining = max(total - downloaded, 0)
+    percent = 0.0 if total <= 0 else min(100.0, downloaded * 100.0 / total)
+    eta = remaining / rate if rate > 0 else None
+    return {
+        "id": str(model.get("id")),
+        "index": index,
+        "count": count,
+        "bytes": downloaded,
+        "total": total,
+        "percent": percent,
+        "rate_bytes": rate,
+        "eta_seconds": eta,
+    }
+
+
+def format_progress(event: dict[str, Any]) -> str:
+    total = int(event["total"])
+    downloaded = int(event["bytes"])
+    percent = float(event["percent"])
+    rate = float(event["rate_bytes"])
+    eta = event["eta_seconds"]
+    filled = min(20, int(percent / 5))
+    bar = "#" * filled + "-" * (20 - filled)
+    eta_text = f"ETA {int(eta)}s" if eta is not None else "ETA --"
+    return (
+        f"[{event['index']}/{event['count']}] {event['id']}  {bar}  "
+        f"{percent:5.1f}%  {downloaded / 1024**3:.2f}/{total / 1024**3:.2f} GiB  "
+        f"{rate / 1024**2:.1f} MB/s  {eta_text}"
+    )
+
+
+def emit_progress(event: dict[str, Any], mode: str, sink: ProgressFn | None) -> None:
+    if sink is not None:
+        sink(event)
+        return
+    if mode == "jsonl":
+        print(json.dumps(event), flush=True)
+        return
+    print(f"\r{format_progress(event)}", end="", flush=True)
+
+
+def download(
+    model: dict[str, Any],
+    target: Path,
+    *,
+    progress: ProgressFn | None = None,
+    progress_mode: str = "text",
+    index: int = 1,
+    count: int = 1,
+) -> None:
     expected_size = int(model["size_bytes"])
     partial = target.with_name(f"{target.name}.part")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -142,19 +226,29 @@ def download(model: dict[str, Any], target: Path) -> None:
 
     mode = "ab" if offset else "wb"
     downloaded = offset
+    started_at = time.monotonic()
+    origin_bytes = downloaded
     with response, partial.open(mode) as handle:
         while chunk := response.read(CHUNK_SIZE):
             handle.write(chunk)
             downloaded += len(chunk)
-            print(
-                f"\r{model['id']}: {downloaded / 1024**3:.2f} / "
-                f"{expected_size / 1024**3:.2f} GiB",
-                end="",
-                flush=True,
+            emit_progress(
+                progress_event(
+                    model,
+                    downloaded,
+                    expected_size,
+                    index=index,
+                    count=count,
+                    started_at=started_at,
+                    origin_bytes=origin_bytes,
+                ),
+                progress_mode,
+                progress,
             )
         handle.flush()
         os.fsync(handle.fileno())
-    print()
+    if progress_mode != "jsonl" and progress is None:
+        print()
 
     if downloaded != expected_size:
         raise RuntimeError(
@@ -188,33 +282,47 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--bundle",
+        action="append",
+        dest="bundles",
         choices=(*sorted(VALID_BUNDLES), "all"),
-        default="image",
-        help="download or verify only this model bundle (default: image)",
+        help="download or verify this model bundle (repeatable; default: image)",
+    )
+    parser.add_argument(
+        "--progress",
+        choices=("text", "jsonl"),
+        default="text",
+        help="progress output: a TTY bar (text) or one JSON object per update",
     )
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    models = select_models(load_manifest(args.manifest), args.bundle, args.only)
+def run(
+    models: list[dict[str, Any]],
+    models_dir: Path,
+    *,
+    verify_only: bool = False,
+    force: bool = False,
+    progress_mode: str = "text",
+    progress: ProgressFn | None = None,
+) -> int:
     if not models:
-        raise ValueError(f"no models declared for bundle {args.bundle}")
+        raise ValueError("no models declared for the selected bundles")
     failures = 0
+    count = len(models)
 
-    for model in models:
-        target = checked_target(args.models_dir, str(model["relative_path"]))
+    for index, model in enumerate(models, start=1):
+        target = checked_target(models_dir, str(model["relative_path"]))
         valid, detail = verify(target, model)
         if valid:
-            print(f"{model['id']}: {detail} ({target})")
+            print(f"[{index}/{count}] {model['id']}: {detail} ({target})")
             continue
-        if args.verify_only:
-            print(f"{model['id']}: {detail} ({target})", file=sys.stderr)
+        if verify_only:
+            print(f"[{index}/{count}] {model['id']}: {detail} ({target})", file=sys.stderr)
             failures += 1
             continue
-        if target.exists() and not args.force:
+        if target.exists() and not force:
             print(
-                f"{model['id']}: {detail}; pass --force to replace {target}",
+                f"[{index}/{count}] {model['id']}: {detail}; pass --force to replace {target}",
                 file=sys.stderr,
             )
             failures += 1
@@ -222,17 +330,42 @@ def main() -> int:
 
         if target.exists():
             target.unlink()
-        print(f"{model['id']}: downloading from immutable revision")
-        download(model, target)
+        print(f"[{index}/{count}] {model['id']}: downloading from immutable revision")
+        download(
+            model,
+            target,
+            progress=progress,
+            progress_mode=progress_mode,
+            index=index,
+            count=count,
+        )
         valid, detail = verify(target, model)
         if not valid:
             target.unlink(missing_ok=True)
-            print(f"{model['id']}: {detail}; removed invalid file", file=sys.stderr)
+            print(
+                f"[{index}/{count}] {model['id']}: {detail}; removed invalid file",
+                file=sys.stderr,
+            )
             failures += 1
         else:
-            print(f"{model['id']}: verified ({target})")
+            print(f"[{index}/{count}] {model['id']}: verified ({target})")
 
     return 1 if failures else 0
+
+
+def main() -> int:
+    args = parse_args()
+    bundles = args.bundles or ["image"]
+    models = select_models(load_manifest(args.manifest), bundles, args.only)
+    if not models:
+        raise ValueError(f"no models declared for bundle {', '.join(bundles)}")
+    return run(
+        models,
+        args.models_dir,
+        verify_only=args.verify_only,
+        force=args.force,
+        progress_mode=args.progress,
+    )
 
 
 if __name__ == "__main__":

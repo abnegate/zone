@@ -11,7 +11,12 @@ cat > "$directory/bin/ollama" <<'OLLAMA'
 #!/bin/sh
 case "$1" in
     list) printf '%s\n' 'NAME    ID    SIZE    MODIFIED' ;;
-    pull) exit 0 ;;
+    pull)
+        if [ -n "${PULLED:-}" ]; then
+            printf '%s\n' "$2" >> "$PULLED"
+        fi
+        exit 0
+        ;;
     *) exit 1 ;;
 esac
 OLLAMA
@@ -42,7 +47,9 @@ assert_plain() {
     fi
 }
 
+: > "$directory/pulled-core"
 PATH="$directory/bin:$PATH" \
+    PULLED="$directory/pulled-core" \
     OLLAMA_HOST='http://ollama:11434' \
     OLLAMA_MODEL_FAST='fast-model' \
     OLLAMA_MODEL_REASON='reason-model' \
@@ -54,6 +61,28 @@ assert_plain "$directory/output"
 assert_plain "$directory/error"
 grep -q '^\[ollama-init\] ' "$directory/output" \
     || fail 'Expected [ollama-init] lines on stdout'
+grep -qx 'fast-model' "$directory/pulled-core" \
+    || fail 'Expected the fast model to be pulled'
+grep -qx 'reason-model' "$directory/pulled-core" \
+    || fail 'Expected the reasoning model to be pulled'
+grep -qx 'embed-model' "$directory/pulled-core" \
+    || fail 'Expected the embedding model to be pulled'
+if grep -q 'vision' "$directory/pulled-core"; then
+    fail 'Expected no vision model when OLLAMA_MODEL_VISION is unset'
+fi
+
+: > "$directory/pulled-vision"
+PATH="$directory/bin:$PATH" \
+    PULLED="$directory/pulled-vision" \
+    OLLAMA_HOST='http://ollama:11434' \
+    OLLAMA_MODEL_FAST='fast-model' \
+    OLLAMA_MODEL_REASON='reason-model' \
+    OLLAMA_MODEL_EMBED='embed-model' \
+    OLLAMA_MODEL_VISION='vision-model' \
+    sh "$script" > "$directory/output" 2> "$directory/error" \
+    || fail 'Expected pull-models.sh to pull a vision model when it is set'
+grep -qx 'vision-model' "$directory/pulled-vision" \
+    || fail 'Expected the vision model to be pulled'
 
 if PATH="$directory/bin:$PATH" \
     OLLAMA_HOST='http://ollama:11434' \

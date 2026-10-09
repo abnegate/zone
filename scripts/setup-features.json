@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "disk_margin_bytes": 10000000000,
+  "vision_min_ram_bytes": 17179869184,
+  "embed": "qwen3-embedding:0.6b",
+  "vision_model": "llava:7b",
+  "ollama_models": {
+    "llama3.2:3b": { "size_bytes": 2000000000 },
+    "llama3.1:8b": { "size_bytes": 4900000000 },
+    "deepseek-r1:7b": { "size_bytes": 4700000000 },
+    "deepseek-r1:14b": { "size_bytes": 9000000000 },
+    "deepseek-r1:32b": { "size_bytes": 20000000000 },
+    "qwen3-embedding:0.6b": { "size_bytes": 700000000 },
+    "llava:7b": { "size_bytes": 4700000000 }
+  },
+  "chat_presets": [
+    {
+      "id": "8gb",
+      "label": "8 GB RAM (chat only)",
+      "min_ram_bytes": 0,
+      "fast": "llama3.2:3b",
+      "reason": "deepseek-r1:7b"
+    },
+    {
+      "id": "16gb",
+      "label": "16 GB RAM",
+      "min_ram_bytes": 17179869184,
+      "fast": "llama3.1:8b",
+      "reason": "deepseek-r1:14b"
+    },
+    {
+      "id": "32gb",
+      "label": "32 GB+ RAM",
+      "min_ram_bytes": 34359738368,
+      "fast": "llama3.1:8b",
+      "reason": "deepseek-r1:32b"
+    }
+  ],
+  "features": [
+    {
+      "id": "chat",
+      "label": "Chat",
+      "description": "Fast, reasoning, and embedding models",
+      "required": true,
+      "ollama_slots": ["fast", "reason", "embed"]
+    },
+    {
+      "id": "vision",
+      "label": "Vision",
+      "description": "Image attachments and train captions (llava:7b). Needs 16 GB RAM.",
+      "min_ram_bytes": 17179869184,
+      "ollama_slots": ["vision"]
+    },
+    {
+      "id": "pictures",
+      "label": "Pictures",
+      "description": "Generate stills with FLUX.1 Schnell",
+      "comfy_bundles": ["image"],
+      "licenses": [
+        "Apache-2.0 (FLUX.1 Schnell)",
+        "CreativeML Open RAIL-M (FLUX uncensored LoRA)"
+      ]
+    },
+    {
+      "id": "edits",
+      "label": "Picture edits",
+      "description": "Qwen Image Edit and FLUX.1 Dev img2img / LoRA training base",
+      "comfy_bundles": ["image-edit", "image-dev"],
+      "licenses": [
+        "Apache-2.0 (Qwen Image Edit)",
+        "FLUX.1-dev Non-Commercial License",
+        "CreativeML Open RAIL++-M (Qwen edit LoRA)"
+      ]
+    },
+    {
+      "id": "video",
+      "label": "Video",
+      "description": "Text-to-video and image-to-video with Wan 2.2 TI2V 5B",
+      "comfy_bundles": ["video"],
+      "licenses": ["Apache-2.0 (Wan 2.2 TI2V)"]
+    },
+    {
+      "id": "audio",
+      "label": "Audio",
+      "description": "Text-to-audio with ACE-Step v1 3.5B",
+      "comfy_bundles": ["audio"],
+      "licenses": ["Apache-2.0 (ACE-Step)"]
+    },
+    {
+      "id": "upscale",
+      "label": "Upscale",
+      "description": "4x upscale for pictures and clips",
+      "comfy_bundles": ["upscale"],
+      "licenses": ["BSD-3-Clause (Real-ESRGAN x4plus)"]
+    },
+    {
+      "id": "train",
+      "label": "Train",
+      "description": "Person SDXL, identity LoRA, and the host trainer",
+      "comfy_bundles": ["image-people", "image-people-control", "vision"],
+      "comfy_bundles_unless": { "edits": ["image-dev"] },
+      "install_trainer": true,
+      "licenses": [
+        "CreativeML Open RAIL-M (SDXL people checkpoint)",
+        "Apache-2.0 (OpenPose, IP-Adapter, U2-Net)"
+      ]
+    }
+  ]
+}

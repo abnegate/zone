@@ -1,5 +1,5 @@
 import { test, expect } from './fixtures';
-import { routeApi } from './test-utils';
+import { EMPTY_SETUP_PLAN, routeApi } from './test-utils';
 import type { Page } from '@playwright/test';
 
 // Helper to create a mock JWT token with embedded roles and permissions
@@ -95,6 +95,14 @@ const mockAdminAuthResponse = () => {
 async function mockModelsAndBrowse(page: Page) {
   await routeApi(page, '**/api/models*', (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname.endsWith('/api/models/setup')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(EMPTY_SETUP_PLAN),
+      });
+      return;
+    }
     const source = url.searchParams.get('source');
 
     if (source) {

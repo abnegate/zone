@@ -342,6 +342,7 @@ export async function setupAdminAuth(page: Page) {
       localStorage.setItem('manager_access_token', token);
       localStorage.setItem('manager_refresh_token', 'mock-refresh-token');
       localStorage.setItem('manager_user', JSON.stringify(user));
+      localStorage.setItem(`manager_setup_complete:${user.id}`, '1');
     },
     { token, user: mockAdminUser }
   );
@@ -379,6 +380,40 @@ export async function setupCommonRoutes(
       body = { organization: mockOrganization };
     else if (/\/workspaces\/[^/]+$/.test(path))
       body = { workspace: mockWorkspace };
+    else if (path === '/api/models/setup')
+      body = {
+        ram_bytes: 68719476736,
+        ram_label: '64 GB',
+        disk_free_bytes: 500000000000,
+        disk_free_label: '500 GB',
+        vision_min_ram_bytes: 17179869184,
+        disk_margin_bytes: 10000000000,
+        chat_preset: '32gb',
+        recommended_preset: '32gb',
+        chat_presets: [],
+        features: [],
+        wants_all: true,
+        gate: null,
+        totals: {
+          size_bytes: 0,
+          size_label: '0 B',
+          present_bytes: 0,
+          present_label: '0 B',
+          needed_bytes: 0,
+          needed_label: '0 B',
+          working_space_bytes: 0,
+          working_space_label: '0 B',
+          required_free_bytes: 0,
+          required_free_label: '0 B',
+          free_now_bytes: 0,
+          free_now_label: '0 B',
+          short_by_bytes: 0,
+          short_by_label: null,
+        },
+        licenses: [],
+        artifacts: [],
+        pulls: [],
+      };
     else if (path === '/api/models')
       body = { models: populated ? mockModels : [], next_cursor: null };
     else if (path === '/api/models/train') {

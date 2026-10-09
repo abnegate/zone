@@ -122,6 +122,19 @@ class DownloadModelsTest(unittest.TestCase):
         )
         self.assertEqual(len(download_models.select_models(models, "all")), 6)
 
+    def test_select_models_unions_repeated_bundles_without_duplicates(self) -> None:
+        models = [
+            {"id": "image", "bundle": "image"},
+            {"id": "flux-uncensored", "bundle": "image", "bundles": ["image-dev"]},
+            {"id": "image-dev", "bundle": "image-dev"},
+            {"id": "video", "bundle": "video"},
+        ]
+        chosen = download_models.select_models(models, ["image", "image-dev", "video"])
+        self.assertEqual(
+            [model["id"] for model in chosen],
+            ["image", "flux-uncensored", "image-dev", "video"],
+        )
+
     def test_parse_args_accepts_every_valid_bundle(self) -> None:
         self.assertEqual(
             download_models.VALID_BUNDLES,
@@ -147,7 +160,26 @@ class DownloadModelsTest(unittest.TestCase):
                     bundle,
                 ]
                 with unittest.mock.patch.object(sys, "argv", argv):
-                    self.assertEqual(download_models.parse_args().bundle, bundle)
+                    parsed = download_models.parse_args()
+                    self.assertEqual(parsed.bundles, [bundle])
+                    self.assertEqual(parsed.progress, "text")
+
+    def test_parse_args_accepts_repeated_bundles(self) -> None:
+        argv = [
+            "download-models.py",
+            "--models-dir",
+            ".",
+            "--bundle",
+            "image",
+            "--bundle",
+            "video",
+            "--progress",
+            "jsonl",
+        ]
+        with unittest.mock.patch.object(sys, "argv", argv):
+            parsed = download_models.parse_args()
+        self.assertEqual(parsed.bundles, ["image", "video"])
+        self.assertEqual(parsed.progress, "jsonl")
 
     def test_shipped_manifest_can_be_verified(self) -> None:
         models = download_models.load_manifest(MODULE_PATH.with_name("model-manifest.json"))
@@ -193,6 +225,32 @@ class DownloadModelsTest(unittest.TestCase):
             download_models.download(model, target)
 
             self.assertEqual(target.read_bytes(), payload)
+
+    def test_download_emits_jsonl_progress(self) -> None:
+        payload = b"progress-jsonl" * 2000
+        url = self.serve(payload)
+        events: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "model.bin"
+            model = self.model(url, payload)
+            download_models.download(
+                model,
+                target,
+                progress=events.append,
+                progress_mode="jsonl",
+                index=2,
+                count=5,
+            )
+        self.assertTrue(events)
+        last = events[-1]
+        self.assertEqual(last["id"], "fixture")
+        self.assertEqual(last["index"], 2)
+        self.assertEqual(last["count"], 5)
+        self.assertEqual(last["bytes"], len(payload))
+        self.assertEqual(last["total"], len(payload))
+        self.assertEqual(last["percent"], 100.0)
+        self.assertIn("rate_bytes", last)
+        self.assertIn("ETA", download_models.format_progress(last))
 
 
 class ModelManifestTest(unittest.TestCase):

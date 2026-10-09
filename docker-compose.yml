@@ -160,6 +160,7 @@ services:
       - OLLAMA_MODEL_FAST=${OLLAMA_MODEL_FAST}
       - OLLAMA_MODEL_REASON=${OLLAMA_MODEL_REASON}
       - OLLAMA_MODEL_EMBED=${OLLAMA_MODEL_EMBED}
+      - OLLAMA_MODEL_VISION=${OLLAMA_MODEL_VISION:-}
     volumes:
       - ollama_data:/root/.ollama
       - ./ollama/pull-models.sh:/pull-models.sh:ro
@@ -304,6 +305,7 @@ services:
       - OLLAMA_MODEL_EMBED=${OLLAMA_MODEL_EMBED:-}
       - OLLAMA_MODEL_VISION=${OLLAMA_MODEL_VISION:-}
       - ZONE_DISK_PATH=${ZONE_DISK_PATH:-/}
+      - ZONE_SETUP_RAM_BYTES=${ZONE_SETUP_RAM_BYTES:-}
       - EMBEDDING_ENGINE=${EMBEDDING_ENGINE:-ollama}
       - ZONE_EMBED_CACHE_DIR=/app/embed-cache
       - LITELLM_HOST=http://litellm:4000

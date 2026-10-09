@@ -913,6 +913,7 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             "004_agent_login_usage.sql",
             "005_agent_login_usage_validation.sql",
             "006_runpod_api_key.sql",
+            "007_devices.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );

@@ -53,6 +53,15 @@ pub struct ComfyPull {
     pub recipe_id: Option<String>,
     pub hf_base: Option<String>,
     pub hub_origin: String,
+    pub manifest: Option<ManifestFile>,
+}
+
+#[derive(Clone)]
+pub struct ManifestFile {
+    pub url: String,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Clone)]
@@ -415,6 +424,10 @@ fn parse_comfy_ref(model: &str) -> Result<(String, String), String> {
 }
 
 async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
+    if let Some(manifest) = &comfy.manifest {
+        download_manifest(&comfy.models_dir, manifest, job).await;
+        return;
+    }
     let (repo, filename) = match parse_comfy_ref(model) {
         Ok(parsed) => parsed,
         Err(message) => {
@@ -463,6 +476,105 @@ async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
             job.publish(Event::Error { message });
         }
     }
+}
+
+async fn download_manifest(models_dir: &std::path::Path, manifest: &ManifestFile, job: &Job) {
+    let Some(target) = crate::setup::confined_relative(models_dir, &manifest.relative_path) else {
+        job.publish(Event::Error {
+            message: "Invalid image weight path".to_string(),
+        });
+        return;
+    };
+    if std::fs::metadata(&target)
+        .ok()
+        .is_some_and(|meta| meta.is_file() && meta.len() == manifest.size_bytes)
+    {
+        job.publish(Event::Complete {
+            success: true,
+            message: "Model installed successfully",
+        });
+        return;
+    }
+    job.publish(Event::Step {
+        status: "downloading image weights".to_string(),
+    });
+    if let Some(parent) = target.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        job.publish(Event::Error {
+            message: format!("Could not create model directory: {error}"),
+        });
+        return;
+    }
+    let partial = target.with_file_name(format!(
+        "{}.part",
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("model")
+    ));
+    match download_file(&manifest.url, &partial, job).await {
+        Ok(()) => {
+            match std::fs::metadata(&partial) {
+                Ok(meta) if meta.len() == manifest.size_bytes => {}
+                Ok(meta) => {
+                    let _ = std::fs::remove_file(&partial);
+                    job.publish(Event::Error {
+                        message: format!(
+                            "Image weight size mismatch: got {} bytes, expected {}",
+                            meta.len(),
+                            manifest.size_bytes
+                        ),
+                    });
+                    return;
+                }
+                Err(error) => {
+                    job.publish(Event::Error {
+                        message: format!("Could not store image weights: {error}"),
+                    });
+                    return;
+                }
+            }
+            if !hash_matches(&partial, &manifest.sha256) {
+                let _ = std::fs::remove_file(&partial);
+                job.publish(Event::Error {
+                    message: "Image weight checksum mismatch".to_string(),
+                });
+                return;
+            }
+            if let Err(error) = std::fs::rename(&partial, &target) {
+                job.publish(Event::Error {
+                    message: format!("Could not store image weights: {error}"),
+                });
+                return;
+            }
+            job.publish(Event::Complete {
+                success: true,
+                message: "Model installed successfully",
+            });
+        }
+        Err(message) => {
+            job.publish(Event::Error { message });
+        }
+    }
+}
+
+fn hash_matches(path: &std::path::Path, expected: &str) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 8 * 1024 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(_) => return false,
+        }
+    }
+    hex::encode(hasher.finalize()).eq_ignore_ascii_case(expected)
 }
 
 async fn download_file(url: &str, dest: &std::path::Path, job: &Job) -> Result<(), String> {
@@ -641,7 +753,8 @@ fn process(job: &Job, line: &[u8]) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, retryable};
+    use super::{ComfyPull, Event, ManifestFile, PullRegistry, PullStart, retryable};
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn parses_owner_repo_safetensors_refs() {
@@ -702,5 +815,95 @@ mod tests {
             }
             .is_terminal()
         );
+    }
+
+    #[tokio::test]
+    async fn skips_manifest_weight_when_size_matches() {
+        let directory = tempfile::tempdir().unwrap();
+        let relative = "checkpoints/tiny.bin";
+        let target = directory.path().join(relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"already-there").unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(PullStart {
+            model: "tiny".into(),
+            ollama_host: String::new(),
+            comfy: Some(ComfyPull {
+                models_dir: directory.path().to_path_buf(),
+                recipe_id: None,
+                hf_base: None,
+                hub_origin: "http://127.0.0.1:1".into(),
+                manifest: Some(ManifestFile {
+                    url: "http://127.0.0.1:1/missing.bin".into(),
+                    relative_path: relative.into(),
+                    size_bytes: 13,
+                    sha256: "deadbeef".into(),
+                }),
+            }),
+        });
+        assert_complete(&registry, "tiny").await;
+    }
+
+    #[tokio::test]
+    async fn downloads_manifest_weight_into_relative_path() {
+        use axum::{Router, routing::get};
+        use tokio::net::TcpListener;
+
+        let body = b"zone-setup-weight";
+        let sha = hex::encode(Sha256::digest(body));
+        let payload = body.to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/file.bin",
+            get(move || {
+                let payload = payload.clone();
+                async move { payload }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(PullStart {
+            model: "tiny".into(),
+            ollama_host: String::new(),
+            comfy: Some(ComfyPull {
+                models_dir: directory.path().to_path_buf(),
+                recipe_id: None,
+                hf_base: None,
+                hub_origin: format!("http://{address}"),
+                manifest: Some(ManifestFile {
+                    url: format!("http://{address}/file.bin"),
+                    relative_path: "checkpoints/tiny.bin".into(),
+                    size_bytes: body.len() as u64,
+                    sha256: sha,
+                }),
+            }),
+        });
+        assert_complete(&registry, "tiny").await;
+        let stored = std::fs::read(directory.path().join("checkpoints/tiny.bin")).unwrap();
+        assert_eq!(stored, body);
+    }
+
+    async fn assert_complete(registry: &PullRegistry, model: &str) {
+        for _ in 0..100 {
+            if let Some(view) = registry.status(model)
+                && let Some(terminal) = view.terminal
+            {
+                match terminal {
+                    Event::Complete { success, .. } => {
+                        assert!(success);
+                        return;
+                    }
+                    Event::Error { message } => panic!("download failed: {message}"),
+                    _ => {}
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("pull did not finish");
     }
 }

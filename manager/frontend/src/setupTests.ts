@@ -147,11 +147,14 @@ expect.extend({
         pass ? 'expected element not to be enabled' : 'expected element to be enabled',
     };
   },
-  toBeChecked(received: HTMLInputElement | null) {
+  toBeChecked(received: HTMLElement | null) {
     if (received === null) {
       return { pass: false, message: () => 'element is null' };
     }
-    const pass = received.checked === true;
+    const pass =
+      (received as HTMLInputElement).checked === true ||
+      received.getAttribute('aria-checked') === 'true' ||
+      received.getAttribute('data-state') === 'checked';
     return {
       pass,
       message: () =>

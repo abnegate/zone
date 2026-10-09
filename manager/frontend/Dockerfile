@@ -22,6 +22,7 @@ FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5d
 WORKDIR /app
 
 COPY --from=builder /workspace/manager/frontend/build ./build
+COPY --chown=bun:bun manager/frontend/serve.ts ./serve.ts
 
 RUN chown -R bun:bun /app
 
@@ -32,4 +33,4 @@ EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3001/ || exit 1
 
-CMD ["bun", "x", "serve@14.2.6", "-s", "build", "-l", "3001"]
+CMD ["bun", "run", "serve.ts"]

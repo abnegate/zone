@@ -68,6 +68,90 @@ export const DiskUsageSchema = z.object({
   percent: z.number(),
 });
 
+export const SetupChatPresetSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  min_ram_bytes: z.number(),
+  fast: z.string(),
+  reason: z.string(),
+});
+
+export const SetupFeatureSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  description: z.string(),
+  required: z.boolean(),
+  selected: z.boolean(),
+  blocked: z.boolean(),
+  block_reason: z.string().nullable(),
+  size_bytes: z.number(),
+  size_label: z.string(),
+  present_bytes: z.number(),
+  needed_bytes: z.number(),
+  ready: z.boolean(),
+  licenses: z.array(z.string()),
+});
+
+export const SetupGateSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+});
+
+export const SetupTotalsSchema = z.object({
+  size_bytes: z.number(),
+  size_label: z.string(),
+  present_bytes: z.number(),
+  present_label: z.string(),
+  needed_bytes: z.number(),
+  needed_label: z.string(),
+  working_space_bytes: z.number(),
+  working_space_label: z.string(),
+  required_free_bytes: z.number(),
+  required_free_label: z.string(),
+  free_now_bytes: z.number(),
+  free_now_label: z.string(),
+  short_by_bytes: z.number(),
+  short_by_label: z.string().nullable(),
+});
+
+export const SetupArtifactSchema = z.object({
+  kind: z.enum(['ollama', 'comfy']),
+  id: z.string(),
+  size_bytes: z.number(),
+  present: z.boolean(),
+  feature: z.string(),
+});
+
+export const SetupPullSchema = z.object({
+  model: z.string(),
+  runtime: z.enum(['ollama', 'comfy']),
+});
+
+export const SetupPlanSchema = z.object({
+  ram_bytes: z.number(),
+  ram_label: z.string(),
+  disk_free_bytes: z.number(),
+  disk_free_label: z.string(),
+  vision_min_ram_bytes: z.number(),
+  disk_margin_bytes: z.number(),
+  chat_preset: z.string(),
+  recommended_preset: z.string(),
+  chat_presets: z.array(SetupChatPresetSchema),
+  features: z.array(SetupFeatureSchema),
+  wants_all: z.boolean(),
+  gate: SetupGateSchema.nullable(),
+  totals: SetupTotalsSchema,
+  licenses: z.array(z.string()),
+  artifacts: z.array(SetupArtifactSchema),
+  pulls: z.array(SetupPullSchema),
+});
+
+export const SetupRefusalSchema = z.object({
+  error: z.string(),
+  code: z.string(),
+  plan: SetupPlanSchema,
+});
+
 export const BrowseResponseSchema = z.object({
   models: z.array(BrowseModelSchema),
   next_cursor: z.string().nullable(),

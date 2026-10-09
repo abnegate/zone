@@ -78,7 +78,7 @@ For production, regenerate secrets for security.
   - `mistral:7b` (alternative)
 
 ### `OLLAMA_MODEL_REASON`
-- **Default**: `deepseek-r1:14b`
+- **Default**: `deepseek-r1:32b` (32 GB chat preset; setup writes `deepseek-r1:7b` / `14b` on smaller machines)
 - **Description**: Reasoning model for complex analysis and deep thinking
 - **RAM**: ~8-16GB
 - **Use for**: Debugging, system design, proofs, complex math
@@ -89,8 +89,8 @@ For production, regenerate secrets for security.
   - `llama3.1:70b` (alternative large model)
 
 ### `OLLAMA_MODEL_VISION`
-- **Default**: empty
-- **Description**: Vision model for chats with attached images and for auto-captioning LoRA training images. Must accept images. `COMFYUI_CAPTION_MODEL` overrides it for captions only.
+- **Default**: `llava:7b` after setup with vision enabled; empty when vision is off
+- **Description**: Vision model for chats with attached images and for auto-captioning LoRA training images. Must accept images. `COMFYUI_CAPTION_MODEL` overrides it for captions only. `llava:7b` needs 16 GB RAM; setup refuses vision (and `all`) on smaller machines.
 - **Example**: `llava:7b`
 
 ### `OLLAMA_MODEL_EMBED`
@@ -1488,8 +1488,8 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: In-container path to a workflow file. Graphs in that
   directory overlay packaged copies of the same filename. If
   `../recipes/catalog.json` exists beside that directory, it replaces the
-  packaged recipe catalog. Chat still only writes prompt, seed, checkpoint,
-  and optional source image.
+  packaged recipe catalog. Chat writes prompt, optional negative prompt, seed,
+  checkpoint, and optional source image.
 - **Usage**: The Compose file mounts the repository `comfyui/workflows` and
   `comfyui/recipes` directories here.
 
@@ -2010,17 +2010,20 @@ Regenerate secrets for production:
 
 ## 🚀 Instant Start Guide
 
-### Absolute Minimum (3 commands, 30 seconds)
+### Secrets only (no models)
 ```bash
 cp .env.example .env
 mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
 make up
 ```
 
-### Production Ready (1 command, 2 minutes)
+### Production Ready
 ```bash
-./scripts/setup.sh
+./scripts/setup.sh --yes
 ```
+Setup downloads every feature by default. That needs 16 GB RAM and about 145 GB
+free disk; it refuses `all` when either is short. Chat-only:
+`./scripts/setup.sh --yes --features chat --chat-preset 8gb`.
 
 ### With VPN Search (1 extra step)
 ```bash

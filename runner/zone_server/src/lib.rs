@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod pull;
 pub mod routes;
 pub mod services;
+pub mod setup;
 pub mod state;
 pub mod sync;
 pub mod train_jobs;

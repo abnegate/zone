@@ -36,17 +36,22 @@ export interface PullApi {
   minimized: boolean;
   setMinimized: (minimized: boolean) => void;
   canStart: (modelName: string) => boolean;
-  pull: (modelName: string) => Promise<boolean>;
+  pull: (modelName: string, options?: PullOptions) => Promise<boolean>;
   cancel: (id?: string) => void;
   dismiss: (id: string) => void;
   reset: () => void;
 }
+
+export type PullOptions = {
+  runtime?: 'comfy' | 'ollama';
+};
 
 type Finish = (success: boolean, message: string, update?: boolean) => void;
 
 type JobRuntime = {
   id: string;
   name: string;
+  runtime?: PullOptions['runtime'];
   generation: number;
   reconnects: number;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
@@ -58,11 +63,13 @@ type JobRuntime = {
 
 const PullContext = createContext<PullApi | null>(null);
 
-function persist(models: string[]): void {
+type SavedPull = { name: string; runtime?: PullOptions['runtime'] };
+
+function persist(models: SavedPull[]): void {
   try {
     if (models.length) {
       sessionStorage.setItem(STORAGE_KEY, JSON.stringify(models));
-      sessionStorage.setItem(LEGACY_STORAGE_KEY, models[models.length - 1]);
+      sessionStorage.setItem(LEGACY_STORAGE_KEY, models[models.length - 1].name);
     } else {
       sessionStorage.removeItem(STORAGE_KEY);
       sessionStorage.removeItem(LEGACY_STORAGE_KEY);
@@ -72,19 +79,35 @@ function persist(models: string[]): void {
   }
 }
 
-function savedPulls(): string[] {
+function savedPulls(): SavedPull[] {
   try {
     const raw = sessionStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed: unknown = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        return parsed.filter(
-          (name): name is string => typeof name === 'string' && Boolean(name.trim())
-        );
+        return parsed.flatMap((entry) => {
+          if (typeof entry === 'string' && entry.trim()) {
+            return [{ name: entry.trim() }];
+          }
+          if (
+            entry &&
+            typeof entry === 'object' &&
+            'name' in entry &&
+            typeof entry.name === 'string' &&
+            entry.name.trim()
+          ) {
+            const runtime =
+              'runtime' in entry && (entry.runtime === 'comfy' || entry.runtime === 'ollama')
+                ? entry.runtime
+                : undefined;
+            return [{ name: entry.name.trim(), runtime }];
+          }
+          return [];
+        });
       }
     }
     const legacy = sessionStorage.getItem(LEGACY_STORAGE_KEY);
-    return legacy ? [legacy] : [];
+    return legacy ? [{ name: legacy }] : [];
   } catch {
     return [];
   }
@@ -141,7 +164,11 @@ export function usePullState(): PullApi {
   jobsRef.current = jobs;
 
   const persistActive = useCallback(() => {
-    persist([...pullingNames.current]);
+    persist(
+      [...runtimes.current.values()]
+        .filter((runtime) => !runtime.settled)
+        .map((runtime) => ({ name: runtime.name, runtime: runtime.runtime }))
+    );
   }, []);
 
   const clearDismiss = useCallback((id: string) => {
@@ -254,7 +281,10 @@ export function usePullState(): PullApi {
               socket.send(
                 JSON.stringify({
                   model: runtime.name,
-                  runtime: runtime.name.includes('.safetensors') ? 'comfy' : undefined,
+                  runtime:
+                    runtime.runtime === 'comfy' || runtime.name.includes('.safetensors')
+                      ? 'comfy'
+                      : undefined,
                 })
               );
             } catch {
@@ -336,7 +366,7 @@ export function usePullState(): PullApi {
   );
 
   const pull = useCallback(
-    (modelName: string): Promise<boolean> => {
+    (modelName: string, options?: PullOptions): Promise<boolean> => {
       return new Promise((resolve) => {
         const name = modelName.trim();
         if (!isAuthenticated || !accessToken || !name || !canStart(name)) {
@@ -359,6 +389,7 @@ export function usePullState(): PullApi {
         const runtime: JobRuntime = {
           id,
           name,
+          runtime: options?.runtime,
           generation: 1,
           reconnects: 0,
           reconnectTimer: null,
@@ -454,8 +485,8 @@ export function usePullState(): PullApi {
   useEffect(() => {
     if (!isAuthenticated || !accessToken || resumedRef.current) return;
     resumedRef.current = true;
-    for (const name of savedPulls()) {
-      void pull(name);
+    for (const saved of savedPulls()) {
+      void pull(saved.name, { runtime: saved.runtime });
     }
   }, [accessToken, isAuthenticated, pull]);
 

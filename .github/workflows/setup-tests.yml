@@ -1,0 +1,51 @@
+name: Setup tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/setup.sh'
+      - 'scripts/setup-models.py'
+      - 'scripts/setup-features.json'
+      - 'scripts/test_setup_models.py'
+      - 'scripts/test-setup.sh'
+      - 'scripts/test-pull-models.sh'
+      - 'ollama/pull-models.sh'
+      - 'comfyui/download-models.py'
+      - 'comfyui/model-manifest.json'
+      - '.github/workflows/setup-tests.yml'
+  pull_request:
+    paths:
+      - 'scripts/setup.sh'
+      - 'scripts/setup-models.py'
+      - 'scripts/setup-features.json'
+      - 'scripts/test_setup_models.py'
+      - 'scripts/test-setup.sh'
+      - 'scripts/test-pull-models.sh'
+      - 'ollama/pull-models.sh'
+      - 'comfyui/download-models.py'
+      - 'comfyui/model-manifest.json'
+      - '.github/workflows/setup-tests.yml'
+
+jobs:
+  tests:
+    name: Setup and model-init tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Run tests
+        run: |
+          python3 -m unittest -v scripts/test_setup_models.py
+          ( cd comfyui && python3 -m unittest -v tests.test_download_models )
+          sh scripts/test-pull-models.sh
+          sh scripts/test-setup.sh

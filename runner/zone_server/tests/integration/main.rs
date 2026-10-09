@@ -66,6 +66,7 @@ mod memory_store;
 mod message_embedding;
 mod migration_atomicity;
 mod model_namespaces;
+mod model_setup;
 mod models;
 mod organization_console_contract;
 mod organization_members;
