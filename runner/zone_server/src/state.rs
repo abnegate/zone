@@ -461,6 +461,13 @@ mod tests {
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
     use zone_core::llm::AgentKind;
+    use zone_core::variables::Variables;
+
+    const REDIS_URL: &str = "REDIS_URL";
+
+    fn test_cache_url() -> Option<String> {
+        std::env::var(REDIS_URL).ok()
+    }
 
     #[tokio::test]
     async fn a_hold_marks_the_device_connected_until_drop() {
@@ -709,12 +716,27 @@ mod tests {
 
     #[tokio::test]
     async fn cache_accessor_exposes_a_connected_cache_when_available() {
-        let Ok(cache) = Cache::connect("redis://localhost:6379").await else {
+        let Some(url) = ({
+            let _environment = Variables::lock();
+            test_cache_url()
+        }) else {
+            return;
+        };
+        let Ok(cache) = Cache::connect(&url).await else {
             return;
         };
         let pool = PgPool::connect_lazy("postgres://localhost/state-cache")
             .expect("a lazy pool needs no server");
         let state = AppState::new(create_test_config(), pool, Some(cache));
         assert!(state.cache().is_some());
+    }
+
+    #[test]
+    fn the_test_cache_url_comes_only_from_redis_url() {
+        let mut environment = Variables::isolated(&[REDIS_URL]);
+        assert_eq!(test_cache_url(), None);
+
+        environment.set(REDIS_URL, "redis://cache.test:6390");
+        assert_eq!(test_cache_url().as_deref(), Some("redis://cache.test:6390"));
     }
 }
