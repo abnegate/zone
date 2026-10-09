@@ -32,6 +32,11 @@ const PROMPT_RULES: &str = "Stay faithful to the request: it must not present in
                             what they supply. When the image arrives, do not describe it back to \
                             the user; they can see it.";
 
+const NEGATIVE_PROMPT: &str = "Things to keep out of the image, such as hats, text, watermark, \
+                               or extra limbs. Omit this to keep the recipe's packaged negative. \
+                               Pass an empty string to clear a packaged quality list. Keep the \
+                               scene in prompt.";
+
 #[async_trait]
 impl Tool for GenerateImageTool {
     fn name(&self) -> &str {
@@ -53,6 +58,10 @@ impl Tool for GenerateImageTool {
                         &trained_identities(&self.0.state.config().comfyui),
                         false,
                     )
+                },
+                "negative_prompt": {
+                    "type": "string",
+                    "description": NEGATIVE_PROMPT
                 }
             },
             "required": ["prompt"]
@@ -110,6 +119,10 @@ impl Tool for EditImageTool {
                                     user for the image instead. Omitting this reuses the most \
                                     recent generated image in the conversation, so confirm one \
                                     exists first."
+                },
+                "negative_prompt": {
+                    "type": "string",
+                    "description": NEGATIVE_PROMPT
                 }
             },
             "required": ["prompt"]
@@ -148,6 +161,13 @@ async fn effective_comfyui(scope: &WorkspaceScope) -> ComfyUiConfig {
 
 fn trained_identities(config: &ComfyUiConfig) -> Vec<Identity> {
     zone_comfy::identities(&config.models_dir, &config.workflow_path)
+}
+
+fn optional_negative_arg(params: &Value) -> Option<&str> {
+    params
+        .get("negative_prompt")
+        .and_then(Value::as_str)
+        .map(str::trim)
 }
 
 fn image_prompt_description(identities: &[Identity], edit: bool) -> String {
@@ -233,7 +253,13 @@ async fn run_image(
     let (_cancel_tx, mut cancel) = broadcast::channel(1);
     let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
     let images = match client
-        .generate(&prompt, source.as_ref(), &mut cancel, progress_tx)
+        .generate(
+            &prompt,
+            source.as_ref(),
+            optional_negative_arg(&params),
+            &mut cancel,
+            progress_tx,
+        )
         .await
     {
         Ok(images) => images,
@@ -394,6 +420,10 @@ mod tests {
         assert_eq!(generate.name(), "generate_image");
         assert!(generate.description().contains("ComfyUI"));
         assert_eq!(generate.parameters_schema()["required"], json!(["prompt"]));
+        assert_eq!(
+            generate.parameters_schema()["properties"]["negative_prompt"]["type"],
+            "string"
+        );
         assert!(generate.tier().mutating());
         assert_eq!(generate.timeout(&context), Duration::from_secs(330));
         assert_eq!(edit.name(), "edit_image");
@@ -401,6 +431,10 @@ mod tests {
         assert_eq!(edit.parameters_schema()["required"], json!(["prompt"]));
         assert_eq!(
             edit.parameters_schema()["properties"]["image_url"]["type"],
+            "string"
+        );
+        assert_eq!(
+            edit.parameters_schema()["properties"]["negative_prompt"]["type"],
             "string"
         );
         assert!(edit.tier().mutating());
@@ -463,6 +497,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn both_image_tools_describe_negative_prompt() {
+        let scope = scope();
+        for schema in [
+            GenerateImageTool(scope.clone()).parameters_schema(),
+            EditImageTool(scope).parameters_schema(),
+        ] {
+            let description = schema["properties"]["negative_prompt"]["description"]
+                .as_str()
+                .expect("negative_prompt carries a description");
+            for rule in [
+                "keep out of the image",
+                "packaged negative",
+                "empty string",
+                "Keep the scene in prompt",
+            ] {
+                assert!(
+                    description.contains(rule),
+                    "negative_prompt dropped {rule:?}: {description}"
+                );
+            }
+        }
+    }
+
     /// The organization/workspace `model_image` pin reaches ComfyUI when the
     /// agent calls the tool, not only when the direct lane handles the message.
     #[tokio::test]
@@ -508,6 +566,66 @@ mod tests {
             vec!["org-pinned-image.safetensors".to_string()],
             "the agent tool ignored the resolved image checkpoint"
         );
+    }
+
+    #[tokio::test]
+    async fn negative_prompt_reaches_the_clip_node() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let scope = scope();
+        let flux = ComfyUiConfig {
+            base_url: server.uri(),
+            ..scope.state.config().comfyui.clone()
+        };
+        let written = run_image(
+            &scope,
+            &flux,
+            json!({"prompt": "a lighthouse", "negative_prompt": "hats"}),
+            false,
+        )
+        .await;
+        assert!(!written.success, "the mocked ComfyUI rejects the prompt");
+        let submitted: Value = serde_json::from_slice(
+            &server
+                .received_requests()
+                .await
+                .expect("the mock server records requests")[0]
+                .body,
+        )
+        .expect("ComfyUI is submitted a JSON prompt");
+        assert_eq!(submitted["prompt"]["7"]["inputs"]["text"], "hats");
+        assert_eq!(submitted["prompt"]["6"]["inputs"]["text"], "a lighthouse");
+
+        let sdxl = ComfyUiConfig {
+            base_url: server.uri(),
+            checkpoint: "juggernautXL_ragnarok.safetensors".to_string(),
+            ..scope.state.config().comfyui.clone()
+        };
+        let omitted = run_image(&scope, &sdxl, json!({"prompt": "a lighthouse"}), false).await;
+        assert!(!omitted.success);
+        let submitted: Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[1].body).unwrap();
+        assert_eq!(
+            submitted["prompt"]["7"]["inputs"]["text"],
+            "blurry, low quality, watermark, deformed"
+        );
+
+        let cleared = run_image(
+            &scope,
+            &sdxl,
+            json!({"prompt": "a lighthouse", "negative_prompt": ""}),
+            false,
+        )
+        .await;
+        assert!(!cleared.success);
+        let submitted: Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[2].body).unwrap();
+        assert_eq!(submitted["prompt"]["7"]["inputs"]["text"], "");
     }
 
     fn ready_identity(models: &std::path::Path, filename: &str, trigger: &str) {

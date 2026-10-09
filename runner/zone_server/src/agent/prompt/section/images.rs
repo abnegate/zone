@@ -4,6 +4,7 @@ use crate::agent::prompt::Context;
 
 const IMAGES: &str = "Images:\n\
      - generate_image and edit_image stay in this loop. After an image is generated you can inspect it and edit it in the same turn.\n\
+     - Put exclusions in negative_prompt (hats, text, watermark) and keep prompt as the scene.\n\
      - Do not claim an image was created unless the tool returned a URL.";
 
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
@@ -26,6 +27,10 @@ mod tests {
         let rendered = render(&chat_context(&tools, false, &environment)).unwrap();
 
         assert!(rendered.contains("edit it in the same turn"), "{rendered}");
+        assert!(
+            rendered.contains("Put exclusions in negative_prompt"),
+            "{rendered}"
+        );
         assert!(
             rendered.contains("unless the tool returned a URL"),
             "{rendered}"

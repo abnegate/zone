@@ -1811,6 +1811,7 @@ async fn handle_image_generation(
         client.generate(
             &generation_prompt,
             source.as_ref(),
+            None,
             &mut generation.cancel,
             progress_tx,
         ),

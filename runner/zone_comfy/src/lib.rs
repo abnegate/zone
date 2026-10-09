@@ -14,7 +14,7 @@
 //! let (_stop, mut cancel) = broadcast::channel(1);
 //! let (progress, _updates) = mpsc::unbounded_channel();
 //! let images = client
-//!     .generate("a lighthouse in a storm", None, &mut cancel, progress)
+//!     .generate("a lighthouse in a storm", None, None, &mut cancel, progress)
 //!     .await?;
 //! # let _ = images;
 //! # Ok(())

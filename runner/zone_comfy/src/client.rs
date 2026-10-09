@@ -1,5 +1,6 @@
 //! Direct ComfyUI API client. Graphs come from packaged recipes; chat only
-//! supplies prompt, seed, checkpoint filename, and an optional source image.
+//! supplies prompt, optional negative prompt, seed, checkpoint filename, and
+//! an optional source image.
 
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
@@ -394,6 +395,7 @@ impl Client {
         &self,
         prompt: &str,
         source: Option<&SourceImage>,
+        negative: Option<&str>,
         cancel: &mut broadcast::Receiver<()>,
         progress: mpsc::UnboundedSender<String>,
     ) -> Result<Vec<GeneratedImage>, Error> {
@@ -418,6 +420,7 @@ impl Client {
         let images = self
             .generate_image(
                 prompt,
+                negative,
                 source,
                 true,
                 None,
@@ -426,13 +429,14 @@ impl Client {
                 progress.clone(),
             )
             .await?;
-        self.maybe_refine(prompt, images, cancel, deadline, progress)
+        self.maybe_refine(prompt, negative, images, cancel, deadline, progress)
             .await
     }
 
     async fn generate_image(
         &self,
         prompt: &str,
+        negative: Option<&str>,
         source: Option<&SourceImage>,
         extras: bool,
         denoise: Option<f64>,
@@ -497,6 +501,7 @@ impl Client {
             let uploaded = self.upload_source(source, cancel, deadline).await?;
             recipe.apply(Fill {
                 prompt: &prompt,
+                negative,
                 seed: rand::random::<u64>() & i64::MAX as u64,
                 weights: fill_weights,
                 source: Some(uploaded.as_str()),
@@ -504,6 +509,7 @@ impl Client {
         } else {
             recipe.apply(Fill {
                 prompt: &prompt,
+                negative,
                 seed: rand::random::<u64>() & i64::MAX as u64,
                 weights: fill_weights,
                 source: None,
@@ -535,6 +541,7 @@ impl Client {
     async fn maybe_refine(
         &self,
         prompt: &str,
+        negative: Option<&str>,
         images: Vec<GeneratedImage>,
         cancel: &mut broadcast::Receiver<()>,
         deadline: tokio::time::Instant,
@@ -550,8 +557,16 @@ impl Client {
         let mut refined = Vec::with_capacity(images.len());
         for image in images {
             refined.push(
-                self.refine_one(prompt, image, &subject, cancel, deadline, progress.clone())
-                    .await?,
+                self.refine_one(
+                    prompt,
+                    negative,
+                    image,
+                    &subject,
+                    cancel,
+                    deadline,
+                    progress.clone(),
+                )
+                .await?,
             );
         }
         Ok(refined)
@@ -560,6 +575,7 @@ impl Client {
     async fn refine_one(
         &self,
         prompt: &str,
+        negative: Option<&str>,
         image: GeneratedImage,
         subject: &Subject,
         cancel: &mut broadcast::Receiver<()>,
@@ -575,6 +591,7 @@ impl Client {
         match self
             .generate_image(
                 prompt,
+                negative,
                 Some(&source),
                 false,
                 Some(people::REFINE_DENOISE),
@@ -1091,6 +1108,7 @@ pub fn build_flux_schnell_workflow(
         .image_recipe_for("flux1-schnell-fp8.safetensors")?
         .apply(Fill {
             prompt,
+            negative: None,
             seed,
             weights: HashMap::from([("checkpoint", checkpoint)]),
             source: None,
@@ -1108,6 +1126,7 @@ pub fn build_flux_schnell_img2img_workflow(
         .image_recipe_for("flux1-schnell-fp8.safetensors")?
         .apply(Fill {
             prompt,
+            negative: None,
             seed,
             weights: HashMap::from([("checkpoint", checkpoint)]),
             source: Some(image_name),
@@ -1622,6 +1641,39 @@ mod tests {
             "flux-uncensored.safetensors"
         );
         assert_eq!(workflow["3"]["inputs"]["model"], json!(["15", 0]));
+        assert_eq!(workflow["7"]["inputs"]["text"], "");
+    }
+
+    #[tokio::test]
+    async fn generate_writes_the_negative_prompt() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let _ = client
+            .generate("a fox", None, Some("hats"), &mut cancel_rx, progress_tx)
+            .await;
+        let submitted: Value = serde_json::from_slice(
+            &server
+                .received_requests()
+                .await
+                .expect("the mock server records requests")[0]
+                .body,
+        )
+        .expect("ComfyUI is submitted a JSON prompt");
+        assert_eq!(submitted["prompt"]["7"]["inputs"]["text"], "hats");
+        assert_eq!(submitted["prompt"]["6"]["inputs"]["text"], "a fox");
     }
 
     #[test]
@@ -2182,7 +2234,7 @@ mod tests {
         let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let images = client
-            .generate("a fox", None, &mut cancel_rx, progress_tx)
+            .generate("a fox", None, None, &mut cancel_rx, progress_tx)
             .await
             .unwrap();
         assert_eq!(images.len(), 1);
@@ -2257,7 +2309,7 @@ mod tests {
         let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, _) = mpsc::unbounded_channel();
         let images = client
-            .generate("remove the sign", None, &mut cancel_rx, progress_tx)
+            .generate("remove the sign", None, None, &mut cancel_rx, progress_tx)
             .await
             .unwrap();
         assert_eq!(images[0].bytes.as_ref(), &[9, 8, 7]);
@@ -2288,7 +2340,7 @@ mod tests {
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
             client
-                .generate("a fox", None, &mut cancel_rx, progress_tx)
+                .generate("a fox", None, None, &mut cancel_rx, progress_tx)
                 .await
         });
         // A cancel that lands before the client holds a prompt id returns `Cancelled`
@@ -2354,7 +2406,7 @@ mod tests {
         let (progress_tx, _) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
             client
-                .generate("a fox", None, &mut cancel_rx, progress_tx)
+                .generate("a fox", None, None, &mut cancel_rx, progress_tx)
                 .await
         });
         // What is under test is cancelling a request already in flight, so the cancel
@@ -2416,7 +2468,13 @@ mod tests {
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let source = SourceImage::new(vec![1, 2, 3, 4], "image/png").unwrap();
         let images = client
-            .generate("make it dusk", Some(&source), &mut cancel_rx, progress_tx)
+            .generate(
+                "make it dusk",
+                Some(&source),
+                None,
+                &mut cancel_rx,
+                progress_tx,
+            )
             .await
             .unwrap();
         assert_eq!(images[0].bytes.as_ref(), &[9, 8, 7]);
@@ -3011,7 +3069,13 @@ mod tests {
         let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, _) = mpsc::unbounded_channel();
         let images = client
-            .generate("a person in a kitchen", None, &mut cancel_rx, progress_tx)
+            .generate(
+                "a person in a kitchen",
+                None,
+                None,
+                &mut cancel_rx,
+                progress_tx,
+            )
             .await
             .unwrap();
         assert_eq!(images[0].bytes.as_ref(), &[1, 2, 3]);
@@ -3089,6 +3153,7 @@ mod tests {
             .generate(
                 "ohwx sitting in a kitchen",
                 None,
+                None,
                 &mut cancel_rx,
                 progress_tx,
             )
@@ -3150,7 +3215,13 @@ mod tests {
         let (progress_tx, _) = mpsc::unbounded_channel();
         let source = SourceImage::from_bytes(rgb_png(8, 8)).unwrap();
         let images = client
-            .generate("ohwx sitting", Some(&source), &mut cancel_rx, progress_tx)
+            .generate(
+                "ohwx sitting",
+                Some(&source),
+                None,
+                &mut cancel_rx,
+                progress_tx,
+            )
             .await
             .unwrap();
         assert_eq!(images[0].bytes.as_ref(), &[3, 2, 1]);
@@ -3234,7 +3305,7 @@ mod tests {
         let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, _) = mpsc::unbounded_channel();
         let images = client
-            .generate("a person standing", None, &mut cancel_rx, progress_tx)
+            .generate("a person standing", None, None, &mut cancel_rx, progress_tx)
             .await
             .unwrap();
         assert_eq!(images.len(), 1);
