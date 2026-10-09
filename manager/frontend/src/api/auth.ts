@@ -1,19 +1,45 @@
 import type { AuthResponse, LoginRequest, RegisterRequest } from '../types';
 import { parse } from '../validation';
 import { AuthResponseSchema } from '../validation/schemas';
+import { deviceHeaders } from './device';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
+
+function jsonHeaders(): HeadersInit {
+  return {
+    'Content-Type': 'application/json',
+    ...deviceHeaders(),
+  };
+}
+
+async function refused(response: Response, fallback: string): Promise<never> {
+  const error = await response.json().catch(() => ({ error: fallback }));
+  const message = error.error || fallback;
+  if (error.code === 'device_pending' || error.code === 'device_blocked') {
+    throw new AuthRequestError(message, error.code);
+  }
+  throw new Error(message);
+}
+
+export class AuthRequestError extends Error {
+  readonly code: string;
+
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = 'AuthRequestError';
+    this.code = code;
+  }
+}
 
 export async function login(request: LoginRequest): Promise<AuthResponse> {
   const response = await fetch(`${API_BASE}/api/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders(),
     body: JSON.stringify(request),
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Login failed' }));
-    throw new Error(error.error || 'Login failed');
+    await refused(response, 'Login failed');
   }
 
   const data = await response.json();
@@ -23,13 +49,12 @@ export async function login(request: LoginRequest): Promise<AuthResponse> {
 export async function register(request: RegisterRequest): Promise<AuthResponse> {
   const response = await fetch(`${API_BASE}/api/auth/register`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders(),
     body: JSON.stringify(request),
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Registration failed' }));
-    throw new Error(error.error || 'Registration failed');
+    await refused(response, 'Registration failed');
   }
 
   const data = await response.json();
@@ -60,7 +85,7 @@ export async function refreshToken(token: string): Promise<AuthResponse> {
   try {
     response = await fetch(`${API_BASE}/api/auth/refresh`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: jsonHeaders(),
       body: JSON.stringify({ refresh_token: token }),
     });
   } catch (cause) {
@@ -78,7 +103,7 @@ export async function refreshToken(token: string): Promise<AuthResponse> {
 export async function logout(token: string): Promise<void> {
   await fetch(`${API_BASE}/api/auth/logout`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: jsonHeaders(),
     body: JSON.stringify({ refresh_token: token }),
   }).catch(() => {
     // Ignore logout errors - we clear local state anyway

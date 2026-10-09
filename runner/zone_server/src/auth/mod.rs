@@ -6,6 +6,7 @@
 //! - Authentication middleware for axum
 //! - Organization and workspace membership guards
 
+pub mod device;
 pub mod jwt;
 pub mod middleware;
 pub mod organization_guard;

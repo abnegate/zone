@@ -13,6 +13,7 @@ import type {
   SearchResponse,
 } from '../features/knowledge/types';
 import { parse } from '../validation';
+import { deviceHeaders } from './device';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
@@ -26,6 +27,7 @@ class KnowledgeApi {
   private getHeaders(): HeadersInit {
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
+      ...deviceHeaders(),
     };
     if (this.getAccessToken) {
       const token = this.getAccessToken();

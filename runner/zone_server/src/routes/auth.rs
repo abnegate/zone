@@ -1,6 +1,11 @@
 //! Authentication endpoints
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -9,6 +14,7 @@ use crate::auth::{
     AuthUser, create_refresh_token, create_session_access_token, hash_password, verify_password,
 };
 use crate::db::{
+    devices::{self, Device},
     organization_members::{self, OrgRole},
     organizations, refresh_tokens, sessions, users,
     workspace_members::{self, WorkspaceRole},
@@ -86,6 +92,7 @@ impl UserResponse {
 /// POST /api/auth/register
 pub async fn register(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     // Validate email with proper regex
@@ -325,9 +332,14 @@ pub async fn register(
         }
     };
 
+    let device = match admit_device(&state, user_perms.user.id, &headers, None).await {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+
     // Generate tokens
     let (access_token, refresh_token) =
-        match generate_tokens(&state, &user_perms, None, None, None).await {
+        match generate_tokens(&state, &user_perms, &headers, &device, None).await {
             Ok(tokens) => tokens,
             Err(response) => return response.into_response(),
         };
@@ -350,6 +362,7 @@ pub async fn register(
 /// POST /api/auth/login
 pub async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> impl IntoResponse {
     // Get user by email
@@ -431,9 +444,17 @@ pub async fn login(
         }
     };
 
+    let device = match admit_device(&state, user_perms.user.id, &headers, None).await {
+        Ok(device) => device,
+        Err(response) => {
+            crate::metrics::record_login("disabled");
+            return response;
+        }
+    };
+
     // Generate tokens
     let (access_token, refresh_token) =
-        match generate_tokens(&state, &user_perms, None, None, None).await {
+        match generate_tokens(&state, &user_perms, &headers, &device, None).await {
             Ok(tokens) => tokens,
             Err(response) => {
                 crate::metrics::record_login("error");
@@ -457,6 +478,7 @@ pub async fn login(
 /// POST /api/auth/refresh
 pub async fn refresh(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<RefreshRequest>,
 ) -> impl IntoResponse {
     // Hash the refresh token to look it up
@@ -526,9 +548,14 @@ pub async fn refresh(
         }
     };
 
+    let device = match admit_device(&state, user_id, &headers, session.device_id).await {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+
     // Generate new tokens
     let (access_token, refresh_token) =
-        match generate_tokens(&state, &user_perms, None, None, Some(session.id)).await {
+        match generate_tokens(&state, &user_perms, &headers, &device, Some(session.id)).await {
             Ok(tokens) => tokens,
             Err(response) => return response.into_response(),
         };
@@ -570,17 +597,76 @@ pub async fn logout(State(state): State<AppState>, auth: AuthUser) -> impl IntoR
     StatusCode::NO_CONTENT.into_response()
 }
 
+async fn admit_device(
+    state: &AppState,
+    user_id: Uuid,
+    headers: &HeaderMap,
+    existing_device_id: Option<Uuid>,
+) -> Result<Device, Response> {
+    let mut claim = crate::auth::device::claim(headers);
+    if claim.public_id.is_none()
+        && let Some(device_id) = existing_device_id
+    {
+        match devices::get(state.db(), device_id).await {
+            Ok(Some(device)) => {
+                claim.public_id = Some(device.public_id);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, "Failed to load the session device");
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    match devices::admit(state.db(), user_id, &claim).await {
+        Ok(devices::Admission::Allowed(device)) => Ok(device),
+        Ok(devices::Admission::Pending(_)) => Err(device_refused(
+            "This device is waiting for an admin to allow it",
+            crate::auth::device::PENDING,
+        )),
+        Ok(devices::Admission::Blocked(_)) => Err(device_refused(
+            "This device is blocked",
+            crate::auth::device::BLOCKED,
+        )),
+        Err(error) => {
+            tracing::error!(%error, "Failed to admit a device");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response())
+        }
+    }
+}
+
+fn device_refused(message: &'static str, code: &'static str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse::with_code(message, code)),
+    )
+        .into_response()
+}
+
 /// Generate access and refresh tokens
 /// Issue a fresh refresh token and an access token bound to a session: a new
 /// session for a login, or the caller's existing one when `session` names it.
 async fn generate_tokens(
     state: &AppState,
     user: &users::UserWithPermissions,
-    ip_address: Option<&str>,
-    user_agent: Option<&str>,
+    headers: &HeaderMap,
+    device: &Device,
     session: Option<Uuid>,
 ) -> Result<(String, String), (StatusCode, Json<ErrorResponse>)> {
     let config = state.config();
+    let claim = crate::auth::device::claim(headers);
+    let ip_address = claim.ip_address.as_deref();
+    let user_agent = claim.user_agent.as_deref();
+    let device_info = crate::auth::device::info(&claim, device);
 
     let refresh_token = create_refresh_token(
         user.user.id,
@@ -629,7 +715,7 @@ async fn generate_tokens(
                 &token_hash,
                 ip_address,
                 user_agent,
-                None,
+                Some(device_info),
                 expires_at.naive_utc(),
             )
             .await
@@ -646,6 +732,14 @@ async fn generate_tokens(
             ));
         }
     };
+    if let Err(error) = sessions::attach_device(state.db(), session.id, device.id).await {
+        tracing::error!(%error, "Failed to bind the session to its device");
+        let _ = refresh_tokens::revoke_refresh_token(state.db(), &token_hash).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("Internal server error")),
+        ));
+    }
 
     let access_token = create_session_access_token(
         user.user.id,

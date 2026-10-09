@@ -17,6 +17,7 @@ import type {
   UpdateSourceRequest,
 } from '../features/sources/types';
 import { parse } from '../validation';
+import { deviceHeaders } from './device';
 
 export const API_BASE = import.meta.env.VITE_API_URL || '';
 
@@ -30,6 +31,7 @@ class SourcesApi {
   private getHeaders(): HeadersInit {
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
+      ...deviceHeaders(),
     };
     const token = this.getAccessToken?.();
     if (token) {

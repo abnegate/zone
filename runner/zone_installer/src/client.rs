@@ -28,6 +28,14 @@ impl ClientPlatform {
         matches!(self, Self::Android | Self::Ios)
     }
 
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Android => "android",
+            Self::Ios => "ios",
+            Self::Desktop => "desktop",
+        }
+    }
+
     pub fn uses_system_share_dir(self) -> bool {
         !self.is_mobile()
     }
@@ -123,6 +131,9 @@ mod tests {
     fn maps_os_names_to_platforms() {
         assert_eq!(ClientPlatform::from_os("android"), ClientPlatform::Android);
         assert_eq!(ClientPlatform::from_os("ios"), ClientPlatform::Ios);
+        assert_eq!(ClientPlatform::Android.as_str(), "android");
+        assert_eq!(ClientPlatform::Ios.as_str(), "ios");
+        assert_eq!(ClientPlatform::Desktop.as_str(), "desktop");
         assert_eq!(ClientPlatform::from_os("macos"), ClientPlatform::Desktop);
         assert_eq!(ClientPlatform::from_os("linux"), ClientPlatform::Desktop);
         assert_eq!(ClientPlatform::from_os("windows"), ClientPlatform::Desktop);

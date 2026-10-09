@@ -362,6 +362,8 @@ export async function setupCommonRoutes(
     }
     if (path.endsWith('/members'))
       body = { members: populated ? mockMembers : [] };
+    else if (path.endsWith('/devices')) body = { devices: [] };
+    else if (path.endsWith('/device-policy')) body = { mode: 'open' };
     else if (/\/organizations\/[^/]+\/settings\/ai$/.test(path))
       body = mockAiSettings;
     else if (

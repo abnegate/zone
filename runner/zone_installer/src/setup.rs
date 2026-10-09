@@ -52,9 +52,14 @@ pub async fn handle_setup(
 }
 
 pub async fn client_info(State(state): State<AppState>) -> Response {
+    let device_id = frontend::ensure_device_id_at(&state.config_path)
+        .ok()
+        .map(|id| id.to_string());
     Json(json!({
         "client": true,
         "host": state.proxy_target(),
+        "device_id": device_id,
+        "platform": crate::client::ClientPlatform::current().as_str(),
     }))
     .into_response()
 }

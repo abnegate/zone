@@ -27,12 +27,13 @@ import { SettingsPage } from '../../components';
 import {
   AuditLogsSection,
   BillingSection,
+  DevicesSection,
   InvitationsSection,
   OrgMembersSection,
 } from '../components';
 import type { AiProvider, AiSettings, Workspace } from '../types';
 
-type TabType = 'ai' | 'members' | 'invitations' | 'billing' | 'audit';
+type TabType = 'ai' | 'members' | 'devices' | 'invitations' | 'billing' | 'audit';
 
 const TITLE = 'Organization Settings';
 
@@ -150,6 +151,7 @@ export default function OrgSettingsPage() {
     <TabsList aria-label="Organization settings">
       <TabsTrigger value="ai">AI Settings</TabsTrigger>
       <TabsTrigger value="members">Members</TabsTrigger>
+      <TabsTrigger value="devices">Devices</TabsTrigger>
       <TabsTrigger value="invitations">Invitations</TabsTrigger>
       <TabsTrigger value="billing">Billing</TabsTrigger>
       <TabsTrigger value="audit">Audit Logs</TabsTrigger>
@@ -182,6 +184,9 @@ export default function OrgSettingsPage() {
 
       <TabsContent value="members">
         <OrgMembersSection orgId={currentOrganization.id} />
+      </TabsContent>
+      <TabsContent value="devices">
+        <DevicesSection orgId={currentOrganization.id} />
       </TabsContent>
       <TabsContent value="invitations">
         <InvitationsSection orgId={currentOrganization.id} workspaces={workspaces} />

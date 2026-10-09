@@ -244,12 +244,22 @@ pub async fn audit(pool: &PgPool, event: AuditEvent<'_>) {
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
 }
 
 impl ErrorResponse {
     pub fn new(error: impl Into<String>) -> Self {
         Self {
             error: error.into(),
+            code: None,
+        }
+    }
+
+    pub fn with_code(error: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            error: error.into(),
+            code: Some(code),
         }
     }
 }

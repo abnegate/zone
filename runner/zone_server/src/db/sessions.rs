@@ -19,6 +19,7 @@ pub struct Session {
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
     pub device_info: Option<JsonValue>,
+    pub device_id: Option<Uuid>,
     pub last_active_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -56,6 +57,7 @@ pub async fn create_session(
             CAST(ip_address AS text) as "ip_address",
             user_agent,
             device_info,
+            device_id,
             last_active_at,
             expires_at,
             revoked_at,
@@ -72,6 +74,25 @@ pub async fn create_session(
     .await?;
 
     Ok(session)
+}
+
+/// Bind a session to the device that just signed in.
+pub async fn attach_device(pool: &PgPool, session_id: Uuid, device_id: Uuid) -> DbResult<()> {
+    sqlx::query("UPDATE sessions SET device_id = $2 WHERE id = $1")
+        .bind(session_id)
+        .bind(device_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// The device a live session is bound to, if any.
+pub async fn device_id_for(pool: &PgPool, session_id: Uuid) -> DbResult<Option<Uuid>> {
+    sqlx::query_scalar("SELECT device_id FROM sessions WHERE id = $1")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await
+        .map(|value| value.flatten())
 }
 
 /// Get session by refresh token hash
@@ -91,6 +112,7 @@ pub async fn get_session_by_token(
             CAST(ip_address AS text) as "ip_address",
             user_agent,
             device_info,
+            device_id,
             last_active_at,
             expires_at,
             revoked_at,
@@ -150,6 +172,7 @@ pub async fn rotate_session(
             CAST(ip_address AS text) as "ip_address",
             user_agent,
             device_info,
+            device_id,
             last_active_at,
             expires_at,
             revoked_at,
@@ -235,6 +258,54 @@ pub async fn revoke_other_user_sessions(pool: &PgPool, user_id: Uuid, keep: Uuid
     Ok(revoked.unwrap_or(0))
 }
 
+/// Revoke every live session bound to a device, refresh tokens included.
+pub async fn revoke_device_sessions(pool: &PgPool, device_id: Uuid) -> DbResult<i64> {
+    let revoked: Option<i64> = sqlx::query_scalar(
+        r#"
+        WITH revoked AS (
+            UPDATE sessions
+            SET revoked_at = NOW()
+            WHERE device_id = $1 AND revoked_at IS NULL
+            RETURNING refresh_token_hash
+        ),
+        tokens AS (
+            UPDATE refresh_tokens
+            SET revoked_at = NOW()
+            WHERE token_hash IN (SELECT refresh_token_hash FROM revoked)
+              AND revoked_at IS NULL
+        )
+        SELECT COUNT(*) FROM revoked
+        "#,
+    )
+    .bind(device_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(revoked.unwrap_or(0))
+}
+
+/// Stamp last-active on a session and its device at most once a minute.
+pub async fn touch_activity(pool: &PgPool, session_id: Uuid) -> DbResult<()> {
+    sqlx::query(
+        r#"
+        WITH touched AS (
+            UPDATE sessions
+            SET last_active_at = NOW()
+            WHERE id = $1
+              AND last_active_at < NOW() - INTERVAL '1 minute'
+            RETURNING device_id
+        )
+        UPDATE devices
+        SET last_seen_at = NOW(), updated_at = NOW()
+        WHERE id IN (SELECT device_id FROM touched WHERE device_id IS NOT NULL)
+        "#,
+    )
+    .bind(session_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// List all sessions for a user
 ///
 /// Returns all sessions (active and revoked) for a user, ordered by creation date.
@@ -248,6 +319,7 @@ pub async fn list_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult<Vec<Se
             CAST(ip_address AS text) as "ip_address",
             user_agent,
             device_info,
+            device_id,
             last_active_at,
             expires_at,
             revoked_at,
@@ -277,6 +349,7 @@ pub async fn list_active_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult
             CAST(ip_address AS text) as "ip_address",
             user_agent,
             device_info,
+            device_id,
             last_active_at,
             expires_at,
             revoked_at,
@@ -321,11 +394,13 @@ where
     let result: Option<(i32,)> = sqlx::query_as(
         r#"
         SELECT 1
-        FROM sessions
-        WHERE id = $1
-          AND user_id = $2
-          AND revoked_at IS NULL
-          AND expires_at > NOW()
+        FROM sessions s
+        LEFT JOIN devices d ON d.id = s.device_id
+        WHERE s.id = $1
+          AND s.user_id = $2
+          AND s.revoked_at IS NULL
+          AND s.expires_at > NOW()
+          AND (s.device_id IS NULL OR d.status = 'allowed')
         "#,
     )
     .bind(session_id)
@@ -367,6 +442,7 @@ mod tests {
             ip_address: Some("127.0.0.1".to_string()),
             user_agent: Some("test".to_string()),
             device_info: None,
+            device_id: None,
             last_active_at: chrono::Utc::now(),
             expires_at: chrono::Utc::now(),
             revoked_at: None,

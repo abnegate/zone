@@ -17,6 +17,7 @@ import type {
 } from '../features/tasks/types';
 import { parse } from '../validation';
 import { API_BASE } from './client';
+import { deviceHeaders } from './device';
 
 // Helper to parse error responses
 async function parseErrorResponse(response: Response): Promise<{ message?: string }> {
@@ -38,6 +39,7 @@ class TasksApi {
   private getHeaders(): HeadersInit {
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
+      ...deviceHeaders(),
     };
     const token = this.getAccessToken?.();
     if (token) {

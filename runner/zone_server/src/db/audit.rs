@@ -77,6 +77,11 @@ pub mod actions {
     pub const SETTINGS_UPDATED: &str = "settings.updated";
     pub const SETTINGS_RESET: &str = "settings.reset";
 
+    pub const DEVICE_ALLOWED: &str = "device.allowed";
+    pub const DEVICE_BLOCKED: &str = "device.blocked";
+    pub const DEVICE_RENAMED: &str = "device.renamed";
+    pub const DEVICE_POLICY_UPDATED: &str = "device_policy.updated";
+
     pub const INVITATION_SENT: &str = "invitation.sent";
     pub const INVITATION_ACCEPTED: &str = "invitation.accepted";
     pub const INVITATION_REVOKED: &str = "invitation.revoked";
@@ -100,6 +105,8 @@ pub mod resources {
     pub const AI_SETTINGS: &str = "ai_settings";
     pub const AGENT_LOGIN: &str = "agent_login";
     pub const SYNC_CONFIG: &str = "sync_config";
+    pub const DEVICE: &str = "device";
+    pub const DEVICE_POLICY: &str = "device_policy";
 }
 
 /// Log an action to the audit trail

@@ -79,6 +79,33 @@ export const OrgMembersResponseSchema = z.object({
   members: z.array(OrganizationMemberSchema),
 });
 
+export const DeviceStatusSchema = z.enum(['allowed', 'pending', 'blocked']);
+export const DevicePlatformSchema = z.enum(['android', 'ios', 'desktop', 'browser', 'cli']);
+
+export const OrganizationDeviceSchema = z.object({
+  id: z.string().min(1),
+  user_id: z.string().min(1),
+  email: z.string(),
+  display_name: z.string().nullable(),
+  name: z.string().nullable(),
+  platform: DevicePlatformSchema,
+  user_agent: z.string().nullable(),
+  last_ip: z.string().nullable(),
+  last_seen_at: z.string().min(1),
+  status: DeviceStatusSchema,
+  connected: z.boolean(),
+  session_count: z.number(),
+  created_at: z.string().min(1),
+});
+
+export const DevicesResponseSchema = z.object({
+  devices: z.array(OrganizationDeviceSchema),
+});
+
+export const DevicePolicySchema = z.object({
+  mode: z.enum(['open', 'allowed']),
+});
+
 // Invitation Schemas
 const workspaceRoles = ['owner', 'admin', 'member', 'viewer'] as const;
 
@@ -246,6 +273,10 @@ export const AUDIT_ACTIONS = [
   'workspace.deleted',
   'settings.updated',
   'settings.reset',
+  'device.allowed',
+  'device.blocked',
+  'device.renamed',
+  'device_policy.updated',
 ] as const;
 export const AUDIT_RESOURCE_TYPES = [
   'organization',
@@ -253,6 +284,8 @@ export const AUDIT_RESOURCE_TYPES = [
   'member',
   'invitation',
   'ai_settings',
+  'device',
+  'device_policy',
 ] as const;
 
 export const AuditActionSchema = z.string().min(1);
@@ -294,6 +327,9 @@ export const AuditLogsResponseSchema = z.object({
 export type OrganizationZ = z.infer<typeof OrganizationSchema>;
 export type OrganizationMemberZ = z.infer<typeof OrganizationMemberSchema>;
 export type OrgMembersResponse = z.infer<typeof OrgMembersResponseSchema>;
+export type OrganizationDeviceZ = z.infer<typeof OrganizationDeviceSchema>;
+export type DevicesResponse = z.infer<typeof DevicesResponseSchema>;
+export type DevicePolicyZ = z.infer<typeof DevicePolicySchema>;
 export type InvitationZ = z.infer<typeof InvitationSchema>;
 export type InvitationsResponse = z.infer<typeof InvitationsResponseSchema>;
 export type PlanZ = z.infer<typeof PlanSchema>;

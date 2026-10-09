@@ -46,6 +46,9 @@ mock.module('../components', () => ({
   OrgMembersSection: ({ orgId }: { orgId: string }) => (
     <div data-testid="org-members-section">OrgMembersSection: {orgId}</div>
   ),
+  DevicesSection: ({ orgId }: { orgId: string }) => (
+    <div data-testid="org-devices-section">DevicesSection: {orgId}</div>
+  ),
   InvitationsSection: ({ orgId, workspaces }: { orgId: string; workspaces: unknown[] }) => (
     <div data-testid="invitations-section">
       InvitationsSection: {orgId}, workspaces: {workspaces.length}
@@ -953,6 +956,21 @@ describe('OrgSettingsPage', () => {
       });
     });
 
+    it('switches to Devices tab', async () => {
+      render(<OrgSettingsPage />);
+      await waitFor(() => {
+        expect(screen.getByRole('tab', { name: 'Devices' })).toBeInTheDocument();
+      });
+
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Devices' }), {
+        button: 0,
+        ctrlKey: false,
+      });
+
+      expect(screen.getByTestId('org-devices-section')).toBeInTheDocument();
+      expect(screen.queryByText('AI Provider Configuration')).not.toBeInTheDocument();
+    });
+
     it('switches to Members tab', async () => {
       render(<OrgSettingsPage />);
       await waitFor(() => {
@@ -1021,6 +1039,7 @@ describe('OrgSettingsPage', () => {
 
       expect(screen.getByRole('tab', { name: 'AI Settings' })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: 'Members' })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'Devices' })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: 'Invitations' })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: 'Billing' })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: 'Audit Logs' })).toBeInTheDocument();

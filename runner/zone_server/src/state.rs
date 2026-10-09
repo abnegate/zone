@@ -1,6 +1,7 @@
 //! Application state
 
 use abnegate_http::{RateLimitConfig, RateLimiter};
+use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -112,6 +113,8 @@ struct AppStateInner {
     /// The process's one instance, which the writers that finish a run also
     /// publish to, so a state built per test observes the same runs.
     pub task_progress: Arc<TaskProgressBroadcaster>,
+    /// Live WebSocket holds per device, so the admin list can show Connected.
+    pub device_connections: DashMap<Uuid, u32>,
 }
 
 impl AppState {
@@ -222,6 +225,7 @@ impl AppState {
                 frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
                 mcp: OnceCell::new(),
                 task_progress: task_progress::progress(),
+                device_connections: DashMap::new(),
             }),
         }
     }
@@ -312,6 +316,49 @@ impl AppState {
         &self.inner.task_progress
     }
 
+    pub fn device_connected(&self, device_id: Uuid) {
+        *self.inner.device_connections.entry(device_id).or_insert(0) += 1;
+    }
+
+    pub fn device_disconnected(&self, device_id: Uuid) {
+        let remaining = {
+            let mut count = match self.inner.device_connections.get_mut(&device_id) {
+                Some(count) => count,
+                None => return,
+            };
+            *count = count.saturating_sub(1);
+            *count
+        };
+        if remaining == 0 {
+            self.inner.device_connections.remove(&device_id);
+        }
+    }
+
+    pub fn device_is_connected(&self, device_id: Uuid) -> bool {
+        self.inner
+            .device_connections
+            .get(&device_id)
+            .is_some_and(|count| *count > 0)
+    }
+
+    pub fn hold_device(&self, device_id: Option<Uuid>) -> DeviceHold {
+        if let Some(device_id) = device_id {
+            self.device_connected(device_id);
+        }
+        DeviceHold {
+            state: self.clone(),
+            device_id,
+        }
+    }
+
+    pub async fn hold_session_device(&self, session_id: Uuid) -> DeviceHold {
+        let device_id = crate::db::sessions::device_id_for(self.db(), session_id)
+            .await
+            .ok()
+            .flatten();
+        self.hold_device(device_id)
+    }
+
     pub fn existing_mcp(&self) -> Option<&McpHub> {
         self.inner.mcp.get()
     }
@@ -326,6 +373,20 @@ impl AppState {
     /// is already installed stays.
     pub fn install_mcp(&self, hub: McpHub) {
         let _ = self.inner.mcp.set(hub);
+    }
+}
+
+/// Decrements the live-connection count for a device when the socket ends.
+pub struct DeviceHold {
+    state: AppState,
+    device_id: Option<Uuid>,
+}
+
+impl Drop for DeviceHold {
+    fn drop(&mut self) {
+        if let Some(device_id) = self.device_id {
+            self.state.device_disconnected(device_id);
+        }
     }
 }
 
@@ -398,6 +459,20 @@ mod tests {
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
     use zone_core::llm::AgentKind;
+
+    #[tokio::test]
+    async fn a_hold_marks_the_device_connected_until_drop() {
+        let state = AppState::for_tests();
+        let id = Uuid::new_v4();
+        assert!(!state.device_is_connected(id));
+        {
+            let _hold = state.hold_device(Some(id));
+            assert!(state.device_is_connected(id));
+            let _second = state.hold_device(Some(id));
+            assert!(state.device_is_connected(id));
+        }
+        assert!(!state.device_is_connected(id));
+    }
 
     #[test]
     fn a_test_config_reads_agent_usage_only_from_loopback() {

@@ -1,0 +1,134 @@
+.org-devices-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
+}
+
+.devices-table-container {
+  overflow-x: auto;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-bg-elevated);
+}
+
+.devices-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.devices-table th {
+  white-space: nowrap;
+}
+
+.devices-table th:first-child,
+.devices-table td:first-child {
+  padding-left: var(--ui-space-4);
+}
+
+.devices-table th:last-child,
+.devices-table td:last-child {
+  padding-right: var(--ui-space-3);
+}
+
+.devices-table td {
+  height: var(--ui-space-12);
+  vertical-align: middle;
+}
+
+.devices-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.devices-actions-head {
+  text-align: right;
+}
+
+.device-identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--ui-space-1);
+}
+
+.device-name {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.device-meta,
+.device-email,
+.device-seen {
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
+  white-space: nowrap;
+}
+
+.device-member {
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text-primary);
+}
+
+.device-status {
+  display: inline-flex;
+  align-items: center;
+  height: var(--ui-badge-height);
+  margin-right: var(--ui-space-2);
+  padding: 0 var(--ui-space-1-5);
+  border-radius: var(--ui-radius-md);
+  font-size: var(--ui-text-2xs);
+  font-weight: 600;
+  line-height: 1;
+  text-transform: capitalize;
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-secondary);
+}
+
+.device-status-allowed {
+  background: color-mix(in srgb, var(--ui-success) 14%, transparent);
+  color: var(--ui-success-600);
+}
+
+.device-status-pending {
+  background: color-mix(in srgb, var(--ui-warning) 14%, transparent);
+  color: var(--ui-warning);
+}
+
+.device-status-blocked {
+  background: color-mix(in srgb, var(--ui-error) 14%, transparent);
+  color: var(--ui-error);
+}
+
+.device-connected {
+  font-size: var(--ui-text-2xs);
+  font-weight: 600;
+  color: var(--ui-success-600);
+}
+
+:root[data-theme='dark'] .device-status-allowed,
+:root[data-theme='dark'] .device-connected {
+  color: var(--ui-success-400);
+}
+
+.device-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ui-space-2);
+}
+
+.device-block {
+  color: var(--ui-error);
+}
+
+@media (max-width: 768px) {
+  .devices-table {
+    min-width: 40rem;
+  }
+}

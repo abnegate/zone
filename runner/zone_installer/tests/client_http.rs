@@ -139,6 +139,14 @@ async fn run_lifecycle(platform: Platform) {
         json!("https://manager.localhost"),
         "{platform:?}"
     );
+    let device_id = info["device_id"].as_str().expect("device_id");
+    assert_eq!(device_id.split('-').count(), 5, "{platform:?} {device_id}");
+    assert!(
+        info["platform"]
+            .as_str()
+            .is_some_and(|platform| { matches!(platform, "android" | "ios" | "desktop") }),
+        "{platform:?}"
+    );
 
     let (status, body) = request(&app, "POST", "/api/setup", Some(r#"{"host":"not-a-url"}"#)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{platform:?}");
@@ -146,9 +154,14 @@ async fn run_lifecycle(platform: Platform) {
         body.contains("http://") || body.contains("https://"),
         "{platform:?}"
     );
+    let after_invalid = fs::read_to_string(&config_path).unwrap_or_default();
     assert!(
-        !config_path.exists(),
+        !after_invalid.contains("not-a-url"),
         "{platform:?} must not write on invalid setup"
+    );
+    assert!(
+        !after_invalid.contains("host ="),
+        "{platform:?} must not write a host on invalid setup: {after_invalid}"
     );
 
     let (status, _) = request(&app, "POST", "/api/setup", Some(r#"{"host":""}"#)).await;

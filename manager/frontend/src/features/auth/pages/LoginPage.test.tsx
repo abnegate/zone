@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
+import { AuthRequestError } from '../../../api/auth';
 
 const mockUseAuth = mock();
 
@@ -198,6 +199,23 @@ describe('LoginPage', () => {
 
       await waitFor(() => {
         expect(mockNavigate).toHaveBeenCalledWith('/');
+      });
+    });
+
+    it('shows pending copy when this device is waiting', async () => {
+      mockLogin.mockRejectedValue(
+        new AuthRequestError('This device is waiting for an admin to allow it', 'device_pending')
+      );
+      renderLoginPage();
+
+      await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com');
+      await userEvent.type(screen.getByLabelText(/password/i), 'password123');
+      await userEvent.click(screen.getByRole('button', { name: /sign in/i }));
+
+      await waitFor(() => {
+        expect(
+          screen.getByText('This device is waiting for an admin to allow it')
+        ).toBeInTheDocument();
       });
     });
 

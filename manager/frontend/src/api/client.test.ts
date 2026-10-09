@@ -2147,6 +2147,78 @@ describe('Client', () => {
       joined_at: '2024-01-01T00:00:00Z',
     };
 
+    describe('getDevices', () => {
+      const device = {
+        id: 'device-1',
+        user_id: 'user-1',
+        email: 'jake@test.com',
+        display_name: 'Jake',
+        name: 'S23 Ultra',
+        platform: 'android' as const,
+        user_agent: 'Zone/1',
+        last_ip: '192.168.4.31',
+        last_seen_at: '2026-10-09T12:00:00Z',
+        status: 'allowed' as const,
+        connected: true,
+        session_count: 1,
+        created_at: '2026-10-09T11:00:00Z',
+      };
+
+      it('fetches organization devices', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ devices: [device] }),
+        });
+
+        const result = await client.getDevices(orgId);
+        expect(mockFetch).toHaveBeenCalledWith(
+          `/api/organizations/${orgId}/devices`,
+          expect.objectContaining({
+            headers: expect.objectContaining({
+              'X-Zone-Device': expect.any(String),
+            }),
+          })
+        );
+        expect(result.devices).toEqual([device]);
+      });
+
+      it('updates a device', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ ...device, status: 'blocked', connected: false }),
+        });
+        const result = await client.updateDevice(orgId, device.id, { status: 'blocked' });
+        expect(mockFetch).toHaveBeenCalledWith(
+          `/api/organizations/${orgId}/devices/${device.id}`,
+          expect.objectContaining({
+            method: 'PATCH',
+            body: JSON.stringify({ status: 'blocked' }),
+          })
+        );
+        expect(result.status).toBe('blocked');
+      });
+
+      it('reads and writes device policy', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ mode: 'open' }),
+        });
+        expect(await client.getDevicePolicy(orgId)).toEqual({ mode: 'open' });
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ mode: 'allowed' }),
+        });
+        expect(await client.setDevicePolicy(orgId, 'allowed')).toEqual({ mode: 'allowed' });
+        expect(mockFetch).toHaveBeenLastCalledWith(
+          `/api/organizations/${orgId}/device-policy`,
+          expect.objectContaining({
+            method: 'PUT',
+            body: JSON.stringify({ mode: 'allowed' }),
+          })
+        );
+      });
+    });
+
     describe('getOrgMembers', () => {
       it('fetches organization members successfully', async () => {
         mockFetch.mockResolvedValueOnce({

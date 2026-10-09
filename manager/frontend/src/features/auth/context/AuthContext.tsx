@@ -12,6 +12,7 @@ import {
 import * as authApi from '../../../api/auth';
 import { RefreshError } from '../../../api/auth';
 import { client } from '../../../api/client';
+import { ensureDevice } from '../../../api/device';
 import type { AuthResponse, JwtPayload, LoginRequest, RegisterRequest, User } from '../types';
 
 interface AuthState {
@@ -199,6 +200,7 @@ export function AuthProvider({
   // Verify/refresh token on mount
   useEffect(() => {
     const verify = async () => {
+      await ensureDevice();
       const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
       const accessToken = storage.getItem(ACCESS_TOKEN_KEY);
 
@@ -243,6 +245,7 @@ export function AuthProvider({
 
   const login = useCallback(
     async (request: LoginRequest) => {
+      await ensureDevice();
       const response = await auth.login(request);
       handleAuthResponse(response);
     },
@@ -251,6 +254,7 @@ export function AuthProvider({
 
   const register = useCallback(
     async (request: RegisterRequest) => {
+      await ensureDevice();
       const response = await auth.register(request);
       handleAuthResponse(response);
     },

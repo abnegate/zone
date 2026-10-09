@@ -14,6 +14,7 @@ pub mod chat_sources;
 pub mod chats;
 pub mod context;
 pub mod context_gatherings;
+pub mod devices;
 pub mod email_verification;
 pub mod gathering_events;
 pub mod invitations;

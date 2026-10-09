@@ -34,6 +34,8 @@ import type {
   CreateInvitationRequest,
   CreateOrganizationRequest,
   CreateWorkspaceRequest,
+  DevicePolicy,
+  DevicesResponse,
   Invitation,
   InvitationDetails,
   InvitationsResponse,
@@ -42,6 +44,7 @@ import type {
   ModelSource,
   Organization,
   OrganizationAiSettingsSave,
+  OrganizationDevice,
   OrganizationMember,
   OrgMembersResponse,
   Plan,
@@ -50,6 +53,7 @@ import type {
   Subscription,
   UpdateAiSettingsRequest,
   UpdateChatRequest,
+  UpdateDeviceRequest,
   UpdateOrganizationRequest,
   UpdateOrgMemberRequest,
   UpdateWorkspaceMemberRequest,
@@ -67,6 +71,8 @@ import {
   AiSettingsResponseSchema,
   AuditLogSchema,
   AuditLogsResponseSchema,
+  DevicePolicySchema,
+  DevicesResponseSchema,
   ForgotPasswordResponseSchema,
   InvitationDetailsSchema,
   InvitationSchema,
@@ -74,6 +80,7 @@ import {
   LimitsResponseSchema,
   OrganizationAiSettingsResetSchema,
   OrganizationAiSettingsSaveSchema,
+  OrganizationDeviceSchema,
   OrganizationMemberSchema,
   OrganizationResponseSchema,
   OrganizationsResponseSchema,
@@ -96,6 +103,7 @@ import {
 } from '../validation/schemas';
 import { ApiError } from './ApiError';
 import { chatsApi } from './chats';
+import { deviceHeaders } from './device';
 import { knowledgeApi } from './knowledge';
 import { modelsApi } from './models';
 import { projectsApi } from './projects';
@@ -130,6 +138,7 @@ class Client {
   getHeaders(): HeadersInit {
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
+      ...deviceHeaders(),
     };
     if (this.accessToken) {
       headers.Authorization = `Bearer ${this.accessToken}`;
@@ -729,6 +738,70 @@ class Client {
   }
 
   // Organization Member Management API
+
+  async getDevices(orgId: string): Promise<DevicesResponse> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/devices`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch devices: ${response.status}`);
+    }
+    return parse(DevicesResponseSchema, await response.json());
+  }
+
+  async updateDevice(
+    orgId: string,
+    deviceId: string,
+    request: UpdateDeviceRequest
+  ): Promise<OrganizationDevice> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/devices/${encodeURIComponent(deviceId)}`,
+      {
+        method: 'PATCH',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to update device: ${response.status}`);
+    }
+    return parse(OrganizationDeviceSchema, await response.json());
+  }
+
+  async getDevicePolicy(orgId: string): Promise<DevicePolicy> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/device-policy`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch device policy: ${response.status}`);
+    }
+    return parse(DevicePolicySchema, await response.json());
+  }
+
+  async setDevicePolicy(orgId: string, mode: DevicePolicy['mode']): Promise<DevicePolicy> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/device-policy`,
+      {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ mode }),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to update device policy: ${response.status}`);
+    }
+    return parse(DevicePolicySchema, await response.json());
+  }
 
   async getOrgMembers(orgId: string): Promise<OrgMembersResponse> {
     const response = await fetch(

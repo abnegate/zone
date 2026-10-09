@@ -55,7 +55,12 @@ async fn require_active_session(state: &AppState, access: &AccessClaims) -> Resu
     })?;
 
     match sessions::is_active_user_session(state.db(), session_id, user_id).await {
-        Ok(true) => Ok(()),
+        Ok(true) => {
+            if let Err(error) = sessions::touch_activity(state.db(), session_id).await {
+                tracing::debug!(%error, %session_id, "Failed to stamp session activity");
+            }
+            Ok(())
+        }
         Ok(false) => Err(AuthError {
             status: StatusCode::UNAUTHORIZED,
             message: "Session expired or revoked".to_string(),

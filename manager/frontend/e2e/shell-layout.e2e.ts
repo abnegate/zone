@@ -289,6 +289,7 @@ for (const scenario of scenarios) {
     for (const tab of [
       'AI Settings',
       'Members',
+      'Devices',
       'Invitations',
       'Billing',
       'Audit Logs',

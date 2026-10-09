@@ -39,11 +39,18 @@ describe('auth API', () => {
       const result = await login({ email: 'test@test.com', password: 'password' });
 
       expect(result).toEqual(mockResponse);
-      expect(mockFetch).toHaveBeenCalledWith('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: 'test@test.com', password: 'password' }),
-      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        '/api/auth/login',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            'Content-Type': 'application/json',
+            'X-Zone-Device': expect.any(String),
+            'X-Zone-Device-Platform': 'browser',
+          }),
+          body: JSON.stringify({ email: 'test@test.com', password: 'password' }),
+        })
+      );
     });
 
     it('throws error on failure', async () => {
@@ -55,6 +62,23 @@ describe('auth API', () => {
       await expect(login({ email: 'test@test.com', password: 'wrong' })).rejects.toThrow(
         'Invalid credentials'
       );
+    });
+
+    it('throws a device pending error', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        json: () =>
+          Promise.resolve({
+            error: 'This device is waiting for an admin to allow it',
+            code: 'device_pending',
+          }),
+      });
+
+      await expect(login({ email: 'test@test.com', password: 'password' })).rejects.toMatchObject({
+        name: 'AuthRequestError',
+        code: 'device_pending',
+        message: 'This device is waiting for an admin to allow it',
+      });
     });
 
     it('uses default error message when json parsing fails', async () => {
@@ -101,14 +125,20 @@ describe('auth API', () => {
       });
 
       expect(result).toEqual(mockResponse);
-      expect(mockFetch).toHaveBeenCalledWith('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: 'new@test.com',
-          password: 'password',
-        }),
-      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        '/api/auth/register',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            'Content-Type': 'application/json',
+            'X-Zone-Device': expect.any(String),
+          }),
+          body: JSON.stringify({
+            email: 'new@test.com',
+            password: 'password',
+          }),
+        })
+      );
     });
 
     it('throws error on failure', async () => {
@@ -169,11 +199,17 @@ describe('auth API', () => {
       const result = await refreshToken('old-refresh-token');
 
       expect(result).toEqual(mockResponse);
-      expect(mockFetch).toHaveBeenCalledWith('/api/auth/refresh', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: 'old-refresh-token' }),
-      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        '/api/auth/refresh',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            'Content-Type': 'application/json',
+            'X-Zone-Device': expect.any(String),
+          }),
+          body: JSON.stringify({ refresh_token: 'old-refresh-token' }),
+        })
+      );
     });
 
     it('throws error on failure', async () => {
@@ -193,11 +229,16 @@ describe('auth API', () => {
 
       await logout('refresh-token');
 
-      expect(mockFetch).toHaveBeenCalledWith('/api/auth/logout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: 'refresh-token' }),
-      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        '/api/auth/logout',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            'Content-Type': 'application/json',
+          }),
+          body: JSON.stringify({ refresh_token: 'refresh-token' }),
+        })
+      );
     });
 
     it('ignores logout errors', async () => {

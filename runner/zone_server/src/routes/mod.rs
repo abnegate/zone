@@ -11,6 +11,7 @@ pub mod billing;
 pub mod chats;
 pub mod common;
 pub mod context;
+pub mod devices;
 pub mod error;
 pub mod health;
 pub mod invitations;
@@ -151,6 +152,15 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/members/{user_id}",
             patch(organizations::update_member_role).delete(organizations::remove_member),
+        )
+        .route("/api/organizations/{org_id}/devices", get(devices::list))
+        .route(
+            "/api/organizations/{org_id}/devices/{device_id}",
+            patch(devices::update),
+        )
+        .route(
+            "/api/organizations/{org_id}/device-policy",
+            get(devices::get_policy).put(devices::set_policy),
         )
         // Organization invitations
         .route(

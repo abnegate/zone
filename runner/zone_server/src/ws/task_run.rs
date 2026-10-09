@@ -192,6 +192,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
         let _ = sender.close().await;
         return;
     };
+    let _device_hold = state.hold_session_device(authorization.session_id).await;
 
     // Verify task run exists and get initial state
     let task_run = match tasks::get_task_run(state.db(), run_id).await {

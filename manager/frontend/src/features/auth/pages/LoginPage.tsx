@@ -6,6 +6,8 @@ import { useForm } from 'react-hook-form';
 import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import type { z } from 'zod';
+import { AuthRequestError } from '../../../api/auth';
+import { ensureDevice } from '../../../api/device';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
 import { useAuth } from '../hooks';
 import { LoginRequestSchema } from '../schemas';
@@ -30,6 +32,10 @@ export default function LoginPage() {
   });
 
   useEffect(() => {
+    void ensureDevice();
+  }, []);
+
+  useEffect(() => {
     if (isAuthenticated && !authLoading) {
       navigate('/', { replace: true });
     }
@@ -41,7 +47,14 @@ export default function LoginPage() {
       navigate('/');
       toast.success('Successfully logged in');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Login failed';
+      const message =
+        err instanceof AuthRequestError && err.code === 'device_pending'
+          ? 'This device is waiting for an admin to allow it'
+          : err instanceof AuthRequestError && err.code === 'device_blocked'
+            ? 'This device is blocked'
+            : err instanceof Error
+              ? err.message
+              : 'Login failed';
       toast.error(message);
       setError('root', { message });
     }

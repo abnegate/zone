@@ -31,12 +31,16 @@ import type {
 import { parse } from '../validation';
 import { ApiError } from './ApiError';
 import { client } from './client';
+import { deviceHeaders } from './device';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
 function bearerHeaders(): HeadersInit {
   const token = client.getAccessToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return {
+    ...deviceHeaders(),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
 }
 
 export type TrainFrame = z.infer<typeof TrainFrameSchema>;

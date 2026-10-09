@@ -117,6 +117,7 @@ async fn handle(socket: WebSocket, state: AppState) {
         let _ = sender.close().await;
         return;
     }
+    let _device_hold = state.hold_session_device(authorization.session_id).await;
     if emit_handshake(&mut sender, Handshake::Authenticated)
         .await
         .is_err()

@@ -47,6 +47,7 @@ mod console_contract;
 mod context;
 mod cross_tenant_authorization;
 mod deferred_tool;
+mod devices;
 mod email_verification;
 mod gathering_worker;
 mod indexing;

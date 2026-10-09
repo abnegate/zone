@@ -58,6 +58,39 @@ export interface OrgMembersResponse {
   members: OrganizationMember[];
 }
 
+export type DeviceStatus = 'allowed' | 'pending' | 'blocked';
+export type DevicePlatform = 'android' | 'ios' | 'desktop' | 'browser' | 'cli';
+export type DevicePolicyMode = 'open' | 'allowed';
+
+export interface OrganizationDevice {
+  id: string;
+  user_id: string;
+  email: string;
+  display_name: string | null;
+  name: string | null;
+  platform: DevicePlatform;
+  user_agent: string | null;
+  last_ip: string | null;
+  last_seen_at: string;
+  status: DeviceStatus;
+  connected: boolean;
+  session_count: number;
+  created_at: string;
+}
+
+export interface DevicesResponse {
+  devices: OrganizationDevice[];
+}
+
+export interface DevicePolicy {
+  mode: DevicePolicyMode;
+}
+
+export interface UpdateDeviceRequest {
+  status?: 'allowed' | 'blocked';
+  name?: string;
+}
+
 // Invitation Types
 export interface Invitation {
   id: string;

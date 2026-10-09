@@ -48,6 +48,9 @@ pub struct Config {
 
     /// Bearer token for `llm_base_url`; omitted for a server that needs none
     pub llm_api_key: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 fn default_model() -> String {
@@ -71,6 +74,7 @@ impl Default for Config {
             editor: default_editor(),
             llm_base_url: None,
             llm_api_key: None,
+            device_id: None,
         }
     }
 }
@@ -101,13 +105,23 @@ impl Config {
     }
 
     fn load_from(loader: &Loader<'_>) -> Result<Self, ConfigError> {
-        if loader.exists() {
-            return Ok(loader.load()?.into_value());
+        let mut config = if loader.exists() {
+            loader.load()?.into_value()
+        } else {
+            let created = abnegate_config::Config::new(loader.path(), Self::default());
+            created.save()?;
+            created.into_value()
+        };
+        if config
+            .device_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .is_none()
+        {
+            config.device_id = Some(uuid::Uuid::new_v4().to_string());
+            abnegate_config::Config::new(loader.path(), config.clone()).save()?;
         }
-
-        let config = abnegate_config::Config::new(loader.path(), Self::default());
-        config.save()?;
-        Ok(config.into_value())
+        Ok(config)
     }
 
     /// Save configuration to file
@@ -164,6 +178,7 @@ mod tests {
             editor: "nano".to_string(),
             llm_base_url: None,
             llm_api_key: None,
+            device_id: None,
         };
 
         let toml_str = toml::to_string(&config).unwrap();
@@ -225,6 +240,7 @@ mod tests {
             editor: "nano".to_string(),
             llm_base_url: None,
             llm_api_key: None,
+            device_id: None,
         };
 
         let cloned = config.clone();
@@ -316,6 +332,9 @@ mod tests {
         assert_eq!(config.model, "gpt-4o");
         let written: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written.max_iterations, 50);
+        let device_id = config.device_id.as_deref().expect("device_id");
+        assert!(uuid::Uuid::parse_str(device_id).is_ok(), "{device_id}");
+        assert_eq!(written.device_id.as_deref(), Some(device_id));
     }
 
     #[test]
@@ -334,6 +353,11 @@ mod tests {
         assert_eq!(loaded.host.as_deref(), Some("https://api.example.com"));
         assert_eq!(loaded.max_iterations, 25);
         assert_eq!(loaded.llm_api_key.as_deref(), Some("ollama"));
+        let device_id = loaded.device_id.as_deref().expect("device_id");
+        assert!(uuid::Uuid::parse_str(device_id).is_ok(), "{device_id}");
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(rewritten.contains("claude-3"));
+        assert!(rewritten.contains("device_id"));
     }
 
     #[cfg(unix)]
@@ -397,6 +421,7 @@ mod tests {
             editor: "nvim".to_string(),
             llm_base_url: Some("http://127.0.0.1:11434/v1".to_string()),
             llm_api_key: Some("ollama".to_string()),
+            device_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
         };
 
         let toml_str = toml::to_string_pretty(&original).unwrap();
@@ -419,6 +444,7 @@ mod tests {
             editor: "vim".to_string(),
             llm_base_url: None,
             llm_api_key: None,
+            device_id: None,
         };
 
         let toml_str = toml::to_string(&config).unwrap();
@@ -438,6 +464,7 @@ mod tests {
                 editor: "vim".to_string(),
                 llm_base_url: None,
                 llm_api_key: None,
+                device_id: None,
             };
 
             let toml_str = toml::to_string(&config).unwrap();

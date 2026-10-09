@@ -19,6 +19,7 @@ import {
   SyncConfigsResponseSchema,
 } from '../validation/schemas';
 import { API_BASE } from './client';
+import { deviceHeaders } from './device';
 
 /**
  * Projects API client
@@ -34,6 +35,7 @@ class ProjectsApi {
   private getHeaders(): HeadersInit {
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
+      ...deviceHeaders(),
     };
     const token = this.getAccessToken?.();
     if (token) {

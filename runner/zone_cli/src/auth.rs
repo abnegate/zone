@@ -135,8 +135,7 @@ impl AuthManager {
 
         let host = host.trim_end_matches('/');
         let response = self
-            .client
-            .post(format!("{host}/api/auth/login"))
+            .with_device(self.client.post(format!("{host}/api/auth/login")))?
             .json(&LoginRequest { email, password })
             .send()
             .await?;
@@ -195,8 +194,7 @@ impl AuthManager {
 
         let url = format!("{}/api/auth/refresh", metadata.host.trim_end_matches('/'));
         let response = self
-            .client
-            .post(&url)
+            .with_device(self.client.post(&url))?
             .json(&RefreshRequest {
                 refresh_token: refresh_token.expose(),
             })
@@ -228,6 +226,21 @@ impl AuthManager {
     /// Check if user is logged in
     pub fn is_logged_in(&self) -> bool {
         self.store.is_authenticated()
+    }
+
+    fn with_device(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, AuthError> {
+        let config = crate::config::Config::load()
+            .map_err(|error| AuthError::Server(format!("Could not load CLI config: {error}")))?;
+        let device_id = config
+            .device_id
+            .ok_or_else(|| AuthError::Server("This CLI has no device id".to_string()))?;
+        Ok(request
+            .header("x-zone-device", device_id)
+            .header("x-zone-device-name", "CLI")
+            .header("x-zone-device-platform", "cli"))
     }
 }
 

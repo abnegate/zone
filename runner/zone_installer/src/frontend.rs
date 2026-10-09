@@ -116,31 +116,44 @@ pub fn write_host(host: &str) -> std::io::Result<()> {
 }
 
 pub fn write_host_to(path: &Path, host: &str) -> std::io::Result<()> {
+    upsert_toml_string(path, "host", host)
+}
+
+pub fn ensure_device_id_at(path: &Path) -> std::io::Result<uuid::Uuid> {
+    if let Some(existing) = read_device_id_from_path(path) {
+        return Ok(existing);
+    }
+    let id = uuid::Uuid::new_v4();
+    upsert_toml_string(path, "device_id", &id.to_string())?;
+    Ok(id)
+}
+
+fn upsert_toml_string(path: &Path, key: &str, value: &str) -> std::io::Result<()> {
     let path = sanitize_writable_config_path(path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let host_line = format!("host = \"{host}\"");
+    let line = format!("{key} = \"{value}\"");
     let mut replaced = false;
     let mut out = String::new();
     if path.exists() {
         let existing = std::fs::read_to_string(&path)?;
-        for line in existing.lines() {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("host")
+        for existing_line in existing.lines() {
+            let trimmed = existing_line.trim();
+            if let Some(rest) = trimmed.strip_prefix(key)
                 && rest.trim_start().starts_with('=')
             {
-                out.push_str(&host_line);
+                out.push_str(&line);
                 out.push('\n');
                 replaced = true;
             } else {
-                out.push_str(line);
+                out.push_str(existing_line);
                 out.push('\n');
             }
         }
     }
     if !replaced {
-        out.push_str(&host_line);
+        out.push_str(&line);
         out.push('\n');
     }
     std::fs::write(&path, out)
@@ -205,14 +218,26 @@ fn bundled_candidates(exe_dir: &Path, kind: FrontendKind) -> Vec<PathBuf> {
 }
 
 fn read_host_from_path(path: &Path) -> Option<String> {
+    toml_string_from_path(path, "host").map(|value| value.trim_end_matches('/').to_string())
+}
+
+fn read_device_id_from_path(path: &Path) -> Option<uuid::Uuid> {
+    toml_string_from_path(path, "device_id").and_then(|value| uuid::Uuid::parse_str(&value).ok())
+}
+
+fn toml_string_from_path(path: &Path, key: &str) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
-    host_from_toml(&content)
+    toml_string(&content, key)
 }
 
 fn host_from_toml(content: &str) -> Option<String> {
+    toml_string(content, "host").map(|value| value.trim_end_matches('/').to_string())
+}
+
+fn toml_string(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("host") {
+        if let Some(rest) = line.strip_prefix(key) {
             let rest = rest.trim_start();
             let Some(rest) = rest.strip_prefix('=') else {
                 continue;
@@ -220,7 +245,7 @@ fn host_from_toml(content: &str) -> Option<String> {
             let rest = rest.trim();
             let value = rest.trim_matches('"').trim_matches('\'').trim();
             if !value.is_empty() {
-                return Some(value.trim_end_matches('/').to_string());
+                return Some(value.to_string());
             }
         }
     }
@@ -390,5 +415,18 @@ mod tests {
         assert!(content.contains("model = \"gpt-4o\""));
         assert!(content.contains("host = \"https://zone.example.com\""));
         assert!(!content.contains("https://old.example"));
+    }
+
+    #[test]
+    fn ensure_device_id_reuses_the_saved_uuid() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        write_host_to(&path, "https://zone.example.com").unwrap();
+        let first = ensure_device_id_at(&path).unwrap();
+        let second = ensure_device_id_at(&path).unwrap();
+        assert_eq!(first, second);
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("host = \"https://zone.example.com\""));
+        assert!(content.contains(&format!("device_id = \"{first}\"")));
     }
 }

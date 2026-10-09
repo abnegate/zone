@@ -22,6 +22,7 @@ import type {
 import { parse } from '../validation';
 import { ApiError } from './ApiError';
 import { API_BASE } from './client';
+import { deviceHeaders } from './device';
 
 class ChatsApi {
   private getAccessToken: () => string | null = () => null;
@@ -33,6 +34,7 @@ class ChatsApi {
   private getHeaders(): HeadersInit {
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
+      ...deviceHeaders(),
     };
     const token = this.getAccessToken();
     if (token) {
