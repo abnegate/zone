@@ -359,10 +359,23 @@ def load_prodigy() -> Any:
     return Prodigy
 
 
+PRODIGY_LR = 1.0
+
+
+def prodigy_param_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prodigy treats `lr` as a multiplier on its adaptive D estimate.
+
+    Distinct non-zero group rates (UNet 1e-4 vs CLIP-L 1e-5) raise
+    `Setting different lr values in different parameter groups is only
+    supported for values of 0`. Share the documented default of 1.0.
+    """
+    return [{**group, 'lr': PRODIGY_LR} for group in groups]
+
+
 def make_optimizer(method: str, groups: list[dict[str, Any]], config: dict[str, Any]) -> Any:
     kind = optimizer_kind(method, config)
     if kind == 'prodigy':
-        return load_prodigy()(groups)
+        return load_prodigy()(prodigy_param_groups(groups))
     import torch
 
     return torch.optim.AdamW(groups)

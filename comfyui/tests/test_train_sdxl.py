@@ -480,6 +480,49 @@ class OptimizerTests(unittest.TestCase):
                     {'optimizer': 'prodigy'},
                 )
 
+    def test_prodigy_shares_one_adaptive_lr_across_groups(self) -> None:
+        captured: dict[str, list] = {}
+
+        class FakeProdigy:
+            def __init__(self, groups: list[dict]) -> None:
+                captured['groups'] = groups
+
+        with mock.patch.object(train_sdxl, 'load_prodigy', return_value=FakeProdigy):
+            optimizer = train_sdxl.make_optimizer(
+                'lora',
+                [
+                    {'params': [object()], 'lr': 0.0001},
+                    {'params': [object()], 'lr': 0.00001},
+                ],
+                {'optimizer': 'prodigy'},
+            )
+        self.assertIsInstance(optimizer, FakeProdigy)
+        self.assertEqual([group['lr'] for group in captured['groups']], [1.0, 1.0])
+
+    def test_adamw_keeps_configured_group_rates(self) -> None:
+        captured: dict[str, list] = {}
+
+        class FakeAdamW:
+            def __init__(self, groups: list[dict]) -> None:
+                captured['groups'] = groups
+
+        fake_torch = mock.MagicMock()
+        fake_torch.optim.AdamW = FakeAdamW
+        with mock.patch.dict(sys.modules, {'torch': fake_torch}):
+            optimizer = train_sdxl.make_optimizer(
+                'lora',
+                [
+                    {'params': [object()], 'lr': 0.0001},
+                    {'params': [object()], 'lr': 0.00001},
+                ],
+                {'optimizer': 'adamw'},
+            )
+        self.assertIsInstance(optimizer, FakeAdamW)
+        self.assertEqual(
+            [group['lr'] for group in captured['groups']],
+            [0.0001, 0.00001],
+        )
+
 
 class PreviewTests(unittest.TestCase):
     def test_placeholder_previews_are_written_for_a_fake_snapshot(self) -> None:
