@@ -37,7 +37,7 @@
     "monocart-reporter": "2.12.6",
     "nyc": "18.0.0",
     "typescript": "7.0.2",
-    "vite": "8.2.2",
+    "vite": "8.2.4",
     "vite-plugin-pwa": "1.3.0"
   },
   "scripts": {
