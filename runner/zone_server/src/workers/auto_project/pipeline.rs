@@ -415,7 +415,16 @@ async fn refresh_from_base(
             .pause("the project has no repository URL to refresh from")
             .await;
     };
-    let remote = RepositoryUrl::parse(remote).map_err(|error| error.to_string())?;
+    let remote = match RepositoryUrl::parse(remote) {
+        Ok(remote) => remote,
+        Err(error) => {
+            return step
+                .pause(&format!(
+                    "the project's repository URL cannot be refreshed from: {error}"
+                ))
+                .await;
+        }
+    };
     let request = ConflictRequest::new(remote, pull.head.clone(), pull.base.clone())
         .with_token(step.token.clone());
     let message = match purpose {
@@ -1334,7 +1343,7 @@ async fn finish_merged(
             .await
             .map_err(|error| error.to_string())?,
         None => {
-            tracing::warn!(task_id = %step.task.task_id, "The pull request merged but GitHub named no merge commit; post-merge jobs go unwatched")
+            tracing::warn!(task_id = %step.task.task_id, "The pull request merged but no merge commit was read; post-merge asks again")
         }
     }
     if let Some(run) = step.task.last_run_id {
@@ -1432,16 +1441,42 @@ async fn merge_commit(
     }
 }
 
+/// Read back the commit a merge made when none was recorded at the merge:
+/// a read that fails is an error the next tick retries, and only a merged
+/// pull request GitHub answers without a commit settles the task unwatched.
+async fn read_merge_commit(step: &Step<'_>) -> Result<(), String> {
+    let pool = step.drive.state.db();
+    let pull = step
+        .drive
+        .services
+        .pr
+        .fetch_pull(&step.reference, &step.token)
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(sha) = pull.merge_commit_sha else {
+        return step
+            .set(Stage::Merged, Some("post-merge: no merge commit recorded"))
+            .await;
+    };
+    auto_projects::set_merge_sha(pool, step.task.task_id, sha.as_str())
+        .await
+        .map_err(|error| error.to_string())?;
+    auto_projects::set_head(pool, step.task.task_id, sha.as_str(), Some("pending"), true)
+        .await
+        .map_err(|error| error.to_string())?;
+    step.set(Stage::PostMerge, Some("waiting for post-merge jobs"))
+        .await
+}
+
 /// Watch the jobs the merge triggered and file a fix task when one fails.
 async fn post_merge(step: &Step<'_>) -> Result<(), String> {
     let pool = step.drive.state.db();
     let config = step.drive.config;
-    let Some(sha) = step
-        .task
-        .merge_sha
-        .as_deref()
-        .and_then(|sha| CommitSha::parse(sha).ok())
-    else {
+    let sha = match step.task.merge_sha.as_deref() {
+        None => return read_merge_commit(step).await,
+        Some(sha) => CommitSha::parse(sha).ok(),
+    };
+    let Some(sha) = sha else {
         return step
             .set(Stage::Merged, Some("post-merge: no merge commit recorded"))
             .await;
@@ -2309,6 +2344,109 @@ mod tests {
         assert_eq!(
             after_post_merge.reason.as_deref(),
             Some("post-merge: no merge commit recorded")
+        );
+    }
+
+    /// The merged pull request GitHub answers, its head and base fixed and its
+    /// merge commit `merge_commit`, if any.
+    async fn serve_merged_pull(server: &wiremock::MockServer, merge_commit: Option<&str>) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_id": "PR_7",
+                "number": 7,
+                "title": "Add a cart",
+                "state": "closed",
+                "head": {"ref": "zone/task-1a2b3c4d-add-a-cart", "sha": commit('a').as_str()},
+                "base": {"ref": "main", "sha": commit('b').as_str()},
+                "html_url": "https://github.com/acme/shop/pull/7",
+                "merged": true,
+                "merge_commit_sha": merge_commit,
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// A merge that recorded no commit, because reading it back failed at
+    /// the merge, has post-merge read it again rather than settle the task
+    /// without watching the jobs the merge started.
+    #[tokio::test]
+    async fn post_merge_reads_back_a_merge_commit_the_merge_did_not_record() {
+        let server = wiremock::MockServer::start().await;
+        serve_merged_pull(&server, Some(commit('c').as_str())).await;
+        let merged = Merged::new(&server).await;
+        auto_projects::set_stage(
+            merged.state.db(),
+            merged.task,
+            merged.project.project_id,
+            Stage::PostMerge,
+            None,
+        )
+        .await
+        .expect("the task is in post-merge");
+        let task = merged.automation().await;
+
+        let settled = advance(&merged.drive(), &task).await;
+        let after = merged.automation().await;
+        merged.remove().await;
+
+        settled.expect("post-merge reads the commit back");
+        assert_eq!(after.stage(), Stage::PostMerge, "{:?}", after.reason);
+        assert_eq!(
+            after.merge_sha.as_deref(),
+            Some(commit('c').as_str()),
+            "the commit read back is recorded, so its jobs are watched"
+        );
+        assert_eq!(after.reason.as_deref(), Some("waiting for post-merge jobs"));
+    }
+
+    /// A stored repository URL that does not parse pauses the task with the
+    /// reason, as a missing one does, instead of failing every tick unseen.
+    #[tokio::test]
+    async fn a_refresh_from_an_unparseable_repository_url_pauses_the_task() {
+        let server = wiremock::MockServer::start().await;
+        serve_merged_pull(&server, None).await;
+        let mut merged = Merged::new(&server).await;
+        merged.project.repository_url = Some("not a repository".to_string());
+        auto_projects::set_stage(
+            merged.state.db(),
+            merged.task,
+            merged.project.project_id,
+            Stage::Merging,
+            None,
+        )
+        .await
+        .expect("the task is merging");
+        let drive = merged.drive();
+        let task = merged.automation().await;
+        let row = tasks::get_task(merged.state.db(), merged.task)
+            .await
+            .expect("the task")
+            .expect("a task");
+        let step = Step {
+            drive: &drive,
+            task: &task,
+            row,
+            reference: reference(),
+            token: token(),
+            pr_url: "https://github.com/acme/shop/pull/7".to_string(),
+        };
+        let pull = step.pull().await.expect("the pull request");
+
+        let refreshed = refresh_from_base(&step, &pull, Refresh::Behind).await;
+        let after = merged.automation().await;
+        merged.remove().await;
+
+        refreshed.expect("an unparseable URL pauses rather than failing the tick");
+        assert_eq!(after.stage(), Stage::Paused);
+        assert!(
+            after.reason.as_deref().is_some_and(|reason| reason
+                .starts_with("the project's repository URL cannot be refreshed from: ")),
+            "{:?}",
+            after.reason
         );
     }
 

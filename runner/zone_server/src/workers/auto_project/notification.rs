@@ -33,13 +33,14 @@ pub struct MergeReport {
     pub findings_addressed: usize,
     pub checks: String,
     pub admin_merge: bool,
-    /// The merge commit, when GitHub named one.
+    /// The merge commit, when one was recorded.
     pub merge_sha: Option<String>,
     pub post_merge: Option<String>,
 }
 
-/// What the notice says of a merge whose commit GitHub never named.
-const MERGE_NOT_RECORDED: &str = "a commit GitHub did not name";
+/// What the notice says of a merge whose commit was not recorded, whether
+/// GitHub named none or reading it back failed.
+const MERGE_NOT_RECORDED: &str = "a commit that was not recorded";
 
 /// Paths named in the low-level summary before the rest are counted.
 const TOP_PATHS: usize = 8;
@@ -262,15 +263,17 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_without_a_named_commit_says_so_rather_than_naming_an_empty_one() {
-        let mut unnamed = report();
-        unnamed.merge_sha = None;
+    fn a_merge_without_a_recorded_commit_says_so_without_blaming_github() {
+        let mut unrecorded = report();
+        unrecorded.merge_sha = None;
+        let body = merged(&unrecorded).body().to_string();
         assert!(
-            merged(&unnamed)
-                .body()
-                .contains("with administrator privileges as a commit GitHub did not name"),
-            "{}",
-            merged(&unnamed).body()
+            body.contains("with administrator privileges as a commit that was not recorded"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("GitHub did not name"),
+            "a failed read back is not GitHub's answer: {body}"
         );
     }
 
