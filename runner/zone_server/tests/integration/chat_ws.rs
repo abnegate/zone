@@ -1272,7 +1272,10 @@ async fn test_video_request_routes_directly_and_serves_protected_artifact() {
     Mock::given(method("POST"))
         .and(path("/prompt"))
         .and(wiremock::matchers::body_string_contains(
-            "custom-video.safetensors",
+            "custom_wan_t2v_high_noise.safetensors",
+        ))
+        .and(wiremock::matchers::body_string_contains(
+            "custom_wan_t2v_low_noise.safetensors",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "wan-1"})))
         .expect(1)
@@ -1310,7 +1313,7 @@ async fn test_video_request_routes_directly_and_serves_protected_artifact() {
     config.comfyui.base_url = comfy.uri();
     config.comfyui.poll_interval_ms = 50;
     config.comfyui.artifact_root = artifact_root.clone();
-    config.comfyui.video_unet = "custom-video.safetensors".to_string();
+    config.comfyui.video_unet = "custom_wan_t2v_high_noise.safetensors".to_string();
     let addr = spawn_server_with_config(config).await;
 
     let (mut socket, _) = connect_async(format!("ws://{}/ws/chats/{}", addr, chat_id))
@@ -1779,7 +1782,7 @@ async fn test_naming_the_video_upscales_it_past_an_attached_screenshot() {
     Mock::given(method("POST"))
         .and(path("/prompt"))
         .and(wiremock::matchers::body_string_contains(
-            "Wan22ImageToVideoLatent",
+            "EmptyHunyuanLatentVideo",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "gen-1"})))
         .expect(1)
