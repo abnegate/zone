@@ -23,6 +23,7 @@ pub const MODELS_DIRECTORY: &str = "/app/comfyui/models";
 /// The `comfyui/` tree the server image ships: graphs, recipes and poses.
 pub const CONTAINER_DIRECTORY: &str = "/app/comfyui";
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+pub const CAPTION_TIMEOUT: Duration = Duration::from_secs(60);
 pub const IMAGE_WORKFLOW: &str = "sdxl-api.json";
 pub const VIDEO_WORKFLOW: &str = "wan2.2-a14b-t2v-api.json";
 pub const AUDIO_WORKFLOW: &str = "ace-step-v1-3.5b-api.json";
@@ -39,6 +40,7 @@ const ARTIFACT_ROOT_VARIABLE: &str = "COMFYUI_ARTIFACT_ROOT";
 const MODELS_DIRECTORY_VARIABLE: &str = "COMFYUI_MODELS_DIRECTORY";
 const REQUEST_TIMEOUT_VARIABLE: &str = "COMFYUI_REQUEST_TIMEOUT_SECONDS";
 const CAPTION_MODEL_VARIABLE: &str = "COMFYUI_CAPTION_MODEL";
+const CAPTION_TIMEOUT_VARIABLE: &str = "COMFYUI_CAPTION_TIMEOUT_SECONDS";
 const POSES_DIRECTORY_VARIABLE: &str = "COMFYUI_POSES_DIRECTORY";
 const WORKFLOWS: &str = "workflows";
 const POSES: &str = "poses";
@@ -111,6 +113,9 @@ fn configure(
     if whole_seconds(environment(REQUEST_TIMEOUT_VARIABLE)).is_none() {
         config.request_timeout = REQUEST_TIMEOUT;
     }
+    if whole_seconds(environment(CAPTION_TIMEOUT_VARIABLE)).is_none() {
+        config = config.with_caption_timeout(CAPTION_TIMEOUT);
+    }
     if unset(VISION_MODEL_VARIABLE) {
         config.vision_model =
             Some(config.models_directory.join(VISION_WEIGHTS)).filter(|weights| weights.is_file());
@@ -151,6 +156,7 @@ mod tests {
     use super::*;
     use abnegate_exec::EnvironmentPolicy;
     use std::collections::HashMap;
+    use zone_core::variables::Variables;
 
     fn configured(base: Config, variables: &[(&str, &str)]) -> Config {
         let variables: HashMap<&str, &str> = variables.iter().copied().collect();
@@ -177,6 +183,7 @@ mod tests {
             PathBuf::from("/app/comfyui/models")
         );
         assert_eq!(config.request_timeout, Duration::from_secs(15));
+        assert_eq!(config.caption_timeout, Duration::from_secs(60));
         let defaults = Config::default();
         for (ours, theirs) in [
             (&config.base_url, &defaults.base_url),
@@ -286,6 +293,7 @@ mod tests {
         base.artifact_root = "/srv/artifacts".into();
         base.models_directory = "/srv/models".into();
         base.request_timeout = Duration::from_secs(90);
+        base.caption_timeout = Duration::from_secs(1200);
         base.vision_model = Some("/srv/u2net.onnx".into());
         base.caption_model = "llava:13b".into();
         base.poses_directory = Some("/srv/poses".into());
@@ -300,6 +308,7 @@ mod tests {
             ARTIFACT_ROOT_VARIABLE,
             MODELS_DIRECTORY_VARIABLE,
             REQUEST_TIMEOUT_VARIABLE,
+            CAPTION_TIMEOUT_VARIABLE,
             VISION_MODEL_VARIABLE,
             CAPTION_MODEL_VARIABLE,
             POSES_DIRECTORY_VARIABLE,
@@ -307,6 +316,7 @@ mod tests {
         ]
         .map(|name| match name {
             REQUEST_TIMEOUT_VARIABLE => (name, "90"),
+            CAPTION_TIMEOUT_VARIABLE => (name, "1200"),
             _ => (name, "set"),
         });
         let config = configured(base.clone(), &set);
@@ -320,6 +330,7 @@ mod tests {
         assert_eq!(config.artifact_root, base.artifact_root);
         assert_eq!(config.models_directory, base.models_directory);
         assert_eq!(config.request_timeout, base.request_timeout);
+        assert_eq!(config.caption_timeout, base.caption_timeout);
         assert_eq!(config.vision_model, base.vision_model);
         assert_eq!(config.caption_model, base.caption_model);
         assert_eq!(config.poses_directory, base.poses_directory);
@@ -341,6 +352,31 @@ mod tests {
         for slashes in ["/", " // "] {
             let base = configured(crate_default.clone(), &[(BASE_URL_VARIABLE, slashes)]);
             assert_eq!(base.base_url, BASE_URL, "{slashes:?}");
+        }
+    }
+
+    #[test]
+    fn a_caption_waits_zones_caption_timeout_when_none_can_be_read() {
+        let mut drifted = Config::default();
+        drifted.caption_timeout = Duration::from_secs(1800);
+        for variables in [&[][..], &[(CAPTION_TIMEOUT_VARIABLE, "abc")][..]] {
+            let config = configured(drifted.clone(), variables);
+            assert_eq!(config.caption_timeout, CAPTION_TIMEOUT, "{variables:?}");
+        }
+        assert_eq!(development().caption_timeout, CAPTION_TIMEOUT);
+    }
+
+    #[test]
+    fn a_caption_timeout_the_environment_names_is_kept_up_to_an_hour() {
+        for (seconds, expected) in [("1200", 1200), ("3600", 3600), ("7200", 3600)] {
+            let mut variables = Variables::isolated(&[CAPTION_TIMEOUT_VARIABLE]);
+            variables.set(CAPTION_TIMEOUT_VARIABLE, seconds);
+            let config = load().expect("zone's settings");
+            assert_eq!(
+                config.caption_timeout,
+                Duration::from_secs(expected),
+                "{CAPTION_TIMEOUT_VARIABLE}={seconds}"
+            );
         }
     }
 

@@ -1641,8 +1641,20 @@ that still sets an old name gets the default instead:
 
 ### `COMFYUI_CAPTION_TIMEOUT_SECONDS`
 - **Default**: `60`
-- **Description**: Per-request budget for one captioning call. A timeout leaves
-  the caption as the trigger word alone rather than failing the training job.
+- **Description**: Whole budget for one captioning request, from sending it to
+  the last byte of the answer. A timeout leaves that shot's caption as the
+  trigger word alone rather than failing the training job. A value below `5` is
+  raised to five seconds, one above `3600` is capped at an hour, and one that
+  is not a whole number of seconds gets the default. Raise it for a vision
+  model on a CPU, which can take minutes per image.
+- **Giving up**: captioning stops at the second request in a row that times
+  out, or at the first whose connection to the endpoint fails or drops. Every
+  shot not yet described keeps the trigger word alone, so an endpoint that
+  never answers costs a training run at most two of these timeouts before
+  training starts. Any answer, a refusal included, starts the count over, so a
+  model whose first request only waited out its load still captions the rest.
+  Captioning runs before training and does not count against
+  `COMFYUI_TRAIN_TIMEOUT_SECONDS`.
 
 ### `COMFYUI_REQUEST_TIMEOUT_SECONDS`
 - **Default**: `15`
