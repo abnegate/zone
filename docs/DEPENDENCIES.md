@@ -95,8 +95,10 @@ runtime dependency. All other frontend advisories remain fatal.
 The root `package.json` pins `glob` and `zod` across every workspace. Bun's
 `overrides` apply to the whole tree, so each pin also lands on one package
 built for an older major. Both pins are needed for `bun run audit` in
-`manager/frontend` to pass, and both reach only the Lighthouse CI tooling
-(`@lhci/cli`), never the bundled console.
+`manager/frontend` to pass. The `glob` pin also reaches `nyc` and
+`vite-plugin-pwa > workbox-build`, which runs in the console's PWA build, so
+`bun run build` must keep passing against it. The `zod` pin reaches only the
+Lighthouse CI tooling (`@lhci/cli`), never the bundled console.
 
 **`glob` 14.0.3.** Without it, `nyc > glob@13` and `vite-plugin-pwa >
 workbox-build > glob@11` fail the audit on `GHSA-3g3m-2fjr-6pw4` (AbortSignal
