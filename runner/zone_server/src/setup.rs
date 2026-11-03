@@ -328,11 +328,11 @@ pub fn ram_bytes() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn comfy_present(models_dir: &Path) -> HashSet<String> {
+pub fn comfy_present(models_directory: &Path) -> HashSet<String> {
     MANIFEST
         .models
         .iter()
-        .filter(|weight| file_present(models_dir, weight))
+        .filter(|weight| file_present(models_directory, weight))
         .map(|weight| weight.id.clone())
         .collect()
 }
@@ -540,11 +540,11 @@ pub fn view_plan(plan: &Plan) -> SetupPlan {
     }
 }
 
-pub fn confined_relative(models_dir: &Path, relative: &str) -> Option<PathBuf> {
+pub fn confined_relative(models_directory: &Path, relative: &str) -> Option<PathBuf> {
     if relative.is_empty() || Path::new(relative).is_absolute() {
         return None;
     }
-    let mut path = models_dir.to_path_buf();
+    let mut path = models_directory.to_path_buf();
     for component in Path::new(relative).components() {
         match component {
             Component::Normal(part) => path.push(part),
@@ -588,8 +588,8 @@ fn detect_ram_bytes() -> Option<u64> {
     }
 }
 
-fn file_present(models_dir: &Path, weight: &Weight) -> bool {
-    let Some(path) = confined_relative(models_dir, &weight.relative_path) else {
+fn file_present(models_directory: &Path, weight: &Weight) -> bool {
+    let Some(path) = confined_relative(models_directory, &weight.relative_path) else {
         return false;
     };
     std::fs::metadata(path)

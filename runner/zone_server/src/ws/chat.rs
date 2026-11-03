@@ -1921,10 +1921,9 @@ async fn handle_image_generation(
     let result = await_media(
         session.guard.lost(),
         cancellation,
-        client.generate_excluding(
+        client.generate(
             &generation_prompt,
             source.as_ref(),
-            None,
             &mut generation.cancel,
             progress.sender(),
         ),

@@ -4,12 +4,10 @@ mod format;
 mod outcome;
 mod request;
 
-pub use dataset::Dataset;
-pub use example::Example;
-pub use format::Format;
 pub use outcome::Outcome;
 pub use request::Request;
 
+use super::policy;
 use abnegate_comfy::Config;
 use abnegate_comfy::host;
 use abnegate_comfy::host::Compute;
@@ -23,8 +21,11 @@ use abnegate_comfy::lora::TrainMethod;
 use abnegate_comfy::train::TrainProgress;
 use abnegate_secret::SecretValue;
 use base64::Engine;
+use dataset::Dataset;
 use std::fs;
+use std::path::Component;
 use std::path::Path;
+use std::path::PathBuf;
 use tokio::sync::watch;
 
 pub const SUBJECT: &str = "language";
@@ -34,8 +35,8 @@ pub const MAXIMUM_STEPS: u32 = 1000;
 pub const INVALID_NAME: &str = "invalid chat model name";
 pub const UNAVAILABLE_METHOD: &str = "not available for a chat model";
 pub const UNKNOWN_BASE: &str = "unknown training base";
-pub const MISSING_KEY: &str = "Save a Runpod API key in Workspace Settings.";
 pub const INVALID_BASE64: &str = "document is not valid base64";
+pub const UNCONFINED: &str = "a staged file is one plain name inside its job";
 const WEIGHT_EXTENSION: &str = ".safetensors";
 const DOCUMENT: &str = "document";
 
@@ -51,14 +52,7 @@ pub async fn train(
     progress: watch::Sender<Option<TrainProgress>>,
 ) -> Result<Outcome, TrainError> {
     let (name, dataset) = prepare(config, &request)?;
-    let key = if compute.is_remote() {
-        Some(
-            key.filter(|key| !key.expose().trim().is_empty())
-                .ok_or(TrainError::Invalid(MISSING_KEY))?,
-        )
-    } else {
-        None
-    };
+    let key = policy::key(compute, key)?;
     let job = job(&request, &name, dataset.len(), compute);
     let directory = JobDirectory::new(config, job.id);
     if let Err(error) = queue(&directory, &job, &dataset, &request.documents, key.as_ref()) {
@@ -151,8 +145,8 @@ fn queue(
     key: Option<&SecretValue>,
 ) -> Result<(), TrainError> {
     directory.write_queued_progress(steps_for(job.image_count))?;
-    dataset.write(&directory.path().join(DATA_DIRECTORY))?;
-    stage(&directory.path().join(DATASET_DIRECTORY), documents)?;
+    dataset.write(&confined(directory.path(), DATA_DIRECTORY)?)?;
+    stage(&confined(directory.path(), DATASET_DIRECTORY)?, documents)?;
     if let Some(key) = key {
         directory.write_compute_key(job.compute, key)?;
     }
@@ -163,12 +157,20 @@ fn stage(directory: &Path, documents: &[TrainImage]) -> Result<(), TrainError> {
     fs::create_dir_all(directory).map_err(failed)?;
     for (index, document) in documents.iter().enumerate() {
         fs::write(
-            directory.join(staged_name(index, &document.filename)),
+            confined(directory, &staged_name(index, &document.filename))?,
             document_bytes(document)?,
         )
         .map_err(failed)?;
     }
     Ok(())
+}
+
+fn confined(directory: &Path, name: &str) -> Result<PathBuf, TrainError> {
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(directory.join(name)),
+        _ => Err(TrainError::Invalid(UNCONFINED)),
+    }
 }
 
 fn staged_name(index: usize, filename: &str) -> String {
@@ -369,6 +371,24 @@ mod tests {
     }
 
     #[test]
+    fn a_staged_path_is_one_plain_name_inside_its_directory() {
+        let directory = Path::new("/models/.zone-train/job");
+        assert_eq!(
+            confined(directory, "0000-chat.json").unwrap(),
+            directory.join("0000-chat.json")
+        );
+        for name in ["", ".", "..", "../escape", "nested/file", "/etc/passwd"] {
+            assert!(
+                matches!(
+                    confined(directory, name),
+                    Err(TrainError::Invalid(UNCONFINED))
+                ),
+                "{name:?} leaves its directory"
+            );
+        }
+    }
+
+    #[test]
     fn a_language_job_json_zone_writes_today_reads_through_the_host_contract() {
         let (_root, config) = hosted();
         let id = "5b0f3c1e-8d7a-4f3e-9a51-0c2d6e7f8a9b";
@@ -558,7 +578,10 @@ mod tests {
             let error = train(&config, chat("support-bot"), Compute::Runpod, key, silent())
                 .await
                 .unwrap_err();
-            assert!(matches!(error, TrainError::Invalid(MISSING_KEY)), "{error}");
+            assert!(
+                matches!(error, TrainError::Invalid(policy::MISSING_RUNPOD_KEY)),
+                "{error}"
+            );
         }
         assert_eq!(host_entries(&config), 0);
     }

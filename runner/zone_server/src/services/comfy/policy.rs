@@ -18,7 +18,6 @@ pub const PEOPLE_CHECKPOINT: &str = "checkpoints/lustifySDXLNSFW_ggwpV7.safetens
 pub const LORAS: &str = "loras";
 pub const CHECKPOINTS: &str = "checkpoints";
 pub const MISSING_RUNPOD_KEY: &str = "Save a Runpod API key in Workspace Settings.";
-pub const REMOTE_SUBJECT_UNAVAILABLE: &str = "this subject trains only on this machine";
 
 /// What each base trains and where it publishes: the people base trains a
 /// person's LoRA, pivotal LoRA and fine-tune, and an object or style LoRA;
@@ -48,19 +47,10 @@ pub fn train_policy() -> TrainPolicy {
         )
 }
 
-/// Whether `subject` may train on `compute`. Every subject trains on this
-/// machine; Runpod takes the image subjects zone knows of.
-pub fn allows(subject: TrainSubject, compute: Compute) -> bool {
-    match compute {
-        Compute::Local => true,
-        Compute::Runpod => matches!(subject, TrainSubject::Person | TrainSubject::Other),
-        _ => false,
-    }
-}
-
 /// The key `compute` trains with, from the workspace's saved key: none for
 /// this machine, and the saved key for Runpod, which refuses to start
-/// without one.
+/// without one. Every subject, a person, anything else or a chat model,
+/// trains on either compute.
 pub fn key(
     compute: Compute,
     saved: Option<SecretValue>,
@@ -84,9 +74,6 @@ pub fn place(
 ) -> Result<TrainRequest, TrainError> {
     if request.method == TrainMethod::Video {
         return Err(TrainError::Invalid(VIDEO_REFUSAL));
-    }
-    if !allows(request.subject, compute) {
-        return Err(TrainError::Invalid(REMOTE_SUBJECT_UNAVAILABLE));
     }
     let placed = request.with_compute(compute);
     Ok(match key(compute, saved)? {
@@ -249,14 +236,6 @@ mod tests {
                     other => panic!("{subject:?} on {compute:?} was not refused: {other:?}"),
                 }
             }
-        }
-    }
-
-    #[test]
-    fn runpod_trains_every_image_subject() {
-        for subject in [TrainSubject::Person, TrainSubject::Other] {
-            assert!(allows(subject, Compute::Runpod), "{subject:?}");
-            assert!(allows(subject, Compute::Local), "{subject:?}");
         }
     }
 

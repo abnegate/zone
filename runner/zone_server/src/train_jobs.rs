@@ -1,8 +1,10 @@
 //! One in-process LoRA training job. The request that starts it returns before
 //! the trainer finishes, so a refresh does not cancel the run.
 
+mod recovery;
 mod screening_view;
 
+pub use recovery::recover;
 pub use screening_view::ScreeningView;
 
 use crate::services::comfy::language;
@@ -19,9 +21,10 @@ use serde::Serialize;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 use uuid::Uuid;
 
-const DISABLED: &str = "LoRA training is not configured on this server";
+pub const DISABLED: &str = "LoRA training is not configured on this server";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,6 +131,29 @@ impl TrainRegistry {
         method: Option<String>,
         provider: Option<String>,
     ) -> Option<Arc<Job>> {
+        self.occupy(Job::running(
+            Uuid::new_v4(),
+            name,
+            method,
+            provider,
+            Utc::now(),
+        ))
+    }
+
+    /// Occupies the slot with the host job `job`, queued before a restart,
+    /// under its own id and start, so following it again shows the run the
+    /// client already knew.
+    pub fn resume(&self, job: &host::Job) -> Option<Arc<Job>> {
+        self.occupy(Job::running(
+            job.id,
+            job.name.clone(),
+            Some(job.method.clone()),
+            Some(job.compute.as_str().to_string()),
+            job.started_at,
+        ))
+    }
+
+    fn occupy(&self, job: Arc<Job>) -> Option<Arc<Job>> {
         let mut slot = self.slot.lock().expect("train job");
         if slot
             .as_ref()
@@ -135,7 +161,6 @@ impl TrainRegistry {
         {
             return None;
         }
-        let job = Job::running(name, method, provider);
         *slot = Some(job.clone());
         Some(job)
     }
@@ -154,13 +179,19 @@ impl TrainRegistry {
 }
 
 impl Job {
-    fn running(name: String, method: Option<String>, provider: Option<String>) -> Arc<Self> {
+    fn running(
+        id: Uuid,
+        name: String,
+        method: Option<String>,
+        provider: Option<String>,
+        started_at: DateTime<Utc>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            id: Uuid::new_v4(),
+            id,
             name,
             method,
             provider,
-            started_at: Utc::now(),
+            started_at,
             snapshot: Mutex::new(Snapshot {
                 status: TrainJobStatus::Running,
                 filename: None,
@@ -239,12 +270,46 @@ impl Job {
         }
     }
 
+    /// Runs `training` to its end, keeping the progress it reports through
+    /// `receiver` on this job, the last update included.
+    pub async fn follow<T>(
+        &self,
+        mut receiver: watch::Receiver<Option<TrainProgress>>,
+        training: impl Future<Output = Result<T, TrainError>>,
+    ) -> Result<T, TrainError> {
+        tokio::pin!(training);
+        let mut open = true;
+        loop {
+            tokio::select! {
+                biased;
+                changed = receiver.changed(), if open => match changed {
+                    Ok(()) => {
+                        let update = receiver.borrow_and_update().clone();
+                        if let Some(update) = update {
+                            self.progress(update);
+                        }
+                    }
+                    Err(_) => open = false,
+                },
+                result = &mut training => {
+                    let latest = receiver.borrow_and_update();
+                    if latest.has_changed()
+                        && let Some(update) = latest.clone()
+                    {
+                        self.progress(update);
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+
     pub fn succeed(&self, outcome: TrainOutcome) {
         self.finish(
             &outcome.path,
             outcome.quality,
-            outcome.dataset,
-            outcome.screening.into(),
+            Some(outcome.dataset),
+            Some(outcome.screening.into()),
         );
     }
 
@@ -252,17 +317,23 @@ impl Job {
         self.finish(
             &outcome.path,
             None,
-            Vec::new(),
-            ScreeningView::kept(outcome.examples),
+            Some(Vec::new()),
+            Some(ScreeningView::kept(outcome.examples)),
         );
+    }
+
+    /// A resumed host job published at `path`. Its quality and what it kept
+    /// of its set went with the process that queued it.
+    pub fn succeed_resumed(&self, path: &Path) {
+        self.finish(path, None, None, None);
     }
 
     fn finish(
         &self,
         path: &Path,
         quality: Option<Quality>,
-        dataset: Vec<Finding>,
-        screening: ScreeningView,
+        dataset: Option<Vec<Finding>>,
+        screening: Option<ScreeningView>,
     ) {
         let filename = path
             .file_name()
@@ -272,8 +343,8 @@ impl Job {
         snapshot.status = TrainJobStatus::Succeeded;
         snapshot.filename = filename;
         snapshot.quality = quality;
-        snapshot.dataset = Some(dataset);
-        snapshot.screening = Some(screening);
+        snapshot.dataset = dataset;
+        snapshot.screening = screening;
         snapshot.error = None;
     }
 
@@ -362,7 +433,7 @@ fn eta_seconds(step: Option<u32>, total: Option<u32>, elapsed: Option<Duration>)
 
 #[cfg(test)]
 mod tests {
-    use super::{TrainJobStatus, TrainJobView, TrainRegistry, eta_seconds};
+    use super::{DISABLED, TrainJobStatus, TrainJobView, TrainRegistry, eta_seconds};
     use crate::services::comfy::language;
     use abnegate_comfy::host::Compute;
     use abnegate_comfy::host::Job;
@@ -566,9 +637,6 @@ mod tests {
         let registry = TrainRegistry::new();
         let job = registry.start("jerry".into(), None, None).expect("start");
         job.fail(TrainError::Disabled);
-        assert_eq!(
-            registry.current().unwrap().error.as_deref(),
-            Some("LoRA training is not configured on this server")
-        );
+        assert_eq!(registry.current().unwrap().error.as_deref(), Some(DISABLED));
     }
 }

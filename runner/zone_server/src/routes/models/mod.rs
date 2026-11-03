@@ -46,14 +46,15 @@ use crate::services::endpoint::Origin;
 use crate::services::model::Model;
 use crate::services::route::Route;
 use crate::state::AppState;
-use crate::train_jobs::{Job, TrainJobStatus, TrainJobView};
+use crate::train_jobs;
+use crate::train_jobs::{TrainJobStatus, TrainJobView};
 use abnegate_comfy::Captioner;
 use abnegate_comfy::Config as ComfyConfig;
 use abnegate_comfy::host;
 use abnegate_comfy::inventory;
 use abnegate_comfy::lora::{self, TrainError, TrainMethod};
 use abnegate_comfy::recipe::{self, RecipeCatalog};
-use abnegate_comfy::train::{self, TrainProgress};
+use abnegate_comfy::train;
 use abnegate_comfy::video;
 use abnegate_secret::SecretValue;
 use tokio::sync::watch;
@@ -61,7 +62,7 @@ use training::Training;
 use types::ModelCapability;
 
 const MAX_MODEL_NAME_LENGTH: usize = 256;
-const TRAIN_RUNNING: &str = "a training job is already running";
+pub(crate) const TRAIN_RUNNING: &str = "a training job is already running";
 const UNREADABLE_CATALOG: &str = "recipe catalog is not readable";
 
 /// Holds a training-dataset permit for the whole request, refusing rather than
@@ -967,7 +968,7 @@ pub(crate) fn dismiss_train_job(state: &AppState) -> Result<(), DismissError> {
             state.train_jobs().clear_finished();
             Ok(())
         }
-        Err(TrainError::Invalid(TRAIN_RUNNING)) => Err(DismissError::Busy),
+        Err(_) if host::busy(config) => Err(DismissError::Busy),
         Err(error) => Err(DismissError::Failed(error.to_string())),
     }
 }
@@ -1104,7 +1105,7 @@ impl StartTrainError {
 
     pub(crate) fn message(&self) -> String {
         match self {
-            Self::Disabled => "LoRA training is not configured on this server".to_string(),
+            Self::Disabled => train_jobs::DISABLED.to_string(),
             Self::Invalid(message) => (*message).to_string(),
             Self::Failed(message) => message.clone(),
             Self::Busy => TRAIN_RUNNING.to_string(),
@@ -1159,7 +1160,7 @@ pub(crate) async fn start_job(
             Training::Image(request) => {
                 let training =
                     lora::train_reporting(&comfyui, litellm_host, litellm_key, request, sender);
-                match follow(&job, receiver, training).await {
+                match job.follow(receiver, training).await {
                     Ok(outcome) => job.succeed(outcome),
                     Err(error) => job.fail(error),
                 }
@@ -1170,7 +1171,7 @@ pub(crate) async fn start_job(
                 key,
             } => {
                 let training = language::train(&comfyui, request, compute, key, sender);
-                match follow(&job, receiver, training).await {
+                match job.follow(receiver, training).await {
                     Ok(outcome) => job.succeed_language(outcome),
                     Err(error) => job.fail(error),
                 }
@@ -1212,38 +1213,6 @@ async fn prepare_training(
     Ok(Training::Image(request))
 }
 
-async fn follow<T>(
-    job: &Job,
-    mut receiver: watch::Receiver<Option<TrainProgress>>,
-    training: impl Future<Output = Result<T, TrainError>>,
-) -> Result<T, TrainError> {
-    tokio::pin!(training);
-    let mut open = true;
-    loop {
-        tokio::select! {
-            biased;
-            changed = receiver.changed(), if open => match changed {
-                Ok(()) => {
-                    let update = receiver.borrow_and_update().clone();
-                    if let Some(update) = update {
-                        job.progress(update);
-                    }
-                }
-                Err(_) => open = false,
-            },
-            result = &mut training => {
-                let latest = receiver.borrow_and_update();
-                if latest.has_changed()
-                    && let Some(update) = latest.clone()
-                {
-                    job.progress(update);
-                }
-                return result;
-            }
-        }
-    }
-}
-
 pub(crate) fn catalog_pull_start(state: &AppState, request: Pull) -> PullStart {
     let manifest = crate::setup::manifest_weight(&request.model).map(|weight| ManifestFile {
         url: weight.url.clone(),
@@ -1262,7 +1231,7 @@ pub(crate) fn catalog_pull_start(state: &AppState, request: Pull) -> PullStart {
             })
         });
         ComfyPull {
-            models_dir: state.config().comfyui.models_directory.clone(),
+            models_directory: state.config().comfyui.models_directory.clone(),
             recipe_id,
             hf_base: request.hf_base.clone(),
             hub_origin: huggingface_hub_origin(&state.config().huggingface_models_url),
@@ -1409,11 +1378,13 @@ mod weight_path_tests {
 
     #[test]
     fn traversal_in_a_scanned_name_is_refused() {
-        let models_dir = Path::new("/models");
-        assert!(confined_weight_path(models_dir, "..", "style.safetensors").is_none());
-        assert!(confined_weight_path(models_dir, "loras", "../../etc/passwd").is_none());
-        assert!(confined_weight_path(models_dir, "loras/nested", "style.safetensors").is_none());
-        assert!(confined_weight_path(models_dir, "loras", "/etc/passwd").is_none());
+        let models_directory = Path::new("/models");
+        assert!(confined_weight_path(models_directory, "..", "style.safetensors").is_none());
+        assert!(confined_weight_path(models_directory, "loras", "../../etc/passwd").is_none());
+        assert!(
+            confined_weight_path(models_directory, "loras/nested", "style.safetensors").is_none()
+        );
+        assert!(confined_weight_path(models_directory, "loras", "/etc/passwd").is_none());
     }
 
     #[test]

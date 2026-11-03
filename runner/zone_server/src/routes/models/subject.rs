@@ -48,15 +48,6 @@ impl Subject {
     }
 }
 
-impl From<TrainSubject> for Subject {
-    fn from(subject: TrainSubject) -> Self {
-        match subject {
-            TrainSubject::Person => Self::Person,
-            _ => Self::Other,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

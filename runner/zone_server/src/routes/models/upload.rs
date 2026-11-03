@@ -14,8 +14,7 @@ use uuid::Uuid;
 use super::subject::Subject;
 use super::train_form::TrainForm;
 use super::types::ErrorResponse;
-use abnegate_comfy::host::Compute;
-use abnegate_comfy::lora::{TrainImage, TrainMethod};
+use abnegate_comfy::lora::TrainImage;
 use abnegate_comfy::video::FrameRequest;
 use abnegate_comfy::{CaptionImage, CaptionRequest};
 
@@ -186,20 +185,19 @@ async fn multipart_train(request: Request) -> Result<ParsedTrain, UploadError> {
             subject: optional_text(&parts, "subject")
                 .and_then(Subject::parse)
                 .unwrap_or_default(),
-            method: match optional_text(&parts, "method") {
-                Some("finetune") => TrainMethod::Finetune,
-                Some("pivotal") => TrainMethod::Pivotal,
-                Some("video") => TrainMethod::Video,
-                _ => TrainMethod::Lora,
-            },
-            compute: match optional_text(&parts, "provider") {
-                Some("runpod") => Compute::Runpod,
-                _ => Compute::Local,
-            },
+            method: wire_name(optional_text(&parts, "method")),
+            compute: wire_name(optional_text(&parts, "provider")),
             images,
         },
         upload_id,
     })
+}
+
+/// The value a JSON form would carry under the same `name`, or its default
+/// when the text names none.
+fn wire_name<T: DeserializeOwned + Default>(name: Option<&str>) -> T {
+    name.and_then(|name| serde_json::from_value(serde_json::Value::from(name)).ok())
+        .unwrap_or_default()
 }
 
 pub async fn append_images(request: Request) -> Result<Vec<TrainImage>, UploadError> {
@@ -463,5 +461,31 @@ fn parse_bool(value: &str) -> Option<bool> {
         "true" | "1" | "yes" => Some(true),
         "false" | "0" | "no" => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use abnegate_comfy::host::Compute;
+    use abnegate_comfy::lora::TrainMethod;
+
+    #[test]
+    fn a_multipart_field_reads_the_name_a_json_form_carries() {
+        for method in [
+            TrainMethod::Lora,
+            TrainMethod::Finetune,
+            TrainMethod::Pivotal,
+            TrainMethod::Video,
+        ] {
+            assert_eq!(wire_name::<TrainMethod>(Some(method.as_str())), method);
+        }
+        for compute in [Compute::Local, Compute::Runpod] {
+            assert_eq!(wire_name::<Compute>(Some(compute.as_str())), compute);
+        }
+        for unknown in [None, Some(""), Some("Runpod"), Some("dreambooth")] {
+            assert_eq!(wire_name::<TrainMethod>(unknown), TrainMethod::Lora);
+            assert_eq!(wire_name::<Compute>(unknown), Compute::Local);
+        }
     }
 }

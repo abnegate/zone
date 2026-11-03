@@ -686,12 +686,11 @@ mod tests {
 
     #[test]
     fn a_trained_identity_is_named_on_the_prompt_parameter() {
-        let root = std::env::temp_dir().join(format!("zone-identity-prompt-{}", Uuid::new_v4()));
-        ready_identity(&root, "jake.safetensors", "ohwx");
+        let root = tempfile::tempdir().expect("models directory");
+        ready_identity(root.path(), "jake.safetensors", "ohwx");
         let mut config = test_config().comfyui;
-        config.models_directory = root.clone();
+        config.models_directory = root.path().to_path_buf();
         let identities = trained_identities(&config);
-        let _ = std::fs::remove_dir_all(root);
         assert_eq!(
             identities
                 .iter()
@@ -721,14 +720,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let root = std::env::temp_dir().join(format!("zone-identity-{}", Uuid::new_v4()));
-        ready_identity(&root, "jake.safetensors", "ohwx");
-        ready_identity(&root, "teapot.safetensors", "zrkxyz");
+        let root = tempfile::tempdir().expect("models directory");
+        ready_identity(root.path(), "jake.safetensors", "ohwx");
+        ready_identity(root.path(), "teapot.safetensors", "zrkxyz");
         let scope = scope();
         let mut config = scope.state.config().comfyui.clone();
         config.base_url = server.uri();
         config.checkpoint = "flux1-schnell-fp8.safetensors".to_string();
-        config.models_directory = root.clone();
+        config.models_directory = root.path().to_path_buf();
 
         let named = run_image(
             &scope,
@@ -784,7 +783,6 @@ mod tests {
             "a prompt that names a different identity must leave the pin"
         );
         assert!(switched_loras.contains(&"flux-uncensored.safetensors".to_string()));
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -836,11 +834,11 @@ mod tests {
     #[tokio::test]
     async fn generated_images_are_persisted_and_returned_to_the_agent() {
         let server = successful_comfy().await;
-        let root = std::env::temp_dir().join(format!("zone-image-tool-{}", Uuid::new_v4()));
+        let root = tempfile::tempdir().expect("artifact root");
         let scope = scope();
         let mut config = scope.state.config().comfyui.clone();
         config.base_url = server.uri();
-        config.artifact_root = root.clone();
+        config.artifact_root = root.path().to_path_buf();
         config.poll_interval = Duration::from_millis(10);
         let result = run_image(&scope, &config, json!({"prompt":"a lighthouse"}), false).await;
         assert!(result.success, "{:?}", result.error);
@@ -854,12 +852,12 @@ mod tests {
         );
         let chat_id = scope.chat_id.expect("the fixture scope has a chat");
         let stored = root
+            .path()
             .join(scope.workspace_id.to_string())
             .join(chat_id.to_string())
             .join(chat_id.to_string())
             .join(result.images[0].rsplit('/').next().unwrap());
         assert_eq!(tokio::fs::read(stored).await.unwrap(), [1, 2, 3, 4]);
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
@@ -876,7 +874,8 @@ mod tests {
         );
 
         let server = successful_comfy().await;
-        let root = std::env::temp_dir().join(format!("zone-image-tool-file-{}", Uuid::new_v4()));
+        let directory = tempfile::tempdir().expect("scratch directory");
+        let root = directory.path().join("artifacts");
         tokio::fs::write(&root, b"not a directory").await.unwrap();
         let mut config = scope.state.config().comfyui.clone();
         config.base_url = server.uri();
@@ -887,7 +886,6 @@ mod tests {
             result.error.as_deref(),
             Some("Image generation failed: could not store the image")
         );
-        tokio::fs::remove_file(root).await.unwrap();
     }
 
     #[tokio::test]

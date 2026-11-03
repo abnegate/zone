@@ -206,6 +206,10 @@ async fn main() {
         zone_server::workers::auto_project::spawn(state.clone());
     }
     let recovery = zone_server::workers::task::spawn_recovery(state.clone());
+    let training = tokio::spawn(zone_server::train_jobs::recover(
+        state.config().comfyui.clone(),
+        state.train_jobs().clone(),
+    ));
     let callback = match state.config().agents.callback {
         Some(callback) => {
             let listener = login::callback::bind(&callback)
@@ -246,6 +250,8 @@ async fn main() {
     let result = axum::serve(listener, app).await;
     recovery.abort();
     let _ = recovery.await;
+    training.abort();
+    let _ = training.await;
     if let Some(callback) = callback {
         callback.abort();
         let _ = callback.await;

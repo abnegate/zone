@@ -496,7 +496,7 @@ fn dismiss_train(state: &AppState) -> ToolResult {
     }
     match dismiss_train_job(state) {
         Ok(()) => ToolResult::success("Dismissed the finished training job."),
-        Err(DismissError::Busy) => ToolResult::error("a training job is already running"),
+        Err(DismissError::Busy) => ToolResult::error(models::TRAIN_RUNNING),
         Err(DismissError::Failed(message)) => ToolResult::error(message),
     }
 }
