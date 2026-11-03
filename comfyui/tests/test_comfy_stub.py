@@ -85,6 +85,7 @@ class OutputAttribution(unittest.TestCase):
         for name, lane, sink in [
             ('flux1-schnell-fp8-api.json', 'image', '9'),
             ('wan2.2-a14b-t2v-api.json', 'video', '10'),
+            ('wan2.2-a14b-i2v-api.json', 'video', '10'),
             ('wan2.2-ti2v-5b-api.json', 'video', '10'),
             ('ace-step-v1-3.5b-api.json', 'audio', '10'),
         ]:
