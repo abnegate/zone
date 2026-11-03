@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import sys
 import tempfile
 import threading
@@ -20,6 +21,10 @@ TRUSTED_PREFIXES = (
 
 MODULE_PATH = Path(__file__).parents[1] / "download-models.py"
 MANIFEST_PATH = Path(__file__).parents[1] / "model-manifest.json"
+CATALOG_PATH = Path(__file__).parents[1] / 'recipes' / 'catalog.json'
+FEATURES_PATH = Path(__file__).parents[2] / 'scripts' / 'setup-features.json'
+VIDEO_RECIPE = 'wan-a14b'
+VIDEO_BUNDLE = 'video'
 SPEC = importlib.util.spec_from_file_location("download_models", MODULE_PATH)
 assert SPEC and SPEC.loader
 download_models = importlib.util.module_from_spec(SPEC)
@@ -300,6 +305,24 @@ class ModelManifestTest(unittest.TestCase):
             with self.subTest(model=model.get("id")):
                 missing = [key for key in self.REQUIRED_KEYS if not model.get(key)]
                 self.assertEqual(missing, [], f"missing keys: {missing}")
+
+    def test_wan_a14b_files_ship_in_the_video_bundle(self) -> None:
+        recipes = json.loads(CATALOG_PATH.read_text())['recipes']
+        recipe = next(recipe for recipe in recipes if recipe['id'] == VIDEO_RECIPE)
+        self.assertTrue(recipe['required_files'])
+        models = {model['filename']: model for model in self.models}
+        for required in recipe['required_files']:
+            filename = required['filename']
+            with self.subTest(filename=filename):
+                self.assertIn(filename, models, f'{filename} is missing from {MANIFEST_PATH}')
+                model = models[filename]
+                self.assertEqual(download_models.model_bundle(model), VIDEO_BUNDLE)
+                self.assertEqual(model['relative_path'], f"{required['directory']}/{filename}")
+
+    def test_the_video_feature_installs_the_video_bundle(self) -> None:
+        features = json.loads(FEATURES_PATH.read_text())['features']
+        video = next(feature for feature in features if feature['id'] == 'video')
+        self.assertIn(VIDEO_BUNDLE, video['comfy_bundles'])
 
 
 if __name__ == "__main__":
