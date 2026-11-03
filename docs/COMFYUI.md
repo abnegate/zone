@@ -350,7 +350,10 @@ Shipped image recipes:
 `sd15` and `sdxl` carry no weights of their own: they match a checkpoint you
 supply by filename hint. The other recipes name the files they need in
 `required_files`, and the weight inventory reports a recipe as not ready until
-every one of them is on disk.
+every one of them is on disk. An unknown checkpoint falls back to
+`sdxl-people`, but a file in `diffusion_models/` is listed only when its name
+is in an image recipe's `files` or `filename_hints` (or a sidecar names its
+recipe), so Wan UNETs never show up as image models.
 
 To add another family, drop two API-format graphs in `comfyui/workflows/`
 (generate + edit) and list them in `comfyui/recipes/catalog.json` with slot

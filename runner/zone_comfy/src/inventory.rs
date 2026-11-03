@@ -11,10 +11,14 @@ const SIDECAR_SUFFIX: &str = ".zone.json";
 pub(crate) const PUBLICATION_DIRECTORY: &str = ".zone-publish";
 const PUBLICATION_SUFFIX: &str = ".pending";
 
+const CHECKPOINT: &str = "checkpoint";
+const DIFFUSION_MODEL: &str = "diffusion_model";
+const LORA: &str = "lora";
+
 const SCAN_DIRECTORIES: &[(&str, &str)] = &[
-    ("checkpoints", "checkpoint"),
-    ("diffusion_models", "diffusion_model"),
-    ("loras", "lora"),
+    ("checkpoints", CHECKPOINT),
+    ("diffusion_models", DIFFUSION_MODEL),
+    ("loras", LORA),
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,7 +149,7 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
             if sanitize_weight_filename(filename).is_err() {
                 continue;
             }
-            if *kind == "lora" && publication_pending(&models_dir, filename) {
+            if *kind == LORA && publication_pending(&models_dir, filename) {
                 continue;
             }
             let metadata = fs::metadata(&path).ok();
@@ -159,7 +163,7 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
             let Some(recipe) = recipe else {
                 continue;
             };
-            if *kind == "lora" && publication_pending(&models_dir, filename) {
+            if *kind == LORA && publication_pending(&models_dir, filename) {
                 continue;
             }
             let missing = missing_required(&models_dir, &recipe.required_files);
@@ -168,7 +172,7 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
                 .iter()
                 .map(|file| file.filename.clone())
                 .collect();
-            if *kind == "lora" {
+            if *kind == LORA {
                 required.insert(0, filename.to_string());
             }
             items.push(InventoryItem {
@@ -381,9 +385,9 @@ pub fn write_sidecar(path: &Path, sidecar: &WeightSidecar) -> std::io::Result<()
 
 pub fn relative_weight_path(kind: &str, filename: &str) -> Option<PathBuf> {
     let directory = match kind {
-        "checkpoint" => "checkpoints",
-        "diffusion_model" => "diffusion_models",
-        "lora" => "loras",
+        CHECKPOINT => "checkpoints",
+        DIFFUSION_MODEL => "diffusion_models",
+        LORA => "loras",
         "vae" => "vae",
         "text_encoder" => "text_encoders",
         _ => return None,
@@ -397,7 +401,7 @@ fn resolve_recipe<'a>(
     kind: &str,
     document: Option<&WeightDocument>,
 ) -> Option<&'a Recipe> {
-    if kind == "lora" {
+    if kind == LORA {
         let document = document?;
         if document
             .generation
@@ -422,6 +426,9 @@ fn resolve_recipe<'a>(
         && let Some(recipe) = catalog.get(&document.sidecar.recipe_id)
     {
         return Some(recipe);
+    }
+    if kind == DIFFUSION_MODEL && !catalog.is_explicit_image_match(filename) {
+        return None;
     }
     catalog.image_recipe_for(filename).ok()
 }
@@ -830,6 +837,25 @@ mod tests {
         assert!(identities_among(&items).is_empty());
         let bound = video_identity_among(&items, "portrait of ohwx").unwrap();
         assert_eq!(bound.trigger, "ohwx");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_skips_wan_unets_in_diffusion_models() {
+        let root = temp_models();
+        for filename in [
+            "wan2.2_ti2v_5B_fp16.safetensors",
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+            "qwen_image_edit_2511_fp8mixed.safetensors",
+        ] {
+            fs::write(root.join("diffusion_models").join(filename), b"unet").unwrap();
+        }
+        let catalog = RecipeCatalog::packaged().unwrap();
+        let listed: Vec<String> = scan(&root, &catalog)
+            .into_iter()
+            .map(|item| item.filename)
+            .collect();
+        assert_eq!(listed, ["qwen_image_edit_2511_fp8mixed.safetensors"]);
         let _ = fs::remove_dir_all(root);
     }
 
