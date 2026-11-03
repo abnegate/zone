@@ -842,6 +842,10 @@ const USAGE_KEY: &str = "usage";
 
 const LIVE_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(300);
 
+const MEDIA_HEARTBEAT: Duration = Duration::from_secs(30);
+
+const MEDIA_WORKING: &str = "Working...";
+
 /// What a turn that produced neither prose nor an image is stored as.
 const STOPPED_BEFORE_ANSWERING: &str = "[Stopped before answering]";
 
@@ -1534,8 +1538,34 @@ async fn await_media<T>(
 }
 
 async fn relay_progress(stream: Arc<ChatStream>, mut progress: mpsc::UnboundedReceiver<String>) {
-    while let Some(message) = progress.recv().await {
-        publish(&stream, ServerMessage::Status { message }).await;
+    let started = tokio::time::Instant::now();
+    let mut latest = MEDIA_WORKING.to_string();
+    let mut heartbeat = tokio::time::interval_at(started + MEDIA_HEARTBEAT, MEDIA_HEARTBEAT);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            message = progress.recv() => {
+                let Some(message) = message else {
+                    return;
+                };
+                latest.clone_from(&message);
+                heartbeat.reset();
+                publish(&stream, ServerMessage::Status { message }).await;
+            }
+            _ = heartbeat.tick() => {
+                let message = format!("{latest} {} elapsed", elapsed_label(started.elapsed()));
+                publish(&stream, ServerMessage::Status { message }).await;
+            }
+        }
+    }
+}
+
+fn elapsed_label(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 60 {
+        format!("{seconds} s")
+    } else {
+        format!("{} min", seconds / 60)
     }
 }
 
@@ -5845,6 +5875,81 @@ cat 'DIR/reply.jsonl'
         ));
         drop(generation);
         assert!(!CHAT_CANCELLATIONS.contains_key(&key));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_video_job_comfy_leaves_silent_for_over_two_hours_keeps_reporting() {
+        const SILENCE: Duration = Duration::from_secs(2 * 60 * 60 + 60);
+        const LONGEST_QUIET: Duration = Duration::from_secs(60);
+        const GENERATING: &str = "Generating video...";
+
+        let stream = ChatStream::of(Uuid::new_v4());
+        let mut events = stream.events.subscribe();
+        let listener = tokio::spawn(async move {
+            let mut heard = Vec::new();
+            loop {
+                match events.recv().await {
+                    Ok(ServerMessage::Status { message }) => {
+                        heard.push((tokio::time::Instant::now(), message));
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return heard,
+                }
+            }
+        });
+        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+        let relay = tokio::spawn(relay_progress(stream.clone(), progress_rx));
+        let silent_comfy = async move {
+            let _ = progress_tx.send("Video queued...".to_string());
+            let _ = progress_tx.send(GENERATING.to_string());
+            tokio::time::sleep(SILENCE).await;
+            "rendered"
+        };
+        let (cancellation, _) = broadcast::channel(1);
+        let started = tokio::time::Instant::now();
+
+        let rendered = await_media(std::future::pending(), cancellation, silent_comfy, &relay)
+            .await
+            .expect("nothing took the lease");
+
+        assert_eq!(rendered, "rendered");
+        assert!(
+            started.elapsed() >= SILENCE,
+            "the job was cut short after {:?}",
+            started.elapsed()
+        );
+        relay.await.expect("the relay ends with the job");
+        drop(stream);
+        let heard = listener.await.expect("the listener ends with the stream");
+        let mut previous = started;
+        for (at, _) in &heard {
+            let quiet = at.duration_since(previous);
+            assert!(
+                quiet <= LONGEST_QUIET,
+                "the console heard nothing for {quiet:?} while ComfyUI was silent"
+            );
+            previous = *at;
+        }
+        let tail = (started + SILENCE).saturating_duration_since(previous);
+        assert!(
+            tail <= LONGEST_QUIET,
+            "the console heard nothing for the last {tail:?} of the job"
+        );
+        assert!(
+            heard
+                .iter()
+                .skip(2)
+                .all(|(_, message)| message.starts_with(GENERATING)),
+            "a status during the silence has to say what the job is doing: {heard:?}"
+        );
+    }
+
+    #[test]
+    fn elapsed_labels_read_in_seconds_then_whole_minutes() {
+        assert_eq!(elapsed_label(Duration::from_secs(30)), "30 s");
+        assert_eq!(elapsed_label(Duration::from_secs(59)), "59 s");
+        assert_eq!(elapsed_label(Duration::from_secs(60)), "1 min");
+        assert_eq!(elapsed_label(Duration::from_secs(7_259)), "120 min");
     }
 
     #[tokio::test(start_paused = true)]
