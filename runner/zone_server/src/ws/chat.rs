@@ -218,23 +218,32 @@ async fn send_server(sender: &SharedSender, message: ServerMessage) -> bool {
 ///
 /// A turn belongs to the chat rather than to the socket that started it, so a
 /// connection that arrives while one is running replays this log and picks the
-/// reply up where it left off.
+/// reply up where it left off. Before its message starts, a turn has only its
+/// latest status to show, such as a media job queued behind another.
 #[derive(Default)]
 struct LiveTurn {
     frames: Vec<ServerMessage>,
+    status: Option<ServerMessage>,
 }
 
 impl LiveTurn {
     fn record(&mut self, message: &ServerMessage) {
         match message {
             ServerMessage::MessageStart { .. } => {
+                self.status = None;
                 self.frames.clear();
                 self.frames.push(message.clone());
             }
             ServerMessage::MessageEnd { .. }
             | ServerMessage::Cancelled { .. }
-            | ServerMessage::Error { .. } => self.frames.clear(),
-            // Anything outside a turn is already in the chat a joining client loads.
+            | ServerMessage::Error { .. } => {
+                self.status = None;
+                self.frames.clear();
+            }
+            ServerMessage::Status { .. } if self.frames.is_empty() => {
+                self.status = Some(message.clone());
+            }
+            // Anything else outside a turn is already in the chat a joining client loads.
             _ if self.frames.is_empty() => {}
             // Text arrives a token at a time, so keeping a frame each would
             // make the log as long as the reply.
@@ -253,6 +262,9 @@ impl LiveTurn {
     }
 
     fn replay(&self) -> Vec<ServerMessage> {
+        if self.frames.is_empty() {
+            return self.status.iter().cloned().collect();
+        }
         self.frames
             .iter()
             .map(|frame| match frame {
@@ -845,6 +857,8 @@ const LIVE_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(300);
 const MEDIA_HEARTBEAT: Duration = Duration::from_secs(30);
 
 const MEDIA_WORKING: &str = "Working...";
+
+const MEDIA_QUEUED: &str = "Waiting for another generation...";
 
 /// What a turn that produced neither prose nor an image is stored as.
 const STOPPED_BEFORE_ANSWERING: &str = "[Stopped before answering]";
@@ -1490,17 +1504,79 @@ async fn watch_lease(
     }
 }
 
+/// One media job's progress, relayed to the chat from the moment it queues for
+/// the media slot until its outcome is published.
+struct MediaProgress {
+    sender: mpsc::UnboundedSender<String>,
+    relay: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl MediaProgress {
+    fn start(stream: &Arc<ChatStream>) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Self {
+            sender,
+            relay: Some(tokio::spawn(relay_progress(stream.clone(), receiver))),
+        }
+    }
+
+    fn report(&self, message: &str) {
+        let _ = self.sender.send(message.to_string());
+    }
+
+    fn sender(&self) -> mpsc::UnboundedSender<String> {
+        self.sender.clone()
+    }
+
+    /// Stop relaying, so no status can follow the frame that settles the job.
+    async fn stop(&mut self) {
+        if let Some(relay) = self.relay.take() {
+            relay.abort();
+            let _ = relay.await;
+        }
+    }
+}
+
+impl Drop for MediaProgress {
+    fn drop(&mut self) {
+        if let Some(relay) = &self.relay {
+            relay.abort();
+        }
+    }
+}
+
+async fn queue_media<'slots>(
+    slots: &'slots Semaphore,
+    progress: &MediaProgress,
+) -> tokio::sync::SemaphorePermit<'slots> {
+    if let Ok(permit) = slots.try_acquire() {
+        return permit;
+    }
+    progress.report(MEDIA_QUEUED);
+    slots
+        .acquire()
+        .await
+        .expect("media semaphore is never closed")
+}
+
 async fn wait_media(
     generation: &mut Generation,
     session: &mut Session,
     stream: &ChatStream,
+    progress: &mut MediaProgress,
 ) -> Result<Option<tokio::sync::SemaphorePermit<'static>>, Box<dyn std::error::Error + Send + Sync>>
 {
-    tokio::select! {
+    let waited: Result<_, Box<dyn std::error::Error + Send + Sync>> = tokio::select! {
         biased;
         _ = session.guard.lost() => Err(OWNERSHIP_LOST.into()),
         error = watch_lease(&session.store, &session.lease) => Err(error.into()),
-        _ = generation.cancel.recv() => {
+        _ = generation.cancel.recv() => Ok(None),
+        permit = queue_media(&IMAGE_GENERATIONS, progress) => Ok(Some(permit)),
+    };
+    let permit = match waited {
+        Ok(Some(permit)) => permit,
+        Ok(None) => {
+            progress.stop().await;
             session.close().await?;
             publish(
                 stream,
@@ -1509,19 +1585,25 @@ async fn wait_media(
                 },
             )
             .await;
-            Ok(None)
+            return Ok(None);
         }
-        permit = IMAGE_GENERATIONS.acquire() => {
-            Ok(Some(permit.expect("image semaphore is never closed")))
+        Err(error) => {
+            progress.stop().await;
+            return Err(error);
         }
+    };
+    if let Err(error) = session.store.assert_current(&session.lease).await {
+        progress.stop().await;
+        return Err(error.into());
     }
+    Ok(Some(permit))
 }
 
 async fn await_media<T>(
     lost: impl Future<Output = ()>,
     cancellation: broadcast::Sender<()>,
     operation: impl Future<Output = T>,
-    progress: &tokio::task::JoinHandle<()>,
+    progress: &mut MediaProgress,
 ) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
     tokio::pin!(lost);
     tokio::pin!(operation);
@@ -1530,7 +1612,7 @@ async fn await_media<T>(
         _ = &mut lost => {
             let _ = cancellation.send(());
             let _ = operation.await;
-            progress.abort();
+            progress.stop().await;
             Err(OWNERSHIP_LOST.into())
         }
         result = &mut operation => Ok(result),
@@ -1827,14 +1909,11 @@ async fn handle_image_generation(
         Some(identity) => zone_comfy::identity_caption(&generation_prompt, &identity.trigger),
         None => generation_prompt,
     };
-    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
+    let mut progress = MediaProgress::start(stream);
+    let Some(_generation_permit) = wait_media(generation, session, stream, &mut progress).await?
+    else {
         return Ok(());
     };
-
-    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-    let progress_task = tokio::spawn(relay_progress(stream.clone(), progress_rx));
-
-    session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
     let result = await_media(
         session.guard.lost(),
@@ -1844,13 +1923,12 @@ async fn handle_image_generation(
             source.as_ref(),
             None,
             &mut generation.cancel,
-            progress_tx,
+            progress.sender(),
         ),
-        &progress_task,
+        &mut progress,
     )
     .await?;
-    progress_task.abort();
-    let _ = progress_task.await;
+    progress.stop().await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(stream).await;
@@ -1955,23 +2033,25 @@ async fn handle_video_generation(
         },
     )
     .await;
-    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
+    let mut progress = MediaProgress::start(stream);
+    let Some(_generation_permit) = wait_media(generation, session, stream, &mut progress).await?
+    else {
         return Ok(());
     };
-    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-    let progress_task = tokio::spawn(relay_progress(stream.clone(), progress_rx));
-
-    session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
     let result = await_media(
         session.guard.lost(),
         cancellation,
-        client.generate_video(prompt, source.as_ref(), &mut generation.cancel, progress_tx),
-        &progress_task,
+        client.generate_video(
+            prompt,
+            source.as_ref(),
+            &mut generation.cancel,
+            progress.sender(),
+        ),
+        &mut progress,
     )
     .await?;
-    progress_task.abort();
-    let _ = progress_task.await;
+    progress.stop().await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(stream).await;
@@ -2096,15 +2176,13 @@ async fn handle_upscale(
         },
     )
     .await;
-    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
+    let mut progress = MediaProgress::start(stream);
+    let Some(_generation_permit) = wait_media(generation, session, stream, &mut progress).await?
+    else {
         return Ok(());
     };
-
-    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-    let progress_task = tokio::spawn(relay_progress(stream.clone(), progress_rx));
-
-    session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
+    let sender = progress.sender();
     let result = await_media(
         session.guard.lost(),
         cancellation,
@@ -2112,21 +2190,20 @@ async fn handle_upscale(
             match &source {
                 Source::Image(image) => {
                     client
-                        .upscale_image(image, &mut generation.cancel, progress_tx)
+                        .upscale_image(image, &mut generation.cancel, sender)
                         .await
                 }
                 Source::Video(video) => {
                     client
-                        .upscale_video(video, &mut generation.cancel, progress_tx)
+                        .upscale_video(video, &mut generation.cancel, sender)
                         .await
                 }
             }
         },
-        &progress_task,
+        &mut progress,
     )
     .await?;
-    progress_task.abort();
-    let _ = progress_task.await;
+    progress.stop().await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(stream).await;
@@ -2263,23 +2340,20 @@ async fn handle_audio_generation(
         },
     )
     .await;
-    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
+    let mut progress = MediaProgress::start(stream);
+    let Some(_generation_permit) = wait_media(generation, session, stream, &mut progress).await?
+    else {
         return Ok(());
     };
-    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-    let progress_task = tokio::spawn(relay_progress(stream.clone(), progress_rx));
-
-    session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
     let result = await_media(
         session.guard.lost(),
         cancellation,
-        client.generate_audio(prompt, &mut generation.cancel, progress_tx),
-        &progress_task,
+        client.generate_audio(prompt, &mut generation.cancel, progress.sender()),
+        &mut progress,
     )
     .await?;
-    progress_task.abort();
-    let _ = progress_task.await;
+    progress.stop().await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(stream).await;
@@ -5626,9 +5700,6 @@ cat 'DIR/reply.jsonl'
     #[test]
     fn frames_outside_a_turn_are_not_replayed() {
         let mut turn = LiveTurn::default();
-        turn.record(&ServerMessage::Status {
-            message: "Searching the web...".to_string(),
-        });
         turn.record(&ServerMessage::MessageSaved {
             message_id: Uuid::new_v4(),
             role: "user".to_string(),
@@ -5639,6 +5710,43 @@ cat 'DIR/reply.jsonl'
         assert!(
             turn.replay().is_empty(),
             "the chat a joining connection loads already has these"
+        );
+    }
+
+    #[test]
+    fn a_status_before_the_message_starts_replays_until_the_turn_settles() {
+        let queued = ServerMessage::Status {
+            message: MEDIA_QUEUED.to_string(),
+        };
+        let mut turn = LiveTurn::default();
+        turn.record(&ServerMessage::Status {
+            message: "Preparing video generation...".to_string(),
+        });
+        turn.record(&queued);
+
+        assert_eq!(
+            frame_kinds(&turn.replay()),
+            vec!["status"],
+            "only the latest status replays"
+        );
+        assert!(
+            matches!(
+                turn.replay().as_slice(),
+                [ServerMessage::Status { message }] if message == MEDIA_QUEUED
+            ),
+            "{:?}",
+            turn.replay()
+        );
+
+        turn.record(&ServerMessage::Cancelled { message_id: None });
+        assert!(turn.replay().is_empty(), "a settled wait leaves nothing");
+
+        turn.record(&queued);
+        turn.record(&started(Uuid::new_v4()));
+        assert_eq!(
+            frame_kinds(&turn.replay()),
+            vec!["message_start"],
+            "a started message replaces the status it was waiting under"
         );
     }
 
@@ -5897,20 +6005,25 @@ cat 'DIR/reply.jsonl'
                 }
             }
         });
-        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-        let relay = tokio::spawn(relay_progress(stream.clone(), progress_rx));
+        let mut progress = MediaProgress::start(&stream);
+        let sender = progress.sender();
         let silent_comfy = async move {
-            let _ = progress_tx.send("Video queued...".to_string());
-            let _ = progress_tx.send(GENERATING.to_string());
+            let _ = sender.send("Video queued...".to_string());
+            let _ = sender.send(GENERATING.to_string());
             tokio::time::sleep(SILENCE).await;
             "rendered"
         };
         let (cancellation, _) = broadcast::channel(1);
         let started = tokio::time::Instant::now();
 
-        let rendered = await_media(std::future::pending(), cancellation, silent_comfy, &relay)
-            .await
-            .expect("nothing took the lease");
+        let rendered = await_media(
+            std::future::pending(),
+            cancellation,
+            silent_comfy,
+            &mut progress,
+        )
+        .await
+        .expect("nothing took the lease");
 
         assert_eq!(rendered, "rendered");
         assert!(
@@ -5918,7 +6031,7 @@ cat 'DIR/reply.jsonl'
             "the job was cut short after {:?}",
             started.elapsed()
         );
-        relay.await.expect("the relay ends with the job");
+        progress.stop().await;
         drop(stream);
         let heard = listener.await.expect("the listener ends with the stream");
         let mut previous = started;
@@ -5941,6 +6054,95 @@ cat 'DIR/reply.jsonl'
                 .skip(2)
                 .all(|(_, message)| message.starts_with(GENERATING)),
             "a status during the silence has to say what the job is doing: {heard:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_job_queued_behind_another_keeps_reporting_while_it_waits() {
+        const OTHER_JOB: Duration = Duration::from_secs(2 * 60 * 60);
+
+        let slots = Semaphore::new(1);
+        let other = slots.acquire().await.expect("the slot is free");
+        let stream = ChatStream::of(Uuid::new_v4());
+        let mut events = stream.events.subscribe();
+        let listener = tokio::spawn(async move {
+            let mut heard = Vec::new();
+            loop {
+                match events.recv().await {
+                    Ok(ServerMessage::Status { message }) => {
+                        heard.push((tokio::time::Instant::now(), message));
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return heard,
+                }
+            }
+        });
+        let mut progress = MediaProgress::start(&stream);
+        let started = tokio::time::Instant::now();
+
+        let (permit, replay) = tokio::join!(queue_media(&slots, &progress), async {
+            tokio::time::sleep(OTHER_JOB / 2).await;
+            let (replay, _) = stream.join().await;
+            tokio::time::sleep(OTHER_JOB / 2).await;
+            drop(other);
+            replay
+        });
+
+        assert!(
+            started.elapsed() >= OTHER_JOB,
+            "the queued job ran alongside the other after {:?}",
+            started.elapsed()
+        );
+        progress.stop().await;
+        drop(permit);
+        drop(stream);
+        let heard = listener.await.expect("the listener ends with the stream");
+        assert_eq!(
+            heard.first().map(|(_, message)| message.as_str()),
+            Some(MEDIA_QUEUED),
+            "the wait has to say why nothing is happening yet: {heard:?}"
+        );
+        let mut previous = started;
+        for (at, message) in &heard {
+            let quiet = at.duration_since(previous);
+            assert!(
+                quiet <= MEDIA_HEARTBEAT,
+                "the console heard nothing for {quiet:?} while the slot was taken"
+            );
+            assert!(
+                message.starts_with(MEDIA_QUEUED),
+                "a status during the wait has to say it is waiting: {message}"
+            );
+            previous = *at;
+        }
+        let tail = (started + OTHER_JOB).saturating_duration_since(previous);
+        assert!(
+            tail <= MEDIA_HEARTBEAT,
+            "the console heard nothing for the last {tail:?} of the wait"
+        );
+        assert!(
+            matches!(
+                replay.as_slice(),
+                [ServerMessage::Status { message }] if message.starts_with(MEDIA_QUEUED)
+            ),
+            "a console that reconnects during the wait has to see it: {replay:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_free_slot_starts_without_saying_it_waited() {
+        let slots = Semaphore::new(1);
+        let stream = ChatStream::of(Uuid::new_v4());
+        let mut events = stream.events.subscribe();
+        let mut progress = MediaProgress::start(&stream);
+
+        let permit = queue_media(&slots, &progress).await;
+        progress.stop().await;
+
+        drop(permit);
+        assert!(
+            events.try_recv().is_err(),
+            "nothing was ahead of the job, so there was nothing to wait for"
         );
     }
 
