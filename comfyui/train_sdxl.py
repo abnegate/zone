@@ -1685,7 +1685,7 @@ def render_previews(
     specs = preview_specs(trigger)[:count]
     preview_dir = Path(job_dir) / 'previews'
     preview_dir.mkdir(parents=True, exist_ok=True)
-    steps = max(int(config.get('preview_steps') or 12), 1)
+    steps = max(int(config.get('preview_steps') or 25), 1)
     size = int(config.get('resolution') or 1024)
     paths: list[str] = []
     was_training = pipeline.unet.training

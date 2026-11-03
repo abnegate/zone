@@ -525,6 +525,110 @@ class OptimizerTests(unittest.TestCase):
 
 
 class PreviewTests(unittest.TestCase):
+    def test_packaged_preview_steps_match_sdxl_people_sampler(self) -> None:
+        config = train_sdxl.load_config()
+        self.assertEqual(config['preview_steps'], 25)
+
+    def test_render_previews_use_configured_sampler_steps(self) -> None:
+        captured: list[dict] = []
+
+        class FakeImage:
+            def save(self, path: Path) -> None:
+                Path(path).write_bytes(b'\x89PNG\r\n\x1a\n')
+
+        class FakeResult:
+            images = [FakeImage()]
+
+        class FakeModule:
+            def __init__(self) -> None:
+                self.training = True
+
+            def eval(self) -> None:
+                self.training = False
+
+            def train(self) -> None:
+                self.training = True
+
+        class FakePipeline:
+            def __init__(self) -> None:
+                self.unet = FakeModule()
+                self.text_encoder = FakeModule()
+                self.vae = mock.Mock()
+
+            def __call__(self, prompt: str, **kwargs: object) -> FakeResult:
+                captured.append({'prompt': prompt, **kwargs})
+                return FakeResult()
+
+        fake_torch = mock.MagicMock()
+        fake_torch.inference_mode.return_value = mock.MagicMock()
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            with mock.patch.dict(sys.modules, {'torch': fake_torch}):
+                paths = train_sdxl.render_previews(
+                    FakePipeline(),
+                    job_dir,
+                    250,
+                    'emily',
+                    'cpu',
+                    {'preview_count': 4, 'preview_steps': 25, 'resolution': 1024},
+                )
+        self.assertEqual(len(captured), 4)
+        self.assertTrue(all(call['num_inference_steps'] == 25 for call in captured))
+        self.assertTrue(all(call['guidance_scale'] == 5.0 for call in captured))
+        self.assertTrue(captured[0]['prompt'].startswith('identity portrait of emily person'))
+        self.assertEqual(
+            paths,
+            [
+                'previews/step-250-0.png',
+                'previews/step-250-1.png',
+                'previews/step-250-2.png',
+                'previews/step-250-3.png',
+            ],
+        )
+
+    def test_render_previews_default_to_twenty_five_steps(self) -> None:
+        captured: list[dict] = []
+
+        class FakeImage:
+            def save(self, path: Path) -> None:
+                Path(path).write_bytes(b'\x89PNG\r\n\x1a\n')
+
+        class FakeResult:
+            images = [FakeImage()]
+
+        class FakeModule:
+            training = True
+
+            def eval(self) -> None:
+                pass
+
+            def train(self) -> None:
+                pass
+
+        class FakePipeline:
+            def __init__(self) -> None:
+                self.unet = FakeModule()
+                self.text_encoder = FakeModule()
+                self.vae = mock.Mock()
+
+            def __call__(self, prompt: str, **kwargs: object) -> FakeResult:
+                captured.append(kwargs)
+                return FakeResult()
+
+        fake_torch = mock.MagicMock()
+        fake_torch.inference_mode.return_value = mock.MagicMock()
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(sys.modules, {'torch': fake_torch}):
+                train_sdxl.render_previews(
+                    FakePipeline(),
+                    Path(directory),
+                    500,
+                    'emily',
+                    'cpu',
+                    {'preview_count': 1},
+                )
+        self.assertEqual(captured[0]['num_inference_steps'], 25)
+
     def test_placeholder_previews_are_written_for_a_fake_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             job_dir = Path(directory)
