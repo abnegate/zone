@@ -1,34 +1,74 @@
-use std::panic::AssertUnwindSafe;
-
 use axum::http::StatusCode;
-use futures::FutureExt;
 use serde_json::json;
-use tokio::sync::Mutex;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{AssertSqlSafe, PgPool};
+use uuid::Uuid;
 
 use super::{Phone, device_named, listed_devices, login, register};
 use crate::common::TestClient;
 use zone_server::db::devices::{self, Mode};
+use zone_server::db::migrations;
 
-static POLICY: Mutex<()> = Mutex::const_new(());
+/// The device policy is one instance-wide row, so each test that switches it
+/// gets a database of its own and every other test keeps signing in.
+struct Database {
+    admin: PgPool,
+    pool: PgPool,
+    name: String,
+}
 
-async fn with_mode<T>(
-    pool: &sqlx::PgPool,
-    mode: Mode,
-    run: impl std::future::Future<Output = T>,
-) -> T {
-    let _lock = POLICY.lock().await;
+impl Database {
+    async fn new() -> Self {
+        let admin =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("disposable database"))
+                .await
+                .expect("the test database is reachable");
+        // Identifiers contain only a fixed prefix and UUID hexadecimal.
+        let name = format!("device_policy_{}", Uuid::new_v4().simple());
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .expect("a database for the policy test");
+        let options = (*admin.connect_options()).clone().database(&name);
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect_with(options)
+            .await
+            .expect("the policy test database is reachable");
+        migrations::run(&pool)
+            .await
+            .expect("the policy test database migrates");
+        Self { admin, pool, name }
+    }
+
+    fn client(&self) -> TestClient {
+        TestClient::with_pool(self.pool.clone())
+    }
+
+    async fn close(self) {
+        self.pool.close().await;
+        sqlx::query(AssertSqlSafe(format!("DROP DATABASE {}", self.name)))
+            .execute(&self.admin)
+            .await
+            .expect("the policy test database drops");
+        self.admin.close().await;
+    }
+}
+
+async fn with_mode<T>(pool: &PgPool, mode: Mode, run: impl std::future::Future<Output = T>) -> T {
     let previous = devices::policy(pool).await.expect("policy");
     devices::set_policy(pool, mode).await.expect("set policy");
-    let output = AssertUnwindSafe(run).catch_unwind().await;
+    let output = run.await;
     devices::set_policy(pool, previous)
         .await
         .expect("restore policy");
-    output.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    output
 }
 
 #[tokio::test]
 async fn an_unknown_device_waits_when_only_allowed_devices_may_connect() {
-    let client = TestClient::with_db().await;
+    let database = Database::new().await;
+    let client = database.client();
     let phone = Phone::named("Laptop", "desktop");
     let account = register(&client, &phone).await;
     let pool = client.state().db();
@@ -54,11 +94,14 @@ async fn an_unknown_device_waits_when_only_allowed_devices_may_connect() {
     let listed = listed_devices(&client, &account).await;
     let device = device_named(&listed, "New Phone");
     assert_eq!(device["status"], json!("pending"));
+
+    database.close().await;
 }
 
 #[tokio::test]
 async fn allowing_a_pending_device_lets_it_sign_in() {
-    let client = TestClient::with_db().await;
+    let database = Database::new().await;
+    let client = database.client();
     let phone = Phone::named("Owner", "desktop");
     let account = register(&client, &phone).await;
     let pool = client.state().db();
@@ -82,11 +125,14 @@ async fn allowing_a_pending_device_lets_it_sign_in() {
 
     let signed_in = with_mode(pool, Mode::Allowed, login(&client, &account, &unknown)).await;
     signed_in.assert_status(StatusCode::OK);
+
+    database.close().await;
 }
 
 #[tokio::test]
 async fn the_last_allowed_admin_device_cannot_be_blocked_while_locked() {
-    let client = TestClient::with_db().await;
+    let database = Database::new().await;
+    let client = database.client();
     let phone = Phone::named("Admin", "desktop");
     let account = register(&client, &phone).await;
     let pool = client.state().db();
@@ -99,9 +145,10 @@ async fn the_last_allowed_admin_device_cannot_be_blocked_while_locked() {
     let listed = listed_devices(&client, &account).await;
     let device_id = device_named(&listed, "Admin")["id"].as_str().unwrap();
     let count = devices::allowed_admin_count(pool).await.unwrap();
-    if !devices::is_last_allowed_admin(Mode::Allowed, devices::Status::Allowed, true, count) {
-        return;
-    }
+    assert!(
+        devices::is_last_allowed_admin(Mode::Allowed, devices::Status::Allowed, true, count),
+        "a fresh database holds one allowed admin device, found {count}"
+    );
 
     let blocked = with_mode(pool, Mode::Allowed, async {
         client
@@ -131,11 +178,14 @@ async fn the_last_allowed_admin_device_cannot_be_blocked_while_locked() {
         "{}",
         blocked.text()
     );
+
+    database.close().await;
 }
 
 #[tokio::test]
 async fn open_mode_allows_a_pending_device_on_the_next_login() {
-    let client = TestClient::with_db().await;
+    let database = Database::new().await;
+    let client = database.client();
     let phone = Phone::named("Desk", "desktop");
     let account = register(&client, &phone).await;
     let pool = client.state().db();
@@ -148,4 +198,6 @@ async fn open_mode_allows_a_pending_device_on_the_next_login() {
 
     let listed = listed_devices(&client, &account).await;
     assert_eq!(device_named(&listed, "Visitor")["status"], json!("allowed"));
+
+    database.close().await;
 }

@@ -1,5 +1,0 @@
-# The device policy is one instance-wide row: while a test holds it at
-# "allowed", every other test's sign-in from a new device is refused.
-[[profile.default.overrides]]
-filter = 'package(zone_server) and binary(integration) and test(/^devices::policy::/)'
-threads-required = "num-test-threads"
