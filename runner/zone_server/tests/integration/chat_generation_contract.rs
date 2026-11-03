@@ -32,7 +32,7 @@ async fn stop_tokens_never_reach_the_live_or_persisted_answer() {
         .entries
         .iter()
         .rev()
-        .find(|entry| entry.message.role == zone_core::llm::Role::Assistant)
+        .find(|entry| entry.message.role == abnegate_llm::Role::Assistant)
         .unwrap();
     assert_eq!(answer.message.content.as_deref(), Some("Visible answer"));
 }
@@ -163,7 +163,7 @@ async fn generation_timeout_interrupts_the_turn_without_saving_a_reply() {
             .await
             .entries
             .iter()
-            .all(|entry| entry.message.role != zone_core::llm::Role::Assistant)
+            .all(|entry| entry.message.role != abnegate_llm::Role::Assistant)
     );
 }
 

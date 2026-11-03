@@ -151,7 +151,6 @@ async fn test_filesystem_exclude_patterns() {
     let adapter = FilesystemAdapter::new();
     let temp_dir = TempDir::new().unwrap();
 
-    // Create files that should be excluded
     create_test_file(temp_dir.path(), "src/main.rs", "fn main() {}");
     create_test_file(
         temp_dir.path(),
@@ -160,10 +159,14 @@ async fn test_filesystem_exclude_patterns() {
     );
     create_test_file(temp_dir.path(), ".git/config", "git config");
     create_test_file(temp_dir.path(), "target/debug/app", "binary");
+    create_test_file(
+        temp_dir.path(),
+        ".venv/lib/python3.11/site-packages/openai/__init__.py",
+        "pass",
+    );
 
     let source = create_filesystem_source(temp_dir.path().to_str().unwrap(), true);
 
-    // Default FetchConfig has node_modules, .git, target in exclude patterns
     let config = FetchConfig::default();
     let progress = NoOpProgress;
     let result = adapter
@@ -171,7 +174,6 @@ async fn test_filesystem_exclude_patterns() {
         .await
         .unwrap();
 
-    // Should only get main.rs, not the excluded files
     assert_eq!(
         result.items.len(),
         1,

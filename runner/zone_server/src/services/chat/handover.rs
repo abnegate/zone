@@ -15,11 +15,12 @@ pub use switch::Switch;
 
 use std::time::Duration;
 
+use abnegate_llm::Message;
 use chrono::Utc;
 use uuid::Uuid;
 use zone_chat::history::NewEntry;
 use zone_core::context::Entry;
-use zone_core::llm::{AgentKind, LlmBackend, Message, Session};
+use zone_core::llm::{AgentKind, LlmBackend, Session};
 
 use super::session::RunContext;
 use crate::config::Config;
@@ -50,6 +51,8 @@ pub struct Handover {
     model: Model,
     /// The move the turn made before it started, not yet told.
     opening: Option<Notice>,
+    /// Whether the turn moves only onto logins of the agent it runs on.
+    strict: bool,
 }
 
 impl Handover {
@@ -78,6 +81,16 @@ impl Handover {
             limited: false,
             model,
             opening,
+            strict: false,
+        }
+    }
+
+    /// This handover moving the turn only onto logins of the agent it runs on, for a chat that
+    /// chose its agent.
+    pub fn strict(self) -> Self {
+        Self {
+            strict: true,
+            ..self
         }
     }
 
@@ -92,7 +105,8 @@ impl Handover {
     }
 
     /// Moves the turn off the login it runs on for `cause`, onto the login the router picks next
-    /// among those the turn has not run on, the current agent's first. Session `session` is
+    /// among those the turn has not run on, the current agent's first, or only the current
+    /// agent's when [`Self::strict`]. Session `session` is
     /// carried along when the new login runs the same agent and that agent resumes a session
     /// carried in from another home; otherwise the turn starts a fresh session there. Either way
     /// the new backend is bounded by `timeout`.
@@ -123,6 +137,7 @@ impl Handover {
             &self.tried,
             None,
             Some(&running),
+            self.strict,
         )
         .await
         {
@@ -371,13 +386,14 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use abnegate_llm::Limit;
     use abnegate_secret::SecretValue;
     use chrono::{DateTime, SecondsFormat, TimeDelta, TimeZone};
     use sqlx::PgPool;
     use tempfile::TempDir;
     use zone_core::context::project;
+    use zone_core::llm::CliSettings;
     use zone_core::llm::provider::render;
-    use zone_core::llm::{CliSettings, Limit};
 
     use super::*;
     use crate::config::AgentConfig;
@@ -414,12 +430,9 @@ mod tests {
     }
 
     fn limit(credits: bool) -> Cause {
-        Cause::limited(Limit {
-            message: LIMITED.to_string(),
-            resets_at: (!credits).then(resets),
-            credits,
-            window: None,
-        })
+        let mut limit = Limit::new(LIMITED).with_credits(credits);
+        limit.resets_at = (!credits).then(resets);
+        Cause::limited(limit)
     }
 
     fn identity(agent: AgentKind, label: &str) -> LoginIdentity {
@@ -445,7 +458,7 @@ mod tests {
 
         let mut context = replayed(&whole);
 
-        assert_eq!(written.message.role, zone_core::llm::Role::Assistant);
+        assert_eq!(written.message.role, abnegate_llm::Role::Assistant);
         assert_eq!(written.message.content.as_deref(), Some(PARTIAL));
         assert_eq!(
             sent(&context),
@@ -809,6 +822,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_strict_handover_ends_the_turn_rather_than_move_to_another_agent() {
+        let fixture = Fixture::new().await;
+        let claude = fixture.claude("a@example.com").await;
+        let codex = fixture.codex("c@example.com").await;
+        fixture.session(&claude, SESSION);
+        let mut limited = fixture.handover(&claude).strict();
+        let mut signed_out = fixture.handover(&claude).strict();
+
+        let refused = signed_out
+            .next(
+                &fixture.state,
+                &Cause::signed_out("Not logged in".into()),
+                Some(SESSION),
+                TIMEOUT,
+            )
+            .await;
+        let spent = limited
+            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .await;
+        fixture.remove().await;
+
+        assert!(
+            matches!(
+                spent,
+                Err(Some(backend::Error::Limited {
+                    agent: AgentKind::Claude,
+                    ..
+                }))
+            ),
+            "a limited turn on a chosen agent moved instead of ending with the limit"
+        );
+        assert!(
+            matches!(refused, Err(None)),
+            "a signed-out turn on a chosen agent moved instead of ending in its own words"
+        );
+        for handover in [limited, signed_out] {
+            assert_eq!(handover.login(), claude.id);
+            assert_ne!(handover.login(), codex.id, "the turn moved to codex");
+        }
+    }
+
+    #[tokio::test]
     async fn a_switch_on_the_same_agent_carries_the_session_file_and_resumes_it() {
         let fixture = Fixture::new().await;
         let from = fixture.claude("a@example.com").await;
@@ -985,6 +1040,7 @@ mod tests {
             &[],
             Some(from.id),
             None,
+            false,
         )
         .await
         .expect("the other login");
@@ -1076,6 +1132,7 @@ mod tests {
             &[],
             Some(from.id),
             None,
+            false,
         )
         .await
         .expect("the configured agent's login");
@@ -1134,6 +1191,7 @@ mod tests {
             &[],
             Some(fallback.id),
             None,
+            false,
         )
         .await
         .expect("the configured agent's login");
@@ -1207,6 +1265,7 @@ mod tests {
             &[],
             Some(refused.id),
             Some(&model),
+            false,
         )
         .await
         .expect("the other login");

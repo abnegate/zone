@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::credential::Credential;
 use super::session::Session;
+use crate::llm::ReasoningEffort;
+use abnegate_llm::Credential;
 use abnegate_secret::SecretValue;
 
 /// Thirty minutes is the chat turn's own budget, which is what a coding agent
@@ -158,6 +159,9 @@ pub struct CliSettings {
     /// The agent's own session this turn starts or resumes. `None` lets the
     /// agent start one of its own choosing.
     pub session: Option<Session>,
+    /// How hard the agent thinks. `None`, or a level the agent's model does
+    /// not take, leaves it to the agent.
+    pub effort: Option<ReasoningEffort>,
 }
 
 impl Default for CliSettings {
@@ -175,6 +179,7 @@ impl Default for CliSettings {
             output_limit: DEFAULT_OUTPUT_LIMIT,
             line_limit: DEFAULT_LINE_LIMIT,
             session: None,
+            effort: None,
         }
     }
 }
@@ -232,6 +237,11 @@ impl CliSettings {
 
     pub fn with_session(mut self, session: Session) -> Self {
         self.session = Some(session);
+        self
+    }
+
+    pub fn with_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.effort = Some(effort);
         self
     }
 }
@@ -358,6 +368,16 @@ mod tests {
         assert_eq!(settings.builtin_tools, BuiltinTools::Withheld);
         assert_eq!(settings.sandbox, CodexSandbox::WorkspaceWrite);
         assert_eq!(settings.sign_in, SignIn::Instance);
+        assert_eq!(settings.session, None);
+        assert_eq!(settings.effort, None);
+    }
+
+    #[test]
+    fn a_turn_leaves_its_effort_to_the_agent_until_given_one() {
+        assert_eq!(CliSettings::default().effort, None);
+
+        let settings = CliSettings::default().with_effort(ReasoningEffort::Max);
+        assert_eq!(settings.effort, Some(ReasoningEffort::Max));
         assert_eq!(settings.session, None);
     }
 

@@ -5,6 +5,7 @@ use crate::common::context::{
     Harness, MODEL, answer, finish, ordinary, send, state, successful, summaries, summary_response,
     usage,
 };
+use abnegate_llm::Message;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -12,7 +13,6 @@ use uuid::Uuid;
 use zone_core::context::{
     self, ContextBreakdown, ContextSource, ContextStatus, ContextUsage, Entry, Policy,
 };
-use zone_core::llm::Message;
 
 #[test]
 fn shared_context_fixture_matches_rust_serialization() {

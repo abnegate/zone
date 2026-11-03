@@ -1,8 +1,6 @@
 //! What one line of a coding agent's output means.
 
-use super::limit::Limit;
-use super::window::Window;
-use crate::llm::{ToolCall, Usage};
+use abnegate_llm::{Limit, ToolCall, Usage, Window};
 
 /// A normalised event, whichever agent produced it.
 ///
@@ -50,35 +48,11 @@ mod tests {
     #[test]
     fn only_a_result_ends_the_run() {
         assert!(!AgentEvent::Text("hello".to_string()).terminal());
-        assert!(
-            !AgentEvent::Usage(Usage {
-                prompt_tokens: 1,
-                completion_tokens: 1,
-                total_tokens: 2,
-            })
-            .terminal()
-        );
-        assert!(
-            !AgentEvent::Window(Window {
-                name: "five_hour".to_string(),
-                used_percent: Some(43.0),
-                used: None,
-                limit: None,
-                resets_at: None,
-            })
-            .terminal()
-        );
+        assert!(!AgentEvent::Usage(Usage::new(1, 1)).terminal());
+        assert!(!AgentEvent::Window(Window::new("five_hour").with_used_percent(43.0)).terminal());
         assert!(!AgentEvent::Session("6f1".to_string()).terminal());
         assert!(AgentEvent::Failed("nope".to_string()).terminal());
-        assert!(
-            AgentEvent::Limited(Limit {
-                message: "You've hit your session limit".to_string(),
-                resets_at: None,
-                credits: false,
-                window: None,
-            })
-            .terminal()
-        );
+        assert!(AgentEvent::Limited(Limit::new("You've hit your session limit")).terminal());
         assert!(
             AgentEvent::Finished {
                 finish_reason: None

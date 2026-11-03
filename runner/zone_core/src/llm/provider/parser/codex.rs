@@ -4,11 +4,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::llm::provider::event::AgentEvent;
-use crate::llm::provider::limit::Limit;
 use crate::llm::provider::settings::Toolset;
-use crate::llm::{FunctionCall, ToolCall, Usage};
-
-const CALL_TYPE: &str = "function";
+use abnegate_llm::{Limit, ToolCall, Usage};
 
 const UNWORDED_FAILURE: &str = "the agent reported a failed turn";
 
@@ -93,11 +90,7 @@ struct TokenCounts {
 
 impl From<TokenCounts> for Usage {
     fn from(counts: TokenCounts) -> Self {
-        Self {
-            prompt_tokens: counts.input_tokens,
-            completion_tokens: counts.output_tokens,
-            total_tokens: counts.input_tokens.saturating_add(counts.output_tokens),
-        }
+        Self::new(counts.input_tokens, counts.output_tokens)
     }
 }
 
@@ -115,14 +108,11 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
         } => events.push(AgentEvent::Text(text)),
         Event::Completed {
             item: Item::Command { id, command },
-        } => events.push(AgentEvent::Tool(ToolCall {
+        } => events.push(AgentEvent::Tool(ToolCall::function(
             id,
-            call_type: CALL_TYPE.to_string(),
-            function: FunctionCall {
-                name: "command_execution".to_string(),
-                arguments: serde_json::json!({ "command": command }).to_string(),
-            },
-        })),
+            "command_execution",
+            serde_json::json!({ "command": command }).to_string(),
+        ))),
         Event::Completed {
             item:
                 Item::Call {
@@ -136,14 +126,11 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
             if let Some(reason) = error.and_then(|error| error.message) {
                 tracing::warn!(%server, %tool, reason, "codex could not complete an MCP tool call");
             }
-            events.push(AgentEvent::Tool(ToolCall {
+            events.push(AgentEvent::Tool(ToolCall::function(
                 id,
-                call_type: CALL_TYPE.to_string(),
-                function: FunctionCall {
-                    name: Toolset::qualified(&server, &tool),
-                    arguments: arguments.to_string(),
-                },
-            }));
+                Toolset::qualified(&server, &tool),
+                arguments.to_string(),
+            )));
         }
         Event::Turn { usage } => {
             if let Some(usage) = usage {
@@ -177,12 +164,7 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
 /// codex reports no reset time with one.
 fn failed(message: String) -> AgentEvent {
     if Limit::worded(&message) && !message.contains(UNAUTHORIZED) {
-        return AgentEvent::Limited(Limit {
-            message,
-            resets_at: None,
-            credits: false,
-            window: None,
-        });
+        return AgentEvent::Limited(Limit::new(message));
     }
     AgentEvent::Failed(message)
 }

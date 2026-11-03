@@ -10,13 +10,13 @@
 //! File and shell operations run in the server runtime, inside the container
 //! for Docker deployments, with the server process permissions.
 
+use abnegate_llm::ToolDefinition;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
-use zone_core::llm::ToolDefinition;
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::toolbox::{

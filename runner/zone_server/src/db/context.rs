@@ -1,5 +1,6 @@
 //! Fenced, transactional conversation persistence. No transaction spans model inference.
 
+use abnegate_llm::{Message, Role};
 use chrono::NaiveDateTime;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -7,7 +8,6 @@ use sqlx::{Connection, PgConnection, PgPool, Row};
 use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
-use zone_core::llm::{Message, Role};
 
 use zone_chat::history::{self, Entry, Evidence, History, NewEntry, ReplayMessage, Summary};
 use zone_chat::store;

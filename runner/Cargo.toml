@@ -37,11 +37,12 @@ rmcp = { version = "=3.4.0", default-features = false }
 # other dependency here, so a patch release of a crate reaches zone on update.
 abnegate-config = "0.1.6"
 abnegate-exec = "0.1.8"
-abnegate-http = "0.1"
+abnegate-http = "0.1.4"
 abnegate-index = "0.1"
-abnegate-notify = "0.1"
-abnegate-search = "0.1.3"
-abnegate-secret = "0.1.3"
+abnegate-llm = "0.1.7"
+abnegate-notify = "0.1.6"
+abnegate-search = "0.1.5"
+abnegate-secret = "0.1.5"
 abnegate-vcs = "0.1.6"
 
 # Server dependencies

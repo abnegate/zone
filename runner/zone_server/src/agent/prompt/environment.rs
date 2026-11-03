@@ -1,8 +1,8 @@
 //! Where and when this turn runs.
 
+use abnegate_llm::Effort;
 use chrono::{DateTime, FixedOffset, Local};
 use std::path::PathBuf;
-use zone_core::llm::Effort;
 
 use super::Vcs;
 use crate::agent::tools::host_root;

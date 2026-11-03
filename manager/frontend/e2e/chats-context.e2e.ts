@@ -5,7 +5,7 @@ import { ContextUsageSchema } from '../src/features/chats/schemas';
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { installChatSocketMock } from './helpers/chatSocket';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
 import type { ContextUsage } from '../src/features/chats/types';
 const initial = ContextUsageSchema.parse(
   JSON.parse(
@@ -43,6 +43,7 @@ for (const width of [1280, 390]) {
     let usage = initial;
     let draft = '';
     await routeApi(page, /\/api\/chats($|\?|\/)/i, async (route) => {
+      if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
       if (route.request().url().endsWith('/context')) {
         draft = route.request().postDataJSON().content;
         await route.fulfill({ json: { context: usage } });
@@ -171,6 +172,7 @@ test('empty chat previews and context updates survive adversarial frame ordering
   let hold = false;
   let draft = '';
   await routeApi(page, /\/api\/chats($|\?|\/)/i, async (route) => {
+    if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
     if (route.request().url().endsWith('/context')) {
       draft = route.request().postDataJSON().content;
       if (hold) {

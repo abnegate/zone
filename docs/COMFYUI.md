@@ -1,10 +1,10 @@
-# ComfyUI, SDXL people, FLUX, Wan 2.2 TI2V, and ACE-Step v1
+# ComfyUI, SDXL people, FLUX, Wan 2.2 A14B, and ACE-Step v1
 
 Zone supports a pinned ComfyUI runtime with SDXL people for stills (FLUX.1
-Schnell and Dev remain optional recipes), Wan 2.2 TI2V 5B for text-to-video
-and image-to-video, ACE-Step v1 3.5B for text-to-audio, and Real-ESRGAN
-x4plus for upscaling a picture or a clip. The runtime is native on Apple
-Silicon and an optional NVIDIA Compose profile on Linux.
+Schnell and Dev remain optional recipes), Wan 2.2 A14B (27B MoE) for
+text-to-video and image-to-video, ACE-Step v1 3.5B for text-to-audio, and
+Real-ESRGAN x4plus for upscaling a picture or a clip. The runtime is native
+on Apple Silicon and an optional NVIDIA Compose profile on Linux.
 
 `./scripts/setup.sh` downloads the Comfy bundles for the features you enable
 (all on by default) and shows per-file progress. It prints each feature’s size,
@@ -47,16 +47,19 @@ Comfy checkout so core files stay unmodified:
 - Combined size: approximately 28.2 GiB / 30.2 GB
 - Model license: Apache-2.0
 
-### Wan 2.2 TI2V 5B (video)
+### Wan 2.2 A14B (video)
 
 - Model repository: `Comfy-Org/Wan_2.2_ComfyUI_Repackaged`
-- Model revision: `c4f60d30c55a624e35427060fdd217579a6c1d77`
-- UNET: `wan2.2_ti2v_5B_fp16.safetensors` (`9,999,658,848` bytes)
-- VAE: `wan2.2_vae.safetensors` (`1,409,400,960` bytes)
+- Model revision: `ee6f4a40737a995bf5818954cfce6d59443b0f04`
+- T2V high-noise UNET: `wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors` (`14,293,923,632` bytes)
+- T2V low-noise UNET: `wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors` (`14,293,923,632` bytes)
+- I2V high-noise UNET: `wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors` (`14,294,742,832` bytes)
+- I2V low-noise UNET: `wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors` (`14,294,742,832` bytes)
+- VAE: `wan_2.1_vae.safetensors` (`253,815,318` bytes)
 - CLIP: `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (`6,735,906,897` bytes)
-- Combined size: `18,144,966,705` bytes (approximately 16.90 GiB / 18.14 GB)
+- Combined size: `64,167,055,143` bytes (approximately 59.77 GiB / 64.17 GB)
 - Model license: Apache-2.0
-- Default output: 832×480, 49 frames (~2s at 24 fps), WebM VP9
+- Default output: 1280×704, 81 frames (~5s at 16 fps), WebM VP9
 
 ### ACE-Step v1 3.5B (audio)
 
@@ -123,11 +126,12 @@ specific `comfyui/requirements*.lock` files.
 - Apple Silicon (arm64); Intel Macs are not supported by this installer
 - Python 3.11 through 3.13, running as arm64
 - Git / Xcode Command Line Tools
-- At least 15 GB free disk space for the SDXL people checkpoint, about 35 GB if
+- At least 15 GB free disk space for the SDXL people checkpoint, about 80 GB if
   also downloading the video bundle, a further 30 GB for the image-edit bundle,
   and a further 8 GB for the audio bundle
 - 32 GB unified memory recommended; 24 GB may work with memory pressure and
-  substantially lower resolutions. Video generation needs the higher figure.
+  substantially lower resolutions. Video generation needs 64 GB for Wan 2.2
+  A14B, and setup refuses the video feature on smaller machines.
 
 Install the pinned runtime without downloading model weights:
 
@@ -220,6 +224,45 @@ COMFYUI_MODELS_DIR="/Volumes/Models/ComfyUI/models" \
 
 Use the same overrides for later verification and startup.
 
+### Wan video on Apple Silicon
+
+Metal kernels corrupt Wan 2.2 frames (Comfy-Org/ComfyUI#15793, #16644), so the
+Zone LoRA node decides where each Wan model runs when ComfyUI starts on MPS:
+
+- A Wan 2.2 TI2V 5B DiT, which setup no longer downloads, loads and samples on
+  CPU.
+- Every Wan VAE, 2.1 and 2.2, loads and decodes on CPU. This is a precaution:
+  both reports rule the VAE out and blame the DiT's sampled latents. Decoding
+  is slow: a 5B 832×480×49 clip took 31 minutes with both its DiT and VAE on
+  CPU.
+- The A14B FP8 experts load on CPU, are densified to fp16 (Metal has no float8
+  kernels) and then sample on Metal. Three Metal kernels they hit are patched:
+  5D constant `pad` is rebuilt with concatenation (pytorch/pytorch#194922),
+  `bmm` gets contiguous inputs (pytorch/pytorch#197636), and `baddbmm` with
+  `beta=0` starts from zeros (Comfy-Org/ComfyUI#15804).
+- Attention is not patched.
+- No A14B clip has yet been rendered end to end on MPS, so treat Metal video
+  as unverified.
+
+#### Memory on a 64 GB Mac
+
+The 64 GB floor setup enforces for video is an estimate, and the arithmetic
+says it is tight. Apple Silicon has one pool of unified memory, so the CPU
+copies below and the Metal working set draw on the same RAM:
+
+- Densifying turns each 14.3 GB FP8 expert into about 28.6 GB of fp16, built
+  on the CPU.
+- A clip runs the high-noise expert and then the low-noise one, and ComfyUI
+  caches both `UNETLoader` outputs, so about 57 GB of expert weights stays
+  resident after the first clip.
+- UMT5-XXL (6.7 GB as FP8 on disk), the Wan 2.1 VAE and its 1280×704×81
+  decode on the CPU, Ollama's loaded models, Postgres and macOS all need room
+  on top of that.
+
+Expect heavy swapping on a 64 GB Mac, with sampling slowed by paging. None of
+this has been measured: no A14B clip has been rendered on Metal, so the floor,
+the resident size and the swap behaviour are all unverified.
+
 ## Bundled NVIDIA Compose profile
 
 ### Requirements
@@ -229,7 +272,7 @@ Use the same overrides for later verification and startup.
 - NVIDIA Container Toolkit configured for Docker
 - At least 24 GB VRAM recommended
 - At least 25 GB free Docker volume storage for the image checkpoint, about
-  45 GB if also downloading the video bundle, a further 30 GB for the
+  90 GB if also downloading the video bundle, a further 30 GB for the
   image-edit bundle, and a further 8 GB for the audio bundle
 
 Set the manager's internal endpoint in `.env`:
@@ -328,7 +371,10 @@ Shipped image recipes:
 `sd15` and `sdxl` carry no weights of their own: they match a checkpoint you
 supply by filename hint. The other recipes name the files they need in
 `required_files`, and the weight inventory reports a recipe as not ready until
-every one of them is on disk.
+every one of them is on disk. An unknown checkpoint falls back to
+`sdxl-people`, but a file in `diffusion_models/` is listed only when its name
+is in an image recipe's `files` or `filename_hints` (or a sidecar names its
+recipe), so Wan UNETs never show up as image models.
 
 To add another family, drop two API-format graphs in `comfyui/workflows/`
 (generate + edit) and list them in `comfyui/recipes/catalog.json` with slot
@@ -453,18 +499,26 @@ bundle `image-people`). Person LoRA is rank 64 with the CLIP-L text encoder trai
 and loads through `sdxl-adapter` (`LoraLoader` on model and CLIP). Method
 **Fine-tune** writes a full SDXL checkpoint (~7 GB) onto the generic `sdxl`
 recipe, with prior preservation class `person`. Captions are
-`{trigger} person, {scene}`. Mixed subjects fail the job.
+`{trigger} person, {scene}`. Mixed subjects fail the job. Video identity
+training is off: it trains Wan 2.2 TI2V 5B adapters, and video generation runs
+Wan 2.2 A14B, which cannot load them, so a `video` method is refused.
 
 Person jobs do not go through ComfyUI `/prompt`. Manager writes
 `models/.zone-train/{id}/` on the bind mount; host LaunchAgent `ai.zone.train`
 runs the same gold recipe on every backend (float32, AdamW for fine-tune,
-Prodigy for LoRA and pivotal, no AMP, no 8-bit Adam, TF32 off). Compute on the
+Prodigy for LoRA and pivotal, no AMP, no 8-bit Adam, TF32 off). Prodigy steps
+every parameter group at one adaptive rate: prodigyopt (1.0 through 1.1.2)
+scales a single D estimate by the largest group `lr` and refuses any other
+non-zero `lr`. The trainer therefore sets `lr` to 1.0 on every group and logs
+`prodigy ignores unet_lr=…, text_encoder_lr=…`, so `unet_lr` and
+`text_encoder_lr` in `comfyui/train_sdxl_config.json` only take effect with
+`"optimizer": "adamw"`, and CLIP-L moves at the UNet's step. Compute on the
 Train form is **Local** (CUDA if `torch.cuda.is_available()`, else MPS, else
-CPU) or **Runpod**. Runpod is Person-only (LoRA, fine-tune, pivotal, video).
+CPU) or **Runpod**. Runpod is Person-only (LoRA, fine-tune, pivotal).
 Save a Runpod API key under Workspace or organization AI settings; GET returns
 `has_runpod_api_key` and never the secret. The host worker writes
 `job_dir/runpod.key` mode `0600`, auto-picks a GPU from the Runpod catalog
-(fine-tune ≥48 GB, LoRA/pivotal/video ≥24 GB, Community then Secure), and
+(fine-tune ≥48 GB, LoRA/pivotal ≥24 GB, Community then Secure), and
 deletes the pod when the job ends. A card below the VRAM floor fails closed
 instead of dropping precision. Language and Flux/Qwen Other stay Local.
 
@@ -751,29 +805,47 @@ attachment URLs are never fetched as img2img sources.
 
 ## Video workflow contract
 
-`comfyui/workflows/wan2.2-ti2v-5b-api.json` is the text-to-video API-format
+`comfyui/workflows/wan2.2-a14b-t2v-api.json` is the text-to-video API-format
 workflow. It uses only built-in ComfyUI nodes. Integration code may replace
 only these inputs:
 
-- node `1`: UNET filename from trusted server configuration (`model_video` /
-  `COMFYUI_VIDEO_UNET`)
+- node `1`: high-noise UNET filename from trusted server configuration
+  (`model_video` / `COMFYUI_VIDEO_UNET`); a name without `wan` and
+  `high_noise` or `low_noise` (a leftover 5B or Wan 2.1 14B file) is rewritten
+  to the A14B high-noise expert
+- node `12`: paired low-noise UNET (`high_noise` → `low_noise`, `t2v` ↔ `i2v`)
 - node `2`: CLIP filename (`COMFYUI_VIDEO_CLIP`)
-- node `3`: VAE filename (`COMFYUI_VIDEO_VAE`)
+- node `3`: VAE filename (`COMFYUI_VIDEO_VAE`); a leftover 5B
+  `wan2.2_vae.safetensors` is rewritten to `wan_2.1_vae.safetensors`
 - node `5`: positive prompt text
-- node `8`: seed
+- node `8` and node `14`: `noise_seed`
 
-`comfyui/workflows/wan2.2-ti2v-5b-i2v-api.json` is the image-to-video sibling.
+`COMFYUI_VIDEO_WORKFLOW_PATH` may point at a custom text-to-video graph. It must
+keep these nodes, `KSamplerAdvanced` at `8` and `14`, `EmptyHunyuanLatentVideo`
+at `7` and `SaveWEBM` at `10`; a graph that is unreadable or breaks the contract
+fails the request rather than falling back to the packaged one. A leftover
+`wan2.2-ti2v-5b-api.json` path logs a warning and loads the A14B graph instead.
+
+`comfyui/workflows/wan2.2-a14b-i2v-api.json` is the image-to-video sibling.
 Chat uses it when the current message includes an image attachment (a data URL
 or a same-chat `/api/artifacts/...` URL) and the request is classified as
 video. The manager uploads that image to ComfyUI's input folder, then may also
 replace:
 
-- node `11`: uploaded source filename, wired as `start_image` on the latent
-  node
+- node `11`: uploaded source filename, wired as `start_image` on
+  `WanImageToVideo`
 
-Packaged defaults are Wan-appropriate: 832×480, length 49, 20 `uni_pc`/`simple`
-steps, CFG 5, and ModelSamplingSD3 shift 8. The negative prompt stays the
-packaged Chinese Wan default and is never taken from untrusted request data.
+A `wan2.2-a14b-i2v-api.json` beside a custom `COMFYUI_VIDEO_WORKFLOW_PATH` is
+held to the same contract with `WanImageToVideo` at node `7` and `LoadImage` at
+node `11`; without one, the packaged image-to-video graph is used.
+
+Packaged defaults are Wan 2.2 A14B: 1280×704, length 81, 20 `euler`/`simple`
+steps split across high then low noise experts (0–10 leftover enable, 10–end
+add_noise disable), CFG 3.5, ModelSamplingSD3 shift 8, 16 fps. The negative
+prompt stays the packaged Chinese Wan default and is never taken from
+untrusted request data. Identity LoRAs are not applied to video: a trigger
+word in the prompt passes through as plain text, and 5B `wan-adapter` LoRA
+files are not loaded onto A14B.
 
 Unlike the image workflows, video uses ComfyUI's built-in `SaveWEBM` node,
 which writes WebM VP9 into ComfyUI's **output** folder rather than temp.

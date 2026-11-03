@@ -1,9 +1,11 @@
-//! Completion providers.
+//! The coding-agent CLI provider.
 //!
-//! A task runs on a local model through LiteLLM or shells out to a coding
-//! agent CLI, and nothing above this module needs to know which. Both satisfy
-//! [`CompletionProvider`]; [`Router`] satisfies it too, over a set of them, so
-//! selection, A/B splitting, and fallback are invisible to the consumer.
+//! A task can shell out to a coding agent CLI instead of calling a model over
+//! HTTP. [`CliProvider`] satisfies
+//! [`CompletionProvider`](abnegate_llm::CompletionProvider) like the crate's
+//! [`HttpProvider`](abnegate_llm::HttpProvider) does, so a
+//! [`Router`](abnegate_llm::Router) can select, split, and fall back between
+//! them without the consumer knowing which ran.
 //!
 //! # Failure classification
 //!
@@ -23,41 +25,21 @@
 
 mod agent;
 mod cli;
-mod completion;
-mod credential;
-pub mod environment;
-mod error;
 mod event;
-mod http;
-mod limit;
 mod lines;
 mod parser;
-mod router;
-mod selection;
 mod session;
 mod settings;
 mod transcript;
-mod window;
-
-#[cfg(test)]
-mod testing;
 
 pub use agent::{AgentKind, Delivery};
 pub use cli::{AgentStream, CliProvider, OUTGROWN, STDERR_HEADING};
-pub use completion::{Completion, CompletionProvider, CompletionRequest, ProviderKind};
-pub use credential::Credential;
-pub use error::{ExitStatus, ProviderError};
 pub use event::AgentEvent;
-pub use http::HttpProvider;
-pub use limit::{LIMIT_WORDINGS, Limit};
 pub use lines::{Frame, Lines};
 pub use parser::claude::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
-pub use router::Router;
-pub use selection::{SelectionStrategy, Weighted, choose, sample};
 pub use session::Session;
 pub use settings::{
     BuiltinTools, CliSettings, CodexSandbox, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT,
     DEFAULT_TIMEOUT, SignIn, Toolset,
 };
 pub use transcript::{render, render_tail};
-pub use window::Window;

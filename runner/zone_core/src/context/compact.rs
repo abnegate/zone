@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
+use abnegate_llm::{Message, RequestOptions, Role, ToolDefinition, finish_reason};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::llm::{LlmClient, Message, RequestOptions, Role, ToolDefinition, finish_reason};
+use crate::llm::LlmClient;
 
 use super::estimate::{message_cost, tokens};
 use super::{ContextError, ContextStatus, Coverage, Entry, Policy, Prepared, Summary, estimate};
@@ -390,14 +391,7 @@ async fn summarize(
         }
         let messages = summary_request(&previous, &sources)?;
         let response = summarizer
-            .chat_with_options(
-                model,
-                &messages,
-                None,
-                RequestOptions {
-                    reserved: policy.reserved,
-                },
-            )
+            .chat_with_options(model, &messages, None, RequestOptions::new(policy.reserved))
             .await?;
         let choice = response
             .choices

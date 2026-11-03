@@ -100,7 +100,7 @@ async fn fresh_seven_large_results_and_errors_survive_restart_and_text_agent_tra
         history
             .entries
             .iter()
-            .filter(|entry| entry.message.role == zone_core::llm::Role::Tool)
+            .filter(|entry| entry.message.role == abnegate_llm::Role::Tool)
             .count(),
         8
     );
@@ -108,7 +108,7 @@ async fn fresh_seven_large_results_and_errors_survive_restart_and_text_agent_tra
         .entries
         .iter()
         .find(|entry| {
-            entry.message.role == zone_core::llm::Role::Tool
+            entry.message.role == abnegate_llm::Role::Tool
                 && entry
                     .message
                     .content
@@ -371,7 +371,7 @@ async fn denied_mutation_has_one_durable_error_result_and_never_writes_the_file(
             .await
             .entries
             .iter()
-            .filter(|entry| entry.message.role == zone_core::llm::Role::Tool)
+            .filter(|entry| entry.message.role == abnegate_llm::Role::Tool)
             .count(),
         1
     );
@@ -600,7 +600,7 @@ async fn evidence_retrieval_is_scoped_to_the_current_chat_even_inside_one_worksp
     let reference = history
         .entries
         .iter()
-        .find(|entry| entry.message.role == zone_core::llm::Role::Tool)
+        .find(|entry| entry.message.role == abnegate_llm::Role::Tool)
         .unwrap()
         .id
         .clone();
@@ -704,7 +704,7 @@ async fn sustained_tool_history_uses_bounded_semantic_references_in_actual_text_
             .await
             .entries
             .iter()
-            .filter(|entry| entry.message.role == zone_core::llm::Role::Tool)
+            .filter(|entry| entry.message.role == abnegate_llm::Role::Tool)
             .count(),
         1024
     );

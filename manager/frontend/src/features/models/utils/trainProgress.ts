@@ -1,3 +1,5 @@
+import { TRAIN_PREVIEW_PATH } from '../../../api/protectedImages';
+
 export const LORA_MIN_STILLS = 20;
 export const FINE_TUNE_MIN_STILLS = 200;
 export const FINE_TUNE_MIN_CLIPS = 20;
@@ -118,7 +120,7 @@ export function previewSrc(value: string): string {
     return value;
   }
   const name = value.split(/[\\/]/).pop() ?? value;
-  return `/api/models/train/previews/${encodeURIComponent(name)}`;
+  return `${TRAIN_PREVIEW_PATH}${encodeURIComponent(name)}`;
 }
 
 export function methodAdvice(input: {
@@ -132,9 +134,6 @@ export function methodAdvice(input: {
   const clips = Math.max(0, input.clips);
   const ready = stills >= FINE_TUNE_READY_STILLS || clips >= FINE_TUNE_READY_CLIPS;
   const consider = stills >= FINE_TUNE_MIN_STILLS || clips >= FINE_TUNE_MIN_CLIPS;
-  if (input.method === 'video') {
-    return 'This method trains Wan from the clips (2–3 windows per clip). Run a still method too for image identity.';
-  }
   if (input.method === 'pivotal') {
     return null;
   }

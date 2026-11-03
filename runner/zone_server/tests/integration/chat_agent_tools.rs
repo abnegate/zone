@@ -72,8 +72,8 @@ impl Agent {
         writeln!(
             file,
             "#!/bin/sh\ncat > {prompt}\nprintf '%s' \"$ZONE_MCP_TOKEN\" > {token}\nprintf \
-             '%s' \"$*\" > {arguments}\nwhile [ ! -f {release} ]; do sleep 0.05; \
-             done\necho '{assistant}'\necho '{result}'",
+             '%s' \"$*\" > {arguments}.partial\nmv {arguments}.partial {arguments}\nwhile [ ! \
+             -f {release} ]; do sleep 0.05; done\necho '{assistant}'\necho '{result}'",
             prompt = agent.prompt.display(),
             arguments = agent.arguments.display(),
             token = agent.token.display(),
@@ -502,7 +502,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         );
         assert!(!agent.tools.has(tool), "a turn on an agent holds {tool}");
     }
-    let LlmBackend::Cli { settings, .. } = &agent.llm.config().backend else {
+    let LlmBackend::Cli { settings, .. } = agent.llm.backend() else {
         panic!("the turn was moved off its agent");
     };
     assert_eq!(settings.timeout, CHAT_TIMEOUT);

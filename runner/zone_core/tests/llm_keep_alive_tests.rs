@@ -1,8 +1,9 @@
+use abnegate_llm::{Error, LlmConfig, Message};
 use futures::StreamExt;
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::{LlmClient, LlmConfig, LlmError, Message};
+use zone_core::llm::LlmClient;
 
 const RACERS: usize = 8;
 const TURNS: usize = 12;
@@ -17,14 +18,10 @@ fn runtime() -> tokio::runtime::Runtime {
 /// One completion on its own runtime, as a chat turn gets in the server.
 fn turn(base_url: &str) {
     runtime().block_on(async {
-        LlmClient::new(LlmConfig {
-            base_url: base_url.to_string(),
-            default_model: "test".to_string(),
-            ..LlmConfig::default()
-        })
-        .chat(&[Message::user("hi")], None)
-        .await
-        .expect("a turn reaches the server")
+        LlmClient::new(LlmConfig::new(base_url, "test", ""))
+            .chat(&[Message::user("hi")], None)
+            .await
+            .expect("a turn reaches the server")
     });
 }
 
@@ -96,12 +93,11 @@ async fn default_streaming_route_uses_the_configured_model_and_yields_chunks() {
         .mount(&server)
         .await;
 
-    let client = LlmClient::new(LlmConfig {
-        base_url: server.uri(),
-        api_key: "test-secret".to_string(),
-        default_model: "configured-model".to_string(),
-        ..LlmConfig::default()
-    });
+    let client = LlmClient::new(LlmConfig::new(
+        server.uri(),
+        "configured-model",
+        "test-secret",
+    ));
     let chunks = client
         .chat_stream(&[Message::user("hi")], None)
         .await
@@ -133,10 +129,7 @@ async fn model_specific_streaming_route_preserves_provider_errors() {
         .mount(&server)
         .await;
 
-    let client = LlmClient::new(LlmConfig {
-        base_url: server.uri(),
-        ..LlmConfig::default()
-    });
+    let client = LlmClient::new(LlmConfig::new(server.uri(), "gpt-4", ""));
     let error = match client
         .chat_stream_with_model("requested-model", &[Message::user("hi")], None)
         .await
@@ -147,9 +140,10 @@ async fn model_specific_streaming_route_preserves_provider_errors() {
 
     assert!(matches!(
         error,
-        LlmError::Api {
+        Error::Api {
             status: 429,
-            ref message
+            ref message,
+            ..
         } if message == "capacity exhausted"
     ));
 }

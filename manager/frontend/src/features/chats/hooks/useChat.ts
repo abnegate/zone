@@ -32,6 +32,7 @@ import {
 } from '../types';
 import { mergeCitations } from '../utils/citations';
 import { appendHandover } from '../utils/handover';
+import { requestedModel } from '../utils/providerOptions';
 
 // How many frames to hold while the chat they belong to is still loading.
 const MAX_HELD_FRAMES = 1000;
@@ -238,7 +239,7 @@ export function useChat(
   const [contextRefresh, setContextRefresh] = useState(0);
   const contextEpoch = useRef(0);
   const contextModel = useRef<string | null>(null);
-  contextModel.current = chat?.id === chatId ? chat.model_name : null;
+  contextModel.current = chat?.id === chatId ? requestedModel(chat) : null;
   const previewSequence = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
   // The chat the socket handlers have to write into. Until the fetch lands
@@ -328,7 +329,7 @@ export function useChat(
   const draftKey = draft === undefined ? null : JSON.stringify(draft);
   const settingsKey = chat
     ? JSON.stringify([
-        chat.model_name,
+        requestedModel(chat),
         chat.agent_enabled,
         chat.character,
         chat.auto_approve,
@@ -339,6 +340,7 @@ export function useChat(
   const identity = `${chatId}:${settingsKey}:${draftKey}:${contextRefresh}`;
   const previewIdentity = useRef(identity);
   previewIdentity.current = identity;
+  const chatModel = chat ? requestedModel(chat) : null;
   useEffect(() => {
     const sequence = ++previewSequence.current;
     if (!chatId || chat?.id !== chatId || draftKey === null || settingsKey === null || streaming) {
@@ -364,7 +366,7 @@ export function useChat(
         )
           return;
         const parsed = ContextUsageSchema.safeParse(usage);
-        if (!parsed.success || parsed.data.model !== chat.model_name)
+        if (!parsed.success || parsed.data.model !== chatModel)
           throw new Error('Invalid context preview');
         setContext(parsed.data);
       } catch {
@@ -386,7 +388,7 @@ export function useChat(
       clearTimeout(timer);
       controller.abort();
     };
-  }, [chatId, chat?.id, chat?.model_name, draftKey, settingsKey, streaming, identity]);
+  }, [chatId, chat?.id, chatModel, draftKey, settingsKey, streaming, identity]);
 
   const upsertMessage = useCallback(
     (id: string, role: MessageRole, content: string, metadata?: MessageMetadata | null) => {
@@ -1307,6 +1309,9 @@ export function useChat(
   const setReasoningEffort = (effort: ReasoningEffort): Promise<void> =>
     updateAgentSettings({ reasoning_effort: effort });
 
+  const setModelName = (modelName: string): Promise<void> =>
+    updateAgentSettings({ model_name: modelName });
+
   const setContextTokens = (tokens: number): Promise<void> =>
     updateAgentSettings({ context_tokens: tokens });
 
@@ -1331,7 +1336,7 @@ export function useChat(
 
   return {
     chat,
-    context: context?.model === chat?.model_name ? context : null,
+    context: chat && context?.model === requestedModel(chat) ? context : null,
     contextError,
     previewing,
     loading,
@@ -1345,6 +1350,7 @@ export function useChat(
     setAutoApprove,
     setAgentSandboxed,
     setReasoningEffort,
+    setModelName,
     setContextTokens,
     setCharacter,
     clearCharacter,

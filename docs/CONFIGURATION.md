@@ -1541,6 +1541,8 @@ details, and native macOS / bundled NVIDIA instructions.
   edit prompt names the trigger word stored on a ready identity LoRA's sidecar,
   that adapter is used instead of the pin, and the trigger is added to the
   CLIP prompt if it is missing. An unmatched or ambiguous name keeps the pin.
+  Video generation applies no identity LoRA; a trigger word in a video prompt
+  passes through as plain text.
 
 ### `COMFYUI_MODELS_DIR`
 - **Default**: `/app/comfyui/models`
@@ -1607,28 +1609,44 @@ details, and native macOS / bundled NVIDIA instructions.
   Timeouts fall back to normal chat.
 
 ### `COMFYUI_VIDEO_WORKFLOW_PATH`
-- **Default**: `/app/comfyui/workflows/wan2.2-ti2v-5b-api.json`
-- **Description**: In-container path to the versioned Wan 2.2 TI2V
-  text-to-video API workflow. Image-to-video uses the sibling file
-  `wan2.2-ti2v-5b-i2v-api.json` in the same directory.
+- **Default**: `/app/comfyui/workflows/wan2.2-a14b-t2v-api.json`
+- **Description**: In-container path to the versioned Wan 2.2 A14B
+  text-to-video API workflow. A custom graph is used as long as it keeps the
+  A14B contract (see *Video workflow contract* in `docs/COMFYUI.md`); a file
+  that is unreadable, is not JSON or breaks the contract fails video
+  generation instead of being swapped for the packaged graph. When the default
+  `wan2.2-a14b-t2v-api.json` is missing, the graph compiled into the binary is
+  used. A leftover `wan2.2-ti2v-5b-api.json` logs a warning and loads
+  `wan2.2-a14b-t2v-api.json` from the same directory, else the compiled graph.
+  Image-to-video uses the sibling file `wan2.2-a14b-i2v-api.json` in the same
+  directory under the same contract, or the compiled graph when that file is
+  absent.
+- **RAM**: 64 GB; setup refuses video (and `all`) on smaller machines.
 
 ### `COMFYUI_VIDEO_UNET`
-- **Default**: `wan2.2_ti2v_5B_fp16.safetensors`
-- **Description**: Fallback Wan UNET when org/workspace AI settings do not set
-  `model_video`. Path separators and traversal are rejected. Chat video
-  generation uses the effective `model_video` setting when present.
+- **Default**: `wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors`
+- **Description**: Fallback Wan high-noise UNET when org/workspace AI settings
+  do not set `model_video`. Path separators and traversal are rejected. Chat
+  video generation uses the effective `model_video` setting when present. A
+  name counts as an A14B expert only when it contains `wan`, `high_noise` or
+  `low_noise`, and `t2v` or `i2v`, in any case; any other name, such as a
+  leftover 5B file or a Wan 2.1 14B model, loads this expert and its low-noise
+  pair instead. The pair keeps the configured name's casing.
 
 ### `COMFYUI_VIDEO_CLIP`
 - **Default**: `umt5_xxl_fp8_e4m3fn_scaled.safetensors`
 - **Description**: Text encoder loaded with the Wan video workflow
 
 ### `COMFYUI_VIDEO_VAE`
-- **Default**: `wan2.2_vae.safetensors`
-- **Description**: VAE loaded with the Wan video workflow
+- **Default**: `wan_2.1_vae.safetensors`
+- **Description**: VAE loaded with the Wan A14B video workflow. A leftover 5B
+  `wan2.2_vae.safetensors` is rewritten to `wan_2.1_vae.safetensors`, the VAE
+  the A14B experts decode with.
 
 ### `COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS`
-- **Default**: `600`
+- **Default**: `7200`
 - **Description**: Wall-clock timeout for a single video generation job
+  (range 10–14400)
 
 ### `COMFYUI_AUDIO_WORKFLOW_PATH`
 - **Default**: `/app/comfyui/workflows/ace-step-v1-3.5b-api.json`
@@ -2072,8 +2090,8 @@ make up
 ```bash
 ./scripts/setup.sh --yes
 ```
-Setup downloads every feature by default. That needs 16 GB RAM and about 145 GB
-free disk; it refuses `all` when either is short. Chat-only:
+Setup downloads every feature by default. That needs 64 GB RAM (Wan 2.2 A14B
+video) and about 174 GB free disk; it refuses `all` when either is short. Chat-only:
 `./scripts/setup.sh --yes --features chat --chat-preset 8gb`.
 
 ### With VPN Search (1 extra step)

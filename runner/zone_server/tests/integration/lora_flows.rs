@@ -1655,6 +1655,38 @@ async fn train_language_rejects_finetune_on_a_large_chat_model() {
 }
 
 #[tokio::test]
+async fn train_upload_refuses_video_identity_training() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(
+        &ollama,
+        &catalog,
+        models_dir.clone(),
+        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+    )
+    .await;
+    let images = json!([{ "filename": "walk.mp4", "caption": "" }]).to_string();
+    let (content_type, body) = multipart(
+        "ZoneTrainBoundary",
+        &[
+            ("name", None, b"jerry"),
+            ("base", None, b"sdxl-people"),
+            ("trigger", None, b"ohwx"),
+            ("subject", None, b"person"),
+            ("method", None, b"video"),
+            ("images", None, images.as_bytes()),
+            ("image_0", Some("walk.mp4"), b"pretend clip"),
+        ],
+    );
+    let (status, response) =
+        post_multipart(router, &token, "/api/models/train", content_type, body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"], zone_comfy::lora::VIDEO_REFUSAL);
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
 async fn train_language_rejects_video() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;

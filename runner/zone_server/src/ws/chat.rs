@@ -10,6 +10,7 @@
 //! 5. Client can send "cancel" to interrupt generation
 //! 6. Connection closes on error or client disconnect
 
+use abnegate_llm::{Message as LlmMessage, Role as LlmRole, Usage};
 use axum::{
     body::Bytes,
     extract::{
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_comfy::MediaType;
-use zone_core::llm::{BuiltinTools, LlmBackend, Message as LlmMessage, Role as LlmRole, Usage};
+use zone_core::llm::{BuiltinTools, LlmBackend};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -218,23 +219,32 @@ async fn send_server(sender: &SharedSender, message: ServerMessage) -> bool {
 ///
 /// A turn belongs to the chat rather than to the socket that started it, so a
 /// connection that arrives while one is running replays this log and picks the
-/// reply up where it left off.
+/// reply up where it left off. Before its message starts, a turn has only its
+/// latest status to show, such as a media job queued behind another.
 #[derive(Default)]
 struct LiveTurn {
     frames: Vec<ServerMessage>,
+    status: Option<ServerMessage>,
 }
 
 impl LiveTurn {
     fn record(&mut self, message: &ServerMessage) {
         match message {
             ServerMessage::MessageStart { .. } => {
+                self.status = None;
                 self.frames.clear();
                 self.frames.push(message.clone());
             }
             ServerMessage::MessageEnd { .. }
             | ServerMessage::Cancelled { .. }
-            | ServerMessage::Error { .. } => self.frames.clear(),
-            // Anything outside a turn is already in the chat a joining client loads.
+            | ServerMessage::Error { .. } => {
+                self.status = None;
+                self.frames.clear();
+            }
+            ServerMessage::Status { .. } if self.frames.is_empty() => {
+                self.status = Some(message.clone());
+            }
+            // Anything else outside a turn is already in the chat a joining client loads.
             _ if self.frames.is_empty() => {}
             // Text arrives a token at a time, so keeping a frame each would
             // make the log as long as the reply.
@@ -253,6 +263,9 @@ impl LiveTurn {
     }
 
     fn replay(&self) -> Vec<ServerMessage> {
+        if self.frames.is_empty() {
+            return self.status.iter().cloned().collect();
+        }
         self.frames
             .iter()
             .map(|frame| match frame {
@@ -841,6 +854,12 @@ const HANDOVERS_KEY: &str = "handovers";
 const USAGE_KEY: &str = "usage";
 
 const LIVE_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(300);
+
+const MEDIA_HEARTBEAT: Duration = Duration::from_secs(30);
+
+const MEDIA_WORKING: &str = "Working...";
+
+const MEDIA_QUEUED: &str = "Waiting for another generation...";
 
 /// What a turn that produced neither prose nor an image is stored as.
 const STOPPED_BEFORE_ANSWERING: &str = "[Stopped before answering]";
@@ -1486,17 +1505,79 @@ async fn watch_lease(
     }
 }
 
+/// One media job's progress, relayed to the chat from the moment it queues for
+/// the media slot until its outcome is published.
+struct MediaProgress {
+    sender: mpsc::UnboundedSender<String>,
+    relay: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl MediaProgress {
+    fn start(stream: &Arc<ChatStream>) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Self {
+            sender,
+            relay: Some(tokio::spawn(relay_progress(stream.clone(), receiver))),
+        }
+    }
+
+    fn report(&self, message: &str) {
+        let _ = self.sender.send(message.to_string());
+    }
+
+    fn sender(&self) -> mpsc::UnboundedSender<String> {
+        self.sender.clone()
+    }
+
+    /// Stop relaying, so no status can follow the frame that settles the job.
+    async fn stop(&mut self) {
+        if let Some(relay) = self.relay.take() {
+            relay.abort();
+            let _ = relay.await;
+        }
+    }
+}
+
+impl Drop for MediaProgress {
+    fn drop(&mut self) {
+        if let Some(relay) = &self.relay {
+            relay.abort();
+        }
+    }
+}
+
+async fn queue_media<'slots>(
+    slots: &'slots Semaphore,
+    progress: &MediaProgress,
+) -> tokio::sync::SemaphorePermit<'slots> {
+    if let Ok(permit) = slots.try_acquire() {
+        return permit;
+    }
+    progress.report(MEDIA_QUEUED);
+    slots
+        .acquire()
+        .await
+        .expect("media semaphore is never closed")
+}
+
 async fn wait_media(
     generation: &mut Generation,
     session: &mut Session,
     stream: &ChatStream,
+    progress: &mut MediaProgress,
 ) -> Result<Option<tokio::sync::SemaphorePermit<'static>>, Box<dyn std::error::Error + Send + Sync>>
 {
-    tokio::select! {
+    let waited: Result<_, Box<dyn std::error::Error + Send + Sync>> = tokio::select! {
         biased;
         _ = session.guard.lost() => Err(OWNERSHIP_LOST.into()),
         error = watch_lease(&session.store, &session.lease) => Err(error.into()),
-        _ = generation.cancel.recv() => {
+        _ = generation.cancel.recv() => Ok(None),
+        permit = queue_media(&IMAGE_GENERATIONS, progress) => Ok(Some(permit)),
+    };
+    let permit = match waited {
+        Ok(Some(permit)) => permit,
+        Ok(None) => {
+            progress.stop().await;
             session.close().await?;
             publish(
                 stream,
@@ -1505,19 +1586,25 @@ async fn wait_media(
                 },
             )
             .await;
-            Ok(None)
+            return Ok(None);
         }
-        permit = IMAGE_GENERATIONS.acquire() => {
-            Ok(Some(permit.expect("image semaphore is never closed")))
+        Err(error) => {
+            progress.stop().await;
+            return Err(error);
         }
+    };
+    if let Err(error) = session.store.assert_current(&session.lease).await {
+        progress.stop().await;
+        return Err(error.into());
     }
+    Ok(Some(permit))
 }
 
 async fn await_media<T>(
     lost: impl Future<Output = ()>,
     cancellation: broadcast::Sender<()>,
     operation: impl Future<Output = T>,
-    progress: &tokio::task::JoinHandle<()>,
+    progress: &mut MediaProgress,
 ) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
     tokio::pin!(lost);
     tokio::pin!(operation);
@@ -1526,10 +1613,42 @@ async fn await_media<T>(
         _ = &mut lost => {
             let _ = cancellation.send(());
             let _ = operation.await;
-            progress.abort();
+            progress.stop().await;
             Err(OWNERSHIP_LOST.into())
         }
         result = &mut operation => Ok(result),
+    }
+}
+
+async fn relay_progress(stream: Arc<ChatStream>, mut progress: mpsc::UnboundedReceiver<String>) {
+    let started = tokio::time::Instant::now();
+    let mut latest = MEDIA_WORKING.to_string();
+    let mut heartbeat = tokio::time::interval_at(started + MEDIA_HEARTBEAT, MEDIA_HEARTBEAT);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            message = progress.recv() => {
+                let Some(message) = message else {
+                    return;
+                };
+                latest.clone_from(&message);
+                heartbeat.reset();
+                publish(&stream, ServerMessage::Status { message }).await;
+            }
+            _ = heartbeat.tick() => {
+                let message = format!("{latest} {} elapsed", elapsed_label(started.elapsed()));
+                publish(&stream, ServerMessage::Status { message }).await;
+            }
+        }
+    }
+}
+
+fn elapsed_label(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 60 {
+        format!("{seconds} s")
+    } else {
+        format!("{} min", seconds / 60)
     }
 }
 
@@ -1791,19 +1910,11 @@ async fn handle_image_generation(
         Some(identity) => zone_comfy::identity_caption(&generation_prompt, &identity.trigger),
         None => generation_prompt,
     };
-    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
+    let mut progress = MediaProgress::start(stream);
+    let Some(_generation_permit) = wait_media(generation, session, stream, &mut progress).await?
+    else {
         return Ok(());
     };
-
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = stream.clone();
-    let progress_task = tokio::spawn(async move {
-        while let Some(message) = progress_rx.recv().await {
-            publish(&progress_sender, ServerMessage::Status { message }).await;
-        }
-    });
-
-    session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
     let result = await_media(
         session.guard.lost(),
@@ -1813,13 +1924,12 @@ async fn handle_image_generation(
             source.as_ref(),
             None,
             &mut generation.cancel,
-            progress_tx,
+            progress.sender(),
         ),
-        &progress_task,
+        &mut progress,
     )
     .await?;
-    progress_task.abort();
-    let _ = progress_task.await;
+    progress.stop().await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(stream).await;
@@ -1924,28 +2034,25 @@ async fn handle_video_generation(
         },
     )
     .await;
-    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
+    let mut progress = MediaProgress::start(stream);
+    let Some(_generation_permit) = wait_media(generation, session, stream, &mut progress).await?
+    else {
         return Ok(());
     };
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = stream.clone();
-    let progress_task = tokio::spawn(async move {
-        while let Some(message) = progress_rx.recv().await {
-            publish(&progress_sender, ServerMessage::Status { message }).await;
-        }
-    });
-
-    session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
     let result = await_media(
         session.guard.lost(),
         cancellation,
-        client.generate_video(prompt, source.as_ref(), &mut generation.cancel, progress_tx),
-        &progress_task,
+        client.generate_video(
+            prompt,
+            source.as_ref(),
+            &mut generation.cancel,
+            progress.sender(),
+        ),
+        &mut progress,
     )
     .await?;
-    progress_task.abort();
-    let _ = progress_task.await;
+    progress.stop().await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(stream).await;
@@ -2070,20 +2177,13 @@ async fn handle_upscale(
         },
     )
     .await;
-    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
+    let mut progress = MediaProgress::start(stream);
+    let Some(_generation_permit) = wait_media(generation, session, stream, &mut progress).await?
+    else {
         return Ok(());
     };
-
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = stream.clone();
-    let progress_task = tokio::spawn(async move {
-        while let Some(message) = progress_rx.recv().await {
-            publish(&progress_sender, ServerMessage::Status { message }).await;
-        }
-    });
-
-    session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
+    let sender = progress.sender();
     let result = await_media(
         session.guard.lost(),
         cancellation,
@@ -2091,21 +2191,20 @@ async fn handle_upscale(
             match &source {
                 Source::Image(image) => {
                     client
-                        .upscale_image(image, &mut generation.cancel, progress_tx)
+                        .upscale_image(image, &mut generation.cancel, sender)
                         .await
                 }
                 Source::Video(video) => {
                     client
-                        .upscale_video(video, &mut generation.cancel, progress_tx)
+                        .upscale_video(video, &mut generation.cancel, sender)
                         .await
                 }
             }
         },
-        &progress_task,
+        &mut progress,
     )
     .await?;
-    progress_task.abort();
-    let _ = progress_task.await;
+    progress.stop().await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(stream).await;
@@ -2242,28 +2341,20 @@ async fn handle_audio_generation(
         },
     )
     .await;
-    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
+    let mut progress = MediaProgress::start(stream);
+    let Some(_generation_permit) = wait_media(generation, session, stream, &mut progress).await?
+    else {
         return Ok(());
     };
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = stream.clone();
-    let progress_task = tokio::spawn(async move {
-        while let Some(message) = progress_rx.recv().await {
-            publish(&progress_sender, ServerMessage::Status { message }).await;
-        }
-    });
-
-    session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
     let result = await_media(
         session.guard.lost(),
         cancellation,
-        client.generate_audio(prompt, &mut generation.cancel, progress_tx),
-        &progress_task,
+        client.generate_audio(prompt, &mut generation.cancel, progress.sender()),
+        &mut progress,
     )
     .await?;
-    progress_task.abort();
-    let _ = progress_task.await;
+    progress.stop().await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(stream).await;
@@ -2605,8 +2696,9 @@ async fn prepare_message(
     if chat.workspace_id != Some(workspace_id) {
         return Err("Chat does not belong to the authenticated workspace".into());
     }
-    let route = Route::for_workspace(state, workspace_id).await;
+    let route = Route::for_chat(state, &chat).await;
     let endpoint = route.endpoint()?.clone();
+    let chat = route.apply(chat);
     let mut image_config = state.config().comfyui.clone();
     if let Some(settings) = route.settings() {
         settings.apply_to_comfyui(&mut image_config);
@@ -2623,7 +2715,7 @@ async fn prepare_message(
                 &endpoint,
                 &mut image_config,
             )
-            .await;
+            .await?;
             let intent = crate::services::image_intent::ImageIntentClassifier::new(
                 image_config.clone(),
                 endpoint.clone(),
@@ -2660,7 +2752,7 @@ async fn prepare_message(
                         &endpoint,
                         &mut image_config,
                     )
-                    .await
+                    .await?
                 }
             };
             Routing::Image(image_config, backend, endpoint)
@@ -2675,6 +2767,8 @@ async fn prepare_message(
 
 /// The backend a workspace's classifier runs on, with `config` naming the
 /// model it classifies with there: the login the chat runs on, while it can.
+/// A workspace's backend that can't be resolved leaves it the instance's; a
+/// chat's chosen provider is the one it runs on, or it fails.
 async fn classifying(
     state: &AppState,
     workspace_id: Uuid,
@@ -2682,7 +2776,7 @@ async fn classifying(
     route: &Route,
     endpoint: &Endpoint,
     config: &mut crate::config::ComfyUiConfig,
-) -> LlmBackend {
+) -> Result<LlmBackend, crate::services::backend::Error> {
     let sticky = match chats::session(state.db(), chat.id).await {
         Ok(session) => session.and_then(|session| session.login),
         Err(error) => {
@@ -2690,24 +2784,25 @@ async fn classifying(
             None
         }
     };
-    let backend = route
-        .backend_for(state, sticky)
-        .await
-        .unwrap_or_else(|error| {
+    let backend = match route.backend_for(state, sticky).await {
+        Ok(backend) => backend,
+        Err(error) if route.chosen().is_some() => return Err(error),
+        Err(error) => {
             tracing::warn!(
                 %workspace_id,
                 %error,
                 "Could not resolve the workspace's model backend; classifying on the instance's"
             );
             crate::services::backend::instance(state.config())
-        });
+        }
+    };
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
     let preferences = route.preferences(&config.classifier_model);
     config.classifier_model =
         crate::services::stages::classifier_model(&preferences, &catalog, &chat.model_name);
-    backend
+    Ok(backend)
 }
 
 async fn load_web_search(
@@ -2828,6 +2923,7 @@ async fn prepare_chat(
         None => None,
     };
     let current = resolved.login.clone();
+    let chosen = route.chosen().is_some();
     let endpoint = route.into_endpoint()?;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &resolved.backend)
@@ -2862,13 +2958,13 @@ async fn prepare_chat(
     )
     .await?;
     preparation.handover = match (organization, current, &preparation.session) {
-        (Some(organization), Some(current), Some(_)) => Some(Handover::new(
-            organization,
-            current,
-            model,
-            previous.as_ref(),
-            opening,
-        )),
+        (Some(organization), Some(current), Some(_)) => {
+            let handover = Handover::new(organization, current, model, previous.as_ref(), opening);
+            Some(match chosen {
+                true => handover.strict(),
+                false => handover,
+            })
+        }
         _ => None,
     };
     let search = load_web_search(state, chat_id, content, web_search_requested, chat.offline).await;
@@ -3053,7 +3149,7 @@ async fn pin(
             pinned.keep(replay);
         }
         None => {
-            let backend = pinned.renew(preparation.llm.config().backend.clone());
+            let backend = pinned.renew(preparation.llm.backend().clone());
             preparation.llm = preparation.llm.clone().with_backend(backend);
             pinned.keep(preparation.context.clone());
         }
@@ -3101,6 +3197,7 @@ async fn handle_chat_generation(
         skills: _,
         session: mut pinned,
         mut handover,
+        effort,
     } = preparation;
     let offline = tools.offline();
     let mut replay = context.clone();
@@ -3111,7 +3208,7 @@ async fn handle_chat_generation(
     let mut agent_tools = agentic
         .then(|| {
             crate::mcp::AgentTools::serve(
-                &llm_client.config().backend,
+                llm_client.backend(),
                 &mut tools,
                 crate::mcp::Scope {
                     workspace: workspace_id,
@@ -3481,7 +3578,7 @@ async fn handle_chat_generation(
                             if handover.is_some() {
                                 handing = Some(Cause::limited(limit));
                             } else {
-                                failure = Some(self::failure(&endpoint, &llm_client.config().backend, limit.message));
+                                failure = Some(self::failure(&endpoint, llm_client.backend(), limit.message));
                             }
                             break;
                         }
@@ -3493,7 +3590,7 @@ async fn handle_chat_generation(
                                 refused = true;
                                 break;
                             }
-                            let remedied = crate::services::backend::remedied(&llm_client.config().backend, message);
+                            let remedied = crate::services::backend::remedied(llm_client.backend(), message);
                             if remedied.signed_out && handover.is_some() {
                                 handing = Some(Cause::signed_out(remedied.message));
                             } else {
@@ -3550,7 +3647,7 @@ async fn handle_chat_generation(
             && !cancelled
             && let Some((whole, backend)) = pinned
                 .as_mut()
-                .and_then(|pinned| pinned.restart(llm_client.config().backend.clone()))
+                .and_then(|pinned| pinned.restart(llm_client.backend().clone()))
         {
             llm_client = llm_client.with_backend(backend);
             replay = whole.clone();
@@ -3578,9 +3675,7 @@ async fn handle_chat_generation(
                 Err(ended) => {
                     failure = Some(match ended {
                         Some(error) => error.to_string(),
-                        None => {
-                            self::failure(&endpoint, &llm_client.config().backend, cause.message)
-                        }
+                        None => self::failure(&endpoint, llm_client.backend(), cause.message),
                     });
                     break;
                 }
@@ -3649,7 +3744,10 @@ async fn handle_chat_generation(
             if let Some(repicked) = switch.model.clone() {
                 model = repicked;
             }
-            llm_client = llm_client.with_backend(switch.backend.clone());
+            llm_client = llm_client.with_backend(crate::services::backend::effort(
+                switch.backend.clone(),
+                effort,
+            ));
             if let Some(served) = &agent_tools {
                 llm_client =
                     llm_client.with_toolset(served.lease.toolset(), builtin_tools(sandboxed));
@@ -3998,7 +4096,7 @@ async fn forget(state: &AppState, chat_id: Uuid) {
 /// Brings what the organization knows of `login`'s usage up to date once a turn on it has
 /// ended, starting from the `windows` the turn observed on it, without holding the answer up for
 /// it.
-fn settle(state: &AppState, login: Uuid, windows: Vec<zone_core::llm::Window>) {
+fn settle(state: &AppState, login: Uuid, windows: Vec<abnegate_llm::Window>) {
     let state = state.clone();
     tokio::spawn(async move {
         router::observe(&state, login, &windows).await;
@@ -4433,6 +4531,8 @@ mod tests {
         use super::*;
         use crate::config::{AgentConfig, ComfyUiConfig, Config, ModelBackend};
         use crate::db::ai_settings::PROVIDER_CLAUDE_CODE;
+        use crate::db::chats::provider::Choice;
+        use crate::services::provider::Provider;
         use crate::services::stages::AUTO;
         use crate::services::stages::testing::{MODEL_FLAG, StandIn};
         use tempfile::TempDir;
@@ -4488,6 +4588,17 @@ mod tests {
                     workspace: workspace.id,
                     chat: chat.id,
                 }
+            }
+
+            /// Sets the chat on `provider` and `model`, or back on its workspace's.
+            async fn choose(&self, provider: Option<Provider>, model: Option<&str>) {
+                let choice = provider.map(|provider| Choice {
+                    provider,
+                    model: model.map(str::to_string),
+                });
+                chats::provider::set(&self.pool, self.chat, choice.as_ref())
+                    .await
+                    .expect("the chat's provider");
             }
 
             async fn remove(&self) {
@@ -4601,6 +4712,97 @@ mod tests {
                 crate::services::route::reads::of(organization.workspace),
                 1,
                 "one turn read its workspace's AI settings more than once"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_turn_on_a_chosen_provider_reads_its_workspaces_ai_settings_once() {
+            let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
+            organization.choose(Some(Provider::SelfHosted), None).await;
+            let state = AppState::new(
+                Config {
+                    litellm_host: UNREACHABLE.to_string(),
+                    ollama_host: UNREACHABLE.to_string(),
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+
+            let prepared = prepare_turn(&state, &organization).await;
+            organization.remove().await;
+
+            let preparation =
+                prepared.unwrap_or_else(|error| panic!("the turn was not prepared: {error}"));
+            assert!(
+                matches!(preparation.llm.backend(), LlmBackend::Http),
+                "the chat ran on its workspace's agent rather than the provider it chose"
+            );
+            assert_eq!(
+                crate::services::route::reads::of(organization.workspace),
+                1,
+                "one turn on a chosen provider read its workspace's AI settings more than once"
+            );
+        }
+
+        const WINDOW: i64 = 8192;
+
+        /// The context limit of one turn of `organization`'s chat once it keeps
+        /// [`WINDOW`] for its workspace's provider.
+        async fn windowed_limit(organization: &Organization) -> Option<u64> {
+            chats::update_chat(
+                &organization.pool,
+                organization.chat,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(WINDOW),
+                None,
+            )
+            .await
+            .expect("the chat's context window");
+            let state = AppState::new(
+                Config {
+                    litellm_host: UNREACHABLE.to_string(),
+                    ollama_host: UNREACHABLE.to_string(),
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+
+            let prepared = prepare_turn(&state, organization).await;
+            organization.remove().await;
+
+            prepared
+                .unwrap_or_else(|error| panic!("the turn was not prepared: {error}"))
+                .context
+                .policy
+                .limit
+        }
+
+        #[tokio::test]
+        async fn a_chat_on_its_workspaces_provider_keeps_its_context_window() {
+            let organization = Organization::on(PROVIDER_SELF_HOSTED).await;
+
+            let limit = windowed_limit(&organization).await;
+
+            assert_eq!(limit, u64::try_from(WINDOW).ok());
+        }
+
+        #[tokio::test]
+        async fn a_chosen_provider_is_not_held_to_the_window_kept_for_its_workspaces_provider() {
+            let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
+            organization.choose(Some(Provider::SelfHosted), None).await;
+
+            let limit = windowed_limit(&organization).await;
+
+            assert_ne!(
+                limit,
+                u64::try_from(WINDOW).ok(),
+                "a chosen provider was held to the window the chat keeps for its workspace's provider"
             );
         }
 
@@ -4832,6 +5034,113 @@ mod tests {
                 panic!("expected an image route carrying the organization's agent");
             };
             settings.credential.expose().map(str::to_string)
+        }
+
+        /// A Codex login of the organization, signed in within its own home.
+        async fn codex_login(state: &AppState, organization: &Organization) -> Uuid {
+            let login = db::agent_logins::insert(
+                &organization.pool,
+                &db::agent_logins::Insert {
+                    organization_id: organization.id,
+                    agent: AgentKind::Codex.as_str(),
+                    account: Some("codex"),
+                    credential: None,
+                    label: Some("codex"),
+                    expires_at: None,
+                },
+            )
+            .await
+            .expect("a stored login")
+            .id;
+            db::agent_logins::observe(
+                &organization.pool,
+                login,
+                &crate::services::login::usage::Snapshot {
+                    windows: Vec::new(),
+                    headroom: Some(90.0),
+                    fetched_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .expect("the login's usage");
+            let home = state
+                .config()
+                .agents
+                .create_login_home(organization.id, AgentKind::Codex, login)
+                .expect("the login's home");
+            std::fs::write(
+                home.join("auth.json"),
+                r#"{"tokens":{"access_token":"codex-access","refresh_token":"codex-refresh","account_id":"acct-42"}}"#,
+            )
+            .expect("the codex sign-in");
+            login
+        }
+
+        #[tokio::test]
+        async fn a_chat_that_chose_claude_code_never_runs_its_turn_or_classifier_on_codex() {
+            let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
+            let agents = TempDir::new().expect("an agent state root");
+            let state = AppState::new(
+                Config {
+                    agents: AgentConfig {
+                        state: agents.path().to_path_buf(),
+                        host_login: false,
+                        ..crate::state::test_agents()
+                    },
+                    comfyui: ComfyUiConfig {
+                        enabled: true,
+                        classifier_timeout_secs: 20,
+                        ..ComfyUiConfig::default()
+                    },
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+            codex_login(&state, &organization).await;
+            let signed_out = crate::services::backend::Error::SignedOut {
+                agent: AgentKind::Claude,
+            }
+            .to_string();
+
+            let following = prepare_turn(&state, &organization).await;
+            organization.choose(Some(Provider::ClaudeCode), None).await;
+            let turn = prepare_turn(&state, &organization).await;
+            let classified = prepare_message(
+                &state,
+                organization.chat,
+                organization.workspace,
+                "generate an image of a lighthouse at dusk",
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+            organization.remove().await;
+
+            let following = following.unwrap_or_else(|error| {
+                panic!("a chat following its workspace lost its fallback to codex: {error}")
+            });
+            assert!(
+                matches!(
+                    following.llm.backend(),
+                    LlmBackend::Cli {
+                        agent: AgentKind::Codex,
+                        ..
+                    }
+                ),
+                "a chat following its workspace did not fall back to codex"
+            );
+            assert_eq!(
+                turn.err().as_deref(),
+                Some(signed_out.as_str()),
+                "the turn of a chat that chose Claude Code ran on codex"
+            );
+            assert_eq!(
+                classified.err().as_deref(),
+                Some(signed_out.as_str()),
+                "the classifier of a chat that chose Claude Code ran on codex or the instance"
+            );
         }
 
         #[tokio::test]
@@ -5087,6 +5396,11 @@ cat 'DIR/reply.jsonl'
                     .expect("the chat's latest entry")
                 }
 
+                /// Sets the chat on `provider` and `model`, or back on its workspace's.
+                async fn choose(&self, provider: Option<Provider>, model: Option<&str>) {
+                    self.organization.choose(provider, model).await;
+                }
+
                 async fn remove(&self) {
                     self.organization.remove().await;
                     sqlx::query("DELETE FROM users WHERE id = $1")
@@ -5173,6 +5487,167 @@ cat 'DIR/reply.jsonl'
                 assert_eq!(second.entry, latest);
             }
 
+            const THIRD: &str = "And before that?";
+            const ELSEWHERE: &str = "Answered by the chosen endpoint.";
+            const CHOSEN: &str = "gpt-chosen";
+
+            /// An OpenAI-compatible endpoint that answers every completion with `ELSEWHERE`.
+            async fn endpoint() -> MockServer {
+                let server = MockServer::start().await;
+                let chunk = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":CHOSEN,"choices":[{"index":0,"delta":{"content":ELSEWHERE},"finish_reason":null}]});
+                let end = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":CHOSEN,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+                Mock::given(method("POST"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .insert_header("Content-Type", "text/event-stream")
+                            .set_body_string(format!(
+                                "data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"
+                            )),
+                    )
+                    .mount(&server)
+                    .await;
+                server
+            }
+
+            #[tokio::test]
+            async fn a_chat_switched_off_its_agent_and_back_resumes_with_the_turns_it_missed() {
+                let chat = Chat::on_claude().await;
+                let server = endpoint().await;
+                sqlx::query(
+                    "UPDATE organization_ai_settings SET openai_base_url = $2, completions_routed = true \
+                     WHERE organization_id = $1",
+                )
+                .bind(chat.organization.id)
+                .bind(format!("{}/v1", server.uri()))
+                .execute(&chat.organization.pool)
+                .await
+                .expect("the organization's OpenAI endpoint");
+
+                chat.ask(FIRST).await;
+                let first = chat
+                    .session()
+                    .await
+                    .expect("the first turn recorded its session");
+                chat.choose(Some(Provider::OpenAI), Some(CHOSEN)).await;
+                chat.ask(SECOND).await;
+                let elsewhere = chat.agent.runs().len();
+                let sent: Vec<serde_json::Value> = server
+                    .received_requests()
+                    .await
+                    .expect("the requests the endpoint received")
+                    .iter()
+                    .map(|request| request.body_json().expect("a JSON completion"))
+                    .collect();
+                chat.choose(Some(Provider::ClaudeCode), None).await;
+                chat.ask(THIRD).await;
+                let latest = chat.latest().await;
+                let back = chat.session().await;
+                let runs = chat.agent.runs();
+                let answers: Vec<String> = sqlx::query_scalar(
+                    "SELECT content FROM messages WHERE chat_id = $1 AND role = 'assistant' ORDER BY created_at",
+                )
+                .bind(chat.organization.chat)
+                .fetch_all(&chat.organization.pool)
+                .await
+                .expect("the chat's answers");
+                chat.remove().await;
+
+                assert_eq!(elsewhere, 1, "the turn on the chosen endpoint ran claude");
+                assert_eq!(answers, [ANSWER, ELSEWHERE, ANSWER]);
+                assert!(
+                    sent.iter()
+                        .any(|body| body["model"] == CHOSEN && body.to_string().contains(SECOND)),
+                    "the chosen endpoint was not asked the second question on its model: {sent:?}"
+                );
+                let [_, resumed] = runs.as_slice() else {
+                    panic!("expected two sessioned runs, got {}", runs.len());
+                };
+                let sent = blocks(&resumed.stdin);
+                match resumed.flag("--resume") {
+                    Some(id) => {
+                        assert_eq!(id, first.id);
+                        let said: Vec<(&str, &str)> = sent
+                            .iter()
+                            .skip(1)
+                            .map(|(label, said)| (label.as_str(), said.as_str()))
+                            .collect();
+                        assert_eq!(
+                            said,
+                            [("User", SECOND), ("Assistant", ELSEWHERE), ("User", THIRD)],
+                            "the resumed session was not sent the turn it missed: {}",
+                            resumed.stdin
+                        );
+                    }
+                    None => {
+                        for said in [FIRST, ANSWER, SECOND, ELSEWHERE, THIRD] {
+                            assert!(
+                                resumed.stdin.contains(said),
+                                "the fresh session was not sent {said:?}: {}",
+                                resumed.stdin
+                            );
+                        }
+                    }
+                }
+                let back = back.expect("the turn back on claude kept its session");
+                assert_eq!(back.entry, latest);
+            }
+
+            #[tokio::test]
+            async fn a_chat_switched_to_codex_and_back_never_resumes_the_codex_session() {
+                let chat = Chat::on_claude().await;
+                chat.ask(FIRST).await;
+                let first = chat
+                    .session()
+                    .await
+                    .expect("the first turn recorded its session");
+                let codex = codex_login(&chat.state, &chat.organization).await;
+                chat.choose(Some(Provider::Codex), None).await;
+                let thread = chats::ChatSession {
+                    login: Some(codex),
+                    id: "019a0000-0000-7000-8000-000000000000".to_string(),
+                    agent: AgentKind::Codex,
+                    entry: chat.latest().await,
+                    prompt: first.prompt.clone(),
+                };
+                chats::set_session(
+                    &chat.organization.pool,
+                    chat.organization.chat,
+                    Some(&thread),
+                )
+                .await
+                .expect("the codex turn's session");
+                chat.choose(Some(Provider::ClaudeCode), None).await;
+                chat.ask(SECOND).await;
+                let back = chat.session().await;
+                let runs = chat.agent.runs();
+                chat.remove().await;
+
+                let [_, fresh] = runs.as_slice() else {
+                    panic!("expected two sessioned runs, got {}", runs.len());
+                };
+                assert_eq!(
+                    fresh.flag("--resume"),
+                    None,
+                    "claude resumed codex's thread"
+                );
+                let pinned = fresh
+                    .flag("--session-id")
+                    .expect("claude started a fresh session");
+                assert_ne!(pinned, thread.id);
+                assert_ne!(pinned, first.id);
+                for said in [FIRST, ANSWER, SECOND] {
+                    assert!(
+                        fresh.stdin.contains(said),
+                        "the fresh session was not sent {said:?}: {}",
+                        fresh.stdin
+                    );
+                }
+                let back = back.expect("the turn back on claude recorded its session");
+                assert_eq!(back.agent, AgentKind::Claude);
+                assert_eq!(back.id, pinned);
+                assert_eq!(back.login, Some(chat.login));
+            }
+
             #[tokio::test]
             async fn a_resume_the_agent_refuses_is_replayed_whole_in_a_fresh_session() {
                 let chat = Chat::on_claude().await;
@@ -5254,7 +5729,6 @@ cat 'DIR/reply.jsonl'
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
         use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
-        use zone_core::llm::LlmClient;
 
         const KEY: &str = "sk-organization-0123456789abcdef";
         const MASKED: &str = "sk-org************cdef";
@@ -5273,7 +5747,7 @@ cat 'DIR/reply.jsonl'
         saved.litellm_host = Some(provider.uri());
         saved.litellm_key = Some(SecretValue::new(KEY.to_string()));
         let endpoint = Endpoint::resolve(&crate::state::test_config(), &saved);
-        let llm = LlmClient::new(endpoint.llm("llama3.2:3b", 0.7, 64, LlmBackend::Http));
+        let llm = endpoint.llm("llama3.2:3b", 0.7, 64, LlmBackend::Http);
 
         let Err(error) = llm.chat_stream(&[LlmMessage::user("Hello")], None).await else {
             panic!("the provider rejected the key, so the completion must fail");
@@ -5522,11 +5996,7 @@ cat 'DIR/reply.jsonl'
 
     #[test]
     fn an_answer_that_moved_keeps_each_move_and_what_every_login_spent() {
-        let spent = Usage {
-            prompt_tokens: 120,
-            completion_tokens: 30,
-            total_tokens: 150,
-        };
+        let spent = Usage::new(120, 30);
 
         let merged = merge_metadata(None, &[], &[], &[], None, &[moved(10)], Some(spent))
             .expect("a move produces metadata");
@@ -5610,9 +6080,6 @@ cat 'DIR/reply.jsonl'
     #[test]
     fn frames_outside_a_turn_are_not_replayed() {
         let mut turn = LiveTurn::default();
-        turn.record(&ServerMessage::Status {
-            message: "Searching the web...".to_string(),
-        });
         turn.record(&ServerMessage::MessageSaved {
             message_id: Uuid::new_v4(),
             role: "user".to_string(),
@@ -5623,6 +6090,43 @@ cat 'DIR/reply.jsonl'
         assert!(
             turn.replay().is_empty(),
             "the chat a joining connection loads already has these"
+        );
+    }
+
+    #[test]
+    fn a_status_before_the_message_starts_replays_until_the_turn_settles() {
+        let queued = ServerMessage::Status {
+            message: MEDIA_QUEUED.to_string(),
+        };
+        let mut turn = LiveTurn::default();
+        turn.record(&ServerMessage::Status {
+            message: "Preparing video generation...".to_string(),
+        });
+        turn.record(&queued);
+
+        assert_eq!(
+            frame_kinds(&turn.replay()),
+            vec!["status"],
+            "only the latest status replays"
+        );
+        assert!(
+            matches!(
+                turn.replay().as_slice(),
+                [ServerMessage::Status { message }] if message == MEDIA_QUEUED
+            ),
+            "{:?}",
+            turn.replay()
+        );
+
+        turn.record(&ServerMessage::Cancelled { message_id: None });
+        assert!(turn.replay().is_empty(), "a settled wait leaves nothing");
+
+        turn.record(&queued);
+        turn.record(&started(Uuid::new_v4()));
+        assert_eq!(
+            frame_kinds(&turn.replay()),
+            vec!["message_start"],
+            "a started message replaces the status it was waiting under"
         );
     }
 
@@ -5859,6 +6363,175 @@ cat 'DIR/reply.jsonl'
         ));
         drop(generation);
         assert!(!CHAT_CANCELLATIONS.contains_key(&key));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_video_job_comfy_leaves_silent_for_over_two_hours_keeps_reporting() {
+        const SILENCE: Duration = Duration::from_secs(2 * 60 * 60 + 60);
+        const LONGEST_QUIET: Duration = Duration::from_secs(60);
+        const GENERATING: &str = "Generating video...";
+
+        let stream = ChatStream::of(Uuid::new_v4());
+        let mut events = stream.events.subscribe();
+        let listener = tokio::spawn(async move {
+            let mut heard = Vec::new();
+            loop {
+                match events.recv().await {
+                    Ok(ServerMessage::Status { message }) => {
+                        heard.push((tokio::time::Instant::now(), message));
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return heard,
+                }
+            }
+        });
+        let mut progress = MediaProgress::start(&stream);
+        let sender = progress.sender();
+        let silent_comfy = async move {
+            let _ = sender.send("Video queued...".to_string());
+            let _ = sender.send(GENERATING.to_string());
+            tokio::time::sleep(SILENCE).await;
+            "rendered"
+        };
+        let (cancellation, _) = broadcast::channel(1);
+        let started = tokio::time::Instant::now();
+
+        let rendered = await_media(
+            std::future::pending(),
+            cancellation,
+            silent_comfy,
+            &mut progress,
+        )
+        .await
+        .expect("nothing took the lease");
+
+        assert_eq!(rendered, "rendered");
+        assert!(
+            started.elapsed() >= SILENCE,
+            "the job was cut short after {:?}",
+            started.elapsed()
+        );
+        progress.stop().await;
+        drop(stream);
+        let heard = listener.await.expect("the listener ends with the stream");
+        let mut previous = started;
+        for (at, _) in &heard {
+            let quiet = at.duration_since(previous);
+            assert!(
+                quiet <= LONGEST_QUIET,
+                "the console heard nothing for {quiet:?} while ComfyUI was silent"
+            );
+            previous = *at;
+        }
+        let tail = (started + SILENCE).saturating_duration_since(previous);
+        assert!(
+            tail <= LONGEST_QUIET,
+            "the console heard nothing for the last {tail:?} of the job"
+        );
+        assert!(
+            heard
+                .iter()
+                .skip(2)
+                .all(|(_, message)| message.starts_with(GENERATING)),
+            "a status during the silence has to say what the job is doing: {heard:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_job_queued_behind_another_keeps_reporting_while_it_waits() {
+        const OTHER_JOB: Duration = Duration::from_secs(2 * 60 * 60);
+
+        let slots = Semaphore::new(1);
+        let other = slots.acquire().await.expect("the slot is free");
+        let stream = ChatStream::of(Uuid::new_v4());
+        let mut events = stream.events.subscribe();
+        let listener = tokio::spawn(async move {
+            let mut heard = Vec::new();
+            loop {
+                match events.recv().await {
+                    Ok(ServerMessage::Status { message }) => {
+                        heard.push((tokio::time::Instant::now(), message));
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return heard,
+                }
+            }
+        });
+        let mut progress = MediaProgress::start(&stream);
+        let started = tokio::time::Instant::now();
+
+        let (permit, replay) = tokio::join!(queue_media(&slots, &progress), async {
+            tokio::time::sleep(OTHER_JOB / 2).await;
+            let (replay, _) = stream.join().await;
+            tokio::time::sleep(OTHER_JOB / 2).await;
+            drop(other);
+            replay
+        });
+
+        assert!(
+            started.elapsed() >= OTHER_JOB,
+            "the queued job ran alongside the other after {:?}",
+            started.elapsed()
+        );
+        progress.stop().await;
+        drop(permit);
+        drop(stream);
+        let heard = listener.await.expect("the listener ends with the stream");
+        assert_eq!(
+            heard.first().map(|(_, message)| message.as_str()),
+            Some(MEDIA_QUEUED),
+            "the wait has to say why nothing is happening yet: {heard:?}"
+        );
+        let mut previous = started;
+        for (at, message) in &heard {
+            let quiet = at.duration_since(previous);
+            assert!(
+                quiet <= MEDIA_HEARTBEAT,
+                "the console heard nothing for {quiet:?} while the slot was taken"
+            );
+            assert!(
+                message.starts_with(MEDIA_QUEUED),
+                "a status during the wait has to say it is waiting: {message}"
+            );
+            previous = *at;
+        }
+        let tail = (started + OTHER_JOB).saturating_duration_since(previous);
+        assert!(
+            tail <= MEDIA_HEARTBEAT,
+            "the console heard nothing for the last {tail:?} of the wait"
+        );
+        assert!(
+            matches!(
+                replay.as_slice(),
+                [ServerMessage::Status { message }] if message.starts_with(MEDIA_QUEUED)
+            ),
+            "a console that reconnects during the wait has to see it: {replay:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_free_slot_starts_without_saying_it_waited() {
+        let slots = Semaphore::new(1);
+        let stream = ChatStream::of(Uuid::new_v4());
+        let mut events = stream.events.subscribe();
+        let mut progress = MediaProgress::start(&stream);
+
+        let permit = queue_media(&slots, &progress).await;
+        progress.stop().await;
+
+        drop(permit);
+        assert!(
+            events.try_recv().is_err(),
+            "nothing was ahead of the job, so there was nothing to wait for"
+        );
+    }
+
+    #[test]
+    fn elapsed_labels_read_in_seconds_then_whole_minutes() {
+        assert_eq!(elapsed_label(Duration::from_secs(30)), "30 s");
+        assert_eq!(elapsed_label(Duration::from_secs(59)), "59 s");
+        assert_eq!(elapsed_label(Duration::from_secs(60)), "1 min");
+        assert_eq!(elapsed_label(Duration::from_secs(7_259)), "120 min");
     }
 
     #[tokio::test(start_paused = true)]

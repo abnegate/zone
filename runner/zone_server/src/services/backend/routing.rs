@@ -16,4 +16,7 @@ pub struct Routing<'a> {
     /// The model the session runs on the configured agent, which a login that lately refused it
     /// for want of usage credits is passed over for.
     pub model: Option<&'a str>,
+    /// Whether only the configured agent's logins may run it, never another agent's: a chat
+    /// that chose its agent runs on that agent or not at all.
+    pub strict: bool,
 }

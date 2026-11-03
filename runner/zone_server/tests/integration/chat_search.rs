@@ -2,11 +2,11 @@
 use crate::common;
 
 use crate::common::context::{Harness, answer, successful, usage};
+use abnegate_llm::{Message, Role};
 use abnegate_search::{SearchContext, SearchHit};
 use serde_json::json;
 use uuid::Uuid;
 use zone_core::context;
-use zone_core::llm::{Message, Role};
 use zone_server::db::chats::{self, ChatRow};
 use zone_server::services::chat::session::{self, Mode};
 use zone_server::services::route::Route;

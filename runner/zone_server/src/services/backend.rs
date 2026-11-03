@@ -11,10 +11,11 @@ pub use routing::Routing;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use abnegate_llm::Credential;
 use chrono::{DateTime, SecondsFormat, Utc};
 use uuid::Uuid;
 use zone_core::llm::provider::{STDERR_HEADING, SignIn};
-use zone_core::llm::{AgentKind, CliSettings, Credential, LlmBackend, Session};
+use zone_core::llm::{AgentKind, CliSettings, LlmBackend, ReasoningEffort, Session};
 
 use crate::config::Config;
 use crate::db::agent_logins;
@@ -132,9 +133,10 @@ pub fn instance(config: &Config) -> LlmBackend {
 /// The backend `settings` choose for one of `organization`'s workspaces.
 ///
 /// A coding agent provider runs on the login [`router::pick`] picks among the organization's,
-/// the configured agent's first, routed by `routing`: in that login's own home and the
-/// organization's working directory for its agent, in the session `routing.continuation` names
-/// for it. With no login at all it runs under the host's sign-in when the instance allows that,
+/// the configured agent's first, or only the configured agent's when `routing.strict`, routed by
+/// `routing`: in that login's own home and the organization's working directory for its agent,
+/// in the session `routing.continuation` names for it. With no login of an agent it may run, it
+/// runs under the host's sign-in of the configured agent when the instance allows that,
 /// and never when every login is exhausted. A provider whose settings resolved to an endpoint
 /// of `origin` [`Origin::Settings`] runs over HTTP to it, and every other provider runs on the
 /// instance default.
@@ -159,6 +161,7 @@ pub async fn for_settings(
         routing.exclude,
         routing.sticky,
         routing.model,
+        routing.strict,
     )
     .await
     {
@@ -351,6 +354,15 @@ pub fn bounded(backend: LlmBackend, timeout: Duration) -> LlmBackend {
         LlmBackend::Cli { agent, settings } => {
             LlmBackend::cli(agent, settings.with_timeout(timeout))
         }
+        LlmBackend::Http => LlmBackend::Http,
+    }
+}
+
+/// `backend` with a coding agent told to think at a chat's `effort`. An
+/// endpoint takes its effort in each request's body instead.
+pub fn effort(backend: LlmBackend, effort: ReasoningEffort) -> LlmBackend {
+    match backend {
+        LlmBackend::Cli { agent, settings } => LlmBackend::cli(agent, settings.with_effort(effort)),
         LlmBackend::Http => LlmBackend::Http,
     }
 }
@@ -1411,6 +1423,30 @@ mod tests {
         );
         assert!(matches!(
             bounded(LlmBackend::Http, budget),
+            LlmBackend::Http
+        ));
+    }
+
+    #[test]
+    fn an_agent_is_told_the_chats_effort_and_an_endpoint_is_left_alone() {
+        let organizations = CliSettings::default().with_sign_in(SignIn::Organization);
+
+        let LlmBackend::Cli { agent, settings } = effort(
+            LlmBackend::cli(AgentKind::Claude, organizations),
+            ReasoningEffort::Max,
+        ) else {
+            panic!("the agent was moved off its CLI");
+        };
+
+        assert_eq!(agent, AgentKind::Claude);
+        assert_eq!(settings.effort, Some(ReasoningEffort::Max));
+        assert_eq!(
+            settings.sign_in,
+            SignIn::Organization,
+            "only the effort moves"
+        );
+        assert!(matches!(
+            effort(LlmBackend::Http, ReasoningEffort::Max),
             LlmBackend::Http
         ));
     }

@@ -3,19 +3,16 @@ import {
   Button,
   Checkbox,
   EmptyState,
+  Input,
   Modal,
   Select,
-  SelectContent,
-  SelectItem,
-  SelectRoot,
-  SelectTrigger,
-  SelectValue,
   Tabs,
   TabsList,
   TabsTrigger,
 } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { isProtectedArtifactUrl } from '../../../api/protectedImages';
 import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
@@ -23,8 +20,8 @@ import SubNav from '../../../shared/components/SubNav/SubNav';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
 import { useProjects } from '../../projects/hooks';
+import type { AiProvider } from '../../settings/workspace/types';
 import { useSources } from '../../sources/hooks/useSources';
-import { isProtectedArtifactUrl } from '../api/protectedImages';
 import {
   ActionReceipts,
   AuthenticatedAudio,
@@ -34,22 +31,34 @@ import {
   Citations,
   Generation,
   HandoverNotice,
+  HeaderSelect,
   MemoryBadge,
   MessageContent,
+  ProviderPicker,
 } from '../components';
 import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
-import { useChat, useChatSearch, useChatSources, useChats } from '../hooks';
+import {
+  useChat,
+  useChatProviders,
+  useChatSearch,
+  useChatSources,
+  useChats,
+  useWorkspaceChatProviders,
+} from '../hooks';
 import {
   type Chat,
+  type ChatProviderOffer,
   type ChatSearchResult,
   REASONING_EFFORT_OPTIONS,
   type ReasoningEffort,
 } from '../types';
 import {
   type Attachment,
+  AUTO_EFFORT,
   AUTO_MODEL,
   arrangeChats,
+  asksModelName,
   attachmentMetadata,
   audioAttachments,
   buildMessageWithAttachments,
@@ -59,24 +68,35 @@ import {
   chatShowsCharacter,
   chatShowsReasoning,
   contextTokenOptions,
+  DEFAULT_PROVIDER,
   defaultContextTokens,
+  effectiveOffer,
+  effortsFor,
   findInstalledModel,
   formatBytes,
   formatDate,
   imageAttachments,
+  isAgentOffer,
   isChatGroupBy,
   isChatSort,
   isSendable,
   isStartingImage,
+  keepEffort,
+  MODEL_NAME_PLACEHOLDER,
+  MODEL_PLACEHOLDER,
   modelLabel,
+  modelSelectOptions,
   offersAgent,
   offersLocalContext,
   parseCharacterFile,
   parseCharacterText,
+  providerChoices,
   readAttachment,
   readChatGroupBy,
   readChatSort,
+  reasoningOptions,
   selectedContextTokens,
+  selectionLabel,
   sourceAttachment,
   splitAtHandovers,
   toPlainText,
@@ -88,68 +108,34 @@ import './ChatsPage.css';
 
 const UNTITLED_CHAT_TITLE = 'Untitled chat';
 const NO_PROJECT = 'none';
+const NEW_CHAT_MODEL_REQUIRED = 'Choose a model for this provider.';
+const PROVIDER_EFFORT_RESET_FAILED =
+  'AI provider changed, but its reasoning effort could not be reset';
+const MODEL_EFFORT_RESET_FAILED = 'Model changed, but its reasoning effort could not be reset';
 
-function HeaderSelect({
-  className,
-  label,
-  value,
-  onValueChange,
-  options,
-  testId,
-  title,
-  ariaLabel,
-}: {
-  className: string;
-  label: string;
-  value: string;
-  onValueChange: (value: string) => void;
-  options: Array<{ value: string; label: string }>;
-  testId: string;
-  title: string;
-  ariaLabel: string;
-}) {
-  return (
-    <SelectRoot
-      value={value}
-      onValueChange={(nextValue) => {
-        if (nextValue === '') return;
-        onValueChange(nextValue);
-      }}
-    >
-      <SelectTrigger
-        className={className}
-        aria-label={ariaLabel}
-        data-testid={testId}
-        title={title}
-      >
-        <span className="chat-header-select-label">{label}</span>
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {options.map((option) => (
-          <SelectItem key={option.value} value={option.value}>
-            {option.label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </SelectRoot>
-  );
-}
+const failure = (prefix: string, error: unknown): string =>
+  error instanceof Error ? `${prefix}: ${error.message}` : prefix;
 
 export default function ChatsPage() {
   const { isAuthenticated } = useAuth();
   const { currentWorkspace } = useWorkspace();
   const { models, error: modelsError } = useModels(currentWorkspace?.id);
+  const {
+    providers: workspaceProviders,
+    error: workspaceProvidersError,
+    refresh: refreshWorkspaceProviders,
+  } = useWorkspaceChatProviders(currentWorkspace?.id ?? null);
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [showArchived, setShowArchived] = useState(false);
   const [selectedChatId, setSelectedChatId] = useState<string | null>(() => searchParams.get('id'));
   const linkedMessageId = searchParams.get('message');
   const [showNewChatModal, setShowNewChatModal] = useState(false);
+  const [newChatProvider, setNewChatProvider] = useState(DEFAULT_PROVIDER);
   const [newChatModel, setNewChatModel] = useState(AUTO_MODEL);
   const [newChatAgent, setNewChatAgent] = useState(false);
   const [newChatAutoApprove, setNewChatAutoApprove] = useState(false);
-  const [newChatReasoning, setNewChatReasoning] = useState<ReasoningEffort>('auto');
+  const [newChatReasoning, setNewChatReasoning] = useState<ReasoningEffort>(AUTO_EFFORT);
   const [newChatProject, setNewChatProject] = useState(NO_PROJECT);
   const [newChatOffline, setNewChatOffline] = useState(false);
   const [newChatContext, setNewChatContext] = useState(String(defaultContextTokens()));
@@ -221,9 +207,11 @@ export default function ChatsPage() {
     setAutoApprove: setAutoApproveFn,
     setAgentSandboxed: setAgentSandboxedFn,
     setReasoningEffort: setReasoningEffortFn,
+    setModelName: setModelNameFn,
     setContextTokens: setContextTokensFn,
     setCharacter: setCharacterFn,
     clearCharacter: clearCharacterFn,
+    refresh: refreshChat,
     updateTitle,
   } = useChat(selectedChatId, updateListTitle, {
     content: messageInput,
@@ -245,6 +233,13 @@ export default function ChatsPage() {
     error: attachedError,
     setAttached: setAttachedSources,
   } = useChatSources(selectedChatId);
+  const {
+    providers: chatProviders,
+    error: providersError,
+    choose: chooseProvider,
+    refresh: refreshProviders,
+  } = useChatProviders(selectedChatId);
+  const [changingProvider, setChangingProvider] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -253,14 +248,27 @@ export default function ChatsPage() {
   // Only render a conversation that matches the current selection so a
   // previous chat never flashes in the main pane while the next one loads.
   const displayedChat = activeChat?.id === selectedChatId ? activeChat : null;
-  const installedForChat = displayedChat
-    ? displayedChat.model_name === AUTO_MODEL
-      ? {
-          tools: models.some((model) => offersAgent(model)),
-          reasoning: models.some((model) => chatShowsReasoning({}, model)),
-        }
-      : findInstalledModel(models, displayedChat.model_name)
-    : undefined;
+  const chatOffer = chatProviders ? effectiveOffer(chatProviders) : null;
+  const agentChat = chatOffer !== null && isAgentOffer(chatOffer);
+  const providerChosen = chatProviders
+    ? chatProviders.selected !== null
+    : Boolean(displayedChat?.provider);
+  const providerDriven = agentChat || providerChosen;
+  const chosenSelection = chatProviders?.selected ?? null;
+  const chatEfforts = chosenSelection
+    ? effortsFor(chosenSelection, chosenSelection.model)
+    : chatOffer
+      ? effortsFor(chatOffer, displayedChat?.model_name)
+      : [];
+  const installedForChat =
+    displayedChat && !providerDriven
+      ? displayedChat.model_name === AUTO_MODEL
+        ? {
+            tools: models.some((model) => offersAgent(model)),
+            reasoning: models.some((model) => chatShowsReasoning({}, model)),
+          }
+        : findInstalledModel(models, displayedChat.model_name)
+      : undefined;
   // An answer to an agent's question is sent as an ordinary user message, so a
   // user message after the assistant message carrying a question card is that
   // answer and settles the card. Nothing on the server records it.
@@ -268,28 +276,60 @@ export default function ChatsPage() {
     (last, message, index) => (message.role === 'user' ? index : last),
     -1
   );
-  const showAgent = displayedChat ? chatShowsAgent(displayedChat, installedForChat) : false;
+  const showAgent = displayedChat
+    ? agentChat || chatShowsAgent(displayedChat, installedForChat)
+    : false;
   const showCharacter = displayedChat ? chatShowsCharacter(displayedChat, installedForChat) : false;
-  const showReasoning = displayedChat ? chatShowsReasoning(displayedChat, installedForChat) : false;
+  const showReasoning = !displayedChat
+    ? false
+    : providerDriven
+      ? chatEfforts.length > 0
+      : chatShowsReasoning(displayedChat, installedForChat);
+  const chatReasoningOptions = providerDriven
+    ? reasoningOptions(chatEfforts)
+    : REASONING_EFFORT_OPTIONS;
+  const chosenOfferFor = (provider: string): ChatProviderOffer | null =>
+    workspaceProviders?.providers.find((offer) => offer.provider === provider) ?? null;
+  const newChatOfferFor = (provider: string): ChatProviderOffer | null => {
+    const fallback = workspaceProviders?.default;
+    return chosenOfferFor(provider) ?? (fallback && isAgentOffer(fallback) ? fallback : null);
+  };
+  const chosenNewOffer = chosenOfferFor(newChatProvider);
+  const newChatOffer = newChatOfferFor(newChatProvider);
+  const newChatEfforts = newChatOffer ? effortsFor(newChatOffer, newChatModel) : null;
+  const newChatEffort = newChatEfforts
+    ? keepEffort(newChatReasoning, newChatEfforts)
+    : newChatReasoning;
   const selectedNewModel = findInstalledModel(models, newChatModel);
   const autoNewChat = newChatModel === AUTO_MODEL;
-  const showNewChatAgent = autoNewChat
-    ? models.some((model) => offersAgent(model))
-    : offersAgent(selectedNewModel);
-  const showNewChatReasoning = autoNewChat
-    ? models.some((model) => chatShowsReasoning({}, model))
-    : selectedNewModel
-      ? chatShowsReasoning({}, selectedNewModel)
-      : false;
-  const showNewChatContext = !autoNewChat && offersLocalContext(selectedNewModel);
+  const newChatNamesModel = newChatOffer !== null && asksModelName(newChatOffer);
+  const newChatNeedsModel = Boolean(newChatOffer?.requires_model) && !newChatModel.trim();
+  const showNewChatAgent =
+    newChatOffer !== null
+      ? isAgentOffer(newChatOffer)
+      : autoNewChat
+        ? models.some((model) => offersAgent(model))
+        : offersAgent(selectedNewModel);
+  const showNewChatReasoning = newChatEfforts
+    ? newChatEfforts.length > 0
+    : autoNewChat
+      ? models.some((model) => chatShowsReasoning({}, model))
+      : selectedNewModel
+        ? chatShowsReasoning({}, selectedNewModel)
+        : false;
+  const showNewChatContext = !newChatOffer && !autoNewChat && offersLocalContext(selectedNewModel);
   const newChatNative = selectedNewModel?.details?.context_length;
-  const installedLocal = displayedChat
-    ? findInstalledModel(models, displayedChat.model_name)
-    : undefined;
+  const installedLocal =
+    displayedChat && !providerDriven
+      ? findInstalledModel(models, displayedChat.model_name)
+      : undefined;
   const showChatContext = Boolean(
     displayedChat && displayedChat.model_name !== AUTO_MODEL && offersLocalContext(installedLocal)
   );
   const chatNative = installedLocal?.details?.context_length;
+  const chatBadge = chatProviders?.selected
+    ? selectionLabel(chatProviders.selected)
+    : modelLabel(displayedChat?.model_name ?? AUTO_MODEL);
   const meterCapacity = showChatContext
     ? selectedContextTokens(displayedChat?.context_tokens, chatNative)
     : chatNative && chatNative > 0
@@ -366,8 +406,65 @@ export default function ChatsPage() {
     setSearchParams({}, { replace: true });
   };
 
-  const handleCreateChat = async (e: FormEvent) => {
-    e.preventDefault();
+  const resetNewChat = () => {
+    setNewChatProvider(DEFAULT_PROVIDER);
+    setNewChatModel(AUTO_MODEL);
+    setNewChatAgent(false);
+    setNewChatAutoApprove(false);
+    setNewChatReasoning(AUTO_EFFORT);
+    setNewChatProject(NO_PROJECT);
+    setNewChatOffline(false);
+    setNewChatContext(String(defaultContextTokens()));
+  };
+
+  const workspaceId = currentWorkspace?.id ?? null;
+  const [newChatWorkspace, setNewChatWorkspace] = useState(workspaceId);
+  if (newChatWorkspace !== workspaceId) {
+    setNewChatWorkspace(workspaceId);
+    resetNewChat();
+  }
+
+  const openNewChat = () => {
+    resetNewChat();
+    setOperationError(null);
+    setShowNewChatModal(true);
+    void refreshWorkspaceProviders();
+  };
+
+  const handleNewChatProvider = (provider: string) => {
+    const offer = newChatOfferFor(provider);
+    const model = offer?.requires_model ? '' : AUTO_MODEL;
+    setNewChatProvider(provider);
+    setNewChatModel(model);
+    setNewChatReasoning(
+      keepEffort(
+        newChatEffort,
+        offer ? effortsFor(offer, model) : REASONING_EFFORT_OPTIONS.map((option) => option.value)
+      )
+    );
+    setNewChatContext(String(defaultContextTokens()));
+  };
+
+  const handleNewChatModel = (name: string) => {
+    setNewChatModel(name);
+    if (newChatOffer) {
+      setNewChatReasoning(keepEffort(newChatEffort, effortsFor(newChatOffer, name)));
+      return;
+    }
+    const installed = findInstalledModel(models, name);
+    const automatic = name === AUTO_MODEL;
+    if (!automatic && !offersAgent(installed)) {
+      setNewChatAgent(false);
+      setNewChatAutoApprove(false);
+    }
+    if (!automatic && !chatShowsReasoning({}, installed)) {
+      setNewChatReasoning(AUTO_EFFORT);
+    }
+    setNewChatContext(String(defaultContextTokens(installed?.details?.context_length)));
+  };
+
+  const handleCreateChat = async (event: FormEvent) => {
+    event.preventDefault();
     if (!isAuthenticated) {
       setOperationError('You must be logged in to create a chat');
       return;
@@ -376,33 +473,38 @@ export default function ChatsPage() {
       setOperationError('No workspace selected. Please select or create a workspace first.');
       return;
     }
-    const modelName = newChatModel || AUTO_MODEL;
+    if (newChatNeedsModel) {
+      setOperationError(NEW_CHAT_MODEL_REQUIRED);
+      return;
+    }
+    const modelName = newChatModel.trim() || AUTO_MODEL;
+    const agentEnabled = showNewChatAgent && newChatAgent;
     setOperationError(null);
     try {
       const chat = await createChat({
         workspace_id: currentWorkspace.id,
         title: modelName === AUTO_MODEL ? 'New chat' : `Chat with ${modelName}`,
         automatic_title: true,
-        model_name: modelName,
-        agent_enabled: newChatAgent,
-        auto_approve: newChatAgent && newChatAutoApprove,
+        model_name: chosenNewOffer ? AUTO_MODEL : modelName,
+        ...(chosenNewOffer
+          ? {
+              provider: chosenNewOffer.provider,
+              provider_model: modelName === AUTO_MODEL ? null : modelName,
+            }
+          : {}),
+        agent_enabled: agentEnabled,
+        auto_approve: agentEnabled && newChatAutoApprove,
         reasoning_effort:
-          showNewChatReasoning && newChatReasoning !== 'auto' ? newChatReasoning : undefined,
+          showNewChatReasoning && newChatEffort !== AUTO_EFFORT ? newChatEffort : undefined,
         ...(newChatProject !== NO_PROJECT ? { project_id: newChatProject } : {}),
         ...(newChatOffline ? { offline: true } : {}),
         ...(showNewChatContext ? { context_tokens: Number(newChatContext) } : {}),
       });
       setShowNewChatModal(false);
-      setNewChatModel(AUTO_MODEL);
-      setNewChatAgent(false);
-      setNewChatAutoApprove(false);
-      setNewChatReasoning('auto');
-      setNewChatProject(NO_PROJECT);
-      setNewChatOffline(false);
-      setNewChatContext(String(defaultContextTokens()));
+      resetNewChat();
       selectChat(chat.id);
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to create chat');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to create chat');
     }
   };
 
@@ -411,8 +513,8 @@ export default function ChatsPage() {
     setOperationError(null);
     try {
       await setAgentEnabledFn(!displayedChat.agent_enabled);
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to change agent mode');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to change agent mode');
     }
   };
 
@@ -421,8 +523,8 @@ export default function ChatsPage() {
     setOperationError(null);
     try {
       await setAutoApproveFn(!displayedChat.auto_approve);
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to change auto-approve');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to change auto-approve');
     }
   };
 
@@ -432,8 +534,8 @@ export default function ChatsPage() {
     try {
       const sandboxed = displayedChat.agent_sandboxed !== false;
       await setAgentSandboxedFn(!sandboxed);
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to change tool access');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to change tool access');
     }
   };
 
@@ -442,8 +544,71 @@ export default function ChatsPage() {
     setOperationError(null);
     try {
       await setReasoningEffortFn(effort);
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to change reasoning');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to change reasoning');
+    }
+  };
+
+  const settleEffort = async (efforts: ReasoningEffort[]) => {
+    const current = displayedChat?.reasoning_effort ?? AUTO_EFFORT;
+    const next = keepEffort(current, efforts);
+    if (next !== current) await setReasoningEffortFn(next);
+  };
+
+  const offerFor = (provider: AiProvider | null): ChatProviderOffer | undefined => {
+    if (!chatProviders) return undefined;
+    if (provider === null) return chatProviders.default;
+    const { providers, selected } = chatProviders;
+    return (
+      providers.find((offer) => offer.provider === provider) ??
+      (selected?.provider === provider ? selected : undefined)
+    );
+  };
+
+  const handleChooseProvider = async (provider: AiProvider | null, model: string | null) => {
+    if (!isAuthenticated || !displayedChat) return;
+    const modelName = displayedChat.model_name;
+    setOperationError(null);
+    setChangingProvider(true);
+    try {
+      await chooseProvider(provider, model);
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to change AI provider');
+      setChangingProvider(false);
+      return;
+    }
+    try {
+      const offer = offerFor(provider);
+      if (offer) await settleEffort(effortsFor(offer, provider === null ? modelName : model));
+    } catch (error) {
+      setOperationError(failure(PROVIDER_EFFORT_RESET_FAILED, error));
+    } finally {
+      await refreshChat();
+      setChangingProvider(false);
+    }
+  };
+
+  const handleProviderModel = async (name: string) => {
+    if (!isAuthenticated || !displayedChat || !chatProviders) return;
+    setOperationError(null);
+    setChangingProvider(true);
+    try {
+      await setModelNameFn(name);
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to change model');
+      setChangingProvider(false);
+      return;
+    }
+    try {
+      await settleEffort(effortsFor(chatProviders.default, name));
+    } catch (error) {
+      setOperationError(failure(MODEL_EFFORT_RESET_FAILED, error));
+    } finally {
+      try {
+        await Promise.all([refreshProviders(), refreshChat()]);
+      } finally {
+        setChangingProvider(false);
+      }
     }
   };
 
@@ -452,8 +617,8 @@ export default function ChatsPage() {
     setOperationError(null);
     try {
       await setContextTokensFn(tokens);
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to change context size');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to change context size');
     }
   };
 
@@ -469,8 +634,8 @@ export default function ChatsPage() {
             await setCharacterFn(card);
             continue;
           }
-        } catch (err) {
-          setOperationError(err instanceof Error ? err.message : 'Failed to attach character');
+        } catch (error) {
+          setOperationError(error instanceof Error ? error.message : 'Failed to attach character');
           continue;
         }
       }
@@ -498,8 +663,8 @@ export default function ChatsPage() {
       await setCharacterFn(card);
       setShowCharacterModal(false);
       setCharacterDraft('');
-    } catch (err) {
-      setCharacterError(err instanceof Error ? err.message : 'Failed to save character');
+    } catch (error) {
+      setCharacterError(error instanceof Error ? error.message : 'Failed to save character');
     } finally {
       setCharacterSaving(false);
     }
@@ -518,8 +683,8 @@ export default function ChatsPage() {
       await setCharacterFn(card);
       setShowCharacterModal(false);
       setCharacterDraft('');
-    } catch (err) {
-      setCharacterError(err instanceof Error ? err.message : 'Failed to save character');
+    } catch (error) {
+      setCharacterError(error instanceof Error ? error.message : 'Failed to save character');
     } finally {
       setCharacterSaving(false);
     }
@@ -533,8 +698,8 @@ export default function ChatsPage() {
       await clearCharacterFn();
       setShowCharacterModal(false);
       setCharacterDraft('');
-    } catch (err) {
-      setCharacterError(err instanceof Error ? err.message : 'Failed to remove character');
+    } catch (error) {
+      setCharacterError(error instanceof Error ? error.message : 'Failed to remove character');
     } finally {
       setCharacterSaving(false);
     }
@@ -579,8 +744,8 @@ export default function ChatsPage() {
       });
       setMessageInput('');
       setAttachments([]);
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to send message');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to send message');
     } finally {
       setSending(false);
     }
@@ -599,8 +764,8 @@ export default function ChatsPage() {
     stickToBottom.current = true;
     try {
       await sendMessageFn({ content });
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to send message');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to send message');
     } finally {
       setSending(false);
     }
@@ -614,8 +779,8 @@ export default function ChatsPage() {
       if (selectedChatId === chatId) {
         clearSelectedChat();
       }
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to archive chat');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to archive chat');
     }
   };
 
@@ -627,8 +792,8 @@ export default function ChatsPage() {
       if (selectedChatId === chatId) {
         clearSelectedChat();
       }
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to unarchive chat');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to unarchive chat');
     }
   };
 
@@ -641,8 +806,8 @@ export default function ChatsPage() {
         clearSelectedChat();
       }
       setDeleteConfirm(null);
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to delete chat');
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Failed to delete chat');
     }
   };
 
@@ -820,10 +985,7 @@ export default function ChatsPage() {
             className="btn-icon"
             aria-label="New chat"
             title="New chat"
-            onClick={() => {
-              setOperationError(null);
-              setShowNewChatModal(true);
-            }}
+            onClick={openNewChat}
           >
             <PlusIcon />
           </button>
@@ -961,18 +1123,7 @@ export default function ChatsPage() {
                 ? 'Your archived conversations will appear here'
                 : 'Start a new conversation to get started'
             }
-            action={
-              !showArchived ? (
-                <Button
-                  onClick={() => {
-                    setOperationError(null);
-                    setShowNewChatModal(true);
-                  }}
-                >
-                  New chat
-                </Button>
-              ) : undefined
-            }
+            action={!showArchived ? <Button onClick={openNewChat}>New chat</Button> : undefined}
           />
         ) : (
           <div className="chats-list">
@@ -1015,12 +1166,8 @@ export default function ChatsPage() {
               </Button>
               <div className="chat-header-info">
                 <h3>{displayedChat.title}</h3>
-                <Badge
-                  variant="neutral"
-                  className="chat-model"
-                  title={modelLabel(displayedChat.model_name)}
-                >
-                  {modelLabel(displayedChat.model_name)}
+                <Badge variant="neutral" className="chat-model" title={chatBadge}>
+                  {chatBadge}
                 </Badge>
                 {displayedChat.purpose === 'project_planner' && (
                   <span className="chat-purpose" data-testid="chat-purpose">
@@ -1060,6 +1207,29 @@ export default function ChatsPage() {
                 )}
               </div>
               <div className="chat-header-actions">
+                {chatProviders && (
+                  <ProviderPicker
+                    key={displayedChat.id}
+                    providers={chatProviders}
+                    modelName={displayedChat.model_name}
+                    disabled={changingProvider}
+                    onChoose={(provider, model) => {
+                      void handleChooseProvider(provider, model);
+                    }}
+                    onModel={(name) => {
+                      void handleProviderModel(name);
+                    }}
+                  />
+                )}
+                {providersError && (
+                  <p
+                    className="chat-provider-error"
+                    role="alert"
+                    data-testid="chat-providers-error"
+                  >
+                    {providersError}
+                  </p>
+                )}
                 {showChatContext && (
                   <HeaderSelect
                     className="context-tokens"
@@ -1081,8 +1251,8 @@ export default function ChatsPage() {
                     ariaLabel="Reasoning effort"
                     testId="reasoning-effort"
                     title="How much the model thinks before answering. Auto matches the request."
-                    value={displayedChat.reasoning_effort ?? 'auto'}
-                    options={REASONING_EFFORT_OPTIONS}
+                    value={displayedChat.reasoning_effort ?? AUTO_EFFORT}
+                    options={chatReasoningOptions}
                     onValueChange={(value) => {
                       void handleReasoningEffort(value as ReasoningEffort);
                     }}
@@ -1502,13 +1672,7 @@ export default function ChatsPage() {
               title="Select a chat to start"
               description="Choose an existing conversation or create a new one"
               action={
-                <Button
-                  variant="primary"
-                  onClick={() => {
-                    setOperationError(null);
-                    setShowNewChatModal(true);
-                  }}
-                >
+                <Button variant="primary" onClick={openNewChat}>
                   New chat
                 </Button>
               }
@@ -1521,32 +1685,62 @@ export default function ChatsPage() {
       <Modal isOpen={showNewChatModal} onClose={() => setShowNewChatModal(false)} title="New Chat">
         <form className="ui-form" onSubmit={handleCreateChat}>
           {operationError && <div className="modal-error">{operationError}</div>}
-          <Select
-            label="Select Model"
-            value={newChatModel}
-            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
-              const name = e.target.value;
-              setNewChatModel(name);
-              const installed = findInstalledModel(models, name);
-              const automatic = name === AUTO_MODEL;
-              if (!automatic && !offersAgent(installed)) {
-                setNewChatAgent(false);
-                setNewChatAutoApprove(false);
+          {workspaceProvidersError && (
+            <div className="modal-error" role="alert" data-testid="new-chat-providers-error">
+              {workspaceProvidersError}
+            </div>
+          )}
+          {workspaceProviders && (
+            <Select
+              label="Provider"
+              value={chosenNewOffer ? newChatProvider : DEFAULT_PROVIDER}
+              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                handleNewChatProvider(event.target.value);
+              }}
+              helpText="Default follows the workspace AI settings."
+              options={providerChoices(workspaceProviders.default, workspaceProviders.providers)}
+            />
+          )}
+          {newChatOffer && newChatNamesModel ? (
+            <Input
+              label="Model name"
+              value={newChatModel}
+              onChange={(event: React.ChangeEvent<HTMLInputElement>) => {
+                handleNewChatModel(event.target.value);
+              }}
+              placeholder={MODEL_NAME_PLACEHOLDER}
+              helpText={`AI Settings save no model for ${newChatOffer.label}, so name one it serves.`}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          ) : (
+            <Select
+              label="Select Model"
+              value={newChatModel}
+              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                handleNewChatModel(event.target.value);
+              }}
+              placeholder={MODEL_PLACEHOLDER}
+              helpText={
+                !newChatOffer
+                  ? 'Automatic picks a chat, image, video or audio model from the message.'
+                  : newChatOffer.requires_model
+                    ? `${newChatOffer.label} needs a model chosen for this chat.`
+                    : `Choose Automatic to let ${newChatOffer.label} pick its own model.`
               }
-              if (!automatic && !chatShowsReasoning({}, installed)) {
-                setNewChatReasoning('auto');
+              error={newChatOffer ? undefined : (modelsError ?? undefined)}
+              options={
+                newChatOffer
+                  ? modelSelectOptions(newChatOffer, newChatModel)
+                  : [
+                      { value: AUTO_MODEL, label: 'Automatic' },
+                      ...models
+                        .filter((model) => model.completion !== false)
+                        .map((model) => ({ value: model.name, label: model.name })),
+                    ]
               }
-              setNewChatContext(String(defaultContextTokens(installed?.details?.context_length)));
-            }}
-            helpText="Automatic picks a chat, image, video or audio model from the message."
-            error={modelsError ?? undefined}
-            options={[
-              { value: AUTO_MODEL, label: 'Automatic' },
-              ...models
-                .filter((model) => model.completion !== false)
-                .map((model) => ({ value: model.name, label: model.name })),
-            ]}
-          />
+            />
+          )}
           {projects.length > 0 && (
             <Select
               label="Project"
@@ -1604,19 +1798,23 @@ export default function ChatsPage() {
           {showNewChatReasoning && (
             <Select
               label="Reasoning"
-              value={newChatReasoning}
+              value={newChatEffort}
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
                 setNewChatReasoning(event.target.value as ReasoningEffort);
               }}
-              helpText="Auto chooses low, medium, or high from the request. Off skips thinking."
-              options={REASONING_EFFORT_OPTIONS}
+              helpText={
+                newChatOffer && isAgentOffer(newChatOffer)
+                  ? `Auto lets ${newChatOffer.label} choose how hard to think.`
+                  : 'Auto chooses low, medium, or high from the request. Off skips thinking.'
+              }
+              options={newChatEfforts ? reasoningOptions(newChatEfforts) : REASONING_EFFORT_OPTIONS}
             />
           )}
           <div className="modal-actions">
             <Button variant="secondary" onClick={() => setShowNewChatModal(false)}>
               Cancel
             </Button>
-            <Button type="submit" variant="primary">
+            <Button type="submit" variant="primary" disabled={newChatNeedsModel}>
               Create Chat
             </Button>
           </div>

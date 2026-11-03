@@ -14,7 +14,7 @@ use super::beneath::{self, Access};
 use super::denied::Denied;
 use super::identity::Identity;
 use super::{REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolResult, reason_property};
-use crate::llm::provider::environment;
+use crate::environment;
 
 // Prompt budget; matches `read_repository_file` paging in zone_server.
 const FILE_PAGE_CHARS: usize = super::MAX_TOOL_OUTPUT_CHARS;

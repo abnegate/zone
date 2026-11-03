@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
+use abnegate_llm::Window;
 use uuid::Uuid;
-use zone_core::llm::Window;
 
 use crate::state::AppState;
 
@@ -38,16 +38,12 @@ impl Observed {
 
 #[cfg(test)]
 mod tests {
+    use zone_core::llm::window;
+
     use super::*;
 
-    fn window(name: &str, used_percent: f64) -> Window {
-        Window {
-            name: name.to_string(),
-            used_percent: Some(used_percent),
-            used: None,
-            limit: None,
-            resets_at: None,
-        }
+    fn measured(name: &str, used_percent: f64) -> Window {
+        Window::new(name).with_used_percent(used_percent)
     }
 
     #[test]
@@ -56,19 +52,19 @@ mod tests {
         let mut observed = Observed::default();
 
         for used in 0..40 {
-            observed.observe(first, window(Window::FIVE_HOURS, f64::from(used)));
+            observed.observe(first, measured(window::FIVE_HOURS, f64::from(used)));
         }
-        observed.observe(first, window(Window::SEVEN_DAYS, 12.0));
-        observed.observe(second, window(Window::FIVE_HOURS, 3.0));
+        observed.observe(first, measured(window::SEVEN_DAYS, 12.0));
+        observed.observe(second, measured(window::FIVE_HOURS, 3.0));
 
         assert_eq!(
             observed.take(first),
             [
-                window(Window::FIVE_HOURS, 39.0),
-                window(Window::SEVEN_DAYS, 12.0)
+                measured(window::FIVE_HOURS, 39.0),
+                measured(window::SEVEN_DAYS, 12.0)
             ]
         );
         assert_eq!(observed.take(first), [], "what was taken is let go of");
-        assert_eq!(observed.take(second), [window(Window::FIVE_HOURS, 3.0)]);
+        assert_eq!(observed.take(second), [measured(window::FIVE_HOURS, 3.0)]);
     }
 }

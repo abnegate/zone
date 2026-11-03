@@ -1,4 +1,4 @@
-use zone_core::llm::Limit;
+use abnegate_llm::Limit;
 
 use super::Reason;
 

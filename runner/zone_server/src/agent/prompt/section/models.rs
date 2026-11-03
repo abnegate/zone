@@ -5,7 +5,7 @@ use crate::agent::prompt::Context;
 const MODELS: &str = "Models:\n\
      - list_models, get_model, install_model and delete_model manage the catalog. Poll get_model_install for a pull; cancel_model_install stops one. Do not claim an install finished unless the tool says it did.\n\
      - list_train_bases then start_train. The call returns while the job runs; poll get_train_job. One job at a time. dismiss_train only a finished job.\n\
-     - Person uses the SDXL people base and a trigger. Language dumps documents. Video needs clips.";
+     - Person uses the SDXL people base and a trigger. Language dumps documents.";
 
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
     context.tools.has("list_models").then(|| MODELS.to_string())
@@ -30,6 +30,7 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("wait_for"), "{rendered}");
+        assert!(!rendered.contains("Video"), "{rendered}");
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub use reason::{REASON_DESCRIPTION, REASON_PARAM, reason_property};
 pub use tier::{CONFIRMED_FROM, Tier};
 pub use zone_routing as routing;
 
+use abnegate_llm::ToolDefinition;
 use abnegate_secret::sanitize_owned;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -26,8 +27,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
-
-use crate::llm::ToolDefinition;
 
 /// Budget a tool spends on output it pages or trims for itself: a `read_file`
 /// page, a captured command log.
@@ -548,7 +547,7 @@ pub(crate) mod test_support {
     use tempfile::TempDir;
     use tracing_subscriber::fmt::MakeWriter;
 
-    use crate::llm::provider::environment;
+    use crate::environment;
 
     /// What a server's environment holds that no child of a tool may be
     /// handed. Every value says `notreal`, so a leak shows under any name.

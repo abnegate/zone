@@ -64,6 +64,12 @@ fn packaged_workflow(name: &str) -> Option<&'static str> {
         "qwen-image-edit-2511-adapter-edit-api.json" => Some(include_str!(
             "../../../comfyui/workflows/qwen-image-edit-2511-adapter-edit-api.json"
         )),
+        "wan2.2-a14b-t2v-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/wan2.2-a14b-t2v-api.json"
+        )),
+        "wan2.2-a14b-i2v-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/wan2.2-a14b-i2v-api.json"
+        )),
         "wan-adapter-api.json" => Some(include_str!(
             "../../../comfyui/workflows/wan-adapter-api.json"
         )),
@@ -390,8 +396,11 @@ impl RecipeCatalog {
 
     pub fn is_explicit_image_match(&self, filename: &str) -> bool {
         let trimmed = filename.trim();
-        self.files.contains_key(trimmed)
-            || self.resolve_image_id(trimmed) != self.default_image.as_str()
+        let id = self.resolve_image_id(trimmed);
+        (self.files.contains_key(trimmed) || id != self.default_image.as_str())
+            && self
+                .get(id)
+                .is_some_and(|recipe| recipe.kind == MediaKind::Image)
     }
 
     fn resolve_image_id(&self, checkpoint: &str) -> &str {
@@ -507,6 +516,11 @@ impl Recipe {
     }
 
     pub fn apply(&self, fill: Fill<'_>) -> Result<Value, Error> {
+        if self.kind != MediaKind::Image {
+            return Err(Error::Configuration(
+                "only image recipes are filled from their slots",
+            ));
+        }
         if fill.prompt.trim().is_empty() || fill.prompt.len() > 100_000 {
             return Err(Error::Configuration("prompt is empty or too long"));
         }
@@ -774,6 +788,26 @@ mod tests {
     }
 
     #[test]
+    fn only_image_recipes_count_as_an_explicit_image_match() {
+        let catalog = catalog();
+        for image in [
+            "qwen_image_edit_2511_fp8mixed.safetensors",
+            "flux1-schnell-fp8.safetensors",
+            "juggernautXL_v9.safetensors",
+        ] {
+            assert!(catalog.is_explicit_image_match(image), "{image}");
+        }
+        for other in [
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+            "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+            "my_wan2.2_t2v_finetune.safetensors",
+            "unrelated-model.safetensors",
+        ] {
+            assert!(!catalog.is_explicit_image_match(other), "{other}");
+        }
+    }
+
+    #[test]
     fn packaged_catalog_validates_every_graph() {
         let catalog = catalog();
         assert!(catalog.get("flux-schnell").is_some());
@@ -790,6 +824,13 @@ mod tests {
         assert!(wan.adapter);
         assert!(wan.has_lora_slot());
         assert_eq!(wan.kind, MediaKind::Video);
+        let a14b = catalog.get("wan-a14b").unwrap();
+        assert!(!a14b.adapter);
+        assert_eq!(a14b.kind, MediaKind::Video);
+        assert_eq!(
+            a14b.defaults.get("unet").map(String::as_str),
+            Some("wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors")
+        );
         for name in [
             "flux1-schnell-fp8-api.json",
             "flux1-schnell-fp8-img2img-api.json",
@@ -809,6 +850,8 @@ mod tests {
             "qwen-image-edit-2511-edit-api.json",
             "qwen-image-edit-2511-adapter-api.json",
             "qwen-image-edit-2511-adapter-edit-api.json",
+            "wan2.2-a14b-t2v-api.json",
+            "wan2.2-a14b-i2v-api.json",
             "wan-adapter-api.json",
             "wan-adapter-i2v-api.json",
         ] {
@@ -1111,6 +1154,94 @@ mod tests {
         assert_eq!(workflow["5"]["inputs"]["width"], 1024);
         assert!(workflow.get("10").is_none());
         assert_eq!(workflow["7"]["inputs"]["text"], "");
+    }
+
+    #[test]
+    fn packaged_a14b_graphs_match_the_wan_a14b_recipe() {
+        use crate::client::{
+            PACKAGED_A14B_I2V_WORKFLOW, PACKAGED_A14B_T2V_WORKFLOW, build_wan_i2v_workflow,
+            build_wan_t2v_workflow, paired_wan_unets, validate_i2v_workflow,
+            validate_video_workflow,
+        };
+
+        let catalog = catalog();
+        let recipe = catalog.get("wan-a14b").unwrap();
+        let text_to_video: Value = serde_json::from_str(PACKAGED_A14B_T2V_WORKFLOW).unwrap();
+        let image_to_video: Value = serde_json::from_str(PACKAGED_A14B_I2V_WORKFLOW).unwrap();
+        assert_eq!(recipe.bare, text_to_video);
+        assert_eq!(recipe.with_source.as_ref(), Some(&image_to_video));
+        validate_video_workflow(&text_to_video).unwrap();
+        validate_i2v_workflow(&image_to_video).unwrap();
+
+        let unet = &recipe.defaults["unet"];
+        let clip = &recipe.defaults["clip"];
+        let vae = &recipe.defaults["vae"];
+        let required: Vec<&str> = recipe
+            .required_files
+            .iter()
+            .map(|file| file.filename.as_str())
+            .collect();
+        let built_text_to_video = build_wan_t2v_workflow("a fox", unet, clip, vae, 42).unwrap();
+        let built_image_to_video =
+            build_wan_i2v_workflow("a fox", unet, clip, vae, 42, "zone-i2v-source.png").unwrap();
+        for (packaged, built, i2v) in [
+            (&text_to_video, &built_text_to_video, false),
+            (&image_to_video, &built_image_to_video, true),
+        ] {
+            let (high, low) = paired_wan_unets(unet, i2v);
+            assert_eq!(packaged["1"]["inputs"]["unet_name"], high);
+            assert_eq!(packaged["12"]["inputs"]["unet_name"], low);
+            assert!(required.contains(&high.as_str()), "{high}");
+            assert!(required.contains(&low.as_str()), "{low}");
+            assert_eq!(packaged["2"]["inputs"]["clip_name"], *clip);
+            assert_eq!(packaged["3"]["inputs"]["vae_name"], *vae);
+            for pointer in [&recipe.slots.prompt, &recipe.slots.seed]
+                .into_iter()
+                .chain(recipe.slots.weights.values())
+            {
+                assert!(packaged.pointer(pointer).is_some(), "{pointer}");
+            }
+            assert_eq!(
+                packaged[recipe.slots.output_node.as_str()]["class_type"],
+                "SaveWEBM"
+            );
+            assert_eq!(built["1"]["inputs"]["unet_name"], high);
+            assert_eq!(built["12"]["inputs"]["unet_name"], low);
+            assert_eq!(built["8"]["inputs"]["noise_seed"], 42);
+            assert_eq!(built["14"]["inputs"]["noise_seed"], 42);
+        }
+        let source = recipe.slots.source.as_deref().unwrap();
+        assert!(image_to_video.pointer(source).is_some());
+        assert!(text_to_video.pointer(source).is_none());
+        assert_eq!(
+            recipe.slots.weights.get("unet").map(String::as_str),
+            Some("/1/inputs/unet_name")
+        );
+        assert_eq!(recipe.slots.seed, "/8/inputs/noise_seed");
+    }
+
+    #[test]
+    fn applying_a_video_recipe_is_refused() {
+        let catalog = catalog();
+        let recipe = catalog.get("wan-a14b").unwrap();
+        let weights: HashMap<&str, &str> = recipe
+            .defaults
+            .iter()
+            .map(|(name, filename)| (name.as_str(), filename.as_str()))
+            .collect();
+        for source in [None, Some("zone-i2v-source.png")] {
+            let result = recipe.apply(Fill {
+                prompt: "a fox running",
+                negative: None,
+                seed: 42,
+                weights: weights.clone(),
+                source,
+            });
+            assert!(
+                matches!(result, Err(Error::Configuration(_))),
+                "a video recipe filled from slots would mix the A14B experts: {result:?}"
+            );
+        }
     }
 
     #[test]

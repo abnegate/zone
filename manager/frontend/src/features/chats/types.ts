@@ -1,3 +1,8 @@
+import type { AiProvider } from '../settings/workspace/types';
+import { REASONING_EFFORT_LABELS, type ReasoningEffort } from './provider';
+
+export * from './provider';
+
 export type MessageRole = 'user' | 'assistant' | 'system';
 
 export interface MessageAttachment {
@@ -352,17 +357,18 @@ export interface Chat {
   purpose?: string | null;
   /** The workspace project this chat is grouped with, if any. Older servers omit this. */
   project_id?: string | null;
+  /**
+   * The provider chosen for this chat alone. Null follows the workspace and
+   * organization AI settings. Chat lists and older servers omit it.
+   */
+  provider?: AiProvider | null;
+  /** The model chosen with `provider`. Null lets the provider pick its default. */
+  provider_model?: string | null;
 }
 
-export type ReasoningEffort = 'auto' | 'off' | 'low' | 'medium' | 'high';
-
-export const REASONING_EFFORT_OPTIONS: Array<{ value: ReasoningEffort; label: string }> = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'off', label: 'Off' },
-];
+export const REASONING_EFFORT_OPTIONS: Array<{ value: ReasoningEffort; label: string }> = (
+  ['auto', 'low', 'medium', 'high', 'off'] as const
+).map((value) => ({ value, label: REASONING_EFFORT_LABELS[value] }));
 
 export interface ChatWithMessages extends Chat {
   messages: Message[];
@@ -383,10 +389,15 @@ export interface CreateChatRequest {
   reasoning_effort?: ReasoningEffort;
   character?: ChatCharacter;
   project_id?: string;
+  /** The provider for this chat alone. Omitted or null follows the workspace settings. */
+  provider?: AiProvider | null;
+  /** The model on `provider`. Omitted or null lets the provider choose. */
+  provider_model?: string | null;
 }
 
 export interface UpdateChatRequest {
   title?: string;
+  model_name?: string;
   agent_enabled?: boolean;
   agent_sandboxed?: boolean;
   auto_approve?: boolean;

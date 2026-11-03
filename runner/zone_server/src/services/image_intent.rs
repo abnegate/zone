@@ -6,9 +6,10 @@
 //! installed completion model) with a small token budget. Timeouts, empty
 //! hosts and an agent with no model named for it fall back to chat.
 
+use abnegate_llm::Message;
 use serde_json::Value;
 use std::time::Duration;
-use zone_core::llm::{LlmBackend, LlmClient, Message};
+use zone_core::llm::{LlmBackend, LlmClient};
 
 use crate::config::ComfyUiConfig;
 use crate::services::endpoint::Endpoint;
@@ -177,12 +178,12 @@ impl ImageIntentClassifier {
     }
 
     fn client(&self, temperature: f32, max_tokens: u32) -> LlmClient {
-        LlmClient::new(self.endpoint.llm(
+        self.endpoint.llm(
             self.config.classifier_model.clone(),
             temperature,
             max_tokens,
             self.backend.clone(),
-        ))
+        )
     }
 
     /// Classify a message. Any unavailable, timed-out, or malformed model result

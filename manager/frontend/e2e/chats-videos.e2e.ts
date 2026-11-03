@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { installChatSocketMock, type ChatSocketController } from './helpers/chatSocket';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
 
 const GENERATED_VIDEO_URL =
   '/api/artifacts/00000000-0000-0000-0000-000000000001/chat-1/msg-generated/generated-video-1.webm';
@@ -40,6 +40,7 @@ test.describe('Chat videos', () => {
 
   async function mockChatRoutes(page: Parameters<typeof routeApi>[0], messages: unknown[] = []) {
     await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+      if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
       const url = route.request().url();
       const method = route.request().method();
       if (url.includes('/chat-1') && method === 'GET') {

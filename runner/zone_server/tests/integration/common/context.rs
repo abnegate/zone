@@ -545,8 +545,8 @@ pub fn pairs(request: &Value) -> usize {
 }
 
 pub async fn seed_evidence(harness: &Harness, count: usize) -> Vec<String> {
+    use abnegate_llm::{Message, ToolCall};
     use zone_chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
-    use zone_core::llm::{FunctionCall, Message, ToolCall};
 
     let store = harness.store();
     let lease = store.acquire(Uuid::new_v4(), LEASE_LIFETIME).await.unwrap();
@@ -573,13 +573,12 @@ pub async fn seed_evidence(harness: &Harness, count: usize) -> Vec<String> {
     for round in (0..count).step_by(ROUND) {
         let last = count.min(round + ROUND);
         let calls: Vec<_> = (round..last)
-            .map(|index| ToolCall {
-                id: format!("historical-{index}"),
-                call_type: "function".into(),
-                function: FunctionCall {
-                    name: "read_file".into(),
-                    arguments: json!({"path":format!("evidence-{index}")}).to_string(),
-                },
+            .map(|index| {
+                ToolCall::function(
+                    format!("historical-{index}"),
+                    "read_file",
+                    json!({"path":format!("evidence-{index}")}).to_string(),
+                )
             })
             .collect();
         let mut entries = vec![NewEntry {

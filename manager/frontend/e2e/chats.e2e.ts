@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
 
 // Mock data generators
 const generateMockChat = (
@@ -99,6 +99,7 @@ test.describe('Chats Page', () => {
 
     // Default mock for chats - use regex for better matching
     await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+      if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -178,6 +179,7 @@ test.describe('Chats Page', () => {
 
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -199,6 +201,7 @@ test.describe('Chats Page', () => {
 
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -218,6 +221,7 @@ test.describe('Chats Page', () => {
 
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         const url = new URL(route.request().url());
         const archived = url.searchParams.get('archived');
 
@@ -258,6 +262,7 @@ test.describe('Chats Page', () => {
 
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         const url = route.request().url();
         if (url.includes('/chat-1') && route.request().method() === 'GET') {
           route.fulfill({
@@ -320,6 +325,7 @@ test.describe('Chats Page', () => {
       // Unroute existing chats routes and set up new ones
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         const url = route.request().url();
         const method = route.request().method();
 
@@ -387,6 +393,7 @@ test.describe('Chats Page', () => {
     test.beforeEach(async ({ page }) => {
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         const url = route.request().url();
         if (url.includes('/chat-1') && route.request().method() === 'GET') {
           route.fulfill({
@@ -428,6 +435,7 @@ test.describe('Chats Page', () => {
       });
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         const url = route.request().url();
         if (url.includes('/chat-1') && route.request().method() === 'GET') {
           route.fulfill({
@@ -531,6 +539,7 @@ test.describe('Chats Page', () => {
     test.beforeEach(async ({ page }) => {
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         const url = route.request().url();
         const method = route.request().method();
 
@@ -616,6 +625,7 @@ test.describe('Chats Page', () => {
     test('shows error when loading chats fails', async ({ page }) => {
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         route.fulfill({
           status: 500,
           contentType: 'application/json',
@@ -636,6 +646,7 @@ test.describe('Chats Page', () => {
 
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         if (route.request().method() === 'GET' && !route.request().url().includes('/chat-')) {
           route.fulfill({
             status: 200,
@@ -671,6 +682,7 @@ test.describe('Chats Page', () => {
     ) => {
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         const url = route.request().url();
         const method = route.request().method();
 

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { client } from '../../../api/client';
 import type { TrainJob } from '../../../api/models';
 
 const trainState = {
@@ -88,7 +89,46 @@ describe('TrainDock', () => {
     expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '8');
   });
 
-  it('renders snapshot previews from the job', () => {
+  it('keeps a 72px tile while a preview is loading', () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(() => new Promise<Response>(() => {})) as typeof fetch;
+    client.setAccessToken('secret-token');
+    trainState.job = {
+      id: 'job-1',
+      name: 'jerry',
+      status: 'running',
+      step: 250,
+      total: 8000,
+      previews: ['previews/step-250-0.png'],
+    };
+    try {
+      render(<TrainDock />);
+      expect(screen.queryByRole('img')).toBeNull();
+      expect(screen.getByRole('status', { name: 'Loading image' })).toHaveClass(
+        'train-meter-preview'
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      client.setAccessToken(null);
+    }
+  });
+
+  it('renders snapshot previews from the job', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    const fetchMock = mock(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        blob: async () => new Blob(['preview'], { type: 'image/png' }),
+      } as Response)
+    );
+    const createObjectUrlMock = mock(() => 'blob:train-preview');
+    globalThis.fetch = fetchMock as typeof fetch;
+    URL.createObjectURL = createObjectUrlMock;
+    URL.revokeObjectURL = mock();
+    client.setAccessToken('secret-token');
     trainState.job = {
       id: 'job-1',
       name: 'jerry',
@@ -102,11 +142,30 @@ describe('TrainDock', () => {
         'previews/step-500-1.png',
       ],
     };
-    render(<TrainDock />);
-    const images = screen.getAllByRole('img');
-    expect(images).toHaveLength(4);
-    expect(images[0]).toHaveAttribute('src', '/api/models/train/previews/step-250-0.png');
-    expect(images[0]).toHaveAttribute('alt', 'Training preview 1 of 4');
+    try {
+      render(<TrainDock />);
+      const images = await screen.findAllByRole('img');
+      expect(images).toHaveLength(4);
+      expect(images[0]).toHaveAttribute('src', 'blob:train-preview');
+      expect(images[0]).toHaveAttribute('alt', 'Training preview 1 of 4');
+      expect(images[0]).toHaveAttribute('width', '72');
+      expect(images[0]).toHaveAttribute('height', '72');
+      expect(images[0]).toHaveClass('train-meter-preview');
+      expect(
+        screen.getByRole('link', { name: 'Open Training preview 1 of 4 full size' })
+      ).toHaveClass('train-meter-preview-link');
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith('/api/models/train/previews/step-250-0.png', {
+          headers: { Authorization: 'Bearer secret-token' },
+          signal: expect.any(AbortSignal),
+        });
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      URL.createObjectURL = originalCreateObjectUrl;
+      URL.revokeObjectURL = originalRevokeObjectUrl;
+      client.setAccessToken(null);
+    }
   });
 
   it('names Runpod compute in the headline', () => {

@@ -2,12 +2,12 @@
 
 use crate::common;
 
+use abnegate_llm::{Message, Role, ToolCall};
 use serde_json::json;
 use sqlx::{Executor, PgPool};
 use std::time::Duration;
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
-use zone_core::llm::{FunctionCall, Message, Role, ToolCall};
 use zone_server::db::chats;
 use zone_server::db::context::{Error, Lease, Store};
 
@@ -66,14 +66,11 @@ async fn begin(store: &Store, lease: &Lease) -> (Uuid, Uuid) {
 }
 
 fn envelope(id: &str, call: &str, mutating: bool) -> NewEntry {
-    let mut message = Message::assistant_with_tools(vec![ToolCall {
-        id: call.into(),
-        call_type: "function".into(),
-        function: FunctionCall {
-            name: if mutating { "write_file" } else { "read_file" }.into(),
-            arguments: r#"{"path":"notes.txt"}"#.into(),
-        },
-    }]);
+    let mut message = Message::assistant_with_tools(vec![ToolCall::function(
+        call,
+        if mutating { "write_file" } else { "read_file" },
+        r#"{"path":"notes.txt"}"#,
+    )]);
     message.content = Some("I will inspect the saved evidence.".into());
     NewEntry {
         id: id.into(),
@@ -746,10 +743,20 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
     let state = AppState::new(config, pool.clone(), None);
     assert!(state.existing_mcp().is_none());
     for enabled in [false, true] {
-        let row = chats::update_chat(&pool, chat, None, Some(enabled), None, None, None, None)
-            .await
-            .unwrap()
-            .unwrap();
+        let row = chats::update_chat(
+            &pool,
+            chat,
+            None,
+            Some(enabled),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let endpoint = Route::for_workspace(&state, row.workspace_id.unwrap())
             .await
             .into_endpoint()

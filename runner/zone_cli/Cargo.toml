@@ -32,6 +32,7 @@ rand = { workspace = true }
 
 # Config & storage
 abnegate-config = { workspace = true, features = ["keyring"] }
+abnegate-llm = { workspace = true }
 abnegate-secret = { workspace = true }
 base64 = { workspace = true }
 

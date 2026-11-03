@@ -93,9 +93,9 @@ mod tests {
     use crate::agent::ChatTools;
     use crate::agent::prompt::test_support::{chat_context, environment, task_context};
     use crate::agent::prompt::{Environment, Vcs};
+    use abnegate_llm::Effort;
     use chrono::DateTime;
     use std::path::PathBuf;
-    use zone_core::llm::Effort;
 
     fn chat(environment: &Environment) -> String {
         let tools = ChatTools::empty();

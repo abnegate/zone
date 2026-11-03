@@ -12,6 +12,7 @@
 //! timeout and a commit nothing is reporting on both have to be unphrasable as
 //! a pass, or a model reads "no news" as "green".
 
+use abnegate_llm::{Message as LlmMessage, ToolCall};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use dashmap::DashMap;
@@ -27,7 +28,6 @@ use tokio::time::Instant;
 use uuid::Uuid;
 use zone_chat::history;
 use zone_core::context::Entry;
-use zone_core::llm::{FunctionCall, Message as LlmMessage, ToolCall};
 use zone_core::tools::job::{JobExited, Jobs};
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
@@ -298,8 +298,6 @@ const RUN_UNKNOWN_ERROR: &str = "Unknown error";
 /// A commit GitHub has registered no run for at all. Never a settle on its own:
 /// right after a push it is indistinguishable from a repository with no CI.
 const UNKNOWN_ASSESSMENT: &str = "unknown";
-
-const FUNCTION_CALL: &str = "function";
 
 /// The suffix that tells the injected envelope apart from the call that opened
 /// the wait. The receipt already claimed the original id, and both the context's
@@ -734,15 +732,13 @@ pub fn resume_with_outcome(
         }
     }
     let call = settled_call_id(&waited.tool_call_id);
-    let envelope = LlmMessage::assistant_with_tools(vec![ToolCall {
-        id: call.clone(),
-        call_type: FUNCTION_CALL.to_string(),
-        function: FunctionCall {
-            name: WAIT_FOR.to_string(),
-            arguments: serde_json::to_string(&waited.waiting)
-                .unwrap_or_else(|_| json!({}).to_string()),
-        },
-    }]);
+    let arguments =
+        serde_json::to_string(&waited.waiting).unwrap_or_else(|_| json!({}).to_string());
+    let envelope = LlmMessage::assistant_with_tools(vec![ToolCall::function(
+        call.clone(),
+        WAIT_FOR,
+        arguments,
+    )]);
     let result = LlmMessage::tool_result(call, outcome);
     let pair = [envelope, result].map(|message| history::NewEntry {
         id: Uuid::new_v4().to_string(),
@@ -1004,12 +1000,12 @@ mod tests {
 
     use crate::agent::integrations::{PENDING_ASSESSMENT, SUCCESS_ASSESSMENT};
     use crate::state::{AppState, test_config};
+    use abnegate_llm::Role;
     use std::collections::{HashMap, VecDeque};
     use std::path::Path;
     use std::sync::Mutex as Lock;
     use tempfile::TempDir;
     use zone_core::context;
-    use zone_core::llm::Role;
     use zone_core::tools::job::{JobCommand, JobStarted};
 
     const POLL: Duration = Duration::from_millis(20);

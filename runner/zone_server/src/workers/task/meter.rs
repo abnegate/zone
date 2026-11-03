@@ -1,5 +1,5 @@
+use abnegate_llm::Window;
 use uuid::Uuid;
-use zone_core::llm::Window;
 
 use crate::services::login::router::Observed;
 use crate::state::AppState;
@@ -35,19 +35,13 @@ impl<'a> Meter<'a> {
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
-    use zone_core::llm::AgentKind;
+    use zone_core::llm::{AgentKind, window};
 
     use super::*;
     use crate::db::agent_logins::{self, Insert};
 
-    fn window(name: &str, used_percent: f64) -> Window {
-        Window {
-            name: name.to_string(),
-            used_percent: Some(used_percent),
-            used: None,
-            limit: None,
-            resets_at: None,
-        }
+    fn measured(name: &str, used_percent: f64) -> Window {
+        Window::new(name).with_used_percent(used_percent)
     }
 
     #[tokio::test]
@@ -88,9 +82,9 @@ mod tests {
         let mut meter = Meter::new(&state, login);
 
         for used in 0..40 {
-            meter.observe(window(Window::FIVE_HOURS, f64::from(used)));
+            meter.observe(measured(window::FIVE_HOURS, f64::from(used)));
         }
-        meter.observe(window(Window::SEVEN_DAYS, 12.0));
+        meter.observe(measured(window::SEVEN_DAYS, 12.0));
         let running = stored().await;
         meter.record().await;
         let recorded = stored().await.expect("the recorded windows");
@@ -107,8 +101,8 @@ mod tests {
         assert_eq!(
             recorded.windows,
             [
-                window(Window::FIVE_HOURS, 39.0),
-                window(Window::SEVEN_DAYS, 12.0)
+                measured(window::FIVE_HOURS, 39.0),
+                measured(window::SEVEN_DAYS, 12.0)
             ]
         );
     }

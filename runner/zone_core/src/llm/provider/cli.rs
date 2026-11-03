@@ -14,16 +14,15 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
 use super::agent::{AgentKind, Reader};
-use super::completion::{Completion, CompletionProvider, CompletionRequest, ProviderKind};
-use super::credential::Credential;
-use super::environment;
-use super::error::{ExitStatus, ProviderError};
 use super::event::AgentEvent;
-use super::limit::Limit;
 use super::lines::{Frame, Lines};
 use super::settings::{CliSettings, Toolset};
 use super::transcript;
-use crate::llm::{Message, Usage};
+use crate::environment;
+use abnegate_llm::{
+    Completion, CompletionProvider, CompletionRequest, ExitStatus, Limit, Message, ProviderError,
+    ProviderKind, Usage,
+};
 
 const READ_BUFFER: usize = 8 * 1024;
 
@@ -100,6 +99,7 @@ impl CliProvider {
         command
             .args(self.agent.arguments_with(
                 Some(model),
+                self.settings.effort,
                 self.settings.toolset.as_deref(),
                 self.settings.builtin_tools,
                 self.settings.sandbox,
@@ -122,8 +122,11 @@ impl CliProvider {
             command.env(Toolset::TOKEN_VARIABLE, toolset.token.expose());
         }
         // Last, so that no variable of the same name can replace it.
-        if let Credential::Key { variable, value } = &self.settings.credential {
-            command.env(variable, value.expose());
+        if let (Some(variable), Some(value)) = (
+            self.settings.credential.variable(),
+            self.settings.credential.expose(),
+        ) {
+            command.env(variable, value);
         }
 
         // A coding agent forks a tree of its own -- language servers, search,
@@ -269,12 +272,9 @@ impl CliProvider {
             }
         }
 
-        Ok(Completion {
-            provider: self.name.clone(),
-            message: Message::assistant(text),
-            usage,
-            finish_reason,
-        })
+        Ok(Completion::new(self.name.clone(), Message::assistant(text))
+            .with_usage(usage)
+            .with_finish_reason(finish_reason))
     }
 }
 
@@ -371,10 +371,9 @@ impl Session {
         let diagnostics = self.diagnostics().await;
         ProviderError::limited(
             &self.name,
-            Limit {
-                message: failure(&limit.message, &diagnostics),
-                ..limit.clone()
-            },
+            limit
+                .clone()
+                .with_message(failure(&limit.message, &diagnostics)),
         )
     }
 
@@ -410,10 +409,7 @@ impl Session {
     }
 
     fn expired(&self) -> ProviderError {
-        ProviderError::Timeout {
-            provider: self.name.clone(),
-            seconds: self.timeout.as_secs(),
-        }
+        ProviderError::timeout(&self.name, self.timeout)
     }
 }
 
@@ -537,10 +533,10 @@ fn is_continuation(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::RequestOptions;
     use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, SignIn};
     use crate::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
     use crate::tools::test_support::captured_logs;
+    use abnegate_llm::{Credential, RequestOptions};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::io::Write;
@@ -598,12 +594,7 @@ mod tests {
     }
 
     fn request(messages: &[Message]) -> CompletionRequest<'_> {
-        CompletionRequest {
-            model: "sonnet",
-            messages,
-            tools: None,
-            options: RequestOptions { reserved: 512 },
-        }
+        CompletionRequest::new("sonnet", messages, RequestOptions::new(512))
     }
 
     async fn run(
@@ -998,7 +989,10 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         );
         assert_eq!(after, 0, "the stream went on past the limit");
         let failure = failure.expect("a limited turn ends in an error");
-        let ProviderError::Limited { provider, limit } = &failure else {
+        let ProviderError::Limited {
+            provider, limit, ..
+        } = &failure
+        else {
             panic!("expected a limit, got {failure:?}");
         };
         assert_eq!(provider, "claude");
@@ -1042,7 +1036,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         else {
             panic!("expected the window, then the answer: {delivered:?}");
         };
-        assert_eq!(window.name, crate::llm::provider::Window::FIVE_HOURS);
+        assert_eq!(window.name, crate::llm::window::FIVE_HOURS);
         assert_eq!(window.used_percent, Some(43.0));
         assert_eq!(text, "Done.");
 
@@ -1831,6 +1825,42 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 .any(|argument| argument == "--resume" || argument == "--session-id"),
             "a turn given no session was pinned to one: {arguments:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_effort_a_turn_is_given_reaches_the_agents_command_line() {
+        let recorder = Recorder::new();
+        answered(
+            recorder
+                .settings()
+                .with_effort(crate::llm::ReasoningEffort::Max),
+        )
+        .await;
+
+        let arguments = recorder.arguments();
+        let model = arguments
+            .iter()
+            .position(|argument| argument == "--model")
+            .expect("the turn's model");
+        assert_eq!(
+            &arguments[model..model + 4],
+            ["--model", "sonnet", "--effort", "max"],
+            "{arguments:?}"
+        );
+
+        for settings in [
+            recorder.settings(),
+            recorder
+                .settings()
+                .with_effort(crate::llm::ReasoningEffort::Auto),
+        ] {
+            answered(settings).await;
+            let arguments = recorder.arguments();
+            assert!(
+                !arguments.iter().any(|argument| argument == "--effort"),
+                "a turn with no effort of its own was given one: {arguments:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -32,6 +32,7 @@ mod chat_handover;
 mod chat_lifecycle;
 mod chat_offline;
 mod chat_project;
+mod chat_provider;
 mod chat_replay;
 mod chat_sandbox;
 mod chat_search;

@@ -1,5 +1,5 @@
 import { type ImgHTMLAttributes, type MouseEvent, useEffect, useState } from 'react';
-import { fetchProtectedImage, isProtectedArtifactUrl } from '../api/protectedImages';
+import { fetchProtectedImage, isProtectedImageUrl } from '../../../api/protectedImages';
 
 interface AuthenticatedImageProps extends Omit<ImgHTMLAttributes<HTMLImageElement>, 'src' | 'alt'> {
   src: string;
@@ -9,6 +9,7 @@ interface AuthenticatedImageProps extends Omit<ImgHTMLAttributes<HTMLImageElemen
   linkClassName?: string;
   linked?: boolean;
   compact?: boolean;
+  fallbackClassName?: string;
 }
 
 interface LoadedImage {
@@ -24,14 +25,15 @@ export function AuthenticatedImage({
   linkClassName,
   linked = true,
   compact = false,
+  fallbackClassName,
   ...imageProps
 }: AuthenticatedImageProps) {
-  const protectedArtifact = isProtectedArtifactUrl(src);
+  const protectedImage = isProtectedImageUrl(src);
   const [loadedImage, setLoadedImage] = useState<LoadedImage | null>(null);
   const [failedSource, setFailedSource] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!protectedArtifact) {
+    if (!protectedImage) {
       return;
     }
 
@@ -64,12 +66,14 @@ export function AuthenticatedImage({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [accessToken, protectedArtifact, src]);
+  }, [accessToken, protectedImage, src]);
 
-  if (protectedArtifact && failedSource === src) {
+  if (protectedImage && failedSource === src) {
     return (
       <span
-        className={compact ? 'attachment-chip-thumb-fallback' : 'message-image-error'}
+        className={
+          fallbackClassName ?? (compact ? 'attachment-chip-thumb-fallback' : 'message-image-error')
+        }
         role="alert"
         aria-label="Image unavailable"
       >
@@ -78,7 +82,7 @@ export function AuthenticatedImage({
     );
   }
 
-  const displaySrc = protectedArtifact
+  const displaySrc = protectedImage
     ? loadedImage?.source === src
       ? loadedImage.objectUrl
       : null
@@ -87,7 +91,10 @@ export function AuthenticatedImage({
   if (!displaySrc) {
     return (
       <span
-        className={compact ? 'attachment-chip-thumb-fallback' : 'message-image-loading'}
+        className={
+          fallbackClassName ??
+          (compact ? 'attachment-chip-thumb-fallback' : 'message-image-loading')
+        }
         role="status"
         aria-label="Loading image"
       >
@@ -102,7 +109,7 @@ export function AuthenticatedImage({
   }
 
   const openFullSize = async (event: MouseEvent<HTMLAnchorElement>) => {
-    if (!protectedArtifact) {
+    if (!protectedImage) {
       return;
     }
     event.preventDefault();
@@ -117,7 +124,7 @@ export function AuthenticatedImage({
   return (
     <a
       className={linkClassName}
-      href={protectedArtifact ? src : displaySrc}
+      href={protectedImage ? src : displaySrc}
       target="_blank"
       rel="noreferrer"
       aria-label={openLabel}

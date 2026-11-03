@@ -6,13 +6,14 @@
 //! streams every completion and yields events instead. The websocket handler
 //! consumes the result exactly like the plain completion stream it replaces.
 
+use abnegate_llm::{
+    Error, Limit, Message as LlmMessage, RequestOptions, Role as LlmRole, StreamToolCall,
+    ToolCall as LlmToolCall, Usage, Window,
+};
 use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
-use zone_core::llm::{
-    AgentKind, BuiltinTools, Limit, LlmBackend, LlmClient, LlmError, Message as LlmMessage,
-    Role as LlmRole, StreamToolCall, ToolCall as LlmToolCall, Window,
-};
+use zone_core::llm::{AgentKind, BuiltinTools, LlmBackend, LlmClient};
 
 use super::Citation;
 use super::approval::ApprovalPolicy;
@@ -27,7 +28,6 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
-use zone_core::llm::{RequestOptions, Usage};
 use zone_core::tools::{Session, is_vision_url};
 
 /// What the calls queued behind a turn-ending question are told.
@@ -321,9 +321,7 @@ pub fn run_with_context(
                     &model,
                     &prepared.messages,
                     definitions,
-                    RequestOptions {
-                        reserved: context.policy.reserved,
-                    },
+                    RequestOptions::new(context.policy.reserved),
                 )
                 .await
             {
@@ -479,16 +477,14 @@ pub fn run_with_context(
                 .map(|call| call.id.clone())
                 .collect();
             let envelope = canonical(
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: replay,
-                    name: None,
-                    tool_calls: Some(requested.clone()),
-                    tool_call_id: None,
-                    images,
-                    generated_images: Vec::new(),
-                    reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
-                    thinking_blocks,
+                {
+                    let mut message = LlmMessage::new(LlmRole::Assistant);
+                    message.content = replay;
+                    message.tool_calls = Some(requested.clone());
+                    message.images = images;
+                    message.reasoning_content = (!reasoning.is_empty()).then_some(reasoning);
+                    message.thinking_blocks = thinking_blocks;
+                    message
                 },
                 mutations,
             );
@@ -702,10 +698,10 @@ impl Parked {
 }
 
 /// The event a stream that broke off with `error` ends the turn on.
-fn halted(error: LlmError) -> AgentEvent {
+fn halted(error: Error) -> AgentEvent {
     let message = format!("Stream error: {error}");
     match error {
-        LlmError::Limited { limit, .. } => AgentEvent::Limited(Limit { message, ..*limit }),
+        Error::Limited { limit, .. } => AgentEvent::Limited(limit.with_message(message)),
         _ => AgentEvent::Failed(message),
     }
 }
@@ -774,7 +770,7 @@ struct HostAgent {
 
 impl HostAgent {
     fn of(llm: &LlmClient) -> Option<Self> {
-        match &llm.config().backend {
+        match llm.backend() {
             LlmBackend::Cli { agent, settings } => Some(Self {
                 kind: *agent,
                 toolset: settings.toolset.is_some(),
@@ -1123,19 +1119,13 @@ fn text_tool_call(
         object if object.is_object() => object.to_string(),
         _ => return None,
     };
-    Some(LlmToolCall {
-        id: value
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("call_{}", index)),
-        call_type: "function".to_string(),
-        function: zone_core::llm::FunctionCall {
-            name: name.to_string(),
-            arguments,
-        },
-    })
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("call_{}", index));
+    Some(LlmToolCall::function(id, name, arguments))
 }
 
 fn registered(names: &[String], name: &str) -> bool {
@@ -1236,19 +1226,16 @@ impl ToolCallAccumulator {
                     .into_iter()
                     .enumerate()
                     .filter(|(_, call)| !call.name.is_empty())
-                    .map(move |(offset, call)| LlmToolCall {
-                        id: call.id.unwrap_or_else(|| {
+                    .map(move |(offset, call)| {
+                        let id = call.id.unwrap_or_else(|| {
                             if offset == 0 {
                                 format!("call_{}", index)
                             } else {
                                 format!("call_{index}_{offset}")
                             }
-                        }),
-                        call_type: "function".to_string(),
-                        function: zone_core::llm::FunctionCall {
-                            name: call.name,
-                            arguments: zone_core::llm::wire_arguments(&call.arguments),
-                        },
+                        });
+                        let arguments = abnegate_llm::wire_arguments(&call.arguments);
+                        LlmToolCall::function(id, call.name, arguments)
                     })
             })
             .collect()
@@ -1306,7 +1293,6 @@ fn complete_ident(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zone_core::llm::StreamFunctionCall;
     use zone_core::tools::ToolResult;
 
     fn parse_text_tool_calls(text: &str) -> Vec<LlmToolCall> {
@@ -1322,15 +1308,13 @@ mod tests {
         name: Option<&str>,
         arguments: Option<&str>,
     ) -> StreamToolCall {
-        StreamToolCall {
-            index,
-            id: id.map(str::to_string),
-            call_type: Some("function".to_string()),
-            function: Some(StreamFunctionCall {
-                name: name.map(str::to_string),
-                arguments: arguments.map(str::to_string),
-            }),
-        }
+        serde_json::from_value(serde_json::json!({
+            "index": index,
+            "id": id,
+            "type": "function",
+            "function": { "name": name, "arguments": arguments },
+        }))
+        .expect("a streamed tool call delta")
     }
 
     /// Running out of rounds is where a model is most tempted to sign off with a
@@ -1925,6 +1909,7 @@ mod tests {
     /// fail every agentic turn instead of answering it.
     mod host_agent_backend {
         use super::*;
+        use abnegate_llm::LlmConfig;
         use serde_json::{Value, json};
         use std::path::PathBuf;
         use std::sync::{Arc, Mutex};
@@ -1932,7 +1917,7 @@ mod tests {
         use tempfile::TempDir;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-        use zone_core::llm::{CliSettings, LlmConfig, Toolset};
+        use zone_core::llm::{CliSettings, Toolset};
 
         const ANSWER: &str = "Ready.";
         const SESSION: &str = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f";
@@ -2022,14 +2007,12 @@ mod tests {
         }
 
         fn cli(executable: PathBuf) -> LlmClient {
-            LlmClient::new(
-                LlmConfig::default().with_backend(LlmBackend::cli(
-                    AgentKind::Claude,
-                    CliSettings::default()
-                        .with_executable(executable)
-                        .with_timeout(Duration::from_secs(20)),
-                )),
-            )
+            LlmClient::new(LlmConfig::default()).with_backend(LlmBackend::cli(
+                AgentKind::Claude,
+                CliSettings::default()
+                    .with_executable(executable)
+                    .with_timeout(Duration::from_secs(20)),
+            ))
         }
 
         fn toolset() -> Toolset {
@@ -2055,9 +2038,10 @@ mod tests {
             if let Some(toolset) = toolset {
                 settings = settings.with_toolset(toolset);
             }
-            HostAgent::of(&LlmClient::new(
-                LlmConfig::default().with_backend(LlmBackend::cli(agent, settings)),
-            ))
+            HostAgent::of(
+                &LlmClient::new(LlmConfig::default())
+                    .with_backend(LlmBackend::cli(agent, settings)),
+            )
             .expect("a CLI backend is a host agent")
         }
 
@@ -2162,7 +2146,7 @@ mod tests {
             assert!(!limit.credits);
             assert_eq!(
                 limit.window.as_ref().map(|window| window.name.as_str()),
-                Some(Window::FIVE_HOURS)
+                Some(zone_core::llm::window::FIVE_HOURS)
             );
             let chunk = events
                 .iter()
@@ -2364,10 +2348,7 @@ mod tests {
                 })
                 .mount(&provider)
                 .await;
-            let llm = LlmClient::new(LlmConfig {
-                base_url: provider.uri(),
-                ..LlmConfig::default()
-            });
+            let llm = LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", ""));
 
             let events = turn(llm, ChatTools::empty().with_plan_approval()).await;
 

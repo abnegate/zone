@@ -484,6 +484,12 @@ class GraphContractTests(unittest.TestCase):
             with self.subTest(graph=name):
                 self.validate_graph(name, graph)
 
+    def test_wan_a14b_graphs_match_the_pinned_registry(self) -> None:
+        for name in ('wan2.2-a14b-t2v-api.json', 'wan2.2-a14b-i2v-api.json'):
+            graph = json.loads((COMFYUI / 'workflows' / name).read_text())
+            with self.subTest(graph=name):
+                self.validate_graph(name, graph)
+
     def test_two_pair_dataset_executes_with_native_zipped_list_mapping(self) -> None:
         node_class = self.nodes.NODE_CLASS_MAPPINGS['ZoneLoadTrainDataset']
         module = sys.modules[node_class.__module__]

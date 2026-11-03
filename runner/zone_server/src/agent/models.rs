@@ -115,7 +115,7 @@ impl Tool for ModelTool {
                 "Current training job with progress, or a short note when none is running. Poll this after start_train; do not claim the job finished until status is succeeded or failed."
             }
             Operation::StartTrain => {
-                "Start a training job from host file paths and return immediately. One job at a time. Poll get_train_job; do not claim it finished from this call. Person uses the SDXL people base and a trigger. Language dumps documents. Video needs clips."
+                "Start a training job from host file paths and return immediately. One job at a time. Poll get_train_job; do not claim it finished from this call. Person uses the SDXL people base and a trigger. Language dumps documents."
             }
             Operation::DismissTrain => {
                 "Dismiss a finished training job so it no longer appears. Refuses a job that is still running."
@@ -211,7 +211,7 @@ impl Tool for ModelTool {
                     },
                     "method": {
                         "type": "string",
-                        "enum": ["lora", "finetune", "pivotal", "video"],
+                        "enum": ["lora", "finetune", "pivotal"],
                         "description": "Defaults to lora."
                     },
                     "trigger": {
@@ -532,9 +532,9 @@ async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> Tool
         Err(error) => return error,
     };
     if paths.is_empty() {
-        return ToolResult::error(empty_paths_message(subject, method));
+        return ToolResult::error(empty_paths_message(subject));
     }
-    let images = match load_training_paths(&scope.state, cwd, &paths, method, subject).await {
+    let images = match load_training_paths(&scope.state, cwd, &paths, subject).await {
         Ok(images) => images,
         Err(error) => return ToolResult::error(error),
     };
@@ -565,11 +565,9 @@ async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> Tool
     }
 }
 
-fn empty_paths_message(subject: TrainSubject, method: TrainMethod) -> &'static str {
+fn empty_paths_message(subject: TrainSubject) -> &'static str {
     if subject == TrainSubject::Language {
         "training needs documents"
-    } else if method == TrainMethod::Video {
-        "video training needs clips"
     } else {
         "training needs images"
     }
@@ -604,9 +602,8 @@ fn parse_method(value: &str) -> Result<TrainMethod, ToolResult> {
         "lora" => Ok(TrainMethod::Lora),
         "finetune" => Ok(TrainMethod::Finetune),
         "pivotal" => Ok(TrainMethod::Pivotal),
-        "video" => Ok(TrainMethod::Video),
         _ => Err(ToolResult::error(
-            "method must be lora, finetune, pivotal, or video",
+            "method must be lora, finetune, or pivotal",
         )),
     }
 }
@@ -644,7 +641,6 @@ async fn load_training_paths(
     state: &AppState,
     cwd: &Path,
     paths: &[String],
-    method: TrainMethod,
     subject: TrainSubject,
 ) -> Result<Vec<TrainImage>, String> {
     let limit = state
@@ -676,7 +672,7 @@ async fn load_training_paths(
             .ok_or_else(|| format!("{} is not a usable file name", path.display()))?
             .to_string();
         let bytes = std::fs::read(&path).map_err(|error| format!("{filename}: {error}"))?;
-        if subject == TrainSubject::Language || method == TrainMethod::Video {
+        if subject == TrainSubject::Language {
             images.push(image_from_bytes(filename, bytes, None));
             continue;
         }
@@ -843,6 +839,10 @@ mod tests {
         );
         let schema = start.parameters_schema();
         assert_eq!(schema["required"], json!(["name", "base", "paths"]));
+        assert_eq!(
+            schema["properties"]["method"]["enum"],
+            json!(["lora", "finetune", "pivotal"])
+        );
         let written = format!("{}{}", start.description(), schema);
         assert!(!written.contains("wait_for"), "{written}");
 
@@ -860,17 +860,45 @@ mod tests {
     #[test]
     fn empty_paths_use_the_same_messages_as_validate_request() {
         assert_eq!(
-            empty_paths_message(TrainSubject::Other, TrainMethod::Lora),
+            empty_paths_message(TrainSubject::Other),
             "training needs images"
         );
         assert_eq!(
-            empty_paths_message(TrainSubject::Person, TrainMethod::Video),
-            "video training needs clips"
+            empty_paths_message(TrainSubject::Person),
+            "training needs images"
         );
         assert_eq!(
-            empty_paths_message(TrainSubject::Language, TrainMethod::Lora),
+            empty_paths_message(TrainSubject::Language),
             "training needs documents"
         );
+    }
+
+    #[test]
+    fn the_train_tool_does_not_take_the_video_method() {
+        let refused = parse_method("video").expect_err("video identity training is off");
+        assert_eq!(
+            refused.error.as_deref(),
+            Some("method must be lora, finetune, or pivotal")
+        );
+    }
+
+    #[tokio::test]
+    async fn video_identity_training_is_refused_before_a_job_starts() {
+        let (_dir, state) = train_state();
+        let request = TrainRequest {
+            name: "Ada".into(),
+            base: "sdxl-people".into(),
+            trigger: Some("ada".into()),
+            subject: TrainSubject::Person,
+            method: TrainMethod::Video,
+            provider: TrainProvider::Local,
+            images: vec![image_from_bytes("walk.mp4".into(), b"clip".to_vec(), None)],
+        };
+        let error = start_job(&state, request, None)
+            .await
+            .expect_err("video identity training is off");
+        assert_eq!(error.message(), lora::VIDEO_REFUSAL);
+        assert!(state.train_jobs().current().is_none());
     }
 
     #[tokio::test]

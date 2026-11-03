@@ -1,5 +1,5 @@
 import { useEffect, useState, type VideoHTMLAttributes } from 'react';
-import { fetchSignedArtifactUrl, isProtectedArtifactUrl } from '../api/protectedImages';
+import { fetchSignedArtifactUrl, isProtectedArtifactUrl } from '../../../api/protectedImages';
 
 interface AuthenticatedVideoProps
   extends Omit<VideoHTMLAttributes<HTMLVideoElement>, 'src' | 'aria-label'> {

@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use abnegate_llm::{LlmConfig, Message};
 use futures::StreamExt;
 use futures_util::SinkExt;
 use serde_json::{Value, json};
@@ -19,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_core::llm::{LlmClient, LlmConfig, Message};
+use zone_core::llm::LlmClient;
 use zone_core::tools::Session;
 use zone_core::tools::job::{self, JobCommand, Jobs};
 use zone_server::agent::{
@@ -691,10 +692,7 @@ async fn a_wait_hands_the_resumed_turn_back_the_round_it_opened_in() {
     let events: Vec<AgentEvent> = tokio::time::timeout(
         SETTLE,
         run(AgentRun {
-            llm: LlmClient::new(LlmConfig {
-                base_url: provider.uri(),
-                ..LlmConfig::default()
-            }),
+            llm: LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", "")),
             model: "test".to_string(),
             tools,
             messages: vec![Message::user("Start the build and wait for it.")],

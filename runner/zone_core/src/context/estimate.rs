@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::llm::{Message, Role, ToolDefinition};
+use abnegate_llm::{Message, Role, ToolDefinition};
 
 use super::{ContextBreakdown, ContextSource, ContextStatus, ContextUsage, Entry, Policy, Summary};
 

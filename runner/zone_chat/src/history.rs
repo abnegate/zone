@@ -1,9 +1,9 @@
 //! Storage is deliberately independent of the provider's asymmetric wire message format.
 
+use abnegate_llm::{GeneratedImage, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use zone_core::llm::{GeneratedImage, ImageUrl, Message, Role, ToolCall};
 
 pub const VERSION: u16 = 1;
 
@@ -46,23 +46,20 @@ impl From<&Message> for ReplayMessage {
 
 impl ReplayMessage {
     pub fn into_message(self) -> Message {
-        Message {
-            role: self.role,
-            content: self.content,
-            name: self.name,
-            tool_calls: self.tool_calls,
-            tool_call_id: self.tool_call_id,
-            images: self.images,
-            generated_images: self
-                .generated_images
-                .into_iter()
-                .map(|url| GeneratedImage {
-                    image_url: ImageUrl { url },
-                })
-                .collect(),
-            reasoning_content: self.reasoning_content,
-            thinking_blocks: self.thinking_blocks,
-        }
+        let mut message = Message::new(self.role);
+        message.content = self.content;
+        message.name = self.name;
+        message.tool_calls = self.tool_calls;
+        message.tool_call_id = self.tool_call_id;
+        message.images = self.images;
+        message.generated_images = self
+            .generated_images
+            .into_iter()
+            .map(GeneratedImage::new)
+            .collect();
+        message.reasoning_content = self.reasoning_content;
+        message.thinking_blocks = self.thinking_blocks;
+        message
     }
 }
 
@@ -206,11 +203,9 @@ mod tests {
     fn storage_roundtrip_preserves_multimodal_messages() {
         let mut message = Message::user("Inspect this exact image");
         message.images.push("/api/artifacts/source.png".into());
-        message.generated_images.push(GeneratedImage {
-            image_url: ImageUrl {
-                url: "data:image/png;base64,AA==".into(),
-            },
-        });
+        message
+            .generated_images
+            .push(GeneratedImage::new("data:image/png;base64,AA=="));
         let replay = ReplayMessage::from(&message);
         let restored: ReplayMessage =
             serde_json::from_slice(&serde_json::to_vec(&replay).unwrap()).unwrap();
