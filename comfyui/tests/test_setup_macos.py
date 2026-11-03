@@ -168,6 +168,7 @@ class SetupMacosTest(unittest.TestCase):
                 text=True,
             ).strip()
             Path(site, "torch.py").write_text("x = 1\n", encoding="utf-8")
+            (install / "train_runpod.py").write_text("stale = True\n", encoding="utf-8")
             self.stub(root / "uname", UNAME_STUB)
             launchctl_log = root / "launchctl.log"
             self.stub(
@@ -233,7 +234,20 @@ class SetupMacosTest(unittest.TestCase):
             self.assertIn("train_sdxl.py", plist)
             self.assertIn(".venv-train/bin/python", plist)
             self.assertNotIn(".venv-train-llm", plist)
-            self.assertIn("bootstrap", launchctl_log.read_text(encoding="utf-8"))
+            self.assertEqual(
+                (install / "train_runpod.py").read_text(encoding="utf-8"),
+                (COMFYUI_DIR / "train_runpod.py").read_text(encoding="utf-8"),
+                "a reinstall left the stale trainer in place",
+            )
+            commands = [
+                line.split()[0]
+                for line in launchctl_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                commands,
+                ["bootout", "bootstrap"],
+                "a reinstall must restart the running trainer on the new scripts",
+            )
 
 
 if __name__ == "__main__":

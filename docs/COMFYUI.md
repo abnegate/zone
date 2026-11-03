@@ -547,6 +547,12 @@ clips; 500 stills or 50 clips is the strong set. Install the worker with:
 ./scripts/setup-comfyui-macos.sh --download-model --bundle image-people
 ```
 
+The LaunchAgent runs copies of the trainer scripts, and upgrading zone does
+not refresh them: rerun `--install-trainer` once no local job is running, as
+[Upgrading to abnegate-comfy](OPERATIONS.md#upgrading-to-abnegate-comfy)
+describes. A trainer left on the scripts from before `abnegate-comfy`
+publishes into `loras/` itself, and every run it trains fails to publish.
+
 `COMFYUI_TRAIN_TIMEOUT_SECONDS` does not apply to the host worker. Person LoRA
 is hours; fine-tune is unbounded and resumes from snapshots.
 

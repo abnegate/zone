@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parent
@@ -62,6 +62,9 @@ SCRIPTS = (
 )
 JOB_ARCHIVE = 'job'
 MODELS_ARCHIVE = 'models'
+LEGACY_WEIGHT_FOLDERS = ('loras', 'checkpoints')
+LEGACY_SIDECAR_SUFFIX = '.zone.json'
+LEGACY_STAGING = '.legacy-artifact'
 
 BOOTSTRAP = r'''from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -516,11 +519,64 @@ def poll_until_done(
         sleep(POLL_INTERVAL)
 
 
-def download_artifact(base: str, models_dir: Path, job_dir: Path) -> None:
+def download_artifact(
+    base: str,
+    models_dir: Path,
+    job_dir: Path,
+    job: dict[str, Any],
+) -> None:
     payload = open_url(f'{base}/artifact', timeout=3600)
     with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
-        extract_tar(archive, Path(job_dir), rebased(archive, JOB_ARCHIVE))
-        extract_tar(archive, Path(models_dir), rebased(archive, MODELS_ARCHIVE))
+        job_members = rebased(archive, JOB_ARCHIVE)
+        model_members = rebased(archive, MODELS_ARCHIVE)
+        if not job_members and not model_members:
+            extract_legacy(archive, Path(models_dir), Path(job_dir), job)
+            return
+        extract_tar(archive, Path(job_dir), job_members)
+        extract_tar(archive, Path(models_dir), model_members)
+
+
+def require_safe(member: tarfile.TarInfo) -> None:
+    path = PurePosixPath(member.name)
+    if path.is_absolute() or '..' in path.parts or not (member.isfile() or member.isdir()):
+        raise RuntimeError(f'the Runpod artifact holds an unsafe member: {member.name}')
+
+
+def extract_legacy(
+    archive: tarfile.TarFile,
+    models_dir: Path,
+    job_dir: Path,
+    job: dict[str, Any],
+) -> None:
+    members = archive.getmembers()
+    for member in members:
+        require_safe(member)
+    staging = job_dir / LEGACY_STAGING
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        extract_tar(archive, staging, members)
+        claim_legacy_weight(staging, job_dir, job)
+        for staged in sorted(staging.rglob('*')):
+            if not staged.is_file():
+                continue
+            destination = models_dir / staged.relative_to(staging)
+            if destination.exists() and not publishes(models_dir, job, destination):
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged, destination)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def claim_legacy_weight(staging: Path, job_dir: Path, job: dict[str, Any]) -> None:
+    weight = trained_weight(job_dir, job)
+    if weight is None:
+        return
+    for folder in LEGACY_WEIGHT_FOLDERS:
+        staged = staging / folder / weight.name
+        staged.with_name(staged.name + LEGACY_SIDECAR_SUFFIX).unlink(missing_ok=True)
+        if staged.is_file():
+            os.replace(staged, weight)
 
 
 def huggingface_url(repo: str, filename: str) -> str:
@@ -598,9 +654,29 @@ def trained_weight(job_dir: Path, job: dict[str, Any]) -> Path | None:
     return train_sdxl.weight_path(job_dir, job)
 
 
+def published_destinations(models_dir: Path, job: dict[str, Any]) -> list[Path]:
+    models_dir = Path(models_dir)
+    destinations = []
+    if str(job.get('method') or 'lora') == 'pivotal':
+        destinations.append(train_sdxl.embedding_path(models_dir, job))
+    stem = Path(str(job.get('filename') or job.get('name') or '')).stem
+    name = str(job.get('name') or stem)
+    for candidate in dict.fromkeys([stem, name]):
+        if candidate:
+            destinations.append(models_dir / 'loras' / f'{candidate}.face.png')
+    return destinations
+
+
+def publishes(models_dir: Path, job: dict[str, Any], destination: Path) -> bool:
+    if str(job.get('subject') or '') == 'language':
+        import train_llm
+
+        return destination.is_relative_to(train_llm.publish_dir(models_dir, job))
+    return destination in published_destinations(models_dir, job)
+
+
 def published_files(models_dir: Path, job: dict[str, Any]) -> list[Path]:
     models_dir = Path(models_dir)
-    method = str(job.get('method') or 'lora')
     if str(job.get('subject') or '') == 'language':
         import train_llm
 
@@ -608,20 +684,7 @@ def published_files(models_dir: Path, job: dict[str, Any]) -> list[Path]:
         if not directory.is_dir():
             return []
         return [path for path in directory.rglob('*') if path.is_file()]
-    files = []
-    if method == 'pivotal':
-        embedding = train_sdxl.embedding_path(models_dir, job)
-        if embedding.is_file():
-            files.append(embedding)
-    stem = Path(str(job.get('filename') or job.get('name') or '')).stem
-    name = str(job.get('name') or stem)
-    for candidate in dict.fromkeys([stem, name]):
-        if not candidate:
-            continue
-        face = models_dir / 'loras' / f'{candidate}.face.png'
-        if face.is_file():
-            files.append(face)
-    return files
+    return [path for path in published_destinations(models_dir, job) if path.is_file()]
 
 
 def write_artifact(root: Path, models_dir: Path, job_dir: Path, job: dict[str, Any]) -> None:
@@ -754,7 +817,7 @@ def process_job(
         if str(status.get('status') or 'waiting') == 'waiting':
             upload_bundle(base, pack_upload(models_dir, job_dir, job, config))
         poll_until_done(base, job_dir, sleep)
-        download_artifact(base, Path(models_dir), Path(job_dir))
+        download_artifact(base, Path(models_dir), Path(job_dir), job)
         weight = trained_weight(job_dir, job)
         if weight is not None and not weight.is_file():
             raise RuntimeError('the Runpod artifact holds no trained weight')

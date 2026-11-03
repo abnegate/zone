@@ -74,8 +74,27 @@ def write_dataset(job_dir: Path, count: int = 1) -> None:
         (dataset / f'{index:04}.txt').write_text('ohwx person', encoding='utf-8')
 
 
-def download_weight(_base: str, _models: Path, job_dir: Path) -> None:
+def download_weight(_base: str, _models: Path, job_dir: Path, _job: dict) -> None:
     (job_dir / 'jerry.safetensors').write_bytes(b'weight')
+
+
+def legacy_artifact(members: dict[str, bytes]) -> bytes:
+    buffer = BytesIO()
+    with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+        for name, data in members.items():
+            add_member(archive, name, data)
+    return buffer.getvalue()
+
+
+def legacy_link(name: str, target: str, kind: bytes = tarfile.SYMTYPE) -> bytes:
+    buffer = BytesIO()
+    with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+        add_member(archive, 'loras/jerry.safetensors', b'weight')
+        info = tarfile.TarInfo(name)
+        info.type = kind
+        info.linkname = target
+        archive.addfile(info)
+    return buffer.getvalue()
 
 
 def add_member(archive: tarfile.TarFile, name: str, data: bytes) -> None:
@@ -589,7 +608,7 @@ class ArtifactTests(unittest.TestCase):
             local_job.mkdir(parents=True)
             artifact = (remote / 'artifact.tar.gz').read_bytes()
             with mock.patch.object(train_runpod, 'open_url', return_value=artifact):
-                train_runpod.download_artifact('http://pod', local_models, local_job)
+                train_runpod.download_artifact('http://pod', local_models, local_job, job)
 
             self.assertEqual((local_job / 'jerry.safetensors').read_bytes(), b'weight')
             self.assertEqual(
@@ -599,6 +618,166 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual((local_models / 'loras' / 'jerry.face.png').read_bytes(), b'face')
             self.assertFalse((local_models / 'loras' / 'jerry.safetensors').exists())
             self.assertFalse((local_models / '.zone-train' / 'remote-job').exists())
+
+
+class LegacyArtifactTests(unittest.TestCase):
+    def download(self, models: Path, job_dir: Path, job: dict, artifact: bytes) -> None:
+        with mock.patch.object(train_runpod, 'open_url', return_value=artifact):
+            train_runpod.download_artifact('http://pod', models, job_dir, job)
+
+    def staged_job(self, models: Path, job: dict) -> tuple[Path, dict]:
+        job_dir = models / '.zone-train' / 'local-job'
+        job_dir.mkdir(parents=True)
+        return job_dir, train_sdxl.normalize_job(job, job_dir)
+
+    def test_an_old_layout_lora_artifact_lands_its_weight_in_the_job_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir, job = self.staged_job(models, queued_job(method='pivotal'))
+            (models / 'embeddings').mkdir()
+            (models / 'embeddings' / 'jerry.safetensors').write_bytes(b'stale embedding')
+            self.download(
+                models,
+                job_dir,
+                job,
+                legacy_artifact(
+                    {
+                        'loras/jerry.safetensors': b'weight',
+                        'loras/jerry.safetensors.zone.json': b'{"trigger": "ohwx"}',
+                        'embeddings/jerry.safetensors': b'embedding',
+                        'loras/jerry.face.png': b'face',
+                    }
+                ),
+            )
+
+            self.assertEqual((job_dir / 'jerry.safetensors').read_bytes(), b'weight')
+            self.assertEqual(
+                (models / 'embeddings' / 'jerry.safetensors').read_bytes(), b'embedding'
+            )
+            self.assertEqual((models / 'loras' / 'jerry.face.png').read_bytes(), b'face')
+            self.assertFalse((models / 'loras' / 'jerry.safetensors').exists())
+            self.assertFalse((models / 'loras' / 'jerry.safetensors.zone.json').exists())
+            self.assertEqual(sorted(path.name for path in job_dir.iterdir()), ['jerry.safetensors'])
+
+    def test_an_old_layout_fine_tune_artifact_lands_its_checkpoint_in_the_job_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir, job = self.staged_job(models, queued_job(method='finetune'))
+            self.download(
+                models,
+                job_dir,
+                job,
+                legacy_artifact(
+                    {
+                        'checkpoints/jerry.safetensors': b'checkpoint',
+                        'checkpoints/jerry.safetensors.zone.json': b'{}',
+                    }
+                ),
+            )
+
+            self.assertEqual((job_dir / 'jerry.safetensors').read_bytes(), b'checkpoint')
+            self.assertFalse((models / 'checkpoints').exists())
+
+    def test_an_old_layout_language_artifact_lands_in_the_language_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / 'local-job'
+            job_dir.mkdir(parents=True)
+            job = {'subject': 'language', 'filename': 'jerry', 'name': 'jerry', 'method': 'lora'}
+            self.download(
+                models,
+                job_dir,
+                job,
+                legacy_artifact(
+                    {
+                        'llm/jerry/Modelfile': b'FROM /workspace/models/llm/jerry\n',
+                        'llm/jerry/adapter_model.safetensors': b'adapter',
+                    }
+                ),
+            )
+
+            self.assertEqual(
+                (models / 'llm' / 'jerry' / 'adapter_model.safetensors').read_bytes(), b'adapter'
+            )
+            self.assertTrue((models / 'llm' / 'jerry' / 'Modelfile').is_file())
+            self.assertEqual(list(job_dir.iterdir()), [])
+
+    def test_an_old_layout_artifact_keeps_files_the_job_does_not_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir, job = self.staged_job(models, queued_job())
+            (models / 'loras').mkdir()
+            (models / 'loras' / 'tom.safetensors').write_bytes(b'mine')
+            self.download(
+                models,
+                job_dir,
+                job,
+                legacy_artifact(
+                    {
+                        'loras/jerry.safetensors': b'weight',
+                        'loras/tom.safetensors': b'theirs',
+                    }
+                ),
+            )
+
+            self.assertEqual((models / 'loras' / 'tom.safetensors').read_bytes(), b'mine')
+            self.assertEqual((job_dir / 'jerry.safetensors').read_bytes(), b'weight')
+
+    def test_an_unsafe_old_layout_member_is_refused(self) -> None:
+        artifacts = {
+            'parent': legacy_artifact(
+                {'loras/jerry.safetensors': b'weight', '../escape.safetensors': b'x'}
+            ),
+            'absolute': legacy_artifact(
+                {'loras/jerry.safetensors': b'weight', '/tmp/escape.safetensors': b'x'}
+            ),
+            'symlink': legacy_link('loras/link.safetensors', '../../outside'),
+            'hardlink': legacy_link(
+                'loras/link.safetensors', 'loras/jerry.safetensors', tarfile.LNKTYPE
+            ),
+        }
+        for label, artifact in artifacts.items():
+            with self.subTest(member=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                models = root / 'models'
+                job_dir, job = self.staged_job(models, queued_job())
+                with self.assertRaisesRegex(RuntimeError, 'unsafe'):
+                    self.download(models, job_dir, job, artifact)
+                self.assertFalse((job_dir / 'jerry.safetensors').exists())
+                self.assertEqual(sorted(path.name for path in root.iterdir()), ['models'])
+                self.assertEqual(list(job_dir.iterdir()), [])
+
+    def test_a_pod_resumed_across_the_upgrade_publishes_its_old_layout_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = stage_job(models, extra={'pod_id': 'keep-me'})
+            client = mock.Mock()
+            client.get_pod.return_value = {'id': 'keep-me', 'status': 'RUNNING'}
+            artifact = legacy_artifact(
+                {
+                    'loras/jerry.safetensors': b'weight',
+                    'loras/jerry.safetensors.zone.json': b'{}',
+                }
+            )
+            with (
+                mock.patch.object(
+                    train_runpod, 'wait_ready', return_value={'status': 'running'}
+                ),
+                mock.patch.object(train_runpod, 'poll_until_done'),
+                mock.patch.object(train_runpod, 'open_url', return_value=artifact),
+            ):
+                train_runpod.process_job(
+                    models,
+                    job_dir,
+                    train_sdxl.load_config(),
+                    client=client,
+                    sleep=lambda _interval: None,
+                    proxy_base='http://127.0.0.1:9',
+                )
+            job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+            self.assertEqual(job['status'], 'succeeded')
+            self.assertEqual((job_dir / 'jerry.safetensors').read_bytes(), b'weight')
+            self.assertFalse((models / 'loras' / 'jerry.safetensors.zone.json').exists())
 
 
 class PublishedFilesTests(unittest.TestCase):

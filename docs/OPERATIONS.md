@@ -280,6 +280,43 @@ reads need egress to `api.anthropic.com` and `chatgpt.com`, or the hosts
 `networkPolicy.enabled` is on; see
 [helm/zone-apps/README.md](../helm/zone-apps/README.md).
 
+## Upgrading to abnegate-comfy
+
+From this release zone publishes trained weights through `abnegate-comfy`: the
+host trainer leaves a finished weight in its job directory under
+`models/.zone-train/`, and zone moves it into `loras/` or `checkpoints/` with
+its `.zone.json` sidecar. The scripts the `ai.zone.train` LaunchAgent runs are
+copies in the ComfyUI install directory, and upgrading zone does not refresh
+them. A trainer left on the old scripts publishes into `loras/` itself and
+leaves nothing in the job directory, so every run it trains fails when zone
+publishes it.
+
+After the upgrade:
+
+1. Wait until no local training job is running: every `job.json` under
+   `models/.zone-train/` that says `"status": "running"` also says
+   `"provider": "runpod"`. Reinstalling restarts the trainer, which stops a
+   local run in progress. A Runpod job need not wait, since its pod keeps
+   training without the host.
+2. Reinstall the trainer:
+
+   ```bash
+   ./scripts/setup-comfyui-macos.sh --install-trainer
+   ```
+
+   It copies the current scripts over the old ones, then boots
+   `ai.zone.train` out and bootstraps it again, so the trainer restarts on
+   them and picks up any queued job.
+
+A Runpod pod started before the upgrade keeps running the scripts it was sent
+and returns its artifact in the old layout, with the weight under `loras/` or
+`checkpoints/` beside its sidecar. The reinstalled trainer resumes that pod,
+moves the weight into the job directory, drops the old sidecar, since zone
+writes its own, and puts the embedding, face image or language model under the
+models directory, without replacing any other file already there. A trainer
+that has not been reinstalled cannot read that layout either, and fails the
+run with `the Runpod artifact holds no trained weight`.
+
 ## Host trainer on Linux
 
 The manager creates each training job under `models/.zone-train/` readable
