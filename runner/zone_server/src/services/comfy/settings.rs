@@ -45,10 +45,11 @@ const POSES: &str = "poses";
 const VISION_WEIGHTS: &str = "vision/u2net.onnx";
 
 /// Zone's ComfyUI settings from this process's environment: the crate's
-/// `COMFYUI_*` names, with zone's defaults where a setting is unset and
-/// zone's contract, training rules and host trainer. A setting that cannot
-/// work, such as a `COMFYUI_TOKEN_HEADER` that is no header name, is
-/// refused here so the server stops at startup instead of on first use.
+/// `COMFYUI_*` names, with zone's defaults where a setting is unset or the
+/// crate could not read it, and zone's contract, training rules and host
+/// trainer. A setting that cannot work, such as a `COMFYUI_TOKEN_HEADER`
+/// that is no header name, is refused here so the server stops at startup
+/// instead of on first use.
 pub fn load() -> Result<Config, ConfigError> {
     validated(configure(
         Config::from_environment_with_vision_model(VISION_MODEL_VARIABLE),
@@ -80,7 +81,7 @@ fn configure(
 ) -> Config {
     let unset = |name: &str| text(environment(name)).is_none();
     let workflows = directory.join(WORKFLOWS);
-    if unset(BASE_URL_VARIABLE) {
+    if url(environment(BASE_URL_VARIABLE)).is_none() {
         config.base_url = BASE_URL.to_string();
     }
     if unset(TOKEN_HEADER_VARIABLE) {
@@ -107,7 +108,7 @@ fn configure(
     if unset(MODELS_DIRECTORY_VARIABLE) {
         config.models_directory = PathBuf::from(MODELS_DIRECTORY);
     }
-    if unset(REQUEST_TIMEOUT_VARIABLE) {
+    if whole_seconds(environment(REQUEST_TIMEOUT_VARIABLE)).is_none() {
         config.request_timeout = REQUEST_TIMEOUT;
     }
     if unset(VISION_MODEL_VARIABLE) {
@@ -135,6 +136,14 @@ fn text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn url(value: Option<String>) -> Option<String> {
+    text(value.map(|url| url.trim().trim_end_matches('/').to_string()))
+}
+
+fn whole_seconds(value: Option<String>) -> Option<u64> {
+    value.and_then(|value| value.parse().ok())
 }
 
 #[cfg(test)]
@@ -296,7 +305,10 @@ mod tests {
             POSES_DIRECTORY_VARIABLE,
             CAPTION_MODEL_FALLBACK_VARIABLE,
         ]
-        .map(|name| (name, "set"));
+        .map(|name| match name {
+            REQUEST_TIMEOUT_VARIABLE => (name, "90"),
+            _ => (name, "set"),
+        });
         let config = configured(base.clone(), &set);
         assert_eq!(config.base_url, base.base_url);
         assert_eq!(config.token_header, base.token_header);
@@ -319,6 +331,17 @@ mod tests {
         base.base_url = "http://127.0.0.1:8188".into();
         let config = configured(base, &[(BASE_URL_VARIABLE, "  ")]);
         assert_eq!(config.base_url, BASE_URL);
+    }
+
+    #[test]
+    fn a_setting_the_crate_cannot_read_gets_zones_default_and_not_the_crates() {
+        let crate_default = Config::default();
+        let timeout = configured(crate_default.clone(), &[(REQUEST_TIMEOUT_VARIABLE, "abc")]);
+        assert_eq!(timeout.request_timeout, REQUEST_TIMEOUT);
+        for slashes in ["/", " // "] {
+            let base = configured(crate_default.clone(), &[(BASE_URL_VARIABLE, slashes)]);
+            assert_eq!(base.base_url, BASE_URL, "{slashes:?}");
+        }
     }
 
     #[test]
