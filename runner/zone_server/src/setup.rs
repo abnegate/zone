@@ -13,19 +13,15 @@ use serde::{Deserialize, Serialize};
 const FEATURES_JSON: &str = include_str!("../../../scripts/setup-features.json");
 const MANIFEST_JSON: &str = include_str!("../../../comfyui/model-manifest.json");
 
-static CATALOG: Lazy<Catalog> =
-    Lazy::new(|| serde_json::from_str(FEATURES_JSON).expect("setup-features.json"));
+static CATALOG: Lazy<Catalog> = Lazy::new(|| Catalog::parse(FEATURES_JSON));
 static MANIFEST: Lazy<Manifest> =
     Lazy::new(|| serde_json::from_str(MANIFEST_JSON).expect("model-manifest.json"));
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
 const VISION: &str = "vision";
-const VIDEO: &str = "video";
 const ALL_RAM: &str = "all-ram";
-const VISION_RAM: &str = "vision-ram";
-const VIDEO_RAM: &str = "video-ram";
-const FEATURE_RAM: &str = "feature-ram";
+const RAM_CODE_SUFFIX: &str = "-ram";
 const VISION_FALLBACK: &str = "8 GB can run chat only.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,12 +39,29 @@ impl std::fmt::Display for PlanError {
 #[derive(Debug, Deserialize)]
 struct Catalog {
     disk_margin_bytes: u64,
-    vision_min_ram_bytes: u64,
     embed: String,
     vision_model: String,
     ollama_models: HashMap<String, OllamaSize>,
     chat_presets: Vec<ChatPreset>,
     features: Vec<Feature>,
+}
+
+impl Catalog {
+    fn parse(json: &str) -> Self {
+        let mut catalog: Self = serde_json::from_str(json).expect("setup-features.json");
+        for feature in &mut catalog.features {
+            feature.ram_code = format!("{}{RAM_CODE_SUFFIX}", feature.id);
+        }
+        catalog
+    }
+
+    fn vision_min_ram_bytes(&self) -> u64 {
+        self.features
+            .iter()
+            .find(|feature| feature.id == VISION)
+            .and_then(|feature| feature.min_ram_bytes)
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +89,8 @@ struct Feature {
     min_ram_bytes: Option<u64>,
     #[serde(default)]
     ram_model: Option<String>,
+    #[serde(skip)]
+    ram_code: String,
     #[serde(default)]
     ollama_slots: Vec<String>,
     #[serde(default)]
@@ -462,7 +477,7 @@ pub fn view_plan(plan: &Plan) -> SetupPlan {
         ram_label: format_ram(plan.ram_bytes),
         disk_free_bytes: plan.disk_free_bytes,
         disk_free_label: format_disk(plan.disk_free_bytes),
-        vision_min_ram_bytes: catalog.vision_min_ram_bytes,
+        vision_min_ram_bytes: catalog.vision_min_ram_bytes(),
         disk_margin_bytes: plan.disk_margin_bytes,
         chat_preset: plan.preset_id.clone(),
         recommended_preset: recommended.id.clone(),
@@ -860,7 +875,7 @@ fn isolation_sizes(plan: &Plan) -> HashMap<String, u64> {
     sizes
 }
 
-fn ram_error(plan: &Plan, feature: &Feature, minimum: u64) -> PlanError {
+fn ram_error(plan: &Plan, feature: &'static Feature, minimum: u64) -> PlanError {
     let id = feature.id.as_str();
     let model = feature.ram_model.as_deref().unwrap_or(&feature.label);
     let needed = format_ram(minimum);
@@ -878,11 +893,7 @@ fn ram_error(plan: &Plan, feature: &Feature, minimum: u64) -> PlanError {
         };
     }
     PlanError {
-        code: match id {
-            VISION => VISION_RAM,
-            VIDEO => VIDEO_RAM,
-            _ => FEATURE_RAM,
-        },
+        code: &feature.ram_code,
         message: format!(
             "{} needs {needed} RAM ({model}). This machine has {available}. Drop {id} or use a machine with at least {needed}.",
             feature.label
@@ -983,7 +994,7 @@ mod tests {
     #[test]
     fn catalog_loads_and_vision_floor_is_16_gib() {
         let catalog = catalog();
-        assert_eq!(catalog.vision_min_ram_bytes, 16 * GIB);
+        assert_eq!(catalog.vision_min_ram_bytes(), 16 * GIB);
         assert_eq!(catalog.disk_margin_bytes, 10 * GB);
         assert!(
             catalog
@@ -1041,6 +1052,60 @@ mod tests {
         let error = enforce_gates(&built).unwrap_err();
         assert_eq!(error.code, "vision-ram");
         assert!(error.message.contains("llava:7b"));
+    }
+
+    #[test]
+    fn a_gated_feature_refuses_under_its_own_code() {
+        let catalog: &'static Catalog = Box::leak(Box::new(Catalog::parse(
+            r#"{
+                "disk_margin_bytes": 0,
+                "vision_min_ram_bytes": 17179869184,
+                "embed": "embed",
+                "vision_model": "vision",
+                "ollama_models": {},
+                "chat_presets": [],
+                "features": [{
+                    "id": "music",
+                    "label": "Music",
+                    "description": "Songs",
+                    "min_ram_bytes": 34359738368
+                }]
+            }"#,
+        )));
+        let music = &catalog.features[0];
+        let built = plan(
+            FeatureSelect::Ids(vec!["chat".into()]),
+            8 * GIB,
+            500 * GB,
+            "8gb",
+        );
+
+        let error = ram_error(&built, music, 32 * GIB);
+
+        assert_eq!(error.code, "music-ram");
+        assert_eq!(
+            error.message,
+            "Music needs 32 GB RAM (Music). This machine has 8 GB. Drop music or use a machine with at least 32 GB."
+        );
+        assert_eq!(
+            catalog.vision_min_ram_bytes(),
+            0,
+            "the floor comes from the vision feature, not a top-level copy"
+        );
+    }
+
+    #[test]
+    fn the_vision_floor_is_the_vision_feature_floor() {
+        let vision = catalog()
+            .features
+            .iter()
+            .find(|feature| feature.id == VISION)
+            .expect("a vision feature");
+        assert_eq!(vision.min_ram_bytes, Some(catalog().vision_min_ram_bytes()));
+        assert_eq!(
+            view_plan(&plan(FeatureSelect::All, 64 * GIB, 500 * GB, "32gb")).vision_min_ram_bytes,
+            16 * GIB
+        );
     }
 
     #[test]

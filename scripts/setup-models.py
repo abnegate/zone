@@ -490,8 +490,9 @@ def make_plan(
 def ram_error(plan: Plan, feature: dict[str, Any]) -> PlanError:
     feature_id = str(feature['id'])
     label = feature['label']
-    model = feature['ram_model']
-    fallback = feature['ram_fallback']
+    model = feature.get('ram_model') or label
+    rest = ','.join(other for other in plan.features if other != feature_id)
+    fallback = feature.get('ram_fallback') or f'Drop {feature_id} with --features {rest}'
     minimum = format_ram(int(feature['min_ram_bytes']))
     available = format_ram(plan.ram_bytes)
     if plan.wants_all:

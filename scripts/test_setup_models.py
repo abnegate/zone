@@ -70,7 +70,9 @@ class SetupModelsTest(unittest.TestCase):
             self.assertIn(preset["reason"], ollama_models)
         self.assertIn(self.catalog["embed"], ollama_models)
         self.assertIn(self.catalog["vision_model"], ollama_models)
-        self.assertEqual(self.catalog["vision_min_ram_bytes"], 16 * GIB)
+        vision = next(feature for feature in self.catalog['features'] if feature['id'] == 'vision')
+        self.assertEqual(vision['min_ram_bytes'], 16 * GIB)
+        self.assertNotIn('vision_min_ram_bytes', self.catalog)
 
     def test_empty_features_means_all(self) -> None:
         selected, wants_all = setup_models.parse_features("", self.catalog)
@@ -127,6 +129,50 @@ class SetupModelsTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 'all-ram')
         self.assertIn('Cannot select all features', str(raised.exception))
         self.assertIn('video needs 64 GB', str(raised.exception))
+
+    def bare_video(self) -> dict:
+        video = next(feature for feature in self.catalog['features'] if feature['id'] == 'video')
+        return {
+            key: value
+            for key, value in video.items()
+            if key not in ('ram_model', 'ram_fallback')
+        }
+
+    def unchecked_plan(self, features: str, *, ram: int) -> setup_models.Plan:
+        return setup_models.make_plan(
+            self.catalog,
+            self.manifest,
+            self.download_models,
+            features_raw=features,
+            preset_id='32gb',
+            ram_bytes=ram,
+            disk_free_bytes=500 * GB,
+            models_dir=Path('.'),
+            ollama_tags=set(),
+            comfy_present=set(),
+        )
+
+    def test_a_gated_feature_without_a_model_names_its_label(self) -> None:
+        plan = self.unchecked_plan('chat,video', ram=32 * GIB)
+
+        error = setup_models.ram_error(plan, self.bare_video())
+
+        self.assertEqual(error.code, 'video-ram')
+        self.assertIn('Video needs 64 GB RAM (Video)', str(error))
+
+    def test_a_gated_feature_without_a_fallback_still_says_how_to_drop_it(self) -> None:
+        plan = self.unchecked_plan('all', ram=32 * GIB)
+
+        error = setup_models.ram_error(plan, self.bare_video())
+
+        self.assertEqual(error.code, 'all-ram')
+        features = str(error).split('--features ', 1)[1].split()[0]
+        selected, _ = setup_models.parse_features(features, self.catalog)
+        self.assertNotIn('video', selected)
+        self.assertEqual(
+            selected,
+            set(setup_models.all_feature_ids(self.catalog)) - {'video'},
+        )
 
     def test_every_ram_fallback_drops_its_feature(self) -> None:
         for feature in self.catalog['features']:

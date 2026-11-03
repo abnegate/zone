@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "disk_margin_bytes": 10000000000,
-  "vision_min_ram_bytes": 17179869184,
   "embed": "qwen3-embedding:0.6b",
   "vision_model": "llava:7b",
   "ollama_models": {
