@@ -102,12 +102,13 @@ export default function ProjectsPage() {
   const [revealedSecret, setRevealedSecret] = useState<RevealedSecret | null>(null);
   const reveals = useRef(0);
 
-  const reveal = ({ config, webhookSecret }: SyncConfigSecret) => {
+  const reveal = ({ config, webhookSecret, registrationError }: SyncConfigSecret) => {
     if (webhookSecret) {
       reveals.current += 1;
       setRevealedSecret({
         configId: config.id,
         secret: webhookSecret,
+        registrationError,
         revision: reveals.current,
       });
     }

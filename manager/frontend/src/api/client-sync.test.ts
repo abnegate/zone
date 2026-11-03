@@ -93,7 +93,46 @@ describe('Client - Sync Configuration API', () => {
           body: JSON.stringify(request),
         })
       );
-      expect(result).toEqual({ config: mockConfig, webhookSecret: secret });
+      expect(result).toEqual({
+        config: mockConfig,
+        webhookSecret: secret,
+        registrationError: null,
+      });
+    });
+
+    it('carries why Zone could not register the webhook', async () => {
+      const config: SyncConfig = {
+        id: 'config-3',
+        project_id: 'proj-1',
+        provider: 'github',
+        direction: 'inbound',
+        external_repo_url: 'https://github.com/user/repo',
+        is_active: true,
+        webhook_secret_issued_by_zone: true,
+        webhook_registered: false,
+        created_at: '2024-01-01T00:00:00Z',
+      };
+      const secret = 'f'.repeat(64);
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          config,
+          webhook_secret: secret,
+          webhook_registration_error: 'Zone could not register the webhook: GitHub refused',
+        }),
+      });
+
+      const result = await client.createSyncConfig('proj-1', {
+        provider: 'github',
+        direction: 'inbound',
+        external_repo_url: 'https://github.com/user/repo',
+      });
+
+      expect(result).toEqual({
+        config,
+        webhookSecret: secret,
+        registrationError: 'Zone could not register the webhook: GitHub refused',
+      });
     });
 
     it('should create a Linear sync config', async () => {
@@ -119,7 +158,7 @@ describe('Client - Sync Configuration API', () => {
 
       const result = await client.createSyncConfig('proj-1', request);
 
-      expect(result).toEqual({ config: mockConfig, webhookSecret: null });
+      expect(result).toEqual({ config: mockConfig, webhookSecret: null, registrationError: null });
       expect(result.config.provider).toBe('linear');
       expect(result.config.external_project_id).toBe('LINEAR-123');
     });
@@ -170,7 +209,7 @@ describe('Client - Sync Configuration API', () => {
           body: '{}',
         })
       );
-      expect(result).toEqual({ config, webhookSecret: secret });
+      expect(result).toEqual({ config, webhookSecret: secret, registrationError: null });
     });
 
     it('sends a supplied secret and gets nothing echoed back', async () => {

@@ -123,6 +123,7 @@ export const SyncConfigSchema = z.object({
   webhook_path: z.string().optional(),
   webhook_secret_configured: z.boolean().optional(),
   webhook_secret_issued_by_zone: z.boolean(),
+  webhook_registered: z.boolean().optional(),
 });
 
 export const CreateSyncConfigRequestSchema = z
@@ -161,6 +162,7 @@ export const SyncConfigSecretResponseSchema = z.object({
   error: z.string().optional(),
   config: SyncConfigSchema,
   webhook_secret: z.string().nullable(),
+  webhook_registration_error: z.string().nullable().optional(),
 });
 
 export const WebhookSecretSchema = z

@@ -48,6 +48,8 @@ export function SyncConfigCard({
 
   const zoneIssuesSecret = config.webhook_secret_issued_by_zone;
   const missing = config.webhook_secret_configured === false;
+  const registered = config.webhook_registered === true;
+  const providerName = PROVIDER_NAMES[config.provider];
   const draftId = `sync-secret-${config.id}`;
 
   const change = async (next?: string) => {
@@ -121,6 +123,9 @@ export function SyncConfigCard({
             ? `Synced ${formatDate(config.last_synced_at)}`
             : 'Configured, not yet synced'}
         </span>
+        {registered && (
+          <span className="sync-status synced">Webhook registered on {providerName}</span>
+        )}
         {config.webhook_path && (
           <code className="sync-webhook" title="Register this webhook URL with the provider">
             {`${window.location.origin}${config.webhook_path}`}
@@ -148,6 +153,7 @@ export function SyncConfigCard({
           key={`${config.id}-${revealed.revision}`}
           secret={revealed.secret}
           hint={SETUP_HINTS[config.provider]}
+          registrationError={revealed.registrationError}
           onDismiss={onDismissSecret}
         />
       )}
@@ -192,9 +198,18 @@ export function SyncConfigCard({
         size="sm"
       >
         <p className="sync-rotate-warning">
-          Zone generates a new secret and stops accepting the current one straight away. The{' '}
-          {PROVIDER_NAMES[config.provider]} webhook keeps signing with the old secret, so its
-          deliveries are refused until you paste the new one into the webhook&apos;s settings.
+          {registered ? (
+            <>
+              Zone generates a new secret and gives it to the {providerName} webhook it registered,
+              which signs with it from then on.
+            </>
+          ) : (
+            <>
+              Zone generates a new secret and stops accepting the current one straight away. The{' '}
+              {providerName} webhook keeps signing with the old secret, so its deliveries are
+              refused until you paste the new one into the webhook&apos;s settings.
+            </>
+          )}
         </p>
         <div className="modal-actions">
           <Button variant="secondary" type="button" onClick={() => setConfirmingRotation(false)}>

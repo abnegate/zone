@@ -12,10 +12,16 @@ const COPY_LABELS: Record<CopyState, string> = {
 interface SyncSecretCalloutProps {
   secret: string;
   hint: string;
+  registrationError: string | null;
   onDismiss: () => void;
 }
 
-export function SyncSecretCallout({ secret, hint, onDismiss }: SyncSecretCalloutProps) {
+export function SyncSecretCallout({
+  secret,
+  hint,
+  registrationError,
+  onDismiss,
+}: SyncSecretCalloutProps) {
   const [copyState, setCopyState] = useState<CopyState>('idle');
 
   const copy = async () => {
@@ -35,6 +41,11 @@ export function SyncSecretCallout({ secret, hint, onDismiss }: SyncSecretCallout
           Dismiss
         </Button>
       </div>
+      {registrationError && (
+        <p className="sync-secret-hint" role="alert">
+          {registrationError}
+        </p>
+      )}
       <div className="sync-secret-value">
         <code data-testid="sync-secret-value">{secret}</code>
         <Button variant="secondary" size="sm" onClick={copy}>

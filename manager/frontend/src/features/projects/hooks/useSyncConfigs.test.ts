@@ -119,7 +119,11 @@ describe('useSyncConfigs', () => {
     mockGetSyncConfigs
       .mockResolvedValueOnce(mockSyncConfigs)
       .mockResolvedValueOnce([...mockSyncConfigs, newConfig]);
-    mockCreateSyncConfig.mockResolvedValue({ config: newConfig, webhookSecret: 'e'.repeat(64) });
+    mockCreateSyncConfig.mockResolvedValue({
+      config: newConfig,
+      webhookSecret: 'e'.repeat(64),
+      registrationError: null,
+    });
 
     const { result } = renderHook(() => useSyncConfigs('proj-1'), { wrapper: createWrapper() });
 
@@ -135,7 +139,11 @@ describe('useSyncConfigs', () => {
 
     const created = await result.current.createSyncConfig(createRequest);
 
-    expect(created).toEqual({ config: newConfig, webhookSecret: 'e'.repeat(64) });
+    expect(created).toEqual({
+      config: newConfig,
+      webhookSecret: 'e'.repeat(64),
+      registrationError: null,
+    });
 
     await waitFor(() => {
       expect(result.current.configs).toContainEqual(newConfig);
@@ -148,8 +156,16 @@ describe('useSyncConfigs', () => {
     const secret = 'f'.repeat(64);
     const queryClient = createQueryClient();
     mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
-    mockCreateSyncConfig.mockResolvedValue({ config: mockSyncConfigs[0], webhookSecret: secret });
-    mockSetWebhookSecret.mockResolvedValue({ config: mockSyncConfigs[0], webhookSecret: secret });
+    mockCreateSyncConfig.mockResolvedValue({
+      config: mockSyncConfigs[0],
+      webhookSecret: secret,
+      registrationError: null,
+    });
+    mockSetWebhookSecret.mockResolvedValue({
+      config: mockSyncConfigs[0],
+      webhookSecret: secret,
+      registrationError: null,
+    });
 
     const { result } = renderHook(() => useSyncConfigs('proj-1'), {
       wrapper: createWrapper(queryClient),
@@ -177,7 +193,11 @@ describe('useSyncConfigs', () => {
 
   it('asks for a generated secret or sets a supplied one, then rereads the configs', async () => {
     mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
-    mockSetWebhookSecret.mockResolvedValue({ config: mockSyncConfigs[1], webhookSecret: null });
+    mockSetWebhookSecret.mockResolvedValue({
+      config: mockSyncConfigs[1],
+      webhookSecret: null,
+      registrationError: null,
+    });
 
     const { result } = renderHook(() => useSyncConfigs('proj-1'), { wrapper: createWrapper() });
     await waitFor(() => {

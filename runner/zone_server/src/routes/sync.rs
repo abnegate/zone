@@ -10,8 +10,10 @@
 //! have moved out.
 //!
 //! GitHub signs deliveries with whatever secret the repository's webhook is
-//! given, so Zone issues one when the configuration is created. Linear issues
-//! its own signing secret, so a Linear configuration waits for it to be set.
+//! given, so Zone issues one when the configuration is created and, when the
+//! project holds a GitHub token, registers the webhook with it too; the secret
+//! is shown only when the webhook has to be added by hand. Linear issues its
+//! own signing secret, so a Linear configuration waits for it to be set.
 
 use std::ops::RangeInclusive;
 
@@ -34,7 +36,8 @@ use crate::db::sync_config::{self, SyncConfigRow, SyncDirection};
 use crate::db::{projects, workspace_members};
 use crate::error::ServerError;
 use crate::state::AppState;
-use crate::sync::Provider;
+use crate::sync::hook::{self, Hook, HookError};
+use crate::sync::{Provider, webhook_path};
 use crate::utils::crypto::generate_token;
 
 /// What a configuration reports until a sync engine has run it.
@@ -78,14 +81,19 @@ pub struct SyncConfigData {
     /// Whether Zone generates this configuration's secret, so the console
     /// offers to rotate it, rather than the provider issuing one to paste in.
     webhook_secret_issued_by_zone: bool,
+    /// Whether Zone registered the provider's webhook itself and keeps it
+    /// signing with the current secret.
+    webhook_registered: bool,
 }
 
 /// A configuration, and the webhook secret Zone just generated for it, which
-/// is shown this once and never listed.
+/// is shown this once and never listed, and only when the webhook has to be
+/// given it by hand: then the reason Zone could not register it is too.
 #[derive(Serialize)]
 pub struct SyncConfigResponse {
     config: SyncConfigData,
     webhook_secret: Option<String>,
+    webhook_registration_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,6 +135,19 @@ impl WebhookSecret {
             .map_err(|_| ServerError::Internal("Failed to encrypt webhook secret".to_string()))
     }
 
+    /// The secret to show the caller once the webhook has been given it: none
+    /// when Zone keeps the webhook signing with it.
+    fn shown_unless_registered(
+        self,
+        row: &SyncConfigRow,
+        refused: &Option<String>,
+    ) -> Option<String> {
+        match refused.is_none() && hook::id_of(row).is_some() {
+            true => None,
+            false => self.shown(),
+        }
+    }
+
     fn audit_action(&self) -> &'static str {
         match self {
             Self::Generated(_) => actions::SYNC_WEBHOOK_SECRET_ROTATED,
@@ -144,11 +165,6 @@ impl WebhookSecret {
     }
 }
 
-/// The path a provider's webhooks are received on for one configuration.
-pub fn webhook_path(id: Uuid, provider: &str) -> String {
-    format!("/api/webhooks/sync/{id}/{provider}")
-}
-
 impl From<SyncConfigRow> for SyncConfigData {
     fn from(row: SyncConfigRow) -> Self {
         let field = |name: &str| {
@@ -164,6 +180,7 @@ impl From<SyncConfigRow> for SyncConfigData {
             external_repo_url: field("external_repo_url"),
             external_project_id: field("external_project_id"),
             webhook_secret_configured: row.webhook_secret_encrypted.is_some(),
+            webhook_registered: hook::id_of(&row).is_some(),
             webhook_secret_issued_by_zone: row
                 .provider
                 .parse::<Provider>()
@@ -178,6 +195,47 @@ impl From<SyncConfigRow> for SyncConfigData {
                 .unwrap_or_default(),
             status: STATUS_CONFIGURED,
             last_synced_at: None,
+        }
+    }
+}
+
+/// Have the webhook Zone manages for `row` sign deliveries with `secret`.
+/// Answers the row as stored, and why the webhook must be given the secret by
+/// hand, when Zone could not do it.
+async fn sign_hook(
+    state: &AppState,
+    row: SyncConfigRow,
+    secret: &WebhookSecret,
+) -> (SyncConfigRow, Option<String>) {
+    let signed = match Hook::of(state, &row).await {
+        Ok(Some(hook)) => hook.sign_with(state, row.clone(), secret.value()).await,
+        Ok(None) => return (row, None),
+        Err(error) => Err(error),
+    };
+    match signed {
+        Ok(row) => (row, None),
+        Err(error) => {
+            tracing::warn!(config = %row.id, %error, "Failed to register a sync's webhook");
+            (row, Some(registration_refused(&error)))
+        }
+    }
+}
+
+fn registration_refused(error: &HookError) -> String {
+    format!("Zone could not register the webhook: {error}")
+}
+
+/// Remove the webhook Zone registered for `row`, if it did; a webhook left
+/// behind only delivers to a path that no longer verifies.
+async fn remove_hook(state: &AppState, row: &SyncConfigRow) {
+    if hook::id_of(row).is_none() {
+        return;
+    }
+    match Hook::of(state, row).await {
+        Ok(Some(hook)) => hook.remove_for(row).await,
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(config = %row.id, %error, "Failed to remove a sync's webhook");
         }
     }
 }
@@ -364,7 +422,7 @@ pub async fn create(
         .as_ref()
         .map(|secret| secret.encrypt(&state))
         .transpose()?;
-    let row = sync_config::create_sync_config(
+    let created = sync_config::create_sync_config(
         state.db(),
         id,
         provider_name,
@@ -389,17 +447,23 @@ pub async fn create(
             actor_email: &auth.0.email,
             action: actions::SYNC_CREATED,
             resource_type: resources::SYNC_CONFIG,
-            resource_id: Some(row.id),
+            resource_id: Some(created.id),
             old_values: None,
-            new_values: Some(audited_values(&row)),
+            new_values: Some(audited_values(&created)),
         },
     )
     .await;
+    let (row, refused) = match &secret {
+        Some(secret) => sign_hook(&state, created, secret).await,
+        None => (created, None),
+    };
+    let webhook_secret = secret.and_then(|secret| secret.shown_unless_registered(&row, &refused));
     Ok((
         StatusCode::CREATED,
         Json(SyncConfigResponse {
             config: SyncConfigData::from(row),
-            webhook_secret: secret.and_then(WebhookSecret::shown),
+            webhook_secret,
+            webhook_registration_error: refused,
         }),
     )
         .into_response())
@@ -449,9 +513,12 @@ pub async fn set_webhook_secret(
         },
     )
     .await;
+    let (row, refused) = sign_hook(&state, row, &secret).await;
+    let webhook_secret = secret.shown_unless_registered(&row, &refused);
     Ok(Json(SyncConfigResponse {
         config: SyncConfigData::from(row),
-        webhook_secret: secret.shown(),
+        webhook_secret,
+        webhook_registration_error: refused,
     })
     .into_response())
 }
@@ -467,6 +534,7 @@ pub async fn delete(
 ) -> Result<Response, ServerError> {
     let caller = authorize(&state, &auth, id, Access::Admin).await?;
     let row = owned_config(&state, id, config_id).await?;
+    remove_hook(&state, &row).await;
     if !sync_config::delete_sync_config(state.db(), row.id).await? {
         return Err(config_not_found());
     }

@@ -3418,3 +3418,187 @@ async fn an_admin_adds_and_removes_a_sync_and_each_is_recorded_without_the_secre
     let listed = listed_config(&client, &admin, &project).await.json_value();
     assert_eq!(listed["configs"], json!([]));
 }
+
+const CONSOLE: &str = "https://console.example.test";
+
+/// A client whose GitHub is `github`, signed in as an admin of a project
+/// connected to it with a token.
+async fn connected(github: &wiremock::MockServer) -> (common::TestClient, String, String) {
+    let mut config = common::test_config();
+    config.github_api_url = github.uri();
+    config.github_api_allows_http = true;
+    config.app_base_url = CONSOLE.to_string();
+    let client = common::TestClient::with_config(config).await;
+    let token = signed_in(&client).await;
+    let (_workspace, project) = workspace_project(&client, &token).await;
+    let encrypted = crypto::encrypt(client.state().encryption_key(), "ghp_hooks").unwrap();
+    projects::link_github(
+        client.state().db(),
+        Uuid::parse_str(&project).unwrap(),
+        "http://127.0.0.1/acme/project",
+        Some(&encrypted),
+    )
+    .await
+    .unwrap();
+    (client, token, project)
+}
+
+fn connected_sync() -> serde_json::Value {
+    json!({
+        "provider": "github",
+        "direction": "inbound",
+        "external_repo_url": "http://127.0.0.1/acme/project"
+    })
+}
+
+#[tokio::test]
+async fn a_github_sync_on_a_connected_project_registers_rotates_and_removes_its_webhook() {
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    Mock::given(method("POST"))
+        .and(path("/repos/acme/project/hooks"))
+        .and(header("authorization", "Bearer ghp_hooks"))
+        .and(body_partial_json(json!({
+            "name": "web",
+            "active": true,
+            "events": ["issues"],
+            "config": { "content_type": "json", "insecure_ssl": "0" }
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 42 })))
+        .expect(1)
+        .mount(&github)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/repos/acme/project/hooks/42/config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&github)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/repos/acme/project/hooks/42"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&github)
+        .await;
+
+    let created = configure(&client, &token, &project, &connected_sync()).await;
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+    assert!(
+        created["webhook_secret"].is_null(),
+        "a registered webhook already has its secret: {created}"
+    );
+    assert!(created["webhook_registration_error"].is_null());
+    assert_eq!(created["config"]["webhook_registered"], true);
+
+    let requests = github.received_requests().await.unwrap();
+    let registration: serde_json::Value = requests[0].body_json().unwrap();
+    assert_eq!(
+        registration["config"]["url"],
+        format!("{CONSOLE}/api/webhooks/sync/{config}/github")
+    );
+    let secret = registration["config"]["secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(is_generated_secret(&secret), "{secret:?}");
+    assert_verified(&deliver_github(&client, &config, &secret).await);
+
+    let rotated = set_secret(&client, &token, &project, &config, &json!({})).await;
+    rotated.assert_status(StatusCode::OK);
+    let rotated = rotated.json_value();
+    assert!(rotated["webhook_secret"].is_null(), "{rotated}");
+    let requests = github.received_requests().await.unwrap();
+    let update: serde_json::Value = requests[1].body_json().unwrap();
+    let new_secret = update["secret"].as_str().unwrap();
+    assert_ne!(new_secret, secret);
+    assert_verified(&deliver_github(&client, &config, new_secret).await);
+
+    remove(&client, &token, &project, &config)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn a_webhook_github_refuses_leaves_its_secret_to_add_by_hand() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    Mock::given(method("POST"))
+        .and(path("/repos/acme/project/hooks"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({ "message": "Must have admin rights" })),
+        )
+        .mount(&github)
+        .await;
+
+    let created = configure(&client, &token, &project, &connected_sync()).await;
+    let secret = created["webhook_secret"].as_str().unwrap_or_default();
+    assert!(is_generated_secret(secret), "{created}");
+    assert_eq!(created["config"]["webhook_registered"], false);
+    assert!(
+        created["webhook_registration_error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("Zone could not register the webhook")),
+        "{created}"
+    );
+}
+
+#[tokio::test]
+async fn a_github_webhook_deleted_on_github_is_registered_again_on_rotation() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    Mock::given(method("POST"))
+        .and(path("/repos/acme/project/hooks"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 7 })))
+        .up_to_n_times(1)
+        .mount(&github)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/acme/project/hooks"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 8 })))
+        .mount(&github)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/repos/acme/project/hooks/7/config"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })))
+        .expect(1)
+        .mount(&github)
+        .await;
+
+    let created = configure(&client, &token, &project, &connected_sync()).await;
+    let config = created["config"]["id"].as_str().unwrap().to_string();
+
+    let rotated = set_secret(&client, &token, &project, &config, &json!({})).await;
+    rotated.assert_status(StatusCode::OK);
+    let rotated = rotated.json_value();
+    assert!(rotated["webhook_secret"].is_null(), "{rotated}");
+    let stored =
+        sync_config::get_sync_config(client.state().db(), Uuid::parse_str(&config).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(stored.config["github_webhook_id"], 8);
+}
+
+#[tokio::test]
+async fn a_github_sync_on_a_project_without_a_token_shows_its_secret_with_no_error() {
+    let client = common::TestClient::with_db().await;
+    let token = signed_in(&client).await;
+    let (_workspace, project) = workspace_project(&client, &token).await;
+
+    let created = configure(&client, &token, &project, &github_sync()).await;
+    assert!(is_generated_secret(
+        created["webhook_secret"].as_str().unwrap_or_default()
+    ));
+    assert!(created["webhook_registration_error"].is_null());
+    assert_eq!(created["config"]["webhook_registered"], false);
+}
