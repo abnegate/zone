@@ -2090,11 +2090,9 @@ mod tests {
 
     #[test]
     fn apply_to_comfyui_keeps_env_checkpoint_when_image_model_unset() {
-        let mut config = ComfyUiConfig {
-            checkpoint: "flux1-schnell-fp8.safetensors".to_string(),
-            classifier_model: "llama3.1:8b".to_string(),
-            ..ComfyUiConfig::default()
-        };
+        let mut config = ComfyUiConfig::default();
+        config.checkpoint = "flux1-schnell-fp8.safetensors".to_string();
+        config.classifier_model = "llama3.1:8b".to_string();
         settings(None, Some("   ")).apply_to_comfyui(&mut config);
         assert_eq!(config.checkpoint, "flux1-schnell-fp8.safetensors");
         assert_eq!(config.classifier_model, "llama3.1:8b");

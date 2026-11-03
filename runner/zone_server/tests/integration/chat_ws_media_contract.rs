@@ -16,7 +16,7 @@ const PNG: &str = "data:image/png;base64,iVBORw0KGgo=";
 async fn configure(harness: &mut Harness, comfy: &MockServer, root: &Path) {
     harness.config.comfyui.enabled = true;
     harness.config.comfyui.base_url = comfy.uri();
-    harness.config.comfyui.poll_interval_ms = 25;
+    harness.config.comfyui.poll_interval = Duration::from_millis(25);
     harness.config.comfyui.artifact_root = root.to_path_buf();
     harness.restart().await;
 }

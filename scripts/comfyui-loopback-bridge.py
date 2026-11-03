@@ -10,6 +10,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_REQUEST_BYTES = 1_048_576
+DEFAULT_TOKEN_HEADER = "X-Zone-ComfyUI-Token"
 HOP_BY_HOP = {
     "connection",
     "keep-alive",
@@ -33,7 +34,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _proxy(self) -> None:
         expected = self.server.token  # type: ignore[attr-defined]
-        supplied = self.headers.get("X-Zone-ComfyUI-Token", "")
+        token_header = self.server.token_header  # type: ignore[attr-defined]
+        supplied = self.headers.get(token_header, "")
         if not hmac.compare_digest(supplied, expected):
             self.send_error(403)
             return
@@ -57,7 +59,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             key: value
             for key, value in self.headers.items()
             if key.lower() not in HOP_BY_HOP
-            and key.lower() not in {"host", "x-zone-comfyui-token", "content-length"}
+            and key.lower() not in {"host", token_header.lower(), "content-length"}
         }
         try:
             connection.request(self.command, self.path, body=body, headers=headers)
@@ -75,6 +77,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             connection.close()
 
 
+def configured_token_header() -> str:
+    return os.environ.get("COMFYUI_TOKEN_HEADER", "").strip() or DEFAULT_TOKEN_HEADER
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--listen-host", default="0.0.0.0")
@@ -89,6 +95,7 @@ def main() -> None:
 
     server = ThreadingHTTPServer((args.listen_host, args.listen_port), BridgeHandler)
     server.token = token
+    server.token_header = configured_token_header()
     server.upstream_host = args.upstream_host
     server.upstream_port = args.upstream_port
     server.serve_forever()

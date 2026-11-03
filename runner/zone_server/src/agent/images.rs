@@ -11,7 +11,8 @@ use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
 use crate::config::ComfyUiConfig;
 use crate::db::{ai_settings, chats};
 use crate::services::{artifacts::ArtifactStore, media_source::resolve_source_image_from};
-use zone_comfy::{Client as ComfyUiClient, Identity, SourceImage};
+use abnegate_comfy::inventory::{self, Identity};
+use abnegate_comfy::{Client as ComfyUiClient, SourceImage, lora};
 
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
     if !scope.state.config().comfyui.enabled {
@@ -73,14 +74,12 @@ impl Tool for GenerateImageTool {
     }
 
     fn timeout(&self, _: &ToolContext) -> Duration {
-        Duration::from_secs(
-            self.0
-                .state
-                .config()
-                .comfyui
-                .generation_timeout_secs
-                .saturating_add(30),
-        )
+        self.0
+            .state
+            .config()
+            .comfyui
+            .generation_timeout
+            .saturating_add(Duration::from_secs(30))
     }
 
     async fn execute(&self, params: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
@@ -134,14 +133,12 @@ impl Tool for EditImageTool {
     }
 
     fn timeout(&self, _: &ToolContext) -> Duration {
-        Duration::from_secs(
-            self.0
-                .state
-                .config()
-                .comfyui
-                .generation_timeout_secs
-                .saturating_add(30),
-        )
+        self.0
+            .state
+            .config()
+            .comfyui
+            .generation_timeout
+            .saturating_add(Duration::from_secs(30))
     }
 
     async fn execute(&self, params: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
@@ -160,7 +157,7 @@ async fn effective_comfyui(scope: &WorkspaceScope) -> ComfyUiConfig {
 }
 
 fn trained_identities(config: &ComfyUiConfig) -> Vec<Identity> {
-    zone_comfy::identities(&config.models_dir, &config.workflow_path)
+    inventory::identities(config)
 }
 
 fn optional_negative_arg(params: &Value) -> Option<&str> {
@@ -221,9 +218,9 @@ async fn run_image(
     };
     let haystack = image_haystack(scope, &prompt).await;
     let mut config = config.clone();
-    let identity = zone_comfy::bind_identity(&mut config, &haystack);
+    let identity = inventory::bind_identity(&mut config, &haystack);
     let prompt = match identity.as_ref() {
-        Some(identity) => zone_comfy::identity_caption(&prompt, &identity.trigger),
+        Some(identity) => lora::identity_caption(&prompt, &identity.trigger),
         None => prompt,
     };
     let client = match ComfyUiClient::new(config.clone()) {
@@ -253,7 +250,7 @@ async fn run_image(
     let (_cancel_tx, mut cancel) = broadcast::channel(1);
     let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
     let images = match client
-        .generate(
+        .generate_excluding(
             &prompt,
             source.as_ref(),
             optional_negative_arg(&params),
@@ -346,7 +343,9 @@ fn extension_for(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::comfy::contract::contract;
     use crate::state::{AppState, test_config};
+    use abnegate_comfy::inventory::WeightSidecar;
     use base64::Engine;
     use uuid::Uuid;
     use wiremock::matchers::{method, path};
@@ -533,11 +532,9 @@ mod tests {
             .await;
 
         let scope = scope();
-        let config = ComfyUiConfig {
-            base_url: server.uri(),
-            checkpoint: "org-pinned-image.safetensors".to_string(),
-            ..scope.state.config().comfyui.clone()
-        };
+        let mut config = scope.state.config().comfyui.clone();
+        config.base_url = server.uri();
+        config.checkpoint = "org-pinned-image.safetensors".to_string();
         assert_ne!(
             config.checkpoint,
             scope.state.config().comfyui.checkpoint,
@@ -578,10 +575,8 @@ mod tests {
             .await;
 
         let scope = scope();
-        let flux = ComfyUiConfig {
-            base_url: server.uri(),
-            ..scope.state.config().comfyui.clone()
-        };
+        let mut flux = scope.state.config().comfyui.clone();
+        flux.base_url = server.uri();
         let written = run_image(
             &scope,
             &flux,
@@ -601,11 +596,9 @@ mod tests {
         assert_eq!(submitted["prompt"]["7"]["inputs"]["text"], "hats");
         assert_eq!(submitted["prompt"]["6"]["inputs"]["text"], "a lighthouse");
 
-        let sdxl = ComfyUiConfig {
-            base_url: server.uri(),
-            checkpoint: "juggernautXL_ragnarok.safetensors".to_string(),
-            ..scope.state.config().comfyui.clone()
-        };
+        let mut sdxl = scope.state.config().comfyui.clone();
+        sdxl.base_url = server.uri();
+        sdxl.checkpoint = "juggernautXL_ragnarok.safetensors".to_string();
         let omitted = run_image(&scope, &sdxl, json!({"prompt": "a lighthouse"}), false).await;
         assert!(!omitted.success);
         let submitted: Value =
@@ -628,19 +621,46 @@ mod tests {
         assert_eq!(submitted["prompt"]["7"]["inputs"]["text"], "");
     }
 
+    #[tokio::test]
+    async fn an_oversized_negative_prompt_fails_before_comfyui_is_asked() {
+        let server = MockServer::start().await;
+        let scope = scope();
+        let mut config = scope.state.config().comfyui.clone();
+        config.base_url = server.uri();
+        let result = run_image(
+            &scope,
+            &config,
+            json!({"prompt": "a lighthouse", "negative_prompt": "x".repeat(100_001)}),
+            false,
+        )
+        .await;
+        assert_eq!(
+            result.error.as_deref(),
+            Some(
+                "Image generation failed: invalid ComfyUI configuration: negative prompt is too long"
+            )
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("the mock server records requests")
+                .is_empty(),
+            "an oversized negative prompt must not reach ComfyUI"
+        );
+    }
+
     fn ready_identity(models: &std::path::Path, filename: &str, trigger: &str) {
         std::fs::create_dir_all(models.join("loras")).unwrap();
         std::fs::create_dir_all(models.join("checkpoints")).unwrap();
         let weight = models.join("loras").join(filename);
         std::fs::write(&weight, b"lora").unwrap();
-        zone_comfy::inventory::write_sidecar(
+        inventory::write_sidecar(
             &weight,
-            &zone_comfy::WeightSidecar {
-                recipe_id: "flux-schnell-adapter".into(),
-                hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
-                trigger: Some(trigger.into()),
-                ..Default::default()
-            },
+            &WeightSidecar::new("flux-schnell-adapter")
+                .with_huggingface_base("black-forest-labs/FLUX.1-schnell")
+                .with_trigger(trigger),
+            &contract(),
         )
         .unwrap();
         let checkpoint = models.join("checkpoints/flux1-schnell-fp8.safetensors");
@@ -666,10 +686,18 @@ mod tests {
 
     #[test]
     fn a_trained_identity_is_named_on_the_prompt_parameter() {
-        let identities = vec![Identity {
-            filename: "jake.safetensors".into(),
-            trigger: "ohwx".into(),
-        }];
+        let root = tempfile::tempdir().expect("models directory");
+        ready_identity(root.path(), "jake.safetensors", "ohwx");
+        let mut config = test_config().comfyui;
+        config.models_directory = root.path().to_path_buf();
+        let identities = trained_identities(&config);
+        assert_eq!(
+            identities
+                .iter()
+                .map(|identity| (identity.filename.as_str(), identity.trigger.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("jake.safetensors", "ohwx")]
+        );
         let generate = image_prompt_description(&identities, false);
         assert!(generate.starts_with("What to generate."));
         assert!(generate.contains("\"ohwx\""));
@@ -692,16 +720,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let root = std::env::temp_dir().join(format!("zone-identity-{}", Uuid::new_v4()));
-        ready_identity(&root, "jake.safetensors", "ohwx");
-        ready_identity(&root, "teapot.safetensors", "zrkxyz");
+        let root = tempfile::tempdir().expect("models directory");
+        ready_identity(root.path(), "jake.safetensors", "ohwx");
+        ready_identity(root.path(), "teapot.safetensors", "zrkxyz");
         let scope = scope();
-        let config = ComfyUiConfig {
-            base_url: server.uri(),
-            checkpoint: "flux1-schnell-fp8.safetensors".to_string(),
-            models_dir: root.clone(),
-            ..scope.state.config().comfyui.clone()
-        };
+        let mut config = scope.state.config().comfyui.clone();
+        config.base_url = server.uri();
+        config.checkpoint = "flux1-schnell-fp8.safetensors".to_string();
+        config.models_directory = root.path().to_path_buf();
 
         let named = run_image(
             &scope,
@@ -757,7 +783,6 @@ mod tests {
             "a prompt that names a different identity must leave the pin"
         );
         assert!(switched_loras.contains(&"flux-uncensored.safetensors".to_string()));
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -809,14 +834,12 @@ mod tests {
     #[tokio::test]
     async fn generated_images_are_persisted_and_returned_to_the_agent() {
         let server = successful_comfy().await;
-        let root = std::env::temp_dir().join(format!("zone-image-tool-{}", Uuid::new_v4()));
+        let root = tempfile::tempdir().expect("artifact root");
         let scope = scope();
-        let config = ComfyUiConfig {
-            base_url: server.uri(),
-            artifact_root: root.clone(),
-            poll_interval_ms: 10,
-            ..scope.state.config().comfyui.clone()
-        };
+        let mut config = scope.state.config().comfyui.clone();
+        config.base_url = server.uri();
+        config.artifact_root = root.path().to_path_buf();
+        config.poll_interval = Duration::from_millis(10);
         let result = run_image(&scope, &config, json!({"prompt":"a lighthouse"}), false).await;
         assert!(result.success, "{:?}", result.error);
         assert_eq!(result.images.len(), 1);
@@ -829,21 +852,19 @@ mod tests {
         );
         let chat_id = scope.chat_id.expect("the fixture scope has a chat");
         let stored = root
+            .path()
             .join(scope.workspace_id.to_string())
             .join(chat_id.to_string())
             .join(chat_id.to_string())
             .join(result.images[0].rsplit('/').next().unwrap());
         assert_eq!(tokio::fs::read(stored).await.unwrap(), [1, 2, 3, 4]);
-        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
     async fn invalid_configuration_and_unwritable_storage_return_tool_errors() {
         let scope = scope();
-        let invalid = ComfyUiConfig {
-            base_url: String::new(),
-            ..scope.state.config().comfyui.clone()
-        };
+        let mut invalid = scope.state.config().comfyui.clone();
+        invalid.base_url = String::new();
         let result = run_image(&scope, &invalid, json!({"prompt":"a lighthouse"}), false).await;
         assert_eq!(
             result.error.as_deref(),
@@ -853,20 +874,18 @@ mod tests {
         );
 
         let server = successful_comfy().await;
-        let root = std::env::temp_dir().join(format!("zone-image-tool-file-{}", Uuid::new_v4()));
+        let directory = tempfile::tempdir().expect("scratch directory");
+        let root = directory.path().join("artifacts");
         tokio::fs::write(&root, b"not a directory").await.unwrap();
-        let config = ComfyUiConfig {
-            base_url: server.uri(),
-            artifact_root: root.clone(),
-            poll_interval_ms: 10,
-            ..scope.state.config().comfyui.clone()
-        };
+        let mut config = scope.state.config().comfyui.clone();
+        config.base_url = server.uri();
+        config.artifact_root = root.clone();
+        config.poll_interval = Duration::from_millis(10);
         let result = run_image(&scope, &config, json!({"prompt":"a lighthouse"}), false).await;
         assert_eq!(
             result.error.as_deref(),
             Some("Image generation failed: could not store the image")
         );
-        tokio::fs::remove_file(root).await.unwrap();
     }
 
     #[tokio::test]

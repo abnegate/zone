@@ -70,8 +70,9 @@ class LaneDetection(unittest.TestCase):
 
 class OutputAttribution(unittest.TestCase):
     def test_an_upscale_answers_on_the_node_the_collector_pins(self) -> None:
-        """`zone_comfy` collects an upscale from node 4 (image) and 5 (video),
-        so answering on any other node would look like an empty result."""
+        """`abnegate-comfy` collects an upscale from node 4 (image) and 5
+        (video), so answering on any other node would look like an empty
+        result."""
         for name, lane, node in [
             ('upscale-image-api.json', 'upscale_image', '4'),
             ('upscale-video-api.json', 'upscale_video', '5'),

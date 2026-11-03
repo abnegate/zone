@@ -406,17 +406,9 @@ zone/
 │   │   ├── src/tools/       # Agent tools
 │   │   ├── src/session/     # Session management
 │   │   └── src/types/       # Shared domain types
-│   ├── zone_comfy/          # ComfyUI generation, model inventory, LoRA training
-│   │   ├── src/client.rs    # Image, video, and audio generation, and upscaling
-│   │   ├── src/recipe.rs    # Workflow recipes and catalog
-│   │   ├── src/inventory.rs # Installed weights on disk
-│   │   ├── src/lora.rs      # LoRA training jobs
-│   │   ├── src/video.rs     # Training frames pulled out of a submitted clip
-│   │   ├── src/subject.rs   # Subject-aware framing for training crops
-│   │   └── src/caption.rs   # Vision captioning for training sets
-│   ├── zone_vision/         # Subject detection and subject-aware cropping
 │   ├── zone_server/         # HTTP/WS server
 │   │   ├── src/routes/      # API endpoints
+│   │   ├── src/services/comfy/ # ComfyUI generation and LoRA training via abnegate-comfy and abnegate-vision
 │   │   ├── src/db/          # Database queries (sqlx)
 │   │   ├── src/cache/       # Redis cache layer
 │   │   └── src/auth/        # JWT & password auth

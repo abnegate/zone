@@ -884,6 +884,8 @@ def stub_requested(stub: bool) -> bool:
 
 def process_job(models_dir: Path, job_dir: Path, stub: bool) -> None:
     job = train_sdxl.load_job(job_dir)
+    if not train_sdxl.claim(job_dir, job):
+        return
     try:
         job = normalize_job(job, job_dir)
         job = train_sdxl.mark_running(job_dir, job)
@@ -902,7 +904,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description='Zone host language trainer')
     parser.add_argument(
         '--models-dir',
-        default=os.environ.get('COMFYUI_MODELS_DIR') or './models',
+        default=os.environ.get('COMFYUI_MODELS_DIRECTORY') or './models',
     )
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--stub', action='store_true')

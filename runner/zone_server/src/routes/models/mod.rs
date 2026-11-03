@@ -2,16 +2,25 @@
 //!
 //! Handles listing, pulling, and deleting models from various sources.
 
+mod method;
 mod providers;
 mod setup;
+mod subject;
+mod train_base;
+mod train_form;
+mod training;
 mod types;
 mod upload;
 
+pub use method::Method;
 pub use providers::{
     DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider, MAX_PAGE_SIZE, ModelProvider,
     ProviderError, get_provider, get_provider_with_proxy, huggingface_hub_origin,
 };
 pub use setup::{get_setup, start_setup};
+pub use subject::Subject;
+pub use train_base::TrainBase;
+pub use train_form::TrainForm;
 pub use types::{
     BrowseQuery, BrowseResponse, DiskUsage, ErrorResponse, ListModelsQuery, ModelDetails,
     ModelMediumFilter, ModelResponse, ModelSizeFilter, ModelSort,
@@ -34,21 +43,29 @@ use crate::auth::AuthUser;
 use crate::db::ai_settings;
 use crate::error::ServerError;
 use crate::pull::{ComfyPull, ManifestFile, Pull, PullStart};
+use crate::services::comfy::{language, overlay, policy};
 use crate::services::endpoint::Origin;
 use crate::services::model::Model;
 use crate::services::route::Route;
 use crate::state::AppState;
+use crate::train_jobs;
 use crate::train_jobs::{TrainJobStatus, TrainJobView};
+use abnegate_comfy::Captioner;
+use abnegate_comfy::Config as ComfyConfig;
+use abnegate_comfy::host;
+use abnegate_comfy::inventory;
+use abnegate_comfy::lora::{self, TrainError};
+use abnegate_comfy::recipe::{self, RecipeCatalog};
+use abnegate_comfy::train;
+use abnegate_comfy::video;
+use abnegate_secret::SecretValue;
+use tokio::sync::watch;
+use training::Training;
 use types::ModelCapability;
-use zone_comfy::caption::{Captioner, Draft};
-use zone_comfy::host_train;
-use zone_comfy::lora::{self, TrainError, TrainProvider};
-use zone_comfy::recipe::RecipeCatalog;
-use zone_comfy::video;
-
-// Constants
 
 const MAX_MODEL_NAME_LENGTH: usize = 256;
+pub(crate) const TRAIN_RUNNING: &str = "a training job is already running";
+const UNREADABLE_CATALOG: &str = "recipe catalog is not readable";
 
 /// Holds a training-dataset permit for the whole request, refusing rather than
 /// queueing. Clip extracts use [`queue_frame_extract`] so a dump of videos can
@@ -91,8 +108,6 @@ pub async fn queue_frame_extract(
     next.run(request).await
 }
 
-// Shared HTTP Client for Ollama API calls
-
 static OLLAMA_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -100,8 +115,6 @@ static OLLAMA_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .build()
         .expect("Failed to build Ollama HTTP client")
 });
-
-// Validation
 
 /// Validate model name to prevent injection attacks
 pub(crate) fn validate_model_name(name: &str) -> Result<(), ErrorResponse> {
@@ -261,9 +274,11 @@ async fn browse_huggingface(
                 .is_some_and(|query| !query.is_empty()));
     let mut response = provider.search(opts).await?;
     if include_adapters {
-        let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
+        let catalog = recipe_catalog(&state.config().comfyui)
             .unwrap_or_else(|_| RecipeCatalog::packaged().expect("packaged recipes"));
-        let adapters = provider.search_adapters(opts, &catalog.hf_bases()).await?;
+        let adapters = provider
+            .search_adapters(opts, &catalog.huggingface_bases())
+            .await?;
         if opts.medium == ModelMediumFilter::ImageGeneration {
             response.models = adapters;
             response.next_cursor = None;
@@ -368,14 +383,20 @@ async fn list_installed_models(state: AppState) -> axum::response::Response {
     }
 }
 
+fn recipe_catalog(config: &ComfyConfig) -> Result<RecipeCatalog, abnegate_comfy::Error> {
+    overlay::catalog(config).or_else(|_| RecipeCatalog::packaged())
+}
+
+fn scan_inventory(config: &ComfyConfig, catalog: &RecipeCatalog) -> Vec<inventory::InventoryItem> {
+    inventory::scan(&config.models_directory, catalog, &config.contract)
+}
+
 pub(crate) fn list_comfy_models(state: &AppState) -> Vec<ModelResponse> {
-    let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
-        .or_else(|_| RecipeCatalog::packaged())
-        .ok();
-    let Some(catalog) = catalog else {
+    let config = &state.config().comfyui;
+    let Ok(catalog) = recipe_catalog(config) else {
         return Vec::new();
     };
-    zone_comfy::inventory::scan(&state.config().comfyui.models_dir, &catalog)
+    scan_inventory(config, &catalog)
         .into_iter()
         .map(|item| ModelResponse {
             name: item.filename,
@@ -506,8 +527,6 @@ struct OllamaModelDetails {
     parameter_size: Option<String>,
     quantization_level: Option<String>,
 }
-
-// Model Details & Management
 
 /// GET /api/models/:name
 pub async fn get(
@@ -693,17 +712,17 @@ pub async fn train_bases(State(state): State<AppState>, _auth: AuthUser) -> impl
     }
 }
 
-pub(crate) async fn train_bases_list(
-    state: &AppState,
-) -> Result<Vec<lora::TrainBase>, &'static str> {
-    let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
-        .map_err(|_| "recipe catalog is not readable")?;
-    let mut bases = lora::available_bases(&catalog, &state.config().comfyui.models_dir);
+pub(crate) async fn train_bases_list(state: &AppState) -> Result<Vec<TrainBase>, &'static str> {
+    let mut bases: Vec<TrainBase> = lora::trainable_bases(&state.config().comfyui)
+        .map_err(|_| UNREADABLE_CATALOG)?
+        .into_iter()
+        .map(TrainBase::from)
+        .collect();
     bases.extend(chat_train_bases(state).await);
     Ok(bases)
 }
 
-async fn chat_train_bases(state: &AppState) -> Vec<lora::TrainBase> {
+async fn chat_train_bases(state: &AppState) -> Vec<TrainBase> {
     match list_ollama_model_rows(state).await {
         Ok(models) => models
             .into_iter()
@@ -719,17 +738,17 @@ fn is_chat_train_model(model: &ModelResponse) -> bool {
     model.completion == Some(true) || capabilities.contains(&ModelCapability::Text)
 }
 
-fn chat_train_base(model: ModelResponse) -> lora::TrainBase {
+fn chat_train_base(model: ModelResponse) -> TrainBase {
     let parameter_size = model
         .details
         .as_ref()
         .and_then(|details| details.parameter_size.as_deref());
     let finetune = chat_finetune(&model.name, parameter_size);
-    lora::TrainBase {
+    TrainBase {
         id: model.name.clone(),
         label: model.name,
         edit: false,
-        subject: lora::TrainSubject::Language,
+        subject: Subject::Language,
         finetune,
     }
 }
@@ -745,7 +764,7 @@ fn llama32_small_chat(name: &str) -> bool {
     matches!(name.as_str(), "llama3.2:1b" | "llama3.2:3b")
 }
 
-fn language_train_base<'a>(bases: &'a [lora::TrainBase], id: &str) -> Option<&'a lora::TrainBase> {
+fn language_train_base<'a>(bases: &'a [TrainBase], id: &str) -> Option<&'a TrainBase> {
     bases.iter().find(|base| base.id == id)
 }
 
@@ -763,7 +782,7 @@ pub async fn captions(
     let captioner = Captioner::new(
         &config.comfyui,
         config.litellm_host.clone(),
-        config.litellm_key.clone(),
+        SecretValue::new(config.litellm_key.clone()),
     );
     if !captioner.available() {
         return (
@@ -780,17 +799,11 @@ pub async fn captions(
         .filter_map(|image| image.group)
         .max()
         .map_or(0, |last| last + 1);
-    let mut drafts: Vec<Draft> = request
+    let mut drafts: Vec<_> = request
         .images
         .iter()
         .enumerate()
-        .map(|(index, image)| {
-            let group = image.group.unwrap_or(clips + index);
-            match &image.bytes {
-                Some(bytes) => Draft::from_bytes(&image.filename, bytes, &image.caption, group),
-                None => Draft::new(&image.filename, &image.bytes_base64, &image.caption, group),
-            }
-        })
+        .map(|(index, image)| image.draft(image.group.unwrap_or(clips + index)))
         .collect();
     let trigger = request.trigger.unwrap_or_default();
     captioner.fill(&mut drafts, trigger.trim()).await;
@@ -811,7 +824,7 @@ pub async fn frames(
         Err(error) => return error.into_response(),
     };
     let config = state.config();
-    let resolution = match zone_comfy::train::packaged_config() {
+    let resolution = match train::packaged_config() {
         Ok(settings) => settings.resolution(),
         Err(error) => {
             return (
@@ -821,24 +834,28 @@ pub async fn frames(
                 .into_response();
         }
     };
-    let video = match request.video_bytes() {
+    let video = match request.encoded() {
         Ok(video) => video,
-        Err(message) => {
+        Err(TrainError::Invalid(message)) => {
             return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response();
         }
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(error.to_string())),
+            )
+                .into_response();
+        }
     };
-    let options = video::Options {
-        fps: request.fps.unwrap_or(config.comfyui.frame_fps),
-        resolution,
-        mirror: request.mirror.unwrap_or(true),
-        limit: config.comfyui.frame_limit as usize,
-    };
+    let options = video::Options::new(request.fps.unwrap_or(config.comfyui.frame_rate), resolution)
+        .with_mirror(request.mirror.unwrap_or(true))
+        .with_limit(config.comfyui.frame_limit as usize);
     match video::extract(&config.comfyui, &video, &request.filename, options).await {
         Ok(clip) => Json(clip).into_response(),
-        Err(lora::TrainError::Invalid(message)) => {
+        Err(TrainError::Invalid(message)) => {
             (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response()
         }
-        Err(lora::TrainError::Disabled) => (
+        Err(TrainError::Disabled) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse::new(format!(
                 "{} is not installed on this server, so a video cannot be turned into training frames",
@@ -860,14 +877,18 @@ pub async fn train_preview(
     _auth: AuthUser,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    train_preview_response(&state.config().comfyui.models_dir, &name)
+    train_preview_response(&state.config().comfyui, &name)
 }
 
-fn train_preview_response(models_dir: &std::path::Path, name: &str) -> Response {
-    if host_train::preview_basename(name).is_none() {
+fn plain_preview_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..")
+}
+
+fn train_preview_response(config: &ComfyConfig, name: &str) -> Response {
+    if !plain_preview_name(name) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let Some(path) = host_train::preview_file(models_dir, name) else {
+    let Some(path) = host::preview(config, name) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     match std::fs::read(&path) {
@@ -891,8 +912,8 @@ pub async fn train_job(State(state): State<AppState>, _auth: AuthUser) -> impl I
 
 pub(crate) fn current_train_job(state: &AppState) -> Option<TrainJobView> {
     if let Some(mut job) = state.train_jobs().current() {
-        if let Some(host) = host_train::current_with_progress(&state.config().comfyui.models_dir) {
-            job.provider = Some(host.provider.as_str().to_string());
+        if let Some(host) = host::current_with_progress(&state.config().comfyui) {
+            job.provider = Some(host.compute.as_str().to_string());
             if host.gpu.is_some() {
                 job.gpu = host.gpu;
             }
@@ -902,14 +923,13 @@ pub(crate) fn current_train_job(state: &AppState) -> Option<TrainJobView> {
         }
         return Some(job);
     }
-    host_train::current_with_progress(&state.config().comfyui.models_dir)
-        .map(TrainJobView::from_host)
+    host::current_with_progress(&state.config().comfyui).map(TrainJobView::from_host)
 }
 
 fn train_running() -> Response {
     (
         StatusCode::CONFLICT,
-        Json(ErrorResponse::new("a training job is already running")),
+        Json(ErrorResponse::new(TRAIN_RUNNING)),
     )
         .into_response()
 }
@@ -941,14 +961,16 @@ pub(crate) fn dismiss_train_job(state: &AppState) -> Result<(), DismissError> {
     {
         return Err(DismissError::Busy);
     }
-    match host_train::dismiss(&state.config().comfyui.models_dir) {
+    let config = &state.config().comfyui;
+    if host::busy(config) {
+        return Err(DismissError::Busy);
+    }
+    match host::dismiss(config) {
         Ok(()) => {
             state.train_jobs().clear_finished();
             Ok(())
         }
-        Err(TrainError::Failed(message)) if message == "a training job is already running" => {
-            Err(DismissError::Busy)
-        }
+        Err(_) if host::busy(config) => Err(DismissError::Busy),
         Err(error) => Err(DismissError::Failed(error.to_string())),
     }
 }
@@ -957,15 +979,12 @@ async fn runpod_key(
     state: &AppState,
     auth: &AuthUser,
     workspace_id: Option<Uuid>,
-) -> Result<Option<String>, ServerError> {
+) -> Result<Option<SecretValue>, ServerError> {
     let Some(workspace_id) = workspace_id else {
         return Ok(None);
     };
     check_workspace_read_access(state, auth, workspace_id).await?;
-    Ok(ai_settings::runpod_api_key(state.db(), workspace_id)
-        .await
-        .map(|key| key.expose().trim().to_string())
-        .filter(|key| !key.is_empty()))
+    Ok(ai_settings::runpod_api_key(state.db(), workspace_id).await)
 }
 
 fn train_user_id(auth: &AuthUser) -> Result<Uuid, ServerError> {
@@ -983,7 +1002,7 @@ pub async fn create_train_upload(
         Ok(user_id) => user_id,
         Err(error) => return error.into_response(),
     };
-    match upload::create_staging(&state.config().comfyui.models_dir, user_id) {
+    match upload::create_staging(&state.config().comfyui.models_directory, user_id) {
         Ok(id) => Json(serde_json::json!({ "id": id })).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1004,7 +1023,12 @@ pub async fn append_train_upload(
         Ok(images) => images,
         Err(error) => return error.into_response(),
     };
-    match upload::append_staging(&state.config().comfyui.models_dir, id, user_id, images) {
+    match upload::append_staging(
+        &state.config().comfyui.models_directory,
+        id,
+        user_id,
+        images,
+    ) {
         Ok(received) => Json(serde_json::json!({ "id": id, "received": received })).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1020,7 +1044,7 @@ pub async fn delete_train_upload(
         Ok(user_id) => user_id,
         Err(error) => return error.into_response(),
     };
-    match upload::drop_staging(&state.config().comfyui.models_dir, id, user_id) {
+    match upload::drop_staging(&state.config().comfyui.models_directory, id, user_id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error.into_response(),
     }
@@ -1037,29 +1061,26 @@ pub async fn train(
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
-    let mut request = parsed.request;
+    let mut form = parsed.form;
     if let Some(upload_id) = parsed.upload_id {
         let user_id = match train_user_id(&auth) {
             Ok(user_id) => user_id,
             Err(error) => return error.into_response(),
         };
-        match upload::take_staging(&state.config().comfyui.models_dir, upload_id, user_id) {
-            Ok(images) => request.images = images,
+        match upload::take_staging(&state.config().comfyui.models_directory, upload_id, user_id) {
+            Ok(images) => form.images = images,
             Err(error) => return error.into_response(),
         }
     }
-    let runpod_api_key = if request.provider == TrainProvider::Runpod {
+    let saved = if form.compute.is_remote() {
         match runpod_key(&state, &auth, query.workspace_id).await {
-            Ok(Some(key)) => Some(key),
-            Ok(None) => {
-                return StartTrainError::MissingRunpodKey.into_response();
-            }
+            Ok(saved) => saved,
             Err(error) => return error.into_response(),
         }
     } else {
         None
     };
-    match start_job(&state, request, runpod_api_key).await {
+    match start_job(&state, form, saved).await {
         Ok(view) => (StatusCode::ACCEPTED, Json(view)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -1072,7 +1093,6 @@ pub(crate) enum StartTrainError {
     Busy,
     UnknownBase,
     FineTuneTooLarge,
-    MissingRunpodKey,
 }
 
 impl StartTrainError {
@@ -1081,20 +1101,20 @@ impl StartTrainError {
             TrainError::Disabled => Self::Disabled,
             TrainError::Invalid(message) => Self::Invalid(message),
             TrainError::Failed(message) => Self::Failed(message),
+            other => Self::Failed(other.to_string()),
         }
     }
 
     pub(crate) fn message(&self) -> String {
         match self {
-            Self::Disabled => "LoRA training is not configured on this server".to_string(),
+            Self::Disabled => train_jobs::DISABLED.to_string(),
             Self::Invalid(message) => (*message).to_string(),
             Self::Failed(message) => message.clone(),
-            Self::Busy => "a training job is already running".to_string(),
-            Self::UnknownBase => "unknown training base".to_string(),
+            Self::Busy => TRAIN_RUNNING.to_string(),
+            Self::UnknownBase => language::UNKNOWN_BASE.to_string(),
             Self::FineTuneTooLarge => {
                 "fine-tune is only available for small chat models".to_string()
             }
-            Self::MissingRunpodKey => "Save a Runpod API key in Workspace Settings.".to_string(),
         }
     }
 }
@@ -1106,11 +1126,9 @@ impl IntoResponse for StartTrainError {
         }
         let status = match self {
             Self::Disabled => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Invalid(_)
-            | Self::Failed(_)
-            | Self::UnknownBase
-            | Self::FineTuneTooLarge
-            | Self::MissingRunpodKey => StatusCode::BAD_REQUEST,
+            Self::Invalid(_) | Self::Failed(_) | Self::UnknownBase | Self::FineTuneTooLarge => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Busy => StatusCode::CONFLICT,
         };
         (status, Json(ErrorResponse::new(self.message()))).into_response()
@@ -1119,81 +1137,84 @@ impl IntoResponse for StartTrainError {
 
 pub(crate) async fn start_job(
     state: &AppState,
-    request: lora::TrainRequest,
-    runpod_api_key: Option<String>,
+    form: TrainForm,
+    saved: Option<SecretValue>,
 ) -> Result<TrainJobView, StartTrainError> {
-    if request.subject == lora::TrainSubject::Language {
-        let bases = chat_train_bases(state).await;
-        match language_train_base(&bases, request.base.trim()) {
-            None => return Err(StartTrainError::UnknownBase),
-            Some(base) if request.method == lora::TrainMethod::Finetune && !base.finetune => {
-                return Err(StartTrainError::FineTuneTooLarge);
-            }
-            Some(_) => {}
-        }
-    }
-    lora::validate_request(&state.config().comfyui, &request)
-        .map_err(StartTrainError::from_train)?;
-    if request.provider == TrainProvider::Runpod
-        && runpod_api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .is_none()
-    {
-        return Err(StartTrainError::MissingRunpodKey);
-    }
-    if host_train::busy(&state.config().comfyui.models_dir) {
+    let training = prepare_training(state, form, saved).await?;
+    let config = &state.config().comfyui;
+    if host::busy(config) {
         return Err(StartTrainError::Busy);
     }
-    let method = request.method.as_str();
     let Some(job) = state.train_jobs().start(
-        request.name.clone(),
-        Some(method.to_string()),
-        Some(request.provider.as_str().to_string()),
+        training.name().to_string(),
+        Some(training.method().as_str().to_string()),
+        Some(training.compute().as_str().to_string()),
     ) else {
         return Err(StartTrainError::Busy);
     };
     let view = job.view();
-    let comfyui = state.config().comfyui.clone();
+    let comfyui = config.clone();
     let litellm_host = state.config().litellm_host.clone();
-    let litellm_key = state.config().litellm_key.clone();
+    let litellm_key = SecretValue::new(state.config().litellm_key.clone());
     tokio::spawn(async move {
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-        let reporter = job.clone();
-        let training = lora::train_reporting(
-            &comfyui,
-            litellm_host,
-            litellm_key,
-            runpod_api_key,
-            request,
-            progress_tx,
-        );
-        tokio::pin!(training);
-        let mut progress_open = true;
-        loop {
-            tokio::select! {
-                biased;
-                update = progress_rx.recv(), if progress_open => {
-                    match update {
-                        Some(update) => reporter.progress(update),
-                        None => progress_open = false,
-                    }
+        let (sender, receiver) = watch::channel(None);
+        match training {
+            Training::Image(request) => {
+                let training =
+                    lora::train_reporting(&comfyui, litellm_host, litellm_key, request, sender);
+                match job.follow(receiver, training).await {
+                    Ok(outcome) => job.succeed(outcome),
+                    Err(error) => job.fail(error),
                 }
-                result = &mut training => {
-                    while let Ok(update) = progress_rx.try_recv() {
-                        reporter.progress(update);
-                    }
-                    match result {
-                        Ok(outcome) => reporter.succeed(outcome),
-                        Err(error) => reporter.fail(error),
-                    }
-                    break;
+            }
+            Training::Language {
+                request,
+                compute,
+                key,
+            } => {
+                let training = language::train(&comfyui, request, compute, key, sender);
+                match job.follow(receiver, training).await {
+                    Ok(outcome) => job.succeed_language(outcome),
+                    Err(error) => job.fail(error),
                 }
             }
         }
     });
     Ok(view)
+}
+
+async fn prepare_training(
+    state: &AppState,
+    form: TrainForm,
+    saved: Option<SecretValue>,
+) -> Result<Training, StartTrainError> {
+    let config = &state.config().comfyui;
+    let Some(subject) = form.subject.image() else {
+        let bases = chat_train_bases(state).await;
+        match language_train_base(&bases, form.base.trim()) {
+            None => return Err(StartTrainError::UnknownBase),
+            Some(base) if form.method == Method::Finetune && !base.finetune => {
+                return Err(StartTrainError::FineTuneTooLarge);
+            }
+            Some(_) => {}
+        }
+        let compute = form.compute;
+        let request = form.language().map_err(StartTrainError::from_train)?;
+        language::validate(config, &request).map_err(StartTrainError::from_train)?;
+        let key = policy::key(compute, saved).map_err(StartTrainError::from_train)?;
+        return Ok(Training::Language {
+            request,
+            compute,
+            key,
+        });
+    };
+    let compute = form.compute;
+    let request = form
+        .image(subject)
+        .and_then(|request| policy::place(request, compute, saved))
+        .map_err(StartTrainError::from_train)?;
+    lora::validate_request(config, &request).map_err(StartTrainError::from_train)?;
+    Ok(Training::Image(request))
 }
 
 pub(crate) fn catalog_pull_start(state: &AppState, request: Pull) -> PullStart {
@@ -1204,9 +1225,7 @@ pub(crate) fn catalog_pull_start(state: &AppState, request: Pull) -> PullStart {
         sha256: weight.sha256.clone(),
     });
     let comfy = (manifest.is_some() || is_comfy_pull(&request)).then(|| {
-        let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
-            .or_else(|_| RecipeCatalog::packaged())
-            .ok();
+        let catalog = recipe_catalog(&state.config().comfyui).ok();
         let recipe_id = request.recipe_id.clone().or_else(|| {
             request.hf_base.as_deref().and_then(|base| {
                 catalog
@@ -1216,7 +1235,7 @@ pub(crate) fn catalog_pull_start(state: &AppState, request: Pull) -> PullStart {
             })
         });
         ComfyPull {
-            models_dir: state.config().comfyui.models_dir.clone(),
+            models_directory: state.config().comfyui.models_directory.clone(),
             recipe_id,
             hf_base: request.hf_base.clone(),
             hub_origin: huggingface_hub_origin(&state.config().huggingface_models_url),
@@ -1253,24 +1272,20 @@ pub async fn disk(_auth: AuthUser) -> impl IntoResponse {
 }
 
 pub(crate) fn delete_comfy_weight(state: &AppState, name: &str) -> bool {
-    let Ok(filename) = zone_comfy::recipe::sanitize_weight_filename(name) else {
+    let Ok(filename) = recipe::sanitize_weight_filename(name) else {
         return false;
     };
-    let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
-        .or_else(|_| RecipeCatalog::packaged())
-        .ok();
-    let Some(catalog) = catalog else {
+    let config = &state.config().comfyui;
+    let Ok(catalog) = recipe_catalog(config) else {
         return false;
     };
-    let items = zone_comfy::inventory::scan(&state.config().comfyui.models_dir, &catalog);
-    let Some(item) = zone_comfy::inventory::find(&items, &filename) else {
+    let items = scan_inventory(config, &catalog);
+    let Some(item) = inventory::find(&items, &filename) else {
         return false;
     };
-    let Some(path) = confined_weight_path(
-        &state.config().comfyui.models_dir,
-        &item.directory,
-        &item.filename,
-    ) else {
+    let Some(path) =
+        confined_weight_path(&config.models_directory, &item.directory, &item.filename)
+    else {
         return false;
     };
     let Some(sidecar) = confined_sidecar_path(&path, &item.filename) else {
@@ -1292,12 +1307,12 @@ fn single_component(value: &str) -> Option<&str> {
 /// The models directory is operator configuration and the two names come from a directory
 /// scan, so each must resolve to exactly one path component beneath it.
 fn confined_weight_path(
-    models_dir: &std::path::Path,
+    models_directory: &std::path::Path,
     directory: &str,
     filename: &str,
 ) -> Option<PathBuf> {
     Some(
-        models_dir
+        models_directory
             .join(single_component(directory)?)
             .join(single_component(filename)?),
     )
@@ -1367,11 +1382,13 @@ mod weight_path_tests {
 
     #[test]
     fn traversal_in_a_scanned_name_is_refused() {
-        let models_dir = Path::new("/models");
-        assert!(confined_weight_path(models_dir, "..", "style.safetensors").is_none());
-        assert!(confined_weight_path(models_dir, "loras", "../../etc/passwd").is_none());
-        assert!(confined_weight_path(models_dir, "loras/nested", "style.safetensors").is_none());
-        assert!(confined_weight_path(models_dir, "loras", "/etc/passwd").is_none());
+        let models_directory = Path::new("/models");
+        assert!(confined_weight_path(models_directory, "..", "style.safetensors").is_none());
+        assert!(confined_weight_path(models_directory, "loras", "../../etc/passwd").is_none());
+        assert!(
+            confined_weight_path(models_directory, "loras/nested", "style.safetensors").is_none()
+        );
+        assert!(confined_weight_path(models_directory, "loras", "/etc/passwd").is_none());
     }
 
     #[test]
@@ -1388,26 +1405,35 @@ mod weight_path_tests {
 
 #[cfg(test)]
 mod train_preview_tests {
-    use super::train_preview_response;
+    use super::{plain_preview_name, train_preview_response};
+    use crate::services::comfy::settings;
+    use abnegate_comfy::Config;
+    use abnegate_comfy::host::{Job, JobDirectory, PREVIEWS_DIRECTORY};
     use axum::http::{StatusCode, header};
     use http_body_util::BodyExt;
     use std::fs;
-    use zone_comfy::host_train::{self, HostJob};
+    use std::path::Path;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\npreview";
+
+    fn config(models: &Path) -> Config {
+        let mut config = settings::development();
+        config.models_directory = models.to_path_buf();
+        config
+    }
 
     #[tokio::test]
     async fn train_preview_serves_png_rejects_traversal_and_missing_job() {
         let root = tempfile::tempdir().unwrap();
-        let models = root.path();
-        let job = HostJob::create("jerry", "lora", "ohwx", "base.safetensors");
-        let dir = host_train::job_dir(models, job.id);
-        host_train::write_job(&dir, &job).unwrap();
-        let previews = dir.join("previews");
+        let config = config(root.path());
+        let job = Job::new("jerry", "lora", "base.safetensors").with_trigger("ohwx");
+        let directory = JobDirectory::new(&config, job.id);
+        directory.write_job(&job).unwrap();
+        let previews = directory.path().join(PREVIEWS_DIRECTORY);
         fs::create_dir_all(&previews).unwrap();
         fs::write(previews.join("step-250-0.png"), PNG).unwrap();
 
-        let served = train_preview_response(models, "step-250-0.png");
+        let served = train_preview_response(&config, "step-250-0.png");
         assert_eq!(served.status(), StatusCode::OK);
         assert_eq!(
             served.headers().get(header::CONTENT_TYPE).unwrap(),
@@ -1416,12 +1442,20 @@ mod train_preview_tests {
         let body = served.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], PNG);
 
-        let junk = train_preview_response(models, "../job.json");
+        let junk = train_preview_response(&config, "../job.json");
         assert_eq!(junk.status(), StatusCode::BAD_REQUEST);
 
         let empty = tempfile::tempdir().unwrap();
-        let missing = train_preview_response(empty.path(), "step-250-0.png");
+        let missing = train_preview_response(&self::config(empty.path()), "step-250-0.png");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn only_a_plain_file_name_is_a_preview() {
+        assert!(plain_preview_name("step-250-0.png"));
+        for name in ["", "../job.json", "previews/a.png", "a\\b.png", "a..png"] {
+            assert!(!plain_preview_name(name), "{name}");
+        }
     }
 }
 

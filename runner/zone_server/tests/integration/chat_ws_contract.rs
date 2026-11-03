@@ -862,7 +862,7 @@ async fn queued_media_stops_when_its_chat_lease_is_fenced() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.request_timeout_secs = 10;
+    config.comfyui.request_timeout = Duration::from_secs(10);
     let client = TestClient::new(create_test_router(create_test_state(
         config.clone(),
         pool.clone(),

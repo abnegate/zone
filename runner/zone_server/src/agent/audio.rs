@@ -11,7 +11,7 @@ use super::tools::{WorkspaceScope, string_arg};
 use crate::config::ComfyUiConfig;
 use crate::db::ai_settings;
 use crate::services::artifacts::ArtifactStore;
-use zone_comfy::{Client as ComfyUiClient, MediaType};
+use abnegate_comfy::{Client as ComfyUiClient, MediaType};
 
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
     if !scope.state.config().comfyui.enabled {
@@ -56,14 +56,12 @@ impl Tool for GenerateAudioTool {
     }
 
     fn timeout(&self, _: &ToolContext) -> Duration {
-        Duration::from_secs(
-            self.0
-                .state
-                .config()
-                .comfyui
-                .audio_generation_timeout_secs
-                .saturating_add(30),
-        )
+        self.0
+            .state
+            .config()
+            .comfyui
+            .audio_generation_timeout
+            .saturating_add(Duration::from_secs(30))
     }
 
     async fn execute(&self, params: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
@@ -245,12 +243,10 @@ mod tests {
             .await;
 
         let scope = scope(true);
-        let config = ComfyUiConfig {
-            enabled: true,
-            base_url: server.uri(),
-            audio_checkpoint: "org-pinned-audio.safetensors".to_string(),
-            ..scope.state.config().comfyui.clone()
-        };
+        let mut config = scope.state.config().comfyui.clone();
+        config.enabled = true;
+        config.base_url = server.uri();
+        config.audio_checkpoint = "org-pinned-audio.safetensors".to_string();
         assert_ne!(
             config.audio_checkpoint,
             scope.state.config().comfyui.audio_checkpoint,

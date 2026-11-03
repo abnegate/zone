@@ -17,8 +17,8 @@ use zone_core::llm::{AgentKind, CodexSandbox};
 use crate::services::hosts::Hosts;
 use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME, ROOT_PATH};
 
+pub use abnegate_comfy::Config as ComfyUiConfig;
 pub use abnegate_search::WebSearchConfig;
-pub use zone_comfy::Config as ComfyUiConfig;
 
 /// Upstream GPT4All model catalog. Tests should override `Config::gpt4all_models_url`.
 pub const DEFAULT_GPT4ALL_MODELS_URL: &str =
@@ -1192,7 +1192,8 @@ impl Config {
             github_api_url,
             github_api_allows_http,
             web_search: crate::services::search::from_environment(),
-            comfyui: ComfyUiConfig::from_env(),
+            comfyui: crate::services::comfy::settings::load()
+                .map_err(|error| ConfigError::Invalid(error.message()))?,
             source_index: SourceIndexConfig::from_env(),
             monitoring: MonitoringConfig::from_env(),
             train_upload_limit_mb: env_u64("TRAIN_UPLOAD_LIMIT_MB", 4096, 4, 65536),
@@ -1292,7 +1293,7 @@ mod tests {
             github_api_url: DEFAULT_GITHUB_API_URL.to_string(),
             github_api_allows_http: false,
             web_search: crate::services::search::defaults(),
-            comfyui: ComfyUiConfig::default(),
+            comfyui: crate::services::comfy::settings::development(),
             source_index: SourceIndexConfig::default(),
             monitoring: MonitoringConfig::default(),
             chat: Default::default(),

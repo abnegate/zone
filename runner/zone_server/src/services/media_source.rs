@@ -5,7 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::services::artifacts::ArtifactStore;
-use zone_comfy::{Error as ComfyUiError, SourceImage, SourceVideo};
+use abnegate_comfy::{Error as ComfyUiError, SourceImage, SourceVideo};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -239,7 +239,7 @@ fn parse_artifact_url(url: &str) -> Option<(Uuid, Uuid, Uuid, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zone_comfy::client::{MAX_SOURCE_IMAGE_BYTES, MAX_SOURCE_VIDEO_BYTES};
+    use abnegate_comfy::{MAXIMUM_SOURCE_IMAGE_BYTES, MAXIMUM_SOURCE_VIDEO_BYTES};
 
     const PNG_1X1: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
@@ -296,7 +296,7 @@ mod tests {
         .unwrap();
         assert_eq!(source.bytes.as_ref(), PNG_1X1);
         assert_eq!(source.mime, "image/png");
-        assert!(source.filename.starts_with("zone-img2img-"));
+        assert!(source.filename.starts_with("img2img-"));
         assert!(source.filename.ends_with(".png"));
 
         assert!(matches!(
@@ -353,9 +353,9 @@ mod tests {
 
     #[test]
     fn source_media_rejects_oversize_and_svg() {
-        assert!(SourceImage::new(vec![0; MAX_SOURCE_IMAGE_BYTES + 1], "image/png").is_err());
+        assert!(SourceImage::new(vec![0; MAXIMUM_SOURCE_IMAGE_BYTES + 1], "image/png").is_err());
         assert!(SourceImage::new(PNG_1X1.to_vec(), "image/svg+xml").is_err());
-        assert!(SourceVideo::new(vec![0; MAX_SOURCE_VIDEO_BYTES + 1], "video/webm").is_err());
+        assert!(SourceVideo::new(vec![0; MAXIMUM_SOURCE_VIDEO_BYTES + 1], "video/webm").is_err());
         assert!(SourceVideo::new(WEBM.to_vec(), "video/quicktime").is_err());
     }
 

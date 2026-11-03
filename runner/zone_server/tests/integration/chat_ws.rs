@@ -1137,7 +1137,7 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     config.comfyui.checkpoint = "custom-image.safetensors".to_string();
     let addr = spawn_server_with_config(config).await;
@@ -1311,7 +1311,7 @@ async fn test_video_request_routes_directly_and_serves_protected_artifact() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     config.comfyui.video_unet = "custom_wan_t2v_high_noise.safetensors".to_string();
     let addr = spawn_server_with_config(config).await;
@@ -1434,7 +1434,7 @@ async fn test_audio_request_routes_directly_and_serves_protected_artifact() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     config.comfyui.audio_checkpoint = "custom-audio.safetensors".to_string();
     let addr = spawn_server_with_config(config).await;
@@ -1575,7 +1575,7 @@ async fn test_attached_image_routes_to_image_to_image() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     let addr = spawn_server_with_config(config).await;
 
@@ -1699,7 +1699,7 @@ async fn test_attached_image_upscale_routes_and_serves_protected_artifact() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     config.comfyui.upscale_model = "custom-upscale.safetensors".to_string();
     let addr = spawn_server_with_config(config).await;
@@ -1842,7 +1842,7 @@ async fn test_naming_the_video_upscales_it_past_an_attached_screenshot() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     let addr = spawn_server_with_config(config).await;
 
@@ -1981,7 +1981,7 @@ async fn test_upscale_output_too_large_says_so_rather_than_claiming_nothing_came
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
     socket.send(upscale_send()).await.unwrap();
@@ -2019,7 +2019,7 @@ async fn test_upscale_reports_an_unreachable_comfyui_without_an_empty_message() 
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = REFUSED_URL.to_string();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
     socket.send(upscale_send()).await.unwrap();
@@ -2056,7 +2056,7 @@ async fn test_upscale_cancel_before_the_prompt_lands_never_submits() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
     socket.send(upscale_send()).await.unwrap();
@@ -2099,7 +2099,7 @@ async fn test_upscale_without_media_reports_what_is_missing() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     let addr = spawn_server_with_config(config).await;
 
@@ -2251,7 +2251,7 @@ async fn test_image_persist_failure_sends_error_without_empty_message() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     let addr = spawn_server_with_config(config).await;
     let (mut socket, _) = connect_async(format!("ws://{addr}/ws/chats/{chat_id}"))
@@ -2375,7 +2375,7 @@ async fn test_concurrent_image_sends_are_serialized_per_chat() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.poll_interval = Duration::from_millis(50);
     config.comfyui.artifact_root = artifact_root.clone();
     let addr = spawn_server_with_config(config).await;
 
@@ -2664,7 +2664,7 @@ async fn test_image_status_precedes_stalled_prompt_and_timeout_is_visible() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.request_timeout_secs = 1;
+    config.comfyui.request_timeout = Duration::from_secs(1);
     config.litellm_host = REFUSED_URL.to_string();
     let (_, _, _, mut socket) = image_socket(config).await;
     socket.send(WsMessage::Text(json!({"type":"send", "content":"Generate an image of the same rooster facing the other way"}).to_string().into())).await.unwrap();
@@ -2762,8 +2762,8 @@ async fn test_image_cancel_during_classification_prevents_submission_and_allows_
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
     config.comfyui.artifact_root = root.clone();
-    config.comfyui.poll_interval_ms = 50;
-    config.comfyui.classifier_timeout_secs = 5;
+    config.comfyui.poll_interval = Duration::from_millis(50);
+    config.comfyui.classifier_timeout = Duration::from_secs(5);
     config.litellm_host = classifier.uri();
     let (_, _, _, mut socket) = image_socket(config).await;
     socket
@@ -2893,7 +2893,7 @@ async fn test_image_cancel_after_queue_waits_for_cleanup_and_stops_progress() {
     let mut config = test_config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = comfy.uri();
-    config.comfyui.poll_interval_ms = 1000;
+    config.comfyui.poll_interval = Duration::from_millis(1000);
     let root = std::env::temp_dir().join(format!("zone-active-cancel-{}", uuid::Uuid::new_v4()));
     config.comfyui.artifact_root = root.clone();
     let (_, _, _, mut socket) = image_socket(config).await;

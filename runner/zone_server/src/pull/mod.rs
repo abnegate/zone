@@ -49,7 +49,7 @@ pub struct Pull {
 
 #[derive(Clone)]
 pub struct ComfyPull {
-    pub models_dir: std::path::PathBuf,
+    pub models_directory: std::path::PathBuf,
     pub recipe_id: Option<String>,
     pub hf_base: Option<String>,
     pub hub_origin: String,
@@ -425,7 +425,7 @@ fn parse_comfy_ref(model: &str) -> Result<(String, String), String> {
 
 async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
     if let Some(manifest) = &comfy.manifest {
-        download_manifest(&comfy.models_dir, manifest, job).await;
+        download_manifest(&comfy.models_directory, manifest, job).await;
         return;
     }
     let (repo, filename) = match parse_comfy_ref(model) {
@@ -438,7 +438,7 @@ async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
     job.publish(Event::Step {
         status: "downloading image weights".to_string(),
     });
-    let directory = comfy.models_dir.join("loras");
+    let directory = comfy.models_directory.join("loras");
     if let Err(error) = std::fs::create_dir_all(&directory) {
         job.publish(Event::Error {
             message: format!("Could not create loras directory: {error}"),
@@ -478,8 +478,9 @@ async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
     }
 }
 
-async fn download_manifest(models_dir: &std::path::Path, manifest: &ManifestFile, job: &Job) {
-    let Some(target) = crate::setup::confined_relative(models_dir, &manifest.relative_path) else {
+async fn download_manifest(models_directory: &std::path::Path, manifest: &ManifestFile, job: &Job) {
+    let Some(target) = crate::setup::confined_relative(models_directory, &manifest.relative_path)
+    else {
         job.publish(Event::Error {
             message: "Invalid image weight path".to_string(),
         });
@@ -829,7 +830,7 @@ mod tests {
             model: "tiny".into(),
             ollama_host: String::new(),
             comfy: Some(ComfyPull {
-                models_dir: directory.path().to_path_buf(),
+                models_directory: directory.path().to_path_buf(),
                 recipe_id: None,
                 hf_base: None,
                 hub_origin: "http://127.0.0.1:1".into(),
@@ -871,7 +872,7 @@ mod tests {
             model: "tiny".into(),
             ollama_host: String::new(),
             comfy: Some(ComfyPull {
-                models_dir: directory.path().to_path_buf(),
+                models_directory: directory.path().to_path_buf(),
                 recipe_id: None,
                 hf_base: None,
                 hub_origin: format!("http://{address}"),

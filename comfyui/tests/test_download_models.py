@@ -24,7 +24,7 @@ MANIFEST_PATH = Path(__file__).parents[1] / "model-manifest.json"
 CATALOG_PATH = Path(__file__).parents[1] / 'recipes' / 'catalog.json'
 FEATURES_PATH = Path(__file__).parents[2] / 'scripts' / 'setup-features.json'
 VIDEO_RECIPE = 'wan-a14b'
-RETIRED_VIDEO_RECIPE = 'wan-adapter'
+RETIRED_VIDEO_FILES = {'wan2.2_ti2v_5B_fp16.safetensors', 'wan2.2_vae.safetensors'}
 VIDEO_BUNDLE = 'video'
 SPEC = importlib.util.spec_from_file_location("download_models", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -320,13 +320,12 @@ class ModelManifestTest(unittest.TestCase):
                 self.assertEqual(download_models.model_bundle(model), VIDEO_BUNDLE)
                 self.assertEqual(model['relative_path'], f"{required['directory']}/{filename}")
 
-    def test_no_bundle_ships_weights_only_the_retired_5b_recipe_needs(self) -> None:
-        recipes = {recipe['id']: recipe for recipe in json.loads(CATALOG_PATH.read_text())['recipes']}
-        live = {required['filename'] for required in recipes[VIDEO_RECIPE]['required_files']}
-        retired = {required['filename'] for required in recipes[RETIRED_VIDEO_RECIPE]['required_files']} - live
-        self.assertTrue(retired)
+    def test_neither_a_recipe_nor_a_bundle_needs_the_retired_5b_weights(self) -> None:
+        recipes = json.loads(CATALOG_PATH.read_text())['recipes']
+        required = {file['filename'] for recipe in recipes for file in recipe.get('required_files', [])}
+        self.assertEqual(RETIRED_VIDEO_FILES & required, set())
         shipped = {model['filename'] for model in self.models}
-        self.assertEqual(retired & shipped, set())
+        self.assertEqual(RETIRED_VIDEO_FILES & shipped, set())
 
     def test_the_video_feature_installs_the_video_bundle(self) -> None:
         features = json.loads(FEATURES_PATH.read_text())['features']

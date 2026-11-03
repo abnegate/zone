@@ -85,7 +85,7 @@ jobs:
           shared-key: test-${{ matrix.rust }}
           cache-on-failure: true
 
-      # zone_comfy turns a submitted clip into training frames through ffmpeg.
+      # abnegate-comfy turns a submitted clip into training frames through ffmpeg.
       # Without it that path's end-to-end test skips itself.
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
@@ -177,7 +177,7 @@ jobs:
           echo "PGDATA=$RUNNER_TEMP/zone-postgres" >> "$GITHUB_ENV"
           echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
 
-      # zone_comfy turns a submitted clip into training frames through ffmpeg.
+      # abnegate-comfy turns a submitted clip into training frames through ffmpeg.
       # Without it the frames endpoint reports 503 and cannot reject bad input.
       - name: Install ffmpeg
         run: brew install ffmpeg

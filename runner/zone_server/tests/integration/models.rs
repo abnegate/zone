@@ -727,15 +727,16 @@ async fn test_list_models_ollama_connection_error() {
 /// one: the rows that could be read are listed, and the failure is named.
 #[tokio::test]
 async fn ollama_down_still_lists_comfy_rows_and_names_the_failure() {
-    let models_dir = std::env::temp_dir().join(format!("zone-models-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(models_dir.join("checkpoints")).unwrap();
+    let models_directory =
+        std::env::temp_dir().join(format!("zone-models-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(models_directory.join("checkpoints")).unwrap();
     std::fs::write(
-        models_dir.join("checkpoints/studio.safetensors"),
+        models_directory.join("checkpoints/studio.safetensors"),
         b"weights",
     )
     .unwrap();
     let router = create_test_router_tuned(|config| {
-        config.comfyui.models_dir = models_dir.clone();
+        config.comfyui.models_directory = models_directory.clone();
     })
     .await;
     let token = get_auth_token(&router).await;
@@ -763,7 +764,7 @@ async fn ollama_down_still_lists_comfy_rows_and_names_the_failure() {
         .as_str()
         .expect("the Ollama failure is named");
     assert!(ollama.contains("Failed to connect to Ollama"), "{ollama}");
-    std::fs::remove_dir_all(&models_dir).ok();
+    std::fs::remove_dir_all(&models_directory).ok();
 }
 
 #[tokio::test]

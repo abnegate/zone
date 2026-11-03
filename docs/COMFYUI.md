@@ -207,6 +207,9 @@ COMFYUI_BASE_URL=http://host.docker.internal:8189
 COMFYUI_API_TOKEN=<value of COMFYUI_BRIDGE_TOKEN>
 ```
 
+The token travels in `X-Zone-ComfyUI-Token`. To use another header, set
+`COMFYUI_TOKEN_HEADER` to the same name for the bridge and in `.env`.
+
 After the runtime and checkpoint are ready, enable routing in `.env`:
 
 ```dotenv
@@ -218,7 +221,7 @@ Override installation paths when necessary:
 
 ```bash
 COMFYUI_INSTALL_DIR="$HOME/Applications/ComfyUI-Zone" \
-COMFYUI_MODELS_DIR="/Volumes/Models/ComfyUI/models" \
+COMFYUI_MODELS_DIRECTORY="/Volumes/Models/ComfyUI/models" \
 ./scripts/setup-comfyui-macos.sh --download-model --bundle image-edit
 ```
 
@@ -380,8 +383,9 @@ To add another family, drop two API-format graphs in `comfyui/workflows/`
 (generate + edit) and list them in `comfyui/recipes/catalog.json` with slot
 pointers. Do not add settings fields or sampler controls. Compose bind-mounts
 those directories, so a catalog on disk replaces the packaged catalog. To bake
-a new graph into the manager binary (no bind mounts), also add the filename to
-`packaged_workflow` in `runner/zone_comfy/src/recipe.rs`. To make the weights
+a new graph into the manager binary (no bind mounts), it has to ship in
+`abnegate-comfy`: add the filename to `packaged_workflow` in that crate's
+`src/recipe.rs` and release it. To make the weights
 downloadable, add an entry to `comfyui/model-manifest.json` with a bundle,
 pinned revision, size, and SHA-256.
 
@@ -391,10 +395,13 @@ neither is in the image catalog yet.
 
 ## LoRA training
 
-The Rust side lives in the `zone_comfy` crate, which owns generation, the recipe
-catalog, weight inventory, training, and captioning. It has no web framework,
-database, or application state, so it can be reused outside Zone; a host that
-wants request metrics installs a hook with `zone_comfy::observe_requests`.
+The Rust side is the `abnegate-comfy` crate, which owns generation, the recipe
+catalog, weight inventory, training, and captioning, with `abnegate-vision` for
+subject detection. Neither has a web framework, database, or application state.
+Zone's side lives in `zone_server::services::comfy`: the contract that names
+Zone's node pack (`ZoneTrainLoRA` and the rest), its file prefixes and its
+sidecar suffix, and the wiring into the server. A host that wants request
+metrics installs a hook with `abnegate_comfy::observe_requests`.
 
 
 Training runs through `ZoneTrainLoRA` in `comfyui/custom_nodes/zone_lora/`.
@@ -472,7 +479,7 @@ training resolution rather than handed to the loader whole. The loader fits what
 it is given onto a white square, so an uncropped photo trains on its own
 letterboxing and on however much background the shot happened to include.
 
-Which square is chosen is `zone_vision`'s port of
+Which square is chosen is `abnegate-vision`'s port of
 [autogravity](https://github.com/appwrite/autogravity): U2-Net segments what
 looks like a subject, and the crop is centred on the centre of mass of that,
 then slid back inside the frame so a subject near an edge stays whole. Weights
@@ -501,7 +508,10 @@ and loads through `sdxl-adapter` (`LoraLoader` on model and CLIP). Method
 recipe, with prior preservation class `person`. Captions are
 `{trigger} person, {scene}`. Mixed subjects fail the job. Video identity
 training is off: it trains Wan 2.2 TI2V 5B adapters, and video generation runs
-Wan 2.2 A14B, which cannot load them, so a `video` method is refused.
+Wan 2.2 A14B, which cannot load them, so a `video` method is refused. A
+**Pivotal** run's name is only letters, digits, dashes and underscores, the
+only names generation prompts its embedding by as `embedding:<name>`, so a
+name with a dot or a space is refused before training.
 
 Person jobs do not go through ComfyUI `/prompt`. Manager writes
 `models/.zone-train/{id}/` on the bind mount; host LaunchAgent `ai.zone.train`
@@ -514,17 +524,36 @@ non-zero `lr`. The trainer therefore sets `lr` to 1.0 on every group and logs
 `text_encoder_lr` in `comfyui/train_sdxl_config.json` only take effect with
 `"optimizer": "adamw"`, and CLIP-L moves at the UNet's step. Compute on the
 Train form is **Local** (CUDA if `torch.cuda.is_available()`, else MPS, else
-CPU) or **Runpod**. Runpod is Person-only (LoRA, fine-tune, pivotal).
+CPU) or **Runpod**. Runpod takes every subject: Person (LoRA, fine-tune,
+pivotal), Other, and Language.
 Save a Runpod API key under Workspace or organization AI settings; GET returns
 `has_runpod_api_key` and never the secret. The host worker writes
 `job_dir/runpod.key` mode `0600`, auto-picks a GPU from the Runpod catalog
 (fine-tune ≥48 GB, LoRA/pivotal ≥24 GB, Community then Secure), and
 deletes the pod when the job ends. A card below the VRAM floor fails closed
-instead of dropping precision. Language and Flux/Qwen Other stay Local.
+instead of dropping precision.
+
+Before the worker marks a queued job `running` it creates the empty file
+`claimed` in the job directory with exclusive create. Zone creates the same
+file before it gives up on a job no worker picked up, so only whichever side
+created it moves the job on: the worker passes over a queued job that is
+already claimed and never trains it, and zone never fails a job the worker
+claimed. A job resumed after a crash is already `running` and keeps the
+claim it had; a job zone failed, or one that already ended, is never picked up
+again.
 
 The worker writes `progress.json` with `phase`, `message`, weighted `percent`,
-`loss`, and a per-phase `eta_seconds`, and publishes the weight plus sidecar.
-Fine-tune phases are queued, loading, class_images, encoding, training,
+`loss`, and a per-phase `eta_seconds`. It leaves the finished weight in the
+job directory under `job.json`'s `filename` and marks the job `succeeded`;
+zone (through `abnegate-comfy`) then publishes it into `loras/` or
+`checkpoints/` with its `.zone.json` sidecar and removes the job's copy. The
+worker never writes into `loras/` or `checkpoints/` itself, and a Runpod run
+brings the weight back into the same job directory. The exception is a job
+queued before the upgrade, which has no `base`: the worker publishes it
+itself, as
+[Upgrading to abnegate-comfy](OPERATIONS.md#upgrading-to-abnegate-comfy)
+describes. A pivotal run's trigger
+embedding still goes straight to `embeddings/`. Fine-tune phases are queued, loading, class_images, encoding, training,
 publishing. Recreating manager does not cancel a run. LoRA is the path for
 about 20–200 unique stills. Fine-tune starts around 200 unique stills or 20
 clips; 500 stills or 50 clips is the strong set. Install the worker with:
@@ -534,8 +563,23 @@ clips; 500 stills or 50 clips is the strong set. Install the worker with:
 ./scripts/setup-comfyui-macos.sh --download-model --bundle image-people
 ```
 
-`COMFYUI_TRAIN_TIMEOUT_SECS` does not apply to the host worker. Person LoRA
+The LaunchAgent runs copies of the trainer scripts, and upgrading zone does
+not refresh them: rerun `--install-trainer` once no local job is running, as
+[Upgrading to abnegate-comfy](OPERATIONS.md#upgrading-to-abnegate-comfy)
+describes. A trainer left on the scripts from before `abnegate-comfy`
+publishes into `loras/` itself, and every run it trains fails to publish.
+
+`COMFYUI_TRAIN_TIMEOUT_SECONDS` does not apply to the host worker. Person LoRA
 is hours; fine-tune is unbounded and resumes from snapshots.
+
+Each job directory under `models/.zone-train/` is readable only by its owner
+(`0700`), and `runpod.key` inside it only by its owner too (`0600`). Docker
+Desktop on macOS shows bind-mounted files on the host as owned by the user
+running Docker Desktop, the same user whose LaunchAgent trains, so nothing
+more is needed there. A Linux bind mount keeps the uid as it is:
+run the host trainer as the uid of the container's `zone` user
+(`docker compose exec manager id -u zone`), or it cannot read the jobs the
+manager queues, and the manager cannot read what it writes back.
 
 For a clip the two signals are combined rather than ranked. Saliency leads, and
 a frame's motion doubles the weight of the region that moved, which is enough to
@@ -617,7 +661,7 @@ starts.
 A video is a worse photo set than its frame count suggests, so the frames are
 earned rather than taken:
 
-- **Sampled above the rate they are kept at.** `COMFYUI_TRAIN_FRAME_FPS` (4) is
+- **Sampled above the rate they are kept at.** `COMFYUI_TRAIN_FRAME_RATE` (4) is
   the rate that survives, but ffmpeg is asked for twice that, and each second
   keeps only its sharpest frames. Whichever frame the clock lands on is as
   likely to be smeared by motion as it is to be sharp; the sharpest of the ones
@@ -652,10 +696,11 @@ them images still train and a submitted video is refused with a message saying
 why. `TRAIN_UPLOAD_LIMIT_MB` (512) bounds one upload; clips are posted inline as
 base64 and held in memory while the request is read.
 
-To see what a clip becomes without going through the UI:
+To see what a clip becomes without going through the UI, run the `frames`
+example from a checkout of [abnegate/crates](https://github.com/abnegate/crates):
 
 ```bash
-cd runner && cargo run --example frames -p zone_comfy -- clip.mp4 /tmp/frames
+cargo run --example frames -p abnegate-comfy -- clip.mp4 /tmp/frames
 ```
 
 It writes every frame the trainer would see, and prints the timestamp, shot, and
@@ -701,10 +746,10 @@ Qwen results may rank checkpoints, but are explicitly reported as
 identity retention outside its training pairs has not yet been proven.
 
 ```bash
-ZONE_TRAIN_DIR=/tmp/my-train-set \
+ZONE_TRAIN_DIRECTORY=/tmp/my-train-set \
 ZONE_TRAIN_ARCHITECTURE=flux \
 ZONE_TRAIN_CHECKPOINT=flux1-dev-fp8.safetensors \
-COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+COMFYUI_MODELS_DIRECTORY="$HOME/Library/Application Support/Zone/ComfyUI/models" \
 python3 comfyui/probe_lora.py my_lora-step150.safetensors my_lora.safetensors
 ```
 
@@ -716,10 +761,10 @@ shows up as a loss that will not move however long the descent runs.
 ```bash
 ZONE_PROBE_MODE=gradient \
 ZONE_PROBE_LEARNING_RATE=0.0001 \
-ZONE_TRAIN_DIR=/tmp/my-train-set \
+ZONE_TRAIN_DIRECTORY=/tmp/my-train-set \
 ZONE_TRAIN_ARCHITECTURE=flux \
 ZONE_TRAIN_CHECKPOINT=flux1-dev-fp8.safetensors \
-COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+COMFYUI_MODELS_DIRECTORY="$HOME/Library/Application Support/Zone/ComfyUI/models" \
 python3 comfyui/probe_lora.py
 ```
 
@@ -738,11 +783,11 @@ running:
 
 ```bash
 ZONE_TRAIN_STEPS=100 \
-ZONE_TRAIN_DIR=/tmp/my-train-set \
+ZONE_TRAIN_DIRECTORY=/tmp/my-train-set \
 ZONE_TRAIN_ARCHITECTURE=flux \
 ZONE_TRAIN_CHECKPOINT=flux1-dev-fp8.safetensors \
 ZONE_TRAIN_OUTPUT="$HOME/Library/Application Support/Zone/ComfyUI/models/loras/probe.safetensors" \
-COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+COMFYUI_MODELS_DIRECTORY="$HOME/Library/Application Support/Zone/ComfyUI/models" \
 python3 comfyui/train_lora.py
 ```
 
@@ -844,8 +889,8 @@ steps split across high then low noise experts (0–10 leftover enable, 10–end
 add_noise disable), CFG 3.5, ModelSamplingSD3 shift 8, 16 fps. The negative
 prompt stays the packaged Chinese Wan default and is never taken from
 untrusted request data. Identity LoRAs are not applied to video: a trigger
-word in the prompt passes through as plain text, and 5B `wan-adapter` LoRA
-files are not loaded onto A14B.
+word in the prompt passes through as plain text, and no recipe loads a Wan 2.2
+TI2V 5B LoRA onto A14B.
 
 Unlike the image workflows, video uses ComfyUI's built-in `SaveWEBM` node,
 which writes WebM VP9 into ComfyUI's **output** folder rather than temp.
@@ -913,7 +958,7 @@ upscale. Chat can force the path with `metadata.upscale: true` and suppress it
 with `false`; turning every generator off still wins over either.
 
 Upscaling is GPU-bound per frame. A short 832×480 Wan clip is roughly 49 frames
-at 4x, so raise `COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECS` past its 600 second
+at 4x, so raise `COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECONDS` past its 600 second
 default before upscaling anything longer.
 
 ## Troubleshooting

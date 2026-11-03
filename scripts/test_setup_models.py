@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).with_name("setup-models.py")
 CATALOG = Path(__file__).with_name("setup-features.json")
@@ -284,6 +286,20 @@ class SetupModelsTest(unittest.TestCase):
                 "CreativeML Open RAIL-M (FLUX uncensored LoRA)",
             ],
         )
+
+    def test_models_directory_setting_overrides_the_default(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"COMFYUI_MODELS_DIRECTORY": "/srv/comfyui/models"}, clear=False
+        ):
+            os.environ.pop("COMFYUI_MODELS_DIR", None)
+            self.assertEqual(setup_models.default_models_dir(), Path("/srv/comfyui/models"))
+
+    def test_the_abbreviated_models_name_is_no_longer_read(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"COMFYUI_MODELS_DIR": "/srv/comfyui/models"}, clear=False
+        ):
+            os.environ.pop("COMFYUI_MODELS_DIRECTORY", None)
+            self.assertNotEqual(setup_models.default_models_dir(), Path("/srv/comfyui/models"))
 
     def test_pick_preset_follows_ram(self) -> None:
         self.assertEqual(setup_models.pick_preset(self.catalog, 8 * GIB)["id"], "8gb")
