@@ -459,4 +459,36 @@ describe('AuthContext', () => {
       });
     });
   });
+
+  describe('refresh scheduling', () => {
+    it('does not refresh at once when the token outlives the longest timer', async () => {
+      const thirtyDays = 30 * 24 * 60 * 60;
+      const payload = {
+        sub: '1',
+        email: 'test@test.com',
+        roles: ['user'],
+        permissions: ['chats:read'],
+        exp: Math.floor(Date.now() / 1000) + thirtyDays,
+      };
+      storage.setItem('manager_access_token', `header.${btoa(JSON.stringify(payload))}.signature`);
+      storage.setItem('manager_refresh_token', 'refresh-token');
+      let refreshes = 0;
+      refreshTokenImpl = async () => {
+        refreshes += 1;
+        throw new RefreshError('Token refresh failed: 401', 401);
+      };
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+
+      expect(refreshes).toBe(0);
+      expect(result.current.isAuthenticated).toBe(true);
+      expect(storage.getItem('manager_refresh_token')).toBe('refresh-token');
+    });
+  });
 });

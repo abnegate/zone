@@ -45,6 +45,9 @@ type StorageApi = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 // rejecting the credential. scheduleRefresh subtracts 60s, so this lands ~15s out.
 const RETRY_REFRESH_SECONDS = 75;
 
+// setTimeout fires a delay above a signed 32-bit millisecond count at once.
+const LONGEST_TIMER_MILLISECONDS = 2_147_483_647;
+
 const ACCESS_TOKEN_KEY = 'manager_access_token';
 const REFRESH_TOKEN_KEY = 'manager_refresh_token';
 const USER_KEY = 'manager_user';
@@ -168,8 +171,7 @@ export function AuthProvider({
         clearTimeout(refreshTimeoutRef.current);
       }
 
-      // Refresh 60 seconds before expiry
-      const refreshTime = (expiresIn - 60) * 1000;
+      const refreshTime = Math.min((expiresIn - 60) * 1000, LONGEST_TIMER_MILLISECONDS);
       if (refreshTime > 0) {
         refreshTimeoutRef.current = setTimeout(async () => {
           const currentRefreshToken = storage.getItem(REFRESH_TOKEN_KEY);
