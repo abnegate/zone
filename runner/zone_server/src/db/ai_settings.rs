@@ -1927,7 +1927,10 @@ mod tests {
             .apply_to_comfyui(&mut config);
         assert_eq!(config.classifier_model, "llama3.2:3b");
         assert_eq!(config.checkpoint, "custom-image.safetensors");
-        assert_eq!(config.video_unet, "wan2.2_ti2v_5B_fp16.safetensors");
+        assert_eq!(
+            config.video_unet,
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
+        );
         assert_eq!(config.audio_checkpoint, "ace_step_v1_3.5b.safetensors");
     }
 

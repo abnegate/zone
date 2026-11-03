@@ -1607,28 +1607,30 @@ details, and native macOS / bundled NVIDIA instructions.
   Timeouts fall back to normal chat.
 
 ### `COMFYUI_VIDEO_WORKFLOW_PATH`
-- **Default**: `/app/comfyui/workflows/wan2.2-ti2v-5b-api.json`
-- **Description**: In-container path to the versioned Wan 2.2 TI2V
+- **Default**: `/app/comfyui/workflows/wan2.2-a14b-t2v-api.json`
+- **Description**: In-container path to the versioned Wan 2.2 A14B
   text-to-video API workflow. Image-to-video uses the sibling file
-  `wan2.2-ti2v-5b-i2v-api.json` in the same directory.
+  `wan2.2-a14b-i2v-api.json` in the same directory.
 
 ### `COMFYUI_VIDEO_UNET`
-- **Default**: `wan2.2_ti2v_5B_fp16.safetensors`
-- **Description**: Fallback Wan UNET when org/workspace AI settings do not set
-  `model_video`. Path separators and traversal are rejected. Chat video
-  generation uses the effective `model_video` setting when present.
+- **Default**: `wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors`
+- **Description**: Fallback Wan high-noise UNET when org/workspace AI settings
+  do not set `model_video`. Path separators and traversal are rejected. Chat
+  video generation uses the effective `model_video` setting when present. A
+  leftover 5B filename is rewritten to this A14B expert.
 
 ### `COMFYUI_VIDEO_CLIP`
 - **Default**: `umt5_xxl_fp8_e4m3fn_scaled.safetensors`
 - **Description**: Text encoder loaded with the Wan video workflow
 
 ### `COMFYUI_VIDEO_VAE`
-- **Default**: `wan2.2_vae.safetensors`
-- **Description**: VAE loaded with the Wan video workflow
+- **Default**: `wan_2.1_vae.safetensors`
+- **Description**: VAE loaded with the Wan A14B video workflow
 
 ### `COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS`
-- **Default**: `600`
+- **Default**: `7200`
 - **Description**: Wall-clock timeout for a single video generation job
+  (range 10–14400)
 
 ### `COMFYUI_AUDIO_WORKFLOW_PATH`
 - **Default**: `/app/comfyui/workflows/ace-step-v1-3.5b-api.json`

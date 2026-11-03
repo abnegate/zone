@@ -1,10 +1,10 @@
-# ComfyUI, SDXL people, FLUX, Wan 2.2 TI2V, and ACE-Step v1
+# ComfyUI, SDXL people, FLUX, Wan 2.2 A14B, and ACE-Step v1
 
 Zone supports a pinned ComfyUI runtime with SDXL people for stills (FLUX.1
-Schnell and Dev remain optional recipes), Wan 2.2 TI2V 5B for text-to-video
-and image-to-video, ACE-Step v1 3.5B for text-to-audio, and Real-ESRGAN
-x4plus for upscaling a picture or a clip. The runtime is native on Apple
-Silicon and an optional NVIDIA Compose profile on Linux.
+Schnell and Dev remain optional recipes), Wan 2.2 A14B (27B MoE) for
+text-to-video and image-to-video, ACE-Step v1 3.5B for text-to-audio, and
+Real-ESRGAN x4plus for upscaling a picture or a clip. The runtime is native
+on Apple Silicon and an optional NVIDIA Compose profile on Linux.
 
 `./scripts/setup.sh` downloads the Comfy bundles for the features you enable
 (all on by default) and shows per-file progress. It prints each feature’s size,
@@ -47,16 +47,21 @@ Comfy checkout so core files stay unmodified:
 - Combined size: approximately 28.2 GiB / 30.2 GB
 - Model license: Apache-2.0
 
-### Wan 2.2 TI2V 5B (video)
+### Wan 2.2 A14B (video)
 
 - Model repository: `Comfy-Org/Wan_2.2_ComfyUI_Repackaged`
-- Model revision: `c4f60d30c55a624e35427060fdd217579a6c1d77`
-- UNET: `wan2.2_ti2v_5B_fp16.safetensors` (`9,999,658,848` bytes)
-- VAE: `wan2.2_vae.safetensors` (`1,409,400,960` bytes)
+- Model revision: `ee6f4a40737a995bf5818954cfce6d59443b0f04`
+- T2V high-noise UNET: `wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors` (`14,293,923,632` bytes)
+- T2V low-noise UNET: `wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors` (`14,293,923,632` bytes)
+- I2V high-noise UNET: `wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors` (`14,294,742,832` bytes)
+- I2V low-noise UNET: `wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors` (`14,294,742,832` bytes)
+- VAE: `wan_2.1_vae.safetensors` (`253,815,318` bytes)
 - CLIP: `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (`6,735,906,897` bytes)
-- Combined size: `18,144,966,705` bytes (approximately 16.90 GiB / 18.14 GB)
+- Combined size: `64,167,055,143` bytes (approximately 59.77 GiB / 64.17 GB)
 - Model license: Apache-2.0
-- Default output: 832×480, 49 frames (~2s at 24 fps), WebM VP9
+- Default output: 1280×704, 81 frames (~5s at 16 fps), WebM VP9
+- The video bundle still includes Wan 2.2 TI2V 5B (`wan2.2_ti2v_5B_fp16.safetensors`)
+  for identity LoRA training. Chat generate always loads A14B.
 
 ### ACE-Step v1 3.5B (audio)
 
@@ -751,29 +756,34 @@ attachment URLs are never fetched as img2img sources.
 
 ## Video workflow contract
 
-`comfyui/workflows/wan2.2-ti2v-5b-api.json` is the text-to-video API-format
+`comfyui/workflows/wan2.2-a14b-t2v-api.json` is the text-to-video API-format
 workflow. It uses only built-in ComfyUI nodes. Integration code may replace
 only these inputs:
 
-- node `1`: UNET filename from trusted server configuration (`model_video` /
-  `COMFYUI_VIDEO_UNET`)
+- node `1`: high-noise UNET filename from trusted server configuration
+  (`model_video` / `COMFYUI_VIDEO_UNET`); a leftover 5B name is rewritten to
+  the A14B high-noise expert
+- node `12`: paired low-noise UNET (`high_noise` → `low_noise`, `t2v` ↔ `i2v`)
 - node `2`: CLIP filename (`COMFYUI_VIDEO_CLIP`)
-- node `3`: VAE filename (`COMFYUI_VIDEO_VAE`)
+- node `3`: VAE filename (always `wan_2.1_vae.safetensors`)
 - node `5`: positive prompt text
-- node `8`: seed
+- node `8` and node `14`: `noise_seed`
 
-`comfyui/workflows/wan2.2-ti2v-5b-i2v-api.json` is the image-to-video sibling.
+`comfyui/workflows/wan2.2-a14b-i2v-api.json` is the image-to-video sibling.
 Chat uses it when the current message includes an image attachment (a data URL
 or a same-chat `/api/artifacts/...` URL) and the request is classified as
 video. The manager uploads that image to ComfyUI's input folder, then may also
 replace:
 
-- node `11`: uploaded source filename, wired as `start_image` on the latent
-  node
+- node `11`: uploaded source filename, wired as `start_image` on
+  `WanImageToVideo`
 
-Packaged defaults are Wan-appropriate: 832×480, length 49, 20 `uni_pc`/`simple`
-steps, CFG 5, and ModelSamplingSD3 shift 8. The negative prompt stays the
-packaged Chinese Wan default and is never taken from untrusted request data.
+Packaged defaults are Wan 2.2 A14B: 1280×704, length 81, 20 `euler`/`simple`
+steps split across high then low noise experts (0–10 leftover enable, 10–end
+add_noise disable), CFG 3.5, ModelSamplingSD3 shift 8, 16 fps. The negative
+prompt stays the packaged Chinese Wan default and is never taken from
+untrusted request data. Identity trigger words are still prefixed; 5B
+`wan-adapter` LoRA files are not loaded onto A14B.
 
 Unlike the image workflows, video uses ComfyUI's built-in `SaveWEBM` node,
 which writes WebM VP9 into ComfyUI's **output** folder rather than temp.

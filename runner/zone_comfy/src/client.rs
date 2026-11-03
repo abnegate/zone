@@ -23,14 +23,12 @@ pub const MAX_SOURCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 /// Clips come back from the artifact store rather than a chat upload, so the
 /// cap matches what the store is willing to keep rather than a request body.
 pub const MAX_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
-const PACKAGED_VIDEO_WORKFLOW: &str =
-    include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-api.json");
-const PACKAGED_I2V_WORKFLOW: &str =
-    include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-i2v-api.json");
-const PACKAGED_WAN_ADAPTER_WORKFLOW: &str =
-    include_str!("../../../comfyui/workflows/wan-adapter-api.json");
-const PACKAGED_WAN_ADAPTER_I2V_WORKFLOW: &str =
-    include_str!("../../../comfyui/workflows/wan-adapter-i2v-api.json");
+const PACKAGED_A14B_T2V_WORKFLOW: &str =
+    include_str!("../../../comfyui/workflows/wan2.2-a14b-t2v-api.json");
+const PACKAGED_A14B_I2V_WORKFLOW: &str =
+    include_str!("../../../comfyui/workflows/wan2.2-a14b-i2v-api.json");
+const A14B_VAE: &str = "wan_2.1_vae.safetensors";
+const A14B_HIGH_UNET: &str = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors";
 const PACKAGED_AUDIO_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/ace-step-v1-3.5b-api.json");
 const PACKAGED_UPSCALE_WORKFLOW: &str =
@@ -653,7 +651,6 @@ impl Client {
             &self.config.workflow_path,
             &prompt,
         );
-        let lora_name = identity.as_ref().and_then(|bound| bound.lora.as_deref());
         if let Some(bound) = identity.as_ref() {
             prompt = crate::identity_caption(&prompt, &bound.trigger);
         }
@@ -661,19 +658,17 @@ impl Client {
         let workflow = if let Some(source) = source {
             let _ = progress.send("Uploading source image...".to_string());
             let uploaded = self.upload_source(source, cancel, deadline).await?;
-            let graph = if lora_name.is_some() {
-                load_wan_adapter_i2v_workflow(&self.config.video_workflow_path)?
-            } else {
-                self.video_workflows()?.1
-            };
-            configure_wan_i2v_workflow(graph, &prompt, unet, clip, vae, seed, &uploaded, lora_name)?
+            configure_wan_i2v_workflow(
+                self.video_workflows()?.1,
+                &prompt,
+                unet,
+                clip,
+                vae,
+                seed,
+                &uploaded,
+            )?
         } else {
-            let graph = if lora_name.is_some() {
-                load_wan_adapter_workflow(&self.config.video_workflow_path)?
-            } else {
-                self.video_workflows()?.0
-            };
-            configure_wan_t2v_workflow(graph, &prompt, unet, clip, vae, seed, lora_name)?
+            configure_wan_t2v_workflow(self.video_workflows()?.0, &prompt, unet, clip, vae, seed)?
         };
         self.submit_and_collect(
             workflow,
@@ -1141,50 +1136,59 @@ fn load_workflow_file(path: &std::path::Path) -> Result<Value, Error> {
 }
 
 fn load_video_workflow(path: &std::path::Path) -> Result<Value, Error> {
-    if path.is_file() {
-        return load_workflow_file(path)
-            .map_err(|_| Error::Configuration("video workflow path is not readable"));
-    }
-    serde_json::from_str(PACKAGED_VIDEO_WORKFLOW)
-        .map_err(|_| Error::Configuration("packaged video workflow is not valid JSON"))
+    let candidate = video_graph_path(path, false);
+    load_matching_workflow(
+        candidate.as_deref(),
+        PACKAGED_A14B_T2V_WORKFLOW,
+        "packaged A14B video workflow is not valid JSON",
+        validate_video_workflow,
+    )
 }
 
 fn load_i2v_workflow(text_to_video_path: &std::path::Path) -> Result<Value, Error> {
-    let sibling = text_to_video_path
-        .parent()
-        .map(|directory| directory.join("wan2.2-ti2v-5b-i2v-api.json"));
-    if let Some(path) = sibling.filter(|path| path.is_file()) {
-        return load_workflow_file(&path)
-            .map_err(|_| Error::Configuration("image-to-video workflow path is not readable"));
-    }
-    serde_json::from_str(PACKAGED_I2V_WORKFLOW)
-        .map_err(|_| Error::Configuration("packaged image-to-video workflow is not valid JSON"))
+    let candidate = video_graph_path(text_to_video_path, true);
+    load_matching_workflow(
+        candidate.as_deref(),
+        PACKAGED_A14B_I2V_WORKFLOW,
+        "packaged A14B image-to-video workflow is not valid JSON",
+        validate_i2v_workflow,
+    )
 }
 
-fn load_wan_adapter_workflow(text_to_video_path: &std::path::Path) -> Result<Value, Error> {
-    let sibling = text_to_video_path
-        .parent()
-        .map(|directory| directory.join("wan-adapter-api.json"));
-    if let Some(path) = sibling.filter(|path| path.is_file()) {
-        return load_workflow_file(&path)
-            .map_err(|_| Error::Configuration("video adapter workflow path is not readable"));
+fn video_graph_path(configured: &std::path::Path, i2v: bool) -> Option<std::path::PathBuf> {
+    let filename = if i2v {
+        "wan2.2-a14b-i2v-api.json"
+    } else {
+        "wan2.2-a14b-t2v-api.json"
+    };
+    if !i2v
+        && configured
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == filename)
+        && configured.is_file()
+    {
+        return Some(configured.to_path_buf());
     }
-    serde_json::from_str(PACKAGED_WAN_ADAPTER_WORKFLOW)
-        .map_err(|_| Error::Configuration("packaged video adapter workflow is not valid JSON"))
+    configured
+        .parent()
+        .map(|directory| directory.join(filename))
+        .filter(|path| path.is_file())
 }
 
-fn load_wan_adapter_i2v_workflow(text_to_video_path: &std::path::Path) -> Result<Value, Error> {
-    let sibling = text_to_video_path
-        .parent()
-        .map(|directory| directory.join("wan-adapter-i2v-api.json"));
-    if let Some(path) = sibling.filter(|path| path.is_file()) {
-        return load_workflow_file(&path).map_err(|_| {
-            Error::Configuration("image-to-video adapter workflow path is not readable")
-        });
+fn load_matching_workflow(
+    path: Option<&std::path::Path>,
+    packaged: &str,
+    packaged_error: &'static str,
+    validate: fn(&Value) -> Result<(), Error>,
+) -> Result<Value, Error> {
+    if let Some(path) = path.filter(|path| path.is_file())
+        && let Ok(loaded) = load_workflow_file(path)
+        && validate(&loaded).is_ok()
+    {
+        return Ok(loaded);
     }
-    serde_json::from_str(PACKAGED_WAN_ADAPTER_I2V_WORKFLOW).map_err(|_| {
-        Error::Configuration("packaged image-to-video adapter workflow is not valid JSON")
-    })
+    serde_json::from_str(packaged).map_err(|_| Error::Configuration(packaged_error))
 }
 
 fn load_audio_workflow(path: &std::path::Path) -> Result<Value, Error> {
@@ -1203,17 +1207,10 @@ pub fn build_wan_t2v_workflow(
     clip: &str,
     vae: &str,
     seed: u64,
-    lora_name: Option<&str>,
 ) -> Result<Value, Error> {
-    let workflow = if lora_name.is_some() {
-        serde_json::from_str(PACKAGED_WAN_ADAPTER_WORKFLOW).map_err(|_| {
-            Error::Configuration("packaged video adapter workflow is not valid JSON")
-        })?
-    } else {
-        serde_json::from_str(PACKAGED_VIDEO_WORKFLOW)
-            .map_err(|_| Error::Configuration("packaged video workflow is not valid JSON"))?
-    };
-    configure_wan_t2v_workflow(workflow, prompt, unet, clip, vae, seed, lora_name)
+    let workflow = serde_json::from_str(PACKAGED_A14B_T2V_WORKFLOW)
+        .map_err(|_| Error::Configuration("packaged A14B video workflow is not valid JSON"))?;
+    configure_wan_t2v_workflow(workflow, prompt, unet, clip, vae, seed)
 }
 
 /// Build the image-to-video workflow and mutate only approved inputs.
@@ -1224,20 +1221,11 @@ pub fn build_wan_i2v_workflow(
     vae: &str,
     seed: u64,
     image_name: &str,
-    lora_name: Option<&str>,
 ) -> Result<Value, Error> {
-    let workflow = if lora_name.is_some() {
-        serde_json::from_str(PACKAGED_WAN_ADAPTER_I2V_WORKFLOW).map_err(|_| {
-            Error::Configuration("packaged image-to-video adapter workflow is not valid JSON")
-        })?
-    } else {
-        serde_json::from_str(PACKAGED_I2V_WORKFLOW).map_err(|_| {
-            Error::Configuration("packaged image-to-video workflow is not valid JSON")
-        })?
-    };
-    configure_wan_i2v_workflow(
-        workflow, prompt, unet, clip, vae, seed, image_name, lora_name,
-    )
+    let workflow = serde_json::from_str(PACKAGED_A14B_I2V_WORKFLOW).map_err(|_| {
+        Error::Configuration("packaged A14B image-to-video workflow is not valid JSON")
+    })?;
+    configure_wan_i2v_workflow(workflow, prompt, unet, clip, vae, seed, image_name)
 }
 
 /// Build the text-to-audio workflow and mutate only approved inputs.
@@ -1364,26 +1352,60 @@ fn configure_upscale_video_workflow(
     Ok(workflow)
 }
 
+fn is_a14b_unet(unet: &str) -> bool {
+    let lower = unet.to_ascii_lowercase();
+    lower.contains("14b") || lower.contains("high_noise") || lower.contains("low_noise")
+}
+
+fn paired_wan_unets(unet: &str, i2v: bool) -> (String, String) {
+    let mut high = if is_a14b_unet(unet) {
+        unet.to_string()
+    } else {
+        A14B_HIGH_UNET.to_string()
+    };
+    if i2v {
+        high = high.replace("t2v", "i2v");
+    } else {
+        high = high.replace("i2v", "t2v");
+    }
+    if high.contains("low_noise") {
+        high = high.replace("low_noise", "high_noise");
+    }
+    let low = high.replace("high_noise", "low_noise");
+    (high, low)
+}
+
 fn validate_video_workflow(workflow: &Value) -> Result<(), Error> {
     for pointer in [
         "/1/inputs/unet_name",
         "/2/inputs/clip_name",
         "/3/inputs/vae_name",
         "/5/inputs/text",
-        "/7/class_type",
-        "/8/inputs/seed",
+        "/8/inputs/noise_seed",
         "/10/inputs/images",
+        "/12/inputs/unet_name",
+        "/14/inputs/noise_seed",
     ] {
         if workflow.pointer(pointer).is_none() {
             return Err(Error::Configuration(
-                "workflow does not match the Wan TI2V contract",
+                "workflow does not match the Wan A14B contract",
             ));
         }
     }
-    if workflow.pointer("/7/class_type").and_then(Value::as_str) != Some("Wan22ImageToVideoLatent")
+    let latent = workflow.pointer("/7/class_type").and_then(Value::as_str);
+    if !matches!(
+        latent,
+        Some("EmptyHunyuanLatentVideo") | Some("WanImageToVideo")
+    ) {
+        return Err(Error::Configuration(
+            "A14B video workflow must use EmptyHunyuanLatentVideo or WanImageToVideo",
+        ));
+    }
+    if workflow.pointer("/8/class_type").and_then(Value::as_str) != Some("KSamplerAdvanced")
+        || workflow.pointer("/14/class_type").and_then(Value::as_str) != Some("KSamplerAdvanced")
     {
         return Err(Error::Configuration(
-            "video workflow must use Wan22ImageToVideoLatent",
+            "A14B video workflow must sample high then low noise experts",
         ));
     }
     if workflow.pointer("/10/class_type").and_then(Value::as_str) != Some("SaveWEBM") {
@@ -1457,11 +1479,9 @@ fn configure_wan_t2v_workflow(
     clip: &str,
     vae: &str,
     seed: u64,
-    lora_name: Option<&str>,
 ) -> Result<Value, Error> {
     validate_video_workflow(&workflow)?;
     apply_wan_workflow_inputs(&mut workflow, prompt, unet, clip, vae, seed)?;
-    apply_wan_lora(&mut workflow, lora_name)?;
     Ok(workflow)
 }
 
@@ -1473,29 +1493,12 @@ fn configure_wan_i2v_workflow(
     vae: &str,
     seed: u64,
     image_name: &str,
-    lora_name: Option<&str>,
 ) -> Result<Value, Error> {
     validate_i2v_workflow(&workflow)?;
     apply_wan_workflow_inputs(&mut workflow, prompt, unet, clip, vae, seed)?;
-    apply_wan_lora(&mut workflow, lora_name)?;
     let image_name = sanitize_upload_name(image_name)?;
     workflow["11"]["inputs"]["image"] = json!(image_name);
     Ok(workflow)
-}
-
-fn apply_wan_lora(workflow: &mut Value, lora_name: Option<&str>) -> Result<(), Error> {
-    let Some(name) = lora_name else {
-        return Ok(());
-    };
-    if workflow.pointer("/12/class_type").and_then(Value::as_str) != Some("LoraLoaderModelOnly") {
-        return Err(Error::Configuration(
-            "adapter workflow must load a LoRA with LoraLoaderModelOnly",
-        ));
-    }
-    let name = sanitize_weight_filename(name)
-        .map_err(|_| Error::Configuration("invalid video LoRA filename"))?;
-    workflow["12"]["inputs"]["lora_name"] = json!(name);
-    Ok(())
 }
 
 fn apply_wan_workflow_inputs(
@@ -1512,11 +1515,18 @@ fn apply_wan_workflow_inputs(
     if !is_model_filename(unet) || !is_model_filename(clip) || !is_model_filename(vae) {
         return Err(Error::Configuration("invalid video model filename"));
     }
-    workflow["1"]["inputs"]["unet_name"] = json!(unet);
+    let i2v = workflow.pointer("/7/class_type").and_then(Value::as_str) == Some("WanImageToVideo");
+    let (high, low) = paired_wan_unets(unet, i2v);
+    if !is_model_filename(&high) || !is_model_filename(&low) {
+        return Err(Error::Configuration("invalid video model filename"));
+    }
+    workflow["1"]["inputs"]["unet_name"] = json!(high);
+    workflow["12"]["inputs"]["unet_name"] = json!(low);
     workflow["2"]["inputs"]["clip_name"] = json!(clip);
-    workflow["3"]["inputs"]["vae_name"] = json!(vae);
+    workflow["3"]["inputs"]["vae_name"] = json!(A14B_VAE);
     workflow["5"]["inputs"]["text"] = json!(prompt);
-    workflow["8"]["inputs"]["seed"] = json!(seed);
+    workflow["8"]["inputs"]["noise_seed"] = json!(seed);
+    workflow["14"]["inputs"]["noise_seed"] = json!(seed);
     Ok(())
 }
 
@@ -1800,16 +1810,19 @@ mod tests {
     fn video_workflow_mutates_only_approved_inputs() {
         let workflow = build_wan_t2v_workflow(
             "a moving fox",
-            "custom-video.safetensors",
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
             "custom-clip.safetensors",
-            "custom-vae.safetensors",
+            "wan2.2_vae.safetensors",
             42,
-            None,
         )
         .unwrap();
         assert_eq!(
             workflow["1"]["inputs"]["unet_name"],
-            "custom-video.safetensors"
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
+        );
+        assert_eq!(
+            workflow["12"]["inputs"]["unet_name"],
+            "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"
         );
         assert_eq!(
             workflow["2"]["inputs"]["clip_name"],
@@ -1817,81 +1830,74 @@ mod tests {
         );
         assert_eq!(
             workflow["3"]["inputs"]["vae_name"],
-            "custom-vae.safetensors"
+            "wan_2.1_vae.safetensors"
         );
         assert_eq!(workflow["5"]["inputs"]["text"], "a moving fox");
-        assert_eq!(workflow["8"]["inputs"]["seed"], 42);
-        assert_eq!(workflow["8"]["inputs"]["steps"], 20);
-        assert_eq!(workflow["7"]["inputs"]["width"], 832);
+        assert_eq!(workflow["8"]["inputs"]["noise_seed"], 42);
+        assert_eq!(workflow["14"]["inputs"]["noise_seed"], 42);
+        assert_eq!(workflow["8"]["class_type"], "KSamplerAdvanced");
+        assert_eq!(workflow["7"]["class_type"], "EmptyHunyuanLatentVideo");
+        assert_eq!(workflow["7"]["inputs"]["width"], 1280);
+        assert_eq!(workflow["7"]["inputs"]["height"], 704);
+        assert_eq!(workflow["7"]["inputs"]["length"], 81);
+        assert_eq!(workflow["10"]["inputs"]["fps"], 16);
         assert!(workflow.get("11").is_none());
+    }
+
+    #[test]
+    fn leftover_5b_unet_still_loads_a14b_experts() {
+        let workflow = build_wan_t2v_workflow(
+            "a moving fox",
+            "wan2.2_ti2v_5B_fp16.safetensors",
+            "custom-clip.safetensors",
+            "wan2.2_vae.safetensors",
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            workflow["1"]["inputs"]["unet_name"],
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
+        );
+        assert_eq!(
+            workflow["12"]["inputs"]["unet_name"],
+            "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"
+        );
+        assert_eq!(
+            workflow["3"]["inputs"]["vae_name"],
+            "wan_2.1_vae.safetensors"
+        );
     }
 
     #[test]
     fn i2v_workflow_mutates_only_approved_inputs() {
         let workflow = build_wan_i2v_workflow(
             "make it move",
-            "custom-video.safetensors",
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
             "custom-clip.safetensors",
             "custom-vae.safetensors",
             42,
             "zone-i2v-source.png",
-            None,
         )
         .unwrap();
         assert_eq!(
             workflow["1"]["inputs"]["unet_name"],
-            "custom-video.safetensors"
+            "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
         );
-        assert_eq!(workflow["5"]["inputs"]["text"], "make it move");
-        assert_eq!(workflow["8"]["inputs"]["seed"], 42);
-        assert_eq!(workflow["11"]["inputs"]["image"], "zone-i2v-source.png");
-        assert_eq!(workflow["7"]["class_type"], "Wan22ImageToVideoLatent");
-        assert!(workflow.get("12").is_none());
-    }
-
-    #[test]
-    fn configure_wan_injects_lora_when_set_and_omits_when_unset() {
-        let bare = build_wan_t2v_workflow(
-            "a moving fox",
-            "custom-video.safetensors",
-            "custom-clip.safetensors",
-            "custom-vae.safetensors",
-            42,
-            None,
-        )
-        .unwrap();
-        assert!(bare.get("12").is_none());
-        assert_eq!(bare["4"]["inputs"]["model"], json!(["1", 0]));
-
-        let adapted = build_wan_t2v_workflow(
-            "a moving fox",
-            "custom-video.safetensors",
-            "custom-clip.safetensors",
-            "custom-vae.safetensors",
-            42,
-            Some("jerry-wan.safetensors"),
-        )
-        .unwrap();
-        assert_eq!(adapted["12"]["class_type"], "LoraLoaderModelOnly");
         assert_eq!(
-            adapted["12"]["inputs"]["lora_name"],
-            "jerry-wan.safetensors"
+            workflow["12"]["inputs"]["unet_name"],
+            "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
         );
-        assert_eq!(adapted["4"]["inputs"]["model"], json!(["12", 0]));
-        assert_eq!(adapted["5"]["inputs"]["text"], "a moving fox");
-
-        let i2v = build_wan_i2v_workflow(
-            "make it move",
-            "custom-video.safetensors",
-            "custom-clip.safetensors",
-            "custom-vae.safetensors",
-            7,
-            "zone-i2v-source.png",
-            Some("jerry-wan.safetensors"),
-        )
-        .unwrap();
-        assert_eq!(i2v["12"]["inputs"]["lora_name"], "jerry-wan.safetensors");
-        assert_eq!(i2v["11"]["inputs"]["image"], "zone-i2v-source.png");
+        assert_eq!(
+            workflow["3"]["inputs"]["vae_name"],
+            "wan_2.1_vae.safetensors"
+        );
+        assert_eq!(workflow["7"]["class_type"], "WanImageToVideo");
+        assert_eq!(workflow["8"]["inputs"]["positive"], json!(["7", 0]));
+        assert_eq!(workflow["8"]["inputs"]["negative"], json!(["7", 1]));
+        assert_eq!(workflow["8"]["inputs"]["latent_image"], json!(["7", 2]));
+        assert_eq!(workflow["8"]["inputs"]["noise_seed"], 42);
+        assert_eq!(workflow["11"]["inputs"]["image"], "zone-i2v-source.png");
+        assert_eq!(workflow["9"]["inputs"]["samples"], json!(["14", 0]));
     }
 
     #[test]
@@ -1903,7 +1909,6 @@ mod tests {
                 "clip.safetensors",
                 "vae.safetensors",
                 1,
-                None
             )
             .is_err()
         );
@@ -1915,7 +1920,6 @@ mod tests {
                 "vae.safetensors",
                 1,
                 "nested/file.png",
-                None
             )
             .is_err()
         );
@@ -2698,7 +2702,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/prompt"))
             .and(wiremock::matchers::body_string_contains(
-                "Wan22ImageToVideoLatent",
+                "EmptyHunyuanLatentVideo",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "v1"})))
             .mount(&server)
@@ -2865,16 +2869,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_video_loads_wan_lora_when_sidecar_is_present() {
+    async fn generate_video_keeps_a14b_when_a_5b_wan_lora_is_present() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/prompt"))
             .and(wiremock::matchers::body_string_contains(
-                "LoraLoaderModelOnly",
+                "EmptyHunyuanLatentVideo",
             ))
-            .and(wiremock::matchers::body_string_contains(
-                "jerry-wan.safetensors",
-            ))
+            .and(BodyDoesNotContain("LoraLoaderModelOnly"))
+            .and(BodyDoesNotContain("jerry-wan.safetensors"))
             .and(wiremock::matchers::body_string_contains("ohwx"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "wan"})))
             .expect(1)

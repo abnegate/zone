@@ -90,11 +90,10 @@ pub struct Identity {
     pub trigger: String,
 }
 
-/// Video generate bind: prefix the trigger, and load a wan-adapter when one exists.
+/// Video generate bind: prefix the trigger. 5B wan-adapter files stay unloaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoIdentity {
     pub trigger: String,
-    pub lora: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -340,20 +339,9 @@ fn video_identity_among(items: &[InventoryItem], haystack: &str) -> Option<Video
     if triggers.len() != 1 {
         return None;
     }
-    let trigger = triggers[0].to_string();
-    let wan: Vec<&InventoryItem> = matches
-        .iter()
-        .copied()
-        .filter(|item| {
-            is_wan_adapter(item)
-                && item
-                    .trigger
-                    .as_deref()
-                    .is_some_and(|value| value.trim() == trigger)
-        })
-        .collect();
-    let lora = (wan.len() == 1).then(|| wan[0].filename.clone());
-    Some(VideoIdentity { trigger, lora })
+    Some(VideoIdentity {
+        trigger: triggers[0].to_string(),
+    })
 }
 
 /// Trigger matching is Unicode-lowercase and requires a boundary around the
@@ -842,24 +830,22 @@ mod tests {
         assert!(identities_among(&items).is_empty());
         let bound = video_identity_among(&items, "portrait of ohwx").unwrap();
         assert_eq!(bound.trigger, "ohwx");
-        assert_eq!(bound.lora.as_deref(), Some("jerry-wan.safetensors"));
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn video_bind_prefixes_a_still_identity_without_a_wan_lora() {
+    fn video_bind_prefixes_a_still_identity() {
         let root = temp_models();
         write_identity(&root, "jerry.safetensors", "ohwx");
         let catalog = RecipeCatalog::packaged().unwrap();
         let items = scan(&root, &catalog);
         let bound = video_identity_among(&items, "ohwx walking on the beach").unwrap();
         assert_eq!(bound.trigger, "ohwx");
-        assert_eq!(bound.lora, None);
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn video_bind_prefers_the_wan_adapter_when_both_exist() {
+    fn video_bind_prefixes_the_trigger_a_wan_adapter_shares_with_a_still_identity() {
         let root = temp_models();
         write_identity(&root, "jerry.safetensors", "ohwx");
         let lora = root.join("loras/jerry-wan.safetensors");
@@ -887,7 +873,6 @@ mod tests {
         let items = scan(&root, &catalog);
         let bound = video_identity_among(&items, "ohwx at dusk").unwrap();
         assert_eq!(bound.trigger, "ohwx");
-        assert_eq!(bound.lora.as_deref(), Some("jerry-wan.safetensors"));
         assert!(
             identities_among(&items)
                 .iter()
