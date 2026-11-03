@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,9 +20,22 @@ COMFYUI = Path(__file__).parents[1]
 INSTALL = Path(os.environ.get('COMFYUI_INSTALL_DIR', ''))
 PIN = '30bdda1ef13a3a34fce2cd2fec633f15d832122a'
 ZONE_NODES = COMFYUI / 'custom_nodes' / 'zone_lora'
-TRAIN_SERVER = ROOT / 'runner/zone_comfy/src/train.rs'
-QUALITY_SERVER = ROOT / 'runner/zone_comfy/src/quality.rs'
-PEOPLE_SERVER = ROOT / 'runner/zone_comfy/src/people.rs'
+CARGO_LOCK = ROOT / 'runner/Cargo.lock'
+CONTRACT = ROOT / 'runner/zone_server/src/services/comfy/contract.rs'
+OVERLAY_CATALOG = COMFYUI / 'recipes/catalog.json'
+CRATE = 'abnegate-comfy'
+SOURCE_VARIABLE = 'ABNEGATE_COMFY_SOURCE'
+PACKAGED_CATALOG = 'comfyui/recipes/catalog.json'
+FACE_CHECKPOINT_NODE = '4'
+FACE_FIRST_FREE_ID = 5
+CONSTANT_NAME = re.compile(r'[A-Z][A-Z0-9_]*')
+STRING_CONSTANT = re.compile(r'const (\w+): &str = "([^"\\]*)";')
+FLOAT_CONSTANT = re.compile(r'const (\w+): f(?:32|64) = ([0-9][0-9_]*(?:\.[0-9_]*)?);')
+INTEGER_CONSTANT = re.compile(r'const (\w+): [iu](?:8|16|32|64|128|size) = ([0-9][0-9_]*);')
+CRATE_IMPORT = re.compile(
+    r'^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use crate::([\w:]+?)::(\{[^}]*\}|\w+(?:\s+as\s+\w+)?);',
+    re.MULTILINE,
+)
 
 if not INSTALL.is_dir():
     raise RuntimeError('COMFYUI_INSTALL_DIR must point to the pinned ComfyUI checkout')
@@ -134,84 +149,400 @@ class RustLiteral:
             return self.array()
         return self.expression()
 
+    def json(self) -> object:
+        self.skip()
+        if not self.source.startswith('json!(', self.index):
+            raise AssertionError(f'{self.path}: expected json!( at {self.index}')
+        self.index += len('json!(')
+        value = self.value()
+        self.take(')')
+        return value
 
-def rust_graph(path: Path, function: str) -> dict:
-    source = path.read_text()
-    start = source.find(f'fn {function}(')
-    if start < 0:
-        raise AssertionError(f'{path}: {function} is missing')
-    literal = source.find('json!({', start)
-    if literal < 0:
-        raise AssertionError(f'{path}: {function} has no graph literal')
-    return RustLiteral(source, literal + len('json!('), path).object()
+    def arguments(self) -> list:
+        self.take('(')
+        values = []
+        while self.more(')'):
+            self.skip()
+            if self.source.startswith('json!(', self.index):
+                values.append(self.json())
+            else:
+                values.append(self.expression())
+        return values
 
 
-def rust_graphs() -> dict[str, dict]:
-    flux_train = rust_graph(TRAIN_SERVER, 'flux_graph')
-    qwen_train = rust_graph(TRAIN_SERVER, 'qwen_graph')
-    trainer = rust_graph(TRAIN_SERVER, 'trainer')
-    trainer['inputs']['model'] = ['1', 0]
-    trainer['inputs']['latents'] = ['3', 0]
-    trainer['inputs']['positive'] = ['4', 0]
-    flux_train['5'] = trainer
-    trainer = rust_graph(TRAIN_SERVER, 'trainer')
-    trainer['inputs']['model'] = ['1', 0]
-    trainer['inputs']['latents'] = ['5', 0]
-    trainer['inputs']['positive'] = ['6', 0]
-    qwen_train['7'] = trainer
-    return {
-        'Rust flux train': flux_train,
-        'Rust qwen train': qwen_train,
-        'Rust flux probe': rust_graph(QUALITY_SERVER, 'flux_graph'),
-        'Rust qwen probe': rust_graph(QUALITY_SERVER, 'qwen_graph'),
+@dataclass(frozen=True)
+class RustFunction:
+    module: str
+    name: str
+    path: Path
+    source: str
+    start: int
+    signature: int
+    end: int
+
+    @property
+    def body(self) -> str:
+        return self.source[self.start : self.end]
+
+    @property
+    def label(self) -> str:
+        return f'{self.path}: {self.module}::{self.name}'
+
+    def reader(self, offset: int) -> RustLiteral:
+        return RustLiteral(self.source, self.start + offset, self.path)
+
+    def parameters(self) -> list[str]:
+        reader = self.reader(self.signature)
+        return [
+            argument.text.split(':', 1)[0].strip()
+            for argument in reader.arguments()
+            if isinstance(argument, Expression)
+        ]
+
+    def literal(self) -> dict:
+        offset = self.body.find('json!({')
+        if offset < 0:
+            raise AssertionError(f'{self.label} has no graph literal')
+        return self.reader(offset).json()
+
+
+def locked_version(package: str) -> str:
+    if not CARGO_LOCK.is_file():
+        raise AssertionError(f'{CARGO_LOCK} is missing, so the locked {package} is unknown')
+    lock = tomllib.loads(CARGO_LOCK.read_text())
+    versions = {
+        entry['version'] for entry in lock.get('package', []) if entry.get('name') == package
     }
+    if len(versions) != 1:
+        raise AssertionError(
+            f'{CARGO_LOCK} locks {sorted(versions) or "no"} {package}, expected exactly one version'
+        )
+    return versions.pop()
 
 
-def resolve(value: object, constants: dict[str, str]) -> object:
+@functools.cache
+def crate_source() -> Path:
+    configured = os.environ.get(SOURCE_VARIABLE)
+    if configured:
+        source = Path(configured).expanduser()
+        if not (source / 'src/lib.rs').is_file():
+            raise AssertionError(f'{SOURCE_VARIABLE}={configured} holds no {CRATE} source')
+        return source
+    version = locked_version(CRATE)
+    registry = Path(os.environ.get('CARGO_HOME') or Path.home() / '.cargo') / 'registry/src'
+    for source in sorted(registry.glob(f'*/{CRATE}-{version}')):
+        if (source / 'src/lib.rs').is_file():
+            return source
+    raise AssertionError(
+        f'no {CRATE} {version} source: set {SOURCE_VARIABLE} to it, '
+        f'or run `cargo fetch` in runner/ so it lands under {registry}'
+    )
+
+
+def module_files(module: str, source: Path | None = None) -> list[Path]:
+    directory = (source or crate_source()) / 'src'
+    files = [directory / f'{module}.rs', *sorted((directory / module).rglob('*.rs'))]
+    present = [path for path in files if path.is_file()]
+    if not present:
+        raise AssertionError(f'{directory}: {CRATE} has no {module} module')
+    return present
+
+
+def rust_function(module: str, name: str) -> RustFunction:
+    definition = re.compile(
+        rf'^([ \t]*)(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+{name}\s*[<(]', re.MULTILINE
+    )
+    found = [
+        (path, source, match)
+        for path in module_files(module)
+        for source in [path.read_text()]
+        for match in definition.finditer(source)
+    ]
+    if len(found) != 1:
+        locations = [f'{path}:{line(source, match.start())}' for path, source, match in found]
+        raise AssertionError(
+            f'{CRATE} {module}::{name}: expected one definition, found {len(found)} {locations}'
+        )
+    path, source, match = found[0]
+    closing = source.find(f'\n{match.group(1)}}}\n', match.start())
+    if closing < 0:
+        raise AssertionError(f'{path}: {module}::{name} has no closing brace')
+    signature = source.index('(', match.end() - 1) - match.start()
+    return RustFunction(module, name, path, source, match.start(), signature, closing + 1)
+
+
+def line(source: str, index: int) -> int:
+    return source.count('\n', 0, index) + 1
+
+
+@functools.cache
+def contract_constants() -> dict[str, str]:
+    if not CONTRACT.is_file():
+        raise AssertionError(f'{CONTRACT} is missing, so no contract.<field> can be resolved')
+    return dict(re.findall(r'pub const (\w+): &str = "([^"\\]*)";', CONTRACT.read_text()))
+
+
+def contract_constant(field: str) -> str:
+    constants = contract_constants()
+    name = field.upper()
+    if name not in constants:
+        raise AssertionError(f'{CONTRACT}: no `pub const {name}: &str` for contract.{field}')
+    return constants[name]
+
+
+def resolve(value: object, substitutions: dict[str, object]) -> object:
     if isinstance(value, Expression):
-        return constants.get(value.text, value)
+        if value.text in substitutions:
+            return substitutions[value.text]
+        field = re.fullmatch(r'&?(?:[\w.]+\.)?contract\.(\w+)', value.text)
+        return contract_constant(field.group(1)) if field else value
     if isinstance(value, list):
-        return [resolve(item, constants) for item in value]
+        return [resolve(item, substitutions) for item in value]
     if isinstance(value, dict):
-        return {name: resolve(item, constants) for name, item in value.items()}
+        return {name: resolve(item, substitutions) for name, item in value.items()}
     return value
 
 
-def people_strings() -> dict[str, str]:
-    return dict(re.findall(r'const (\w+): &str = "([^"]*)";', PEOPLE_SERVER.read_text()))
+@dataclass(frozen=True)
+class Import:
+    module: str
+    name: str
 
 
-def people_numbers() -> dict[str, float]:
+@functools.cache
+def declared_constants(source: Path, module: str) -> dict[str, str | float | int]:
+    constants = {}
+    for path in module_files(module, source):
+        text = path.read_text()
+        constants |= dict(STRING_CONSTANT.findall(text))
+        constants |= {
+            name: float(value.replace('_', '')) for name, value in FLOAT_CONSTANT.findall(text)
+        }
+        constants |= {
+            name: int(value.replace('_', '')) for name, value in INTEGER_CONSTANT.findall(text)
+        }
+    return constants
+
+
+@functools.cache
+def imported_constants(source: Path, module: str) -> dict[str, Import]:
+    imports = {}
+    for path in module_files(module, source):
+        for origin, items in CRATE_IMPORT.findall(path.read_text()):
+            for item in items.strip('{}').split(','):
+                name, _, alias = (part.strip() for part in item.strip().partition(' as '))
+                if CONSTANT_NAME.fullmatch(name):
+                    imports[alias or name] = Import(origin.replace('::', '/'), name)
+    return imports
+
+
+def imported_constant(
+    source: Path, origin: Import, visited: frozenset[str]
+) -> str | float | int | None:
+    declared = declared_constants(source, origin.module)
+    if origin.name in declared:
+        return declared[origin.name]
+    onward = imported_constants(source, origin.module).get(origin.name)
+    if onward is None or onward.module in visited:
+        return None
+    return imported_constant(source, onward, visited | {origin.module})
+
+
+@functools.cache
+def crate_constants(source: Path, module: str) -> dict[str, str | float | int]:
+    imported = {
+        name: value
+        for name, origin in imported_constants(source, module).items()
+        if (value := imported_constant(source, origin, frozenset({module}))) is not None
+    }
+    return imported | declared_constants(source, module)
+
+
+def module_constants(module: str, source: Path | None = None) -> dict[str, str | float | int]:
+    return crate_constants(source or crate_source(), module)
+
+
+def expressions(value: object) -> list[Expression]:
+    if isinstance(value, Expression):
+        return [value]
+    if isinstance(value, list):
+        return [found for item in value for found in expressions(item)]
+    if isinstance(value, dict):
+        return [found for item in value.values() for found in expressions(item)]
+    return []
+
+
+def unresolved(module: str, name: str, source: Path) -> str:
+    origin = imported_constants(source, module).get(name)
+    if origin is None:
+        return (
+            f'{CRATE} {module} neither declares nor imports a &str, float or integer '
+            f'`const {name}`'
+        )
+    return (
+        f'{CRATE} {module} imports it from {origin.module}, which declares no &str, '
+        f'float or integer `const {origin.name}`'
+    )
+
+
+def resolve_graph(
+    label: str,
+    module: str,
+    graph: dict,
+    substitutions: dict[str, object] | None = None,
+    source: Path | None = None,
+) -> dict:
+    crate = source or crate_source()
+    resolved = resolve(graph, module_constants(module, crate) | (substitutions or {}))
+    for expression in expressions(resolved):
+        if CONSTANT_NAME.fullmatch(expression.text):
+            raise AssertionError(
+                f'{label}: cannot resolve {expression.text}: '
+                f'{unresolved(module, expression.text, crate)}'
+            )
+    for identifier, node in resolved.items():
+        class_type = node.get('class_type') if isinstance(node, dict) else None
+        if not isinstance(class_type, str):
+            raise AssertionError(f'{label}: node {identifier} has class_type {class_type!r}')
+    return resolved
+
+
+def inline(caller: RustFunction, callee: RustFunction) -> dict[str, dict]:
+    nodes = {}
+    for call in re.finditer(rf'graph\["(\w+)"\]\s*=\s*{callee.name}\(', caller.body):
+        arguments = caller.reader(call.end() - 1).arguments()
+        parameters = callee.parameters()
+        if len(arguments) != len(parameters):
+            raise AssertionError(
+                f'{caller.label} passes {len(arguments)} arguments to '
+                f'{callee.name}, which takes {len(parameters)}'
+            )
+        bound = dict(zip(parameters, arguments, strict=True))
+        nodes[call.group(1)] = resolve(callee.literal(), module_constants(callee.module) | bound)
+    if not nodes:
+        raise AssertionError(f'{caller.label} never calls {callee.name}')
+    return nodes
+
+
+def rust_graph(module: str, name: str) -> dict:
+    function = rust_function(module, name)
+    graph = function.literal()
+    if module == 'train':
+        graph |= inline(function, rust_function('train', 'trainer'))
+    return resolve_graph(function.label, module, graph)
+
+
+def rust_graphs() -> dict[str, dict]:
     return {
-        name: float(value)
-        for name, value in re.findall(r'const (\w+): f64 = ([0-9.]+);', PEOPLE_SERVER.read_text())
+        'Rust flux train': rust_graph('train', 'flux_graph'),
+        'Rust qwen train': rust_graph('train', 'qwen_graph'),
+        'Rust flux probe': rust_graph('quality', 'flux_graph'),
+        'Rust qwen probe': rust_graph('quality', 'qwen_graph'),
     }
 
 
+def module_strings(module: str) -> dict[str, str]:
+    return {
+        name: value for name, value in module_constants(module).items() if isinstance(value, str)
+    }
+
+
+def module_numbers(module: str) -> dict[str, float]:
+    return {
+        name: value for name, value in module_constants(module).items() if isinstance(value, float)
+    }
+
+
+def catalogs() -> list[Path]:
+    return [crate_source() / PACKAGED_CATALOG, OVERLAY_CATALOG]
+
+
+def face_filenames(directory: str) -> set[str]:
+    filenames = set()
+    for path in catalogs():
+        if not path.is_file():
+            raise AssertionError(f'{path} is missing')
+        for recipe in json.loads(path.read_text())['recipes']:
+            for required in recipe.get('face_required_files', []):
+                if required['directory'] == directory:
+                    filenames.add(required['filename'])
+    return filenames
+
+
+def face_files(function: RustFunction) -> dict[str, str]:
+    directories = module_strings('recipe')
+    files = {}
+    for binding in re.finditer(r'let (\w+) = recipe\s*\.face_file\((\w+)\)', function.body):
+        name, constant = binding.groups()
+        if constant not in directories:
+            raise AssertionError(f'{CRATE} recipe module has no &str constant {constant}')
+        filenames = face_filenames(directories[constant])
+        if len(filenames) != 1:
+            raise AssertionError(
+                f'{[str(path) for path in catalogs()]} name {sorted(filenames)} as the face '
+                f'file in {directories[constant]}/, expected exactly one'
+            )
+        files[f'{name}.filename'] = filenames.pop()
+    if not files:
+        raise AssertionError(f'{function.label} reads no face file from its recipe')
+    return files
+
+
+def face_node_ids(function: RustFunction) -> dict[str, str]:
+    allocations = re.findall(r'let \[([\w\s,]+)\]\s*=\s*\[([\d\s,]+)\]\s*\.map', function.body)
+    if len(allocations) != 1:
+        raise AssertionError(f'{function.label}: expected one node id allocation')
+    names, offsets = allocations[0]
+    return {
+        name.strip(): str(FACE_FIRST_FREE_ID + int(offset))
+        for name, offset in zip(names.split(','), offsets.split(','), strict=True)
+    }
+
+
+def face_node_class(function: RustFunction) -> str:
+    position = function.parameters().index('node')
+    calls = []
+    for path in crate_source().joinpath('src').rglob('*.rs'):
+        source = path.read_text()
+        for call in re.finditer(rf'(?<!fn ){function.name}\(', source):
+            arguments = RustLiteral(source, call.end() - 1, path).arguments()
+            node = arguments[position] if len(arguments) > position else None
+            if isinstance(node, Expression) and 'contract.' in node.text:
+                calls.append((path, node))
+    if len(calls) != 1:
+        raise AssertionError(
+            f'{CRATE}: expected one {function.name} call naming its node from the contract, '
+            f'found {[str(path) for path, _ in calls]}'
+        )
+    resolved = resolve(calls[0][1], {})
+    if not isinstance(resolved, str):
+        raise AssertionError(f'{calls[0][0]}: {calls[0][1].text} is not a contract field')
+    return resolved
+
+
 def rust_face_graph() -> dict:
-    source = PEOPLE_SERVER.read_text()
-    constants = people_strings()
-    start = source.find('fn inject_ipadapter(')
-    if start < 0:
-        raise AssertionError(f'{PEOPLE_SERVER}: inject_ipadapter is missing')
-    end = source.find('\n}\n', start)
-    if end <= start:
-        raise AssertionError(f'{PEOPLE_SERVER}: inject_ipadapter has no closing brace')
+    function = rust_function('people', 'attach_face')
     graph = {
-        '4': {
+        FACE_CHECKPOINT_NODE: {
             'class_type': 'CheckpointLoaderSimple',
             'inputs': {'ckpt_name': 'model.safetensors'},
         }
     }
-    for insert in re.finditer(r'object\.insert\(\s*(\w+)\.into\(\),\s*json!\(', source[start:end]):
+    ids = face_node_ids(function)
+    substitutions = (
+        face_files(function)
+        | ids
+        | {'node': face_node_class(function), 'model': [FACE_CHECKPOINT_NODE, 0]}
+    )
+    for insert in re.finditer(
+        r'nodes\.insert\(\s*(\w+)(?:\.clone\(\))?,\s*json!\(', function.body
+    ):
         key = insert.group(1)
-        if key not in constants:
-            raise AssertionError(f'{PEOPLE_SERVER}: node key {key} is not a &str constant')
-        node = RustLiteral(source, start + insert.end(), PEOPLE_SERVER).object()
-        graph[constants[key]] = resolve(node, constants)
-    face = graph[constants['IPADAPTER_NODE']]
-    face['inputs']['model'] = ['4', 0]
-    return graph
+        if key not in ids:
+            raise AssertionError(f'{function.label}: node key {key} is not an allocated id')
+        node = function.reader(insert.end() - len('json!(')).json()
+        graph[ids[key]] = node
+    return resolve_graph(function.label, 'people', graph, substitutions)
 
 
 def flux() -> train_lora.TrainingModel:
@@ -408,11 +739,11 @@ class GraphContractTests(unittest.TestCase):
         sources = [
             COMFYUI / 'train_lora.py',
             COMFYUI / 'probe_lora.py',
-            ROOT / 'runner/zone_comfy/src/train.rs',
-            ROOT / 'runner/zone_comfy/src/quality.rs',
+            *module_files('train'),
+            *module_files('quality'),
         ]
         for source in sources:
-            with self.subTest(source=source.name):
+            with self.subTest(source=str(source)):
                 self.assertNotIn('MakeTrainingDataset', source.read_text())
 
     def test_repository_extension_is_part_of_the_loaded_registry(self) -> None:
@@ -440,13 +771,14 @@ class GraphContractTests(unittest.TestCase):
         node_class = self.nodes.NODE_CLASS_MAPPINGS['ZoneIPAdapterFace']
         inputs, _, _ = schema(node_class)
         bounds = inputs['strength'][1]
-        strength = people_numbers()['IPADAPTER_STRENGTH']
-        self.assertGreaterEqual(strength, bounds['min'], f'{PEOPLE_SERVER}: IPADAPTER_STRENGTH')
-        self.assertLessEqual(strength, bounds['max'], f'{PEOPLE_SERVER}: IPADAPTER_STRENGTH')
+        strength = module_numbers('people')['IPADAPTER_STRENGTH']
+        self.assertGreaterEqual(strength, bounds['min'], f'{CRATE} people::IPADAPTER_STRENGTH')
+        self.assertLessEqual(strength, bounds['max'], f'{CRATE} people::IPADAPTER_STRENGTH')
+        directory = module_strings('recipe')['IPADAPTER_DIRECTORY']
         self.assertEqual(
-            people_strings()['IPADAPTER_FILE'],
-            sys.modules[node_class.__module__].PLUS_FACE,
-            f'{PEOPLE_SERVER}: IPADAPTER_FILE',
+            face_filenames(directory),
+            {sys.modules[node_class.__module__].PLUS_FACE},
+            f'{[str(path) for path in catalogs()]}: face_required_files in {directory}/',
         )
 
     def test_face_node_at_zero_strength_returns_the_model_untouched(self) -> None:
@@ -647,6 +979,75 @@ class GraphContractTests(unittest.TestCase):
             finally:
                 module.folder_paths.get_input_directory = original
             self.assertTrue(victim.is_file())
+
+
+class ConstantResolutionTests(unittest.TestCase):
+    def crate(self, modules: dict[str, str]) -> Path:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        source = Path(directory.name)
+        for name, text in ({'lib': ''} | modules).items():
+            path = source / 'src' / f'{name}.rs'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return source
+
+    @staticmethod
+    def face(class_type: str) -> dict:
+        return {
+            '5': {
+                'class_type': Expression(class_type),
+                'inputs': {'image': Expression('face'), 'strength': Expression('STRENGTH')},
+            }
+        }
+
+    def test_a_constant_declared_in_the_module_resolves(self) -> None:
+        source = self.crate(
+            {
+                'people': 'const LOAD_IMAGE: &str = "LoadImage";\n'
+                'const STRENGTH: f64 = 0.4;\n',
+            }
+        )
+        graph = resolve_graph(
+            'face', 'people', self.face('LOAD_IMAGE'), {'face': 'face.png'}, source
+        )
+        self.assertEqual(
+            graph['5'],
+            {'class_type': 'LoadImage', 'inputs': {'image': 'face.png', 'strength': 0.4}},
+        )
+
+    def test_a_constant_imported_from_another_module_resolves(self) -> None:
+        source = self.crate(
+            {
+                'recipe': 'pub(crate) const LOAD_IMAGE: &str = "LoadImage";\n'
+                'pub(crate) const STRENGTH: f64 = 0.4;\n'
+                'pub struct Recipe;\n',
+                'people': 'use crate::recipe::LOAD_IMAGE;\n'
+                'use crate::recipe::{Recipe, STRENGTH};\n',
+            }
+        )
+        graph = resolve_graph(
+            'face', 'people', self.face('LOAD_IMAGE'), {'face': 'face.png'}, source
+        )
+        self.assertEqual(
+            graph['5'],
+            {'class_type': 'LoadImage', 'inputs': {'image': 'face.png', 'strength': 0.4}},
+        )
+
+    def test_an_import_whose_module_declares_no_constant_fails_naming_it(self) -> None:
+        source = self.crate(
+            {
+                'recipe': 'pub(crate) const STRENGTH: f64 = 0.4;\n',
+                'people': 'use crate::recipe::{LOAD_IMAGE, STRENGTH};\n',
+            }
+        )
+        with self.assertRaisesRegex(AssertionError, r'face: cannot resolve LOAD_IMAGE: .* recipe'):
+            resolve_graph('face', 'people', self.face('LOAD_IMAGE'), {'face': 'face.png'}, source)
+
+    def test_a_constant_neither_declared_nor_imported_fails_naming_it(self) -> None:
+        source = self.crate({'people': 'const STRENGTH: f64 = 0.4;\n'})
+        with self.assertRaisesRegex(AssertionError, r'face: cannot resolve LOAD_IMAGE: '):
+            resolve_graph('face', 'people', self.face('LOAD_IMAGE'), {'face': 'face.png'}, source)
 
 
 if __name__ == '__main__':

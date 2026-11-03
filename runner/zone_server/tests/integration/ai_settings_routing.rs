@@ -534,7 +534,7 @@ async fn an_image_intent_check_uses_the_organization_endpoint() {
     let mut config = endpoints.config();
     config.comfyui.enabled = true;
     config.comfyui.base_url = UNREACHABLE.to_string();
-    config.comfyui.classifier_timeout_secs = 5;
+    config.comfyui.classifier_timeout = Duration::from_secs(5);
 
     let outcome = chat_turn(config, CHAT_MODEL, AMBIGUOUS, &organization, None).await;
 

@@ -106,28 +106,28 @@ async fn plan_from_select(
     chat_preset: Option<&str>,
 ) -> Result<Plan, PlanError> {
     let features = select?;
-    let models_dir = state.config().comfyui.models_dir.clone();
+    let models_directory = state.config().comfyui.models_directory.clone();
     let tags = ollama_tags(&state.config().ollama_host).await;
     make_plan(PlanInput {
         features,
         preset_id: chat_preset.map(str::to_string),
         ram_bytes: ram_bytes(),
-        disk_free_bytes: disk_free(&models_dir),
+        disk_free_bytes: disk_free(&models_directory),
         ollama_tags: tags,
-        comfy_present: comfy_present(&models_dir),
+        comfy_present: comfy_present(&models_directory),
     })
 }
 
-fn disk_free(models_dir: &Path) -> u64 {
+fn disk_free(models_directory: &Path) -> u64 {
     if let Ok(value) = std::env::var("ZONE_SETUP_DISK_FREE_BYTES")
         && let Ok(parsed) = value.trim().parse()
     {
         return parsed;
     }
-    let path = if models_dir.exists() {
-        models_dir
+    let path = if models_directory.exists() {
+        models_directory
     } else {
-        models_dir.parent().unwrap_or(models_dir)
+        models_directory.parent().unwrap_or(models_directory)
     };
     super::filesystem_usage(&path.to_string_lossy())
         .map(|usage| usage.available_bytes)

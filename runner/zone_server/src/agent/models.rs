@@ -5,23 +5,28 @@ use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
 use crate::db::workspace_members::{self, WorkspaceRole};
 use crate::pull::Pull;
 use crate::routes::models::{
-    self, CatalogError, DismissError, ListModelsQuery, browse_models, catalog_pull_start,
-    current_train_job, delete_named, dismiss_train_job, filesystem_usage, list_comfy_models,
-    list_ollama_model_rows, show_model, start_job, train_bases_list, validate_model_name,
+    self, CatalogError, DismissError, ListModelsQuery, Method, Subject, TrainForm, browse_models,
+    catalog_pull_start, current_train_job, delete_named, dismiss_train_job, filesystem_usage,
+    list_comfy_models, list_ollama_model_rows, show_model, start_job, train_bases_list,
+    validate_model_name,
 };
 use crate::state::AppState;
+use abnegate_comfy::host::Compute;
+use abnegate_comfy::lora::{TrainError, TrainImage};
+use abnegate_comfy::{train, video};
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use zone_comfy::lora::{self, TrainImage, TrainMethod, TrainProvider, TrainRequest, TrainSubject};
-use zone_comfy::video;
 use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, excerpt};
 
 const LIST_CAP: usize = 25;
 const START_TIMEOUT_SECS: u64 = 600;
+const NO_DOCUMENTS: &str = "training needs documents";
+const NO_IMAGES: &str = "training needs images";
+const CLIP_EXTENSIONS: [&str; 6] = ["mp4", "mov", "m4v", "webm", "mkv", "avi"];
 
 pub(crate) const NAMES: [&str; 10] = [
     "cancel_model_install",
@@ -198,7 +203,7 @@ impl Tool for ModelTool {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Adapter or chat-model name to publish as."
+                        "description": "Adapter or chat-model name to publish as. A pivotal adapter's name is only letters, digits, dashes or underscores."
                     },
                     "base": {
                         "type": "string",
@@ -492,7 +497,7 @@ fn dismiss_train(state: &AppState) -> ToolResult {
     }
     match dismiss_train_job(state) {
         Ok(()) => ToolResult::success("Dismissed the finished training job."),
-        Err(DismissError::Busy) => ToolResult::error("a training job is already running"),
+        Err(DismissError::Busy) => ToolResult::error(models::TRAIN_RUNNING),
         Err(DismissError::Failed(message)) => ToolResult::error(message),
     }
 }
@@ -511,7 +516,7 @@ async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> Tool
             Ok(method) => method,
             Err(error) => return error,
         },
-        None => TrainMethod::Lora,
+        None => Method::Lora,
     };
     let subject = match optional_string_arg(params, "subject") {
         Some(value) => match parse_subject(value) {
@@ -520,12 +525,12 @@ async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> Tool
         },
         None => infer_subject(&scope.state, &base, method).await,
     };
-    let provider = match optional_string_arg(params, "provider") {
-        Some(value) => match parse_provider(value) {
-            Ok(provider) => provider,
+    let compute = match optional_string_arg(params, "provider") {
+        Some(value) => match parse_compute(value) {
+            Ok(compute) => compute,
             Err(error) => return error,
         },
-        None => TrainProvider::Local,
+        None => Compute::Local,
     };
     let paths = match string_list(params, "paths") {
         Ok(paths) => paths,
@@ -539,24 +544,21 @@ async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> Tool
         Err(error) => return ToolResult::error(error),
     };
     let trigger = optional_string_arg(params, "trigger").map(str::to_string);
-    let request = TrainRequest {
+    let form = TrainForm {
         name,
         base,
         trigger,
         subject,
         method,
-        provider,
         images,
+        compute,
     };
-    let runpod_api_key = if provider == TrainProvider::Runpod {
-        crate::db::ai_settings::runpod_api_key(scope.state.db(), scope.workspace_id)
-            .await
-            .map(|key| key.expose().trim().to_string())
-            .filter(|key| !key.is_empty())
+    let saved = if compute.is_remote() {
+        crate::db::ai_settings::runpod_api_key(scope.state.db(), scope.workspace_id).await
     } else {
         None
     };
-    match start_job(&scope.state, request, runpod_api_key).await {
+    match start_job(&scope.state, form, saved).await {
         Ok(view) => json_ok(json!({
             "job": view,
             "note": "Training continues after this call. Poll get_train_job; do not claim it finished.",
@@ -565,55 +567,48 @@ async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> Tool
     }
 }
 
-fn empty_paths_message(subject: TrainSubject) -> &'static str {
-    if subject == TrainSubject::Language {
-        "training needs documents"
+fn empty_paths_message(subject: Subject) -> &'static str {
+    if subject == Subject::Language {
+        NO_DOCUMENTS
     } else {
-        "training needs images"
+        NO_IMAGES
     }
 }
 
-async fn infer_subject(state: &AppState, base: &str, method: TrainMethod) -> TrainSubject {
+async fn infer_subject(state: &AppState, base: &str, method: Method) -> Subject {
     if let Ok(bases) = train_bases_list(state).await
         && let Some(found) = bases.into_iter().find(|item| item.id == base)
     {
         return found.subject;
     }
-    if method.requires_person() {
-        TrainSubject::Person
+    if method == Method::Lora {
+        Subject::Other
     } else {
-        TrainSubject::Other
+        Subject::Person
     }
 }
 
-fn parse_subject(value: &str) -> Result<TrainSubject, ToolResult> {
-    match value {
-        "person" => Ok(TrainSubject::Person),
-        "other" => Ok(TrainSubject::Other),
-        "language" => Ok(TrainSubject::Language),
-        _ => Err(ToolResult::error(
-            "subject must be person, other, or language",
-        )),
-    }
+fn parse_subject(value: &str) -> Result<Subject, ToolResult> {
+    Subject::parse(value)
+        .ok_or_else(|| ToolResult::error("subject must be person, other, or language"))
 }
 
-fn parse_method(value: &str) -> Result<TrainMethod, ToolResult> {
+fn parse_method(value: &str) -> Result<Method, ToolResult> {
     match value {
-        "lora" => Ok(TrainMethod::Lora),
-        "finetune" => Ok(TrainMethod::Finetune),
-        "pivotal" => Ok(TrainMethod::Pivotal),
+        "lora" => Ok(Method::Lora),
+        "finetune" => Ok(Method::Finetune),
+        "pivotal" => Ok(Method::Pivotal),
         _ => Err(ToolResult::error(
             "method must be lora, finetune, or pivotal",
         )),
     }
 }
 
-fn parse_provider(value: &str) -> Result<TrainProvider, ToolResult> {
-    match value {
-        "local" => Ok(TrainProvider::Local),
-        "runpod" => Ok(TrainProvider::Runpod),
-        _ => Err(ToolResult::error("provider must be local or runpod")),
-    }
+fn parse_compute(value: &str) -> Result<Compute, ToolResult> {
+    [Compute::Local, Compute::Runpod]
+        .into_iter()
+        .find(|compute| compute.as_str() == value)
+        .ok_or_else(|| ToolResult::error("provider must be local or runpod"))
 }
 
 fn string_list(params: &Value, key: &str) -> Result<Vec<String>, ToolResult> {
@@ -641,7 +636,7 @@ async fn load_training_paths(
     state: &AppState,
     cwd: &Path,
     paths: &[String],
-    subject: TrainSubject,
+    subject: Subject,
 ) -> Result<Vec<TrainImage>, String> {
     let limit = state
         .config()
@@ -672,11 +667,11 @@ async fn load_training_paths(
             .ok_or_else(|| format!("{} is not a usable file name", path.display()))?
             .to_string();
         let bytes = std::fs::read(&path).map_err(|error| format!("{filename}: {error}"))?;
-        if subject == TrainSubject::Language {
+        if subject == Subject::Language {
             images.push(image_from_bytes(filename, bytes, None));
             continue;
         }
-        if video::is_clip_filename(&filename) {
+        if is_clip(&filename) {
             let clip = extract_clip(state, &bytes, &filename).await?;
             let max_group = clip
                 .frames
@@ -700,6 +695,17 @@ async fn load_training_paths(
     Ok(images)
 }
 
+fn is_clip(filename: &str) -> bool {
+    Path::new(filename)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            CLIP_EXTENSIONS
+                .iter()
+                .any(|clip| extension.eq_ignore_ascii_case(clip))
+        })
+}
+
 fn resolve_path(cwd: &Path, given: &str) -> PathBuf {
     let path = Path::new(given);
     if path.is_absolute() {
@@ -710,14 +716,10 @@ fn resolve_path(cwd: &Path, given: &str) -> PathBuf {
 }
 
 fn image_from_bytes(filename: String, bytes: Vec<u8>, group: Option<usize>) -> TrainImage {
-    TrainImage {
-        filename,
-        caption: String::new(),
-        bytes_base64: String::new(),
-        bytes: Some(bytes),
-        before_base64: None,
-        before: None,
-        group,
+    let image = TrainImage::from_bytes(filename, String::new(), bytes);
+    match group {
+        Some(group) => image.with_group(group),
+        None => image,
     }
 }
 
@@ -734,19 +736,15 @@ async fn extract_clip(
     filename: &str,
 ) -> Result<video::Clip, String> {
     let config = &state.config().comfyui;
-    let resolution = zone_comfy::train::packaged_config()
+    let resolution = train::packaged_config()
         .map(|settings| settings.resolution())
         .map_err(|error| error.to_string())?;
-    let options = video::Options {
-        fps: config.frame_fps,
-        resolution,
-        mirror: true,
-        limit: config.frame_limit as usize,
-    };
+    let options =
+        video::Options::new(config.frame_rate, resolution).with_limit(config.frame_limit as usize);
     match video::extract(config, video, filename, options).await {
         Ok(clip) => Ok(clip),
-        Err(lora::TrainError::Invalid(message)) => Err(message.to_string()),
-        Err(lora::TrainError::Disabled) => Err(format!(
+        Err(TrainError::Invalid(message)) => Err(message.to_string()),
+        Err(TrainError::Disabled) => Err(format!(
             "{} is not installed on this server, so a video cannot be turned into training frames",
             config.ffmpeg
         )),
@@ -770,6 +768,7 @@ fn json_ok(value: impl Serialize) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::comfy::policy;
     use crate::state::test_config;
     use crate::train_jobs::TrainJobStatus;
     use uuid::Uuid;
@@ -802,7 +801,7 @@ mod tests {
         let mut config = test_config();
         config.comfyui.enabled = true;
         config.comfyui.train_command = Some("true".into());
-        config.comfyui.models_dir = directory.path().to_path_buf();
+        config.comfyui.models_directory = directory.path().to_path_buf();
         let database =
             sqlx::PgPool::connect_lazy("postgres://localhost/test").expect("a lazy pool");
         (directory, AppState::new(config, database, None))
@@ -810,6 +809,18 @@ mod tests {
 
     fn still(filename: &str) -> TrainImage {
         image_from_bytes(filename.to_string(), PIXEL.to_vec(), None)
+    }
+
+    fn form(base: &str, trigger: Option<&str>, subject: Subject) -> TrainForm {
+        TrainForm {
+            name: "Ada".into(),
+            base: base.into(),
+            trigger: trigger.map(str::to_string),
+            subject,
+            method: Method::Lora,
+            images: vec![still("shot.png")],
+            compute: Compute::Local,
+        }
     }
 
     #[tokio::test]
@@ -859,16 +870,13 @@ mod tests {
 
     #[test]
     fn empty_paths_use_the_same_messages_as_validate_request() {
+        assert_eq!(empty_paths_message(Subject::Other), "training needs images");
         assert_eq!(
-            empty_paths_message(TrainSubject::Other),
+            empty_paths_message(Subject::Person),
             "training needs images"
         );
         assert_eq!(
-            empty_paths_message(TrainSubject::Person),
-            "training needs images"
-        );
-        assert_eq!(
-            empty_paths_message(TrainSubject::Language),
+            empty_paths_message(Subject::Language),
             "training needs documents"
         );
     }
@@ -885,34 +893,61 @@ mod tests {
     #[tokio::test]
     async fn video_identity_training_is_refused_before_a_job_starts() {
         let (_dir, state) = train_state();
-        let request = TrainRequest {
+        let request = TrainForm {
             name: "Ada".into(),
-            base: "sdxl-people".into(),
+            base: policy::PEOPLE_BASE.into(),
             trigger: Some("ada".into()),
-            subject: TrainSubject::Person,
-            method: TrainMethod::Video,
-            provider: TrainProvider::Local,
+            subject: Subject::Person,
+            method: Method::Video,
             images: vec![image_from_bytes("walk.mp4".into(), b"clip".to_vec(), None)],
+            compute: Compute::Local,
         };
         let error = start_job(&state, request, None)
             .await
             .expect_err("video identity training is off");
-        assert_eq!(error.message(), lora::VIDEO_REFUSAL);
+        assert_eq!(error.message(), policy::VIDEO_REFUSAL);
         assert!(state.train_jobs().current().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pivotal_name_with_a_dot_is_refused_before_a_job_starts() {
+        let (directory, state) = train_state();
+        let checkpoint = directory.path().join(policy::PEOPLE_CHECKPOINT);
+        std::fs::create_dir_all(checkpoint.parent().expect("checkpoints")).expect("checkpoints");
+        std::fs::write(&checkpoint, b"weights").expect("checkpoint");
+        let request = TrainForm {
+            name: "ada.v2".into(),
+            method: Method::Pivotal,
+            ..form(policy::PEOPLE_BASE, Some("ada"), Subject::Person)
+        };
+        let error = start_job(&state, request, None)
+            .await
+            .expect_err("an embedding named ada.v2 cannot be prompted");
+        assert_eq!(error.message(), policy::PIVOTAL_NAME);
+        assert!(state.train_jobs().current().is_none());
+    }
+
+    #[test]
+    fn a_clip_is_a_file_in_a_container_ffmpeg_reads_frames_from() {
+        for clip in [
+            "walk.mp4",
+            "walk.MOV",
+            "walk.webm",
+            "walk.m4v",
+            "walk.mkv",
+            "walk.avi",
+        ] {
+            assert!(is_clip(clip), "{clip}");
+        }
+        for still in ["walk.png", "walk.mp4.png", "walk", "mp4"] {
+            assert!(!is_clip(still), "{still}");
+        }
     }
 
     #[tokio::test]
     async fn start_train_with_a_png_reaches_the_registry() {
         let (_dir, state) = train_state();
-        let request = TrainRequest {
-            name: "Ada".into(),
-            base: "flux-schnell".into(),
-            trigger: Some("ada".into()),
-            subject: TrainSubject::Other,
-            method: TrainMethod::Lora,
-            provider: TrainProvider::Local,
-            images: vec![still("shot.png")],
-        };
+        let request = form("flux-schnell", Some("ada"), Subject::Other);
         match start_job(&state, request, None).await {
             Ok(view) => {
                 assert_eq!(view.name, "Ada");
@@ -941,15 +976,7 @@ mod tests {
                 .start("held".into(), Some("lora".into()), Some("local".into()))
                 .is_some()
         );
-        let request = TrainRequest {
-            name: "Ada".into(),
-            base: "flux-schnell".into(),
-            trigger: Some("ada".into()),
-            subject: TrainSubject::Other,
-            method: TrainMethod::Lora,
-            provider: TrainProvider::Local,
-            images: vec![still("shot.png")],
-        };
+        let request = form("flux-schnell", Some("ada"), Subject::Other);
         let error = start_job(&state, request, None)
             .await
             .expect_err("the slot is held");
@@ -964,16 +991,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_person_run_without_a_trigger_is_refused() {
-        let (_dir, state) = train_state();
-        let request = TrainRequest {
-            name: "Ada".into(),
-            base: "sdxl-people".into(),
-            trigger: None,
-            subject: TrainSubject::Person,
-            method: TrainMethod::Lora,
-            provider: TrainProvider::Local,
-            images: vec![still("shot.png")],
-        };
+        let (directory, state) = train_state();
+        let checkpoint = directory.path().join(policy::PEOPLE_CHECKPOINT);
+        std::fs::create_dir_all(checkpoint.parent().expect("a checkpoints directory"))
+            .expect("the checkpoints directory");
+        std::fs::write(&checkpoint, b"weights").expect("the people checkpoint");
+        let request = form("sdxl-people", None, Subject::Person);
         let error = start_job(&state, request, None)
             .await
             .expect_err("a person needs a trigger");
@@ -981,6 +1004,39 @@ mod tests {
             error.message().contains("trigger word is required"),
             "{}",
             error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn runpod_without_a_saved_key_is_refused_before_training() {
+        let (_dir, state) = train_state();
+        let mut request = form("sdxl-people", Some("ada"), Subject::Person);
+        request.compute = Compute::Runpod;
+        let error = start_job(&state, request, None)
+            .await
+            .expect_err("Runpod needs a saved key");
+        assert_eq!(
+            error.message(),
+            "Save a Runpod API key in Workspace Settings."
+        );
+        assert!(state.train_jobs().current().is_none());
+    }
+
+    #[test]
+    fn the_tool_reads_the_wire_names_of_subjects_and_computes() {
+        assert_eq!(parse_subject("language").ok(), Some(Subject::Language));
+        assert_eq!(parse_subject("person").ok(), Some(Subject::Person));
+        assert_eq!(
+            parse_subject("robot").err().and_then(|result| result.error),
+            Some("subject must be person, other, or language".into())
+        );
+        assert_eq!(parse_compute("runpod").ok(), Some(Compute::Runpod));
+        assert_eq!(parse_compute("local").ok(), Some(Compute::Local));
+        assert_eq!(
+            parse_compute("lambda")
+                .err()
+                .and_then(|result| result.error),
+            Some("provider must be local or runpod".into())
         );
     }
 

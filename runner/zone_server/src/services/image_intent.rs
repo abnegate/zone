@@ -8,7 +8,6 @@
 
 use abnegate_llm::Message;
 use serde_json::Value;
-use std::time::Duration;
 use zone_core::llm::{LlmBackend, LlmClient};
 
 use crate::config::ComfyUiConfig;
@@ -240,7 +239,7 @@ impl ImageIntentClassifier {
         };
         let messages = [Message::user(prompt)];
         let result = tokio::time::timeout(
-            Duration::from_secs(self.config.classifier_timeout_secs),
+            self.config.classifier_timeout,
             client.chat_with_model(&self.config.classifier_model, &messages, None),
         )
         .await;
@@ -269,7 +268,7 @@ impl ImageIntentClassifier {
         let prompt = format!("{EDIT_SCENE_REWRITE}\nUser: {content}");
         let messages = [Message::user(prompt)];
         let result = tokio::time::timeout(
-            Duration::from_secs(self.config.classifier_timeout_secs),
+            self.config.classifier_timeout,
             client.chat_with_model(&self.config.classifier_model, &messages, None),
         )
         .await;
@@ -1084,8 +1083,30 @@ mod tests {
     use super::*;
 
     use std::path::PathBuf;
+    use std::time::Duration;
     use tempfile::TempDir;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
     use zone_core::llm::{AgentKind, CliSettings};
+
+    fn enabled() -> ComfyUiConfig {
+        let mut config = crate::services::comfy::settings::development();
+        config.enabled = true;
+        config
+    }
+
+    fn classifying(model: &str) -> ComfyUiConfig {
+        let mut config = enabled();
+        config.classifier_model = model.to_string();
+        config
+    }
+
+    fn waiting(mut config: ComfyUiConfig, timeout: Duration) -> ComfyUiConfig {
+        config.classifier_timeout = timeout;
+        config
+    }
 
     /// The backend every one of these cases assumes: an endpoint at the host
     /// the case names, with nothing else on this machine to ask.
@@ -1100,10 +1121,6 @@ mod tests {
             LlmBackend::default(),
         )
     }
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
 
     /// An attached image is attached media too, so the two source flags the
     /// rules read only ever disagree when a clip is the attachment.
@@ -1590,11 +1607,7 @@ mod tests {
 
     #[tokio::test]
     async fn upscale_metadata_flag_forces_and_skips() {
-        let config = ComfyUiConfig {
-            enabled: true,
-            ..Default::default()
-        };
-        let classifier = over_http(config, String::new(), String::new());
+        let classifier = over_http(enabled(), String::new(), String::new());
         assert_eq!(
             classifier
                 .classify("hello", Some(&serde_json::json!({"upscale": true})))
@@ -1632,10 +1645,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_override_and_disabled_guard() {
-        let mut config = ComfyUiConfig {
-            enabled: true,
-            ..Default::default()
-        };
+        let mut config = enabled();
         let classifier = over_http(config.clone(), String::new(), String::new());
         assert!(
             classifier
@@ -1668,14 +1678,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_metadata_flag_forces_and_skips_audio() {
-        let classifier = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                ..Default::default()
-            },
-            String::new(),
-            String::new(),
-        );
+        let classifier = over_http(enabled(), String::new(), String::new());
         assert_eq!(
             classifier
                 .classify(
@@ -1713,15 +1716,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                classifier_model: "fast".to_string(),
-                ..Default::default()
-            },
-            server.uri(),
-            "key".to_string(),
-        );
+        let classifier = over_http(classifying("fast"), server.uri(), "key".to_string());
         (server, classifier)
     }
 
@@ -1750,12 +1745,7 @@ mod tests {
     async fn a_host_agent_decides_the_ambiguous_turn_with_no_endpoint_configured() {
         const SOFT_AUDIO: &str = "generate ambient rain sounds";
         let directory = TempDir::new().expect("a temporary directory");
-        let comfyui = ComfyUiConfig {
-            enabled: true,
-            classifier_model: "sonnet".to_string(),
-            classifier_timeout_secs: 20,
-            ..Default::default()
-        };
+        let comfyui = waiting(classifying("sonnet"), Duration::from_secs(20));
 
         let hostless = over_http(comfyui.clone(), String::new(), String::new());
         assert_eq!(
@@ -1785,12 +1775,10 @@ mod tests {
         const EDIT: &str = "Remove this object from an image";
         let directory = TempDir::new().expect("a temporary directory");
         let agent = ImageIntentClassifier::new(
-            ComfyUiConfig {
-                enabled: true,
-                classifier_model: crate::services::stages::AUTO.to_string(),
-                classifier_timeout_secs: 20,
-                ..Default::default()
-            },
+            waiting(
+                classifying(crate::services::stages::AUTO),
+                Duration::from_secs(20),
+            ),
             crate::services::endpoint::testing::endpoint("", ""),
             LlmBackend::cli(
                 AgentKind::Claude,
@@ -1840,12 +1828,10 @@ mod tests {
             crate::services::endpoint::Origin::Settings
         );
         let classifier = ImageIntentClassifier::new(
-            ComfyUiConfig {
-                enabled: true,
-                classifier_model: crate::services::stages::AUTO.to_string(),
-                classifier_timeout_secs: 20,
-                ..Default::default()
-            },
+            waiting(
+                classifying(crate::services::stages::AUTO),
+                Duration::from_secs(20),
+            ),
             endpoint,
             LlmBackend::Http,
         );
@@ -1896,14 +1882,7 @@ mod tests {
             GenerationIntent::Chat
         );
 
-        let hostless = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                ..Default::default()
-            },
-            String::new(),
-            String::new(),
-        );
+        let hostless = over_http(enabled(), String::new(), String::new());
         assert_eq!(
             hostless.classify(SOFT_AUDIO, None).await,
             GenerationIntent::Chat
@@ -1942,15 +1921,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                classifier_model: "fast".to_string(),
-                ..Default::default()
-            },
-            server.uri(),
-            "key".to_string(),
-        );
+        let classifier = over_http(classifying("fast"), server.uri(), "key".to_string());
         assert!(
             classifier
                 .is_image_request("Design a logo for Acme", None)
@@ -1976,14 +1947,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                ..Default::default()
-            },
-            server.uri(),
-            "key".to_string(),
-        );
+        let classifier = over_http(enabled(), server.uri(), "key".to_string());
         assert!(
             !classifier
                 .is_image_request("Design a logo for Acme", None)
@@ -2004,11 +1968,7 @@ mod tests {
             .mount(&server)
             .await;
         let classifier = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                classifier_timeout_secs: 1,
-                ..Default::default()
-            },
+            waiting(enabled(), Duration::from_secs(1)),
             server.uri(),
             "key".to_string(),
         );
@@ -2093,15 +2053,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                classifier_model: "fast".to_string(),
-                ..Default::default()
-            },
-            server.uri(),
-            "key".to_string(),
-        );
+        let classifier = over_http(classifying("fast"), server.uri(), "key".to_string());
         let prompt = classifier
             .edit_prompt("Put this object in a different environment")
             .await;
@@ -2111,14 +2063,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_prompt_falls_back_when_host_is_empty() {
-        let classifier = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                ..Default::default()
-            },
-            String::new(),
-            String::new(),
-        );
+        let classifier = over_http(enabled(), String::new(), String::new());
         let prompt = classifier
             .edit_prompt("Remove this object from an image")
             .await;
@@ -2154,15 +2099,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                classifier_model: "fast".to_string(),
-                ..Default::default()
-            },
-            server.uri(),
-            "key".to_string(),
-        );
+        let classifier = over_http(classifying("fast"), server.uri(), "key".to_string());
         assert!(
             classifier
                 .is_image_request("the same subject at night", Some(&attached_png()))
@@ -2188,15 +2125,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let classifier = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                classifier_model: "fast".to_string(),
-                ..Default::default()
-            },
-            server.uri(),
-            "key".to_string(),
-        );
+        let classifier = over_http(classifying("fast"), server.uri(), "key".to_string());
         assert!(
             !classifier
                 .is_image_request("thanks", Some(&attached_png()))
@@ -2206,14 +2135,7 @@ mod tests {
 
     #[tokio::test]
     async fn attached_informal_edit_stays_chat_without_classifier_host() {
-        let classifier = over_http(
-            ComfyUiConfig {
-                enabled: true,
-                ..Default::default()
-            },
-            String::new(),
-            String::new(),
-        );
+        let classifier = over_http(enabled(), String::new(), String::new());
         assert!(
             !classifier
                 .is_image_request("the same subject at night", Some(&attached_png()))
@@ -2239,11 +2161,7 @@ Answer the instruction against how things are now, and compare that with the rea
             RuleDecision::Image,
             "the word rules read the watch's prompt as an image edit"
         );
-        let config = ComfyUiConfig {
-            enabled: true,
-            ..Default::default()
-        };
-        let classifier = over_http(config, String::new(), String::new());
+        let classifier = over_http(enabled(), String::new(), String::new());
         assert_eq!(
             classifier
                 .classify(prompt, Some(&serde_json::json!({"source": "reminder"})))

@@ -25,6 +25,10 @@ DEFAULT_HF_BASE = 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged'
 WAN_TRANSFORMER = 'wan2.2_ti2v_5B_fp16.safetensors'
 WAN_VAE = 'wan2.2_vae.safetensors'
 ATTN_TARGETS = ['to_q', 'to_k', 'to_v', 'to_out.0']
+VIDEO_REFUSAL = (
+    'video identity training is off: it trains Wan 2.2 TI2V 5B adapters, '
+    'and video generation runs Wan 2.2 A14B, which cannot load them'
+)
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
@@ -71,7 +75,6 @@ def normalize_job(job: dict[str, Any], job_dir: Path) -> dict[str, Any]:
     job['filename'] = train_sdxl.weight_name(
         str(job.get('filename') or default_filename(job['name'])), 'filename'
     )
-    job['recipe_id'] = str(job.get('recipe_id') or 'wan-adapter')
     job['hf_base'] = str(job.get('hf_base') or DEFAULT_HF_BASE)
     windows = list_windows(job_dir)
     if job.get('image_count') is None:
@@ -79,47 +82,6 @@ def normalize_job(job: dict[str, Any], job_dir: Path) -> dict[str, Any]:
     else:
         job['image_count'] = int(job['image_count'])
     return job
-
-
-def still_face(models_dir: Path, job: dict[str, Any]) -> str | None:
-    filename = Path(str(job.get('filename') or '')).name
-    stem = filename[:-12] if filename.endswith('.safetensors') else filename
-    if stem.endswith('-wan'):
-        stem = stem[:-4]
-    name = str(job.get('name') or stem)
-    for candidate in (stem, name):
-        if not candidate:
-            continue
-        face = Path(models_dir) / 'loras' / f'{candidate}.face.png'
-        if face.is_file():
-            return face.name
-    return None
-
-
-def sidecar_payload(job: dict[str, Any], models_dir: Path) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        'recipe_id': job.get('recipe_id') or 'wan-adapter',
-        'hf_base': job.get('hf_base') or DEFAULT_HF_BASE,
-        'trigger': job.get('trigger') or '',
-        'architecture': 'wan',
-    }
-    face = still_face(models_dir, job)
-    if face:
-        payload['face'] = face
-    return payload
-
-
-def publish_path(models_dir: Path, job: dict[str, Any]) -> Path:
-    directory = Path(models_dir) / 'loras'
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / train_sdxl.weight_name(str(job['filename']), 'filename')
-
-
-def publish_stub(models_dir: Path, job: dict[str, Any]) -> Path:
-    destination = publish_path(models_dir, job)
-    train_sdxl.write_stub_weights(destination)
-    train_sdxl.write_json(train_sdxl.sidecar_path(destination), sidecar_payload(job, models_dir))
-    return destination
 
 
 def caption_for(job: dict[str, Any], meta: dict[str, Any]) -> str:
@@ -130,7 +92,7 @@ def caption_for(job: dict[str, Any], meta: dict[str, Any]) -> str:
     return trigger or pose or 'a person'
 
 
-def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str, Any]) -> None:
+def run_stub(job_dir: Path, job: dict[str, Any], config: dict[str, Any]) -> None:
     total = steps_for(int(job.get('image_count') or 0), config)
     progress = train_sdxl.Progress(job_dir, 'video', total)
     job['total'] = total
@@ -140,7 +102,7 @@ def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[
     progress.emit('encoding', phase_step=1, phase_total=1)
     progress.emit('training', phase_step=total, phase_total=total)
     progress.emit('publishing', step=0, phase_step=0, phase_total=1)
-    publish_stub(models_dir, job)
+    train_sdxl.write_stub_weights(train_sdxl.weight_path(job_dir, job))
     job['step'] = total
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     train_sdxl.write_job(job_dir, job)
@@ -347,9 +309,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
             train_sdxl.write_job(job_dir, job)
 
     progress.emit('publishing', step=0, phase_step=0, phase_total=1)
-    destination = publish_path(models_dir, job)
-    train_sdxl.save_safetensors(destination, wan_lora_state(transformer))
-    train_sdxl.write_json(train_sdxl.sidecar_path(destination), sidecar_payload(job, models_dir))
+    train_sdxl.save_safetensors(train_sdxl.weight_path(job_dir, job), wan_lora_state(transformer))
     job['step'] = total
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     train_sdxl.write_job(job_dir, job)
@@ -357,12 +317,16 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
 
 def process_job(models_dir: Path, job_dir: Path, stub: bool) -> None:
     job = train_sdxl.load_job(job_dir)
+    if not train_sdxl.claim(job_dir, job):
+        return
     try:
+        if train_sdxl.legacy(job):
+            raise ValueError(VIDEO_REFUSAL)
         job = normalize_job(job, job_dir)
         job = train_sdxl.mark_running(job_dir, job)
         config = load_config()
         if stub:
-            run_stub(models_dir, job_dir, job, config)
+            run_stub(job_dir, job, config)
         else:
             train(models_dir, job_dir, job, config)
         train_sdxl.mark_succeeded(job_dir, job)
@@ -379,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description='Zone host Wan video LoRA trainer')
     parser.add_argument(
         '--models-dir',
-        default=os.environ.get('COMFYUI_MODELS_DIR') or './models',
+        default=os.environ.get('COMFYUI_MODELS_DIRECTORY') or './models',
     )
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--stub', action='store_true')

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 COMFYUI = Path(__file__).parents[1]
 if str(COMFYUI) not in sys.path:
@@ -13,6 +14,8 @@ if str(COMFYUI) not in sys.path:
 
 import train_sdxl  # noqa: E402
 import train_wan  # noqa: E402
+
+CLAIM = 'claimed'
 
 
 def queued_job(name: str = 'jerry', trigger: str = 'ohwx', extra: dict | None = None) -> dict:
@@ -29,8 +32,8 @@ def queued_job(name: str = 'jerry', trigger: str = 'ohwx', extra: dict | None = 
         'total': None,
         'pid': None,
         'started_at': '2026-10-04T00:00:00Z',
-        'recipe_id': 'wan-adapter',
         'hf_base': 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+        'base': 'wan-people',
     }
     if extra:
         job.update(extra)
@@ -74,27 +77,7 @@ class FilenameTests(unittest.TestCase):
         )
 
 
-class StubPublishTests(unittest.TestCase):
-    def test_stub_publishes_a_tiny_wan_adapter(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            models = Path(directory)
-            job_dir = models / '.zone-train' / str(uuid.uuid4())
-            job_dir.mkdir(parents=True)
-            write_clips(job_dir, count=2)
-            (models / 'loras').mkdir()
-            (models / 'loras' / 'jerry.face.png').write_bytes(b'face')
-            job = train_wan.normalize_job(queued_job(), job_dir)
-            destination = train_wan.publish_stub(models, job)
-            self.assertEqual(destination.name, 'jerry-wan.safetensors')
-            self.assertTrue(destination.is_file())
-            self.assertGreater(destination.stat().st_size, 0)
-            sidecar = json.loads(train_sdxl.sidecar_path(destination).read_text(encoding='utf-8'))
-            self.assertEqual(sidecar['recipe_id'], 'wan-adapter')
-            self.assertEqual(sidecar['architecture'], 'wan')
-            self.assertEqual(sidecar['trigger'], 'ohwx')
-            self.assertEqual(sidecar['hf_base'], 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged')
-            self.assertEqual(sidecar['face'], 'jerry.face.png')
-
+class StubTrainingTests(unittest.TestCase):
     def test_process_job_stub_writes_progress_and_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
@@ -111,11 +94,11 @@ class StubPublishTests(unittest.TestCase):
             self.assertEqual(progress['phase'], 'publishing')
             self.assertEqual(progress['percent'], 100)
             self.assertIn(progress['phase'], {'loading', 'encoding', 'training', 'publishing'})
-            weight = models / 'loras' / 'jerry-wan.safetensors'
+            self.assertNotIn('recipe_id', job)
+            weight = job_dir / 'jerry-wan.safetensors'
             self.assertTrue(weight.is_file())
-            sidecar = json.loads(weight.with_name(weight.name + '.zone.json').read_text())
-            self.assertEqual(sidecar['recipe_id'], 'wan-adapter')
-            self.assertEqual(sidecar['architecture'], 'wan')
+            self.assertGreater(weight.stat().st_size, 0)
+            self.assertEqual(list((models / 'loras').iterdir()), [])
 
     def test_sdxl_worker_dispatches_video_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -128,7 +111,66 @@ class StubPublishTests(unittest.TestCase):
             train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
             job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
             self.assertEqual(job['status'], 'succeeded')
-            self.assertTrue((models / 'loras' / 'jerry-wan.safetensors').is_file())
+            self.assertTrue((job_dir / 'jerry-wan.safetensors').is_file())
+
+
+class LegacyJobTests(unittest.TestCase):
+    def test_a_video_lora_queued_before_the_upgrade_fails_without_training_or_publishing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            write_clips(job_dir, count=2)
+            (models / 'loras').mkdir()
+            job = queued_job(extra={'filename': 'jerry-wan.safetensors'})
+            del job['base']
+            train_sdxl.write_job(job_dir, job)
+            with mock.patch.object(train_wan, 'run_stub') as run_stub:
+                with self.assertRaises(ValueError):
+                    train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+            run_stub.assert_not_called()
+            failed = train_sdxl.load_job(job_dir)
+            self.assertEqual(failed['status'], 'failed')
+            self.assertEqual(failed['error'], train_wan.VIDEO_REFUSAL)
+            self.assertEqual(list((models / 'loras').iterdir()), [])
+            self.assertFalse((job_dir / 'jerry-wan.safetensors').exists())
+
+
+class ClaimTests(unittest.TestCase):
+    def stage(self, models: Path) -> Path:
+        job_dir = models / '.zone-train' / str(uuid.uuid4())
+        job_dir.mkdir(parents=True)
+        write_clips(job_dir, count=3)
+        (models / 'loras').mkdir(exist_ok=True)
+        train_sdxl.write_job(job_dir, queued_job())
+        return job_dir
+
+    def test_the_claim_is_taken_before_the_job_is_marked_running(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            claimed_when_running: list[bool] = []
+            mark_running = train_sdxl.mark_running
+
+            def spy(path: Path, job: dict) -> dict:
+                claimed_when_running.append((Path(path) / CLAIM).is_file())
+                return mark_running(path, job)
+
+            with mock.patch.object(train_sdxl, 'mark_running', side_effect=spy):
+                train_wan.process_job(models, job_dir, stub=True)
+            self.assertEqual(claimed_when_running, [True])
+            self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+
+    def test_a_job_claimed_elsewhere_is_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            (job_dir / CLAIM).touch()
+            before = (job_dir / 'job.json').read_bytes()
+            with mock.patch.object(train_wan, 'run_stub') as run_stub:
+                train_wan.process_job(models, job_dir, stub=True)
+            run_stub.assert_not_called()
+            self.assertEqual((job_dir / 'job.json').read_bytes(), before)
 
 
 if __name__ == '__main__':

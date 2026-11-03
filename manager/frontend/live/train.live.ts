@@ -3,9 +3,9 @@ import { join } from 'node:path';
 import { expect, signIn, test } from './harness';
 
 /**
- * Models → Train, against the real server: ffmpeg samples the clip, zone_vision
- * crops each frame on its subject, and the screening that PR #45 added decides
- * what the trainer is allowed to see.
+ * Models → Train, against the real server: ffmpeg samples the clip,
+ * abnegate-vision crops each frame on its subject, and the screening that
+ * PR #45 added decides what the trainer is allowed to see.
  *
  * What a trained adapter learns is not checked here and is not claimed: that
  * needs the real weights. Everything up to and including the receipt is real.

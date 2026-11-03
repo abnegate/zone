@@ -1,5 +1,6 @@
 //! Authorized generated-artifact serving.
 
+use abnegate_comfy::MediaType;
 use axum::{
     Json,
     body::Body,
@@ -11,7 +12,6 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
-use zone_comfy::MediaType;
 
 use crate::{
     auth::AuthUser,

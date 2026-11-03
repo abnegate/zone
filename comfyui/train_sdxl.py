@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,12 @@ DEFAULT_HF_BASE = 'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl'
 DEFAULT_CHECKPOINT = 'lustifySDXLNSFW_ggwpV7.safetensors'
 CONFIG_PATH = Path(__file__).with_name('train_sdxl_config.json')
 TRAIN_ROOT = '.zone-train'
+CLAIM_FILE = 'claimed'
+LORAS = 'loras'
+CHECKPOINTS = 'checkpoints'
+SIDECAR_SUFFIX = '.zone.json'
+GENERATION = 'generation'
+LANGUAGE_SUBJECT = 'language'
 LATEST_SNAPSHOT = 'latest.pt'
 STILL_METHODS = {'lora', 'finetune', 'pivotal'}
 ADAPTER_METHODS = {'lora', 'pivotal'}
@@ -99,8 +106,6 @@ def steps_for(image_count: int, config: dict[str, Any]) -> int:
 def recipe_for(method: str) -> str:
     if method == 'finetune':
         return 'sdxl'
-    if method == 'video':
-        return 'wan-adapter'
     return 'sdxl-adapter'
 
 
@@ -669,8 +674,22 @@ def write_progress(job_dir: Path, step: int, total: int, **extra: Any) -> None:
     write_json(Path(job_dir) / 'progress.json', payload, pretty=False)
 
 
+def weight_path(job_dir: Path, job: dict[str, Any]) -> Path:
+    return Path(job_dir) / weight_name(str(job['filename']), 'filename')
+
+
+def legacy(job: dict[str, Any]) -> bool:
+    """A job queued before abnegate-comfy has no `base`, and its trainer publishes it."""
+    return not job.get('base') and str(job.get('subject') or '') != LANGUAGE_SUBJECT
+
+
+def legacy_destination(models_dir: Path, job: dict[str, Any]) -> Path:
+    folder = CHECKPOINTS if job.get('method') == 'finetune' else LORAS
+    return Path(models_dir) / folder / weight_name(str(job['filename']), 'filename')
+
+
 def sidecar_path(weight: Path) -> Path:
-    return weight.with_name(weight.name + '.zone.json')
+    return weight.with_name(weight.name + SIDECAR_SUFFIX)
 
 
 def sidecar_payload(job: dict[str, Any]) -> dict[str, Any]:
@@ -684,20 +703,33 @@ def sidecar_payload(job: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def write_sidecar(weight: Path, job: dict[str, Any]) -> None:
-    write_json(sidecar_path(weight), sidecar_payload(job))
+def with_generation(sidecar: dict[str, Any]) -> dict[str, Any]:
+    """abnegate-comfy replaces a weight only when its sidecar names a `generation`."""
+    return {**sidecar, GENERATION: str(uuid.uuid4())}
 
 
-def publish_directory(models_dir: Path, method: str) -> Path:
-    folder = 'checkpoints' if method == 'finetune' else 'loras'
-    directory = Path(models_dir) / folder
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
+def legacy_publish(
+    models_dir: Path,
+    job_dir: Path,
+    job: dict[str, Any],
+    sidecar: dict[str, Any],
+) -> Path:
+    destination = legacy_destination(models_dir, job)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(weight_path(job_dir, job), destination)
+    write_json(sidecar_path(destination), with_generation(sidecar))
+    return destination
 
 
-def publish_path(models_dir: Path, job: dict[str, Any]) -> Path:
-    filename = weight_name(str(job['filename']), 'filename')
-    return publish_directory(models_dir, job['method']) / filename
+def succeed(
+    models_dir: Path,
+    job_dir: Path,
+    job: dict[str, Any],
+    sidecar: dict[str, Any],
+) -> dict[str, Any]:
+    if legacy(job):
+        legacy_publish(models_dir, job_dir, job, sidecar)
+    return mark_succeeded(job_dir, job)
 
 
 def pid_alive(pid: object) -> bool:
@@ -743,7 +775,7 @@ def find_job(models_dir: Path) -> Path | None:
             continue
         status = job.get('status')
         started = str(job.get('started_at') or '')
-        if status == 'queued':
+        if status == 'queued' and not (entry / CLAIM_FILE).exists():
             queued.append((started, entry))
         elif status == 'running' and not pid_alive(job.get('pid')):
             resumable.append((started, entry))
@@ -754,6 +786,21 @@ def find_job(models_dir: Path) -> Path | None:
     if resumable:
         return resumable[0][1]
     return None
+
+
+def claim(job_dir: Path, job: dict[str, Any]) -> bool:
+    # abnegate-comfy creates the same claim before it gives up on a queued job;
+    # a running job was claimed by this trainer before it crashed.
+    if job.get('status') != 'queued':
+        return job.get('status') == 'running'
+    try:
+        descriptor = os.open(
+            Path(job_dir) / CLAIM_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+    except FileExistsError:
+        return False
+    os.close(descriptor)
+    return True
 
 
 def mark_running(job_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
@@ -799,12 +846,11 @@ def write_stub_weights(path: Path) -> None:
     atomic_write(path, b'stub')
 
 
-def publish_stub(models_dir: Path, job: dict[str, Any]) -> Path:
-    destination = publish_path(models_dir, job)
+def write_stub(models_dir: Path, job_dir: Path, job: dict[str, Any]) -> Path:
+    destination = weight_path(job_dir, job)
     write_stub_weights(destination)
     if job.get('method') == 'pivotal':
         write_stub_weights(embedding_path(models_dir, job))
-    write_sidecar(destination, job)
     return destination
 
 
@@ -831,7 +877,7 @@ def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[
         previews=previews,
     )
     progress.emit('publishing', step=0, phase_step=0, phase_total=1)
-    publish_stub(models_dir, job)
+    write_stub(models_dir, job_dir, job)
     job['step'] = total
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     write_job(job_dir, job)
@@ -923,7 +969,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Zone host SDXL person trainer')
     parser.add_argument(
         '--models-dir',
-        default=os.environ.get('COMFYUI_MODELS_DIR') or './models',
+        default=os.environ.get('COMFYUI_MODELS_DIRECTORY') or './models',
     )
     parser.add_argument('--config', default=str(CONFIG_PATH))
     parser.add_argument('--once', action='store_true')
@@ -964,6 +1010,8 @@ def process_job(
 
         train_wan.process_job(models_dir, job_dir, stub)
         return
+    if not claim(job_dir, job):
+        return
     try:
         job = normalize_job(job, job_dir)
         job = mark_running(job_dir, job)
@@ -971,7 +1019,7 @@ def process_job(
             run_stub(models_dir, job_dir, job, config)
         else:
             train(models_dir, job_dir, job, config)
-        mark_succeeded(job_dir, job)
+        succeed(models_dir, job_dir, job, sidecar_payload(job))
     except Exception as error:
         if not is_transient_crash(error):
             mark_failed(job_dir, job, error)
@@ -1759,8 +1807,9 @@ def write_snapshot_previews(
     progress.previews = paths
 
 
-def publish_trained(
+def save_trained(
     models_dir: Path,
+    job_dir: Path,
     job: dict[str, Any],
     *,
     method: str,
@@ -1771,7 +1820,7 @@ def publish_trained(
     alpha: int,
     token_id: int | None = None,
 ) -> Path:
-    destination = publish_path(models_dir, job)
+    destination = weight_path(job_dir, job)
     if method in ADAPTER_METHODS:
         save_safetensors(destination, kohya_state_dict(unet, text_encoder, alpha))
         if method == 'pivotal':
@@ -1788,7 +1837,6 @@ def publish_trained(
             destination,
             pipeline_to_original(unet, vae, text_encoder, text_encoder_2),
         )
-    write_sidecar(destination, job)
     return destination
 
 
@@ -1797,7 +1845,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     from diffusers import DDPMScheduler
 
     method = job['method']
-    checkpoint = Path(models_dir) / 'checkpoints' / job['checkpoint']
+    checkpoint = Path(models_dir) / CHECKPOINTS / job['checkpoint']
     if not checkpoint.is_file():
         raise FileNotFoundError(f'base checkpoint is missing: {checkpoint}')
     frames = list_frames(Path(job_dir) / 'dataset')
@@ -2087,8 +2135,9 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
 
     wait_for_latest_save()
     progress.emit('publishing', step=total, phase_step=0, phase_total=1)
-    destination = publish_trained(
+    destination = save_trained(
         models_dir,
+        job_dir,
         job,
         method=method,
         unet=unet,

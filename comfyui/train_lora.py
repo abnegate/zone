@@ -22,6 +22,7 @@ CONFIG_PATH = Path(__file__).with_name('custom_nodes') / 'zone_lora' / 'train_co
 MIN_WEIGHT_BYTES = 10_000
 CANCEL_TIMEOUT = 30
 POLL_INTERVAL = 2
+TOKEN_HEADER = 'X-Zone-ComfyUI-Token'
 RUN_PATTERN = re.compile(
     r'zone-(?:train|probe)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
 )
@@ -116,7 +117,7 @@ def request(url: str, payload: dict | None = None, timeout: int = 60):
         headers['Content-Type'] = 'application/json'
     token = env('COMFYUI_API_TOKEN')
     if token:
-        headers['X-Zone-ComfyUI-Token'] = token
+        headers[env('COMFYUI_TOKEN_HEADER').strip() or TOKEN_HEADER] = token
     method = 'POST' if payload is not None else 'GET'
     return urllib.request.urlopen(
         urllib.request.Request(url, data=data, headers=headers, method=method),
@@ -467,7 +468,7 @@ def comfy_input_dir() -> Path:
     if override:
         directory = Path(override)
     else:
-        models_dir = env('COMFYUI_MODELS_DIR')
+        models_dir = env('COMFYUI_MODELS_DIRECTORY')
         if not models_dir:
             raise SystemExit('ZONE_COMFY_INPUT is required so images land in ComfyUI/input')
         directory = Path(models_dir).parent / 'input'
@@ -569,10 +570,10 @@ def main() -> None:
     model = TrainingModel.from_environment()
     run = Run.from_environment()
     run.validate()
-    train_dir_value = env('ZONE_TRAIN_DIR')
+    train_dir_value = env('ZONE_TRAIN_DIRECTORY')
     output_value = env('ZONE_TRAIN_OUTPUT')
     if not train_dir_value or not output_value:
-        raise SystemExit('ZONE_TRAIN_DIR and ZONE_TRAIN_OUTPUT are required')
+        raise SystemExit('ZONE_TRAIN_DIRECTORY and ZONE_TRAIN_OUTPUT are required')
     train_dir = Path(train_dir_value)
     output = Path(output_value)
     base = env('COMFYUI_BASE_URL', env('ZONE_COMFY_URL', 'http://127.0.0.1:8188')).rstrip('/')

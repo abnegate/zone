@@ -10,6 +10,7 @@
 //! 5. Client can send "cancel" to interrupt generation
 //! 6. Connection closes on error or client disconnect
 
+use abnegate_comfy::MediaType;
 use abnegate_llm::{Message as LlmMessage, Role as LlmRole, Usage};
 use axum::{
     body::Bytes,
@@ -30,7 +31,6 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
-use zone_comfy::MediaType;
 use zone_core::llm::{BuiltinTools, LlmBackend};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
@@ -1453,7 +1453,7 @@ async fn resolve_generation_source(
     prompt: &str,
     metadata: Option<&serde_json::Value>,
     store: &crate::services::artifacts::ArtifactStore,
-) -> Result<Option<zone_comfy::client::SourceImage>, crate::services::media_source::Error> {
+) -> Result<Option<abnegate_comfy::SourceImage>, crate::services::media_source::Error> {
     use crate::services::media_source::{
         has_image_attachment, resolve_source_image, resolve_source_image_from,
     };
@@ -1678,12 +1678,12 @@ fn stored_media(mime: &str, fallback: MediaType) -> MediaType {
         .unwrap_or(fallback)
 }
 
-fn comfy_failure(subject: &str, error: &zone_comfy::Error) -> String {
+fn comfy_failure(subject: &str, error: &abnegate_comfy::Error) -> String {
     match error {
-        zone_comfy::Error::Http(error) if error.is_connect() => format!(
+        abnegate_comfy::Error::Http(error) if error.is_connect() => format!(
             "{subject} failed: cannot reach ComfyUI. Start the image service and try again."
         ),
-        zone_comfy::Error::Http(error) if error.is_timeout() => format!(
+        abnegate_comfy::Error::Http(error) if error.is_timeout() => format!(
             "{subject} failed: ComfyUI did not respond in time. Check the image service and try again."
         ),
         _ => format!("{subject} failed: {error}"),
@@ -1695,7 +1695,7 @@ async fn deliver_media(
     stream: &Arc<ChatStream>,
     chat_id: Uuid,
     workspace_id: Uuid,
-    media: Vec<zone_comfy::GeneratedImage>,
+    media: Vec<abnegate_comfy::GeneratedImage>,
     store: &crate::services::artifacts::ArtifactStore,
     delivery: Delivery,
     generation: &Generation,
@@ -1845,11 +1845,11 @@ async fn handle_image_generation(
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::services::artifacts::ArtifactStore;
-    use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
+    use abnegate_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
     let assistant_message_id = generation.message_id;
 
-    let identity = zone_comfy::bind_identity(&mut image_config, prompt);
+    let identity = abnegate_comfy::inventory::bind_identity(&mut image_config, prompt);
     let client = match ComfyUiClient::new(image_config.clone()) {
         Ok(client) => client,
         Err(error) => {
@@ -1894,7 +1894,7 @@ async fn handle_image_generation(
     )
     .await;
     let generation_prompt = if source.is_some()
-        && client.prompt_mode() != zone_comfy::recipe::PromptMode::EditInstruction
+        && client.prompt_mode() != abnegate_comfy::recipe::PromptMode::EditInstruction
     {
         crate::services::image_intent::ImageIntentClassifier::new(
             image_config.clone(),
@@ -1907,7 +1907,9 @@ async fn handle_image_generation(
         prompt.to_string()
     };
     let generation_prompt = match identity.as_ref() {
-        Some(identity) => zone_comfy::identity_caption(&generation_prompt, &identity.trigger),
+        Some(identity) => {
+            abnegate_comfy::lora::identity_caption(&generation_prompt, &identity.trigger)
+        }
         None => generation_prompt,
     };
     let mut progress = MediaProgress::start(stream);
@@ -1922,7 +1924,6 @@ async fn handle_image_generation(
         client.generate(
             &generation_prompt,
             source.as_ref(),
-            None,
             &mut generation.cancel,
             progress.sender(),
         ),
@@ -1987,7 +1988,7 @@ async fn handle_video_generation(
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::services::artifacts::ArtifactStore;
-    use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
+    use abnegate_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
     let assistant_message_id = generation.message_id;
 
@@ -2111,7 +2112,7 @@ async fn handle_upscale(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::services::artifacts::ArtifactStore;
     use crate::services::media_source::{Kind, Source};
-    use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
+    use abnegate_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
     const SUBJECT: &str = "Upscaling";
     let assistant_message_id = generation.message_id;
@@ -2315,7 +2316,7 @@ async fn handle_audio_generation(
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::services::artifacts::ArtifactStore;
-    use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
+    use abnegate_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
     let assistant_message_id = generation.message_id;
 
@@ -4529,7 +4530,7 @@ mod tests {
 
     mod routing {
         use super::*;
-        use crate::config::{AgentConfig, ComfyUiConfig, Config, ModelBackend};
+        use crate::config::{AgentConfig, Config, ModelBackend};
         use crate::db::ai_settings::PROVIDER_CLAUDE_CODE;
         use crate::db::chats::provider::Choice;
         use crate::services::provider::Provider;
@@ -4931,10 +4932,11 @@ mod tests {
                         host_login: true,
                         ..crate::state::test_agents()
                     },
-                    comfyui: ComfyUiConfig {
-                        enabled: true,
-                        classifier_timeout_secs: 20,
-                        ..ComfyUiConfig::default()
+                    comfyui: {
+                        let mut comfyui = crate::services::comfy::settings::development();
+                        comfyui.enabled = true;
+                        comfyui.classifier_timeout = Duration::from_secs(20);
+                        comfyui
                     },
                     ..crate::state::test_config()
                 },
@@ -5087,10 +5089,11 @@ mod tests {
                         host_login: false,
                         ..crate::state::test_agents()
                     },
-                    comfyui: ComfyUiConfig {
-                        enabled: true,
-                        classifier_timeout_secs: 20,
-                        ..ComfyUiConfig::default()
+                    comfyui: {
+                        let mut comfyui = crate::services::comfy::settings::development();
+                        comfyui.enabled = true;
+                        comfyui.classifier_timeout = Duration::from_secs(20);
+                        comfyui
                     },
                     ..crate::state::test_config()
                 },
@@ -6756,7 +6759,7 @@ cat 'DIR/reply.jsonl'
 
     #[test]
     fn every_job_reports_an_unreachable_comfyui_the_same_way() {
-        let error = zone_comfy::Error::Configuration("prompt is empty or too long");
+        let error = abnegate_comfy::Error::Configuration("prompt is empty or too long");
         for subject in [
             "Image generation",
             "Video generation",
@@ -6768,7 +6771,7 @@ cat 'DIR/reply.jsonl'
             assert!(message.contains("prompt is empty or too long"), "{message}");
         }
         assert_eq!(
-            comfy_failure("Upscaling", &zone_comfy::Error::Disabled),
+            comfy_failure("Upscaling", &abnegate_comfy::Error::Disabled),
             "Upscaling failed: ComfyUI is disabled"
         );
     }
@@ -6782,7 +6785,7 @@ cat 'DIR/reply.jsonl'
             .await
             .expect_err("the listener was closed before the request");
         assert_eq!(
-            comfy_failure("Image generation", &zone_comfy::Error::Http(connection)),
+            comfy_failure("Image generation", &abnegate_comfy::Error::Http(connection)),
             "Image generation failed: cannot reach ComfyUI. Start the image service and try again."
         );
 
@@ -6801,7 +6804,7 @@ cat 'DIR/reply.jsonl'
             .await
             .expect_err("the accepted request never receives an HTTP response");
         assert_eq!(
-            comfy_failure("Video generation", &zone_comfy::Error::Http(timeout)),
+            comfy_failure("Video generation", &abnegate_comfy::Error::Http(timeout)),
             "Video generation failed: ComfyUI did not respond in time. Check the image service and try again."
         );
         blocker.abort();

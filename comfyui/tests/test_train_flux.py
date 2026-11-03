@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 COMFYUI = Path(__file__).parents[1]
 if str(COMFYUI) not in sys.path:
@@ -14,6 +15,8 @@ if str(COMFYUI) not in sys.path:
 import train_flux  # noqa: E402
 import train_runpod  # noqa: E402
 import train_sdxl  # noqa: E402
+
+CLAIM = 'claimed'
 
 
 def queued_job(name: str = 'jerry', extra: dict | None = None) -> dict:
@@ -33,6 +36,7 @@ def queued_job(name: str = 'jerry', extra: dict | None = None) -> dict:
         'started_at': '2026-10-04T00:00:00Z',
         'recipe_id': 'flux-dev-adapter',
         'hf_base': 'black-forest-labs/FLUX.1-dev',
+        'base': 'flux-dev',
     }
     if extra:
         job.update(extra)
@@ -111,8 +115,8 @@ class NormalizeTests(unittest.TestCase):
         )
 
 
-class StubPublishTests(unittest.TestCase):
-    def test_process_job_stub_writes_lora_and_sidecar(self) -> None:
+class StubTrainingTests(unittest.TestCase):
+    def test_process_job_stub_leaves_the_lora_in_the_job_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
             job_dir = models / '.zone-train' / str(uuid.uuid4())
@@ -128,13 +132,49 @@ class StubPublishTests(unittest.TestCase):
             progress = json.loads((job_dir / 'progress.json').read_text(encoding='utf-8'))
             self.assertEqual(progress['phase'], 'publishing')
             self.assertEqual(progress['percent'], 100)
-            weight = models / 'loras' / 'jerry.safetensors'
-            self.assertTrue(weight.is_file())
-            sidecar = json.loads(weight.with_name(weight.name + '.zone.json').read_text())
-            self.assertEqual(sidecar['recipe_id'], 'flux-dev-adapter')
-            self.assertEqual(sidecar['architecture'], 'flux')
-            self.assertEqual(sidecar['trigger'], 'ohwx')
-            self.assertEqual(sidecar['hf_base'], 'black-forest-labs/FLUX.1-dev')
+            self.assertEqual(job['recipe_id'], 'flux-dev-adapter')
+            self.assertEqual(job['hf_base'], 'black-forest-labs/FLUX.1-dev')
+            self.assertTrue((job_dir / 'jerry.safetensors').is_file())
+            self.assertEqual(list((models / 'loras').iterdir()), [])
+
+
+class LegacyPublishTests(unittest.TestCase):
+    def test_a_lora_queued_before_the_upgrade_publishes_a_sidecar_that_trains_again(self) -> None:
+        for recipe, architecture in (
+            ('flux-dev-adapter', 'flux'),
+            ('qwen-image-edit-adapter', 'qwen_edit'),
+        ):
+            with self.subTest(recipe=recipe), tempfile.TemporaryDirectory() as directory:
+                models = Path(directory)
+                job_dir = models / '.zone-train' / str(uuid.uuid4())
+                job_dir.mkdir(parents=True)
+                write_dataset(job_dir, count=3)
+                job = queued_job(extra={'recipe_id': recipe})
+                del job['base']
+                train_sdxl.write_job(job_dir, job)
+                train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+                self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+                self.assertFalse((job_dir / 'jerry.safetensors').exists())
+                weight = models / 'loras' / 'jerry.safetensors'
+                self.assertTrue(weight.is_file())
+                sidecar = json.loads(
+                    (models / 'loras' / 'jerry.safetensors.zone.json').read_text(encoding='utf-8')
+                )
+                self.assertIn(
+                    'generation',
+                    sidecar,
+                    'abnegate-comfy refuses to replace a weight whose sidecar has no generation',
+                )
+                uuid.UUID(sidecar.pop('generation'))
+                self.assertEqual(
+                    sidecar,
+                    {
+                        'recipe_id': recipe,
+                        'hf_base': 'black-forest-labs/FLUX.1-dev',
+                        'trigger': 'ohwx',
+                        'architecture': architecture,
+                    },
+                )
 
 
 class RemoteScriptTests(unittest.TestCase):
@@ -145,6 +185,43 @@ class RemoteScriptTests(unittest.TestCase):
         )
         self.assertIn('train_flux.py', train_runpod.SCRIPTS)
         self.assertIn('train_flux_config.json', train_runpod.SCRIPTS)
+
+
+class ClaimTests(unittest.TestCase):
+    def stage(self, models: Path) -> Path:
+        job_dir = models / '.zone-train' / str(uuid.uuid4())
+        job_dir.mkdir(parents=True)
+        write_dataset(job_dir, count=3)
+        (models / 'loras').mkdir(exist_ok=True)
+        train_sdxl.write_job(job_dir, queued_job())
+        return job_dir
+
+    def test_the_claim_is_taken_before_the_job_is_marked_running(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            claimed_when_running: list[bool] = []
+            mark_running = train_sdxl.mark_running
+
+            def spy(path: Path, job: dict) -> dict:
+                claimed_when_running.append((Path(path) / CLAIM).is_file())
+                return mark_running(path, job)
+
+            with mock.patch.object(train_sdxl, 'mark_running', side_effect=spy):
+                train_flux.process_job(models, job_dir, stub=True)
+            self.assertEqual(claimed_when_running, [True])
+            self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+
+    def test_a_job_claimed_elsewhere_is_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            (job_dir / CLAIM).touch()
+            before = (job_dir / 'job.json').read_bytes()
+            with mock.patch.object(train_flux, 'run_stub') as run_stub:
+                train_flux.process_job(models, job_dir, stub=True)
+            run_stub.assert_not_called()
+            self.assertEqual((job_dir / 'job.json').read_bytes(), before)
 
 
 if __name__ == '__main__':

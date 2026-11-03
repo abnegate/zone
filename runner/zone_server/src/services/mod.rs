@@ -9,6 +9,7 @@ pub mod backend;
 pub mod character;
 pub mod chat;
 pub mod checkout;
+pub mod comfy;
 pub mod completion_tokens;
 pub mod embedding;
 pub mod endpoint;

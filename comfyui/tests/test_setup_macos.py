@@ -54,7 +54,7 @@ class SetupMacosTest(unittest.TestCase):
         path.write_text(body, encoding="utf-8")
         path.chmod(0o755)
 
-    def selected_bundle(self, *arguments: str) -> str:
+    def downloader_arguments(self, *arguments: str) -> tuple[list[str], str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             record = root / "argv"
@@ -72,14 +72,24 @@ class SetupMacosTest(unittest.TestCase):
                     "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
                     "PYTHON_BIN": str(root / "python"),
                     "COMFYUI_INSTALL_DIR": str(root / "runtime"),
-                    "COMFYUI_MODELS_DIR": str(root / "models"),
+                    "COMFYUI_MODELS_DIRECTORY": str(root / "models"),
                 },
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            recorded = record.read_text(encoding="utf-8").splitlines()
+            return record.read_text(encoding="utf-8").splitlines(), str(root / "models")
+
+    def selected_bundle(self, *arguments: str) -> str:
+        recorded, _ = self.downloader_arguments(*arguments)
         self.assertIn("--verify-only", recorded)
         self.assertIn("--bundle", recorded, "the downloader was called without a bundle")
         return recorded[recorded.index("--bundle") + 1]
+
+    def test_the_models_directory_setting_reaches_the_downloader(self) -> None:
+        recorded, models = self.downloader_arguments(
+            "--verify-model", "--bundle", MANIFEST_BUNDLES[0]
+        )
+        self.assertIn("--models-dir", recorded)
+        self.assertEqual(recorded[recorded.index("--models-dir") + 1], models)
 
     def test_every_manifest_bundle_is_accepted(self) -> None:
         for bundle in MANIFEST_BUNDLES:
@@ -158,6 +168,7 @@ class SetupMacosTest(unittest.TestCase):
                 text=True,
             ).strip()
             Path(site, "torch.py").write_text("x = 1\n", encoding="utf-8")
+            (install / "train_runpod.py").write_text("stale = True\n", encoding="utf-8")
             self.stub(root / "uname", UNAME_STUB)
             launchctl_log = root / "launchctl.log"
             self.stub(
@@ -175,7 +186,7 @@ class SetupMacosTest(unittest.TestCase):
                     "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
                     "HOME": str(home),
                     "COMFYUI_INSTALL_DIR": str(install),
-                    "COMFYUI_MODELS_DIR": str(root / "models"),
+                    "COMFYUI_MODELS_DIRECTORY": str(root / "models"),
                     "ZONE_TRAIN_SKIP_PIP": "1",
                 },
             )
@@ -223,7 +234,20 @@ class SetupMacosTest(unittest.TestCase):
             self.assertIn("train_sdxl.py", plist)
             self.assertIn(".venv-train/bin/python", plist)
             self.assertNotIn(".venv-train-llm", plist)
-            self.assertIn("bootstrap", launchctl_log.read_text(encoding="utf-8"))
+            self.assertEqual(
+                (install / "train_runpod.py").read_text(encoding="utf-8"),
+                (COMFYUI_DIR / "train_runpod.py").read_text(encoding="utf-8"),
+                "a reinstall left the stale trainer in place",
+            )
+            commands = [
+                line.split()[0]
+                for line in launchctl_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                commands,
+                ["bootout", "bootstrap"],
+                "a reinstall must restart the running trainer on the new scripts",
+            )
 
 
 if __name__ == "__main__":

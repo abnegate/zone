@@ -280,6 +280,63 @@ reads need egress to `api.anthropic.com` and `chatgpt.com`, or the hosts
 `networkPolicy.enabled` is on; see
 [helm/zone-apps/README.md](../helm/zone-apps/README.md).
 
+## Upgrading to abnegate-comfy
+
+From this release zone publishes trained weights through `abnegate-comfy`: the
+host trainer leaves a finished weight in its job directory under
+`models/.zone-train/`, and zone moves it into `loras/` or `checkpoints/` with
+its `.zone.json` sidecar. The scripts the `ai.zone.train` LaunchAgent runs are
+copies in the ComfyUI install directory, and upgrading zone does not refresh
+them. A trainer left on the old scripts publishes into `loras/` itself and
+leaves nothing in the job directory, so every run it trains fails when zone
+publishes it. It also starts a job without
+[claiming](COMFYUI.md#person-sdxl-lora-and-fine-tune) it first, so zone can
+give up on a job the old trainer has just picked up.
+
+After the upgrade:
+
+1. Wait until no local training job is running: every `job.json` under
+   `models/.zone-train/` that says `"status": "running"` also says
+   `"provider": "runpod"`. Reinstalling restarts the trainer, which stops a
+   local run in progress. A Runpod job need not wait, since its pod keeps
+   training without the host.
+2. Reinstall the trainer:
+
+   ```bash
+   ./scripts/setup-comfyui-macos.sh --install-trainer
+   ```
+
+   It copies the current scripts over the old ones, then boots
+   `ai.zone.train` out and bootstraps it again, so the trainer restarts on
+   them and picks up any queued job.
+
+A job zone queued before the upgrade has no `base` in its `job.json`, and zone
+never publishes such a job. The reinstalled trainer publishes it the way the
+old scripts did: it trains the job, moves the weight into `loras/`, or
+`checkpoints/` for a fine-tune, and writes the old `.zone.json` sidecar beside
+it, with the `embedding` of a pivotal run. A Runpod pod started before the
+upgrade keeps running the scripts it was sent and returns its artifact in the
+old layout, with the weight under `loras/` or `checkpoints/` beside its
+sidecar; the reinstalled trainer resumes that pod and puts the weight, its
+sidecar, and the embedding or face image under the models directory, without
+replacing any other file already there. A base-less job still queued for
+Runpod is trained on a new pod, which publishes it the same way before it
+returns. The trainer gives each of those sidecars a fresh `generation`, the
+mark abnegate-comfy looks for before it replaces a weight, so the name trains
+again straight away, with no restart. A language job publishes its model on
+its own path either way. A base-less Wan video job, which only a zone from
+before video identity training was turned off could have queued, fails with
+that refusal instead of training an adapter no video graph loads.
+
+## Host trainer on Linux
+
+The manager creates each training job under `models/.zone-train/` readable
+only by its owner (`0700`). On a Linux bind mount the uid is not translated,
+so the host trainer must run as the uid of the container's `zone` user, which
+`docker compose exec manager id -u zone` prints. Run as anyone else, the
+trainer cannot read a queued job and the manager cannot read its progress or
+publish its weight. See the host worker in [COMFYUI.md](COMFYUI.md).
+
 ## Pulling models into the bundled Ollama
 
 With `PROFILES=bundled-ollama`, `ollama-init` pulls `OLLAMA_MODEL_FAST`,
