@@ -1626,7 +1626,9 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: Fallback Wan high-noise UNET when org/workspace AI settings
   do not set `model_video`. Path separators and traversal are rejected. Chat
   video generation uses the effective `model_video` setting when present. A
-  leftover 5B filename is rewritten to this A14B expert.
+  name counts as an A14B expert only when it contains `wan` and `high_noise` or
+  `low_noise`; any other name, such as a leftover 5B file or a Wan 2.1 14B
+  model, loads this expert and its low-noise pair instead.
 
 ### `COMFYUI_VIDEO_CLIP`
 - **Default**: `umt5_xxl_fp8_e4m3fn_scaled.safetensors`

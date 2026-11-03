@@ -778,8 +778,9 @@ workflow. It uses only built-in ComfyUI nodes. Integration code may replace
 only these inputs:
 
 - node `1`: high-noise UNET filename from trusted server configuration
-  (`model_video` / `COMFYUI_VIDEO_UNET`); a leftover 5B name is rewritten to
-  the A14B high-noise expert
+  (`model_video` / `COMFYUI_VIDEO_UNET`); a name without `wan` and
+  `high_noise` or `low_noise` (a leftover 5B or Wan 2.1 14B file) is rewritten
+  to the A14B high-noise expert
 - node `12`: paired low-noise UNET (`high_noise` → `low_noise`, `t2v` ↔ `i2v`)
 - node `2`: CLIP filename (`COMFYUI_VIDEO_CLIP`)
 - node `3`: VAE filename (`COMFYUI_VIDEO_VAE`); a leftover 5B

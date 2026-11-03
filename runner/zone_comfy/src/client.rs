@@ -30,6 +30,11 @@ const PACKAGED_A14B_I2V_WORKFLOW: &str =
 const A14B_VAE: &str = "wan_2.1_vae.safetensors";
 const LEFTOVER_5B_VAE: &str = "wan2.2_vae.safetensors";
 const A14B_HIGH_UNET: &str = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors";
+const WAN: &str = "wan";
+const HIGH_NOISE: &str = "high_noise";
+const LOW_NOISE: &str = "low_noise";
+const TEXT_TO_VIDEO: &str = "t2v";
+const IMAGE_TO_VIDEO: &str = "i2v";
 const A14B_T2V_GRAPH: &str = "wan2.2-a14b-t2v-api.json";
 const A14B_I2V_GRAPH: &str = "wan2.2-a14b-i2v-api.json";
 const LEFTOVER_5B_GRAPH: &str = "wan2.2-ti2v-5b-api.json";
@@ -1356,24 +1361,22 @@ fn configure_upscale_video_workflow(
 
 fn is_a14b_unet(unet: &str) -> bool {
     let lower = unet.to_ascii_lowercase();
-    lower.contains("14b") || lower.contains("high_noise") || lower.contains("low_noise")
+    lower.contains(WAN) && (lower.contains(HIGH_NOISE) || lower.contains(LOW_NOISE))
 }
 
 fn paired_wan_unets(unet: &str, i2v: bool) -> (String, String) {
-    let mut high = if is_a14b_unet(unet) {
-        unet.to_string()
+    let expert = if is_a14b_unet(unet) {
+        unet
     } else {
-        A14B_HIGH_UNET.to_string()
+        A14B_HIGH_UNET
     };
-    if i2v {
-        high = high.replace("t2v", "i2v");
+    let (from, to) = if i2v {
+        (TEXT_TO_VIDEO, IMAGE_TO_VIDEO)
     } else {
-        high = high.replace("i2v", "t2v");
-    }
-    if high.contains("low_noise") {
-        high = high.replace("low_noise", "high_noise");
-    }
-    let low = high.replace("high_noise", "low_noise");
+        (IMAGE_TO_VIDEO, TEXT_TO_VIDEO)
+    };
+    let high = expert.replace(from, to).replace(LOW_NOISE, HIGH_NOISE);
+    let low = high.replace(HIGH_NOISE, LOW_NOISE);
     (high, low)
 }
 
@@ -1925,6 +1928,29 @@ mod tests {
         assert_eq!(
             workflow["3"]["inputs"]["vae_name"],
             "wan_2.1_vae.safetensors"
+        );
+    }
+
+    #[test]
+    fn only_wan_noise_experts_keep_their_own_pair() {
+        let default_pair = (
+            A14B_HIGH_UNET.to_string(),
+            "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors".to_string(),
+        );
+        assert_eq!(
+            paired_wan_unets("wan2.1_t2v_14B_fp16.safetensors", false),
+            default_pair
+        );
+        assert_eq!(
+            paired_wan_unets("hunyuan_video_high_noise.safetensors", false),
+            default_pair
+        );
+        assert_eq!(
+            paired_wan_unets("wan2.2_i2v_low_noise_14B_fp16.safetensors", true),
+            (
+                "wan2.2_i2v_high_noise_14B_fp16.safetensors".to_string(),
+                "wan2.2_i2v_low_noise_14B_fp16.safetensors".to_string(),
+            )
         );
     }
 
