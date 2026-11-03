@@ -458,7 +458,7 @@ mod shape {
     use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
     use super::*;
-    use crate::llm::{Dialect, TEMPLATE_STOPS};
+    use abnegate_llm::{Dialect, TEMPLATE_STOPS};
 
     const TEMPERATURE: f32 = 1.4;
     const RESERVED: u32 = 321;

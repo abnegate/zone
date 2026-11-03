@@ -1,9 +1,9 @@
 //! Storage is deliberately independent of the provider's asymmetric wire message format.
 
+use abnegate_llm::{GeneratedImage, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use zone_core::llm::{GeneratedImage, Message, Role, ToolCall};
 
 pub const VERSION: u16 = 1;
 

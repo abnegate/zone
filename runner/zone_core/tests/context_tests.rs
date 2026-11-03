@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use abnegate_llm::{
+    LlmConfig, Message, RequestOptions, Role, ToolCall, ToolDefinition, finish_reason,
+};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,9 +11,7 @@ use tokio::sync::{Mutex, Notify};
 use zone_core::context::{
     self, ContextError, ContextSource, ContextStatus, Coverage, Entry, Policy, Summary,
 };
-use zone_core::llm::{
-    LlmClient, LlmConfig, Message, RequestOptions, Role, ToolCall, ToolDefinition, finish_reason,
-};
+use zone_core::llm::LlmClient;
 
 struct Provider {
     client: LlmClient,
@@ -782,7 +783,7 @@ async fn reasoning_is_enabled_on_ordinary_requests_and_stripped_from_summaries()
     let client = provider
         .client
         .clone()
-        .with_reasoning("test", zone_core::llm::Effort::Medium)
+        .with_reasoning("test", abnegate_llm::Effort::Medium)
         .with_ollama_context("test", 5_000);
     let history = active_history();
     let prepared = context::prepare(&client, "test", &history, None, &policy(5_000), None)

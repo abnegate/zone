@@ -1,8 +1,9 @@
+use abnegate_llm::{Error, LlmConfig, Message};
 use futures::StreamExt;
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::{LlmClient, LlmConfig, LlmError, Message};
+use zone_core::llm::LlmClient;
 
 const RACERS: usize = 8;
 const TURNS: usize = 12;
@@ -139,7 +140,7 @@ async fn model_specific_streaming_route_preserves_provider_errors() {
 
     assert!(matches!(
         error,
-        LlmError::Api {
+        Error::Api {
             status: 429,
             ref message,
             ..

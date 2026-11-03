@@ -4,13 +4,14 @@
 
 use std::path::PathBuf;
 
+use abnegate_llm::LlmConfig;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use thiserror::Error;
 
 use zone_core::{
     Agent, AgentCallback, AgentConfig, AgentError, AgentPhase, FileSessionStore, LlmClient,
-    LlmConfig, Session, SessionStore, ToolContext, ToolResult, llm,
+    Session, SessionStore, ToolContext, ToolResult, llm,
 };
 
 use crate::auth::AuthManager;

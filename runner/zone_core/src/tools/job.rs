@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use super::routing;
 use super::{Session, WaitFor};
-use crate::llm::provider::environment;
+use crate::environment;
 
 pub const TAIL_JOB: &str = "tail_job";
 

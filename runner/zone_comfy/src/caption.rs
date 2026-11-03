@@ -7,11 +7,12 @@
 //! two passes: name the subject shared by every image, then describe each image
 //! while excluding that subject.
 
+use abnegate_llm::{LlmConfig, Message};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
-use zone_core::llm::{self, LlmClient, LlmConfig, Message};
+use zone_core::llm::{self, LlmClient};
 
 use crate::config::Config;
 

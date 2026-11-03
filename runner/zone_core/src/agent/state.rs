@@ -1,9 +1,8 @@
 //! Agent state management
 
+use abnegate_llm::{Message, ToolCall};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::llm::{Message, ToolCall};
 
 /// Current phase of the agent execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,7 +123,7 @@ pub struct AgentState {
     /// Current phase
     pub phase: AgentPhase,
     /// All messages in the conversation
-    #[serde(with = "crate::llm::history")]
+    #[serde(with = "abnegate_llm::history")]
     pub messages: Vec<Message>,
     /// Separate checkpoint; canonical messages are append-only.
     #[serde(default)]
@@ -272,8 +271,8 @@ mod tests {
     fn test_agent_state_new_with_system_prompt() {
         let state = AgentState::new("Hello", Some("You are helpful".to_string()));
         assert_eq!(state.messages.len(), 2);
-        assert_eq!(state.messages[0].role, crate::llm::Role::System);
-        assert_eq!(state.messages[1].role, crate::llm::Role::User);
+        assert_eq!(state.messages[0].role, abnegate_llm::Role::System);
+        assert_eq!(state.messages[1].role, abnegate_llm::Role::User);
     }
 
     #[test]
@@ -383,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_agent_step_with_tool_calls() {
-        use crate::llm::ToolCall;
+        use abnegate_llm::ToolCall;
 
         let tool_call = ToolCall::function("call_123", "read_file", r#"{"path": "/tmp/test"}"#);
 
@@ -443,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_tool_call_result_failed() {
-        use crate::llm::ToolCall;
+        use abnegate_llm::ToolCall;
 
         let tool_call = ToolCall::function("call_fail", "execute_command", r#"{"cmd": "invalid"}"#);
 
@@ -460,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_tool_call_result_serialization() {
-        use crate::llm::ToolCall;
+        use abnegate_llm::ToolCall;
 
         let tool_call = ToolCall::function("call_test", "test", "{}");
 
@@ -679,7 +678,7 @@ mod tests {
 
     #[test]
     fn test_agent_state_serialization_with_all_fields() {
-        use crate::llm::ToolCall;
+        use abnegate_llm::ToolCall;
 
         let mut state = AgentState::new("Test", Some("System prompt".to_string()));
         state.iteration = 5;
