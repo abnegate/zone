@@ -175,6 +175,16 @@ impl TestClient {
         }
     }
 
+    /// Create a test client on `pool`, for a test that needs a database of its own.
+    pub fn with_pool(pool: PgPool) -> Self {
+        let state = create_test_state(test_config(), pool);
+        let router = create_test_router(state.clone());
+        Self {
+            router,
+            state: Some(state),
+        }
+    }
+
     /// Create a test client whose state sends account mail through `mail`.
     pub async fn with_mail(mail: Arc<AccountMail>) -> Self {
         let pool = create_test_pool().await;

@@ -6,4 +6,7 @@ ignore = [
     # RSA Marvin Attack - no fix available. Server JWTs use HMAC only;
     # octocrab is unused by zone_context. See docs/DEPENDENCIES.md.
     "RUSTSEC-2023-0071",
+    # crypto-bigint 0.5 timing variability - no compatible fix. Reached only
+    # through jsonwebtoken's p256/p384; zone never uses ECDSA. See docs/DEPENDENCIES.md.
+    "RUSTSEC-2026-0387",
 ]

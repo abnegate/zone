@@ -63,11 +63,11 @@ const PLAIN: &[Section] = &[
 ];
 
 /// Raised by measurement rather than by guess, the way every section that has
-/// widened this has raised it: the chat prompt with the models catalog/train
-/// section is 23,287 characters, so the ceiling is the next round number above
-/// that and the next section to grow has to measure itself too. Memory plus
-/// automations previously measured 22,637; models is the new occupant.
-pub const CHAT_MAX_CHARS: usize = 23_300;
+/// widened this has raised it: the chat prompt with the image section's
+/// negative_prompt line is 23,377 characters, so the ceiling is the next round
+/// number above that and the next section to grow has to measure itself too.
+/// The models catalog/train section previously measured 23,287.
+pub const CHAT_MAX_CHARS: usize = 23_400;
 /// A planner chat adds the interview section to the chat prompt; measured
 /// the same way and rounded up the same way.
 pub const PLANNER_MAX_CHARS: usize = 26_000;

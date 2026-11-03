@@ -314,8 +314,8 @@ impl Devices {
                 match recorded {
                     Ok(login) => {
                         drop(staging);
-                        self.attempts.remove(&organization);
                         audit::signed_in(state.db(), organization, initiator, &email, &login).await;
+                        self.attempts.remove(&organization);
                     }
                     Err(error) => {
                         tracing::error!(

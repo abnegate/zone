@@ -334,7 +334,7 @@ pub async fn register(
 
     let device = match admit_device(&state, user_perms.user.id, &headers, None).await {
         Ok(device) => device,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     // Generate tokens
@@ -448,7 +448,7 @@ pub async fn login(
         Ok(device) => device,
         Err(response) => {
             crate::metrics::record_login("disabled");
-            return response;
+            return *response;
         }
     };
 
@@ -550,7 +550,7 @@ pub async fn refresh(
 
     let device = match admit_device(&state, user_id, &headers, session.device_id).await {
         Ok(device) => device,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     // Generate new tokens
@@ -602,7 +602,7 @@ async fn admit_device(
     user_id: Uuid,
     headers: &HeaderMap,
     existing_device_id: Option<Uuid>,
-) -> Result<Device, Response> {
+) -> Result<Device, Box<Response>> {
     let mut claim = crate::auth::device::claim(headers);
     if claim.public_id.is_none()
         && let Some(device_id) = existing_device_id
@@ -614,11 +614,7 @@ async fn admit_device(
             Ok(None) => {}
             Err(error) => {
                 tracing::error!(%error, "Failed to load the session device");
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response());
+                return Err(device_unavailable());
             }
         }
     }
@@ -635,21 +631,29 @@ async fn admit_device(
         )),
         Err(error) => {
             tracing::error!(%error, "Failed to admit a device");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response())
+            Err(device_unavailable())
         }
     }
 }
 
-fn device_refused(message: &'static str, code: &'static str) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(ErrorResponse::with_code(message, code)),
+fn device_refused(message: &'static str, code: &'static str) -> Box<Response> {
+    Box::new(
+        (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::with_code(message, code)),
+        )
+            .into_response(),
     )
-        .into_response()
+}
+
+fn device_unavailable() -> Box<Response> {
+    Box::new(
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("Internal server error")),
+        )
+            .into_response(),
+    )
 }
 
 /// Generate access and refresh tokens
