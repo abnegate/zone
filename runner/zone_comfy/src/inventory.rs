@@ -249,7 +249,7 @@ fn load_catalog(workflow_path: &Path) -> Option<RecipeCatalog> {
 fn is_identity(item: &InventoryItem) -> bool {
     item.ready
         && item.recipe_id != "wan-adapter"
-        && (item.adapter || item.kind == "checkpoint")
+        && (item.adapter || item.kind == CHECKPOINT)
         && item
             .trigger
             .as_deref()
