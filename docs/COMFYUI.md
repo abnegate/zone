@@ -614,7 +614,10 @@ is filtered rather than trusted: a word that appears in a third or more of the
 descriptions cannot be describing what varies between them, so clauses carrying
 those words are dropped along with the subject phrase itself. A description that
 merely copies the format example, or repeats another image's answer verbatim, is
-discarded, and that image falls back to the trigger word alone. Captions you
+discarded, and that image falls back to the trigger word alone. Two requests in
+a row that time out, or one whose connection fails, end captioning, and the
+shots left keep the trigger word alone; `COMFYUI_CAPTION_TIMEOUT_SECONDS` sets
+how long each request may take. Captions you
 write by hand are never overwritten. The Models Train tab exposes this as
 **Auto-caption images**, so the captions can be reviewed and edited before
 training starts. Training itself is a background job: `POST /api/models/train`
