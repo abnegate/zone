@@ -65,7 +65,8 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
-    use crate::db::chats::{create_chat, get_chat};
+    use crate::db::chats::{ChatRow, create_chat, create_chat_with_title, get_chat};
+    use zone_core::llm::ReasoningEffort;
 
     #[test]
     fn a_chat_following_its_workspace_asks_for_its_stored_model() {
@@ -190,6 +191,56 @@ mod tests {
             "no chat, nothing set"
         );
         assert_eq!(get(pool, Uuid::new_v4()).await.unwrap(), None);
+        fixture.cleanup().await;
+    }
+
+    async fn create(fixture: &Fixture, title: &str, choice: &Choice) -> DbResult<ChatRow> {
+        create_chat_with_title(
+            &fixture.pool,
+            Some(fixture.workspace),
+            title,
+            AUTO,
+            (false, true),
+            false,
+            false,
+            ReasoningEffort::Auto,
+            None,
+            false,
+            None,
+            Some(choice),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_new_chat_is_created_with_its_choice_or_not_at_all() {
+        let fixture = Fixture::new().await;
+        let pool = &fixture.pool;
+        let codex = Choice {
+            provider: Provider::Codex,
+            model: Some("gpt-6-sol".to_string()),
+        };
+        let chat = create(&fixture, "Created chosen", &codex)
+            .await
+            .expect("a chat created on its choice");
+        assert_eq!(get(pool, chat.id).await.unwrap().as_ref(), Some(&codex));
+
+        let blank = Choice {
+            provider: Provider::OpenAI,
+            model: Some(" ".to_string()),
+        };
+        assert!(
+            create(&fixture, "Refused choice", &blank).await.is_err(),
+            "the database refuses a blank model"
+        );
+        let refused: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM chats WHERE workspace_id = $1 AND title = $2")
+                .bind(fixture.workspace)
+                .bind("Refused choice")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(refused, 0, "a choice that can't be stored leaves no chat");
         fixture.cleanup().await;
     }
 

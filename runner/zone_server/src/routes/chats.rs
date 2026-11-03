@@ -1,5 +1,7 @@
 //! Chat endpoints
 
+pub(super) mod provider;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -15,9 +17,9 @@ use crate::error::ServerError;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
 use crate::services::chat::session;
-use crate::services::endpoint::Endpoint;
 use crate::services::model::Model;
-use crate::services::route::{Route, Unusable};
+use crate::services::provider::Provider;
+use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use zone_core::context::ContextUsage;
@@ -142,6 +144,12 @@ pub struct ChatResponse {
     purpose: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_id: Option<Uuid>,
+    /// The provider the chat chose, null while it follows its workspace's. Only a single chat
+    /// whose choice could be read carries it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<Option<Provider>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_model: Option<Option<String>>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -166,6 +174,8 @@ impl From<chats::ChatRow> for ChatResponse {
             needs_character: None,
             purpose: None,
             project_id: None,
+            provider: None,
+            provider_model: None,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
@@ -179,6 +189,17 @@ impl ChatResponse {
                 self.purpose = Some(link.purpose.as_str().to_string());
             }
             self.project_id = link.project_id;
+        }
+        self
+    }
+
+    /// Carry the provider the chat chose, or that it follows its workspace's.
+    /// A choice that couldn't be read is left out rather than reported as
+    /// following the workspace.
+    fn with_choice(mut self, choice: Option<Option<&chats::provider::Choice>>) -> Self {
+        if let Some(choice) = choice {
+            self.provider = Some(choice.map(|choice| choice.provider));
+            self.provider_model = Some(choice.and_then(|choice| choice.model.clone()));
         }
         self
     }
@@ -238,26 +259,37 @@ async fn chat_with_messages(
     auth: &AuthUser,
     chat: chats::ChatRow,
 ) -> ChatWithMessagesResponse {
-    let endpoint = match chat.workspace_id {
-        Some(workspace) => Some(Route::for_workspace(state, workspace).await.into_endpoint()),
+    let route = match chat.workspace_id {
+        Some(_) => Some(Route::for_chat(state, &chat).await),
         None => None,
     };
-    chat_on_endpoint(state, auth, chat, endpoint).await
+    chat_on_route(state, auth, chat, route).await
 }
 
-/// [`chat_with_messages`] for a chat whose workspace's endpoint is already
-/// read.
-async fn chat_on_endpoint(
+/// [`chat_with_messages`] for a chat whose route is already read. Its profile
+/// and context are those of the model the chat asks its provider for.
+async fn chat_on_route(
     state: &AppState,
     auth: &AuthUser,
     chat: chats::ChatRow,
-    endpoint: Option<Result<Endpoint, Unusable>>,
+    route: Option<Route>,
 ) -> ChatWithMessagesResponse {
+    let choice = match &route {
+        Some(route) => route.choice().map(|choice| choice.cloned()),
+        None => Some(None),
+    };
+    let requested = match &route {
+        Some(route) => route.apply(chat.clone()),
+        None => chat.clone(),
+    };
+    let endpoint = route.map(Route::into_endpoint);
     let host = &state.config().ollama_host;
     let profile = match &endpoint {
-        None => Model::profile(host, &chat.model_name).await,
-        Some(Ok(endpoint)) => Model::profile_on(endpoint.origin(), host, &chat.model_name).await,
-        Some(Err(_)) => Model::unshown(&chat.model_name),
+        None => Model::profile(host, &requested.model_name).await,
+        Some(Ok(endpoint)) => {
+            Model::profile_on(endpoint.origin(), host, &requested.model_name).await
+        }
+        Some(Err(_)) => Model::unshown(&requested.model_name),
     };
     let messages = chats::list_messages(state.db(), chat.id)
         .await
@@ -269,16 +301,23 @@ async fn chat_on_endpoint(
     let context = match (endpoint, auth.0.user_id()) {
         (Some(Ok(endpoint)), Ok(actor)) => {
             // No draft or inference; reconstruct a fresh observation for reconnect.
-            session::build(state, &chat, actor, None, session::Mode::Preview, endpoint)
-                .await
-                .ok()
-                .map(|prepared| {
-                    // The exposed set, not every registered tool: this is what
-                    // a turn would actually send, which is the number a reader
-                    // is asking for when they ask what a chat costs.
-                    let exposed = prepared.agentic.then(|| prepared.tools.definitions());
-                    prepared.context.usage(&prepared.model, exposed.as_deref())
-                })
+            session::build(
+                state,
+                &requested,
+                actor,
+                None,
+                session::Mode::Preview,
+                endpoint,
+            )
+            .await
+            .ok()
+            .map(|prepared| {
+                // The exposed set, not every registered tool: this is what
+                // a turn would actually send, which is the number a reader
+                // is asking for when they ask what a chat costs.
+                let exposed = prepared.agentic.then(|| prepared.tools.definitions());
+                prepared.context.usage(&prepared.model, exposed.as_deref())
+            })
         }
         _ => None,
     };
@@ -287,7 +326,8 @@ async fn chat_on_endpoint(
         context,
         chat: ChatResponse::from(chat)
             .with_profile(profile)
-            .with_link(link),
+            .with_link(link)
+            .with_choice(choice.as_ref().map(Option::as_ref)),
         messages,
     }
 }
@@ -382,6 +422,11 @@ pub struct CreateChatRequest {
     character: Option<ChatCharacter>,
     #[serde(default)]
     project_id: Option<Uuid>,
+    /// The provider the chat runs on in place of its workspace's.
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    provider_model: Option<String>,
 }
 
 const fn sandboxed_by_default() -> bool {
@@ -400,6 +445,7 @@ fn parse_context_tokens(value: Option<i64>) -> Result<Option<i64>, &'static str>
 #[derive(Debug, Deserialize)]
 pub struct UpdateChatRequest {
     title: Option<String>,
+    model_name: Option<String>,
     agent_enabled: Option<bool>,
     agent_sandboxed: Option<bool>,
     auto_approve: Option<bool>,
@@ -476,26 +522,24 @@ pub async fn create(
         return e.into_response();
     }
 
-    let endpoint = match Route::for_workspace(&state, req.workspace_id)
-        .await
-        .into_endpoint()
-    {
-        Ok(endpoint) => endpoint,
-        Err(unusable) => return ServerError::Conflict(unusable.to_string()).into_response(),
-    };
-    let profile = Model::profile_on(
-        endpoint.origin(),
-        &state.config().ollama_host,
-        &req.model_name,
+    let choice = match provider::chosen(
+        &state,
+        req.workspace_id,
+        req.provider.as_deref(),
+        req.provider_model.as_deref(),
     )
-    .await;
-    if profile.completion == Some(false) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(crate::services::model::UNSUPPORTED)),
-        )
-            .into_response();
+    .await
+    {
+        Ok(choice) => choice,
+        Err(refusal) => return provider::refused(refusal),
+    };
+    let route = Route::for_workspace(&state, req.workspace_id).await;
+    if let Some(refusal) =
+        workspace_refusal(&state, &route, &req.model_name, choice.is_some()).await
+    {
+        return refusal;
     }
+    let route = choice.is_none().then_some(route);
 
     if let Some(project_id) = req.project_id {
         match projects::get_project_in_workspace(state.db(), project_id, req.workspace_id).await {
@@ -537,6 +581,7 @@ pub async fn create(
         req.project_id,
         req.offline,
         context_tokens,
+        choice.as_ref(),
     )
     .await
     {
@@ -546,13 +591,11 @@ pub async fn create(
                 Ok(None) => chat,
                 Err(response) => return response.into_response(),
             };
-            (
-                StatusCode::CREATED,
-                Json(SingleChatResponse {
-                    chat: chat_on_endpoint(&state, &auth, chat, Some(Ok(endpoint))).await,
-                }),
-            )
-                .into_response()
+            let chat = match route {
+                Some(route) => chat_on_route(&state, &auth, chat, Some(route)).await,
+                None => chat_with_messages(&state, &auth, chat).await,
+            };
+            (StatusCode::CREATED, Json(SingleChatResponse { chat })).into_response()
         }
         Err(e) => {
             tracing::error!("Database error: {}", e);
@@ -609,12 +652,25 @@ pub async fn update(
         )
             .into_response();
     }
+    let model = req.model_name.as_deref().map(str::trim);
+    if model.is_some_and(str::is_empty) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new("Model cannot be blank")),
+        )
+            .into_response();
+    }
     let context_tokens = match parse_context_tokens(req.context_tokens) {
         Ok(tokens) => tokens,
         Err(message) => {
             return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response();
         }
     };
+    if let Some(model) = model
+        && let Some(refusal) = model_refusal(&state, &chat, model).await
+    {
+        return refusal;
+    }
     match chats::update_chat(
         state.db(),
         id,
@@ -624,6 +680,7 @@ pub async fn update(
         req.auto_approve,
         req.reasoning_effort,
         context_tokens,
+        model,
     )
     .await
     {
@@ -663,6 +720,61 @@ pub async fn update(
                 .into_response()
         }
     }
+}
+
+/// Why `chat` can't keep `model` as the model it asks its workspace's
+/// provider for, as [`create`] refuses it.
+async fn model_refusal(
+    state: &AppState,
+    chat: &chats::ChatRow,
+    model: &str,
+) -> Option<axum::response::Response> {
+    let Some(workspace) = chat.workspace_id else {
+        let profile = Model::profile(&state.config().ollama_host, model).await;
+        return (profile.completion == Some(false)).then(unsupported);
+    };
+    let chosen = match chats::provider::get(state.db(), chat.id).await {
+        Ok(choice) => choice.is_some(),
+        Err(error) => {
+            tracing::error!(chat = %chat.id, %error, "Could not read the chat's provider");
+            return Some(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response(),
+            );
+        }
+    };
+    let route = Route::for_workspace(state, workspace).await;
+    workspace_refusal(state, &route, model, chosen).await
+}
+
+/// Why `model` is refused as the model a chat keeps for its workspace's
+/// `route`: the route knows it can't chat, or can't be used at all. A name the
+/// route doesn't know is allowed. A `chosen` chat runs on its own provider
+/// until it returns to the workspace's, so an unusable route refuses it nothing.
+async fn workspace_refusal(
+    state: &AppState,
+    route: &Route,
+    model: &str,
+    chosen: bool,
+) -> Option<axum::response::Response> {
+    let endpoint = match route.endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(_) if chosen => return None,
+        Err(unusable) => return Some(ServerError::Conflict(unusable.to_string()).into_response()),
+    };
+    let profile = Model::profile_on(endpoint.origin(), &state.config().ollama_host, model).await;
+    (profile.completion == Some(false)).then(unsupported)
+}
+
+fn unsupported() -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse::new(crate::services::model::UNSUPPORTED)),
+    )
+        .into_response()
 }
 
 /// DELETE /api/chats/:id
@@ -1299,10 +1411,9 @@ pub async fn context(
         Ok(actor) => actor,
         Err(error) => return error.into_response(),
     };
-    let endpoint = match Route::for_workspace(&state, workspace)
-        .await
-        .into_endpoint()
-    {
+    let route = Route::for_chat(&state, &chat).await;
+    let chat = route.apply(chat);
+    let endpoint = match route.into_endpoint() {
         Ok(endpoint) => endpoint,
         Err(unusable) => return ServerError::Conflict(unusable.to_string()).into_response(),
     };
@@ -1321,5 +1432,43 @@ pub async fn context(
             Json(serde_json::json!({"context":prepared.context.usage(&prepared.model,exposed.as_deref())})).into_response()
         }
         Err(error) => ServerError::Conflict(error).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::db::chats::provider::Choice;
+    use crate::services::chat::session::chat_row;
+
+    fn serialised(choice: Option<Option<&Choice>>) -> Value {
+        let response = ChatResponse::from(chat_row(None, false, false)).with_choice(choice);
+        serde_json::to_value(response).expect("a chat serialises")
+    }
+
+    #[test]
+    fn a_chat_carries_its_choice_and_leaves_out_one_it_could_not_read() {
+        let choice = Choice {
+            provider: Provider::Codex,
+            model: Some("gpt-6-sol".to_string()),
+        };
+
+        let chosen = serialised(Some(Some(&choice)));
+        let following = serialised(Some(None));
+        let unread = serialised(None);
+
+        assert_eq!(chosen["provider"], json!("codex"), "{chosen}");
+        assert_eq!(chosen["provider_model"], json!("gpt-6-sol"), "{chosen}");
+        assert!(
+            following.get("provider") == Some(&Value::Null)
+                && following.get("provider_model") == Some(&Value::Null),
+            "a chat following its workspace says so: {following}"
+        );
+        assert!(
+            unread.get("provider").is_none() && unread.get("provider_model").is_none(),
+            "an unread choice is not reported as following the workspace: {unread}"
+        );
     }
 }

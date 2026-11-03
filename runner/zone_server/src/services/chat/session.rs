@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
-use zone_core::llm::{LlmClient, Message, Role};
+use zone_core::llm::{LlmClient, Message, ReasoningEffort, Role};
 
 use crate::agent::prompt::Environment;
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
@@ -311,6 +311,9 @@ pub struct Preparation {
     /// The logins the turn may move to when the one it runs on can no longer run it: none over
     /// HTTP, or under the instance's or the host's sign-in.
     pub handover: Option<Handover>,
+    /// The chat's reasoning effort, which a coding agent the turn hands over to
+    /// is told again.
+    pub effort: ReasoningEffort,
 }
 
 /// Read-only common builder. It never classifies intent, executes tools, searches, or summarizes.
@@ -374,9 +377,10 @@ pub async fn build(
     };
     let backend = match &mode {
         Mode::Preview => backend::instance(state.config()),
-        Mode::Generation(generation) => {
-            backend::bounded(generation.resolved.backend.clone(), settings.timeout)
-        }
+        Mode::Generation(generation) => backend::effort(
+            backend::bounded(generation.resolved.backend.clone(), settings.timeout),
+            chat.reasoning_effort,
+        ),
     };
     let session = match &mode {
         Mode::Preview => None,
@@ -560,6 +564,7 @@ pub async fn build(
         skills,
         session,
         handover: None,
+        effort: chat.reasoning_effort,
     })
 }
 
@@ -641,7 +646,7 @@ pub(crate) fn chat_row(
         auto_approve,
         offline: false,
         context_tokens: None,
-        reasoning_effort: zone_core::llm::ReasoningEffort::default(),
+        reasoning_effort: ReasoningEffort::default(),
         character,
         created_at: None,
         updated_at: None,
@@ -1253,5 +1258,152 @@ mod tests {
         if let Err(error) = preview {
             panic!("the context meter must still preview a chat with no model: {error}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_chats_effort_reaches_an_agent_on_its_backend_and_an_endpoint_in_its_body() {
+        use crate::db::{chats, organizations, workspaces};
+        use serde_json::json;
+        use sqlx::PgPool;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use zone_core::llm::{AgentKind, CliSettings};
+
+        const MODEL: &str = "reasoner";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/model/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{
+                    "model_name": MODEL,
+                    "litellm_params": {"model": "anthropic/claude-sonnet"},
+                    "model_info": {"max_input_tokens": 200000, "supports_reasoning": true}
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": MODEL,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Thought hard."},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        )
+        .await
+        .expect("the test database");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let organization = organizations::create_organization(&pool, "Effort", &suffix, None)
+            .await
+            .expect("an organization");
+        let workspace =
+            workspaces::create_workspace(&pool, organization.id, "Effort", &suffix, None)
+                .await
+                .expect("a workspace");
+        let created = chats::create_chat(&pool, Some(workspace.id), "Effort", MODEL, false, false)
+            .await
+            .expect("a chat");
+        let chat = chats::update_chat(
+            &pool,
+            created.id,
+            None,
+            None,
+            None,
+            None,
+            Some(ReasoningEffort::Max),
+            None,
+            None,
+        )
+        .await
+        .expect("the chat's effort to be saved")
+        .expect("the chat");
+        let mut config = crate::state::test_config();
+        config.litellm_host = server.uri();
+        config.ollama_host = server.uri();
+        let state = AppState::new(config, pool.clone(), None);
+        let user = Uuid::new_v4();
+        let endpoint = crate::services::route::Route::for_workspace(&state, workspace.id)
+            .await
+            .into_endpoint()
+            .expect("the instance's route");
+
+        let agent = build(
+            &state,
+            &chat,
+            user,
+            None,
+            Mode::Generation(Generation::unrouted(LlmBackend::cli(
+                AgentKind::Claude,
+                CliSettings::default(),
+            ))),
+            endpoint.clone(),
+        )
+        .await;
+        let http = build(
+            &state,
+            &chat,
+            user,
+            None,
+            Mode::Generation(Generation::unrouted(LlmBackend::Http)),
+            endpoint,
+        )
+        .await;
+        let answered = match &http {
+            Ok(preparation) => Some(preparation.llm.chat(&[Message::user("Hi")], None).await),
+            Err(_) => None,
+        };
+        let requests = server.received_requests().await.unwrap_or_default();
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .expect("the organization to be removed");
+
+        let agent = agent.unwrap_or_else(|error| panic!("an agent turn prepares: {error}"));
+        assert_eq!(agent.effort, ReasoningEffort::Max);
+        let LlmBackend::Cli {
+            agent: kind,
+            settings,
+        } = &agent.llm.config().backend
+        else {
+            panic!("an agent turn runs on its CLI");
+        };
+        assert_eq!(*kind, AgentKind::Claude);
+        assert_eq!(
+            settings.effort,
+            Some(ReasoningEffort::Max),
+            "the agent is told the chat's effort"
+        );
+        assert_eq!(
+            settings.timeout,
+            state.config().chat.timeout,
+            "the effort leaves the chat's budget in place"
+        );
+
+        let http = http.unwrap_or_else(|error| panic!("an endpoint turn prepares: {error}"));
+        assert_eq!(http.effort, ReasoningEffort::Max);
+        assert!(matches!(http.llm.config().backend, LlmBackend::Http));
+        let answered = answered.expect("the endpoint turn was sent");
+        assert!(answered.is_ok(), "{answered:?}");
+        let sent = requests
+            .iter()
+            .find(|request| request.url.path() == "/chat/completions")
+            .expect("the endpoint was asked for a completion");
+        let body: Value = serde_json::from_slice(&sent.body).expect("a JSON body");
+        assert_eq!(
+            body["reasoning_effort"],
+            json!("high"),
+            "an endpoint is sent the chat's effort at the highest level it takes: {body}"
+        );
     }
 }

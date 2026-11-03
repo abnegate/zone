@@ -227,6 +227,7 @@ pub async fn create_chat(
         None,
         false,
         None,
+        None,
     )
     .await
 }
@@ -244,6 +245,7 @@ pub async fn create_chat_with_title(
     project_id: Option<Uuid>,
     offline: bool,
     context_tokens: Option<i64>,
+    choice: Option<&provider::Choice>,
 ) -> DbResult<ChatRow> {
     let (agent_enabled, agent_sandboxed) = agent;
     let mut transaction = pool.begin().await?;
@@ -279,6 +281,9 @@ pub async fn create_chat_with_title(
             .execute(&mut *transaction)
             .await?;
     }
+    if choice.is_some() {
+        provider::set(&mut *transaction, row.id, choice).await?;
+    }
     transaction.commit().await?;
 
     Ok(map_chat_row!(row))
@@ -294,11 +299,19 @@ pub async fn update_chat(
     auto_approve: Option<bool>,
     reasoning_effort: Option<ReasoningEffort>,
     context_tokens: Option<i64>,
+    model_name: Option<&str>,
 ) -> DbResult<Option<ChatRow>> {
     let mut transaction = pool.begin().await?;
     if title.is_some() {
         sqlx::query("UPDATE chats SET automatic_title = FALSE WHERE id = $1")
             .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    if let Some(model_name) = model_name {
+        sqlx::query("UPDATE chats SET model_name = $2 WHERE id = $1")
+            .bind(id)
+            .bind(model_name)
             .execute(&mut *transaction)
             .await?;
     }
@@ -332,20 +345,6 @@ pub async fn update_chat(
         Some(r) => get_chat(pool, r.id).await,
         None => Ok(None),
     }
-}
-
-/// Replace a chat's model, then return the fresh row.
-pub async fn set_model_name(pool: &PgPool, id: Uuid, model: &str) -> DbResult<Option<ChatRow>> {
-    let updated = sqlx::query("UPDATE chats SET model_name = $2, updated_at = NOW() WHERE id = $1")
-        .bind(id)
-        .bind(model)
-        .execute(pool)
-        .await?
-        .rows_affected();
-    if updated == 0 {
-        return Ok(None);
-    }
-    get_chat(pool, id).await
 }
 
 /// Save a generated title only while its original claim still owns the title.
@@ -1026,13 +1025,33 @@ mod tests {
             .await
             .expect("another chat");
 
-        let moved = set_model_name(&pool, chat.id, "opus")
-            .await
-            .expect("the model to be saved")
-            .expect("the chat");
-        let missing = set_model_name(&pool, Uuid::new_v4(), "opus")
-            .await
-            .expect("an absent chat to be a no-op");
+        let moved = update_chat(
+            &pool,
+            chat.id,
+            None,
+            None,
+            None,
+            None,
+            Some(ReasoningEffort::Max),
+            None,
+            Some("opus"),
+        )
+        .await
+        .expect("the model to be saved")
+        .expect("the chat");
+        let missing = update_chat(
+            &pool,
+            Uuid::new_v4(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("opus"),
+        )
+        .await
+        .expect("an absent chat to be a no-op");
         let read = get_chat(&pool, chat.id).await.unwrap().expect("the chat");
         let bystander = get_chat(&pool, other.id)
             .await
@@ -1046,6 +1065,11 @@ mod tests {
 
         assert_eq!(moved.model_name, "opus");
         assert_eq!(read.model_name, "opus", "the new model is persisted");
+        assert_eq!(
+            read.reasoning_effort,
+            ReasoningEffort::Max,
+            "the model moves with the chat's other changes"
+        );
         assert!(
             read.updated_at >= chat.updated_at,
             "moving the model touches the chat"
