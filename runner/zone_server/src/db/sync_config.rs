@@ -350,6 +350,31 @@ pub async fn update_sync_config(
 /// the ciphertext the caller read. `None` when another change landed first or
 /// the configuration is gone, so no caller is shown a secret that was
 /// overwritten before it could be used.
+/// Replace configuration `id`'s config with `config`, provided it still holds
+/// `prior`.
+pub async fn replace_config(
+    pool: &PgPool,
+    id: Uuid,
+    prior: &JsonValue,
+    config: &JsonValue,
+) -> DbResult<Option<SyncConfigRow>> {
+    sqlx::query_as(
+        r#"
+        UPDATE sync_configs
+        SET config = $3,
+            updated_at = NOW()
+        WHERE id = $1 AND config = $2
+        RETURNING id, project_id, provider, enabled, config, webhook_secret_encrypted,
+                  created_at, updated_at
+        "#,
+    )
+    .bind(id)
+    .bind(prior)
+    .bind(config)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn replace_webhook_secret(
     pool: &PgPool,
     id: Uuid,

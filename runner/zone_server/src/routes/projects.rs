@@ -16,7 +16,7 @@ use crate::error::ServerError;
 use crate::services::model::Model;
 use crate::services::route::Route;
 use crate::state::AppState;
-use crate::sync::hook;
+use crate::sync::hook::Removal;
 
 use super::common::Timestamps;
 
@@ -466,8 +466,9 @@ pub async fn delete(
 ) -> Result<Response, ServerError> {
     writable(&state, &auth, id).await?;
 
-    remove_hooks(&state, id).await?;
+    let removal = hooks(&state, id).await?;
     if projects::delete_project(state.db(), id).await? {
+        removal.run(&state).await;
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {
         Err(not_found())
@@ -537,17 +538,19 @@ pub async fn unlink_github(
 ) -> Result<Response, ServerError> {
     writable(&state, &auth, id).await?;
 
-    remove_hooks(&state, id).await?;
-    respond(&state, projects::unlink_github(state.db(), id).await?).await
+    let removal = hooks(&state, id).await?;
+    let unlinked = projects::unlink_github(state.db(), id).await?;
+    if unlinked.is_some() {
+        removal.run(&state).await;
+    }
+    respond(&state, unlinked).await
 }
 
-/// Remove the webhooks Zone registered for project `id`'s syncs while the
-/// project still holds the token they were registered with.
-async fn remove_hooks(state: &AppState, id: Uuid) -> Result<(), ServerError> {
-    for row in sync_config::list_sync_configs(state.db(), id).await? {
-        hook::remove(state, &row).await;
-    }
-    Ok(())
+/// The webhooks Zone registered for project `id`'s syncs, resolved while the
+/// project still holds the token to remove them with.
+async fn hooks(state: &AppState, id: Uuid) -> Result<Removal, ServerError> {
+    let rows = sync_config::list_sync_configs(state.db(), id).await?;
+    Ok(Removal::of(state, &rows).await)
 }
 
 /// One task of a project as automation sees it.

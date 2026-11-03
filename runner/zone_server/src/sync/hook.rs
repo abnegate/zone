@@ -18,6 +18,7 @@ use super::{Provider, webhook_path};
 use crate::db::projects;
 use crate::db::sync_config::{self, SyncConfigRow};
 use crate::state::AppState;
+use uuid::Uuid;
 
 /// Where a sync's configuration keeps the identifier GitHub gave its webhook.
 pub const HOOK_ID: &str = "github_webhook_id";
@@ -47,6 +48,9 @@ pub enum HookError {
 
     #[error("the sync was removed while its webhook was being registered")]
     Deleted,
+
+    #[error("the sync changed while its webhook was being registered; try again")]
+    Changed,
 
     #[error("the sync could not be read or recorded: {0}")]
     Database(#[from] sqlx::Error),
@@ -147,39 +151,82 @@ impl Hook {
     }
 }
 
-/// Remove the webhook Zone registered for `row`, if it did, and forget it.
-/// A webhook that cannot be removed only delivers to a path that no longer
-/// verifies, so a failure is logged rather than refused.
-pub async fn remove(state: &AppState, row: &SyncConfigRow) {
-    let Some(id) = id_of(row) else {
-        return;
-    };
-    match Hook::of(state, row).await {
-        Ok(Some(hook)) => hook.delete(id).await,
-        Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(config = %row.id, %error, "Failed to remove a sync's webhook");
+/// The webhooks Zone registered for some syncs, resolved while their project
+/// still holds the token to remove them with, so they can be removed once the
+/// change that orphans them has been made.
+pub struct Removal(Vec<(Hook, u64, Uuid)>);
+
+impl Removal {
+    pub async fn of(state: &AppState, rows: &[SyncConfigRow]) -> Self {
+        let mut hooks = Vec::new();
+        for row in rows {
+            let Some(id) = id_of(row) else {
+                continue;
+            };
+            match Hook::of(state, row).await {
+                Ok(Some(hook)) => hooks.push((hook, id, row.id)),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(config = %row.id, %error, "Failed to resolve a sync's webhook");
+                }
+            }
         }
+        Self(hooks)
     }
-    if let Err(error) = record(state, row, None, false).await
-        && !matches!(error, HookError::Deleted)
-    {
-        tracing::warn!(config = %row.id, %error, "Failed to forget a sync's webhook");
+
+    /// Remove each webhook and forget it. A webhook that cannot be removed
+    /// only delivers to a path that no longer verifies, so a failure is
+    /// logged rather than refused.
+    pub async fn run(self, state: &AppState) {
+        for (hook, id, config) in self.0 {
+            hook.delete(id).await;
+            forget(state, config, id).await;
+        }
     }
 }
 
-/// Record that `row`'s webhook still signs with a secret Zone no longer
-/// verifies with, so the console stops calling it registered. Answers the row
-/// as stored.
-pub async fn unsigned(state: &AppState, row: SyncConfigRow) -> SyncConfigRow {
-    let Some(id) = id_of(&row) else {
-        return row;
+/// Remove the webhook Zone registered for `row`, if it did, and forget it.
+pub async fn remove(state: &AppState, row: &SyncConfigRow) {
+    Removal::of(state, std::slice::from_ref(row))
+        .await
+        .run(state)
+        .await;
+}
+
+async fn forget(state: &AppState, config: Uuid, id: u64) {
+    let Ok(Some(row)) = sync_config::get_sync_config(state.db(), config).await else {
+        return;
     };
-    match record(state, &row, Some(id), false).await {
+    if id_of(&row) != Some(id) {
+        return;
+    }
+    if let Err(error) = record(state, &row, None, false).await
+        && !matches!(error, HookError::Deleted)
+    {
+        tracing::warn!(%config, %error, "Failed to forget a sync's webhook");
+    }
+}
+
+/// Record that the webhook of configuration `row` still signs with a secret
+/// Zone no longer verifies with, so the console stops calling it registered.
+/// Answers the row as stored, or as it would read had the write landed.
+pub async fn unsigned(state: &AppState, row: SyncConfigRow) -> SyncConfigRow {
+    let current = match sync_config::get_sync_config(state.db(), row.id).await {
+        Ok(Some(current)) => current,
+        Ok(None) | Err(_) => row,
+    };
+    let Some(id) = id_of(&current) else {
+        return current;
+    };
+    match record(state, &current, Some(id), false).await {
         Ok(updated) => updated,
         Err(error) => {
-            tracing::warn!(config = %row.id, %error, "Failed to record a sync's stale webhook");
-            row
+            tracing::warn!(config = %current.id, %error, "Failed to record a sync's stale webhook");
+            let mut stale = current;
+            if let Some(fields) = stale.config.as_object_mut() {
+                fields.insert(HOOK_SIGNED.to_string(), false.into());
+            }
+            stale
         }
     }
 }
@@ -215,7 +262,13 @@ async fn record(
             fields.remove(HOOK_SIGNED);
         }
     }
-    sync_config::update_sync_config(state.db(), row.id, None, Some(config), None)
-        .await?
-        .ok_or(HookError::Deleted)
+    if let Some(updated) =
+        sync_config::replace_config(state.db(), row.id, &row.config, &config).await?
+    {
+        return Ok(updated);
+    }
+    match sync_config::get_sync_config(state.db(), row.id).await? {
+        Some(_) => Err(HookError::Changed),
+        None => Err(HookError::Deleted),
+    }
 }

@@ -100,20 +100,21 @@ export default function ProjectsPage() {
     deleteSyncConfig: deleteSyncConfigMutation,
   } = useSyncConfigs(selectedProject?.id || null);
   const [revealedSecret, setRevealedSecret] = useState<RevealedSecret | null>(null);
-  const reveals = useRef(0);
+  const secretRequests = useRef(0);
 
-  const reveal = ({ config, webhookSecret, registrationError }: SyncConfigSecret) => {
-    if (webhookSecret) {
-      reveals.current += 1;
-      setRevealedSecret({
-        configId: config.id,
-        secret: webhookSecret,
-        registrationError,
-        revision: reveals.current,
-      });
-    } else {
-      setRevealedSecret((current) => (current?.configId === config.id ? null : current));
-    }
+  const reveal = (
+    { config, webhookSecret, registrationError }: SyncConfigSecret,
+    request: number
+  ) => {
+    setRevealedSecret((current) => {
+      if (current?.configId === config.id && current.revision > request) {
+        return current;
+      }
+      if (webhookSecret) {
+        return { configId: config.id, secret: webhookSecret, registrationError, revision: request };
+      }
+      return current?.configId === config.id ? null : current;
+    });
   };
 
   // A link such as /projects?id=… (from a planner receipt) selects that project once
@@ -336,7 +337,9 @@ export default function ProjectsPage() {
     setSubmitting(true);
     setOperationError(null);
     try {
-      reveal(await createSyncConfigMutation(request));
+      secretRequests.current += 1;
+      const order = secretRequests.current;
+      reveal(await createSyncConfigMutation(request), order);
       setShowSyncModal(false);
       resetForm();
     } catch (err) {
@@ -363,7 +366,9 @@ export default function ProjectsPage() {
 
     setOperationError(null);
     try {
-      reveal(await setWebhookSecretMutation(config.id, secret));
+      secretRequests.current += 1;
+      const order = secretRequests.current;
+      reveal(await setWebhookSecretMutation(config.id, secret), order);
       return true;
     } catch (err) {
       failed(err, 'Failed to set the webhook secret');

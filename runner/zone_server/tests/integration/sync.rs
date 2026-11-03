@@ -3728,6 +3728,40 @@ async fn deleting_a_project_removes_the_webhooks_zone_registered() {
 }
 
 #[tokio::test]
+async fn unlinking_github_succeeds_and_forgets_the_webhook_even_when_github_refuses_to_delete_it() {
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    registers(&github, 14).await;
+    answers(&github, "DELETE", format!("{HOOKS}/14"), 500).await;
+    let config = id_of(&configure(&client, &token, &project, &connected_sync()).await);
+
+    client
+        .delete_auth(&format!("/api/projects/{project}/github"), &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    assert_eq!(deletions(&github).await, [format!("{HOOKS}/14")]);
+    assert!(stored(&client, &config).await.unwrap().config["github_webhook_id"].is_null());
+}
+
+#[tokio::test]
+async fn deleting_a_project_succeeds_even_when_github_refuses_to_delete_its_webhooks() {
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    registers(&github, 15).await;
+    answers(&github, "DELETE", format!("{HOOKS}/15"), 500).await;
+    let config = id_of(&configure(&client, &token, &project, &connected_sync()).await);
+
+    client
+        .delete_auth(&format!("/api/projects/{project}"), &token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    assert_eq!(deletions(&github).await, [format!("{HOOKS}/15")]);
+    assert!(stored(&client, &config).await.is_none());
+}
+
+#[tokio::test]
 async fn a_github_sync_on_a_project_without_a_token_shows_its_secret_with_no_error() {
     let client = common::TestClient::with_db().await;
     let token = signed_in(&client).await;

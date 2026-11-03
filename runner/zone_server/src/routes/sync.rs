@@ -230,20 +230,23 @@ async fn converge(
     signed: SyncConfigRow,
     committed: Option<&str>,
 ) -> Result<(SyncConfigRow, Option<String>), ServerError> {
-    let current = sync_config::get_sync_config(state.db(), signed.id)
-        .await?
-        .ok_or_else(config_not_found)?;
-    let Some(kept) = current
-        .webhook_secret_encrypted
-        .as_deref()
-        .filter(|kept| Some(*kept) != committed)
-    else {
-        return Ok((current, None));
-    };
-    let kept = crypto::open(state.encryption_key(), kept);
-    match hook.sign_with(state, current.clone(), &kept).await {
-        Ok(signed) => Ok((signed, None)),
-        Err(error) => refused(state, current, error).await,
+    let mut pushed = committed.map(str::to_string);
+    loop {
+        let current = sync_config::get_sync_config(state.db(), signed.id)
+            .await?
+            .ok_or_else(config_not_found)?;
+        let Some(kept) = current
+            .webhook_secret_encrypted
+            .clone()
+            .filter(|kept| Some(kept) != pushed.as_ref())
+        else {
+            return Ok((current, None));
+        };
+        let secret = crypto::open(state.encryption_key(), &kept);
+        if let Err(error) = hook.sign_with(state, current.clone(), &secret).await {
+            return refused(state, current, error).await;
+        }
+        pushed = Some(kept);
     }
 }
 

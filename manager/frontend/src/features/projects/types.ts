@@ -131,7 +131,7 @@ export interface RevealedSecret {
   secret: string;
   /** Why Zone could not register the webhook, so the secret has to be added by hand */
   registrationError: string | null;
-  /** Counts reveals, so each new secret mounts a fresh callout */
+  /** The request that revealed it: a response to an earlier one leaves it alone, and each new secret mounts a fresh callout */
   revision: number;
 }
 

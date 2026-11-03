@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { clientModule } from '../../../test/client';
 import { chooseSelect } from '../../../test/select';
-import type { Project, SyncConfig } from '../types';
+import type { Project, SyncConfig, SyncConfigSecret } from '../types';
 
 const mockGetProjects = mock();
 const mockGetSyncConfigs = mock();
@@ -531,11 +531,47 @@ describe('ProjectsPage - Sync Configuration', () => {
       await openProject();
       await rotateConfirmed();
       await screen.findByText(rotated);
+      mockGetSyncConfigs.mockResolvedValue([{ ...githubConfig, webhook_registered: true }]);
       await rotateConfirmed();
 
       await waitFor(() => {
         expect(screen.queryByTestId('sync-secret')).toBeNull();
       });
+      expect(await screen.findByText('Webhook registered on GitHub')).toBeInTheDocument();
+    });
+
+    it('keeps a refused secret when an earlier rotation answers after it', async () => {
+      const refusal = 'Zone could not register the webhook: GitHub refused';
+      let answerEarlier: (value: SyncConfigSecret) => void = () => {};
+      mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+      mockSetWebhookSecret
+        .mockImplementationOnce(
+          () =>
+            new Promise<SyncConfigSecret>((resolve) => {
+              answerEarlier = resolve;
+            })
+        )
+        .mockResolvedValueOnce({
+          config: githubConfig,
+          webhookSecret: rotated,
+          registrationError: refusal,
+        });
+
+      await openProject();
+      await rotateConfirmed();
+      fireEvent.click(screen.getByLabelText('Close'));
+      fireEvent.click(screen.getByText('Test Project').closest('.project-card')!);
+      await rotateConfirmed();
+      await screen.findByText(rotated);
+
+      answerEarlier({
+        config: { ...githubConfig, webhook_registered: true },
+        webhookSecret: null,
+        registrationError: null,
+      });
+
+      await new Promise((settle) => setTimeout(settle, 50));
+      expect(screen.getByTestId('sync-secret-value').textContent).toBe(rotated);
     });
 
     it('offers rotation where the server says Zone issues the secret, whatever the provider', async () => {
