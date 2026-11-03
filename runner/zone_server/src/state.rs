@@ -469,6 +469,13 @@ mod tests {
         std::env::var(REDIS_URL).ok()
     }
 
+    async fn connect_test_cache(url: Option<String>) -> Option<Cache> {
+        let cache = Cache::connect(&url?)
+            .await
+            .expect("REDIS_URL must point to a reachable cache");
+        Some(cache)
+    }
+
     #[tokio::test]
     async fn a_hold_marks_the_device_connected_until_drop() {
         let state = AppState::for_tests();
@@ -716,13 +723,11 @@ mod tests {
 
     #[tokio::test]
     async fn cache_accessor_exposes_a_connected_cache_when_available() {
-        let Some(url) = ({
+        let url = {
             let _environment = Variables::lock();
             test_cache_url()
-        }) else {
-            return;
         };
-        let Ok(cache) = Cache::connect(&url).await else {
+        let Some(cache) = connect_test_cache(url).await else {
             return;
         };
         let pool = PgPool::connect_lazy("postgres://localhost/state-cache")
@@ -738,5 +743,16 @@ mod tests {
 
         environment.set(REDIS_URL, "redis://cache.test:6390");
         assert_eq!(test_cache_url().as_deref(), Some("redis://cache.test:6390"));
+    }
+
+    #[tokio::test]
+    async fn an_unset_redis_url_skips_the_cache_test() {
+        assert!(connect_test_cache(None).await.is_none());
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "REDIS_URL must point to a reachable cache")]
+    async fn a_redis_url_that_cannot_connect_fails_the_cache_test() {
+        connect_test_cache(Some("not a redis url".to_string())).await;
     }
 }
