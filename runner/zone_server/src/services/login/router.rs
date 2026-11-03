@@ -1202,7 +1202,7 @@ mod tests {
         let started = Utc::now();
 
         let (_, ()) = tokio::join!(scene.pick(AgentKind::Claude, &[], None), async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            reading_began(&usage).await;
             observe(
                 &scene.state,
                 login,
@@ -1233,7 +1233,7 @@ mod tests {
             .await;
 
         let (chosen, ()) = tokio::join!(scene.pick(AgentKind::Claude, &[], None), async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            reading_began(&usage).await;
             scene.read(login, 15.0, resets_at).await;
         });
         let stored = scene.stored(login).await.snapshot().expect("a snapshot");
@@ -1256,6 +1256,18 @@ mod tests {
             .mount(&usage)
             .await;
         usage
+    }
+
+    /// Once the reading `usage` answers late has reached it, so what a test
+    /// does next happens while that reading is under way.
+    async fn reading_began(usage: &MockServer) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while readings(usage).await == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the reading to reach the usage endpoint");
     }
 
     async fn readings(usage: &MockServer) -> usize {
