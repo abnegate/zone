@@ -21,7 +21,10 @@ function formatSetupDisk(bytes: number): string {
   return `${bytes} B`;
 }
 
-function featureSize(feature: FeatureRow): { label: string; state: 'ready' | 'partial' | 'missing' } {
+function featureSize(feature: FeatureRow): {
+  label: string;
+  state: 'ready' | 'partial' | 'missing';
+} {
   if (feature.ready || (feature.needed_bytes === 0 && feature.present_bytes > 0)) {
     return { label: 'Installed', state: 'ready' };
   }
@@ -251,6 +254,7 @@ export default function FeaturesPanel({
               />
               <span
                 className={`models-feature-size models-feature-size--${size.state}`}
+                role="note"
                 aria-label={`${feature.label}: ${size.label}`}
               >
                 {size.label}

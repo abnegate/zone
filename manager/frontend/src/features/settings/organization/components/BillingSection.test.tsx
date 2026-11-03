@@ -1,17 +1,15 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { render, screen, waitFor } from '@testing-library/react';
+import { clientModule } from '../../../../test/client';
 import type { Limits, Subscription, Usage } from '../types';
 
-// Mock the client
 const mockClient = {
   getSubscription: mock(),
   getUsage: mock(),
   getLimits: mock(),
 };
 
-mock.module('../../../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../../../api/client', () => clientModule(mockClient));
 
 let BillingSection: typeof import('./BillingSection').BillingSection;
 

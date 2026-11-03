@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { clientModule } from '../../../test/client';
 
 // Mock client
 const mockResendVerification = mock();
@@ -8,9 +9,7 @@ const mockClient = {
   resendVerification: mockResendVerification,
 };
 
-mock.module('../../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../../api/client', () => clientModule(mockClient));
 
 let VerificationPendingBanner: typeof import('./VerificationPendingBanner').default;
 

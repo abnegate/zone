@@ -73,24 +73,61 @@ cargo tree --workspace --all-features --target all -e all -i crypto-bigint
 
 Both report no match.
 
-## Lighthouse archive advisory exception
+## Frontend advisory exception
 
-`GHSA-7pqw-9j4j-h8q3` is excepted in `manager/frontend`'s audit script. The
-advisory describes arbitrary file writes through symlink entries in an archive
-handed to extract-zip, and covers every published release: 2.0.1 is the latest,
-so there is nothing to upgrade to.
+`GHSA-gcqx-w48m-w2h4` is excepted in `manager/frontend`'s audit script. The
+advisory describes prototype poisoning in deepmerge's `mergeObject()` when a
+caller merges an attacker-supplied object, and covers every release from 4.2.0
+through 4.3.1, the latest, so there is nothing to upgrade to.
 
-The single path is
-`@lhci/cli > lighthouse > puppeteer-core > @puppeteer/browsers > extract-zip`.
-`@lhci/cli` is a devDependency, so extract-zip is never bundled into the
-manager frontend or any shipped artifact; it runs only in CI, and the only
-archive it opens is the Chrome build `@puppeteer/browsers` downloads from
-Google's endpoint. Reaching the vulnerable path means that download is already
-attacker-controlled.
+The single path is `vite-plugin-pwa > workbox-build >
+@rollup/plugin-node-resolve > deepmerge`, a build-time devDependency that is
+never bundled into the manager frontend. Its one call merges the plugin's own
+constant defaults into an empty object when the module loads; no
+configuration, package metadata or request data reaches it.
 
-This exception must be revisited if extract-zip publishes a patched release, if
-`@lhci/cli` moves out of devDependencies, or if a caller extracts an archive from
-a source outside the Chrome download. All other frontend advisories remain fatal.
+This exception must be revisited if deepmerge publishes a patched release, if
+the plugin starts merging caller-supplied objects, or if deepmerge reaches a
+runtime dependency. All other frontend advisories remain fatal.
+
+## Cross-major frontend overrides
+
+The root `package.json` pins `glob` and `zod` across every workspace. Bun's
+`overrides` apply to the whole tree, so each pin also lands on one package
+built for an older major. Both pins are needed for `bun run audit` in
+`manager/frontend` to pass. The `glob` pin also reaches `nyc` and
+`vite-plugin-pwa > workbox-build`, which runs in the console's PWA build, so
+`bun run build` must keep passing against it. The `zod` pin reaches only the
+Lighthouse CI tooling (`@lhci/cli`), never the bundled console.
+
+**`glob` 14.0.3.** Without it, `nyc > glob@13` and `vite-plugin-pwa >
+workbox-build > glob@11` fail the audit on `GHSA-3g3m-2fjr-6pw4` (AbortSignal
+cancellation bypass, `>=9.0.0 <=14.0.1`). The pin also gives `@lhci/cli >
+chrome-launcher@0.13.4 > rimraf@3`, which expects glob 7, glob 14. rimraf
+only calls glob when a path has glob magic. chrome-launcher removes the
+`mktemp -d -t lighthouse.XXXXXXX` profile directory it created with the async
+call, and that path has none, so glob 14's `hasMagic` answers and rimraf
+removes the directory itself. `rimraf.sync` with a pattern also works, because
+glob 14 still has `sync`. The error path differs: an async rimraf on a path
+with glob magic, for example a `TMPDIR` containing `*` or `[`, calls
+`glob(...)`, which is not a function in glob 14, and throws `TypeError` out of
+an fs callback instead of deleting the directory.
+
+**`zod` 4.6.7.** The console depends on zod 4 directly. Without the override,
+`@lhci/cli > lighthouse > puppeteer-core > chromium-bidi@12` resolves zod
+3.25.76, which fails the audit on `GHSA-mrhx-c7xc-m3w5` (memory exhaustion on
+oversized constrained collections, `<4.6.6`); no zod 3 release is patched.
+puppeteer-core loads chromium-bidi only for a WebDriver BiDi connection, and
+Lighthouse drives Chrome over CDP, so the module is never loaded. If it were,
+valid messages would parse as before, but the error path differs:
+`parseObject` reads `parseResult.error.errors`, which zod 4 removed in favour
+of `issues`, so a malformed BiDi message would throw `TypeError` instead of
+`InvalidArgumentException`.
+
+Drop either pin once a release outside the advisory's range satisfies every
+dependent: `nyc` and `workbox-build` on glob 14.0.2 or later, and
+`chromium-bidi` on zod 4. Revisit both if Lighthouse starts using WebDriver
+BiDi or if chrome-launcher is called with a user-supplied profile path.
 
 ## aiusg
 

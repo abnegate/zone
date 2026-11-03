@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import type React from 'react';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { clientModule } from '../../../test/client';
 import { chooseSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project, ProjectAutomation } from '../types';
@@ -96,15 +97,14 @@ mock.module('../../../api/projects', () => ({
   },
 }));
 
-// Mock client module
-mock.module('../../../api/client', () => ({
-  client: {
+mock.module('../../../api/client', () =>
+  clientModule({
     getSources: mockGetSources,
     getWorkspaceMembers: mockGetWorkspaceMembers,
     linkSource: mockLinkSource,
     unlinkSource: mockUnlinkSource,
-  },
-}));
+  })
+);
 
 // Mock useAuth
 mock.module('../../../features/auth', () => ({

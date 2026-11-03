@@ -45,12 +45,18 @@ export default function SetupPage() {
           ) : (
             <p>Choose host folders chat tools can use on this machine.</p>
           )}
-          <p className="setup-steps" aria-current={step}>
-            <span className={step === 'features' ? 'setup-step setup-step--current' : 'setup-step'}>
+          <p className="setup-steps">
+            <span
+              className={step === 'features' ? 'setup-step setup-step--current' : 'setup-step'}
+              aria-current={step === 'features' ? 'step' : undefined}
+            >
               1 Features
             </span>
             <span aria-hidden="true"> · </span>
-            <span className={step === 'folders' ? 'setup-step setup-step--current' : 'setup-step'}>
+            <span
+              className={step === 'folders' ? 'setup-step setup-step--current' : 'setup-step'}
+              aria-current={step === 'folders' ? 'step' : undefined}
+            >
               2 Folders
             </span>
           </p>

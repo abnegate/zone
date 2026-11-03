@@ -10,18 +10,19 @@ import {
   spyOn,
 } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { clientModule } from '../../../../test/client';
 import { chooseSelect } from '../../../../test/select';
 import type { AuditLog, AuditLogsResponse } from '../types';
 
 const mockGetAuditLogs = mock();
 const mockExportAuditLogs = mock();
 
-mock.module('../../../../api/client', () => ({
-  client: {
+mock.module('../../../../api/client', () =>
+  clientModule({
     getAuditLogs: mockGetAuditLogs,
     exportAuditLogs: mockExportAuditLogs,
-  },
-}));
+  })
+);
 
 let AuditLogsSection: typeof import('./AuditLogsSection').AuditLogsSection;
 let createElementSpy: ReturnType<typeof spyOn> | null = null;

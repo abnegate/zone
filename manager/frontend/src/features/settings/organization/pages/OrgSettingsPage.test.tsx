@@ -10,9 +10,10 @@ import {
   setSystemTime,
 } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { chooseSelect, selectOptionValues } from '../../../../test/select';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { ApiError } from '../../../../api/ApiError';
+import { clientModule } from '../../../../test/client';
+import { chooseSelect, selectOptionValues } from '../../../../test/select';
 import type { AiSettings, OrgRole } from '../types';
 
 // Mock client
@@ -24,9 +25,7 @@ const mockClient = {
   getWorkspaces: mock(),
 };
 
-mock.module('../../../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../../../api/client', () => clientModule(mockClient));
 
 const agentsApi = {
   list: mock(),
@@ -39,7 +38,6 @@ const agentsApi = {
 
 mock.module('../../../../api/agents', () => ({ agentsApi }));
 
-// Mock OrgMembersSection, InvitationsSection, BillingSection, and AuditLogsSection components
 mock.module('../components', () => ({
   Button: ({ children, ...props }: React.ComponentProps<'button'>) => (
     <button {...props}>{children}</button>
@@ -54,6 +52,9 @@ mock.module('../components', () => ({
   ),
   BillingSection: ({ orgId }: { orgId: string }) => (
     <div data-testid="billing-section">BillingSection: {orgId}</div>
+  ),
+  DevicesSection: ({ orgId }: { orgId: string }) => (
+    <div data-testid="devices-section">DevicesSection: {orgId}</div>
   ),
   AuditLogsSection: ({ orgId }: { orgId: string }) => (
     <div data-testid="audit-logs-section">AuditLogsSection: {orgId}</div>

@@ -1,5 +1,6 @@
 import { test, expect } from './fixtures';
 import type { Locator, Page } from '@playwright/test';
+import { chooseSelect } from './helpers/select';
 import { setupAuth, blockServiceWorker, routeApi } from './test-utils';
 
 type InstalledModel = {
@@ -1270,7 +1271,7 @@ test.describe('Models Page', () => {
       }
     });
 
-    await page.getByLabel('Sort models').selectOption('name_desc');
+    await chooseSelect(page.getByRole('combobox', { name: 'Sort models' }), 'Name Z–A');
     await expect(page.locator('.browse-name').first()).toHaveText('codellama');
   });
 

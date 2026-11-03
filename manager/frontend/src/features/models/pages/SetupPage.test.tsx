@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { SetupPlan } from '../../../api/models';
+import { clientModule } from '../../../test/client';
 import { setupCompleteKey } from '../setupComplete';
 
 const mockGetSetup = mock();
@@ -28,13 +29,13 @@ const mockGetHostMounts = mock();
 const mockGetWorkspaceHostDirectories = mock();
 const mockUpdateWorkspaceHostDirectories = mock();
 
-mock.module('../../../api/client', () => ({
-  client: {
+mock.module('../../../api/client', () =>
+  clientModule({
     getHostMounts: mockGetHostMounts,
     getWorkspaceHostDirectories: mockGetWorkspaceHostDirectories,
     updateWorkspaceHostDirectories: mockUpdateWorkspaceHostDirectories,
-  },
-}));
+  })
+);
 
 mock.module('../../auth', () => ({
   useAuth: () => ({
@@ -208,6 +209,18 @@ describe('SetupPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
     expect(localStorage.getItem(setupCompleteKey('user-1'))).toBe('1');
     expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true });
+  });
+
+  it('marks only the current step as current', async () => {
+    render(<SetupPage />);
+    await screen.findByRole('heading', { name: 'Set up Zone' });
+    expect(screen.getByText('1 Features')).toHaveAttribute('aria-current', 'step');
+    expect(screen.getByText('2 Folders')).not.toHaveAttribute('aria-current');
+    expect(screen.getByText('1 Features').parentElement).not.toHaveAttribute('aria-current');
+    fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
+    await screen.findByRole('heading', { name: 'Host folders' });
+    expect(screen.getByText('1 Features')).not.toHaveAttribute('aria-current');
+    expect(screen.getByText('2 Folders')).toHaveAttribute('aria-current', 'step');
   });
 
   it('shows per-piece download progress on the setup step', async () => {

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
+import { clientModule } from '../../../test/client';
 
 // Mock client
 const mockForgotPassword = mock();
@@ -9,9 +10,7 @@ const mockClient = {
   forgotPassword: mockForgotPassword,
 };
 
-mock.module('../../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../../api/client', () => clientModule(mockClient));
 
 // Mock useNavigate
 const mockNavigate = mock();

@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { clientModule } from '../../../../test/client';
 import { chooseSelectElement } from '../../../../test/select';
 import type { OrganizationMember, OrgRole } from '../types';
 
-// Mock client
 const mockClient = {
   getOrgMembers: mock(),
   addOrgMember: mock(),
@@ -11,9 +11,7 @@ const mockClient = {
   removeOrgMember: mock(),
 };
 
-mock.module('../../../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../../../api/client', () => clientModule(mockClient));
 
 // Mock useAuth
 const mockUseAuth = mock(() => ({

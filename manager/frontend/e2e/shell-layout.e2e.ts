@@ -4,7 +4,11 @@ import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 const timestamp = '2026-09-05T00:00:00Z';
-const settingsTabs = { height: 32, gap: 24.5 };
+const narrowLayoutWidth = 768;
+const settingsTabs = (width: number) => ({
+  height: 32,
+  gap: width <= narrowLayoutWidth ? 25 : 24.5,
+});
 const scenarios = [
   { name: 'desktop-light', width: 1440, height: 1000, mode: 'light' },
   { name: 'mobile-light', width: 390, height: 844, mode: 'light' },
@@ -226,7 +230,7 @@ for (const scenario of scenarios) {
   }, information) => {
     await signIn(page, scenario, '/settings');
     await expect(page.locator('#font-family')).toBeVisible();
-    await expect.poll(() => tabs(page)).toEqual(settingsTabs);
+    await expect.poll(() => tabs(page)).toEqual(settingsTabs(scenario.width));
     const workspaceTitle = page.locator('.settings-page .page-bar-title');
     const rhythm = await page
       .locator('.settings-form')
@@ -299,7 +303,7 @@ for (const scenario of scenarios) {
       await expect(
         page.getByRole('tab', { name: tab, exact: true }),
       ).toHaveAttribute('aria-selected', 'true');
-      await expect.poll(() => tabs(page)).toEqual(settingsTabs);
+      await expect.poll(() => tabs(page)).toEqual(settingsTabs(scenario.width));
       await capture(
         page,
         information,
@@ -364,7 +368,7 @@ for (const scenario of scenarios) {
     ).toBeVisible();
     await capture(page, information, 'session-confirmation');
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-    if (scenario.width <= 768) {
+    if (scenario.width <= narrowLayoutWidth) {
       await page.getByRole('button', { name: /Toggle menu/i }).click();
       await expect
         .poll(async () => (await page.locator('.sidebar').boundingBox())?.x)
@@ -414,7 +418,7 @@ test('workspace custom typography preserves shared proportions', async ({
   await page.goto('/login', { waitUntil: 'domcontentloaded' });
   await setupAdminAuth(page);
   await page.goto('/settings', { waitUntil: 'domcontentloaded' });
-  await expect(page.locator('#font-family')).toHaveValue('roboto');
+  await expect(page.getByRole('combobox', { name: 'Font Family' })).toHaveText('Roboto');
   await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS(
     'font-size',
     '20.25px',

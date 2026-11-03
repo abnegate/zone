@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { client } from './client';
+import { deviceHeaders } from './device';
 
 describe('Client - Auth Methods', () => {
   const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -33,6 +34,7 @@ describe('Client - Auth Methods', () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...deviceHeaders(),
           Authorization: 'Bearer test-token',
         },
         body: JSON.stringify({ token: 'test-token-123' }),
@@ -71,6 +73,7 @@ describe('Client - Auth Methods', () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...deviceHeaders(),
           Authorization: 'Bearer test-token',
         },
         body: JSON.stringify({ email: 'test@example.com' }),

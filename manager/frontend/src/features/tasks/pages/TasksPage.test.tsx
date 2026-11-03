@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
+import { clientModule } from '../../../test/client';
 import { chooseSelect, openSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
@@ -75,11 +76,11 @@ mock.module('../../../api/projects', () => ({
   },
 }));
 
-mock.module('../../../api/client', () => ({
-  client: {
+mock.module('../../../api/client', () =>
+  clientModule({
     getSources: mockGetSources,
-  },
-}));
+  })
+);
 
 afterAll(() => {
   mock.restore();

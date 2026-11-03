@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { chooseSelect, openSelect, selectOptionValues } from '../../../../test/select';
 import userEvent from '@testing-library/user-event';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { ApiError } from '../../../../api/ApiError';
+import { clientModule } from '../../../../test/client';
+import { chooseSelect, openSelect, selectOptionValues } from '../../../../test/select';
 import type { OrgRole } from '../../organization/types';
 import type { AiSettings, WorkspaceAiSettings, WorkspaceTheme } from '../types';
 
@@ -19,9 +20,7 @@ const mockClient = {
   getConnectUrls: mock(),
 };
 
-mock.module('../../../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../../../api/client', () => clientModule(mockClient));
 
 const agentsApi = {
   list: mock(),

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { clientModule } from '../../../../test/client';
 
 const mockClient = {
   getHostMounts: mock(),
@@ -7,9 +8,7 @@ const mockClient = {
   updateWorkspaceHostDirectories: mock(),
 };
 
-mock.module('../../../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../../../api/client', () => clientModule(mockClient));
 
 let HostFoldersPanel: typeof import('./HostFoldersPanel').default;
 

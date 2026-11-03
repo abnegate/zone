@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { clientModule } from '../../../../test/client';
 import type { OrganizationDevice } from '../types';
 
 const mockClient = {
@@ -9,9 +10,7 @@ const mockClient = {
   setDevicePolicy: mock(),
 };
 
-mock.module('../../../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../../../api/client', () => clientModule(mockClient));
 
 let DevicesSection: typeof import('./DevicesSection').default;
 

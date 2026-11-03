@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures';
 import { setupAuth } from './helpers/auth';
+import { chooseSelect, expectSelectOptions } from './helpers/select';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 type Agent = 'claude' | 'codex';
@@ -355,7 +356,9 @@ test.describe('Coding agent sign-in', () => {
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await expect(panel.getByText('Not signed in')).toBeVisible();
-    await expect(page.getByLabel('AI Provider')).toHaveValue('claude_code');
+    await expect(page.getByRole('combobox', { name: 'AI Provider' })).toHaveText(
+      'Claude Code (Claude subscription)'
+    );
     await expect(page.getByLabel(/LiteLLM Host/)).toHaveCount(0);
 
     await panel.getByRole('button', { name: 'Sign in with Claude' }).click();
@@ -396,10 +399,10 @@ test.describe('Coding agent sign-in', () => {
     });
     expect(captured.filter((request) => request.method === 'PUT')).toHaveLength(0);
 
-    const fast = page.getByLabel('Fast Model');
-    await expect(fast.locator('option')).toHaveText(['Automatic', 'sonnet', 'opus', 'haiku']);
-    await fast.selectOption('sonnet');
-    await page.getByLabel('Reasoning Model').selectOption('opus');
+    const fast = page.getByRole('combobox', { name: 'Fast Model' });
+    await expectSelectOptions(fast, ['Automatic', 'sonnet', 'opus', 'haiku']);
+    await chooseSelect(fast, 'sonnet');
+    await chooseSelect(page.getByRole('combobox', { name: 'Reasoning Model' }), 'opus');
     await expect(page.getByText("this server's own embedding engine")).toBeVisible();
     await capture(page, 'signed-in');
 
@@ -808,7 +811,7 @@ test.describe('Coding agent sign-in', () => {
     expect(polls).toBe(2);
     await page.waitForTimeout(4000);
     expect(polls).toBe(2);
-    await expect(page.getByLabel('Fast Model').locator('option')).toHaveText([
+    await expectSelectOptions(page.getByRole('combobox', { name: 'Fast Model' }), [
       'Automatic',
       'gpt-6-astra',
       'gpt-6-sol',
@@ -865,7 +868,9 @@ test.describe('Coding agent sign-in', () => {
     await page.getByRole('tab', { name: 'AI Settings' }).click();
 
     await expect(page.getByLabel('Override organization AI settings')).toBeChecked();
-    await expect(page.getByLabel('AI Provider')).toHaveValue('codex');
+    await expect(page.getByRole('combobox', { name: 'AI Provider' })).toHaveText(
+      'Codex (ChatGPT subscription)'
+    );
     const panel = page.getByRole('region', { name: 'Codex sign-in' });
     await expect(panel.getByText('Not signed in', { exact: true })).toBeVisible();
     await expect(panel.getByText('Signing in', { exact: true })).toHaveCount(0);
@@ -899,7 +904,9 @@ test.describe('Coding agent sign-in', () => {
     await page.goto('/settings');
     await page.getByRole('tab', { name: 'AI Settings' }).click();
 
-    await expect(page.getByLabel('AI Provider')).toHaveValue('claude_code');
+    await expect(page.getByRole('combobox', { name: 'AI Provider' })).toHaveText(
+      'Claude Code (Claude subscription)'
+    );
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await expect(panel.getByRole('heading', { level: 3 })).toHaveText('Claude Code sign-in');
     await expect(panel.getByRole('status').getByText('Signed in', { exact: true })).toBeVisible();

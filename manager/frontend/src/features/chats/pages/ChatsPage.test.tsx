@@ -11,8 +11,8 @@ import {
 } from 'bun:test';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
-import type { Chat, ChatSearchResult, ChatWithMessages, Message } from '../types';
 import { chooseSelect } from '../../../test/select';
+import type { Chat, ChatSearchResult, ChatWithMessages, Message } from '../types';
 import { CHAT_GROUP_STORAGE_KEY, CHAT_SORT_STORAGE_KEY } from '../utils/arrange';
 
 // Create mock functions

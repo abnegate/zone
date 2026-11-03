@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import type { TrainJob } from '../../../api/models';
+import { clientModule } from '../../../test/client';
 
 function fluxQwenBases() {
   return [
@@ -91,11 +92,11 @@ mock.module('../hooks/useTrain', () => ({
   useTrain: () => trainState,
 }));
 
-mock.module('../../../api/client', () => ({
-  client: {
+mock.module('../../../api/client', () =>
+  clientModule({
     getEffectiveAiSettings: mockGetEffectiveAiSettings,
-  },
-}));
+  })
+);
 
 mock.module('../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: () => ({

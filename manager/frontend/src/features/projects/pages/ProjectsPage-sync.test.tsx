@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { clientModule } from '../../../test/client';
 import { chooseSelect } from '../../../test/select';
 import type { Project, SyncConfig } from '../types';
 
@@ -35,15 +36,14 @@ mock.module('../../../api/projects', () => ({
   },
 }));
 
-// Mock client (for sources)
-mock.module('../../../api/client', () => ({
-  client: {
+mock.module('../../../api/client', () =>
+  clientModule({
     getSources: mockGetSources,
     getWorkspaceMembers: mockGetWorkspaceMembers,
     linkSource: mockLinkSource,
     unlinkSource: mockUnlinkSource,
-  },
-}));
+  })
+);
 
 // Mock useAuth
 mock.module('../../auth/context', () => ({
