@@ -502,7 +502,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         );
         assert!(!agent.tools.has(tool), "a turn on an agent holds {tool}");
     }
-    let LlmBackend::Cli { settings, .. } = &agent.llm.config().backend else {
+    let LlmBackend::Cli { settings, .. } = agent.llm.backend() else {
         panic!("the turn was moved off its agent");
     };
     assert_eq!(settings.timeout, CHAT_TIMEOUT);

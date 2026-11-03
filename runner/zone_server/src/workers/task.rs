@@ -2296,8 +2296,7 @@ async fn attempt_run(
 
     let capacity = endpoint.capacity(state.config()).resolve(model).await;
     let policy = session::policy(&state.config().chat, &capacity);
-    let mut llm =
-        LlmClient::new(endpoint.llm(model, TASK_TEMPERATURE, policy.reserved, backend.clone()));
+    let mut llm = endpoint.llm(model, TASK_TEMPERATURE, policy.reserved, backend.clone());
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(model, limit);
     }
@@ -2377,7 +2376,7 @@ async fn attempt_run(
             )
             .await
             {
-                Err(halt) => return Err(halt.fault(&llm.config().backend)),
+                Err(halt) => return Err(halt.fault(llm.backend())),
                 Ok(TurnOutcome::Finished(outcome)) => {
                     carried.absorb(outcome);
                     return Ok(carried);
@@ -3644,10 +3643,7 @@ mod tests {
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             run_task_loop(
-                LlmClient::new(LlmConfig {
-                    base_url: provider.uri(),
-                    ..LlmConfig::default()
-                }),
+                LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", "")),
                 "test".into(),
                 tools,
                 RunContext::from_messages(vec![LlmMessage::user(
@@ -4296,7 +4292,7 @@ mod retry_tests {
         let outcome = tokio::time::timeout(
             Duration::from_secs(30),
             run_task_loop(
-                LlmClient::new(zone_core::llm::LlmConfig::default().with_backend(backend.clone())),
+                LlmClient::new(zone_core::llm::LlmConfig::default()).with_backend(backend.clone()),
                 "sonnet".to_string(),
                 ChatTools::empty(),
                 RunContext::from_messages(vec![LlmMessage::user("Write the file.")]),
@@ -4916,12 +4912,10 @@ mod retry_tests {
         drop(held);
     }
     fn limit(resets_at: Option<chrono::DateTime<chrono::Utc>>, credits: bool) -> Box<Limit> {
-        Box::new(Limit {
-            message: format!("Stream error: claude: {SESSION_LIMIT}"),
-            resets_at,
-            credits,
-            window: None,
-        })
+        let mut limit =
+            Limit::new(format!("Stream error: claude: {SESSION_LIMIT}")).with_credits(credits);
+        limit.resets_at = resets_at;
+        Box::new(limit)
     }
 
     fn login(agent: AgentKind, label: &str) -> LoginIdentity {
@@ -8173,10 +8167,7 @@ mod cli_tests {
         };
 
         run_task_loop(
-            LlmClient::new(LlmConfig {
-                base_url: provider.uri(),
-                ..LlmConfig::default()
-            }),
+            LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", "")),
             "test".to_string(),
             ChatTools::empty(),
             RunContext::from_messages(vec![LlmMessage::user("Read both files.")]),
@@ -8333,7 +8324,7 @@ mod cli_tests {
         let windows = snapshot.expect("a snapshot of the login's usage").windows;
         let window = windows
             .iter()
-            .find(|window| window.name == zone_core::llm::Window::FIVE_HOURS)
+            .find(|window| window.name == zone_core::llm::window::FIVE_HOURS)
             .unwrap_or_else(|| panic!("no five-hour window in {windows:?}"));
         assert_eq!(window.used_percent, Some(50.0));
     }
@@ -8427,13 +8418,11 @@ mod cli_tests {
         agent.first_attempt().await;
         for (login, headroom) in [(&first, 10.0), (&second, 90.0)] {
             let snapshot = Snapshot {
-                windows: vec![zone_core::llm::Window {
-                    name: "5h".to_string(),
-                    used_percent: Some(100.0 - headroom),
-                    used: None,
-                    limit: None,
-                    resets_at: Some(Utc::now() + TimeDelta::hours(3)),
-                }],
+                windows: vec![
+                    zone_core::llm::Window::new("5h")
+                        .with_used_percent(100.0 - headroom)
+                        .with_resets_at(Utc::now() + TimeDelta::hours(3)),
+                ],
                 headroom: Some(headroom),
                 fetched_at: Utc::now(),
             };

@@ -323,6 +323,7 @@ mod tests {
     use tempfile::TempDir;
     use wiremock::matchers::{any, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zone_core::llm::window::{FIVE_HOURS, SEVEN_DAYS};
 
     use super::*;
     use crate::config::{AgentConfig, Config};
@@ -331,8 +332,6 @@ mod tests {
     use crate::services::login::credential::Login;
 
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";
-    const FIVE_HOURS: &str = Window::FIVE_HOURS;
-    const SEVEN_DAYS: &str = Window::SEVEN_DAYS;
     const CLAUDE_USAGE: &str = "/api/oauth/usage";
     const CODEX_USAGE: &str = "/backend-api/wham/usage";
     const READING: &str = r#"{"five_hour":{"utilization":62.0,"resets_at":"2026-09-23T06:10:00Z"},"seven_day":{"utilization":31.0,"resets_at":"2026-09-28T04:00:00Z"}}"#;
@@ -559,22 +558,15 @@ mod tests {
     }
 
     fn window(name: &str, used_percent: f64, resets_at: Option<DateTime<Utc>>) -> Window {
-        Window {
-            name: name.to_string(),
-            used_percent: Some(used_percent),
-            used: None,
-            limit: None,
-            resets_at,
-        }
+        let mut window = Window::new(name).with_used_percent(used_percent);
+        window.resets_at = resets_at;
+        window
     }
 
     fn limit(credits: bool, resets_at: Option<DateTime<Utc>>) -> Limit {
-        Limit {
-            message: "You've hit your session limit".to_string(),
-            resets_at,
-            credits,
-            window: None,
-        }
+        let mut limit = Limit::new("You've hit your session limit").with_credits(credits);
+        limit.resets_at = resets_at;
+        limit
     }
 
     #[tokio::test]

@@ -116,13 +116,12 @@ pub async fn fetch(
 
 /// `window` as Zone records it.
 pub fn window(window: aiusg::model::Window) -> Window {
-    Window {
-        name: window.name,
-        used_percent: window.used_percent,
-        used: window.used,
-        limit: window.limit,
-        resets_at: window.resets_at,
-    }
+    let mut recorded = Window::new(window.name);
+    recorded.used_percent = window.used_percent;
+    recorded.used = window.used;
+    recorded.limit = window.limit;
+    recorded.resets_at = window.resets_at;
+    recorded
 }
 
 /// `chosen`'s usage read from its agent now, however recently it was read, and stored; `None`
@@ -283,6 +282,7 @@ mod tests {
     use tempfile::TempDir;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zone_core::llm::window::{FIVE_HOURS, SEVEN_DAYS};
 
     use super::*;
 
@@ -345,20 +345,12 @@ mod tests {
         assert_eq!(
             snapshot.windows,
             [
-                Window {
-                    name: "5h".to_string(),
-                    used_percent: Some(62.0),
-                    used: None,
-                    limit: None,
-                    resets_at: Some(at("2026-09-23T06:10:00Z")),
-                },
-                Window {
-                    name: "7d".to_string(),
-                    used_percent: Some(31.0),
-                    used: None,
-                    limit: None,
-                    resets_at: Some(at("2026-09-28T04:00:00Z")),
-                },
+                Window::new(FIVE_HOURS)
+                    .with_used_percent(62.0)
+                    .with_resets_at(at("2026-09-23T06:10:00Z")),
+                Window::new(SEVEN_DAYS)
+                    .with_used_percent(31.0)
+                    .with_resets_at(at("2026-09-28T04:00:00Z")),
             ]
         );
         assert!((before..=Utc::now()).contains(&snapshot.fetched_at));
@@ -477,13 +469,11 @@ mod tests {
 
         assert_eq!(
             window(counted),
-            Window {
-                name: "Extra usage".to_string(),
-                used_percent: Some(25.0),
-                used: Some(30),
-                limit: Some(120),
-                resets_at: Some(resets_at),
-            }
+            Window::new("Extra usage")
+                .with_used_percent(25.0)
+                .with_used(30)
+                .with_limit(120)
+                .with_resets_at(resets_at)
         );
     }
 

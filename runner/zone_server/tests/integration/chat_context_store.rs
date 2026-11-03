@@ -7,7 +7,7 @@ use sqlx::{Executor, PgPool};
 use std::time::Duration;
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
-use zone_core::llm::{FunctionCall, Message, Role, ToolCall};
+use zone_core::llm::{Message, Role, ToolCall};
 use zone_server::db::chats;
 use zone_server::db::context::{Error, Lease, Store};
 
@@ -66,14 +66,11 @@ async fn begin(store: &Store, lease: &Lease) -> (Uuid, Uuid) {
 }
 
 fn envelope(id: &str, call: &str, mutating: bool) -> NewEntry {
-    let mut message = Message::assistant_with_tools(vec![ToolCall {
-        id: call.into(),
-        call_type: "function".into(),
-        function: FunctionCall {
-            name: if mutating { "write_file" } else { "read_file" }.into(),
-            arguments: r#"{"path":"notes.txt"}"#.into(),
-        },
-    }]);
+    let mut message = Message::assistant_with_tools(vec![ToolCall::function(
+        call,
+        if mutating { "write_file" } else { "read_file" },
+        r#"{"path":"notes.txt"}"#,
+    )]);
     message.content = Some("I will inspect the saved evidence.".into());
     NewEntry {
         id: id.into(),

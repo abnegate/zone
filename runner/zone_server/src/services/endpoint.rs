@@ -6,11 +6,12 @@
 
 use std::fmt;
 
+use abnegate_http::metadata;
 use abnegate_secret::{REDACTED, SecretValue, conceal, redact};
 use reqwest::Url;
 use zone_chat::capacity::Resolver;
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
-use zone_core::llm::{Dialect, LlmBackend, LlmConfig, Trust, metadata};
+use zone_core::llm::{self, Dialect, LlmBackend, LlmClient, LlmConfig, Trust};
 
 use crate::config::Config;
 use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC};
@@ -174,26 +175,27 @@ impl Endpoint {
         self.dialect
     }
 
+    /// A client for `model` on this endpoint, sending through `backend` with
+    /// zone's request timeouts and the dialect and trust this endpoint was
+    /// resolved with.
     pub fn llm(
         &self,
         model: impl Into<String>,
         temperature: f32,
-        max_tokens: u32,
+        maximum_tokens: u32,
         backend: LlmBackend,
-    ) -> LlmConfig {
-        LlmConfig {
-            base_url: self.url.clone(),
-            api_key: self.key.expose().to_string(),
-            default_model: model.into(),
-            temperature,
-            max_tokens,
-            backend,
-            dialect: self.dialect,
-            trust: match self.origin {
+    ) -> LlmClient {
+        let config = LlmConfig::new(self.url.clone(), model, self.key.clone())
+            .with_temperature(temperature)
+            .with_maximum_tokens(maximum_tokens)
+            .with_timeout(llm::TIMEOUT)
+            .with_read_timeout(llm::READ_TIMEOUT)
+            .with_dialect(self.dialect)
+            .with_trust(match self.origin {
                 Origin::Instance => Trust::Operator,
                 Origin::Settings => Trust::Tenant,
-            },
-        }
+            });
+        LlmClient::new(config).with_backend(backend)
     }
 
     /// Where a model's context capacity is learned. Only the instance's own
@@ -878,6 +880,8 @@ mod tests {
             ("http://[fe80::1]:4000", UrlError::Metadata),
             ("http://[fd00:ec2::254]", UrlError::Metadata),
             ("http://[::ffff:169.254.169.254]", UrlError::Metadata),
+            ("http://[64:ff9b::a9fe:a9fe]", UrlError::Metadata),
+            ("http://[64:ff9b:1::1]", UrlError::Metadata),
             ("http://2852039166/", UrlError::Metadata),
             ("http://metadata.google.internal", UrlError::Metadata),
             ("http://Metadata.Google.Internal./v1", UrlError::Metadata),
@@ -1016,12 +1020,16 @@ mod tests {
         );
 
         assert_eq!(
-            settings.llm("gpt-4o", 0.2, 64, LlmBackend::Http).trust,
+            settings
+                .llm("gpt-4o", 0.2, 64, LlmBackend::Http)
+                .config()
+                .trust,
             Trust::Tenant
         );
         assert_eq!(
             Endpoint::instance(&config)
                 .llm("alias", 0.2, 64, LlmBackend::Http)
+                .config()
                 .trust,
             Trust::Operator
         );
@@ -1042,12 +1050,12 @@ mod tests {
         settings.litellm_key = Some(SecretValue::new(SAVED_KEY));
         let endpoint = Endpoint::resolve(&config(), &settings);
 
-        let failure =
-            zone_core::llm::LlmClient::new(endpoint.llm("model", 0.2, 64, LlmBackend::Http))
-                .chat(&[zone_core::llm::Message::user("hi")], None)
-                .await
-                .expect_err("the endpoint refused the turn")
-                .to_string();
+        let failure = endpoint
+            .llm("model", 0.2, 64, LlmBackend::Http)
+            .chat(&[zone_core::llm::Message::user("hi")], None)
+            .await
+            .expect_err("the endpoint refused the turn")
+            .to_string();
 
         assert!(failure.contains("404"), "{failure}");
         assert!(failure.contains("no route for key"), "{failure}");
@@ -1092,15 +1100,18 @@ mod tests {
             ),
         );
 
-        let llm = endpoint.llm("claude-sonnet-4-5", 0.2, 64, LlmBackend::Http);
+        let client = endpoint.llm("claude-sonnet-4-5", 0.2, 64, LlmBackend::Http);
+        let config = client.config();
 
-        assert_eq!(llm.base_url, ANTHROPIC_URL);
-        assert_eq!(llm.api_key, SAVED_KEY);
-        assert_eq!(llm.default_model, "claude-sonnet-4-5");
-        assert_eq!(llm.temperature, 0.2);
-        assert_eq!(llm.max_tokens, 64);
-        assert!(matches!(llm.backend, LlmBackend::Http));
-        assert_eq!(llm.dialect, Dialect::Anthropic);
+        assert_eq!(config.base_url, ANTHROPIC_URL);
+        assert_eq!(config.api_key.expose(), SAVED_KEY);
+        assert_eq!(config.default_model, "claude-sonnet-4-5");
+        assert_eq!(config.temperature, 0.2);
+        assert_eq!(config.maximum_tokens, 64);
+        assert_eq!(config.timeout, llm::TIMEOUT);
+        assert_eq!(config.read_timeout, llm::READ_TIMEOUT);
+        assert!(matches!(client.backend(), LlmBackend::Http));
+        assert_eq!(config.dialect, Dialect::Anthropic);
     }
 
     #[test]
@@ -1129,7 +1140,10 @@ mod tests {
 
             assert_eq!(endpoint.dialect(), dialect, "{provider} {:?}", values.url);
             assert_eq!(
-                endpoint.llm("model", 0.2, 64, LlmBackend::Http).dialect,
+                endpoint
+                    .llm("model", 0.2, 64, LlmBackend::Http)
+                    .config()
+                    .dialect,
                 dialect,
                 "{provider} {:?}",
                 values.url
@@ -1161,11 +1175,11 @@ mod tests {
         let endpoint = Endpoint::resolve(&config(), &settings);
         let stops = crate::services::completion_tokens::merge_stops(&["User:".to_string()]);
 
-        let answered =
-            zone_core::llm::LlmClient::new(endpoint.llm(model, temperature, 512, LlmBackend::Http))
-                .with_stop(stops)
-                .chat(&[zone_core::llm::Message::user("hi")], None)
-                .await;
+        let answered = endpoint
+            .llm(model, temperature, 512, LlmBackend::Http)
+            .with_stop(stops)
+            .chat(&[zone_core::llm::Message::user("hi")], None)
+            .await;
 
         assert!(answered.is_ok(), "{provider} {model}: {answered:?}");
         let requests = server.received_requests().await.unwrap_or_default();

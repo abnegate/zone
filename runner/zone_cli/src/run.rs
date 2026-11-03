@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use zone_core::{
     Agent, AgentCallback, AgentConfig, AgentError, AgentPhase, FileSessionStore, LlmClient,
-    LlmConfig, Session, SessionStore, ToolContext, ToolResult,
+    LlmConfig, Session, SessionStore, ToolContext, ToolResult, llm,
 };
 
 use crate::auth::AuthManager;
@@ -155,14 +155,15 @@ fn llm_config(config: &Config) -> Result<LlmConfig, RunError> {
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|_| "~/.zone/config.toml".to_string()),
         })?;
-    Ok(LlmConfig {
-        base_url: base_url.trim_end_matches('/').to_string(),
-        api_key: config.llm_api_key.clone().unwrap_or_default(),
-        default_model: config.model.clone(),
-        temperature: 0.7,
-        max_tokens: 4096,
-        ..LlmConfig::default()
-    })
+    Ok(LlmConfig::new(
+        base_url.trim_end_matches('/'),
+        config.model.clone(),
+        config.llm_api_key.clone().unwrap_or_default(),
+    )
+    .with_temperature(0.7)
+    .with_maximum_tokens(4096)
+    .with_timeout(llm::TIMEOUT)
+    .with_read_timeout(llm::READ_TIMEOUT))
 }
 
 /// Run the agent with a prompt
@@ -601,7 +602,9 @@ mod tests {
         };
         let llm = llm_config(&config).unwrap();
         assert_eq!(llm.base_url, "http://127.0.0.1:11434/v1");
-        assert_eq!(llm.api_key, "ollama");
+        assert_eq!(llm.api_key.expose(), "ollama");
         assert_eq!(llm.default_model, "qwen3:8b");
+        assert_eq!(llm.timeout, zone_core::llm::TIMEOUT);
+        assert_eq!(llm.read_timeout, zone_core::llm::READ_TIMEOUT);
     }
 }

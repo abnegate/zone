@@ -11,7 +11,7 @@ use std::time::Duration;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_core::llm::{FunctionCall, LlmClient, LlmConfig, Message, Role, ToolCall};
+use zone_core::llm::{LlmClient, LlmConfig, Message, Role, ToolCall};
 use zone_core::tools::job::{self, Jobs};
 use zone_core::tools::{Session, Tool};
 use zone_core::variables::Variables;
@@ -216,10 +216,7 @@ where
     let events = tokio::time::timeout(
         Duration::from_secs(10),
         run(AgentRun {
-            llm: LlmClient::new(LlmConfig {
-                base_url: provider.uri(),
-                ..LlmConfig::default()
-            }),
+            llm: LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", "")),
             model: "test".to_string(),
             tools,
             messages,
@@ -1534,14 +1531,7 @@ async fn the_turn_after_an_answer_replays_the_question_it_answers() {
     let arguments = ask("ask_1")["arguments"].to_string();
     let messages = vec![
         Message::user("Change the tenant column."),
-        Message::assistant_with_tools(vec![ToolCall {
-            id: "ask_1".to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: "ask_user".to_string(),
-                arguments,
-            },
-        }]),
+        Message::assistant_with_tools(vec![ToolCall::function("ask_1", "ask_user", arguments)]),
         Message::tool_result(
             "ask_1",
             "The question card was shown. Your turn ends here; the answer arrives as the next user message.",
@@ -1844,14 +1834,7 @@ fn settled_wait(job: &str, outcome: &str) -> Vec<Message> {
 }
 
 fn wait_call(id: &str, arguments: &str) -> ToolCall {
-    ToolCall {
-        id: id.to_string(),
-        call_type: "function".to_string(),
-        function: FunctionCall {
-            name: WAIT_FOR.to_string(),
-            arguments: arguments.to_string(),
-        },
-    }
+    ToolCall::function(id.to_string(), WAIT_FOR.to_string(), arguments.to_string())
 }
 
 /// What the waiting section asks for: report which of the two you have. A

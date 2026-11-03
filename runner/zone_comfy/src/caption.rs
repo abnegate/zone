@@ -11,7 +11,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
-use zone_core::llm::{LlmClient, LlmConfig, Message};
+use zone_core::llm::{self, LlmClient, LlmConfig, Message};
 
 use crate::config::Config;
 
@@ -232,15 +232,8 @@ impl Captioner {
         Some(cleaned)
     }
 
-    async fn ask(&self, message: Message, max_tokens: u32) -> Option<String> {
-        let client = LlmClient::new(LlmConfig {
-            base_url: self.host.clone(),
-            api_key: self.key.clone(),
-            default_model: self.model.clone(),
-            temperature: 0.0,
-            max_tokens,
-            ..LlmConfig::default()
-        });
+    async fn ask(&self, message: Message, maximum_tokens: u32) -> Option<String> {
+        let client = self.client(maximum_tokens);
         let result = tokio::time::timeout(
             self.timeout,
             client.chat_with_model(&self.model, &[message], None),
@@ -253,6 +246,16 @@ impl Captioner {
             .choices
             .first()
             .and_then(|choice| choice.message.content.clone())
+    }
+
+    fn client(&self, maximum_tokens: u32) -> LlmClient {
+        LlmClient::new(
+            LlmConfig::new(self.host.clone(), self.model.clone(), self.key.clone())
+                .with_temperature(0.0)
+                .with_maximum_tokens(maximum_tokens)
+                .with_timeout(llm::TIMEOUT)
+                .with_read_timeout(llm::READ_TIMEOUT),
+        )
     }
 }
 
@@ -611,6 +614,16 @@ mod tests {
             "the caption itself still drops identity: {}",
             images[0].caption
         );
+    }
+
+    #[test]
+    fn a_caption_waits_as_long_as_any_zone_completion() {
+        let captioner = Captioner::new(&config("vision"), "http://unused".into(), "key".into());
+
+        let client = captioner.client(SUBJECT_TOKENS);
+
+        assert_eq!(client.config().timeout, llm::TIMEOUT);
+        assert_eq!(client.config().read_timeout, llm::READ_TIMEOUT);
     }
 
     #[tokio::test]

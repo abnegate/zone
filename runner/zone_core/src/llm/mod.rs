@@ -1,25 +1,26 @@
 //! LLM client module
 //!
-//! Provides an OpenAI-compatible client for chat completions with tool use,
-//! and a provider abstraction that puts a coding agent CLI behind the same
-//! handle.
+//! Completions come from an OpenAI-compatible endpoint through
+//! [`abnegate_llm`], or from a coding agent CLI on this host, behind one
+//! [`LlmClient`].
 
 mod client;
-mod dialect;
-pub mod finish_reason;
-pub(crate) mod history;
-pub mod metadata;
 pub mod provider;
 mod reasoning;
-mod types;
+pub mod window;
 
-pub use client::{ChatStream, LlmBackend, LlmClient, LlmConfig, LlmError, RequestOptions, Trust};
-pub use dialect::{Budget, Dialect, TEMPLATE_STOPS};
+pub use abnegate_llm::{
+    Budget, ChatRequest, ChatResponse, ChatStreamChunk, Choice, ContentPart, Dialect, Effort,
+    Error as LlmError, FunctionCall, FunctionDefinition, GeneratedImage, ImageUrl, LlmConfig,
+    Message, RequestOptions, Role, SpecificFunction, StreamChoice, StreamDelta,
+    StreamFunctionCall, StreamToolCall, TEMPLATE_STOPS, ToolCall, ToolChoice, ToolDefinition,
+    Trust, Usage, finish_reason, history, reasoning::classify, wire_arguments,
+};
+pub use client::{ChatStream, LlmBackend, LlmClient, READ_TIMEOUT, TIMEOUT};
 pub use provider::{
     AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, CodexSandbox,
     Completion, CompletionProvider, CompletionRequest, Credential, HttpProvider, LIMIT_WORDINGS,
     Limit, ProviderError, ProviderKind, Router, SelectionStrategy, Session, Toolset, Weighted,
     Window,
 };
-pub use reasoning::{Effort, ReasoningEffort, classify};
-pub use types::*;
+pub use reasoning::ReasoningEffort;

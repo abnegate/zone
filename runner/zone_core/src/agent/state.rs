@@ -383,16 +383,9 @@ mod tests {
 
     #[test]
     fn test_agent_step_with_tool_calls() {
-        use crate::llm::{FunctionCall, ToolCall};
+        use crate::llm::ToolCall;
 
-        let tool_call = ToolCall {
-            id: "call_123".to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: "read_file".to_string(),
-                arguments: r#"{"path": "/tmp/test"}"#.to_string(),
-            },
-        };
+        let tool_call = ToolCall::function("call_123", "read_file", r#"{"path": "/tmp/test"}"#);
 
         let tool_result = ToolCallResult {
             call: tool_call,
@@ -450,16 +443,9 @@ mod tests {
 
     #[test]
     fn test_tool_call_result_failed() {
-        use crate::llm::{FunctionCall, ToolCall};
+        use crate::llm::ToolCall;
 
-        let tool_call = ToolCall {
-            id: "call_fail".to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: "execute_command".to_string(),
-                arguments: r#"{"cmd": "invalid"}"#.to_string(),
-            },
-        };
+        let tool_call = ToolCall::function("call_fail", "execute_command", r#"{"cmd": "invalid"}"#);
 
         let result = ToolCallResult {
             call: tool_call,
@@ -474,16 +460,9 @@ mod tests {
 
     #[test]
     fn test_tool_call_result_serialization() {
-        use crate::llm::{FunctionCall, ToolCall};
+        use crate::llm::ToolCall;
 
-        let tool_call = ToolCall {
-            id: "call_test".to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: "test".to_string(),
-                arguments: "{}".to_string(),
-            },
-        };
+        let tool_call = ToolCall::function("call_test", "test", "{}");
 
         let result = ToolCallResult {
             call: tool_call,
@@ -700,20 +679,13 @@ mod tests {
 
     #[test]
     fn test_agent_state_serialization_with_all_fields() {
-        use crate::llm::{FunctionCall, ToolCall};
+        use crate::llm::ToolCall;
 
         let mut state = AgentState::new("Test", Some("System prompt".to_string()));
         state.iteration = 5;
         state.tokens_used = 1000;
 
-        let tool_call = ToolCall {
-            id: "call_1".to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: "test".to_string(),
-                arguments: "{}".to_string(),
-            },
-        };
+        let tool_call = ToolCall::function("call_1", "test", "{}");
 
         let mut step = AgentStep::new(AgentPhase::Acting);
         step.tool_calls = Some(vec![ToolCallResult {

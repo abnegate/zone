@@ -99,6 +99,7 @@ aiusg = { version = "=0.5.0", default-features = false }
 # Internal
 abnegate-exec = { workspace = true }
 abnegate-http = { workspace = true }
+abnegate-llm = { workspace = true }
 abnegate-notify = { workspace = true, features = ["smtp"] }
 abnegate-search = { workspace = true }
 abnegate-secret = { workspace = true, features = ["sqlx"] }

@@ -321,9 +321,7 @@ pub fn run_with_context(
                     &model,
                     &prepared.messages,
                     definitions,
-                    RequestOptions {
-                        reserved: context.policy.reserved,
-                    },
+                    RequestOptions::new(context.policy.reserved),
                 )
                 .await
             {
@@ -479,16 +477,14 @@ pub fn run_with_context(
                 .map(|call| call.id.clone())
                 .collect();
             let envelope = canonical(
-                LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: replay,
-                    name: None,
-                    tool_calls: Some(requested.clone()),
-                    tool_call_id: None,
-                    images,
-                    generated_images: Vec::new(),
-                    reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
-                    thinking_blocks,
+                {
+                    let mut message = LlmMessage::new(LlmRole::Assistant);
+                    message.content = replay;
+                    message.tool_calls = Some(requested.clone());
+                    message.images = images;
+                    message.reasoning_content = (!reasoning.is_empty()).then_some(reasoning);
+                    message.thinking_blocks = thinking_blocks;
+                    message
                 },
                 mutations,
             );
@@ -705,7 +701,7 @@ impl Parked {
 fn halted(error: LlmError) -> AgentEvent {
     let message = format!("Stream error: {error}");
     match error {
-        LlmError::Limited { limit, .. } => AgentEvent::Limited(Limit { message, ..*limit }),
+        LlmError::Limited { limit, .. } => AgentEvent::Limited(limit.with_message(message)),
         _ => AgentEvent::Failed(message),
     }
 }
@@ -774,7 +770,7 @@ struct HostAgent {
 
 impl HostAgent {
     fn of(llm: &LlmClient) -> Option<Self> {
-        match &llm.config().backend {
+        match llm.backend() {
             LlmBackend::Cli { agent, settings } => Some(Self {
                 kind: *agent,
                 toolset: settings.toolset.is_some(),
@@ -1123,19 +1119,13 @@ fn text_tool_call(
         object if object.is_object() => object.to_string(),
         _ => return None,
     };
-    Some(LlmToolCall {
-        id: value
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("call_{}", index)),
-        call_type: "function".to_string(),
-        function: zone_core::llm::FunctionCall {
-            name: name.to_string(),
-            arguments,
-        },
-    })
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("call_{}", index));
+    Some(LlmToolCall::function(id, name, arguments))
 }
 
 fn registered(names: &[String], name: &str) -> bool {
@@ -1236,19 +1226,16 @@ impl ToolCallAccumulator {
                     .into_iter()
                     .enumerate()
                     .filter(|(_, call)| !call.name.is_empty())
-                    .map(move |(offset, call)| LlmToolCall {
-                        id: call.id.unwrap_or_else(|| {
+                    .map(move |(offset, call)| {
+                        let id = call.id.unwrap_or_else(|| {
                             if offset == 0 {
                                 format!("call_{}", index)
                             } else {
                                 format!("call_{index}_{offset}")
                             }
-                        }),
-                        call_type: "function".to_string(),
-                        function: zone_core::llm::FunctionCall {
-                            name: call.name,
-                            arguments: zone_core::llm::wire_arguments(&call.arguments),
-                        },
+                        });
+                        let arguments = zone_core::llm::wire_arguments(&call.arguments);
+                        LlmToolCall::function(id, call.name, arguments)
                     })
             })
             .collect()
@@ -1306,7 +1293,6 @@ fn complete_ident(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zone_core::llm::StreamFunctionCall;
     use zone_core::tools::ToolResult;
 
     fn parse_text_tool_calls(text: &str) -> Vec<LlmToolCall> {
@@ -1322,15 +1308,13 @@ mod tests {
         name: Option<&str>,
         arguments: Option<&str>,
     ) -> StreamToolCall {
-        StreamToolCall {
-            index,
-            id: id.map(str::to_string),
-            call_type: Some("function".to_string()),
-            function: Some(StreamFunctionCall {
-                name: name.map(str::to_string),
-                arguments: arguments.map(str::to_string),
-            }),
-        }
+        serde_json::from_value(serde_json::json!({
+            "index": index,
+            "id": id,
+            "type": "function",
+            "function": { "name": name, "arguments": arguments },
+        }))
+        .expect("a streamed tool call delta")
     }
 
     /// Running out of rounds is where a model is most tempted to sign off with a
@@ -2022,14 +2006,12 @@ mod tests {
         }
 
         fn cli(executable: PathBuf) -> LlmClient {
-            LlmClient::new(
-                LlmConfig::default().with_backend(LlmBackend::cli(
-                    AgentKind::Claude,
-                    CliSettings::default()
-                        .with_executable(executable)
-                        .with_timeout(Duration::from_secs(20)),
-                )),
-            )
+            LlmClient::new(LlmConfig::default()).with_backend(LlmBackend::cli(
+                AgentKind::Claude,
+                CliSettings::default()
+                    .with_executable(executable)
+                    .with_timeout(Duration::from_secs(20)),
+            ))
         }
 
         fn toolset() -> Toolset {
@@ -2055,9 +2037,10 @@ mod tests {
             if let Some(toolset) = toolset {
                 settings = settings.with_toolset(toolset);
             }
-            HostAgent::of(&LlmClient::new(
-                LlmConfig::default().with_backend(LlmBackend::cli(agent, settings)),
-            ))
+            HostAgent::of(
+                &LlmClient::new(LlmConfig::default())
+                    .with_backend(LlmBackend::cli(agent, settings)),
+            )
             .expect("a CLI backend is a host agent")
         }
 
@@ -2162,7 +2145,7 @@ mod tests {
             assert!(!limit.credits);
             assert_eq!(
                 limit.window.as_ref().map(|window| window.name.as_str()),
-                Some(Window::FIVE_HOURS)
+                Some(zone_core::llm::window::FIVE_HOURS)
             );
             let chunk = events
                 .iter()
@@ -2364,10 +2347,7 @@ mod tests {
                 })
                 .mount(&provider)
                 .await;
-            let llm = LlmClient::new(LlmConfig {
-                base_url: provider.uri(),
-                ..LlmConfig::default()
-            });
+            let llm = LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", ""));
 
             let events = turn(llm, ChatTools::empty().with_plan_approval()).await;
 

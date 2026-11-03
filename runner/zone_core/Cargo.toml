@@ -32,9 +32,9 @@ nix = { workspace = true, features = ["fs"] }
 dirs = { workspace = true }
 
 abnegate-exec = { workspace = true }
+abnegate-llm = { workspace = true }
 abnegate-secret = { workspace = true }
 zone_routing = { path = "../zone_routing" }
-rand = { workspace = true }
 
 # Process-local registry of background jobs
 dashmap = { workspace = true }

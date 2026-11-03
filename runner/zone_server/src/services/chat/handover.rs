@@ -428,12 +428,9 @@ mod tests {
     }
 
     fn limit(credits: bool) -> Cause {
-        Cause::limited(Limit {
-            message: LIMITED.to_string(),
-            resets_at: (!credits).then(resets),
-            credits,
-            window: None,
-        })
+        let mut limit = Limit::new(LIMITED).with_credits(credits);
+        limit.resets_at = (!credits).then(resets);
+        Cause::limited(limit)
     }
 
     fn identity(agent: AgentKind, label: &str) -> LoginIdentity {

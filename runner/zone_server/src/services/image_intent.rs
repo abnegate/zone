@@ -177,12 +177,12 @@ impl ImageIntentClassifier {
     }
 
     fn client(&self, temperature: f32, max_tokens: u32) -> LlmClient {
-        LlmClient::new(self.endpoint.llm(
+        self.endpoint.llm(
             self.config.classifier_model.clone(),
             temperature,
             max_tokens,
             self.backend.clone(),
-        ))
+        )
     }
 
     /// Classify a message. Any unavailable, timed-out, or malformed model result

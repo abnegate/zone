@@ -6,9 +6,8 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::llm::provider::event::AgentEvent;
-use crate::llm::provider::limit::Limit;
-use crate::llm::provider::window::Window;
-use crate::llm::{FunctionCall, ToolCall, Usage};
+use crate::llm::window;
+use abnegate_llm::{Limit, ToolCall, Usage, Window};
 
 /// Statuses that report headroom rather than refuse the request.
 const ALLOWED: [&str; 2] = ["allowed", "allowed_warning"];
@@ -24,8 +23,6 @@ const UNNAMED_WINDOW: &str = "request";
 const UNWORDED_FAILURE: &str = "the agent reported a failed run";
 
 const FAILED_SUBTYPE_PREFIX: &str = "error";
-
-const CALL_TYPE: &str = "function";
 
 /// The system event claude opens a turn with, naming its session.
 const INIT_SUBTYPE: &str = "init";
@@ -55,10 +52,10 @@ const OVERAGE_INCLUDED_WINDOW: &str = "seven_day_overage_included";
 /// claude's stream's name for each window of the plan, beside the name its usage endpoint gives
 /// the same window.
 const WINDOWS: [(&str, &str); 4] = [
-    ("five_hour", Window::FIVE_HOURS),
-    ("seven_day", Window::SEVEN_DAYS),
-    ("seven_day_opus", Window::SEVEN_DAYS_OPUS),
-    ("seven_day_sonnet", Window::SEVEN_DAYS_SONNET),
+    ("five_hour", window::FIVE_HOURS),
+    ("seven_day", window::SEVEN_DAYS),
+    ("seven_day_opus", window::SEVEN_DAYS_OPUS),
+    ("seven_day_sonnet", window::SEVEN_DAYS_SONNET),
 ];
 
 const FABLE: &str = "Fable";
@@ -183,14 +180,9 @@ enum Block {
 impl Block {
     fn call(self) -> Option<ToolCall> {
         match self {
-            Self::ToolUse { id, name, input } => Some(ToolCall {
-                id,
-                call_type: CALL_TYPE.to_string(),
-                function: FunctionCall {
-                    name,
-                    arguments: input.to_string(),
-                },
-            }),
+            Self::ToolUse { id, name, input } => {
+                Some(ToolCall::function(id, name, input.to_string()))
+            }
             Self::Text { .. } | Self::Ignored => None,
         }
     }
@@ -253,13 +245,10 @@ impl Info {
             .utilization
             .map(|fraction| fraction * PERCENT)
             .or(refused.then_some(PERCENT));
-        Some(Window {
-            name: read_as(name).to_string(),
-            used_percent,
-            used: None,
-            limit: None,
-            resets_at: self.resets_at,
-        })
+        let mut window = Window::new(read_as(name));
+        window.used_percent = used_percent;
+        window.resets_at = self.resets_at;
+        Some(window)
     }
 }
 
@@ -326,11 +315,7 @@ impl From<TokenCounts> for Usage {
             .input_tokens
             .saturating_add(counts.cache_read_input_tokens)
             .saturating_add(counts.cache_creation_input_tokens);
-        Self {
-            prompt_tokens,
-            completion_tokens: counts.output_tokens,
-            total_tokens: prompt_tokens.saturating_add(counts.output_tokens),
-        }
+        Self::new(prompt_tokens, counts.output_tokens)
     }
 }
 
@@ -508,12 +493,10 @@ impl Reader {
     /// The turn refused past a limit, in `message`, with whatever claude said
     /// of the window it refused on.
     fn limited(&self, message: String, credits: bool) -> AgentEvent {
-        AgentEvent::Limited(Limit {
-            message,
-            resets_at: self.resets_at,
-            credits,
-            window: self.window.clone(),
-        })
+        let mut limit = Limit::new(message).with_credits(credits);
+        limit.resets_at = self.resets_at;
+        limit.window = self.window.clone();
+        AgentEvent::Limited(limit)
     }
 
     /// A failed result no refused window accounts for, which is a limit when
@@ -895,13 +878,9 @@ mod tests {
             assert!(failures(&events).is_empty(), "{status}: {events:?}");
             assert_eq!(
                 windows(&events),
-                [&Window {
-                    name: Window::FIVE_HOURS.to_string(),
-                    used_percent: Some(43.0),
-                    used: None,
-                    limit: None,
-                    resets_at: at(1_790_208_000),
-                }],
+                [&Window::new(window::FIVE_HOURS)
+                    .with_used_percent(43.0)
+                    .with_resets_at(at(1_790_208_000).expect("a timestamp"))],
                 "{status}"
             );
         }
@@ -937,10 +916,10 @@ mod tests {
     #[test]
     fn a_window_is_named_as_claudes_usage_endpoint_names_it() {
         for (streamed, read) in [
-            ("five_hour", Window::FIVE_HOURS),
-            ("seven_day", Window::SEVEN_DAYS),
-            ("seven_day_opus", Window::SEVEN_DAYS_OPUS),
-            ("seven_day_sonnet", Window::SEVEN_DAYS_SONNET),
+            ("five_hour", window::FIVE_HOURS),
+            ("seven_day", window::SEVEN_DAYS),
+            ("seven_day_opus", window::SEVEN_DAYS_OPUS),
+            ("seven_day_sonnet", window::SEVEN_DAYS_SONNET),
             ("hourly_burst", "hourly_burst"),
         ] {
             let reported = interpret_all(&limit(json!({

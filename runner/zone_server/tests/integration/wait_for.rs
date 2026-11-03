@@ -691,10 +691,7 @@ async fn a_wait_hands_the_resumed_turn_back_the_round_it_opened_in() {
     let events: Vec<AgentEvent> = tokio::time::timeout(
         SETTLE,
         run(AgentRun {
-            llm: LlmClient::new(LlmConfig {
-                base_url: provider.uri(),
-                ..LlmConfig::default()
-            }),
+            llm: LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", "")),
             model: "test".to_string(),
             tools,
             messages: vec![Message::user("Start the build and wait for it.")],

@@ -93,13 +93,10 @@ mod tests {
     }
 
     fn window(name: &str, used_percent: Option<f64>, resets_at: Option<i64>) -> Window {
-        Window {
-            name: name.to_string(),
-            used_percent,
-            used: None,
-            limit: None,
-            resets_at: resets_at.map(at),
-        }
+        let mut window = Window::new(name);
+        window.used_percent = used_percent;
+        window.resets_at = resets_at.map(at);
+        window
     }
 
     fn snapshot(windows: Vec<Window>) -> Snapshot {

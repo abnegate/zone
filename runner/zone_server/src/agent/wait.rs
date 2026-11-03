@@ -27,7 +27,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 use zone_chat::history;
 use zone_core::context::Entry;
-use zone_core::llm::{FunctionCall, Message as LlmMessage, ToolCall};
+use zone_core::llm::{Message as LlmMessage, ToolCall};
 use zone_core::tools::job::{JobExited, Jobs};
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
@@ -298,8 +298,6 @@ const RUN_UNKNOWN_ERROR: &str = "Unknown error";
 /// A commit GitHub has registered no run for at all. Never a settle on its own:
 /// right after a push it is indistinguishable from a repository with no CI.
 const UNKNOWN_ASSESSMENT: &str = "unknown";
-
-const FUNCTION_CALL: &str = "function";
 
 /// The suffix that tells the injected envelope apart from the call that opened
 /// the wait. The receipt already claimed the original id, and both the context's
@@ -734,15 +732,13 @@ pub fn resume_with_outcome(
         }
     }
     let call = settled_call_id(&waited.tool_call_id);
-    let envelope = LlmMessage::assistant_with_tools(vec![ToolCall {
-        id: call.clone(),
-        call_type: FUNCTION_CALL.to_string(),
-        function: FunctionCall {
-            name: WAIT_FOR.to_string(),
-            arguments: serde_json::to_string(&waited.waiting)
-                .unwrap_or_else(|_| json!({}).to_string()),
-        },
-    }]);
+    let arguments =
+        serde_json::to_string(&waited.waiting).unwrap_or_else(|_| json!({}).to_string());
+    let envelope = LlmMessage::assistant_with_tools(vec![ToolCall::function(
+        call.clone(),
+        WAIT_FOR,
+        arguments,
+    )]);
     let result = LlmMessage::tool_result(call, outcome);
     let pair = [envelope, result].map(|message| history::NewEntry {
         id: Uuid::new_v4().to_string(),

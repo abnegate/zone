@@ -105,17 +105,16 @@ async fn an_organization_without_a_sign_in_of_its_own_runs_the_hosts_claude() {
     assert_eq!(settings.working_directory.as_deref(), Some(work.as_path()));
 
     let nonce = format!("zone-host-login-{}", Uuid::new_v4().simple());
-    let response = LlmClient::new(LlmConfig {
-        default_model: AUTO.to_string(),
-        backend,
-        ..LlmConfig::default()
-    })
-    .chat(
-        &[Message::user(format!("Reply with exactly: {nonce}"))],
-        None,
-    )
-    .await
-    .expect("claude to answer through the host's sign-in");
+    let mut config = LlmConfig::default();
+    config.default_model = AUTO.to_string();
+    let response = LlmClient::new(config)
+        .with_backend(backend)
+        .chat(
+            &[Message::user(format!("Reply with exactly: {nonce}"))],
+            None,
+        )
+        .await
+        .expect("claude to answer through the host's sign-in");
 
     let answer = response
         .choices

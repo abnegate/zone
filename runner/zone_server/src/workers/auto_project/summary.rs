@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use abnegate_vcs::PullRequestDetail;
-use zone_core::llm::{LlmClient, Message, finish_reason};
+use zone_core::llm::{Message, finish_reason};
 
 use crate::db::tasks::TaskRow;
 use crate::services::stages;
@@ -56,12 +56,9 @@ async fn generate(
         &venue.catalog,
         task.model_name.as_deref().unwrap_or(stages::AUTO),
     )?;
-    let client = LlmClient::new(venue.endpoint.llm(
-        model,
-        SUMMARY_TEMPERATURE,
-        SUMMARY_TOKENS,
-        venue.backend,
-    ));
+    let client = venue
+        .endpoint
+        .llm(model, SUMMARY_TEMPERATURE, SUMMARY_TOKENS, venue.backend);
     let body = pull.body.as_deref().unwrap_or_default();
     let body: String = body.chars().take(BODY_CHARS).collect();
     let messages = [

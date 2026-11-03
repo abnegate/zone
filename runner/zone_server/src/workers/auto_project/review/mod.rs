@@ -23,7 +23,7 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
 use zone_core::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{LlmBackend, LlmClient, LlmError, Message, ToolDefinition};
+use zone_core::llm::{LlmBackend, LlmError, Message, ToolDefinition};
 use zone_core::tools::{ToolContext, ToolResult};
 
 use crate::db::auto_projects::{Finding, ReviewRow};
@@ -119,11 +119,13 @@ fn unreachable(error: &LlmError) -> bool {
                 || status == StatusCode::REQUEST_TIMEOUT)
                 && !error.unsupported_tools()
         }
+        LlmError::Timeout(_) => true,
         LlmError::Json(_)
         | LlmError::Stream(_)
+        | LlmError::InvalidConfig(_)
         | LlmError::Agent(_)
-        | LlmError::Limited { .. }
-        | LlmError::InvalidConfig(_) => false,
+        | LlmError::Limited { .. } => false,
+        _ => false,
     }
 }
 
@@ -149,12 +151,12 @@ pub async fn run(
     pr: PullRequestService,
     request: ReviewRequest<'_>,
 ) -> Result<Verdict, ReviewError> {
-    let client = LlmClient::new(endpoint.llm(
+    let client = endpoint.llm(
         request.reviewer.clone(),
         REVIEW_TEMPERATURE,
         REVIEW_TOKENS,
         backend,
-    ));
+    );
     let shared = Arc::new(tools::Shared {
         pr,
         reference: request.reference.clone(),
@@ -165,7 +167,7 @@ pub async fn run(
     });
     let registry = tools::registry(shared);
     let definitions: Option<Vec<ToolDefinition>> =
-        matches!(client.config().backend, LlmBackend::Http).then(|| registry.definitions());
+        matches!(client.backend(), LlmBackend::Http).then(|| registry.definitions());
     let context = ToolContext::default();
     let mut messages = vec![
         Message::system(prompt::system(
@@ -190,7 +192,7 @@ pub async fn run(
             let response = client
                 .chat_with_model(&reviewer, &messages, definitions.as_deref())
                 .await
-                .map_err(|error| ReviewError::model(&client.config().backend, &reviewer, error))?;
+                .map_err(|error| ReviewError::model(client.backend(), &reviewer, error))?;
             let Some(choice) = response.choices.into_iter().next() else {
                 return Err(ReviewError::Model("the model returned no choices".into()));
             };
@@ -494,16 +496,29 @@ mod tests {
         assert_eq!(error.stalled(), None, "the next tick asks another reviewer");
     }
 
+    /// An endpoint that sends nothing for as long as the client waits is as
+    /// unreachable as one that refuses the connection.
+    #[test]
+    fn an_endpoint_that_never_answers_is_unreachable() {
+        let error = ReviewError::model(
+            &LlmBackend::Http,
+            "qwen3:32b",
+            LlmError::Timeout(std::time::Duration::from_secs(600)),
+        );
+
+        assert!(matches!(error, ReviewError::Unreachable(_)), "{error:?}");
+    }
+
     /// An endpoint's failure is never read for a coding agent's wording.
     #[test]
     fn an_endpoint_failure_in_the_words_of_an_unfunded_reviewer_is_a_model_failure() {
         let error = ReviewError::model(
             &LlmBackend::Http,
             "fable",
-            LlmError::Api {
-                status: StatusCode::BAD_REQUEST.as_u16(),
-                message: format!("{UNFUNDED}: {REFUSAL}"),
-            },
+            LlmError::api(
+                StatusCode::BAD_REQUEST.as_u16(),
+                format!("{UNFUNDED}: {REFUSAL}"),
+            ),
         );
 
         assert!(matches!(error, ReviewError::Model(_)), "{error:?}");
@@ -542,14 +557,8 @@ mod tests {
     #[test]
     fn a_credits_limit_is_an_unfunded_reviewer_and_any_other_limit_a_model_failure() {
         let agent = LlmBackend::cli(AgentKind::Claude, zone_core::llm::CliSettings::default());
-        let limited = |message: &str, credits: bool| LlmError::Limited {
-            provider: "claude".to_string(),
-            limit: Box::new(Limit {
-                message: message.to_string(),
-                resets_at: None,
-                credits,
-                window: None,
-            }),
+        let limited = |message: &str, credits: bool| {
+            LlmError::limited("claude", Limit::new(message).with_credits(credits))
         };
 
         let error = ReviewError::model(
