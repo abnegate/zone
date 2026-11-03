@@ -1,5 +1,6 @@
 import { expect, test } from './fixtures';
 import { mockCommonEndpoints, setupAuth } from './helpers/auth';
+import { chooseSelect } from './helpers/select';
 import { blockServiceWorker, routeApi, routeApiContext } from './test-utils';
 
 const tasksRoutePattern = /\/api\/workspaces\/[^/]+\/tasks/;
@@ -315,7 +316,7 @@ test.describe('Tasks Page', () => {
 
   test.describe('Filters', () => {
     test('displays project and status filter dropdowns', async ({ page }) => {
-      await expect(page.locator('.tasks-filters select')).toHaveCount(2);
+      await expect(page.locator('.tasks-filters').getByRole('combobox')).toHaveCount(2);
     });
 
     test('filters by project', async ({ context, page }) => {
@@ -348,7 +349,7 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
       await expect(page.locator('.task-card')).toHaveCount(3);
 
-      await page.getByLabel('Filter by project').selectOption('proj-1');
+      await chooseSelect(page.getByRole('combobox', { name: 'Filter by project' }), 'Frontend App');
 
       await expect(page.locator('.task-card')).toHaveCount(2);
     });
@@ -381,7 +382,7 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
       await expect(page.locator('.task-card')).toHaveCount(3);
 
-      await page.getByLabel('Filter by status').selectOption('complete');
+      await chooseSelect(page.getByRole('combobox', { name: 'Filter by status' }), 'Complete');
 
       await expect(page.locator('.task-card')).toHaveCount(1);
     });

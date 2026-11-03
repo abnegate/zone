@@ -1,5 +1,6 @@
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { chooseSelect, expectSelectOptions } from './helpers/select';
 import { blockServiceWorker, routeApi, routeApiContext } from './test-utils';
 
 const mockTheme = {
@@ -156,7 +157,7 @@ test.describe('Workspace Settings Page', () => {
 
     test('displays font family dropdown', async ({ page }) => {
       await expect(page.locator('#font-family')).toBeVisible();
-      await expect(page.locator('#font-family option')).toHaveText([
+      await expectSelectOptions(page.getByRole('combobox', { name: 'Font Family' }), [
         'App Default', 'System Default', 'Inter', 'Roboto', 'Open Sans', 'Lato', 'Nunito',
       ]);
     });
@@ -167,8 +168,7 @@ test.describe('Workspace Settings Page', () => {
     });
 
     test('changes font family', async ({ page }) => {
-      await page.selectOption('#font-family', 'inter');
-      await expect(page.locator('#font-family')).toHaveValue('inter');
+      await chooseSelect(page.getByRole('combobox', { name: 'Font Family' }), 'Inter');
     });
 
     test('adjusts font size with slider', async ({ page }) => {
@@ -409,7 +409,7 @@ test.describe('Workspace Settings Page', () => {
       // The preview should update as we change values
       // This is hard to verify visually in Playwright, but we can verify
       // that the form inputs change and no errors occur
-      await page.selectOption('#font-family', 'roboto');
+      await chooseSelect(page.getByRole('combobox', { name: 'Font Family' }), 'Roboto');
       await page.locator('#font-size').fill('18');
       await page.click('.radio-option:has-text("Large") input');
 
@@ -422,7 +422,9 @@ test.describe('Workspace Settings Page', () => {
     test('shows the configured ComfyUI checkpoint', async ({ page }) => {
       await page.getByRole('tab', { name: 'AI Settings' }).click();
 
-      await expect(page.locator('#model-image')).toHaveValue('flux1-schnell-fp8.safetensors');
+      await expect(page.getByRole('combobox', { name: 'Image Model' })).toHaveText(
+        'flux1-schnell-fp8.safetensors'
+      );
       await expect(page.getByText('ComfyUI checkpoint for image requests.')).toBeVisible();
     });
 
@@ -491,7 +493,9 @@ test.describe('Workspace Settings Page', () => {
     test('shows the configured ComfyUI video UNET', async ({ page }) => {
       await page.getByRole('tab', { name: 'AI Settings' }).click();
 
-      await expect(page.locator('#model-video')).toHaveValue('wan2.2_ti2v_5B_fp16.safetensors');
+      await expect(page.getByRole('combobox', { name: 'Video Model' })).toHaveText(
+        'wan2.2_ti2v_5B_fp16.safetensors'
+      );
       await expect(page.getByText('ComfyUI UNET for video requests.')).toBeVisible();
     });
 
@@ -514,7 +518,9 @@ test.describe('Workspace Settings Page', () => {
     test('shows the configured ComfyUI audio checkpoint', async ({ page }) => {
       await page.getByRole('tab', { name: 'AI Settings' }).click();
 
-      await expect(page.locator('#model-audio')).toHaveValue('ace_step_v1_3.5b.safetensors');
+      await expect(page.getByRole('combobox', { name: 'Audio Model' })).toHaveText(
+        'ace_step_v1_3.5b.safetensors'
+      );
       await expect(page.getByText('ComfyUI checkpoint for audio requests.')).toBeVisible();
     });
 

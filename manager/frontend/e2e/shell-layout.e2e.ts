@@ -414,7 +414,7 @@ test('workspace custom typography preserves shared proportions', async ({
   await page.goto('/login', { waitUntil: 'domcontentloaded' });
   await setupAdminAuth(page);
   await page.goto('/settings', { waitUntil: 'domcontentloaded' });
-  await expect(page.locator('#font-family')).toHaveValue('roboto');
+  await expect(page.getByRole('combobox', { name: 'Font Family' })).toHaveText('Roboto');
   await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS(
     'font-size',
     '20.25px',

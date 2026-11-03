@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures';
 import { mockCommonEndpoints, setupAuth } from './helpers/auth';
+import { chooseSelect } from './helpers/select';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 const workspace = '00000000-0000-0000-0000-000000000001';
@@ -173,13 +174,13 @@ test('first save survives reload outside settings and unsaved edits are discarde
   await openSettings(page);
   await expect(page.locator('.alert-error')).not.toBeVisible();
   await page.locator('#primary-light').fill(theme.primary_color_light);
-  await page.locator('#font-family').selectOption('roboto');
+  await chooseSelect(page.getByRole('combobox', { name: 'Font Family' }), 'Roboto');
   await page.locator('#font-size').fill('18');
   await page.getByRole('button', { name: 'Save Changes', exact: true }).click();
   await expect(page.locator('.alert-success')).toBeVisible();
   expect(writes).toEqual(['theme:PUT']);
   await page.locator('#primary-light').fill('#00ff00');
-  await page.locator('#font-family').selectOption('lato');
+  await chooseSelect(page.getByRole('combobox', { name: 'Font Family' }), 'Lato');
   await page.locator('.sidebar a[href="/chats"]').click();
   await expect(page.locator('body')).toHaveCSS('font-family', /Roboto/i);
   await page.reload();
@@ -216,7 +217,7 @@ test('nullable persisted fields resolve to usable defaults', async ({
   await prepare(page, nullableTheme);
   await openSettings(page);
   await expect(page.locator('.alert-error')).not.toBeVisible();
-  await expect(page.locator('#font-family')).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: 'Font Family' })).toHaveText('App Default');
   await expect(page.locator('html')).toHaveCSS('font-size', '16px');
   await page.locator('#primary-light').fill('#b03040');
   await expect(
