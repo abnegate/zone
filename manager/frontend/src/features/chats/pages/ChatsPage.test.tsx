@@ -12,7 +12,17 @@ import {
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import { chooseSelect } from '../../../test/select';
-import type { Chat, ChatSearchResult, ChatWithMessages, Message } from '../types';
+import type {
+  Chat,
+  ChatProviderOffer,
+  ChatProviderSelection,
+  ChatProviders,
+  ChatSearchResult,
+  ChatWithMessages,
+  Message,
+  ReasoningEffort,
+  UpdateChatRequest,
+} from '../types';
 import { CHAT_GROUP_STORAGE_KEY, CHAT_SORT_STORAGE_KEY } from '../utils/arrange';
 
 // Create mock functions
@@ -27,6 +37,9 @@ const mockSearchChatMessages = mock();
 const mockUpdateChat = mock();
 const mockGetChatSources = mock();
 const mockSetChatSources = mock();
+const mockGetChatProviders = mock();
+const mockSetChatProvider = mock();
+const mockGetWorkspaceChatProviders = mock();
 const mockWsSend = mock();
 const mockWsClose = mock();
 
@@ -62,6 +75,9 @@ mock.module('../../../api/chats', () => ({
     searchChatMessages: mockSearchChatMessages,
     getChatSources: mockGetChatSources,
     setChatSources: mockSetChatSources,
+    getChatProviders: mockGetChatProviders,
+    setChatProvider: mockSetChatProvider,
+    getWorkspaceChatProviders: mockGetWorkspaceChatProviders,
     setGetAccessToken: mock(),
     getMessages: mock(),
     updateChat: mockUpdateChat,
@@ -358,6 +374,61 @@ const mockChatWithSystemMessage: ChatWithMessages = {
   ],
 };
 
+const HTTP_EFFORTS: ReasoningEffort[] = ['off', 'low', 'medium', 'high'];
+const CLAUDE_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+const providerOffer = (overrides: Partial<ChatProviderOffer> = {}): ChatProviderOffer => ({
+  provider: 'self_hosted',
+  label: 'Self-Hosted',
+  usable: true,
+  reason: null,
+  models: [],
+  efforts: HTTP_EFFORTS,
+  requires_model: false,
+  ...overrides,
+});
+
+const selfHostedOffer = providerOffer();
+
+const openAiOffer = providerOffer({
+  provider: 'openai',
+  label: 'OpenAI',
+  models: [{ name: 'gpt-4o', label: 'gpt-4o', efforts: HTTP_EFFORTS }],
+});
+
+const claudeOffer = providerOffer({
+  provider: 'claude_code',
+  label: 'Claude Code',
+  models: [
+    { name: 'sonnet', label: 'Sonnet', efforts: CLAUDE_EFFORTS },
+    { name: 'haiku', label: 'Haiku', efforts: [] },
+  ],
+  efforts: CLAUDE_EFFORTS,
+});
+
+const codexOffer = providerOffer({
+  provider: 'codex',
+  label: 'Codex',
+  models: [
+    { name: 'gpt-6-sol', label: 'gpt-6-sol', efforts: [...CLAUDE_EFFORTS, 'ultra'] },
+    { name: 'gpt-5.5', label: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'] },
+  ],
+  efforts: ['low', 'medium', 'high', 'xhigh'],
+});
+
+const chatProviders = (overrides: Partial<ChatProviders> = {}): ChatProviders => ({
+  default: selfHostedOffer,
+  selected: null,
+  providers: [selfHostedOffer, openAiOffer, claudeOffer, codexOffer],
+  ...overrides,
+});
+
+const selection = (
+  offer: ChatProviderOffer,
+  model: string | null,
+  overrides: Partial<ChatProviderSelection> = {}
+): ChatProviderSelection => ({ ...offer, model, ...overrides });
+
 const newChatButtons = () => screen.getAllByRole('button', { name: 'New chat' });
 
 function chooseSelectOption(testId: string, optionName: string) {
@@ -390,6 +461,14 @@ describe('ChatsPage', () => {
     mockGetChatSources.mockReset();
     mockSetChatSources.mockReset();
     mockGetChatSources.mockResolvedValue([]);
+    mockGetChatProviders.mockReset();
+    mockSetChatProvider.mockReset();
+    mockGetChatProviders.mockResolvedValue(chatProviders());
+    mockGetWorkspaceChatProviders.mockReset();
+    mockGetWorkspaceChatProviders.mockResolvedValue({
+      default: selfHostedOffer,
+      providers: [selfHostedOffer],
+    });
     window.history.pushState({}, '', '/');
     mockGetChats.mockReset();
     mockGetChat.mockReset();
@@ -2677,6 +2756,360 @@ describe('ChatsPage', () => {
     fireEvent.click(screen.getByText('Chat 1'));
     await waitFor(() => expect(screen.getByTestId('agent-toggle')).toBeInTheDocument());
     expect(screen.getByTestId('character-toggle')).toHaveTextContent('Ada');
+  });
+
+  describe('chat provider', () => {
+    const openChat = async (chat: Partial<ChatWithMessages> = {}) => {
+      mockClient.getChat.mockResolvedValue({ ...mockChatWithMessages, ...chat });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByText('Hi there!');
+    };
+
+    const optionNames = (testId: string): string[] => {
+      const trigger = screen.getByTestId(testId);
+      fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+      const names = screen.getAllByRole('option').map((option) => option.textContent ?? '');
+      fireEvent.keyDown(trigger, { key: 'Escape' });
+      return names;
+    };
+
+    const badge = () => document.querySelector('.chat-header-info .chat-model');
+
+    it('renders the picker on the workspace default', async () => {
+      await openChat();
+      const picker = await screen.findByTestId('chat-provider');
+      expect(picker).toHaveTextContent('Default');
+      expect(picker).not.toHaveTextContent('Self-Hosted');
+      expect(picker.getAttribute('title')).toContain('(Self-Hosted)');
+      expect(optionNames('chat-provider')[0]).toBe('Default (Self-Hosted)');
+      expect(screen.queryByTestId('chat-provider-model')).not.toBeInTheDocument();
+      expect(badge()).toHaveTextContent('llama2');
+    });
+
+    it('chooses Claude Code and refreshes both the providers and the chat', async () => {
+      await openChat();
+      await screen.findByTestId('chat-provider');
+      const providerLoads = mockGetChatProviders.mock.calls.length;
+      const chatLoads = mockClient.getChat.mock.calls.length;
+      mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, provider: 'claude_code' });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(claudeOffer, null) })
+      );
+      mockClient.getChat.mockResolvedValue({ ...mockChatWithMessages, provider: 'claude_code' });
+
+      chooseSelectOption('chat-provider', 'Claude Code');
+
+      await waitFor(() =>
+        expect(mockSetChatProvider).toHaveBeenCalledWith('chat-1', {
+          provider: 'claude_code',
+          model: null,
+        })
+      );
+      await waitFor(() => {
+        expect(mockGetChatProviders.mock.calls.length).toBeGreaterThan(providerLoads);
+        expect(mockClient.getChat.mock.calls.length).toBeGreaterThan(chatLoads);
+      });
+      await waitFor(() => expect(badge()).toHaveTextContent('Claude Code · Automatic'));
+      expect(mockClient.updateChat).not.toHaveBeenCalled();
+    });
+
+    it('shows a refused choice and keeps the chat as it was', async () => {
+      await openChat();
+      await screen.findByTestId('chat-provider');
+      mockSetChatProvider.mockRejectedValue(new Error('Codex is not signed in.'));
+
+      chooseSelectOption('chat-provider', 'Codex');
+
+      expect(await screen.findByText('Codex is not signed in.')).toBeInTheDocument();
+      expect(screen.getByTestId('chat-provider')).toHaveTextContent('Default');
+      expect(screen.getByTestId('chat-provider')).not.toHaveTextContent('Codex');
+    });
+
+    it('hides the context size for a chosen provider', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(openAiOffer, 'gpt-4o') })
+      );
+      await openChat({ context_tokens: 32768, provider: 'openai', provider_model: 'gpt-4o' });
+      await waitFor(() => expect(screen.getByTestId('chat-provider')).toHaveTextContent('OpenAI'));
+      expect(screen.queryByTestId('context-tokens')).not.toBeInTheDocument();
+      expect(badge()).toHaveTextContent('OpenAI · gpt-4o');
+      expect(optionNames('reasoning-effort')).toEqual(['Auto', 'Off', 'Low', 'Medium', 'High']);
+    });
+
+    it('hides the context size for an agent default', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: claudeOffer }));
+      await openChat({ context_tokens: 32768 });
+      await screen.findByTestId('chat-provider-model');
+      expect(screen.getByTestId('chat-provider')).toHaveTextContent('Default');
+      expect(screen.queryByTestId('context-tokens')).not.toBeInTheDocument();
+    });
+
+    it('shows the agent toggle from an agent offer', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: claudeOffer }));
+      await openChat({ model_name: 'llama2' });
+      expect(await screen.findByTestId('agent-toggle')).toBeInTheDocument();
+    });
+
+    it('ignores the local model profile for a chosen endpoint provider', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(openAiOffer, 'gpt-4o') })
+      );
+      await openChat({ model_name: 'llama3.1', provider: 'openai', provider_model: 'gpt-4o' });
+      await waitFor(() => expect(screen.getByTestId('chat-provider')).toHaveTextContent('OpenAI'));
+      expect(screen.queryByTestId('agent-toggle')).not.toBeInTheDocument();
+    });
+
+    it('offers agent models and efforts on an agent default and saves a model change', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: claudeOffer }));
+      await openChat({ model_name: 'auto', reasoning_effort: 'auto' });
+      await screen.findByTestId('chat-provider-model');
+      expect(optionNames('chat-provider-model')).toEqual(['Automatic', 'Sonnet', 'Haiku']);
+      expect(optionNames('reasoning-effort')).toEqual([
+        'Auto',
+        'Low',
+        'Medium',
+        'High',
+        'Extra high',
+        'Max',
+      ]);
+      const providerLoads = mockGetChatProviders.mock.calls.length;
+      const chatLoads = mockClient.getChat.mock.calls.length;
+      mockClient.updateChat.mockResolvedValue({ ...mockChatWithMessages, model_name: 'sonnet' });
+
+      chooseSelectOption('chat-provider-model', 'Sonnet');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { model_name: 'sonnet' })
+      );
+      await waitFor(() => {
+        expect(mockGetChatProviders.mock.calls.length).toBeGreaterThan(providerLoads);
+        expect(mockClient.getChat.mock.calls.length).toBeGreaterThan(chatLoads);
+      });
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('hides reasoning for an agent model without efforts', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: claudeOffer }));
+      await openChat({ model_name: 'haiku', reasoning: true });
+      await screen.findByTestId('chat-provider-model');
+      expect(screen.queryByTestId('reasoning-effort')).not.toBeInTheDocument();
+    });
+
+    it('resets an effort the new codex model does not support', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(codexOffer, 'gpt-6-sol') })
+      );
+      await openChat({ provider: 'codex', provider_model: 'gpt-6-sol', reasoning_effort: 'max' });
+      await screen.findByTestId('chat-provider-model');
+      expect(optionNames('reasoning-effort')).toContain('Ultra');
+      expect(badge()).toHaveTextContent('Codex · gpt-6-sol');
+      mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, provider: 'codex' });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(codexOffer, 'gpt-5.5') })
+      );
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        reasoning_effort: 'auto',
+      });
+
+      chooseSelectOption('chat-provider-model', 'gpt-5.5');
+
+      await waitFor(() =>
+        expect(mockSetChatProvider).toHaveBeenCalledWith('chat-1', {
+          provider: 'codex',
+          model: 'gpt-5.5',
+        })
+      );
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { reasoning_effort: 'auto' })
+      );
+      await waitFor(() => expect(badge()).toHaveTextContent('Codex · gpt-5.5'));
+      expect(optionNames('reasoning-effort')).not.toContain('Ultra');
+    });
+
+    it('keeps an effort the new codex model supports', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(codexOffer, 'gpt-6-sol') })
+      );
+      await openChat({ provider: 'codex', provider_model: 'gpt-6-sol', reasoning_effort: 'high' });
+      await screen.findByTestId('chat-provider-model');
+      mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, provider: 'codex' });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(codexOffer, 'gpt-5.5') })
+      );
+
+      chooseSelectOption('chat-provider-model', 'gpt-5.5');
+
+      await waitFor(() => expect(badge()).toHaveTextContent('Codex · gpt-5.5'));
+      expect(mockClient.updateChat).not.toHaveBeenCalled();
+    });
+
+    it('shows why a chosen provider cannot be used', async () => {
+      const reason =
+        'Codex is not signed in for this organization. An organization admin can sign in under Organization Settings > AI Settings.';
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({
+          providers: [selfHostedOffer, openAiOffer, claudeOffer],
+          selected: selection(codexOffer, null, { usable: false, reason }),
+        })
+      );
+      await openChat({ provider: 'codex' });
+      expect(await screen.findByTestId('chat-provider-error')).toHaveTextContent(reason);
+      expect(screen.getByTestId('chat-provider-error')).toHaveAttribute('role', 'alert');
+      expect(screen.getByTestId('chat-provider')).toHaveTextContent('Codex (unavailable)');
+    });
+
+    it("offers the unusable chosen provider's efforts rather than the default's", async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({
+          selected: selection(codexOffer, 'gpt-6-sol', { usable: false, reason: 'Signed out.' }),
+        })
+      );
+      await openChat({ provider: 'codex', provider_model: 'gpt-6-sol', reasoning_effort: 'ultra' });
+      await screen.findByTestId('chat-provider-error');
+      expect(optionNames('reasoning-effort')).toEqual([
+        'Auto',
+        'Low',
+        'Medium',
+        'High',
+        'Extra high',
+        'Max',
+        'Ultra',
+      ]);
+    });
+
+    it('hides the picker and says why when the providers fail to load', async () => {
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+      await openChat();
+      expect(await screen.findByTestId('chat-providers-error')).toHaveTextContent(
+        'Failed to load AI providers: 502'
+      );
+      expect(screen.getByTestId('chat-providers-error')).toHaveAttribute('role', 'alert');
+      expect(screen.queryByTestId('chat-provider')).not.toBeInTheDocument();
+      expect(badge()).toHaveTextContent('llama2');
+    });
+
+    it('keeps the picker and says why when the providers fail to reload', async () => {
+      await openChat();
+      await screen.findByTestId('chat-provider');
+      mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, provider: 'claude_code' });
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+
+      chooseSelectOption('chat-provider', 'Claude Code');
+
+      expect(await screen.findByTestId('chat-providers-error')).toHaveTextContent(
+        'Failed to load AI providers: 502'
+      );
+      expect(screen.getByTestId('chat-provider')).toBeInTheDocument();
+    });
+
+    it('follows the authoritative Default choice while the chat still names the old provider', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(codexOffer, 'gpt-5.5') })
+      );
+      const stale = {
+        context_tokens: 32768,
+        provider: 'codex' as const,
+        provider_model: 'gpt-5.5',
+      };
+      await openChat(stale);
+      await screen.findByTestId('chat-provider-model');
+      expect(screen.queryByTestId('context-tokens')).not.toBeInTheDocument();
+      mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, ...stale });
+      mockGetChatProviders.mockResolvedValue(chatProviders());
+
+      chooseSelectOption('chat-provider', 'Default (Self-Hosted)');
+
+      await waitFor(() =>
+        expect(mockSetChatProvider).toHaveBeenCalledWith('chat-1', { provider: null, model: null })
+      );
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toBeInTheDocument());
+      expect(screen.queryByTestId('chat-provider-model')).not.toBeInTheDocument();
+      expect(badge()).toHaveTextContent('llama2');
+    });
+
+    it('refreshes the chat and reports only the effort when its reset fails', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(codexOffer, 'gpt-6-sol') })
+      );
+      await openChat({ provider: 'codex', provider_model: 'gpt-6-sol', reasoning_effort: 'max' });
+      await screen.findByTestId('chat-provider-model');
+      const chatLoads = mockClient.getChat.mock.calls.length;
+      mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, provider: 'codex' });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(codexOffer, 'gpt-5.5') })
+      );
+      mockClient.updateChat.mockRejectedValue(new Error('Server unavailable'));
+
+      chooseSelectOption('chat-provider-model', 'gpt-5.5');
+
+      expect(
+        await screen.findByText(
+          'AI provider changed, but its reasoning effort could not be reset: Server unavailable'
+        )
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Failed to change AI provider/)).not.toBeInTheDocument();
+      await waitFor(() => expect(mockClient.getChat.mock.calls.length).toBeGreaterThan(chatLoads));
+      await waitFor(() => expect(badge()).toHaveTextContent('Codex · gpt-5.5'));
+    });
+
+    it('refreshes after a saved model change and reports only the effort when its reset fails', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: codexOffer }));
+      await openChat({ model_name: 'gpt-6-sol', reasoning_effort: 'max' });
+      await screen.findByTestId('chat-provider-model');
+      const providerLoads = mockGetChatProviders.mock.calls.length;
+      const chatLoads = mockClient.getChat.mock.calls.length;
+      mockClient.updateChat.mockImplementation(async (_id: string, update: UpdateChatRequest) => {
+        if (update.reasoning_effort) throw new Error('Server unavailable');
+        return { ...mockChatWithMessages, model_name: 'gpt-5.5' };
+      });
+
+      chooseSelectOption('chat-provider-model', 'gpt-5.5');
+
+      expect(
+        await screen.findByText(
+          'Model changed, but its reasoning effort could not be reset: Server unavailable'
+        )
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Failed to change model/)).not.toBeInTheDocument();
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { model_name: 'gpt-5.5' });
+      await waitFor(() => {
+        expect(mockGetChatProviders.mock.calls.length).toBeGreaterThan(providerLoads);
+        expect(mockClient.getChat.mock.calls.length).toBeGreaterThan(chatLoads);
+      });
+    });
+
+    it('asks for a typed model name before choosing a provider with none saved', async () => {
+      const openAi = providerOffer({
+        provider: 'openai',
+        label: 'OpenAI',
+        requires_model: true,
+      });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ providers: [selfHostedOffer, openAi] })
+      );
+      await openChat();
+      await screen.findByTestId('chat-provider');
+
+      chooseSelectOption('chat-provider', 'OpenAI');
+
+      const field = screen.getByRole('textbox', { name: 'Provider model name' });
+      expect(field).toHaveValue('');
+      expect(mockSetChatProvider).not.toHaveBeenCalled();
+      mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, provider: 'openai' });
+
+      fireEvent.change(field, { target: { value: 'my-deployment' } });
+      fireEvent.keyDown(field, { key: 'Enter' });
+
+      await waitFor(() =>
+        expect(mockSetChatProvider).toHaveBeenCalledWith('chat-1', {
+          provider: 'openai',
+          model: 'my-deployment',
+        })
+      );
+      expect(mockSetChatProvider).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('attached sources', () => {

@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { AiProviderSchema } from '../settings/workspace/schemas';
+import { REASONING_EFFORT_LABELS, type ReasoningEffort } from './provider';
 import { ACTION_TARGETS, HANDOVER_AGENTS, HANDOVER_REASONS } from './types';
 
 export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);
@@ -259,6 +261,13 @@ export const ChatCharacterSchema = z
   })
   .passthrough();
 
+const REASONING_EFFORTS = Object.keys(REASONING_EFFORT_LABELS) as [
+  ReasoningEffort,
+  ...ReasoningEffort[],
+];
+
+export const ReasoningEffortSchema = z.enum(REASONING_EFFORTS);
+
 export const ChatSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -276,12 +285,14 @@ export const ChatSchema = z.object({
   // Servers predating a chosen window omit this; those chats use native capacity.
   context_tokens: z.number().int().positive().nullish(),
   reasoning: z.boolean().nullish(),
-  reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high']).default('auto'),
+  reasoning_effort: ReasoningEffortSchema.default('auto'),
   character: ChatCharacterSchema.nullish(),
   tools: z.boolean().nullish(),
   needs_character: z.boolean().nullish(),
   purpose: z.string().nullish(),
   project_id: z.string().nullish(),
+  provider: AiProviderSchema.nullish().catch(null),
+  provider_model: z.string().nullish(),
 });
 
 const tokenCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -329,8 +340,43 @@ export const CreateChatRequestSchema = z.object({
   auto_approve: z.boolean().optional(),
   offline: z.boolean().optional(),
   context_tokens: z.number().int().positive().optional(),
-  reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high']).optional(),
+  reasoning_effort: ReasoningEffortSchema.optional(),
   project_id: z.string().min(1).optional(),
+  provider: AiProviderSchema.nullish(),
+  provider_model: z.string().min(1).nullish(),
+});
+
+const ProviderEffortsSchema = tolerantArray(ReasoningEffortSchema);
+
+export const ChatProviderModelSchema = z.object({
+  name: z.string(),
+  label: z.string(),
+  efforts: ProviderEffortsSchema,
+});
+
+export const ChatProviderOfferSchema = z.object({
+  provider: AiProviderSchema,
+  label: z.string(),
+  usable: z.boolean(),
+  reason: z.string().nullish(),
+  models: tolerantArray(ChatProviderModelSchema),
+  efforts: ProviderEffortsSchema,
+  requires_model: z.boolean(),
+});
+
+export const ChatProviderSelectionSchema = ChatProviderOfferSchema.extend({
+  model: z.string().nullable(),
+});
+
+export const ChatProvidersSchema = z.object({
+  default: ChatProviderOfferSchema,
+  selected: ChatProviderSelectionSchema.nullable(),
+  providers: tolerantArray(ChatProviderOfferSchema),
+});
+
+export const WorkspaceChatProvidersSchema = z.object({
+  default: ChatProviderOfferSchema,
+  providers: tolerantArray(ChatProviderOfferSchema),
 });
 
 export const SendMessageRequestSchema = z.object({

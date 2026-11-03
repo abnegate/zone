@@ -1,4 +1,5 @@
 import { test as base, expect } from '@playwright/test';
+import { CHAT_PROVIDERS, WORKSPACE_CHAT_PROVIDERS } from './test-utils';
 
 const defaultOrg = {
   id: '00000000-0000-0000-0000-000000000001',
@@ -8,6 +9,16 @@ const defaultOrg = {
   is_active: true,
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
+};
+
+const selfHosted = {
+  provider: 'self_hosted',
+  label: 'Self-Hosted',
+  usable: true,
+  reason: null,
+  models: [],
+  efforts: ['off', 'low', 'medium', 'high'],
+  requires_model: false,
 };
 
 const defaultWorkspace = {
@@ -177,6 +188,30 @@ export const test = base.extend({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({ directories: [], folders: [] }),
+      });
+    });
+
+    await context.route(CHAT_PROVIDERS, (route) => {
+      const type = route.request().resourceType();
+      if (type !== 'xhr' && type !== 'fetch') {
+        return route.continue();
+      }
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ default: selfHosted, selected: null, providers: [selfHosted] }),
+      });
+    });
+
+    await context.route(WORKSPACE_CHAT_PROVIDERS, (route) => {
+      const type = route.request().resourceType();
+      if (type !== 'xhr' && type !== 'fetch') {
+        return route.continue();
+      }
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ default: selfHosted, providers: [selfHosted] }),
       });
     });
 

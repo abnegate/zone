@@ -64,6 +64,7 @@ async fn the_host_agent_connects_to_zone_and_is_shown_zones_tools() {
     let mut child = Command::new("claude")
         .args(AgentKind::Claude.arguments_with(
             None,
+            None,
             Some(&toolset),
             BuiltinTools::Withheld,
             CodexSandbox::default(),

@@ -14,6 +14,7 @@ use crate::services::hosts::Hosts;
 
 use super::{
     DbResult,
+    chats::provider::Choice,
     organization_members::{self, OrgRole},
     workspace_members::{self, WorkspaceRole},
 };
@@ -22,7 +23,7 @@ pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_CLAUDE_CODE: &str = "claude_code";
 pub const PROVIDER_CODEX: &str = "codex";
 
-const PROVIDERS: [&str; 6] = [
+pub(crate) const PROVIDERS: [&str; 6] = [
     PROVIDER_SELF_HOSTED,
     PROVIDER_OPENAI,
     PROVIDER_ANTHROPIC,
@@ -541,6 +542,28 @@ pub struct EffectiveAiSettings {
 impl EffectiveAiSettings {
     pub fn agent(&self) -> Option<AgentKind> {
         agent(&self.provider)
+    }
+
+    /// These settings with `choice` as their provider. Another provider's saved
+    /// models are not its own, so they are left for it to choose. A model the
+    /// choice names fills the completion lanes only when none is saved: the
+    /// models an admin saves stay the ones a chat is held to.
+    pub fn choosing(&self, choice: &Choice) -> Self {
+        let mut chosen = self.clone();
+        let provider = choice.provider.as_str();
+        if provider != chosen.provider {
+            chosen.provider = provider.to_string();
+            chosen.model_fast = None;
+            chosen.model_reasoning = None;
+            chosen.model_embedding = None;
+        }
+        let unsaved = nonempty(chosen.model_fast.as_deref()).is_none()
+            && nonempty(chosen.model_reasoning.as_deref()).is_none();
+        if let Some(model) = choice.model.as_ref().filter(|_| unsaved) {
+            chosen.model_fast = Some(model.clone());
+            chosen.model_reasoning = Some(model.clone());
+        }
+        chosen
     }
 
     /// Overlay workspace/org image settings onto the process ComfyUI defaults.
@@ -1334,6 +1357,7 @@ pub async fn effective_comfyui(
 mod tests {
     use super::*;
     use crate::config::ComfyUiConfig;
+    use crate::services::provider::Provider;
     use abnegate_secret::OptionalSecretExtension;
 
     fn settings(fast: Option<&str>, image: Option<&str>) -> EffectiveAiSettings {
@@ -1381,6 +1405,106 @@ mod tests {
         ] {
             assert_eq!(agent(name), None, "{name:?} must not select an agent");
         }
+    }
+
+    fn saved_models() -> EffectiveAiSettings {
+        EffectiveAiSettings {
+            openai_api_key: Some(SecretValue::new("sk-openai")),
+            model_reasoning: Some("qwen3:32b".to_string()),
+            model_embedding: Some("nomic-embed-text".to_string()),
+            ..settings(Some("qwen3:8b"), Some("flux.safetensors"))
+        }
+    }
+
+    fn models(settings: &EffectiveAiSettings) -> [Option<&str>; 4] {
+        [
+            settings.model_fast.as_deref(),
+            settings.model_reasoning.as_deref(),
+            settings.model_embedding.as_deref(),
+            settings.model_image.as_deref(),
+        ]
+    }
+
+    #[test]
+    fn choosing_the_same_provider_without_a_model_changes_nothing() {
+        let saved = saved_models();
+        let chosen = saved.choosing(&Choice {
+            provider: Provider::SelfHosted,
+            model: None,
+        });
+        assert_eq!(chosen.provider, PROVIDER_SELF_HOSTED);
+        assert_eq!(models(&chosen), models(&saved));
+    }
+
+    #[test]
+    fn choosing_another_provider_leaves_it_to_pick_its_own_models() {
+        let saved = saved_models();
+        let chosen = saved.choosing(&Choice {
+            provider: Provider::OpenAI,
+            model: None,
+        });
+        assert_eq!(chosen.provider, PROVIDER_OPENAI);
+        assert_eq!(
+            models(&chosen),
+            [None, None, None, Some("flux.safetensors")],
+            "the saved completion and embedding models belong to the workspace's provider"
+        );
+        assert_eq!(
+            chosen.openai_api_key.expose_as_deref(),
+            Some("sk-openai"),
+            "every provider's keys stay so the chosen one can be reached"
+        );
+        assert_eq!(
+            saved.provider, PROVIDER_SELF_HOSTED,
+            "the workspace's settings are untouched"
+        );
+    }
+
+    #[test]
+    fn choosing_a_model_fills_both_completion_lanes_when_none_are_saved() {
+        let saved = saved_models();
+        let other = saved.choosing(&Choice {
+            provider: Provider::Codex,
+            model: Some("gpt-6-sol".to_string()),
+        });
+        assert_eq!(other.provider, PROVIDER_CODEX);
+        assert_eq!(
+            models(&other),
+            [
+                Some("gpt-6-sol"),
+                Some("gpt-6-sol"),
+                None,
+                Some("flux.safetensors")
+            ]
+        );
+    }
+
+    #[test]
+    fn choosing_a_model_keeps_the_lanes_the_settings_save() {
+        let saved = saved_models();
+        let same = saved.choosing(&Choice {
+            provider: Provider::SelfHosted,
+            model: Some("llama3.3:70b".to_string()),
+        });
+        assert_eq!(
+            models(&same),
+            models(&saved),
+            "a chat's choice must not stand in for the models an admin saved"
+        );
+
+        let fast_only = EffectiveAiSettings {
+            model_reasoning: None,
+            ..saved_models()
+        };
+        let chosen = fast_only.choosing(&Choice {
+            provider: Provider::SelfHosted,
+            model: Some("llama3.3:70b".to_string()),
+        });
+        assert_eq!(
+            models(&chosen),
+            models(&fast_only),
+            "one saved lane is a saved list the choice is held to"
+        );
     }
 
     #[test]

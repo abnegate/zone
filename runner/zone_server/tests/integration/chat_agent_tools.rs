@@ -72,8 +72,8 @@ impl Agent {
         writeln!(
             file,
             "#!/bin/sh\ncat > {prompt}\nprintf '%s' \"$ZONE_MCP_TOKEN\" > {token}\nprintf \
-             '%s' \"$*\" > {arguments}\nwhile [ ! -f {release} ]; do sleep 0.05; \
-             done\necho '{assistant}'\necho '{result}'",
+             '%s' \"$*\" > {arguments}.partial\nmv {arguments}.partial {arguments}\nwhile [ ! \
+             -f {release} ]; do sleep 0.05; done\necho '{assistant}'\necho '{result}'",
             prompt = agent.prompt.display(),
             arguments = agent.arguments.display(),
             token = agent.token.display(),

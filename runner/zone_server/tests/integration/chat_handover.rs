@@ -1531,3 +1531,108 @@ async fn a_chat_stays_off_a_login_out_of_credits_for_its_model_until_the_cool_do
     assert_eq!(harness.codex.invocations().len(), 3);
     assert_eq!(harness.session().await.login, Some(carol));
 }
+
+const EFFORT: &str = "--effort";
+const CODEX_SETTING: &str = "-c";
+const CODEX_EFFORT: &str = "model_reasoning_effort";
+
+async fn think(harness: &Harness, effort: &str) {
+    sqlx::query("UPDATE chats SET reasoning_effort = $2 WHERE id = $1")
+        .bind(harness.chat)
+        .bind(effort)
+        .execute(&harness.pool)
+        .await
+        .expect("the chat's effort");
+}
+
+/// The value codex was given for `name` as a `-c` override.
+fn setting<'a>(run: &'a Invocation, name: &str) -> Option<&'a str> {
+    run.arguments.windows(2).find_map(|pair| match pair {
+        [flag, value] if flag == CODEX_SETTING => value
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix('=')),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn a_turn_handed_to_another_login_keeps_thinking_at_the_chats_effort() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.sign_in(BOB).await;
+    think(&harness, "max").await;
+    harness.claude.plan(
+        ALICE,
+        0,
+        Run::Limited {
+            partial: Some(PARTIAL),
+            resets_at: reset_in(TimeDelta::hours(2)),
+        },
+    );
+    harness.claude.plan(BOB, 0, Run::Answers(ANSWER));
+
+    let frames = harness.turn(QUESTION).await;
+
+    handed(&frames, 1);
+    let end = answered(&frames);
+    assert_eq!(end["content"], format!("{PARTIAL}{ANSWER}"), "{end}");
+    let runs = harness.claude.invocations();
+    let [limited, carried] = runs.as_slice() else {
+        panic!("the turn runs Alice, then Bob: {runs:#?}");
+    };
+    assert_eq!(
+        limited.after(EFFORT),
+        Some("max"),
+        "the turn is told the chat's effort: {:?}",
+        limited.arguments
+    );
+    assert_eq!(
+        carried.after(EFFORT),
+        Some("max"),
+        "the login the turn moved to is told it again: {:?}",
+        carried.arguments
+    );
+}
+
+#[tokio::test]
+async fn a_turn_handed_to_the_other_agent_is_told_the_chats_effort_its_own_way() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.sign_in_codex(CAROL).await;
+    think(&harness, "xhigh").await;
+    harness.claude.plan(
+        ALICE,
+        0,
+        Run::Limited {
+            partial: Some(PARTIAL),
+            resets_at: reset_in(TimeDelta::hours(2)),
+        },
+    );
+
+    let frames = harness.turn(QUESTION).await;
+
+    handed(&frames, 1);
+    let end = answered(&frames);
+    assert_eq!(end["content"], format!("{PARTIAL}{CODEX_ANSWER}"), "{end}");
+    let claude = harness.claude.invocations();
+    let [limited] = claude.as_slice() else {
+        panic!("Claude runs once: {claude:#?}");
+    };
+    assert_eq!(
+        limited.after(EFFORT),
+        Some("xhigh"),
+        "the turn is told the chat's effort: {:?}",
+        limited.arguments
+    );
+    let codex = harness.codex.invocations();
+    let [moved] = codex.as_slice() else {
+        panic!("the turn runs codex once: {codex:#?}");
+    };
+    assert_eq!(
+        setting(moved, CODEX_EFFORT),
+        Some("xhigh"),
+        "codex is told the chat's effort as its own setting: {:?}",
+        moved.arguments
+    );
+    assert!(!moved.has(EFFORT), "{:?}", moved.arguments);
+}

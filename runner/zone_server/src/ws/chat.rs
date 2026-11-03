@@ -2695,8 +2695,9 @@ async fn prepare_message(
     if chat.workspace_id != Some(workspace_id) {
         return Err("Chat does not belong to the authenticated workspace".into());
     }
-    let route = Route::for_workspace(state, workspace_id).await;
+    let route = Route::for_chat(state, &chat).await;
     let endpoint = route.endpoint()?.clone();
+    let chat = route.apply(chat);
     let mut image_config = state.config().comfyui.clone();
     if let Some(settings) = route.settings() {
         settings.apply_to_comfyui(&mut image_config);
@@ -2713,7 +2714,7 @@ async fn prepare_message(
                 &endpoint,
                 &mut image_config,
             )
-            .await;
+            .await?;
             let intent = crate::services::image_intent::ImageIntentClassifier::new(
                 image_config.clone(),
                 endpoint.clone(),
@@ -2750,7 +2751,7 @@ async fn prepare_message(
                         &endpoint,
                         &mut image_config,
                     )
-                    .await
+                    .await?
                 }
             };
             Routing::Image(image_config, backend, endpoint)
@@ -2765,6 +2766,8 @@ async fn prepare_message(
 
 /// The backend a workspace's classifier runs on, with `config` naming the
 /// model it classifies with there: the login the chat runs on, while it can.
+/// A workspace's backend that can't be resolved leaves it the instance's; a
+/// chat's chosen provider is the one it runs on, or it fails.
 async fn classifying(
     state: &AppState,
     workspace_id: Uuid,
@@ -2772,7 +2775,7 @@ async fn classifying(
     route: &Route,
     endpoint: &Endpoint,
     config: &mut crate::config::ComfyUiConfig,
-) -> LlmBackend {
+) -> Result<LlmBackend, crate::services::backend::Error> {
     let sticky = match chats::session(state.db(), chat.id).await {
         Ok(session) => session.and_then(|session| session.login),
         Err(error) => {
@@ -2780,24 +2783,25 @@ async fn classifying(
             None
         }
     };
-    let backend = route
-        .backend_for(state, sticky)
-        .await
-        .unwrap_or_else(|error| {
+    let backend = match route.backend_for(state, sticky).await {
+        Ok(backend) => backend,
+        Err(error) if route.chosen().is_some() => return Err(error),
+        Err(error) => {
             tracing::warn!(
                 %workspace_id,
                 %error,
                 "Could not resolve the workspace's model backend; classifying on the instance's"
             );
             crate::services::backend::instance(state.config())
-        });
+        }
+    };
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
     let preferences = route.preferences(&config.classifier_model);
     config.classifier_model =
         crate::services::stages::classifier_model(&preferences, &catalog, &chat.model_name);
-    backend
+    Ok(backend)
 }
 
 async fn load_web_search(
@@ -2918,6 +2922,7 @@ async fn prepare_chat(
         None => None,
     };
     let current = resolved.login.clone();
+    let chosen = route.chosen().is_some();
     let endpoint = route.into_endpoint()?;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &resolved.backend)
@@ -2952,13 +2957,13 @@ async fn prepare_chat(
     )
     .await?;
     preparation.handover = match (organization, current, &preparation.session) {
-        (Some(organization), Some(current), Some(_)) => Some(Handover::new(
-            organization,
-            current,
-            model,
-            previous.as_ref(),
-            opening,
-        )),
+        (Some(organization), Some(current), Some(_)) => {
+            let handover = Handover::new(organization, current, model, previous.as_ref(), opening);
+            Some(match chosen {
+                true => handover.strict(),
+                false => handover,
+            })
+        }
         _ => None,
     };
     let search = load_web_search(state, chat_id, content, web_search_requested, chat.offline).await;
@@ -3191,6 +3196,7 @@ async fn handle_chat_generation(
         skills: _,
         session: mut pinned,
         mut handover,
+        effort,
     } = preparation;
     let offline = tools.offline();
     let mut replay = context.clone();
@@ -3739,7 +3745,10 @@ async fn handle_chat_generation(
             if let Some(repicked) = switch.model.clone() {
                 model = repicked;
             }
-            llm_client = llm_client.with_backend(switch.backend.clone());
+            llm_client = llm_client.with_backend(crate::services::backend::effort(
+                switch.backend.clone(),
+                effort,
+            ));
             if let Some(served) = &agent_tools {
                 llm_client =
                     llm_client.with_toolset(served.lease.toolset(), builtin_tools(sandboxed));
@@ -4523,6 +4532,8 @@ mod tests {
         use super::*;
         use crate::config::{AgentConfig, ComfyUiConfig, Config, ModelBackend};
         use crate::db::ai_settings::PROVIDER_CLAUDE_CODE;
+        use crate::db::chats::provider::Choice;
+        use crate::services::provider::Provider;
         use crate::services::stages::AUTO;
         use crate::services::stages::testing::{MODEL_FLAG, StandIn};
         use tempfile::TempDir;
@@ -4578,6 +4589,17 @@ mod tests {
                     workspace: workspace.id,
                     chat: chat.id,
                 }
+            }
+
+            /// Sets the chat on `provider` and `model`, or back on its workspace's.
+            async fn choose(&self, provider: Option<Provider>, model: Option<&str>) {
+                let choice = provider.map(|provider| Choice {
+                    provider,
+                    model: model.map(str::to_string),
+                });
+                chats::provider::set(&self.pool, self.chat, choice.as_ref())
+                    .await
+                    .expect("the chat's provider");
             }
 
             async fn remove(&self) {
@@ -4691,6 +4713,97 @@ mod tests {
                 crate::services::route::reads::of(organization.workspace),
                 1,
                 "one turn read its workspace's AI settings more than once"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_turn_on_a_chosen_provider_reads_its_workspaces_ai_settings_once() {
+            let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
+            organization.choose(Some(Provider::SelfHosted), None).await;
+            let state = AppState::new(
+                Config {
+                    litellm_host: UNREACHABLE.to_string(),
+                    ollama_host: UNREACHABLE.to_string(),
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+
+            let prepared = prepare_turn(&state, &organization).await;
+            organization.remove().await;
+
+            let preparation =
+                prepared.unwrap_or_else(|error| panic!("the turn was not prepared: {error}"));
+            assert!(
+                matches!(preparation.llm.config().backend, LlmBackend::Http),
+                "the chat ran on its workspace's agent rather than the provider it chose"
+            );
+            assert_eq!(
+                crate::services::route::reads::of(organization.workspace),
+                1,
+                "one turn on a chosen provider read its workspace's AI settings more than once"
+            );
+        }
+
+        const WINDOW: i64 = 8192;
+
+        /// The context limit of one turn of `organization`'s chat once it keeps
+        /// [`WINDOW`] for its workspace's provider.
+        async fn windowed_limit(organization: &Organization) -> Option<u64> {
+            chats::update_chat(
+                &organization.pool,
+                organization.chat,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(WINDOW),
+                None,
+            )
+            .await
+            .expect("the chat's context window");
+            let state = AppState::new(
+                Config {
+                    litellm_host: UNREACHABLE.to_string(),
+                    ollama_host: UNREACHABLE.to_string(),
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+
+            let prepared = prepare_turn(&state, organization).await;
+            organization.remove().await;
+
+            prepared
+                .unwrap_or_else(|error| panic!("the turn was not prepared: {error}"))
+                .context
+                .policy
+                .limit
+        }
+
+        #[tokio::test]
+        async fn a_chat_on_its_workspaces_provider_keeps_its_context_window() {
+            let organization = Organization::on(PROVIDER_SELF_HOSTED).await;
+
+            let limit = windowed_limit(&organization).await;
+
+            assert_eq!(limit, u64::try_from(WINDOW).ok());
+        }
+
+        #[tokio::test]
+        async fn a_chosen_provider_is_not_held_to_the_window_kept_for_its_workspaces_provider() {
+            let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
+            organization.choose(Some(Provider::SelfHosted), None).await;
+
+            let limit = windowed_limit(&organization).await;
+
+            assert_ne!(
+                limit,
+                u64::try_from(WINDOW).ok(),
+                "a chosen provider was held to the window the chat keeps for its workspace's provider"
             );
         }
 
@@ -4922,6 +5035,113 @@ mod tests {
                 panic!("expected an image route carrying the organization's agent");
             };
             settings.credential.expose().map(str::to_string)
+        }
+
+        /// A Codex login of the organization, signed in within its own home.
+        async fn codex_login(state: &AppState, organization: &Organization) -> Uuid {
+            let login = db::agent_logins::insert(
+                &organization.pool,
+                &db::agent_logins::Insert {
+                    organization_id: organization.id,
+                    agent: AgentKind::Codex.as_str(),
+                    account: Some("codex"),
+                    credential: None,
+                    label: Some("codex"),
+                    expires_at: None,
+                },
+            )
+            .await
+            .expect("a stored login")
+            .id;
+            db::agent_logins::observe(
+                &organization.pool,
+                login,
+                &crate::services::login::usage::Snapshot {
+                    windows: Vec::new(),
+                    headroom: Some(90.0),
+                    fetched_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .expect("the login's usage");
+            let home = state
+                .config()
+                .agents
+                .create_login_home(organization.id, AgentKind::Codex, login)
+                .expect("the login's home");
+            std::fs::write(
+                home.join("auth.json"),
+                r#"{"tokens":{"access_token":"codex-access","refresh_token":"codex-refresh","account_id":"acct-42"}}"#,
+            )
+            .expect("the codex sign-in");
+            login
+        }
+
+        #[tokio::test]
+        async fn a_chat_that_chose_claude_code_never_runs_its_turn_or_classifier_on_codex() {
+            let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
+            let agents = TempDir::new().expect("an agent state root");
+            let state = AppState::new(
+                Config {
+                    agents: AgentConfig {
+                        state: agents.path().to_path_buf(),
+                        host_login: false,
+                        ..crate::state::test_agents()
+                    },
+                    comfyui: ComfyUiConfig {
+                        enabled: true,
+                        classifier_timeout_secs: 20,
+                        ..ComfyUiConfig::default()
+                    },
+                    ..crate::state::test_config()
+                },
+                organization.pool.clone(),
+                None,
+            );
+            codex_login(&state, &organization).await;
+            let signed_out = crate::services::backend::Error::SignedOut {
+                agent: AgentKind::Claude,
+            }
+            .to_string();
+
+            let following = prepare_turn(&state, &organization).await;
+            organization.choose(Some(Provider::ClaudeCode), None).await;
+            let turn = prepare_turn(&state, &organization).await;
+            let classified = prepare_message(
+                &state,
+                organization.chat,
+                organization.workspace,
+                "generate an image of a lighthouse at dusk",
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+            organization.remove().await;
+
+            let following = following.unwrap_or_else(|error| {
+                panic!("a chat following its workspace lost its fallback to codex: {error}")
+            });
+            assert!(
+                matches!(
+                    following.llm.config().backend,
+                    LlmBackend::Cli {
+                        agent: AgentKind::Codex,
+                        ..
+                    }
+                ),
+                "a chat following its workspace did not fall back to codex"
+            );
+            assert_eq!(
+                turn.err().as_deref(),
+                Some(signed_out.as_str()),
+                "the turn of a chat that chose Claude Code ran on codex"
+            );
+            assert_eq!(
+                classified.err().as_deref(),
+                Some(signed_out.as_str()),
+                "the classifier of a chat that chose Claude Code ran on codex or the instance"
+            );
         }
 
         #[tokio::test]
@@ -5177,6 +5397,11 @@ cat 'DIR/reply.jsonl'
                     .expect("the chat's latest entry")
                 }
 
+                /// Sets the chat on `provider` and `model`, or back on its workspace's.
+                async fn choose(&self, provider: Option<Provider>, model: Option<&str>) {
+                    self.organization.choose(provider, model).await;
+                }
+
                 async fn remove(&self) {
                     self.organization.remove().await;
                     sqlx::query("DELETE FROM users WHERE id = $1")
@@ -5261,6 +5486,167 @@ cat 'DIR/reply.jsonl'
                 assert_eq!(second.prompt, first.prompt);
                 assert!(second.entry > first.entry);
                 assert_eq!(second.entry, latest);
+            }
+
+            const THIRD: &str = "And before that?";
+            const ELSEWHERE: &str = "Answered by the chosen endpoint.";
+            const CHOSEN: &str = "gpt-chosen";
+
+            /// An OpenAI-compatible endpoint that answers every completion with `ELSEWHERE`.
+            async fn endpoint() -> MockServer {
+                let server = MockServer::start().await;
+                let chunk = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":CHOSEN,"choices":[{"index":0,"delta":{"content":ELSEWHERE},"finish_reason":null}]});
+                let end = serde_json::json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":CHOSEN,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+                Mock::given(method("POST"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .insert_header("Content-Type", "text/event-stream")
+                            .set_body_string(format!(
+                                "data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"
+                            )),
+                    )
+                    .mount(&server)
+                    .await;
+                server
+            }
+
+            #[tokio::test]
+            async fn a_chat_switched_off_its_agent_and_back_resumes_with_the_turns_it_missed() {
+                let chat = Chat::on_claude().await;
+                let server = endpoint().await;
+                sqlx::query(
+                    "UPDATE organization_ai_settings SET openai_base_url = $2, completions_routed = true \
+                     WHERE organization_id = $1",
+                )
+                .bind(chat.organization.id)
+                .bind(format!("{}/v1", server.uri()))
+                .execute(&chat.organization.pool)
+                .await
+                .expect("the organization's OpenAI endpoint");
+
+                chat.ask(FIRST).await;
+                let first = chat
+                    .session()
+                    .await
+                    .expect("the first turn recorded its session");
+                chat.choose(Some(Provider::OpenAI), Some(CHOSEN)).await;
+                chat.ask(SECOND).await;
+                let elsewhere = chat.agent.runs().len();
+                let sent: Vec<serde_json::Value> = server
+                    .received_requests()
+                    .await
+                    .expect("the requests the endpoint received")
+                    .iter()
+                    .map(|request| request.body_json().expect("a JSON completion"))
+                    .collect();
+                chat.choose(Some(Provider::ClaudeCode), None).await;
+                chat.ask(THIRD).await;
+                let latest = chat.latest().await;
+                let back = chat.session().await;
+                let runs = chat.agent.runs();
+                let answers: Vec<String> = sqlx::query_scalar(
+                    "SELECT content FROM messages WHERE chat_id = $1 AND role = 'assistant' ORDER BY created_at",
+                )
+                .bind(chat.organization.chat)
+                .fetch_all(&chat.organization.pool)
+                .await
+                .expect("the chat's answers");
+                chat.remove().await;
+
+                assert_eq!(elsewhere, 1, "the turn on the chosen endpoint ran claude");
+                assert_eq!(answers, [ANSWER, ELSEWHERE, ANSWER]);
+                assert!(
+                    sent.iter()
+                        .any(|body| body["model"] == CHOSEN && body.to_string().contains(SECOND)),
+                    "the chosen endpoint was not asked the second question on its model: {sent:?}"
+                );
+                let [_, resumed] = runs.as_slice() else {
+                    panic!("expected two sessioned runs, got {}", runs.len());
+                };
+                let sent = blocks(&resumed.stdin);
+                match resumed.flag("--resume") {
+                    Some(id) => {
+                        assert_eq!(id, first.id);
+                        let said: Vec<(&str, &str)> = sent
+                            .iter()
+                            .skip(1)
+                            .map(|(label, said)| (label.as_str(), said.as_str()))
+                            .collect();
+                        assert_eq!(
+                            said,
+                            [("User", SECOND), ("Assistant", ELSEWHERE), ("User", THIRD)],
+                            "the resumed session was not sent the turn it missed: {}",
+                            resumed.stdin
+                        );
+                    }
+                    None => {
+                        for said in [FIRST, ANSWER, SECOND, ELSEWHERE, THIRD] {
+                            assert!(
+                                resumed.stdin.contains(said),
+                                "the fresh session was not sent {said:?}: {}",
+                                resumed.stdin
+                            );
+                        }
+                    }
+                }
+                let back = back.expect("the turn back on claude kept its session");
+                assert_eq!(back.entry, latest);
+            }
+
+            #[tokio::test]
+            async fn a_chat_switched_to_codex_and_back_never_resumes_the_codex_session() {
+                let chat = Chat::on_claude().await;
+                chat.ask(FIRST).await;
+                let first = chat
+                    .session()
+                    .await
+                    .expect("the first turn recorded its session");
+                let codex = codex_login(&chat.state, &chat.organization).await;
+                chat.choose(Some(Provider::Codex), None).await;
+                let thread = chats::ChatSession {
+                    login: Some(codex),
+                    id: "019a0000-0000-7000-8000-000000000000".to_string(),
+                    agent: AgentKind::Codex,
+                    entry: chat.latest().await,
+                    prompt: first.prompt.clone(),
+                };
+                chats::set_session(
+                    &chat.organization.pool,
+                    chat.organization.chat,
+                    Some(&thread),
+                )
+                .await
+                .expect("the codex turn's session");
+                chat.choose(Some(Provider::ClaudeCode), None).await;
+                chat.ask(SECOND).await;
+                let back = chat.session().await;
+                let runs = chat.agent.runs();
+                chat.remove().await;
+
+                let [_, fresh] = runs.as_slice() else {
+                    panic!("expected two sessioned runs, got {}", runs.len());
+                };
+                assert_eq!(
+                    fresh.flag("--resume"),
+                    None,
+                    "claude resumed codex's thread"
+                );
+                let pinned = fresh
+                    .flag("--session-id")
+                    .expect("claude started a fresh session");
+                assert_ne!(pinned, thread.id);
+                assert_ne!(pinned, first.id);
+                for said in [FIRST, ANSWER, SECOND] {
+                    assert!(
+                        fresh.stdin.contains(said),
+                        "the fresh session was not sent {said:?}: {}",
+                        fresh.stdin
+                    );
+                }
+                let back = back.expect("the turn back on claude recorded its session");
+                assert_eq!(back.agent, AgentKind::Claude);
+                assert_eq!(back.id, pinned);
+                assert_eq!(back.login, Some(chat.login));
             }
 
             #[tokio::test]

@@ -9,8 +9,11 @@ use super::event::AgentEvent;
 use super::parser;
 use super::session::Session;
 use super::settings::{BuiltinTools, CodexSandbox, DEFAULT_TIMEOUT, Toolset};
+use crate::llm::ReasoningEffort;
 
 const MODEL: &str = "--model";
+const EFFORT: &str = "--effort";
+const REASONING_EFFORT: &str = "model_reasoning_effort";
 const SETTING_SOURCES: &str = "--setting-sources";
 const NO_SETTING_SOURCES: &str = "";
 const SETTINGS: &str = "--settings";
@@ -59,6 +62,52 @@ const CODEX_MODELS: &[&str] = &[
     "gpt-5.5",
 ];
 const CODEX_FAMILY: &str = "gpt-";
+
+const UP_TO_XHIGH: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+];
+const UP_TO_MAX: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+    ReasoningEffort::Max,
+];
+const UP_TO_ULTRA: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+    ReasoningEffort::Max,
+    ReasoningEffort::Ultra,
+];
+
+/// What claude's `--effort` takes on every model its aliases name but haiku,
+/// and so on the default model a turn with none runs. It warns about any
+/// other level and runs at its default.
+const CLAUDE_EFFORTS: &[ReasoningEffort] = UP_TO_MAX;
+
+/// Claude drops `--effort` for its haiku models without a word, so none is
+/// offered for them.
+const CLAUDE_EFFORTLESS_FAMILY: &str = "haiku";
+
+/// What each offered codex model takes. Codex checks none of them itself and
+/// sends whatever it is given to its API.
+const CODEX_EFFORTS: &[(&str, &[ReasoningEffort])] = &[
+    ("gpt-6-astra", UP_TO_ULTRA),
+    ("gpt-6-sol", UP_TO_ULTRA),
+    ("gpt-6-luna", UP_TO_MAX),
+    ("gpt-5.6-sol", UP_TO_ULTRA),
+    ("gpt-5.6-terra", UP_TO_ULTRA),
+    ("gpt-5.6-luna", UP_TO_MAX),
+    ("gpt-5.5", UP_TO_XHIGH),
+];
+
+/// What every offered codex model takes, for a turn whose model codex picks.
+const CODEX_SHARED_EFFORTS: &[ReasoningEffort] = UP_TO_XHIGH;
 
 /// Both timeouts are [`super::DEFAULT_TIMEOUT`] in milliseconds, because a call
 /// to zone's tools can wait that long on an approval.
@@ -208,6 +257,38 @@ impl AgentKind {
         }
     }
 
+    /// The reasoning efforts this agent takes for `model`: none for a model
+    /// whose efforts are not verified, since neither agent checks an effort
+    /// before sending it to its API. With no model, what the model the agent
+    /// picks takes: for claude, its default model's; for codex, only what
+    /// every offered model takes.
+    pub fn efforts(self, model: Option<&str>) -> &'static [ReasoningEffort] {
+        let Some(model) = model.map(str::trim) else {
+            return match self {
+                Self::Claude => CLAUDE_EFFORTS,
+                Self::Codex => CODEX_SHARED_EFFORTS,
+            };
+        };
+        match self {
+            Self::Claude if claude_effortful(model) => CLAUDE_EFFORTS,
+            Self::Claude => &[],
+            Self::Codex => CODEX_EFFORTS
+                .iter()
+                .find(|(name, _)| *name == model)
+                .map_or(&[], |(_, efforts)| efforts),
+        }
+    }
+
+    /// How `model` is shown to a person: claude's aliases capitalised, every
+    /// other name as the agent spells it.
+    pub fn label(self, model: &str) -> String {
+        let alias = model.trim().to_ascii_lowercase();
+        match self {
+            Self::Claude if CLAUDE_ALIASES.contains(&alias.as_str()) => capitalised(&alias),
+            Self::Claude | Self::Codex => model.to_string(),
+        }
+    }
+
     /// The variable naming the directory this agent keeps its settings,
     /// sessions and login in.
     pub fn home(self) -> &'static str {
@@ -254,9 +335,12 @@ impl AgentKind {
     /// picks its own thread id, so only a session to resume reaches it, and
     /// `codex exec resume` takes no `--sandbox`: a resumed turn's sandbox is
     /// set as the `sandbox_mode` it would otherwise read from its config.
+    ///
+    /// An effort reaches the agent only when the model it runs takes it.
     pub fn arguments_with(
         self,
         model: Option<&str>,
+        effort: Option<ReasoningEffort>,
         toolset: Option<&Toolset>,
         builtin_tools: BuiltinTools,
         sandbox: CodexSandbox,
@@ -270,9 +354,10 @@ impl AgentKind {
         .map(|argument| (*argument).to_string())
         .collect();
 
-        match model.map(str::trim).filter(|model| !model.is_empty()) {
+        let model = match model.map(str::trim).filter(|model| !model.is_empty()) {
             Some(model) if self.knows(model) => {
                 arguments.extend([MODEL.to_string(), model.to_string()]);
+                Some(model)
             }
             Some(model) => {
                 tracing::debug!(
@@ -280,8 +365,13 @@ impl AgentKind {
                     model,
                     "the agent does not know this model, so it chooses its own"
                 );
+                None
             }
-            None => {}
+            None => None,
+        };
+
+        if let Some(effort) = effort {
+            arguments.extend(self.effort_arguments(model, effort));
         }
 
         arguments.extend(
@@ -321,6 +411,27 @@ impl AgentKind {
         );
 
         arguments
+    }
+
+    /// The flag setting `effort`, or nothing when `model` does not take it.
+    fn effort_arguments(self, model: Option<&str>, effort: ReasoningEffort) -> Vec<String> {
+        if !self.efforts(model).contains(&effort) {
+            tracing::debug!(
+                agent = %self,
+                model,
+                effort = effort.as_str(),
+                "the model does not take this effort, so the agent chooses its own"
+            );
+            return Vec::new();
+        }
+
+        match self {
+            Self::Claude => vec![EFFORT.to_string(), effort.as_str().to_string()],
+            Self::Codex => vec![
+                CONFIG.to_string(),
+                format!("{REASONING_EFFORT}={}", effort.as_str()),
+            ],
+        }
     }
 
     /// A reader for one turn of this agent's output.
@@ -526,6 +637,13 @@ impl fmt::Display for AgentKind {
     }
 }
 
+/// One of claude's aliases, all of whose models take [`CLAUDE_EFFORTS`] but
+/// haiku's.
+fn claude_effortful(model: &str) -> bool {
+    let alias = model.to_ascii_lowercase();
+    CLAUDE_ALIASES.contains(&alias.as_str()) && !alias.contains(CLAUDE_EFFORTLESS_FAMILY)
+}
+
 /// A full claude model name: `^claude-[a-z0-9-]+(\[1m\])?$`.
 fn claude_model(model: &str) -> bool {
     model
@@ -555,6 +673,13 @@ fn lowercase_or_digit(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit()
 }
 
+fn capitalised(word: &str) -> String {
+    let mut characters = word.chars();
+    characters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(characters).collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +689,7 @@ mod tests {
         fn arguments(self, model: Option<&str>) -> Vec<String> {
             self.arguments_with(
                 model,
+                None,
                 None,
                 BuiltinTools::Granted,
                 CodexSandbox::default(),
@@ -868,6 +994,7 @@ mod tests {
                 for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
                     let arguments = AgentKind::Claude.arguments_with(
                         model,
+                        None,
                         served,
                         builtin_tools,
                         CodexSandbox::default(),
@@ -898,6 +1025,7 @@ mod tests {
             for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
                 let arguments = AgentKind::Codex.arguments_with(
                     Some("gpt-6-sol"),
+                    None,
                     served,
                     builtin_tools,
                     CodexSandbox::default(),
@@ -934,6 +1062,7 @@ mod tests {
                 for sandbox in CodexSandbox::ALL {
                     let claude = AgentKind::Claude.arguments_with(
                         Some("opus"),
+                        None,
                         served,
                         builtin_tools,
                         sandbox,
@@ -1008,7 +1137,14 @@ mod tests {
         builtin_tools: BuiltinTools,
         sandbox: CodexSandbox,
     ) -> Vec<String> {
-        AgentKind::Codex.arguments_with(Some("gpt-6-sol"), toolset, builtin_tools, sandbox, None)
+        AgentKind::Codex.arguments_with(
+            Some("gpt-6-sol"),
+            None,
+            toolset,
+            builtin_tools,
+            sandbox,
+            None,
+        )
     }
 
     #[test]
@@ -1016,6 +1152,7 @@ mod tests {
         let toolset = toolset();
         let arguments = AgentKind::Claude.arguments_with(
             Some("opus"),
+            None,
             Some(&toolset),
             BuiltinTools::Withheld,
             CodexSandbox::default(),
@@ -1053,7 +1190,14 @@ mod tests {
             for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
                 for sandbox in CodexSandbox::ALL {
                     let arguments = agent
-                        .arguments_with(Some("model"), Some(&toolset), builtin_tools, sandbox, None)
+                        .arguments_with(
+                            Some("model"),
+                            None,
+                            Some(&toolset),
+                            builtin_tools,
+                            sandbox,
+                            None,
+                        )
                         .join(" ");
 
                     assert!(
@@ -1074,6 +1218,7 @@ mod tests {
         let toolset = toolset();
         let arguments = AgentKind::Claude.arguments_with(
             Some("opus"),
+            None,
             Some(&toolset),
             BuiltinTools::Granted,
             CodexSandbox::default(),
@@ -1092,6 +1237,7 @@ mod tests {
     fn a_turn_with_no_tools_of_zones_still_withholds_the_agents_own() {
         let arguments = AgentKind::Claude.arguments_with(
             Some("opus"),
+            None,
             None,
             BuiltinTools::Withheld,
             CodexSandbox::default(),
@@ -1359,6 +1505,7 @@ mod tests {
             for builtin_tools in [BuiltinTools::Withheld, BuiltinTools::Granted] {
                 let unpinned = AgentKind::Claude.arguments_with(
                     Some("opus"),
+                    None,
                     served,
                     builtin_tools,
                     CodexSandbox::default(),
@@ -1366,6 +1513,7 @@ mod tests {
                 );
                 let new = AgentKind::Claude.arguments_with(
                     Some("opus"),
+                    None,
                     served,
                     builtin_tools,
                     CodexSandbox::default(),
@@ -1373,6 +1521,7 @@ mod tests {
                 );
                 let resume = AgentKind::Claude.arguments_with(
                     Some("opus"),
+                    None,
                     served,
                     builtin_tools,
                     CodexSandbox::default(),
@@ -1402,6 +1551,7 @@ mod tests {
         let arguments = AgentKind::Codex.arguments_with(
             Some("gpt-6-sol"),
             None,
+            None,
             BuiltinTools::Granted,
             CodexSandbox::WorkspaceWrite,
             Some(&resumed(id)),
@@ -1426,6 +1576,7 @@ mod tests {
         let new = AgentKind::Codex.arguments_with(
             Some("gpt-6-sol"),
             None,
+            None,
             BuiltinTools::Granted,
             CodexSandbox::WorkspaceWrite,
             Some(&pinned(id)),
@@ -1448,6 +1599,7 @@ mod tests {
                     let fresh = codex(served, builtin_tools, sandbox);
                     let arguments = AgentKind::Codex.arguments_with(
                         Some("gpt-6-sol"),
+                        None,
                         served,
                         builtin_tools,
                         sandbox,
@@ -1548,5 +1700,395 @@ mod tests {
             reader.interpret("", &mut events);
             assert!(events.is_empty(), "{agent} reacted to noise");
         }
+    }
+
+    fn effortful(
+        agent: AgentKind,
+        model: Option<&str>,
+        effort: ReasoningEffort,
+        session: Option<&Session>,
+    ) -> Vec<String> {
+        agent.arguments_with(
+            model,
+            Some(effort),
+            None,
+            BuiltinTools::Granted,
+            CodexSandbox::default(),
+            session,
+        )
+    }
+
+    fn mentions_effort(arguments: &[String]) -> bool {
+        arguments.iter().any(|argument| {
+            argument == EFFORT || argument.starts_with(&format!("{REASONING_EFFORT}="))
+        })
+    }
+
+    #[test]
+    fn claude_is_told_its_effort_after_its_model() {
+        let arguments = effortful(AgentKind::Claude, Some("opus"), ReasoningEffort::Max, None);
+        let model = arguments
+            .iter()
+            .position(|argument| argument == MODEL)
+            .expect("the model");
+        assert_eq!(
+            &arguments[model..model + 4],
+            ["--model", "opus", "--effort", "max"],
+            "{arguments:?}"
+        );
+
+        let automatic = effortful(AgentKind::Claude, None, ReasoningEffort::XHigh, None);
+        assert_eq!(
+            value_after(&automatic, EFFORT),
+            Some("xhigh"),
+            "{automatic:?}"
+        );
+    }
+
+    #[test]
+    fn codex_is_told_its_effort_as_a_setting_after_its_model() {
+        let arguments = effortful(
+            AgentKind::Codex,
+            Some("gpt-6-sol"),
+            ReasoningEffort::Ultra,
+            None,
+        );
+        let model = arguments
+            .iter()
+            .position(|argument| argument == MODEL)
+            .expect("the model");
+        assert_eq!(
+            &arguments[model..model + 4],
+            ["--model", "gpt-6-sol", "-c", "model_reasoning_effort=ultra"],
+            "{arguments:?}"
+        );
+        assert!(!arguments.contains(&EFFORT.to_string()), "{arguments:?}");
+    }
+
+    #[test]
+    fn an_effort_the_model_does_not_take_is_never_sent() {
+        for (agent, model, effort) in [
+            (AgentKind::Codex, Some("gpt-5.5"), ReasoningEffort::Ultra),
+            (AgentKind::Codex, Some("gpt-5.5"), ReasoningEffort::Max),
+            (AgentKind::Codex, Some("gpt-6-luna"), ReasoningEffort::Ultra),
+            (AgentKind::Codex, None, ReasoningEffort::Max),
+            (AgentKind::Codex, Some("gpt-7"), ReasoningEffort::Ultra),
+            (AgentKind::Codex, Some("gpt-4o"), ReasoningEffort::XHigh),
+            (AgentKind::Codex, Some("gpt-4o"), ReasoningEffort::Low),
+            (AgentKind::Codex, Some("o3"), ReasoningEffort::Ultra),
+            (
+                AgentKind::Claude,
+                Some("claude-opus-4-8"),
+                ReasoningEffort::Max,
+            ),
+            (
+                AgentKind::Claude,
+                Some("claude-sonnet-5[1m]"),
+                ReasoningEffort::Low,
+            ),
+            (AgentKind::Claude, Some("opus"), ReasoningEffort::Ultra),
+            (AgentKind::Claude, None, ReasoningEffort::Ultra),
+            (AgentKind::Claude, Some("haiku"), ReasoningEffort::Max),
+            (AgentKind::Claude, Some("haiku"), ReasoningEffort::Low),
+        ] {
+            let arguments = effortful(agent, model, effort, None);
+            assert!(
+                !mentions_effort(&arguments),
+                "{agent} on {model:?} was sent {effort:?}: {arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_haiku_turn_is_never_told_an_effort() {
+        for model in [
+            "haiku",
+            "HAIKU",
+            " haiku ",
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            for effort in ReasoningEffort::ALL {
+                let arguments = effortful(AgentKind::Claude, Some(model), effort, None);
+                assert_eq!(
+                    value_after(&arguments, MODEL),
+                    Some(model.trim()),
+                    "{arguments:?}"
+                );
+                assert!(
+                    !mentions_effort(&arguments),
+                    "claude on {model:?} was sent {effort:?}: {arguments:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auto_and_off_leave_the_effort_to_the_agent() {
+        for agent in AgentKind::ALL {
+            for model in [None, agent.models().first().copied()] {
+                for effort in [ReasoningEffort::Auto, ReasoningEffort::Off] {
+                    let arguments = effortful(agent, model, effort, None);
+                    assert!(
+                        !mentions_effort(&arguments),
+                        "{agent} on {model:?} was sent {effort:?}: {arguments:?}"
+                    );
+                }
+            }
+            assert!(
+                !mentions_effort(&agent.arguments(agent.models().first().copied())),
+                "{agent} was sent an effort it was never given"
+            );
+        }
+    }
+
+    #[test]
+    fn every_effort_an_agent_offers_reaches_it() {
+        for agent in AgentKind::ALL {
+            for model in agent.models() {
+                for effort in agent.efforts(Some(model)) {
+                    let arguments = effortful(agent, Some(model), *effort, None);
+                    assert!(
+                        mentions_effort(&arguments),
+                        "{agent} on {model} was not sent {effort:?}: {arguments:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_resumed_codex_turn_keeps_its_effort() {
+        let id = "019b2c41-0000-7000-8000-000000000001";
+        let arguments = effortful(
+            AgentKind::Codex,
+            Some("gpt-6-sol"),
+            ReasoningEffort::Ultra,
+            Some(&resumed(id)),
+        );
+
+        assert_eq!(
+            arguments,
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--model",
+                "gpt-6-sol",
+                "-c",
+                "model_reasoning_effort=ultra",
+                "-c",
+                r#"sandbox_mode="workspace-write""#,
+                "resume",
+                id,
+                "-",
+            ]
+        );
+    }
+
+    #[test]
+    fn each_agent_offers_the_efforts_its_models_take() {
+        use ReasoningEffort::{High, Low, Max, Medium, Ultra, XHigh};
+
+        for model in [
+            None,
+            Some("sonnet"),
+            Some("opus"),
+            Some("fable"),
+            Some("Opus"),
+            Some("sonnet[1m]"),
+            Some("opus[1m]"),
+            Some("fable[1m]"),
+            Some("best"),
+            Some("opusplan"),
+        ] {
+            assert_eq!(
+                AgentKind::Claude.efforts(model),
+                [Low, Medium, High, XHigh, Max],
+                "{model:?}"
+            );
+        }
+        for model in [
+            "haiku",
+            "Haiku",
+            "claude-haiku-4-5",
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-opus-4-8[1m]",
+            "gpt-7",
+        ] {
+            assert!(AgentKind::Claude.efforts(Some(model)).is_empty(), "{model}");
+        }
+        for model in ["gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"] {
+            assert_eq!(
+                AgentKind::Codex.efforts(Some(model)),
+                [Low, Medium, High, XHigh, Max, Ultra],
+                "{model}"
+            );
+        }
+        for model in ["gpt-6-luna", "gpt-5.6-luna", " gpt-6-luna "] {
+            assert_eq!(
+                AgentKind::Codex.efforts(Some(model)),
+                [Low, Medium, High, XHigh, Max],
+                "{model:?}"
+            );
+        }
+        for model in [Some("gpt-5.5"), None] {
+            assert_eq!(
+                AgentKind::Codex.efforts(model),
+                [Low, Medium, High, XHigh],
+                "{model:?}"
+            );
+        }
+        for model in ["gpt-7", "gpt-4o", "opus", "auto"] {
+            assert!(AgentKind::Codex.efforts(Some(model)).is_empty(), "{model}");
+        }
+    }
+
+    #[test]
+    fn claudes_aliases_are_labelled_capitalised_and_every_other_name_as_spelled() {
+        for (agent, model, label) in [
+            (AgentKind::Claude, "sonnet", "Sonnet"),
+            (AgentKind::Claude, "opus", "Opus"),
+            (AgentKind::Claude, "haiku", "Haiku"),
+            (AgentKind::Claude, "fable", "Fable"),
+            (AgentKind::Claude, "OPUS", "Opus"),
+            (AgentKind::Claude, "opusplan", "Opusplan"),
+            (AgentKind::Claude, "sonnet[1m]", "Sonnet[1m]"),
+            (AgentKind::Claude, "claude-opus-4-8", "claude-opus-4-8"),
+            (AgentKind::Codex, "gpt-6-sol", "gpt-6-sol"),
+            (AgentKind::Codex, "gpt-5.5", "gpt-5.5"),
+            (AgentKind::Codex, "opus", "opus"),
+        ] {
+            assert_eq!(agent.label(model), label, "{agent}: {model}");
+        }
+    }
+
+    #[test]
+    fn every_offered_codex_model_has_its_efforts_listed() {
+        let listed: Vec<&str> = CODEX_EFFORTS.iter().map(|(model, _)| *model).collect();
+        assert_eq!(listed, CODEX_MODELS);
+    }
+
+    fn fixture(name: &str) -> Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/llm/provider/fixtures")
+            .join(name);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        serde_json::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    }
+
+    /// The version `manager/Dockerfile` installs, from its `ARG name=version`.
+    fn installed(argument: &str) -> String {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manager/Dockerfile");
+        let dockerfile = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let prefix = format!("ARG {argument}=");
+        dockerfile
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("the Dockerfile pins no {argument}"))
+            .to_string()
+    }
+
+    fn levels(value: &Value) -> Vec<ReasoningEffort> {
+        value
+            .as_array()
+            .expect("a list of efforts")
+            .iter()
+            .map(|level| {
+                let level = level.as_str().expect("an effort's name");
+                ReasoningEffort::parse(level)
+                    .unwrap_or_else(|| panic!("an effort zone does not know: {level}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_fixtures_were_read_from_the_agents_the_image_installs() {
+        assert_eq!(
+            fixture("claude/efforts.json")["version"],
+            json!(installed("CLAUDE_VERSION"))
+        );
+        assert_eq!(
+            fixture("codex/models.json")["version"],
+            json!(installed("CODEX_VERSION"))
+        );
+    }
+
+    #[test]
+    fn claudes_efforts_are_the_ones_its_cli_lists() {
+        let fixture = fixture("claude/efforts.json");
+        let listed: Vec<(&str, Vec<ReasoningEffort>)> = fixture["models"]
+            .as_array()
+            .expect("claude's models")
+            .iter()
+            .map(|model| {
+                (
+                    model["alias"].as_str().expect("a model's alias"),
+                    levels(&model["efforts"]),
+                )
+            })
+            .collect();
+
+        let aliases: Vec<&str> = listed.iter().map(|(alias, _)| *alias).collect();
+        assert_eq!(aliases, CLAUDE_MODELS);
+
+        for (alias, efforts) in &listed {
+            assert_eq!(
+                AgentKind::Claude.efforts(Some(alias)),
+                efforts.as_slice(),
+                "{alias}"
+            );
+        }
+
+        for default in ["sonnet", "opus"] {
+            let (_, efforts) = listed
+                .iter()
+                .find(|(alias, _)| *alias == default)
+                .expect("a default model");
+            assert_eq!(
+                AgentKind::Claude.efforts(None),
+                efforts.as_slice(),
+                "{default}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_offers_the_models_and_efforts_its_cli_lists() {
+        let fixture = fixture("codex/models.json");
+        let listed: Vec<(&str, Vec<ReasoningEffort>)> = fixture["models"]
+            .as_array()
+            .expect("codex's models")
+            .iter()
+            .map(|model| {
+                (
+                    model["slug"].as_str().expect("a model's slug"),
+                    levels(&model["efforts"]),
+                )
+            })
+            .collect();
+
+        let offered: std::collections::BTreeSet<&str> = CODEX_MODELS.iter().copied().collect();
+        let slugs: std::collections::BTreeSet<&str> =
+            listed.iter().map(|(slug, _)| *slug).collect();
+        assert_eq!(offered, slugs);
+
+        for (slug, efforts) in &listed {
+            assert_eq!(
+                AgentKind::Codex.efforts(Some(slug)),
+                efforts.as_slice(),
+                "{slug}"
+            );
+        }
+
+        let shared: Vec<ReasoningEffort> = ReasoningEffort::ALL
+            .into_iter()
+            .filter(|effort| listed.iter().all(|(_, efforts)| efforts.contains(effort)))
+            .collect();
+        assert_eq!(AgentKind::Codex.efforts(None), shared);
     }
 }

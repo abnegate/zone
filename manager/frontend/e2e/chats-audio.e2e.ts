@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { installChatSocketMock, type ChatSocketController } from './helpers/chatSocket';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
 
 const GENERATED_AUDIO_URL =
   '/api/artifacts/00000000-0000-0000-0000-000000000001/chat-1/msg-generated/generated-audio-1.flac';
@@ -65,6 +65,7 @@ test.describe('Chat audio', () => {
 
   async function mockChatRoutes(page: Parameters<typeof routeApi>[0], messages: unknown[] = []) {
     await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+      if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
       const url = route.request().url();
       const method = route.request().method();
       if (url.includes('/chat-1') && method === 'GET') {

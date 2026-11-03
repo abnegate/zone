@@ -100,6 +100,7 @@ impl CliProvider {
         command
             .args(self.agent.arguments_with(
                 Some(model),
+                self.settings.effort,
                 self.settings.toolset.as_deref(),
                 self.settings.builtin_tools,
                 self.settings.sandbox,
@@ -1831,6 +1832,42 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 .any(|argument| argument == "--resume" || argument == "--session-id"),
             "a turn given no session was pinned to one: {arguments:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_effort_a_turn_is_given_reaches_the_agents_command_line() {
+        let recorder = Recorder::new();
+        answered(
+            recorder
+                .settings()
+                .with_effort(crate::llm::ReasoningEffort::Max),
+        )
+        .await;
+
+        let arguments = recorder.arguments();
+        let model = arguments
+            .iter()
+            .position(|argument| argument == "--model")
+            .expect("the turn's model");
+        assert_eq!(
+            &arguments[model..model + 4],
+            ["--model", "sonnet", "--effort", "max"],
+            "{arguments:?}"
+        );
+
+        for settings in [
+            recorder.settings(),
+            recorder
+                .settings()
+                .with_effort(crate::llm::ReasoningEffort::Auto),
+        ] {
+            answered(settings).await;
+            let arguments = recorder.arguments();
+            assert!(
+                !arguments.iter().any(|argument| argument == "--effort"),
+                "a turn with no effort of its own was given one: {arguments:?}"
+            );
+        }
     }
 
     #[tokio::test]

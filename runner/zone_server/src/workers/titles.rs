@@ -48,21 +48,19 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
         return None;
     }
     let chat = chats::get_chat(state.db(), message.chat_id).await.ok()??;
-    let route = match chat.workspace_id {
-        Some(workspace) => Route::for_workspace(state, workspace).await,
-        None => Route::instance(state.config()),
-    };
+    let route = Route::for_chat(state, &chat).await;
     if let Err(unusable) = route.endpoint() {
         tracing::warn!(chat_id = %chat.id, %unusable, "Titling the chat without a model");
         return None;
     }
     let preferences = route.preferences(&state.config().comfyui.classifier_model);
+    let requested = route.requested(&chat.model_name);
     let backend = route.backend(state).await.ok()?;
     let endpoint = route.into_endpoint().ok()?;
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
-    let model = stages::summary_model(&preferences, &catalog, &chat.model_name)?;
+    let model = stages::summary_model(&preferences, &catalog, &requested)?;
     let client = LlmClient::new(endpoint.llm(model, TEMPERATURE, MAX_TOKENS, backend));
     let messages = [
         Message::system(

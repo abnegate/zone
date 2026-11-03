@@ -8,7 +8,7 @@ import {
   installChatSocketMock,
   type ChatSocketController,
 } from './helpers/chatSocket';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 
 const mockChat = {
   id: 'chat-1',
@@ -57,6 +57,7 @@ test.describe('Chat images', () => {
 
   async function mockChatRoutes(page: Parameters<typeof routeApi>[0], messages: unknown[] = []) {
     await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+      if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
       const url = route.request().url();
       const method = route.request().method();
       if (url.includes('/chat-1') && method === 'GET') {

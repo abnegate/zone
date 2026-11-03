@@ -42,6 +42,9 @@ const REST: TimeDelta = TimeDelta::minutes(5);
 /// A login that refused `model`, the one the session runs on `preferred`, for want of usage
 /// credits within [`unfunded::COOL_DOWN`] cannot run the session: it ranks after every other
 /// login, and is picked only when no other can be, even as `sticky`.
+///
+/// When `strict`, only `preferred`'s logins are candidates: with none of them, there is no login
+/// at all.
 pub async fn pick(
     state: &AppState,
     organization: Uuid,
@@ -49,9 +52,13 @@ pub async fn pick(
     exclude: &[Uuid],
     sticky: Option<Uuid>,
     model: Option<&str>,
+    strict: bool,
 ) -> Result<Chosen, Error> {
     let now = Utc::now();
-    let logins = agent_logins::list(state.db(), organization).await?;
+    let mut logins = agent_logins::list(state.db(), organization).await?;
+    if strict {
+        logins.retain(|login| AgentKind::named(&login.agent) == Some(preferred));
+    }
     if logins.is_empty() {
         return Err(Error::None);
     }
@@ -501,6 +508,7 @@ mod tests {
                 exclude,
                 sticky,
                 None,
+                false,
             )
             .await
         }
@@ -532,6 +540,7 @@ mod tests {
                 exclude,
                 sticky,
                 Some(model),
+                false,
             )
             .await
             {
@@ -690,6 +699,53 @@ mod tests {
         scene.remove().await;
 
         assert_eq!((chosen.login.id, chosen.agent), (codex, AgentKind::Codex));
+    }
+
+    #[tokio::test]
+    async fn a_strict_pick_never_serves_the_configured_agent_on_another_agents_login() {
+        let scene = Scene::new().await;
+        let codex = scene.login(AgentKind::Codex, "codex", Some(90.0)).await;
+        let strictly = |preferred, sticky| {
+            pick(
+                &scene.state,
+                scene.organization,
+                preferred,
+                &[],
+                sticky,
+                None,
+                true,
+            )
+        };
+
+        let alone = strictly(AgentKind::Claude, Some(codex)).await;
+        let loose = scene.picked(AgentKind::Claude, &[], Some(codex)).await;
+        let claude = scene.login(AgentKind::Claude, "claude", Some(10.0)).await;
+        let beside = strictly(AgentKind::Claude, Some(codex)).await;
+        scene
+            .exhaust(claude, Utc::now() + TimeDelta::hours(1))
+            .await;
+        let spent = strictly(AgentKind::Claude, None).await;
+        let own = strictly(AgentKind::Codex, None).await;
+        scene.remove().await;
+
+        assert!(
+            matches!(alone, Err(Error::None)),
+            "with only another agent's login, a strict pick has no login: {alone:?}"
+        );
+        assert_eq!(
+            loose, codex,
+            "a pick that is not strict still crosses agents"
+        );
+        assert_eq!(
+            beside.expect("the configured agent's login").login.id,
+            claude,
+            "another agent's sticky login does not keep a strict session"
+        );
+        assert!(
+            matches!(spent, Err(Error::Exhausted { .. })),
+            "a strict pick with its agent's logins spent fell back to another agent: {spent:?}"
+        );
+        assert_eq!(own.expect("codex's own login").login.id, codex);
     }
 
     #[tokio::test]

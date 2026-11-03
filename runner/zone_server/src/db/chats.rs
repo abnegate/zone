@@ -1,5 +1,6 @@
 //! Chat database queries
 
+pub mod provider;
 mod session;
 
 use chrono::NaiveDateTime;
@@ -226,6 +227,7 @@ pub async fn create_chat(
         None,
         false,
         None,
+        None,
     )
     .await
 }
@@ -243,6 +245,7 @@ pub async fn create_chat_with_title(
     project_id: Option<Uuid>,
     offline: bool,
     context_tokens: Option<i64>,
+    choice: Option<&provider::Choice>,
 ) -> DbResult<ChatRow> {
     let (agent_enabled, agent_sandboxed) = agent;
     let mut transaction = pool.begin().await?;
@@ -278,6 +281,9 @@ pub async fn create_chat_with_title(
             .execute(&mut *transaction)
             .await?;
     }
+    if choice.is_some() {
+        provider::set(&mut *transaction, row.id, choice).await?;
+    }
     transaction.commit().await?;
 
     Ok(map_chat_row!(row))
@@ -293,11 +299,19 @@ pub async fn update_chat(
     auto_approve: Option<bool>,
     reasoning_effort: Option<ReasoningEffort>,
     context_tokens: Option<i64>,
+    model_name: Option<&str>,
 ) -> DbResult<Option<ChatRow>> {
     let mut transaction = pool.begin().await?;
     if title.is_some() {
         sqlx::query("UPDATE chats SET automatic_title = FALSE WHERE id = $1")
             .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    if let Some(model_name) = model_name {
+        sqlx::query("UPDATE chats SET model_name = $2 WHERE id = $1")
+            .bind(id)
+            .bind(model_name)
             .execute(&mut *transaction)
             .await?;
     }
@@ -984,5 +998,83 @@ mod tests {
             .execute(&pool)
             .await
             .expect("the organization can be deleted");
+    }
+
+    #[tokio::test]
+    async fn a_chat_keeps_the_model_it_is_moved_to() {
+        let pool = pool().await;
+        let organization = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Models', $1::text)")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+        let workspace = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Models', $1::text)",
+        )
+        .bind(workspace)
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("a workspace");
+        let chat = create_chat(&pool, Some(workspace), "Models", "sonnet", true, true)
+            .await
+            .expect("a chat");
+        let other = create_chat(&pool, Some(workspace), "Bystander", "sonnet", true, true)
+            .await
+            .expect("another chat");
+
+        let moved = update_chat(
+            &pool,
+            chat.id,
+            None,
+            None,
+            None,
+            None,
+            Some(ReasoningEffort::Max),
+            None,
+            Some("opus"),
+        )
+        .await
+        .expect("the model to be saved")
+        .expect("the chat");
+        let missing = update_chat(
+            &pool,
+            Uuid::new_v4(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("opus"),
+        )
+        .await
+        .expect("an absent chat to be a no-op");
+        let read = get_chat(&pool, chat.id).await.unwrap().expect("the chat");
+        let bystander = get_chat(&pool, other.id)
+            .await
+            .unwrap()
+            .expect("the other chat");
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization can be deleted");
+
+        assert_eq!(moved.model_name, "opus");
+        assert_eq!(read.model_name, "opus", "the new model is persisted");
+        assert_eq!(
+            read.reasoning_effort,
+            ReasoningEffort::Max,
+            "the model moves with the chat's other changes"
+        );
+        assert!(
+            read.updated_at >= chat.updated_at,
+            "moving the model touches the chat"
+        );
+        assert_eq!(bystander.model_name, "sonnet", "only the chat itself moves");
+        assert!(missing.is_none(), "an absent chat has no row to return");
     }
 }

@@ -1,6 +1,6 @@
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
 
 // Mock data generators
 const generateMockProject = (
@@ -785,6 +785,7 @@ test.describe('Projects Page', () => {
       });
       // The planner chat the page navigates to
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
         const url = route.request().url();
         if (route.request().method() !== 'GET') {
           route.continue();

@@ -746,10 +746,20 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
     let state = AppState::new(config, pool.clone(), None);
     assert!(state.existing_mcp().is_none());
     for enabled in [false, true] {
-        let row = chats::update_chat(&pool, chat, None, Some(enabled), None, None, None, None)
-            .await
-            .unwrap()
-            .unwrap();
+        let row = chats::update_chat(
+            &pool,
+            chat,
+            None,
+            Some(enabled),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let endpoint = Route::for_workspace(&state, row.workspace_id.unwrap())
             .await
             .into_endpoint()

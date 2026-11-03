@@ -3,10 +3,13 @@ import { z } from 'zod';
 import {
   ActionReceiptSchema,
   ActionTargetSchema,
+  ChatProvidersSchema,
   ChatSchema,
+  CreateChatRequestSchema,
   HandoverSchema,
   MessageMetadataSchema,
   MessageSchema,
+  WorkspaceChatProvidersSchema,
 } from './schemas';
 import { ACTION_TARGETS } from './types';
 
@@ -180,5 +183,151 @@ describe('a handover', () => {
 
     expect(parsed.metadata?.handovers).toBeUndefined();
     expect(parsed.content).toBe('Hi there!');
+  });
+});
+
+const codexOffer = {
+  provider: 'codex',
+  label: 'Codex',
+  usable: true,
+  reason: null,
+  models: [
+    {
+      name: 'gpt-6-sol',
+      label: 'gpt-6-sol',
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    },
+    { name: 'gpt-5.5', label: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'] },
+  ],
+  efforts: ['low', 'medium', 'high', 'xhigh'],
+  requires_model: false,
+};
+
+const openaiOffer = {
+  provider: 'openai',
+  label: 'OpenAI',
+  usable: true,
+  reason: null,
+  models: [],
+  efforts: ['off', 'low', 'medium', 'high'],
+  requires_model: true,
+};
+
+describe('a chat provider choice', () => {
+  const chat = {
+    id: 'chat-1',
+    title: 'Chat 1',
+    model_name: 'auto',
+    created_at: '2026-11-03T00:00:00Z',
+    updated_at: '2026-11-03T00:00:00Z',
+    archived: false,
+  };
+
+  it('keeps the chosen provider and model', () => {
+    const parsed = ChatSchema.parse({ ...chat, provider: 'codex', provider_model: 'gpt-5.5' });
+    expect(parsed.provider).toBe('codex');
+    expect(parsed.provider_model).toBe('gpt-5.5');
+  });
+
+  it('reads a provider this console does not know as following the defaults', () => {
+    const parsed = ChatSchema.parse({ ...chat, provider: 'gemini_cli', provider_model: 'x' });
+    expect(parsed.provider).toBeNull();
+  });
+
+  it('leaves a listed chat without provider fields untouched', () => {
+    const parsed = ChatSchema.parse(chat);
+    expect(parsed.provider).toBeUndefined();
+    expect(parsed.provider_model).toBeUndefined();
+  });
+
+  it.each(['xhigh', 'max', 'ultra'])('accepts the %s reasoning effort', (effort) => {
+    expect(ChatSchema.parse({ ...chat, reasoning_effort: effort }).reasoning_effort).toBe(effort);
+  });
+
+  it('sends the provider fields when creating a chat', () => {
+    const request = {
+      workspace_id: 'ws-1',
+      title: 'New chat',
+      model_name: 'auto',
+      provider: 'claude_code',
+      provider_model: null,
+      reasoning_effort: 'max',
+    };
+    expect(CreateChatRequestSchema.parse(request)).toEqual(request);
+    expect(CreateChatRequestSchema.safeParse({ ...request, provider: 'gemini_cli' }).success).toBe(
+      false
+    );
+  });
+});
+
+describe('the providers a chat can run on', () => {
+  it('parses the default, the selection and the offers with their labels and efforts', () => {
+    const parsed = ChatProvidersSchema.parse({
+      default: { ...openaiOffer, requires_model: false },
+      selected: { ...codexOffer, model: 'gpt-6-sol' },
+      providers: [openaiOffer, codexOffer],
+    });
+
+    expect(parsed.default.label).toBe('OpenAI');
+    expect(parsed.selected?.label).toBe('Codex');
+    expect(parsed.selected?.model).toBe('gpt-6-sol');
+    expect(parsed.selected?.models[0].efforts).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max',
+      'ultra',
+    ]);
+    expect(parsed.providers.map((offer) => offer.label)).toEqual(['OpenAI', 'Codex']);
+    expect(parsed.providers[0].requires_model).toBe(true);
+  });
+
+  it('keeps an unusable selection and its reason', () => {
+    const reason =
+      'Claude Code is not signed in for this organization. An organization admin can sign in under Organization Settings > AI Settings.';
+    const parsed = ChatProvidersSchema.parse({
+      default: openaiOffer,
+      selected: {
+        ...codexOffer,
+        provider: 'claude_code',
+        label: 'Claude Code',
+        usable: false,
+        reason,
+        model: null,
+      },
+      providers: [openaiOffer],
+    });
+    expect(parsed.selected?.usable).toBe(false);
+    expect(parsed.selected?.reason).toBe(reason);
+    expect(parsed.selected?.model).toBeNull();
+  });
+
+  it('parses a chat that follows the defaults', () => {
+    const parsed = ChatProvidersSchema.parse({
+      default: codexOffer,
+      selected: null,
+      providers: [codexOffer],
+    });
+    expect(parsed.selected).toBeNull();
+  });
+
+  it('drops offers and efforts this console does not know instead of failing', () => {
+    const parsed = ChatProvidersSchema.parse({
+      default: { ...codexOffer, efforts: ['low', 'turbo'] },
+      selected: null,
+      providers: [{ ...codexOffer, provider: 'gemini_cli', label: 'Gemini CLI' }, openaiOffer],
+    });
+    expect(parsed.default.efforts).toEqual(['low']);
+    expect(parsed.providers.map((offer) => offer.provider)).toEqual(['openai']);
+  });
+
+  it('parses the offers for a new chat in a workspace', () => {
+    const parsed = WorkspaceChatProvidersSchema.parse({
+      default: codexOffer,
+      providers: [openaiOffer, codexOffer],
+    });
+    expect(parsed.default.models.map((model) => model.name)).toEqual(['gpt-6-sol', 'gpt-5.5']);
+    expect(parsed.providers).toHaveLength(2);
   });
 });

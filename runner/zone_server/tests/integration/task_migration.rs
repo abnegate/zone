@@ -857,6 +857,78 @@ async fn the_chat_login_key_is_added_unvalidated_and_proven_after() {
     database.cleanup().await;
 }
 
+/// 009 adds a chat's provider checks, and widens its effort check, under the
+/// brief lock of unvalidated constraints, and 010 proves the rows while chats
+/// stay writable.
+#[tokio::test]
+async fn the_chat_provider_checks_are_added_unvalidated_and_proven_after() {
+    const CHECKS: [&str; 3] = [
+        "chats_provider_check",
+        "chats_provider_model_check",
+        "chats_reasoning_effort_check",
+    ];
+    const CHECK_VIOLATION: &str = "23514";
+    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
+         WHERE conrelid = 'chats'::regclass AND conname = $1";
+    let database = Database::new().await;
+    database.through(8).await;
+    let (workspace, _) = database.workspace().await;
+    let kept: Uuid = sqlx::query_scalar(
+        "INSERT INTO chats(workspace_id,title,model_name,reasoning_effort) \
+         VALUES($1,'Kept','gpt-4o','high') RETURNING id",
+    )
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+
+    database.through(9).await;
+    let mut added = Vec::new();
+    for check in CHECKS {
+        let validated: bool = sqlx::query_scalar(VALIDATED)
+            .bind(check)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap_or_else(|error| panic!("009 adds {check}: {error}"));
+        added.push(validated);
+    }
+    database.through(10).await;
+    let mut proven = Vec::new();
+    for check in CHECKS {
+        let validated: bool = sqlx::query_scalar(VALIDATED)
+            .bind(check)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap_or_else(|error| panic!("010 keeps {check}: {error}"));
+        proven.push(validated);
+    }
+
+    assert_eq!(
+        added, [false; 3],
+        "009 must not scan chats under its exclusive lock"
+    );
+    assert_eq!(proven, [true; 3], "010 validates what 009 added");
+    let provider: Option<String> = sqlx::query_scalar("SELECT provider FROM chats WHERE id=$1")
+        .bind(kept)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        provider, None,
+        "a chat kept before 009 follows its workspace"
+    );
+    let refused = sqlx::query("UPDATE chats SET provider='gemini' WHERE id=$1")
+        .bind(kept)
+        .execute(&database.pool)
+        .await
+        .expect_err("the provider check must hold once proven");
+    assert_eq!(
+        refused.as_database_error().unwrap().code().as_deref(),
+        Some(CHECK_VIOLATION)
+    );
+    database.cleanup().await;
+}
+
 /// Every lock a later migration takes on a live table is one ordinary traffic
 /// already holds, and the boot holds sqlx's advisory lock while it queues for
 /// them: an unbounded wait wedges every other instance instead of failing with
@@ -914,6 +986,8 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             "005_agent_login_usage_validation.sql",
             "006_runpod_api_key.sql",
             "007_devices.sql",
+            "009_chat_provider.sql",
+            "010_chat_provider_validation.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );
