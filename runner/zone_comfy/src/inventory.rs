@@ -11,10 +11,14 @@ const SIDECAR_SUFFIX: &str = ".zone.json";
 pub(crate) const PUBLICATION_DIRECTORY: &str = ".zone-publish";
 const PUBLICATION_SUFFIX: &str = ".pending";
 
+const CHECKPOINT: &str = "checkpoint";
+const DIFFUSION_MODEL: &str = "diffusion_model";
+const LORA: &str = "lora";
+
 const SCAN_DIRECTORIES: &[(&str, &str)] = &[
-    ("checkpoints", "checkpoint"),
-    ("diffusion_models", "diffusion_model"),
-    ("loras", "lora"),
+    ("checkpoints", CHECKPOINT),
+    ("diffusion_models", DIFFUSION_MODEL),
+    ("loras", LORA),
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,13 +94,6 @@ pub struct Identity {
     pub trigger: String,
 }
 
-/// Video generate bind: prefix the trigger, and load a wan-adapter when one exists.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VideoIdentity {
-    pub trigger: String,
-    pub lora: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct WeightDocument {
     #[serde(flatten)]
@@ -146,7 +143,7 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
             if sanitize_weight_filename(filename).is_err() {
                 continue;
             }
-            if *kind == "lora" && publication_pending(&models_dir, filename) {
+            if *kind == LORA && publication_pending(&models_dir, filename) {
                 continue;
             }
             let metadata = fs::metadata(&path).ok();
@@ -160,7 +157,7 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
             let Some(recipe) = recipe else {
                 continue;
             };
-            if *kind == "lora" && publication_pending(&models_dir, filename) {
+            if *kind == LORA && publication_pending(&models_dir, filename) {
                 continue;
             }
             let missing = missing_required(&models_dir, &recipe.required_files);
@@ -169,7 +166,7 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
                 .iter()
                 .map(|file| file.filename.clone())
                 .collect();
-            if *kind == "lora" {
+            if *kind == LORA {
                 required.insert(0, filename.to_string());
             }
             items.push(InventoryItem {
@@ -228,15 +225,6 @@ pub fn identity_for_prompt(
     identity_among(&scan(models_dir, catalog), haystack)
 }
 
-pub fn bind_video_identity(
-    models_dir: &Path,
-    workflow_path: &Path,
-    haystack: &str,
-) -> Option<VideoIdentity> {
-    let catalog = load_catalog(workflow_path)?;
-    video_identity_among(&scan(models_dir, &catalog), haystack)
-}
-
 fn load_catalog(workflow_path: &Path) -> Option<RecipeCatalog> {
     RecipeCatalog::load(Some(workflow_path))
         .or_else(|_| RecipeCatalog::packaged())
@@ -246,17 +234,7 @@ fn load_catalog(workflow_path: &Path) -> Option<RecipeCatalog> {
 fn is_identity(item: &InventoryItem) -> bool {
     item.ready
         && item.recipe_id != "wan-adapter"
-        && (item.adapter || item.kind == "checkpoint")
-        && item
-            .trigger
-            .as_deref()
-            .is_some_and(|trigger| !trigger.trim().is_empty())
-}
-
-fn is_wan_adapter(item: &InventoryItem) -> bool {
-    item.ready
-        && item.recipe_id == "wan-adapter"
-        && item.adapter
+        && (item.adapter || item.kind == CHECKPOINT)
         && item
             .trigger
             .as_deref()
@@ -315,47 +293,6 @@ fn identity_among(items: &[InventoryItem], haystack: &str) -> Option<Identity> {
     })
 }
 
-fn video_identity_among(items: &[InventoryItem], haystack: &str) -> Option<VideoIdentity> {
-    let matches: Vec<&InventoryItem> = items
-        .iter()
-        .filter(|item| (is_wan_adapter(item) || is_identity(item)) && names_trigger(item, haystack))
-        .collect();
-    if matches.is_empty() {
-        return None;
-    }
-    let longest = matches
-        .iter()
-        .filter_map(|item| item.trigger.as_deref())
-        .map(|trigger| trigger.trim().chars().count())
-        .max()
-        .unwrap_or(0);
-    let mut triggers: Vec<&str> = matches
-        .iter()
-        .filter_map(|item| item.trigger.as_deref())
-        .map(str::trim)
-        .filter(|trigger| trigger.chars().count() == longest)
-        .collect();
-    triggers.sort_unstable();
-    triggers.dedup();
-    if triggers.len() != 1 {
-        return None;
-    }
-    let trigger = triggers[0].to_string();
-    let wan: Vec<&InventoryItem> = matches
-        .iter()
-        .copied()
-        .filter(|item| {
-            is_wan_adapter(item)
-                && item
-                    .trigger
-                    .as_deref()
-                    .is_some_and(|value| value.trim() == trigger)
-        })
-        .collect();
-    let lora = (wan.len() == 1).then(|| wan[0].filename.clone());
-    Some(VideoIdentity { trigger, lora })
-}
-
 /// Trigger matching is Unicode-lowercase and requires a boundary around the
 /// complete phrase. It never treats a trigger as a substring of another token.
 pub(crate) fn contains_phrase(text: &str, phrase: &str) -> bool {
@@ -393,9 +330,9 @@ pub fn write_sidecar(path: &Path, sidecar: &WeightSidecar) -> std::io::Result<()
 
 pub fn relative_weight_path(kind: &str, filename: &str) -> Option<PathBuf> {
     let directory = match kind {
-        "checkpoint" => "checkpoints",
-        "diffusion_model" => "diffusion_models",
-        "lora" => "loras",
+        CHECKPOINT => "checkpoints",
+        DIFFUSION_MODEL => "diffusion_models",
+        LORA => "loras",
         "vae" => "vae",
         "text_encoder" => "text_encoders",
         _ => return None,
@@ -409,7 +346,7 @@ fn resolve_recipe<'a>(
     kind: &str,
     document: Option<&WeightDocument>,
 ) -> Option<&'a Recipe> {
-    if kind == "lora" {
+    if kind == LORA {
         let document = document?;
         if document
             .generation
@@ -434,6 +371,9 @@ fn resolve_recipe<'a>(
         && let Some(recipe) = catalog.get(&document.sidecar.recipe_id)
     {
         return Some(recipe);
+    }
+    if kind == DIFFUSION_MODEL && !catalog.is_explicit_image_match(filename) {
+        return None;
     }
     catalog.image_recipe_for(filename).ok()
 }
@@ -840,59 +780,25 @@ mod tests {
         assert!(item.ready);
         assert!(item.adapter);
         assert!(identities_among(&items).is_empty());
-        let bound = video_identity_among(&items, "portrait of ohwx").unwrap();
-        assert_eq!(bound.trigger, "ohwx");
-        assert_eq!(bound.lora.as_deref(), Some("jerry-wan.safetensors"));
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn video_bind_prefixes_a_still_identity_without_a_wan_lora() {
+    fn scan_skips_wan_unets_in_diffusion_models() {
         let root = temp_models();
-        write_identity(&root, "jerry.safetensors", "ohwx");
-        let catalog = RecipeCatalog::packaged().unwrap();
-        let items = scan(&root, &catalog);
-        let bound = video_identity_among(&items, "ohwx walking on the beach").unwrap();
-        assert_eq!(bound.trigger, "ohwx");
-        assert_eq!(bound.lora, None);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn video_bind_prefers_the_wan_adapter_when_both_exist() {
-        let root = temp_models();
-        write_identity(&root, "jerry.safetensors", "ohwx");
-        let lora = root.join("loras/jerry-wan.safetensors");
-        fs::write(&lora, b"lora").unwrap();
-        write_sidecar(
-            &lora,
-            &WeightSidecar {
-                recipe_id: "wan-adapter".into(),
-                hf_base: Some("Comfy-Org/Wan_2.2_ComfyUI_Repackaged".into()),
-                trigger: Some("ohwx".into()),
-                architecture: Some("wan".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        for (directory, filename) in [
-            ("diffusion_models", "wan2.2_ti2v_5B_fp16.safetensors"),
-            ("text_encoders", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
-            ("vae", "wan2.2_vae.safetensors"),
+        for filename in [
+            "wan2.2_ti2v_5B_fp16.safetensors",
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+            "qwen_image_edit_2511_fp8mixed.safetensors",
         ] {
-            fs::create_dir_all(root.join(directory)).unwrap();
-            fs::write(root.join(directory).join(filename), b"wan").unwrap();
+            fs::write(root.join("diffusion_models").join(filename), b"unet").unwrap();
         }
         let catalog = RecipeCatalog::packaged().unwrap();
-        let items = scan(&root, &catalog);
-        let bound = video_identity_among(&items, "ohwx at dusk").unwrap();
-        assert_eq!(bound.trigger, "ohwx");
-        assert_eq!(bound.lora.as_deref(), Some("jerry-wan.safetensors"));
-        assert!(
-            identities_among(&items)
-                .iter()
-                .any(|item| item.filename == "jerry.safetensors")
-        );
+        let listed: Vec<String> = scan(&root, &catalog)
+            .into_iter()
+            .map(|item| item.filename)
+            .collect();
+        assert_eq!(listed, ["qwen_image_edit_2511_fp8mixed.safetensors"]);
         let _ = fs::remove_dir_all(root);
     }
 

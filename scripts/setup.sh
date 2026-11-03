@@ -487,9 +487,9 @@ Usage: $0 [options]
   --help             Show this help
 
 Features: chat, vision, pictures, edits, video, audio, upscale, train
-Vision and all require 16 GB RAM. all also needs enough free disk for
-every selected model plus 10 GB working space (~128 GB for a full 32 GB
-preset install).
+Vision needs 16 GB RAM. Video and all need 64 GB RAM. all also needs
+enough free disk for every selected model plus 10 GB working space
+(~174 GB for a full 32 GB preset install).
 
 Examples:
   $0 --yes

@@ -18,6 +18,10 @@ def install_all() -> None:
     install_bypass_lora_loader()
     install_out_of_place_residuals()
     install_contiguous_tiled_scale()
+    install_mps_kernel_workarounds()
+    install_mps_fp8_dequant()
+    install_wan_mps_cpu_unet()
+    install_wan_mps_cpu_vae()
 
 
 def install_contiguous_tiled_scale() -> None:
@@ -50,6 +54,298 @@ def install_contiguous_tiled_scale() -> None:
     tiled_scale_multidim.__wrapped__ = original
     comfy.utils.tiled_scale_multidim = tiled_scale_multidim
     logging.info('Zone LoRA: tiled upscales get a contiguous tensor')
+
+
+def should_rewrite_mps_pad(tensor, pad, mode) -> bool:
+    """MPS F.pad on 5D constant tensors corrupts the temporal axis (pytorch/pytorch#194922)."""
+    if mode not in (None, 'constant'):
+        return False
+    device = getattr(tensor, 'device', None)
+    if device is None or device.type != 'mps':
+        return False
+    if getattr(tensor, 'ndim', 0) < 5:
+        return False
+    try:
+        length = len(pad)
+    except TypeError:
+        return False
+    return length <= tensor.ndim * 2 and length % 2 == 0
+
+
+def constant_pad_with_cat(tensor, pad, value=0):
+    if value is None:
+        value = 0
+    pairs = [int(item) for item in pad]
+    if len(pairs) % 2 != 0:
+        raise ValueError('padding length must be even')
+    result = tensor
+    dim = result.ndim - 1
+    for index in range(0, len(pairs), 2):
+        left, right = pairs[index], pairs[index + 1]
+        size = result.size(dim)
+        start = -left if left < 0 else 0
+        end = size + right if right < 0 else size
+        if start != 0 or end != size:
+            slicer = [slice(None)] * result.ndim
+            slicer[dim] = slice(start, end)
+            result = result[tuple(slicer)]
+        left = max(left, 0)
+        right = max(right, 0)
+        if left or right:
+            pieces = []
+            if left:
+                shape = list(result.shape)
+                shape[dim] = left
+                pieces.append(result.new_full(shape, value))
+            pieces.append(result)
+            if right:
+                shape = list(result.shape)
+                shape[dim] = right
+                pieces.append(result.new_full(shape, value))
+            result = torch.cat(pieces, dim=dim)
+        dim -= 1
+    return result
+
+
+def wrap_mps_bmm(original):
+    """Non-contiguous bmm on MPS overflows past 2^32 elements (pytorch/pytorch#197636)."""
+
+    def bmm(input, mat2, *args, **kwargs):
+        if getattr(input, 'device', None) is not None and input.device.type == 'mps':
+            if hasattr(input, 'is_contiguous') and not input.is_contiguous():
+                input = input.contiguous()
+            if hasattr(mat2, 'is_contiguous') and not mat2.is_contiguous():
+                mat2 = mat2.contiguous()
+        return original(input, mat2, *args, **kwargs)
+
+    bmm._zone_patched = True
+    bmm.__wrapped__ = original
+    return bmm
+
+
+def wrap_mps_baddbmm(original):
+    """MPS baddbmm with beta=0 still reads its input, so NaN in it propagates.
+
+    Comfy-Org/ComfyUI#15804 traces all-NaN attention on Apple Silicon to this.
+    """
+
+    def baddbmm(input, batch1, batch2, *args, **kwargs):
+        if getattr(input, 'device', None) is not None and input.device.type == 'mps':
+            if kwargs.get('beta', 1) == 0:
+                input = torch.zeros_like(input)
+                kwargs = dict(kwargs)
+                kwargs['beta'] = 1
+            if hasattr(batch1, 'is_contiguous') and not batch1.is_contiguous():
+                batch1 = batch1.contiguous()
+            if hasattr(batch2, 'is_contiguous') and not batch2.is_contiguous():
+                batch2 = batch2.contiguous()
+        return original(input, batch1, batch2, *args, **kwargs)
+
+    baddbmm._zone_patched = True
+    baddbmm.__wrapped__ = original
+    return baddbmm
+
+
+def install_mps_kernel_workarounds() -> None:
+    if not torch.backends.mps.is_available():
+        return
+    if getattr(torch.nn.functional.pad, '_zone_patched', False):
+        return
+    original_pad = torch.nn.functional.pad
+
+    def pad(input, pad, mode='constant', value=None):
+        if should_rewrite_mps_pad(input, pad, mode):
+            return constant_pad_with_cat(input, pad, 0 if value is None else value)
+        return original_pad(input, pad, mode=mode, value=value)
+
+    pad._zone_patched = True
+    pad.__wrapped__ = original_pad
+    torch.nn.functional.pad = pad
+    torch.bmm = wrap_mps_bmm(torch.bmm)
+    torch.Tensor.bmm = wrap_mps_bmm(torch.Tensor.bmm)
+    torch.baddbmm = wrap_mps_baddbmm(torch.baddbmm)
+    torch.Tensor.baddbmm = wrap_mps_baddbmm(torch.Tensor.baddbmm)
+    logging.info('Zone LoRA: MPS 5D pad, bmm, and baddbmm workarounds installed')
+
+
+_FLOAT8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+
+
+def wrap_mps_fp8_dequant(original):
+    """MPS can store float8 but cannot cast it (TypeError on x.to(fp16))."""
+
+    def dequantize_per_tensor_fp8(x, scale, output_type=torch.bfloat16, *args, **kwargs):
+        device = getattr(x, 'device', None)
+        if device is not None and device.type == 'mps':
+            x = x.to('cpu')
+            if getattr(scale, 'device', None) is not None and scale.device.type == 'mps':
+                scale = scale.to('cpu')
+            result = original(x, scale, output_type, *args, **kwargs)
+            return result.to(device)
+        return original(x, scale, output_type, *args, **kwargs)
+
+    dequantize_per_tensor_fp8._zone_patched = True
+    dequantize_per_tensor_fp8.__wrapped__ = original
+    return dequantize_per_tensor_fp8
+
+
+def install_mps_fp8_dequant() -> None:
+    try:
+        import comfy_kitchen.backends.eager as eager
+        import comfy_kitchen.backends.eager.quantization as quantization
+    except ImportError:
+        return
+    if getattr(eager.dequantize_per_tensor_fp8, '_zone_patched', False):
+        return
+    wrapped = wrap_mps_fp8_dequant(eager.dequantize_per_tensor_fp8)
+    eager.dequantize_per_tensor_fp8 = wrapped
+    quantization.dequantize_per_tensor_fp8 = wrapped
+    logging.info('Zone LoRA: FP8 dequant on MPS runs on CPU')
+
+
+def densify_tensor(tensor, dtype=torch.float16):
+    if tensor is None:
+        return None
+    dequantize = getattr(tensor, 'dequantize', None)
+    if callable(dequantize):
+        qdata = getattr(tensor, '_qdata', tensor)
+        device = getattr(qdata, 'device', None)
+        if device is not None and device.type == 'mps':
+            tensor = tensor.to('cpu')
+            dequantize = tensor.dequantize
+        return dequantize().detach().to(dtype=dtype)
+    qdata = getattr(tensor, '_qdata', None)
+    if qdata is not None:
+        device = qdata.device
+        if device.type == 'mps':
+            qdata = qdata.to('cpu')
+        dense = qdata.detach().to(dtype=dtype)
+        scale = getattr(getattr(tensor, '_params', None), 'scale', None)
+        if scale is not None:
+            dense = dense * scale.to(device=dense.device, dtype=dtype)
+        return dense
+    tensor_dtype = getattr(tensor, 'dtype', None)
+    if tensor_dtype in _FLOAT8_DTYPES:
+        device = tensor.device
+        if device.type == 'mps':
+            tensor = tensor.to('cpu')
+        return tensor.detach().to(dtype=dtype)
+    return tensor
+
+
+def materialize_quantized_to_float16(model, dtype=torch.float16) -> int:
+    """Metal has no float8 kernels, so quantized weights must become dense fp16."""
+    converted = 0
+    root = getattr(model, 'model', model)
+    for module in root.modules():
+        for name, param in list(module._parameters.items()):
+            dense = densify_tensor(param, dtype)
+            if dense is param or dense is None:
+                continue
+            module._parameters[name] = torch.nn.Parameter(
+                dense, requires_grad=bool(getattr(param, 'requires_grad', False))
+            )
+            converted += 1
+        for name, buf in list(module._buffers.items()):
+            dense = densify_tensor(buf, dtype)
+            if dense is buf or dense is None:
+                continue
+            module._buffers[name] = dense
+            converted += 1
+    return converted
+
+
+def is_wan_14b_path(unet_path) -> bool:
+    path = str(unet_path).lower()
+    if 'wan' not in path:
+        return False
+    return '14b' in path or 'high_noise' in path or 'low_noise' in path
+
+
+def wan_cpu_model_options(unet_path, model_options=None) -> dict:
+    """Every Wan DiT loads on CPU under MPS; only a 14B expert later samples on Metal.
+
+    Wan sampling on Metal silently corrupts every generated frame:
+    Comfy-Org/ComfyUI#15793 and #16644 reproduce it with Wan 2.2 TI2V 5B.
+    """
+    options = dict(model_options or {})
+    if 'wan' not in str(unet_path).lower():
+        return options
+    if not torch.backends.mps.is_available():
+        return options
+    cpu = torch.device('cpu')
+    options['load_device'] = cpu
+    options['offload_device'] = cpu
+    return options
+
+
+def install_wan_mps_cpu_unet() -> None:
+    try:
+        import comfy.sd
+    except ImportError:
+        logging.warning('Zone LoRA: comfy.sd not importable, Wan CPU load patch skipped')
+        return
+    if getattr(comfy.sd.load_diffusion_model, '_zone_patched', False):
+        return
+    original = comfy.sd.load_diffusion_model
+
+    def load_diffusion_model(unet_path, model_options=None, disable_dynamic=False):
+        options = wan_cpu_model_options(unet_path, model_options)
+        if is_wan_14b_path(unet_path) and torch.backends.mps.is_available():
+            logging.info('Zone LoRA: Wan 14B FP8 loads on CPU then materializes fp16')
+            patcher = original(unet_path, model_options=options, disable_dynamic=True)
+            converted = materialize_quantized_to_float16(patcher)
+            patcher.load_device = torch.device('mps')
+            patcher.offload_device = options['offload_device']
+            patcher.size = 0
+            logging.info('Zone LoRA: materialized %s 14B tensors to fp16 for Metal', converted)
+            return patcher
+        if options.get('load_device') == torch.device('cpu'):
+            logging.info('Zone LoRA: Wan DiT loads on CPU; MPS kernels corrupt video frames')
+        return original(unet_path, model_options=options, disable_dynamic=disable_dynamic)
+
+    load_diffusion_model._zone_patched = True
+    load_diffusion_model.__wrapped__ = original
+    comfy.sd.load_diffusion_model = load_diffusion_model
+    logging.info('Zone LoRA: Wan DiT on MPS loads on CPU')
+
+
+def is_wan_vae_state_dict(sd) -> bool:
+    return isinstance(sd, dict) and 'decoder.middle.0.residual.0.gamma' in sd
+
+
+def wan_cpu_vae_device(sd, device=None):
+    """A precaution: Comfy-Org/ComfyUI#15793 and #16644 both rule the Wan VAE out on Metal."""
+    if device is not None:
+        return device
+    if not torch.backends.mps.is_available():
+        return None
+    if not is_wan_vae_state_dict(sd):
+        return None
+    return torch.device('cpu')
+
+
+def install_wan_mps_cpu_vae() -> None:
+    try:
+        import comfy.sd
+    except ImportError:
+        logging.warning('Zone LoRA: comfy.sd not importable, Wan VAE CPU load patch skipped')
+        return
+    if getattr(comfy.sd.VAE.__init__, '_zone_patched', False):
+        return
+    original = comfy.sd.VAE.__init__
+
+    def init(self, sd=None, device=None, config=None, dtype=None, metadata=None):
+        chosen = wan_cpu_vae_device(sd, device)
+        if chosen is not None:
+            device = chosen
+            logging.info('Zone LoRA: Wan VAE loads on CPU; MPS 3D conv corrupts video frames')
+        return original(self, sd=sd, device=device, config=config, dtype=dtype, metadata=metadata)
+
+    init._zone_patched = True
+    init.__wrapped__ = original
+    comfy.sd.VAE.__init__ = init
+    logging.info('Zone LoRA: Wan VAE on MPS loads on CPU')
 
 
 class OutOfPlaceResidual(torch.Tensor):

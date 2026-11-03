@@ -1056,36 +1056,23 @@ describe('TrainPanel', () => {
     });
   });
 
-  it('submits a person video train and retitles the panel', async () => {
+  it('does not offer video identity training for a person', async () => {
     mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
     render(<TrainPanel onTrained={mock()} />);
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
     await selectSubject('Person');
     fireEvent.click(screen.getByLabelText('Method'));
-    expect(await screen.findByRole('option', { name: 'Video' })).not.toHaveAttribute(
-      'data-disabled'
-    );
-    fireEvent.click(screen.getByRole('option', { name: 'Video' }));
-    await waitFor(() => {
-      expect(screen.getByLabelText('Method')).toHaveTextContent('Video');
-    });
-
-    expect(screen.getByRole('heading', { name: 'Train video identity' })).toBeInTheDocument();
-    expect(screen.getByText(/Wan 2\.2 TI2V 5B/)).toBeInTheDocument();
-    expect(screen.getAllByText(/2–3 windows/).length).toBeGreaterThan(0);
-
-    fillIdentity();
-    await addTargets(file('portrait.png', 'portrait'));
-    fireEvent.click(screen.getByRole('button', { name: 'Train' }));
-    await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
-    expect(mockTrain.mock.calls[0]?.[0]).toMatchObject({
-      base: 'sdxl-people',
-      subject: 'person',
-      method: 'video',
-    });
+    await screen.findByRole('option', { name: 'Pivotal' });
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'LoRA',
+      'Fine-tune',
+      'Pivotal',
+    ]);
+    expect(screen.queryByRole('option', { name: 'Video' })).toBeNull();
+    expect(screen.queryByText(/Wan 2\.2 TI2V 5B/)).toBeNull();
   });
 
-  it('keeps Pivotal and Video disabled while Subject is Other', async () => {
+  it('keeps Pivotal disabled while Subject is Other', async () => {
     render(<TrainPanel onTrained={mock()} />);
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
     expect(screen.getByLabelText('Subject')).toHaveTextContent('Other');
@@ -1093,12 +1080,8 @@ describe('TrainPanel', () => {
 
     fireEvent.click(screen.getByLabelText('Method'));
     const pivotal = await screen.findByRole('option', { name: 'Pivotal' });
-    const video = screen.getByRole('option', { name: 'Video' });
     expect(pivotal).toHaveAttribute('data-disabled');
-    expect(video).toHaveAttribute('data-disabled');
     fireEvent.click(pivotal);
-    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
-    fireEvent.click(screen.getByRole('option', { name: 'Video' }));
     expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
     fireEvent.click(screen.getByRole('option', { name: 'LoRA' }));
     expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
@@ -1144,21 +1127,13 @@ describe('TrainPanel', () => {
     fireEvent.click(screen.getByRole('option', { name: 'Qwen Image Edit' }));
   });
 
-  it('restores LoRA when switching Person back to Other after Pivotal or Video', async () => {
+  it('restores LoRA when switching Person back to Other after Pivotal', async () => {
     mockTrainBases.mockImplementation(() => Promise.resolve(peopleReadyBases()));
     render(<TrainPanel onTrained={mock()} />);
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
     await selectSubject('Person');
     await selectMethod('Pivotal');
     expect(screen.getByRole('heading', { name: 'Pivotal training' })).toBeInTheDocument();
-
-    await selectSubject('Other');
-    expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
-    expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
-
-    await selectSubject('Person');
-    await selectMethod('Video');
-    expect(screen.getByRole('heading', { name: 'Train video identity' })).toBeInTheDocument();
 
     await selectSubject('Other');
     expect(screen.getByLabelText('Method')).toHaveTextContent('LoRA');
@@ -1229,7 +1204,6 @@ describe('TrainPanel', () => {
     const disabledFineTune = await screen.findByRole('option', { name: 'Fine-tune' });
     expect(disabledFineTune).toHaveAttribute('data-disabled');
     expect(screen.getByRole('option', { name: 'Pivotal' })).toHaveAttribute('data-disabled');
-    expect(screen.getByRole('option', { name: 'Video' })).toHaveAttribute('data-disabled');
     fireEvent.click(disabledFineTune);
     expect(screen.getByLabelText('Method')).toHaveTextContent('Language LoRA');
     fireEvent.click(screen.getByRole('option', { name: 'Language LoRA' }));
@@ -1299,7 +1273,7 @@ describe('TrainPanel', () => {
     });
   });
 
-  it('quotes a 24 GB GPU for Runpod LoRA, pivotal, and video', async () => {
+  it('quotes a 24 GB GPU for Runpod LoRA and pivotal', async () => {
     mockGetEffectiveAiSettings.mockImplementation(() =>
       Promise.resolve({ has_runpod_api_key: true })
     );
@@ -1313,8 +1287,6 @@ describe('TrainPanel', () => {
     await selectOption('Compute', 'Runpod');
     expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
     await selectMethod('Pivotal');
-    expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
-    await selectMethod('Video');
     expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
   });
 

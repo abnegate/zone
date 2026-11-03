@@ -33,14 +33,30 @@
   overflow-x: auto;
 }
 
+.train-meter-preview-link,
 .train-meter-preview {
+  box-sizing: border-box;
   width: 4.5rem;
   height: 4.5rem;
   flex-shrink: 0;
-  object-fit: cover;
+  overflow: hidden;
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-md);
   background: var(--ui-bg-muted);
+}
+
+.train-meter-preview-link {
+  display: block;
+}
+
+.train-meter-preview-link .train-meter-preview {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  object-fit: cover;
+  object-position: center;
+  display: block;
 }
 
 .progress-bar-fill--unknown {

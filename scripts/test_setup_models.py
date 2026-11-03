@@ -70,7 +70,9 @@ class SetupModelsTest(unittest.TestCase):
             self.assertIn(preset["reason"], ollama_models)
         self.assertIn(self.catalog["embed"], ollama_models)
         self.assertIn(self.catalog["vision_model"], ollama_models)
-        self.assertEqual(self.catalog["vision_min_ram_bytes"], 16 * GIB)
+        vision = next(feature for feature in self.catalog['features'] if feature['id'] == 'vision')
+        self.assertEqual(vision['min_ram_bytes'], 16 * GIB)
+        self.assertNotIn('vision_min_ram_bytes', self.catalog)
 
     def test_empty_features_means_all(self) -> None:
         selected, wants_all = setup_models.parse_features("", self.catalog)
@@ -108,6 +110,79 @@ class SetupModelsTest(unittest.TestCase):
         self.assertEqual(plan.vision, "llava:7b")
         self.assertEqual(plan.env["OLLAMA_MODEL_VISION"], "llava:7b")
         self.assertEqual(plan.env["ZONE_SETUP_RAM_BYTES"], str(16 * GIB))
+
+    def test_video_needs_64_gib_ram(self) -> None:
+        with self.assertRaises(setup_models.PlanError) as raised:
+            self.plan('chat,video', ram=32 * GIB, disk=500 * GB, preset='32gb')
+        self.assertEqual(raised.exception.code, 'video-ram')
+        self.assertIn('64 GB', str(raised.exception))
+        self.assertIn('Wan 2.2 A14B', str(raised.exception))
+
+    def test_video_on_exactly_64_gib_is_allowed(self) -> None:
+        plan = self.plan('chat,video', ram=68719476736, disk=500 * GB, preset='32gb')
+        self.assertIn('video', plan.features)
+        self.assertIn('video', plan.comfy_bundles)
+
+    def test_all_on_32gb_ram_is_blocked_by_video(self) -> None:
+        with self.assertRaises(setup_models.PlanError) as raised:
+            self.plan('all', ram=32 * GIB, disk=500 * GB, preset='32gb')
+        self.assertEqual(raised.exception.code, 'all-ram')
+        self.assertIn('Cannot select all features', str(raised.exception))
+        self.assertIn('video needs 64 GB', str(raised.exception))
+
+    def bare_video(self) -> dict:
+        video = next(feature for feature in self.catalog['features'] if feature['id'] == 'video')
+        return {
+            key: value
+            for key, value in video.items()
+            if key not in ('ram_model', 'ram_fallback')
+        }
+
+    def unchecked_plan(self, features: str, *, ram: int) -> setup_models.Plan:
+        return setup_models.make_plan(
+            self.catalog,
+            self.manifest,
+            self.download_models,
+            features_raw=features,
+            preset_id='32gb',
+            ram_bytes=ram,
+            disk_free_bytes=500 * GB,
+            models_dir=Path('.'),
+            ollama_tags=set(),
+            comfy_present=set(),
+        )
+
+    def test_a_gated_feature_without_a_model_names_its_label(self) -> None:
+        plan = self.unchecked_plan('chat,video', ram=32 * GIB)
+
+        error = setup_models.ram_error(plan, self.bare_video())
+
+        self.assertEqual(error.code, 'video-ram')
+        self.assertIn('Video needs 64 GB RAM (Video)', str(error))
+
+    def test_a_gated_feature_without_a_fallback_still_says_how_to_drop_it(self) -> None:
+        plan = self.unchecked_plan('all', ram=32 * GIB)
+
+        error = setup_models.ram_error(plan, self.bare_video())
+
+        self.assertEqual(error.code, 'all-ram')
+        features = str(error).split('--features ', 1)[1].split()[0]
+        selected, _ = setup_models.parse_features(features, self.catalog)
+        self.assertNotIn('video', selected)
+        self.assertEqual(
+            selected,
+            set(setup_models.all_feature_ids(self.catalog)) - {'video'},
+        )
+
+    def test_every_ram_fallback_drops_its_feature(self) -> None:
+        for feature in self.catalog['features']:
+            if 'min_ram_bytes' not in feature:
+                continue
+            with self.subTest(feature=feature['id']):
+                fallback = feature['ram_fallback']
+                features = fallback.split('--features ', 1)[1].split()[0]
+                selected, _ = setup_models.parse_features(features, self.catalog)
+                self.assertNotIn(feature['id'], selected)
 
     def test_subset_on_short_disk_is_blocked(self) -> None:
         with self.assertRaises(setup_models.PlanError) as raised:
@@ -286,10 +361,10 @@ class SetupModelsTest(unittest.TestCase):
             set(plan.comfy_bundles),
             set(self.download_models.VALID_BUNDLES) - {"image"},
         )
-        self.assertGreater(plan.total_bytes, 110 * GB)
-        self.assertLess(plan.total_bytes, 130 * GB)
-        self.assertGreater(plan.required_free_bytes, 120 * GB)
-        self.assertLess(plan.required_free_bytes, 140 * GB)
+        self.assertGreater(plan.total_bytes, 160 * GB)
+        self.assertLess(plan.total_bytes, 170 * GB)
+        self.assertGreater(plan.required_free_bytes, 170 * GB)
+        self.assertLess(plan.required_free_bytes, 180 * GB)
 
 
 def make_all_plan(test: SetupModelsTest) -> setup_models.Plan:

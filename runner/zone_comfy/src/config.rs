@@ -2,6 +2,9 @@
 
 use std::env;
 
+const OUTAGE_WINDOW_SECS: u64 = 120;
+const QUEUE_CHECK_INTERVAL_SECS: u64 = 30;
+
 fn env_truthy(name: &str, default: bool) -> bool {
     truthy(env::var(name).ok(), default)
 }
@@ -75,6 +78,13 @@ pub struct Config {
     pub audio_generation_timeout_secs: u64,
     pub upscale_generation_timeout_secs: u64,
     pub poll_interval_ms: u64,
+    /// How long a job keeps retrying ComfyUI requests that fail without a
+    /// lasting status before it gives up on a dead or restarted server.
+    pub outage_window_secs: u64,
+    /// How often a job whose prompt has no history yet confirms ComfyUI still
+    /// queues it, so a prompt lost to a restart fails instead of waiting out
+    /// the generation deadline.
+    pub queue_check_interval_secs: u64,
     /// ComfyUI models root (`checkpoints/`, `loras/`, `diffusion_models/`, ...).
     pub models_dir: std::path::PathBuf,
     /// Optional command used to train a LoRA. Empty uses ComfyUI ZoneTrainLoRA.
@@ -105,10 +115,10 @@ impl Default for Config {
                 .join("../../comfyui/workflows/sdxl-api.json"),
             checkpoint: "lustifySDXLNSFW_ggwpV7.safetensors".to_string(),
             video_workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../comfyui/workflows/wan2.2-ti2v-5b-api.json"),
-            video_unet: "wan2.2_ti2v_5B_fp16.safetensors".to_string(),
+                .join("../../comfyui/workflows/wan2.2-a14b-t2v-api.json"),
+            video_unet: "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors".to_string(),
             video_clip: "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string(),
-            video_vae: "wan2.2_vae.safetensors".to_string(),
+            video_vae: "wan_2.1_vae.safetensors".to_string(),
             audio_workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../comfyui/workflows/ace-step-v1-3.5b-api.json"),
             audio_checkpoint: "ace_step_v1_3.5b.safetensors".to_string(),
@@ -122,10 +132,12 @@ impl Default for Config {
             caption_timeout_secs: 60,
             request_timeout_secs: 15,
             generation_timeout_secs: 300,
-            video_generation_timeout_secs: 600,
+            video_generation_timeout_secs: 7200,
             audio_generation_timeout_secs: 600,
             upscale_generation_timeout_secs: 600,
             poll_interval_ms: 500,
+            outage_window_secs: OUTAGE_WINDOW_SECS,
+            queue_check_interval_secs: QUEUE_CHECK_INTERVAL_SECS,
             models_dir: std::path::PathBuf::from("/app/comfyui/models"),
             train_command: None,
             train_timeout_secs: 3600,
@@ -158,14 +170,14 @@ impl Config {
             checkpoint: env::var("COMFYUI_CHECKPOINT")
                 .unwrap_or_else(|_| "lustifySDXLNSFW_ggwpV7.safetensors".to_string()),
             video_workflow_path: env::var("COMFYUI_VIDEO_WORKFLOW_PATH")
-                .unwrap_or_else(|_| "/app/comfyui/workflows/wan2.2-ti2v-5b-api.json".to_string())
+                .unwrap_or_else(|_| "/app/comfyui/workflows/wan2.2-a14b-t2v-api.json".to_string())
                 .into(),
             video_unet: env::var("COMFYUI_VIDEO_UNET")
-                .unwrap_or_else(|_| "wan2.2_ti2v_5B_fp16.safetensors".to_string()),
+                .unwrap_or_else(|_| "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors".to_string()),
             video_clip: env::var("COMFYUI_VIDEO_CLIP")
                 .unwrap_or_else(|_| "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string()),
             video_vae: env::var("COMFYUI_VIDEO_VAE")
-                .unwrap_or_else(|_| "wan2.2_vae.safetensors".to_string()),
+                .unwrap_or_else(|_| "wan_2.1_vae.safetensors".to_string()),
             audio_workflow_path: env::var("COMFYUI_AUDIO_WORKFLOW_PATH")
                 .unwrap_or_else(|_| "/app/comfyui/workflows/ace-step-v1-3.5b-api.json".to_string())
                 .into(),
@@ -191,9 +203,9 @@ impl Config {
             generation_timeout_secs: env_u64("COMFYUI_GENERATION_TIMEOUT_SECS", 300, 10, 3600),
             video_generation_timeout_secs: env_u64(
                 "COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS",
-                600,
+                7200,
                 10,
-                3600,
+                14400,
             ),
             audio_generation_timeout_secs: env_u64(
                 "COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS",
@@ -208,6 +220,8 @@ impl Config {
                 3600,
             ),
             poll_interval_ms: env_u64("COMFYUI_POLL_INTERVAL_MS", 500, 50, 5000),
+            outage_window_secs: OUTAGE_WINDOW_SECS,
+            queue_check_interval_secs: QUEUE_CHECK_INTERVAL_SECS,
             vision_model: env_text("ZONE_VISION_MODEL")
                 .map(std::path::PathBuf::from)
                 .or_else(|| Some(models_dir.join("vision/u2net.onnx")))
@@ -248,6 +262,40 @@ mod tests {
                 std::path::PathBuf::from("/app/comfyui/workflows/sdxl-api.json")
             );
             assert_eq!(container.checkpoint, "lustifySDXLNSFW_ggwpV7.safetensors");
+        }
+    }
+
+    #[test]
+    fn video_defaults_cover_a14b() {
+        let development = Config::default();
+        assert!(
+            development
+                .video_workflow_path
+                .ends_with("comfyui/workflows/wan2.2-a14b-t2v-api.json"),
+            "dev default must resolve the packaged A14B graph, got {:?}",
+            development.video_workflow_path
+        );
+        assert_eq!(
+            development.video_unet,
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
+        );
+        assert_eq!(development.video_vae, "wan_2.1_vae.safetensors");
+        assert_eq!(development.video_generation_timeout_secs, 7200);
+
+        if env::var_os("COMFYUI_VIDEO_WORKFLOW_PATH").is_none()
+            && env::var_os("COMFYUI_VIDEO_UNET").is_none()
+            && env::var_os("COMFYUI_VIDEO_VAE").is_none()
+        {
+            let container = Config::from_env();
+            assert_eq!(
+                container.video_workflow_path,
+                std::path::PathBuf::from("/app/comfyui/workflows/wan2.2-a14b-t2v-api.json")
+            );
+            assert_eq!(
+                container.video_unet,
+                "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
+            );
+            assert_eq!(container.video_vae, "wan_2.1_vae.safetensors");
         }
     }
 

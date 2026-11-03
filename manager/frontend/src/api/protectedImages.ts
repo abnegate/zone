@@ -1,9 +1,15 @@
-import { API_BASE, client } from '../../../api/client';
+import { API_BASE, client } from './client';
 
+export const TRAIN_PREVIEW_PATH = '/api/models/train/previews/';
 const PROTECTED_ARTIFACT_PREFIX = '/api/artifacts/';
+const PROTECTED_IMAGE_PREFIXES = [PROTECTED_ARTIFACT_PREFIX, TRAIN_PREVIEW_PATH] as const;
 
 export function isProtectedArtifactUrl(url: string): boolean {
   return url.startsWith(PROTECTED_ARTIFACT_PREFIX);
+}
+
+export function isProtectedImageUrl(url: string): boolean {
+  return PROTECTED_IMAGE_PREFIXES.some((prefix) => url.startsWith(prefix));
 }
 
 export async function fetchProtectedImage(
@@ -11,8 +17,8 @@ export async function fetchProtectedImage(
   signal?: AbortSignal,
   accessToken = client.getAccessToken()
 ): Promise<Blob> {
-  if (!isProtectedArtifactUrl(url)) {
-    throw new Error('Only protected artifact images can be fetched with authentication');
+  if (!isProtectedImageUrl(url)) {
+    throw new Error('Only protected images can be fetched with authentication');
   }
   if (!accessToken) {
     throw new Error('Authentication is required to load this image');

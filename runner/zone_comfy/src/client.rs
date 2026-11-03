@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Once;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
@@ -23,20 +24,31 @@ pub const MAX_SOURCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 /// Clips come back from the artifact store rather than a chat upload, so the
 /// cap matches what the store is willing to keep rather than a request body.
 pub const MAX_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
-const PACKAGED_VIDEO_WORKFLOW: &str =
-    include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-api.json");
-const PACKAGED_I2V_WORKFLOW: &str =
-    include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-i2v-api.json");
-const PACKAGED_WAN_ADAPTER_WORKFLOW: &str =
-    include_str!("../../../comfyui/workflows/wan-adapter-api.json");
-const PACKAGED_WAN_ADAPTER_I2V_WORKFLOW: &str =
-    include_str!("../../../comfyui/workflows/wan-adapter-i2v-api.json");
+pub(crate) const PACKAGED_A14B_T2V_WORKFLOW: &str =
+    include_str!("../../../comfyui/workflows/wan2.2-a14b-t2v-api.json");
+pub(crate) const PACKAGED_A14B_I2V_WORKFLOW: &str =
+    include_str!("../../../comfyui/workflows/wan2.2-a14b-i2v-api.json");
+const A14B_VAE: &str = "wan_2.1_vae.safetensors";
+const LEFTOVER_5B_VAE: &str = "wan2.2_vae.safetensors";
+const A14B_HIGH_UNET: &str = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors";
+const WAN: &str = "wan";
+const HIGH_NOISE: &str = "high_noise";
+const LOW_NOISE: &str = "low_noise";
+const TEXT_TO_VIDEO: &str = "t2v";
+const IMAGE_TO_VIDEO: &str = "i2v";
+const A14B_T2V_GRAPH: &str = "wan2.2-a14b-t2v-api.json";
+const A14B_I2V_GRAPH: &str = "wan2.2-a14b-i2v-api.json";
+const LEFTOVER_5B_GRAPH: &str = "wan2.2-ti2v-5b-api.json";
+static LEFTOVER_5B_GRAPH_WARNING: Once = Once::new();
 const PACKAGED_AUDIO_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/ace-step-v1-3.5b-api.json");
 const PACKAGED_UPSCALE_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/upscale-image-api.json");
 const PACKAGED_UPSCALE_VIDEO_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/upscale-video-api.json");
+const DOWNLOAD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(300);
+const QUEUE_ENTRY_PROMPT_ID: usize = 1;
+const LOST_PROMPT: &str = "it no longer has the prompt, most likely because it restarted";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -145,6 +157,25 @@ struct UploadResponse {
     name: String,
     #[serde(default)]
     subfolder: String,
+}
+
+/// ComfyUI lists each queue entry as `[number, prompt_id, prompt, extra_data,
+/// outputs_to_execute]`.
+#[derive(Debug, Deserialize)]
+struct QueueResponse {
+    queue_running: Vec<Value>,
+    queue_pending: Vec<Value>,
+}
+
+impl QueueResponse {
+    fn holds(&self, prompt_id: &str) -> bool {
+        self.queue_running
+            .iter()
+            .chain(&self.queue_pending)
+            .any(|entry| {
+                entry.get(QUEUE_ENTRY_PROMPT_ID).and_then(Value::as_str) == Some(prompt_id)
+            })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,13 +404,12 @@ impl Client {
         ))
     }
 
-    fn video_workflows(&self) -> Result<(Value, Value), Error> {
-        let _ = self.video_model_names()?;
-        let video_workflow = load_video_workflow(&self.config.video_workflow_path)?;
-        validate_video_workflow(&video_workflow)?;
-        let i2v_workflow = load_i2v_workflow(&self.config.video_workflow_path)?;
-        validate_i2v_workflow(&i2v_workflow)?;
-        Ok((video_workflow, i2v_workflow))
+    fn video_workflow(&self, image_to_video: bool) -> Result<Value, Error> {
+        if image_to_video {
+            load_i2v_workflow(&self.config.video_workflow_path)
+        } else {
+            load_video_workflow(&self.config.video_workflow_path)
+        }
     }
 
     fn audio_workflow(&self) -> Result<Value, Error> {
@@ -639,41 +669,23 @@ impl Client {
         let (unet, clip, vae) = self.video_model_names()?;
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(self.config.video_generation_timeout_secs);
-        let mut prompt = if prompt.trim().is_empty() {
+        let prompt = if prompt.trim().is_empty() {
             if source.is_some() {
-                "animate this image".to_string()
+                "animate this image"
             } else {
                 return Err(Error::Configuration("prompt is empty or too long"));
             }
         } else {
-            prompt.to_string()
+            prompt
         };
-        let identity = crate::inventory::bind_video_identity(
-            &self.config.models_dir,
-            &self.config.workflow_path,
-            &prompt,
-        );
-        let lora_name = identity.as_ref().and_then(|bound| bound.lora.as_deref());
-        if let Some(bound) = identity.as_ref() {
-            prompt = crate::identity_caption(&prompt, &bound.trigger);
-        }
+        let workflow = self.video_workflow(source.is_some())?;
         let seed = rand::random::<u64>() & i64::MAX as u64;
         let workflow = if let Some(source) = source {
             let _ = progress.send("Uploading source image...".to_string());
             let uploaded = self.upload_source(source, cancel, deadline).await?;
-            let graph = if lora_name.is_some() {
-                load_wan_adapter_i2v_workflow(&self.config.video_workflow_path)?
-            } else {
-                self.video_workflows()?.1
-            };
-            configure_wan_i2v_workflow(graph, &prompt, unet, clip, vae, seed, &uploaded, lora_name)?
+            configure_wan_i2v_workflow(workflow, prompt, unet, clip, vae, seed, &uploaded)?
         } else {
-            let graph = if lora_name.is_some() {
-                load_wan_adapter_workflow(&self.config.video_workflow_path)?
-            } else {
-                self.video_workflows()?.0
-            };
-            configure_wan_t2v_workflow(graph, &prompt, unet, clip, vae, seed, lora_name)?
+            configure_wan_t2v_workflow(workflow, prompt, unet, clip, vae, seed)?
         };
         self.submit_and_collect(
             workflow,
@@ -873,6 +885,8 @@ impl Client {
         let _ = progress.send(collection.queued.to_string());
 
         let mut announced_generation = false;
+        let mut failing_since = None;
+        let mut queue_checked = tokio::time::Instant::now();
         loop {
             tokio::select! {
                 biased;
@@ -889,21 +903,46 @@ impl Client {
                         let _ = progress.send(collection.generating.to_string());
                         announced_generation = true;
                     }
-                    match self.history_outputs(&prompt_id, cancel, deadline, collection).await {
+                    let polled = match self
+                        .history_outputs(&prompt_id, cancel, deadline, collection)
+                        .await
+                    {
+                        Ok(None) if queue_checked.elapsed() >= self.queue_check_interval() => {
+                            queue_checked = tokio::time::Instant::now();
+                            self.confirm_pending(&prompt_id, cancel, deadline, collection)
+                                .await
+                        }
+                        polled => polled,
+                    };
+                    match polled {
                         Ok(Some(outputs)) => {
                             let _ = progress.send(collection.saving.to_string());
                             let result = self.fetch_outputs(outputs, cancel, deadline).await;
-                            self.clear_history(&prompt_id).await;
-                            if matches!(result, Err(Error::Cancelled | Error::Timeout)) {
-                                self.cancel(&prompt_id).await;
+                            match &result {
+                                Ok(_) => self.clear_history(&prompt_id).await,
+                                Err(_) => self.cancel(&prompt_id).await,
                             }
                             return result;
                         }
-                        Ok(None) => {}
-                        Err(error) => {
-                            if matches!(error, Error::Cancelled | Error::Timeout) {
+                        Ok(None) => failing_since = None,
+                        Err(Error::Http(error)) if is_transient(&error) => {
+                            if self.outage_outlasted(&mut failing_since) {
+                                tracing::warn!(
+                                    prompt_id = %prompt_id,
+                                    error = %error,
+                                    "ComfyUI kept failing; giving up on the prompt"
+                                );
                                 self.cancel(&prompt_id).await;
+                                return Err(Error::Http(error));
                             }
+                            tracing::warn!(
+                                prompt_id = %prompt_id,
+                                error = %error,
+                                "ComfyUI history poll failed; polling again"
+                            );
+                        }
+                        Err(error) => {
+                            self.cancel(&prompt_id).await;
                             return Err(error);
                         }
                     }
@@ -1023,6 +1062,51 @@ impl Client {
         )
     }
 
+    async fn confirm_pending(
+        &self,
+        prompt_id: &str,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+        collection: Collection<'_>,
+    ) -> Result<Option<Vec<OutputImage>>, Error> {
+        let request = self.authorize(self.client.get(format!("{}/queue", self.config.base_url)));
+        let queue = self
+            .bounded(cancel, deadline, async move {
+                request
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<QueueResponse>()
+                    .await
+            })
+            .await?;
+        if queue.holds(prompt_id) {
+            return Ok(None);
+        }
+        match self
+            .history_outputs(prompt_id, cancel, deadline, collection)
+            .await?
+        {
+            Some(outputs) => Ok(Some(outputs)),
+            None => Err(Error::InvalidResponse(LOST_PROMPT)),
+        }
+    }
+
+    fn queue_check_interval(&self) -> Duration {
+        Duration::from_secs(self.config.queue_check_interval_secs)
+    }
+
+    fn outage_outlasted(&self, failing_since: &mut Option<tokio::time::Instant>) -> bool {
+        let since = *failing_since.get_or_insert_with(tokio::time::Instant::now);
+        since.elapsed() >= Duration::from_secs(self.config.outage_window_secs)
+    }
+
+    fn download_timeout(&self, deadline: tokio::time::Instant) -> Duration {
+        let attempt =
+            Duration::from_secs(self.config.request_timeout_secs).max(DOWNLOAD_ATTEMPT_TIMEOUT);
+        attempt.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+    }
+
     async fn fetch_outputs(
         &self,
         outputs: Vec<OutputImage>,
@@ -1031,17 +1115,37 @@ impl Client {
     ) -> Result<Vec<GeneratedImage>, Error> {
         let mut generated = Vec::with_capacity(outputs.len());
         for output in outputs {
-            let filename = output.filename.clone();
-            // reqwest 0.13 dropped RequestBuilder::query; encode onto the URL.
-            let url = format!(
-                "{}/view?filename={}&subfolder={}&type={}",
-                self.config.base_url,
-                urlencoding::encode(output.filename.as_str()),
-                urlencoding::encode(output.subfolder.as_str()),
-                urlencoding::encode(output.r#type.as_str()),
-            );
-            let request = self.authorize(self.client.get(url));
-            let (bytes, mime) = self
+            let (bytes, mime) = self.fetch_output(&output, cancel, deadline).await?;
+            generated.push(GeneratedImage {
+                bytes,
+                mime,
+                filename: output.filename,
+            });
+        }
+        Ok(generated)
+    }
+
+    async fn fetch_output(
+        &self,
+        output: &OutputImage,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+    ) -> Result<(bytes::Bytes, String), Error> {
+        // reqwest 0.13 dropped RequestBuilder::query; encode onto the URL.
+        let url = format!(
+            "{}/view?filename={}&subfolder={}&type={}",
+            self.config.base_url,
+            urlencoding::encode(output.filename.as_str()),
+            urlencoding::encode(output.subfolder.as_str()),
+            urlencoding::encode(output.r#type.as_str()),
+        );
+        let mut failing_since = None;
+        loop {
+            let request = self
+                .authorize(self.client.get(&url))
+                .timeout(self.download_timeout(deadline));
+            let filename = output.filename.as_str();
+            let result = self
                 .bounded(cancel, deadline, async move {
                     let response = request.send().await?.error_for_status()?;
                     let mime = response
@@ -1056,17 +1160,43 @@ impl Client {
                                 || value.starts_with("audio/")
                         })
                         .map(str::to_string)
-                        .unwrap_or_else(|| mime_for_filename(&filename));
+                        .unwrap_or_else(|| mime_for_filename(filename));
                     Ok((response.bytes().await?, mime))
                 })
-                .await?;
-            generated.push(GeneratedImage {
-                bytes,
-                mime,
-                filename: output.filename,
-            });
+                .await;
+            match result {
+                Err(Error::Http(error)) if is_transient(&error) => {
+                    if self.outage_outlasted(&mut failing_since) {
+                        tracing::warn!(
+                            filename = %output.filename,
+                            error = %error,
+                            "ComfyUI output download kept failing; giving up"
+                        );
+                        return Err(Error::Http(error));
+                    }
+                    tracing::warn!(
+                        filename = %output.filename,
+                        error = %error,
+                        "ComfyUI output download failed; retrying"
+                    );
+                    self.pause(cancel, deadline).await?;
+                }
+                result => return result,
+            }
         }
-        Ok(generated)
+    }
+
+    async fn pause(
+        &self,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), Error> {
+        tokio::select! {
+            biased;
+            _ = cancel.recv() => Err(Error::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => Err(Error::Timeout),
+            _ = tokio::time::sleep(Duration::from_millis(self.config.poll_interval_ms)) => Ok(()),
+        }
     }
 
     async fn cancel(&self, prompt_id: &str) {
@@ -1140,51 +1270,62 @@ fn load_workflow_file(path: &std::path::Path) -> Result<Value, Error> {
         .map_err(|_| Error::Configuration("COMFYUI_WORKFLOW_PATH is not valid JSON"))
 }
 
-fn load_video_workflow(path: &std::path::Path) -> Result<Value, Error> {
-    if path.is_file() {
-        return load_workflow_file(path)
-            .map_err(|_| Error::Configuration("video workflow path is not readable"));
+fn load_video_workflow(configured: &std::path::Path) -> Result<Value, Error> {
+    match video_graph_path(configured) {
+        Some(path) => load_custom_video_workflow(
+            &path,
+            "video workflow path is not readable",
+            validate_video_workflow,
+        ),
+        None => serde_json::from_str(PACKAGED_A14B_T2V_WORKFLOW)
+            .map_err(|_| Error::Configuration("packaged A14B video workflow is not valid JSON")),
     }
-    serde_json::from_str(PACKAGED_VIDEO_WORKFLOW)
-        .map_err(|_| Error::Configuration("packaged video workflow is not valid JSON"))
 }
 
 fn load_i2v_workflow(text_to_video_path: &std::path::Path) -> Result<Value, Error> {
-    let sibling = text_to_video_path
-        .parent()
-        .map(|directory| directory.join("wan2.2-ti2v-5b-i2v-api.json"));
-    if let Some(path) = sibling.filter(|path| path.is_file()) {
-        return load_workflow_file(&path)
-            .map_err(|_| Error::Configuration("image-to-video workflow path is not readable"));
+    match sibling_graph_path(text_to_video_path, A14B_I2V_GRAPH) {
+        Some(path) => load_custom_video_workflow(
+            &path,
+            "image-to-video workflow path is not readable",
+            validate_i2v_workflow,
+        ),
+        None => serde_json::from_str(PACKAGED_A14B_I2V_WORKFLOW).map_err(|_| {
+            Error::Configuration("packaged A14B image-to-video workflow is not valid JSON")
+        }),
     }
-    serde_json::from_str(PACKAGED_I2V_WORKFLOW)
-        .map_err(|_| Error::Configuration("packaged image-to-video workflow is not valid JSON"))
 }
 
-fn load_wan_adapter_workflow(text_to_video_path: &std::path::Path) -> Result<Value, Error> {
-    let sibling = text_to_video_path
-        .parent()
-        .map(|directory| directory.join("wan-adapter-api.json"));
-    if let Some(path) = sibling.filter(|path| path.is_file()) {
-        return load_workflow_file(&path)
-            .map_err(|_| Error::Configuration("video adapter workflow path is not readable"));
+fn video_graph_path(configured: &std::path::Path) -> Option<std::path::PathBuf> {
+    match configured.file_name().and_then(|name| name.to_str()) {
+        Some(LEFTOVER_5B_GRAPH) => {
+            LEFTOVER_5B_GRAPH_WARNING.call_once(|| {
+                tracing::warn!(
+                    path = %configured.display(),
+                    "COMFYUI_VIDEO_WORKFLOW_PATH names the retired Wan 2.2 TI2V 5B graph; loading the A14B graph instead"
+                );
+            });
+            sibling_graph_path(configured, A14B_T2V_GRAPH)
+        }
+        Some(A14B_T2V_GRAPH) if !configured.is_file() => None,
+        _ => Some(configured.to_path_buf()),
     }
-    serde_json::from_str(PACKAGED_WAN_ADAPTER_WORKFLOW)
-        .map_err(|_| Error::Configuration("packaged video adapter workflow is not valid JSON"))
 }
 
-fn load_wan_adapter_i2v_workflow(text_to_video_path: &std::path::Path) -> Result<Value, Error> {
-    let sibling = text_to_video_path
+fn sibling_graph_path(configured: &std::path::Path, filename: &str) -> Option<std::path::PathBuf> {
+    configured
         .parent()
-        .map(|directory| directory.join("wan-adapter-i2v-api.json"));
-    if let Some(path) = sibling.filter(|path| path.is_file()) {
-        return load_workflow_file(&path).map_err(|_| {
-            Error::Configuration("image-to-video adapter workflow path is not readable")
-        });
-    }
-    serde_json::from_str(PACKAGED_WAN_ADAPTER_I2V_WORKFLOW).map_err(|_| {
-        Error::Configuration("packaged image-to-video adapter workflow is not valid JSON")
-    })
+        .map(|directory| directory.join(filename))
+        .filter(|path| path.is_file())
+}
+
+fn load_custom_video_workflow(
+    path: &std::path::Path,
+    unreadable: &'static str,
+    validate: fn(&Value) -> Result<(), Error>,
+) -> Result<Value, Error> {
+    let workflow = load_workflow_file(path).map_err(|_| Error::Configuration(unreadable))?;
+    validate(&workflow)?;
+    Ok(workflow)
 }
 
 fn load_audio_workflow(path: &std::path::Path) -> Result<Value, Error> {
@@ -1203,17 +1344,10 @@ pub fn build_wan_t2v_workflow(
     clip: &str,
     vae: &str,
     seed: u64,
-    lora_name: Option<&str>,
 ) -> Result<Value, Error> {
-    let workflow = if lora_name.is_some() {
-        serde_json::from_str(PACKAGED_WAN_ADAPTER_WORKFLOW).map_err(|_| {
-            Error::Configuration("packaged video adapter workflow is not valid JSON")
-        })?
-    } else {
-        serde_json::from_str(PACKAGED_VIDEO_WORKFLOW)
-            .map_err(|_| Error::Configuration("packaged video workflow is not valid JSON"))?
-    };
-    configure_wan_t2v_workflow(workflow, prompt, unet, clip, vae, seed, lora_name)
+    let workflow = serde_json::from_str(PACKAGED_A14B_T2V_WORKFLOW)
+        .map_err(|_| Error::Configuration("packaged A14B video workflow is not valid JSON"))?;
+    configure_wan_t2v_workflow(workflow, prompt, unet, clip, vae, seed)
 }
 
 /// Build the image-to-video workflow and mutate only approved inputs.
@@ -1224,20 +1358,11 @@ pub fn build_wan_i2v_workflow(
     vae: &str,
     seed: u64,
     image_name: &str,
-    lora_name: Option<&str>,
 ) -> Result<Value, Error> {
-    let workflow = if lora_name.is_some() {
-        serde_json::from_str(PACKAGED_WAN_ADAPTER_I2V_WORKFLOW).map_err(|_| {
-            Error::Configuration("packaged image-to-video adapter workflow is not valid JSON")
-        })?
-    } else {
-        serde_json::from_str(PACKAGED_I2V_WORKFLOW).map_err(|_| {
-            Error::Configuration("packaged image-to-video workflow is not valid JSON")
-        })?
-    };
-    configure_wan_i2v_workflow(
-        workflow, prompt, unet, clip, vae, seed, image_name, lora_name,
-    )
+    let workflow = serde_json::from_str(PACKAGED_A14B_I2V_WORKFLOW).map_err(|_| {
+        Error::Configuration("packaged A14B image-to-video workflow is not valid JSON")
+    })?;
+    configure_wan_i2v_workflow(workflow, prompt, unet, clip, vae, seed, image_name)
 }
 
 /// Build the text-to-audio workflow and mutate only approved inputs.
@@ -1364,26 +1489,99 @@ fn configure_upscale_video_workflow(
     Ok(workflow)
 }
 
-fn validate_video_workflow(workflow: &Value) -> Result<(), Error> {
+fn is_a14b_unet(unet: &str) -> bool {
+    let lower = unet.to_ascii_lowercase();
+    lower.contains(WAN)
+        && (lower.contains(HIGH_NOISE) || lower.contains(LOW_NOISE))
+        && (lower.contains(TEXT_TO_VIDEO) || lower.contains(IMAGE_TO_VIDEO))
+}
+
+pub(crate) fn paired_wan_unets(unet: &str, i2v: bool) -> (String, String) {
+    let expert = if is_a14b_unet(unet) {
+        unet
+    } else {
+        A14B_HIGH_UNET
+    };
+    let (from, to) = if i2v {
+        (TEXT_TO_VIDEO, IMAGE_TO_VIDEO)
+    } else {
+        (IMAGE_TO_VIDEO, TEXT_TO_VIDEO)
+    };
+    let high = replace_token(&replace_token(expert, from, to), LOW_NOISE, HIGH_NOISE);
+    let low = replace_token(&high, HIGH_NOISE, LOW_NOISE);
+    (high, low)
+}
+
+fn replace_token(name: &str, token: &str, replacement: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let mut replaced = String::with_capacity(name.len());
+    let mut copied = 0;
+    for (start, _) in lower.match_indices(token) {
+        let end = start + token.len();
+        replaced.push_str(&name[copied..start]);
+        replaced.push_str(&cased_like(&name[start..end], replacement));
+        copied = end;
+    }
+    replaced.push_str(&name[copied..]);
+    replaced
+}
+
+fn cased_like(original: &str, replacement: &str) -> String {
+    original
+        .split('_')
+        .zip(replacement.split('_'))
+        .map(|(original, replacement)| {
+            let uppercase = original.bytes().any(|byte| byte.is_ascii_uppercase());
+            let lowercase = original.bytes().any(|byte| byte.is_ascii_lowercase());
+            if uppercase && !lowercase {
+                replacement.to_ascii_uppercase()
+            } else if original.starts_with(|character: char| character.is_ascii_uppercase()) {
+                let mut characters = replacement.chars();
+                characters
+                    .next()
+                    .map(|first| first.to_ascii_uppercase().to_string() + characters.as_str())
+                    .unwrap_or_default()
+            } else {
+                replacement.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+pub(crate) fn validate_video_workflow(workflow: &Value) -> Result<(), Error> {
+    validate_a14b_workflow(workflow)?;
+    if workflow.pointer("/7/class_type").and_then(Value::as_str) != Some("EmptyHunyuanLatentVideo")
+    {
+        return Err(Error::Configuration(
+            "text-to-video workflow must use EmptyHunyuanLatentVideo",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_a14b_workflow(workflow: &Value) -> Result<(), Error> {
     for pointer in [
         "/1/inputs/unet_name",
         "/2/inputs/clip_name",
         "/3/inputs/vae_name",
         "/5/inputs/text",
-        "/7/class_type",
-        "/8/inputs/seed",
+        "/8/inputs/noise_seed",
         "/10/inputs/images",
+        "/12/inputs/unet_name",
+        "/14/inputs/noise_seed",
     ] {
         if workflow.pointer(pointer).is_none() {
             return Err(Error::Configuration(
-                "workflow does not match the Wan TI2V contract",
+                "workflow does not match the Wan A14B contract",
             ));
         }
     }
-    if workflow.pointer("/7/class_type").and_then(Value::as_str) != Some("Wan22ImageToVideoLatent")
+    if workflow.pointer("/8/class_type").and_then(Value::as_str) != Some("KSamplerAdvanced")
+        || workflow.pointer("/14/class_type").and_then(Value::as_str) != Some("KSamplerAdvanced")
     {
         return Err(Error::Configuration(
-            "video workflow must use Wan22ImageToVideoLatent",
+            "A14B video workflow must sample high then low noise experts",
         ));
     }
     if workflow.pointer("/10/class_type").and_then(Value::as_str) != Some("SaveWEBM") {
@@ -1394,8 +1592,13 @@ fn validate_video_workflow(workflow: &Value) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate_i2v_workflow(workflow: &Value) -> Result<(), Error> {
-    validate_video_workflow(workflow)?;
+pub(crate) fn validate_i2v_workflow(workflow: &Value) -> Result<(), Error> {
+    validate_a14b_workflow(workflow)?;
+    if workflow.pointer("/7/class_type").and_then(Value::as_str) != Some("WanImageToVideo") {
+        return Err(Error::Configuration(
+            "image-to-video workflow must use WanImageToVideo",
+        ));
+    }
     if workflow.pointer("/11/class_type").and_then(Value::as_str) != Some("LoadImage") {
         return Err(Error::Configuration(
             "image-to-video workflow must load a source image",
@@ -1457,11 +1660,9 @@ fn configure_wan_t2v_workflow(
     clip: &str,
     vae: &str,
     seed: u64,
-    lora_name: Option<&str>,
 ) -> Result<Value, Error> {
     validate_video_workflow(&workflow)?;
     apply_wan_workflow_inputs(&mut workflow, prompt, unet, clip, vae, seed)?;
-    apply_wan_lora(&mut workflow, lora_name)?;
     Ok(workflow)
 }
 
@@ -1473,29 +1674,12 @@ fn configure_wan_i2v_workflow(
     vae: &str,
     seed: u64,
     image_name: &str,
-    lora_name: Option<&str>,
 ) -> Result<Value, Error> {
     validate_i2v_workflow(&workflow)?;
     apply_wan_workflow_inputs(&mut workflow, prompt, unet, clip, vae, seed)?;
-    apply_wan_lora(&mut workflow, lora_name)?;
     let image_name = sanitize_upload_name(image_name)?;
     workflow["11"]["inputs"]["image"] = json!(image_name);
     Ok(workflow)
-}
-
-fn apply_wan_lora(workflow: &mut Value, lora_name: Option<&str>) -> Result<(), Error> {
-    let Some(name) = lora_name else {
-        return Ok(());
-    };
-    if workflow.pointer("/12/class_type").and_then(Value::as_str) != Some("LoraLoaderModelOnly") {
-        return Err(Error::Configuration(
-            "adapter workflow must load a LoRA with LoraLoaderModelOnly",
-        ));
-    }
-    let name = sanitize_weight_filename(name)
-        .map_err(|_| Error::Configuration("invalid video LoRA filename"))?;
-    workflow["12"]["inputs"]["lora_name"] = json!(name);
-    Ok(())
 }
 
 fn apply_wan_workflow_inputs(
@@ -1512,12 +1696,27 @@ fn apply_wan_workflow_inputs(
     if !is_model_filename(unet) || !is_model_filename(clip) || !is_model_filename(vae) {
         return Err(Error::Configuration("invalid video model filename"));
     }
-    workflow["1"]["inputs"]["unet_name"] = json!(unet);
+    let i2v = workflow.pointer("/7/class_type").and_then(Value::as_str) == Some("WanImageToVideo");
+    let (high, low) = paired_wan_unets(unet, i2v);
+    if !is_model_filename(&high) || !is_model_filename(&low) {
+        return Err(Error::Configuration("invalid video model filename"));
+    }
+    workflow["1"]["inputs"]["unet_name"] = json!(high);
+    workflow["12"]["inputs"]["unet_name"] = json!(low);
     workflow["2"]["inputs"]["clip_name"] = json!(clip);
-    workflow["3"]["inputs"]["vae_name"] = json!(vae);
+    workflow["3"]["inputs"]["vae_name"] = json!(a14b_vae(vae));
     workflow["5"]["inputs"]["text"] = json!(prompt);
-    workflow["8"]["inputs"]["seed"] = json!(seed);
+    workflow["8"]["inputs"]["noise_seed"] = json!(seed);
+    workflow["14"]["inputs"]["noise_seed"] = json!(seed);
     Ok(())
+}
+
+fn a14b_vae(vae: &str) -> &str {
+    if vae == LEFTOVER_5B_VAE {
+        A14B_VAE
+    } else {
+        vae
+    }
 }
 
 fn configure_ace_step_workflow(
@@ -1579,6 +1778,15 @@ fn extension_for_video_mime(mime: &str) -> &'static str {
         "video/mp4" => "mp4",
         _ => "webm",
     }
+}
+
+fn is_transient(error: &reqwest::Error) -> bool {
+    !error.is_builder()
+        && error.status().is_none_or(|status| {
+            status.is_server_error()
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        })
 }
 
 fn is_model_filename(name: &str) -> bool {
@@ -1800,16 +2008,19 @@ mod tests {
     fn video_workflow_mutates_only_approved_inputs() {
         let workflow = build_wan_t2v_workflow(
             "a moving fox",
-            "custom-video.safetensors",
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
             "custom-clip.safetensors",
-            "custom-vae.safetensors",
+            "wan2.2_vae.safetensors",
             42,
-            None,
         )
         .unwrap();
         assert_eq!(
             workflow["1"]["inputs"]["unet_name"],
-            "custom-video.safetensors"
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
+        );
+        assert_eq!(
+            workflow["12"]["inputs"]["unet_name"],
+            "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"
         );
         assert_eq!(
             workflow["2"]["inputs"]["clip_name"],
@@ -1817,81 +2028,284 @@ mod tests {
         );
         assert_eq!(
             workflow["3"]["inputs"]["vae_name"],
-            "custom-vae.safetensors"
+            "wan_2.1_vae.safetensors"
         );
         assert_eq!(workflow["5"]["inputs"]["text"], "a moving fox");
-        assert_eq!(workflow["8"]["inputs"]["seed"], 42);
-        assert_eq!(workflow["8"]["inputs"]["steps"], 20);
-        assert_eq!(workflow["7"]["inputs"]["width"], 832);
+        assert_eq!(workflow["8"]["inputs"]["noise_seed"], 42);
+        assert_eq!(workflow["14"]["inputs"]["noise_seed"], 42);
+        assert_eq!(workflow["8"]["class_type"], "KSamplerAdvanced");
+        assert_eq!(workflow["7"]["class_type"], "EmptyHunyuanLatentVideo");
+        assert_eq!(workflow["7"]["inputs"]["width"], 1280);
+        assert_eq!(workflow["7"]["inputs"]["height"], 704);
+        assert_eq!(workflow["7"]["inputs"]["length"], 81);
+        assert_eq!(workflow["10"]["inputs"]["fps"], 16);
         assert!(workflow.get("11").is_none());
+    }
+
+    #[test]
+    fn leftover_5b_unet_still_loads_a14b_experts() {
+        let workflow = build_wan_t2v_workflow(
+            "a moving fox",
+            "wan2.2_ti2v_5B_fp16.safetensors",
+            "custom-clip.safetensors",
+            "wan2.2_vae.safetensors",
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            workflow["1"]["inputs"]["unet_name"],
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"
+        );
+        assert_eq!(
+            workflow["12"]["inputs"]["unet_name"],
+            "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"
+        );
+        assert_eq!(
+            workflow["3"]["inputs"]["vae_name"],
+            "wan_2.1_vae.safetensors"
+        );
+    }
+
+    #[test]
+    fn video_workflow_uses_the_configured_vae() {
+        let text_to_video = build_wan_t2v_workflow(
+            "a moving fox",
+            A14B_HIGH_UNET,
+            "custom-clip.safetensors",
+            "custom-vae.safetensors",
+            7,
+        )
+        .unwrap();
+        let image_to_video = build_wan_i2v_workflow(
+            "make it move",
+            A14B_HIGH_UNET,
+            "custom-clip.safetensors",
+            "custom-vae.safetensors",
+            7,
+            "zone-i2v-source.png",
+        )
+        .unwrap();
+        for workflow in [text_to_video, image_to_video] {
+            assert_eq!(
+                workflow["3"]["inputs"]["vae_name"],
+                "custom-vae.safetensors"
+            );
+        }
+    }
+
+    #[test]
+    fn leftover_5b_vae_maps_to_the_wan_21_vae() {
+        let workflow = build_wan_t2v_workflow(
+            "a moving fox",
+            A14B_HIGH_UNET,
+            "custom-clip.safetensors",
+            "wan2.2_vae.safetensors",
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            workflow["3"]["inputs"]["vae_name"],
+            "wan_2.1_vae.safetensors"
+        );
+    }
+
+    #[test]
+    fn only_wan_noise_experts_keep_their_own_pair() {
+        let default_pair = (
+            A14B_HIGH_UNET.to_string(),
+            "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors".to_string(),
+        );
+        assert_eq!(
+            paired_wan_unets("wan2.1_t2v_14B_fp16.safetensors", false),
+            default_pair
+        );
+        assert_eq!(
+            paired_wan_unets("hunyuan_video_high_noise.safetensors", false),
+            default_pair
+        );
+        assert_eq!(
+            paired_wan_unets("wan2.2_i2v_low_noise_14B_fp16.safetensors", true),
+            (
+                "wan2.2_i2v_high_noise_14B_fp16.safetensors".to_string(),
+                "wan2.2_i2v_low_noise_14B_fp16.safetensors".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn noise_expert_names_pair_whatever_their_case() {
+        assert_eq!(
+            paired_wan_unets("Wan2.2_T2V_HIGH_NOISE_14B_fp8.safetensors", true),
+            (
+                "Wan2.2_I2V_HIGH_NOISE_14B_fp8.safetensors".to_string(),
+                "Wan2.2_I2V_LOW_NOISE_14B_fp8.safetensors".to_string(),
+            )
+        );
+        assert_eq!(
+            paired_wan_unets("WAN2.2_i2v_Low_Noise_14B.safetensors", false),
+            (
+                "WAN2.2_t2v_High_Noise_14B.safetensors".to_string(),
+                "WAN2.2_t2v_Low_Noise_14B.safetensors".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn a_noise_expert_without_a_mode_loads_the_default_pair() {
+        assert_eq!(
+            paired_wan_unets("wan2.2_high_noise_14B_custom.safetensors", true),
+            (
+                "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors".to_string(),
+                "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors".to_string(),
+            )
+        );
+        assert_eq!(
+            paired_wan_unets("wan2.2_low_noise_14B_custom.safetensors", false),
+            (
+                A14B_HIGH_UNET.to_string(),
+                "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors".to_string(),
+            )
+        );
     }
 
     #[test]
     fn i2v_workflow_mutates_only_approved_inputs() {
         let workflow = build_wan_i2v_workflow(
             "make it move",
-            "custom-video.safetensors",
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
             "custom-clip.safetensors",
             "custom-vae.safetensors",
             42,
             "zone-i2v-source.png",
-            None,
         )
         .unwrap();
         assert_eq!(
             workflow["1"]["inputs"]["unet_name"],
-            "custom-video.safetensors"
+            "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
         );
-        assert_eq!(workflow["5"]["inputs"]["text"], "make it move");
-        assert_eq!(workflow["8"]["inputs"]["seed"], 42);
+        assert_eq!(
+            workflow["12"]["inputs"]["unet_name"],
+            "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+        );
+        assert_eq!(
+            workflow["3"]["inputs"]["vae_name"],
+            "custom-vae.safetensors"
+        );
+        assert_eq!(workflow["7"]["class_type"], "WanImageToVideo");
+        assert_eq!(workflow["8"]["inputs"]["positive"], json!(["7", 0]));
+        assert_eq!(workflow["8"]["inputs"]["negative"], json!(["7", 1]));
+        assert_eq!(workflow["8"]["inputs"]["latent_image"], json!(["7", 2]));
+        assert_eq!(workflow["8"]["inputs"]["noise_seed"], 42);
         assert_eq!(workflow["11"]["inputs"]["image"], "zone-i2v-source.png");
-        assert_eq!(workflow["7"]["class_type"], "Wan22ImageToVideoLatent");
-        assert!(workflow.get("12").is_none());
+        assert_eq!(workflow["9"]["inputs"]["samples"], json!(["14", 0]));
+    }
+
+    fn packaged_graph(text: &str) -> Value {
+        serde_json::from_str(text).expect("the packaged graph is valid JSON")
+    }
+
+    fn write_graph(path: &std::path::Path, workflow: &Value) {
+        std::fs::write(path, serde_json::to_vec(workflow).unwrap()).unwrap();
+    }
+
+    fn narrowed(packaged: &str) -> Value {
+        let mut workflow = packaged_graph(packaged);
+        workflow["7"]["inputs"]["width"] = json!(960);
+        workflow
     }
 
     #[test]
-    fn configure_wan_injects_lora_when_set_and_omits_when_unset() {
-        let bare = build_wan_t2v_workflow(
-            "a moving fox",
-            "custom-video.safetensors",
-            "custom-clip.safetensors",
-            "custom-vae.safetensors",
-            42,
-            None,
-        )
-        .unwrap();
-        assert!(bare.get("12").is_none());
-        assert_eq!(bare["4"]["inputs"]["model"], json!(["1", 0]));
+    fn a_valid_custom_video_graph_is_used() {
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("my-video.json");
+        write_graph(&configured, &narrowed(PACKAGED_A14B_T2V_WORKFLOW));
+        let workflow = load_video_workflow(&configured).unwrap();
+        assert_eq!(workflow["7"]["inputs"]["width"], 960);
+    }
 
-        let adapted = build_wan_t2v_workflow(
-            "a moving fox",
-            "custom-video.safetensors",
-            "custom-clip.safetensors",
-            "custom-vae.safetensors",
-            42,
-            Some("jerry-wan.safetensors"),
-        )
-        .unwrap();
-        assert_eq!(adapted["12"]["class_type"], "LoraLoaderModelOnly");
+    #[test]
+    fn an_unreadable_custom_video_graph_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("my-video.json");
+        assert!(matches!(
+            load_video_workflow(&missing),
+            Err(Error::Configuration(_))
+        ));
+        let garbled = directory.path().join("garbled.json");
+        std::fs::write(&garbled, b"not a graph").unwrap();
+        assert!(matches!(
+            load_video_workflow(&garbled),
+            Err(Error::Configuration(_))
+        ));
+    }
+
+    #[test]
+    fn a_custom_video_graph_that_breaks_the_a14b_contract_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("my-video.json");
+        let mut single_expert = packaged_graph(PACKAGED_A14B_T2V_WORKFLOW);
+        single_expert.as_object_mut().unwrap().remove("14");
+        write_graph(&configured, &single_expert);
+        assert!(matches!(
+            load_video_workflow(&configured),
+            Err(Error::Configuration(_))
+        ));
+        write_graph(&configured, &packaged_graph(PACKAGED_A14B_I2V_WORKFLOW));
+        assert!(matches!(
+            load_video_workflow(&configured),
+            Err(Error::Configuration(_))
+        ));
+    }
+
+    #[test]
+    fn a_leftover_5b_video_graph_falls_back_to_a14b() {
+        let directory = tempfile::tempdir().unwrap();
+        let leftover = directory.path().join("wan2.2-ti2v-5b-api.json");
+        std::fs::write(&leftover, b"{}").unwrap();
         assert_eq!(
-            adapted["12"]["inputs"]["lora_name"],
-            "jerry-wan.safetensors"
+            load_video_workflow(&leftover).unwrap(),
+            packaged_graph(PACKAGED_A14B_T2V_WORKFLOW)
         );
-        assert_eq!(adapted["4"]["inputs"]["model"], json!(["12", 0]));
-        assert_eq!(adapted["5"]["inputs"]["text"], "a moving fox");
+        write_graph(
+            &directory.path().join("wan2.2-a14b-t2v-api.json"),
+            &narrowed(PACKAGED_A14B_T2V_WORKFLOW),
+        );
+        let workflow = load_video_workflow(&leftover).unwrap();
+        assert_eq!(workflow["7"]["inputs"]["width"], 960);
+    }
 
-        let i2v = build_wan_i2v_workflow(
-            "make it move",
-            "custom-video.safetensors",
-            "custom-clip.safetensors",
-            "custom-vae.safetensors",
-            7,
-            "zone-i2v-source.png",
-            Some("jerry-wan.safetensors"),
-        )
-        .unwrap();
-        assert_eq!(i2v["12"]["inputs"]["lora_name"], "jerry-wan.safetensors");
-        assert_eq!(i2v["11"]["inputs"]["image"], "zone-i2v-source.png");
+    #[test]
+    fn a_missing_packaged_video_graph_loads_the_compiled_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("wan2.2-a14b-t2v-api.json");
+        assert_eq!(
+            load_video_workflow(&configured).unwrap(),
+            packaged_graph(PACKAGED_A14B_T2V_WORKFLOW)
+        );
+        assert_eq!(
+            load_i2v_workflow(&configured).unwrap(),
+            packaged_graph(PACKAGED_A14B_I2V_WORKFLOW)
+        );
+    }
+
+    #[test]
+    fn image_to_video_uses_a_valid_sibling_and_refuses_a_broken_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("my-video.json");
+        write_graph(&configured, &packaged_graph(PACKAGED_A14B_T2V_WORKFLOW));
+        let sibling = directory.path().join("wan2.2-a14b-i2v-api.json");
+        let mut workflow = narrowed(PACKAGED_A14B_I2V_WORKFLOW);
+        write_graph(&sibling, &workflow);
+        assert_eq!(
+            load_i2v_workflow(&configured).unwrap()["7"]["inputs"]["width"],
+            960
+        );
+        workflow.as_object_mut().unwrap().remove("11");
+        write_graph(&sibling, &workflow);
+        assert!(matches!(
+            load_i2v_workflow(&configured),
+            Err(Error::Configuration(_))
+        ));
     }
 
     #[test]
@@ -1903,7 +2317,6 @@ mod tests {
                 "clip.safetensors",
                 "vae.safetensors",
                 1,
-                None
             )
             .is_err()
         );
@@ -1915,7 +2328,6 @@ mod tests {
                 "vae.safetensors",
                 1,
                 "nested/file.png",
-                None
             )
             .is_err()
         );
@@ -2698,7 +3110,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/prompt"))
             .and(wiremock::matchers::body_string_contains(
-                "Wan22ImageToVideoLatent",
+                "EmptyHunyuanLatentVideo",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "v1"})))
             .mount(&server)
@@ -2738,6 +3150,329 @@ mod tests {
         assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(videos[0].mime, "video/webm");
         assert_eq!(progress_rx.recv().await.as_deref(), Some("Video queued..."));
+    }
+
+    async fn mock_video_prompt(server: &MockServer, prompt_id: &str) {
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": prompt_id})))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    async fn generate_clip(client: Client) -> Result<Vec<GeneratedImage>, Error> {
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        client
+            .generate_video("a fox running", None, &mut cancel_rx, progress_tx)
+            .await
+    }
+
+    async fn posted_bodies(server: &MockServer, endpoint: &str) -> Vec<Value> {
+        server
+            .received_requests()
+            .await
+            .expect("the mock server records requests")
+            .into_iter()
+            .filter(|request| request.method.as_str() == "POST" && request.url.path() == endpoint)
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_failed_history_poll_keeps_the_render_alive() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "flaky").await;
+        Mock::given(method("GET"))
+            .and(path("/history/flaky"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_video_output(&server, "flaky").await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let videos = generate_clip(client)
+            .await
+            .expect("one failed poll must not discard the render");
+        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+        assert!(
+            posted_bodies(&server, "/queue").await.is_empty(),
+            "a finished render must not be cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_download_slower_than_the_request_timeout_still_lands() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "slow").await;
+        Mock::given(method("GET"))
+            .and(path("/history/slow"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "slow": {"status": {"status_str": "success"}, "outputs": {
+                    "10": {"gifs": [{"filename": "zone.webm", "subfolder": "", "type": "output"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "video/webm")
+                    .set_body_bytes(vec![5, 6, 7])
+                    .set_delay(Duration::from_millis(2500)),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            request_timeout_secs: 1,
+            video_generation_timeout_secs: 60,
+            ..Default::default()
+        })
+        .unwrap();
+        let videos = generate_clip(client)
+            .await
+            .expect("a download inside the render deadline must land");
+        assert_eq!(videos[0].bytes.as_ref(), &[5, 6, 7]);
+    }
+
+    #[tokio::test]
+    async fn a_terminal_http_error_cancels_the_prompt_and_keeps_its_history() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "gone").await;
+        Mock::given(method("GET"))
+            .and(path("/history/gone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "gone": {"status": {"status_str": "success"}, "outputs": {
+                    "10": {"gifs": [{"filename": "zone.webm", "subfolder": "", "type": "output"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/queue"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(matches!(generate_clip(client).await, Err(Error::Http(_))));
+        assert_eq!(
+            posted_bodies(&server, "/queue").await,
+            [json!({"delete": ["gone"]})],
+            "a terminal error must delete the accepted prompt"
+        );
+        assert!(
+            posted_bodies(&server, "/history").await.is_empty(),
+            "history is cleared only after a clip lands"
+        );
+    }
+
+    async fn mock_queue(server: &MockServer, running: Value) {
+        Mock::given(method("GET"))
+            .and(path("/queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "queue_running": running,
+                "queue_pending": []
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn empty_history(prompt_id: &str) -> Mock {
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt_id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+    }
+
+    async fn history_reads(server: &MockServer, prompt_id: &str) -> usize {
+        let expected = format!("/history/{prompt_id}");
+        server
+            .received_requests()
+            .await
+            .expect("the mock server records requests")
+            .iter()
+            .filter(|request| request.method.as_str() == "GET" && request.url.path() == expected)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_prompt_comfyui_lost_fails_long_before_the_deadline() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "lost").await;
+        empty_history("lost").mount(&server).await;
+        mock_queue(&server, json!([])).await;
+        Mock::given(method("POST"))
+            .and(path("/queue"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            queue_check_interval_secs: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let result = tokio::time::timeout(REQUEST_WAIT, generate_clip(client))
+            .await
+            .expect("a lost prompt must fail instead of waiting out the generation deadline");
+        assert!(
+            matches!(result, Err(Error::InvalidResponse(LOST_PROMPT))),
+            "{result:?}"
+        );
+        assert_eq!(
+            history_reads(&server, "lost").await,
+            2,
+            "history is read once more after the queue misses the prompt"
+        );
+        assert_eq!(
+            posted_bodies(&server, "/queue").await,
+            [json!({"delete": ["lost"]})]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_finishes_between_history_and_queue_reads_is_collected() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "raced").await;
+        empty_history("raced").up_to_n_times(1).mount(&server).await;
+        mock_video_output(&server, "raced").await;
+        mock_queue(&server, json!([])).await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            queue_check_interval_secs: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let videos = generate_clip(client)
+            .await
+            .expect("a prompt that left the queue for history is finished, not lost");
+        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+        assert!(posted_bodies(&server, "/queue").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_prompt_still_in_the_queue_keeps_polling() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "queued").await;
+        empty_history("queued")
+            .up_to_n_times(3)
+            .mount(&server)
+            .await;
+        mock_video_output(&server, "queued").await;
+        mock_queue(&server, json!([[0, "queued", {}, {}, []]])).await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            queue_check_interval_secs: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let videos = generate_clip(client)
+            .await
+            .expect("a running prompt must not be taken for a lost one");
+        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(history_reads(&server, "queued").await, 4);
+    }
+
+    #[tokio::test]
+    async fn a_comfyui_that_goes_away_fails_with_a_connect_error_within_the_window() {
+        let server = MockServer::builder().start().await;
+        mock_video_prompt(&server, "dead").await;
+        empty_history("dead").mount(&server).await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            outage_window_secs: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let render = tokio::spawn(generate_clip(client));
+        wait_for_request(&server, "/prompt").await;
+        drop(server);
+        let result = tokio::time::timeout(REQUEST_WAIT, render)
+            .await
+            .expect("a dead ComfyUI must fail within the outage window, not the deadline")
+            .expect("the render task should not panic");
+        assert!(
+            matches!(&result, Err(Error::Http(error)) if error.is_connect()),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_download_that_keeps_failing_gives_up_within_the_window() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "stuck").await;
+        Mock::given(method("GET"))
+            .and(path("/history/stuck"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "stuck": {"status": {"status_str": "success"}, "outputs": {
+                    "10": {"gifs": [{"filename": "zone.webm", "subfolder": "", "type": "output"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/queue"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            outage_window_secs: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let result = tokio::time::timeout(REQUEST_WAIT, generate_clip(client))
+            .await
+            .expect("a failing download must give up within the outage window");
+        assert!(
+            matches!(
+                &result,
+                Err(Error::Http(error))
+                    if error.status() == Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            posted_bodies(&server, "/queue").await,
+            [json!({"delete": ["stuck"]})]
+        );
     }
 
     struct BodyDoesNotContain(&'static str);
@@ -2828,11 +3563,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_video_prefixes_a_still_identity_without_loading_wan_lora() {
+    async fn generate_video_posts_the_prompt_unchanged_when_an_identity_exists() {
+        const PROMPT: &str = "  ohwx walking on the beach\n";
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/prompt"))
-            .and(wiremock::matchers::body_string_contains("ohwx"))
             .and(BodyDoesNotContain("LoraLoaderModelOnly"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "still"})))
             .expect(1)
@@ -2853,28 +3588,27 @@ mod tests {
         let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, _) = mpsc::unbounded_channel();
         let videos = client
-            .generate_video(
-                "ohwx walking on the beach",
-                None,
-                &mut cancel_rx,
-                progress_tx,
-            )
+            .generate_video(PROMPT, None, &mut cancel_rx, progress_tx)
             .await
             .unwrap();
         assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+        let posted = posted_bodies(&server, "/prompt").await;
+        assert_eq!(
+            posted[0]["prompt"]["5"]["inputs"]["text"], PROMPT,
+            "a video prompt reaches the graph exactly as written"
+        );
     }
 
     #[tokio::test]
-    async fn generate_video_loads_wan_lora_when_sidecar_is_present() {
+    async fn generate_video_keeps_a14b_when_a_5b_wan_lora_is_present() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/prompt"))
             .and(wiremock::matchers::body_string_contains(
-                "LoraLoaderModelOnly",
+                "EmptyHunyuanLatentVideo",
             ))
-            .and(wiremock::matchers::body_string_contains(
-                "jerry-wan.safetensors",
-            ))
+            .and(BodyDoesNotContain("LoraLoaderModelOnly"))
+            .and(BodyDoesNotContain("jerry-wan.safetensors"))
             .and(wiremock::matchers::body_string_contains("ohwx"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "wan"})))
             .expect(1)
@@ -2902,6 +3636,37 @@ mod tests {
                 &mut cancel_rx,
                 progress_tx,
             )
+            .await
+            .unwrap();
+        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn generate_video_posts_the_configured_graph() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains("\"width\":960"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "custom"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_video_output(&server, "custom").await;
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("my-video.json");
+        write_graph(&configured, &narrowed(PACKAGED_A14B_T2V_WORKFLOW));
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            video_workflow_path: configured,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let videos = client
+            .generate_video("a fox running", None, &mut cancel_rx, progress_tx)
             .await
             .unwrap();
         assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
@@ -2963,6 +3728,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(videos[0].bytes.as_ref(), &[9, 8, 7, 6]);
+    }
+
+    #[tokio::test]
+    async fn a_broken_text_to_video_graph_leaves_image_to_video_working() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "uploaded-source.png",
+                "subfolder": "",
+                "type": "input"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains("WanImageToVideo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "i2v"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_video_output(&server, "i2v").await;
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("my-video.json");
+        let mut single_expert = packaged_graph(PACKAGED_A14B_T2V_WORKFLOW);
+        single_expert.as_object_mut().unwrap().remove("14");
+        write_graph(&configured, &single_expert);
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            video_workflow_path: configured,
+            ..Default::default()
+        })
+        .unwrap();
+        let source = SourceImage::new(vec![1, 2, 3, 4], "image/png").unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let videos = client
+            .generate_video("make it move", Some(&source), &mut cancel_rx, progress_tx)
+            .await
+            .expect("image-to-video must not load the text-to-video graph");
+        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+        assert!(matches!(
+            generate_clip(client).await,
+            Err(Error::Configuration(_))
+        ));
     }
 
     #[tokio::test]

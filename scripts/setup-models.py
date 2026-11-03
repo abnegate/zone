@@ -410,8 +410,9 @@ def format_plan(plan: Plan, catalog: dict[str, Any], download_models: Any, manif
             catalog, manifest, download_models, feature_id, preset
         )
         note = str(feature.get("description") or "")
-        if feature_id == "vision":
-            note = f"needs {format_ram(int(catalog['vision_min_ram_bytes']))} RAM"
+        if 'min_ram_bytes' in feature:
+            minimum = format_ram(int(feature['min_ram_bytes']))
+            note = f'needs {minimum} RAM'
         lines.append(
             f"{mark} {feature_id:<14}{format_disk(size):<12}{note}"
         )
@@ -486,23 +487,33 @@ def make_plan(
     )
 
 
-def enforce_gates(plan: Plan, catalog: dict[str, Any]) -> None:
-    vision_min = int(catalog["vision_min_ram_bytes"])
-    if "vision" in plan.features and plan.ram_bytes < vision_min:
-        if plan.wants_all:
-            raise PlanError(
-                "Cannot select all features: vision needs "
-                f"{format_ram(vision_min)} RAM (llava:7b). This machine has "
-                f"{format_ram(plan.ram_bytes)}. 8 GB can run chat only: "
-                "--features chat --chat-preset 8gb",
-                code="all-ram",
-            )
-        raise PlanError(
-            "Vision needs "
-            f"{format_ram(vision_min)} RAM (llava:7b). This machine has "
-            f"{format_ram(plan.ram_bytes)}. Drop vision or use a machine with at least 16 GB.",
-            code="vision-ram",
+def ram_error(plan: Plan, feature: dict[str, Any]) -> PlanError:
+    feature_id = str(feature['id'])
+    label = feature['label']
+    model = feature.get('ram_model') or label
+    rest = ','.join(other for other in plan.features if other != feature_id)
+    fallback = feature.get('ram_fallback') or f'Drop {feature_id} with --features {rest}'
+    minimum = format_ram(int(feature['min_ram_bytes']))
+    available = format_ram(plan.ram_bytes)
+    if plan.wants_all:
+        return PlanError(
+            f'Cannot select all features: {feature_id} needs {minimum} RAM ({model}). '
+            f'This machine has {available}. {fallback}',
+            code='all-ram',
         )
+    return PlanError(
+        f'{label} needs {minimum} RAM ({model}). This machine has {available}. '
+        f'Drop {feature_id} or use a machine with at least {minimum}.',
+        code=f'{feature_id}-ram',
+    )
+
+
+def enforce_gates(plan: Plan, catalog: dict[str, Any]) -> None:
+    for feature in catalog['features']:
+        if feature['id'] not in plan.features or 'min_ram_bytes' not in feature:
+            continue
+        if plan.ram_bytes < int(feature['min_ram_bytes']):
+            raise ram_error(plan, feature)
     if plan.disk_free_bytes < plan.required_free_bytes:
         report = disk_report(
             plan,

@@ -25,7 +25,7 @@
   "noise_offset": 0.05,
   "optimizer": "prodigy",
   "finetune_optimizer": "adamw",
-  "preview_steps": 12,
+  "preview_steps": 25,
   "preview_count": 4,
   "train_text_encoder": true,
   "freeze_text_encoder_2": true,

@@ -77,7 +77,7 @@ setup-comfyui-upscale-model: ## Explicitly download Real-ESRGAN x4plus upscale w
 		--bundle upscale \
 		$(if $(filter 1 true yes,$(FORCE)),--force,)
 
-setup-comfyui-video-model: ## Explicitly download Wan 2.2 TI2V 5B video weights (~16.9 GB)
+setup-comfyui-video-model: ## Explicitly download Wan 2.2 A14B video weights (~64.2 GB)
 	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
 		--manifest /opt/zone/model-manifest.json \
@@ -125,7 +125,7 @@ verify-comfyui-upscale-model: ## Verify the installed Real-ESRGAN x4plus size an
 		--bundle upscale \
 		--verify-only
 
-verify-comfyui-video-model: ## Verify the installed Wan 2.2 TI2V 5B size and SHA-256
+verify-comfyui-video-model: ## Verify the installed Wan 2.2 A14B sizes and SHA-256
 	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
 		--manifest /opt/zone/model-manifest.json \

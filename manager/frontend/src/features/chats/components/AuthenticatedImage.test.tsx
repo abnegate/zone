@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { isProtectedArtifactUrl } from '../api/protectedImages';
+import { isProtectedArtifactUrl, isProtectedImageUrl } from '../../../api/protectedImages';
 import { AuthenticatedImage } from './AuthenticatedImage';
 
 const originalFetch = globalThis.fetch;
@@ -119,5 +119,40 @@ describe('AuthenticatedImage', () => {
     expect(isProtectedArtifactUrl('https://other.example/api/artifacts/chat/image.webp')).toBe(
       false
     );
+  });
+
+  it('fetches train previews with the bearer token instead of an img src', async () => {
+    const imageBlob = new Blob(['preview'], { type: 'image/png' });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: async () => imageBlob,
+    } as Response);
+
+    render(
+      <AuthenticatedImage
+        src="/api/models/train/previews/step-250-0.png"
+        alt="Training preview 1 of 4"
+        accessToken="secret-token"
+        linked={false}
+        compact
+        fallbackClassName="train-meter-preview"
+      />
+    );
+
+    expect(screen.getByRole('status', { name: 'Loading image' })).toHaveClass(
+      'train-meter-preview'
+    );
+    const image = await screen.findByRole('img', { name: 'Training preview 1 of 4' });
+    expect(image).toHaveAttribute('src', 'blob:protected-image');
+    expect(fetchMock).toHaveBeenCalledWith('/api/models/train/previews/step-250-0.png', {
+      headers: { Authorization: 'Bearer secret-token' },
+      signal: expect.any(AbortSignal),
+    });
+    expect(isProtectedImageUrl('/api/models/train/previews/step-250-0.png')).toBe(true);
+    expect(isProtectedArtifactUrl('/api/models/train/previews/step-250-0.png')).toBe(false);
+    expect(
+      isProtectedImageUrl('https://example.test/api/models/train/previews/step-250-0.png')
+    ).toBe(false);
   });
 });
