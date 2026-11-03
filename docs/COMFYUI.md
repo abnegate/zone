@@ -787,6 +787,12 @@ only these inputs:
 - node `5`: positive prompt text
 - node `8` and node `14`: `noise_seed`
 
+`COMFYUI_VIDEO_WORKFLOW_PATH` may point at a custom text-to-video graph. It must
+keep these nodes, `KSamplerAdvanced` at `8` and `14`, `EmptyHunyuanLatentVideo`
+at `7` and `SaveWEBM` at `10`; a graph that is unreadable or breaks the contract
+fails the request rather than falling back to the packaged one. A leftover
+`wan2.2-ti2v-5b-api.json` path logs a warning and loads the A14B graph instead.
+
 `comfyui/workflows/wan2.2-a14b-i2v-api.json` is the image-to-video sibling.
 Chat uses it when the current message includes an image attachment (a data URL
 or a same-chat `/api/artifacts/...` URL) and the request is classified as
@@ -795,6 +801,10 @@ replace:
 
 - node `11`: uploaded source filename, wired as `start_image` on
   `WanImageToVideo`
+
+A `wan2.2-a14b-i2v-api.json` beside a custom `COMFYUI_VIDEO_WORKFLOW_PATH` is
+held to the same contract with `WanImageToVideo` at node `7` and `LoadImage` at
+node `11`; without one, the packaged image-to-video graph is used.
 
 Packaged defaults are Wan 2.2 A14B: 1280×704, length 81, 20 `euler`/`simple`
 steps split across high then low noise experts (0–10 leftover enable, 10–end

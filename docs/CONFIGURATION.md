@@ -1609,8 +1609,16 @@ details, and native macOS / bundled NVIDIA instructions.
 ### `COMFYUI_VIDEO_WORKFLOW_PATH`
 - **Default**: `/app/comfyui/workflows/wan2.2-a14b-t2v-api.json`
 - **Description**: In-container path to the versioned Wan 2.2 A14B
-  text-to-video API workflow. Image-to-video uses the sibling file
-  `wan2.2-a14b-i2v-api.json` in the same directory.
+  text-to-video API workflow. A custom graph is used as long as it keeps the
+  A14B contract (see *Video workflow contract* in `docs/COMFYUI.md`); a file
+  that is unreadable, is not JSON or breaks the contract fails video
+  generation instead of being swapped for the packaged graph. When the default
+  `wan2.2-a14b-t2v-api.json` is missing, the graph compiled into the binary is
+  used. A leftover `wan2.2-ti2v-5b-api.json` logs a warning and loads
+  `wan2.2-a14b-t2v-api.json` from the same directory, else the compiled graph.
+  Image-to-video uses the sibling file `wan2.2-a14b-i2v-api.json` in the same
+  directory under the same contract, or the compiled graph when that file is
+  absent.
 - **RAM**: 64 GB; setup refuses video (and `all`) on smaller machines.
 
 ### `COMFYUI_VIDEO_UNET`
