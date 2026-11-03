@@ -2839,6 +2839,12 @@ async fn set_secret(
         .await
 }
 
+/// Assert a webhook secret response's status without echoing a body that
+/// may carry the secret.
+fn answered(response: &common::TestResponse, expected: StatusCode) {
+    assert_eq!(response.status, expected);
+}
+
 async fn listed_config(
     client: &common::TestClient,
     token: &str,
@@ -3020,7 +3026,7 @@ async fn rotating_a_webhook_secret_retires_the_old_one() {
     let old = created["webhook_secret"].as_str().unwrap().to_string();
 
     let response = set_secret(&client, &token, &project, &config, &json!({})).await;
-    response.assert_status(StatusCode::OK);
+    answered(&response, StatusCode::OK);
     let body = response.json_value();
     let new = body["webhook_secret"].as_str().unwrap().to_string();
     assert!(
@@ -3079,7 +3085,7 @@ async fn another_projects_sync_has_no_webhook_secret_to_set() {
     let secret = created["webhook_secret"].as_str().unwrap().to_string();
 
     let response = set_secret(&client, &token, &other_project, &config, &json!({})).await;
-    response.assert_status(StatusCode::NOT_FOUND);
+    answered(&response, StatusCode::NOT_FOUND);
     assert_eq!(
         response.json_value()["error"],
         "Sync configuration not found"
@@ -3111,9 +3117,10 @@ async fn a_read_only_member_cannot_set_a_webhook_secret() {
 
     listed_config(&client, &viewer, &project).await;
     for body in [json!({}), json!({ "secret": "viewer-chosen-secret-123" })] {
-        set_secret(&client, &viewer, &project, &config, &body)
-            .await
-            .assert_status(StatusCode::FORBIDDEN);
+        answered(
+            &set_secret(&client, &viewer, &project, &config, &body).await,
+            StatusCode::FORBIDDEN,
+        );
     }
 
     assert_verified(&deliver_github(&client, &config, &secret).await);
@@ -3204,7 +3211,7 @@ async fn a_member_who_is_not_an_admin_cannot_set_or_rotate_a_webhook_secret() {
     listed_config(&client, &member, &project).await;
     for body in [json!({}), json!({ "secret": "member-chosen-secret-123" })] {
         let response = set_secret(&client, &member, &project, &config, &body).await;
-        response.assert_status(StatusCode::FORBIDDEN);
+        answered(&response, StatusCode::FORBIDDEN);
         assert_eq!(
             response.json_value()["error"],
             "Workspace admin access required"
@@ -3214,9 +3221,10 @@ async fn a_member_who_is_not_an_admin_cannot_set_or_rotate_a_webhook_secret() {
     assert_verified(&deliver_github(&client, &config, &secret).await);
 
     let (admin, _admin_id) = joined(&client, &workspace, WorkspaceRole::Admin).await;
-    set_secret(&client, &admin, &project, &config, &json!({}))
-        .await
-        .assert_status(StatusCode::OK);
+    answered(
+        &set_secret(&client, &admin, &project, &config, &json!({})).await,
+        StatusCode::OK,
+    );
 }
 
 #[tokio::test]
@@ -3275,7 +3283,7 @@ async fn setting_or_rotating_a_webhook_secret_moves_updated_at_and_records_who_d
     let github = github["config"]["id"].as_str().unwrap().to_string();
     let before = updated_at(&pool, &github).await;
     let response = set_secret(&client, &token, &project, &github, &json!({})).await;
-    response.assert_status(StatusCode::OK);
+    answered(&response, StatusCode::OK);
     let rotated = response.json_value()["webhook_secret"]
         .as_str()
         .unwrap()
@@ -3295,15 +3303,17 @@ async fn setting_or_rotating_a_webhook_secret_moves_updated_at_and_records_who_d
     let linear = configure(&client, &token, &project, &linear_sync()).await;
     let linear = linear["config"]["id"].as_str().unwrap().to_string();
     let before = updated_at(&pool, &linear).await;
-    set_secret(
-        &client,
-        &token,
-        &project,
-        &linear,
-        &json!({ "secret": signing_secret }),
-    )
-    .await
-    .assert_status(StatusCode::OK);
+    answered(
+        &set_secret(
+            &client,
+            &token,
+            &project,
+            &linear,
+            &json!({ "secret": signing_secret }),
+        )
+        .await,
+        StatusCode::OK,
+    );
     assert!(updated_at(&pool, &linear).await > before);
     let entries = audited(&pool, &linear).await;
     assert_eq!(entries.len(), 1, "one change, one entry: {entries:?}");
@@ -3552,7 +3562,7 @@ async fn a_github_sync_on_a_connected_project_registers_rotates_and_removes_its_
     assert_verified(&deliver_github(&client, &config, &secret).await);
 
     let rotated = set_secret(&client, &token, &project, &config, &json!({})).await;
-    rotated.assert_status(StatusCode::OK);
+    answered(&rotated, StatusCode::OK);
     let rotated = rotated.json_value();
     assert!(
         rotated["webhook_secret"].is_null(),
@@ -3600,7 +3610,7 @@ async fn a_rotation_github_refuses_shows_the_new_secret_and_stops_calling_the_we
     let config = id_of(&configure(&client, &token, &project, &connected_sync()).await);
 
     let rotated = set_secret(&client, &token, &project, &config, &json!({})).await;
-    rotated.assert_status(StatusCode::OK);
+    answered(&rotated, StatusCode::OK);
     let rotated = rotated.json_value();
     let secret = rotated["webhook_secret"].as_str().unwrap_or_default();
     assert!(
@@ -3625,7 +3635,7 @@ async fn a_github_webhook_deleted_on_github_is_registered_again_on_rotation() {
     registers(&github, 8).await;
 
     let rotated = set_secret(&client, &token, &project, &config, &json!({})).await;
-    rotated.assert_status(StatusCode::OK);
+    answered(&rotated, StatusCode::OK);
     let rotated = rotated.json_value();
     assert!(
         rotated["webhook_secret"].is_null(),
@@ -3653,7 +3663,7 @@ async fn a_rotation_after_the_token_is_gone_shows_the_secret_and_says_why() {
         .unwrap();
 
     let rotated = set_secret(&client, &token, &project, &config, &json!({})).await;
-    rotated.assert_status(StatusCode::OK);
+    answered(&rotated, StatusCode::OK);
     let rotated = rotated.json_value();
     assert!(is_generated_secret(
         rotated["webhook_secret"].as_str().unwrap_or_default()
