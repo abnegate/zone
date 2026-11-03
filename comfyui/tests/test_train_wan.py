@@ -34,6 +34,7 @@ def queued_job(name: str = 'jerry', trigger: str = 'ohwx', extra: dict | None = 
         'started_at': '2026-10-04T00:00:00Z',
         'recipe_id': 'wan-adapter',
         'hf_base': 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+        'base': 'wan-people',
     }
     if extra:
         job.update(extra)
@@ -112,6 +113,37 @@ class StubTrainingTests(unittest.TestCase):
             job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
             self.assertEqual(job['status'], 'succeeded')
             self.assertTrue((job_dir / 'jerry-wan.safetensors').is_file())
+
+
+class LegacyPublishTests(unittest.TestCase):
+    def test_a_video_lora_queued_before_the_upgrade_publishes_with_its_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            write_clips(job_dir, count=2)
+            (models / 'loras').mkdir()
+            (models / 'loras' / 'jerry.face.png').write_bytes(b'face')
+            job = queued_job(extra={'filename': 'jerry-wan.safetensors'})
+            del job['base']
+            train_sdxl.write_job(job_dir, job)
+            train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+            self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+            self.assertFalse((job_dir / 'jerry-wan.safetensors').exists())
+            self.assertTrue((models / 'loras' / 'jerry-wan.safetensors').is_file())
+            sidecar = json.loads(
+                (models / 'loras' / 'jerry-wan.safetensors.zone.json').read_text(encoding='utf-8')
+            )
+            self.assertEqual(
+                sidecar,
+                {
+                    'recipe_id': 'wan-adapter',
+                    'hf_base': 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+                    'trigger': 'ohwx',
+                    'architecture': 'wan',
+                    'face': 'jerry.face.png',
+                },
+            )
 
 
 class ClaimTests(unittest.TestCase):

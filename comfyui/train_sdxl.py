@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,11 @@ DEFAULT_CHECKPOINT = 'lustifySDXLNSFW_ggwpV7.safetensors'
 CONFIG_PATH = Path(__file__).with_name('train_sdxl_config.json')
 TRAIN_ROOT = '.zone-train'
 CLAIM_FILE = 'claimed'
+LORAS = 'loras'
+CHECKPOINTS = 'checkpoints'
+SIDECAR_SUFFIX = '.zone.json'
+GENERATION = 'generation'
+LANGUAGE_SUBJECT = 'language'
 LATEST_SNAPSHOT = 'latest.pt'
 STILL_METHODS = {'lora', 'finetune', 'pivotal'}
 ADAPTER_METHODS = {'lora', 'pivotal'}
@@ -674,6 +680,60 @@ def weight_path(job_dir: Path, job: dict[str, Any]) -> Path:
     return Path(job_dir) / weight_name(str(job['filename']), 'filename')
 
 
+def legacy(job: dict[str, Any]) -> bool:
+    """A job queued before abnegate-comfy has no `base`, and its trainer publishes it."""
+    return not job.get('base') and str(job.get('subject') or '') != LANGUAGE_SUBJECT
+
+
+def legacy_destination(models_dir: Path, job: dict[str, Any]) -> Path:
+    folder = CHECKPOINTS if job.get('method') == 'finetune' else LORAS
+    return Path(models_dir) / folder / weight_name(str(job['filename']), 'filename')
+
+
+def sidecar_path(weight: Path) -> Path:
+    return weight.with_name(weight.name + SIDECAR_SUFFIX)
+
+
+def sidecar_payload(job: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        'recipe_id': job.get('recipe_id') or recipe_for(job.get('method') or 'lora'),
+        'hf_base': job.get('hf_base') or DEFAULT_HF_BASE,
+        'trigger': job.get('trigger') or '',
+    }
+    if (job.get('method') or '') == 'pivotal':
+        payload['embedding'] = embedding_filename(job)
+    return payload
+
+
+def with_generation(sidecar: dict[str, Any]) -> dict[str, Any]:
+    """abnegate-comfy replaces a weight only when its sidecar names a `generation`."""
+    return {**sidecar, GENERATION: str(uuid.uuid4())}
+
+
+def legacy_publish(
+    models_dir: Path,
+    job_dir: Path,
+    job: dict[str, Any],
+    sidecar: dict[str, Any],
+) -> Path:
+    destination = legacy_destination(models_dir, job)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(weight_path(job_dir, job), destination)
+    write_json(sidecar_path(destination), with_generation(sidecar))
+    return destination
+
+
+def succeed(
+    models_dir: Path,
+    job_dir: Path,
+    job: dict[str, Any],
+    sidecar: dict[str, Any],
+) -> dict[str, Any]:
+    if legacy(job):
+        legacy_publish(models_dir, job_dir, job, sidecar)
+    return mark_succeeded(job_dir, job)
+
+
 def pid_alive(pid: object) -> bool:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
@@ -732,9 +792,9 @@ def find_job(models_dir: Path) -> Path | None:
 
 def claim(job_dir: Path, job: dict[str, Any]) -> bool:
     # abnegate-comfy creates the same claim before it gives up on a queued job;
-    # a job past queued was claimed by this trainer before it crashed.
+    # a running job was claimed by this trainer before it crashed.
     if job.get('status') != 'queued':
-        return True
+        return job.get('status') == 'running'
     try:
         descriptor = os.open(
             Path(job_dir) / CLAIM_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
@@ -961,7 +1021,7 @@ def process_job(
             run_stub(models_dir, job_dir, job, config)
         else:
             train(models_dir, job_dir, job, config)
-        mark_succeeded(job_dir, job)
+        succeed(models_dir, job_dir, job, sidecar_payload(job))
     except Exception as error:
         if not is_transient_crash(error):
             mark_failed(job_dir, job, error)
@@ -1787,7 +1847,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     from diffusers import DDPMScheduler
 
     method = job['method']
-    checkpoint = Path(models_dir) / 'checkpoints' / job['checkpoint']
+    checkpoint = Path(models_dir) / CHECKPOINTS / job['checkpoint']
     if not checkpoint.is_file():
         raise FileNotFoundError(f'base checkpoint is missing: {checkpoint}')
     frames = list_frames(Path(job_dir) / 'dataset')

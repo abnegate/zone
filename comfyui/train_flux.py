@@ -115,6 +115,15 @@ def normalize_job(job: dict[str, Any], job_dir: Path) -> dict[str, Any]:
     return job
 
 
+def sidecar_payload(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        'recipe_id': job.get('recipe_id') or DEFAULT_RECIPE,
+        'hf_base': job.get('hf_base') or DEFAULT_HF_BASE,
+        'trigger': job.get('trigger') or '',
+        'architecture': 'qwen_edit' if is_qwen(job) else 'flux',
+    }
+
+
 def run_stub(job_dir: Path, job: dict[str, Any], config: dict[str, Any]) -> None:
     total = steps_for(int(job.get('image_count') or 0), config)
     progress = train_sdxl.Progress(job_dir, 'other', total)
@@ -431,7 +440,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         transformer, vae = load_qwen_modules(job, device, dtype)
         targets = QWEN_TARGETS
     else:
-        checkpoint = Path(models_dir) / 'checkpoints' / job['checkpoint']
+        checkpoint = Path(models_dir) / train_sdxl.CHECKPOINTS / job['checkpoint']
         if not checkpoint.is_file():
             raise FileNotFoundError(f'Flux checkpoint is missing: {checkpoint}')
         transformer = load_flux_transformer(checkpoint, device, dtype)
@@ -537,7 +546,7 @@ def process_job(models_dir: Path, job_dir: Path, stub: bool) -> None:
             run_stub(job_dir, job, config)
         else:
             train(models_dir, job_dir, job, config)
-        train_sdxl.mark_succeeded(job_dir, job)
+        train_sdxl.succeed(models_dir, job_dir, job, sidecar_payload(job))
     except Exception as error:
         train_sdxl.mark_failed(job_dir, job, error)
         raise

@@ -298,24 +298,43 @@ fn complete_language_host_job(models_directory: PathBuf) {
 }
 
 /// Runs zone's host trainer, `comfyui/train_sdxl.py`, in stub mode on the
-/// first job queued under `models_directory`, the way the `ai.zone.train`
-/// LaunchAgent would.
-fn run_host_trainer(models_directory: PathBuf) -> tokio::task::JoinHandle<std::process::Output> {
+/// first job queued under `models_directory` other than `previous`, the way
+/// the `ai.zone.train` LaunchAgent would.
+fn run_host_trainer_after(
+    models_directory: PathBuf,
+    previous: Option<uuid::Uuid>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let config = comfy(&models_directory);
         let deadline = tokio::time::Instant::now() + TRAIN_JOB_BUDGET;
-        while host::current(&config).is_none() && tokio::time::Instant::now() < deadline {
+        while host::current(&config).map(|job| job.id) == previous
+            && tokio::time::Instant::now() < deadline
+        {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        tokio::process::Command::new("python3")
-            .arg(settings::development_directory().join("train_sdxl.py"))
-            .args(["--stub", "--once", "--models-dir"])
-            .arg(&models_directory)
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .output()
-            .await
-            .expect("python3 runs the host trainer")
+        train_on_host(&models_directory).await
     })
+}
+
+fn run_host_trainer(models_directory: PathBuf) -> tokio::task::JoinHandle<()> {
+    run_host_trainer_after(models_directory, None)
+}
+
+async fn train_on_host(models_directory: &Path) {
+    let output = tokio::process::Command::new("python3")
+        .arg(settings::development_directory().join("train_sdxl.py"))
+        .args(["--stub", "--once", "--models-dir"])
+        .arg(models_directory)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .await
+        .expect("python3 runs the host trainer");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 const TRAIN_JOB_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
@@ -534,13 +553,7 @@ async fn a_person_lora_the_host_trainer_leaves_in_its_job_is_published_with_its_
     assert_eq!(status, StatusCode::ACCEPTED, "{started}");
 
     let job = wait_train_job(&router, &token).await;
-    let output = trainer.await.unwrap();
-    assert!(
-        output.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    trainer.await.unwrap();
     assert_eq!(job["status"], "succeeded", "{job}");
     assert_eq!(job["filename"], "jerry.safetensors");
     let weight = models_directory.join("loras/jerry.safetensors");
@@ -568,6 +581,61 @@ async fn a_person_lora_the_host_trainer_leaves_in_its_job_is_published_with_its_
             .exists(),
         "the job directory gave up its copy once the weight was published"
     );
+    let _ = fs::remove_dir_all(models_directory);
+}
+
+#[tokio::test]
+async fn a_lora_queued_before_the_upgrade_trains_again_without_a_restart() {
+    let models_directory = temp_models();
+    plant_image_bases(&models_directory);
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) =
+        router_tuned(&ollama, &catalog, models_directory.clone(), None, |comfy| {
+            comfy.host_trainer = comfy
+                .host_trainer
+                .take()
+                .map(|trainer| trainer.with_poll_interval(std::time::Duration::from_millis(20)));
+        })
+        .await;
+    let legacy = host_job("jerry", "lora");
+    assert!(
+        legacy.base.is_empty(),
+        "a job queued before the upgrade has no base"
+    );
+    let directory = write_host_job(&models_directory, &legacy);
+    fs::create_dir_all(directory.path().join("dataset")).unwrap();
+    fs::write(directory.path().join("dataset/0000.png"), b"png").unwrap();
+    fs::write(directory.path().join("dataset/0000.txt"), "ohwx person").unwrap();
+    train_on_host(&models_directory).await;
+    let sidecar = models_directory.join("loras/jerry.safetensors.zone.json");
+    let previous = fs::read(&sidecar).expect("the trainer published the queued job");
+
+    let trainer = run_host_trainer_after(models_directory.clone(), Some(legacy.id));
+    let body = json!({
+        "name": "jerry",
+        "base": "sdxl-people",
+        "trigger": "ohwx",
+        "subject": "person",
+        "images": [{
+            "filename": "a.png",
+            "caption": "a portrait",
+            "bytes_base64": TINY_PNG
+        }]
+    });
+    let (status, started) = post_json(router.clone(), &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let job = wait_train_job(&router, &token).await;
+    trainer.await.unwrap();
+    assert_eq!(job["status"], "succeeded", "{job}");
+    assert_ne!(
+        fs::read(&sidecar).unwrap(),
+        previous,
+        "retraining the name published over the old weight"
+    );
+    let published: Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+    let generation = published["generation"].as_str().expect("a generation");
+    uuid::Uuid::parse_str(generation).expect("the generation is a UUID");
     let _ = fs::remove_dir_all(models_directory);
 }
 
@@ -602,13 +670,7 @@ async fn a_pivotal_lora_the_host_trainer_leaves_in_its_job_is_published_with_its
     assert_eq!(status, StatusCode::ACCEPTED, "{started}");
 
     let job = wait_train_job(&router, &token).await;
-    let output = trainer.await.unwrap();
-    assert!(
-        output.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    trainer.await.unwrap();
     assert_eq!(job["status"], "succeeded", "{job}");
     assert_eq!(job["method"], "pivotal", "{job}");
     assert!(

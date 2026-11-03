@@ -61,6 +61,7 @@ def queued_job(method: str = 'lora', extra: dict | None = None) -> dict:
         'status': 'queued',
         'error': None,
         'provider': 'runpod',
+        'base': 'sdxl-people',
     }
     if extra:
         job.update(extra)
@@ -96,6 +97,33 @@ def legacy_link(name: str, target: str, kind: bytes = tarfile.SYMTYPE) -> bytes:
         info.linkname = target
         archive.addfile(info)
     return buffer.getvalue()
+
+
+def old_format_job(pod_id: str) -> dict:
+    return {
+        'schema_version': 1,
+        'id': str(uuid.uuid4()),
+        'name': 'jerry',
+        'method': 'lora',
+        'subject': 'person',
+        'trigger': 'ohwx',
+        'checkpoint': 'lustifySDXLNSFW_ggwpV7.safetensors',
+        'filename': 'jerry.safetensors',
+        'status': 'running',
+        'error': None,
+        'pid': None,
+        'provider': 'runpod',
+        'pod_id': pod_id,
+    }
+
+
+def without_filter(extractall):
+    def extract(self, path='.', members=None, *, numeric_owner=False, **options):
+        if 'filter' in options:
+            raise TypeError("extractall() got an unexpected keyword argument 'filter'")
+        return extractall(self, path, members, numeric_owner=numeric_owner)
+
+    return extract
 
 
 def add_member(archive: tarfile.TarFile, name: str, data: bytes) -> None:
@@ -803,7 +831,112 @@ class LegacyArtifactTests(unittest.TestCase):
                 self.assertEqual(sorted(path.name for path in root.iterdir()), ['models'])
                 self.assertEqual(list(job_dir.iterdir()), [])
 
+    def resume_old_pod(self, models: Path, method: str, members: dict[str, bytes]) -> Path:
+        job_dir = models / '.zone-train' / str(uuid.uuid4())
+        job_dir.mkdir(parents=True)
+        job = old_format_job('keep-me')
+        job['method'] = method
+        train_sdxl.write_job(job_dir, job)
+        write_dataset(job_dir)
+        (job_dir / 'runpod.key').write_text('rp-test-key\n', encoding='utf-8')
+        client = mock.Mock()
+        client.get_pod.return_value = {'id': 'keep-me', 'status': 'RUNNING'}
+        with (
+            mock.patch.object(train_runpod, 'wait_ready', return_value={'status': 'running'}),
+            mock.patch.object(train_runpod, 'poll_until_done'),
+            mock.patch.object(
+                train_runpod, 'open_url', return_value=legacy_artifact(members)
+            ),
+        ):
+            train_runpod.process_job(
+                models,
+                job_dir,
+                train_sdxl.load_config(),
+                client=client,
+                sleep=lambda _interval: None,
+                proxy_base='http://127.0.0.1:9',
+            )
+        job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+        self.assertEqual(job['status'], 'succeeded', job.get('error'))
+        client.delete_pod.assert_called_once_with('keep-me')
+        return job_dir
+
     def test_a_pod_resumed_across_the_upgrade_publishes_its_old_layout_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            sidecar = {
+                'recipe_id': 'sdxl-adapter',
+                'hf_base': train_sdxl.DEFAULT_HF_BASE,
+                'trigger': 'ohwx',
+            }
+            job_dir = self.resume_old_pod(
+                models,
+                'lora',
+                {
+                    'loras/jerry.safetensors': b'weight',
+                    'loras/jerry.safetensors.zone.json': json.dumps(sidecar).encode(),
+                    'loras/jerry.face.png': b'face',
+                },
+            )
+            self.assertEqual((models / 'loras' / 'jerry.safetensors').read_bytes(), b'weight')
+            published = json.loads(
+                (models / 'loras' / 'jerry.safetensors.zone.json').read_text(encoding='utf-8')
+            )
+            published.pop('generation')
+            self.assertEqual(published, sidecar)
+            self.assertEqual((models / 'loras' / 'jerry.face.png').read_bytes(), b'face')
+            self.assertFalse((job_dir / 'jerry.safetensors').exists())
+
+    def test_a_pod_resumed_across_the_upgrade_leaves_a_name_that_trains_again(self) -> None:
+        for method, folder, recipe in (
+            ('lora', 'loras', 'sdxl-adapter'),
+            ('finetune', 'checkpoints', 'sdxl'),
+        ):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
+                models = Path(directory)
+                sidecar = {
+                    'recipe_id': recipe,
+                    'hf_base': train_sdxl.DEFAULT_HF_BASE,
+                    'trigger': 'ohwx',
+                }
+                self.resume_old_pod(
+                    models,
+                    method,
+                    {
+                        f'{folder}/jerry.safetensors': b'weight',
+                        f'{folder}/jerry.safetensors.zone.json': json.dumps(sidecar).encode(),
+                    },
+                )
+                published = json.loads(
+                    (models / folder / 'jerry.safetensors.zone.json').read_text(encoding='utf-8')
+                )
+                self.assertIn(
+                    'generation',
+                    published,
+                    'abnegate-comfy refuses to replace a weight whose sidecar has no generation',
+                )
+                uuid.UUID(published['generation'])
+
+    def test_a_resumed_pod_stamps_only_its_own_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            other = json.dumps({'recipe_id': 'sdxl-adapter', 'trigger': 'sks'}).encode()
+            self.resume_old_pod(
+                models,
+                'lora',
+                {
+                    'loras/jerry.safetensors': b'weight',
+                    'loras/jerry.safetensors.zone.json': json.dumps(
+                        {'recipe_id': 'sdxl-adapter', 'trigger': 'ohwx'}
+                    ).encode(),
+                    'loras/tom.safetensors.zone.json': other,
+                },
+            )
+            self.assertEqual(
+                (models / 'loras' / 'tom.safetensors.zone.json').read_bytes(), other
+            )
+
+    def test_a_reinstalled_trainer_resumes_a_pod_whose_job_has_a_base(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
             job_dir = stage_job(models, extra={'pod_id': 'keep-me'})
@@ -834,6 +967,86 @@ class LegacyArtifactTests(unittest.TestCase):
             self.assertEqual(job['status'], 'succeeded')
             self.assertEqual((job_dir / 'jerry.safetensors').read_bytes(), b'weight')
             self.assertFalse((models / 'loras' / 'jerry.safetensors.zone.json').exists())
+
+
+class LegacyRemoteTests(unittest.TestCase):
+    def test_a_job_queued_before_the_upgrade_comes_back_published_from_a_new_pod(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as remote_directory,
+            tempfile.TemporaryDirectory() as local_directory,
+        ):
+            remote = Path(remote_directory)
+            remote_models = remote / 'models'
+            remote_job = remote_models / '.zone-train' / 'remote-job'
+            remote_job.mkdir(parents=True)
+            job = old_format_job('keep-me')
+            del job['pod_id']
+            train_sdxl.write_job(remote_job, train_runpod.remote_job(job))
+            write_dataset(remote_job)
+            train_sdxl.process_job(remote_models, remote_job, train_sdxl.load_config(), stub=True)
+            train_runpod.write_artifact(
+                remote, remote_models, remote_job, train_sdxl.load_job(remote_job)
+            )
+
+            local_models = Path(local_directory)
+            local_job = local_models / '.zone-train' / 'local-job'
+            local_job.mkdir(parents=True)
+            artifact = (remote / 'artifact.tar.gz').read_bytes()
+            with mock.patch.object(train_runpod, 'open_url', return_value=artifact):
+                train_runpod.download_artifact('http://pod', local_models, local_job, job)
+
+            self.assertTrue((local_models / 'loras' / 'jerry.safetensors').is_file())
+            sidecar = json.loads(
+                (local_models / 'loras' / 'jerry.safetensors.zone.json').read_text(
+                    encoding='utf-8'
+                )
+            )
+            self.assertEqual(sidecar['recipe_id'], 'sdxl-adapter')
+            self.assertEqual(sidecar['trigger'], 'ohwx')
+            uuid.UUID(sidecar['generation'])
+            self.assertEqual(list(local_job.iterdir()), [])
+
+
+class UnsafeArtifactTests(unittest.TestCase):
+    def artifact(self, members: dict[str, bytes], link: str | None = None) -> bytes:
+        buffer = BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+            add_member(archive, 'job/jerry.safetensors', b'weight')
+            for name, data in members.items():
+                add_member(archive, name, data)
+            if link is not None:
+                info = tarfile.TarInfo(link)
+                info.type = tarfile.SYMTYPE
+                info.linkname = '../../../outside'
+                archive.addfile(info)
+        return buffer.getvalue()
+
+    def test_an_unsafe_new_layout_member_is_refused_without_the_extraction_filter(self) -> None:
+        artifacts = {
+            'job parent': self.artifact({'job/../../../escape.safetensors': b'x'}),
+            'models parent': self.artifact({'models/../escape.safetensors': b'x'}),
+            'models symlink': self.artifact({}, link='models/loras/link.safetensors'),
+        }
+        for label, artifact in artifacts.items():
+            with self.subTest(member=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                models = root / 'models'
+                job_dir = models / '.zone-train' / 'local-job'
+                job_dir.mkdir(parents=True)
+                job = train_sdxl.normalize_job(queued_job(), job_dir)
+                with (
+                    mock.patch.object(
+                        tarfile.TarFile,
+                        'extractall',
+                        without_filter(tarfile.TarFile.extractall),
+                    ),
+                    mock.patch.object(train_runpod, 'open_url', return_value=artifact),
+                    self.assertRaisesRegex(RuntimeError, 'unsafe'),
+                ):
+                    train_runpod.download_artifact('http://pod', models, job_dir, job)
+                self.assertEqual(sorted(path.name for path in root.iterdir()), ['models'])
+                self.assertEqual(list(job_dir.iterdir()), [])
+                self.assertFalse((models / 'loras').exists())
 
 
 class PublishedFilesTests(unittest.TestCase):
@@ -870,6 +1083,7 @@ class LanguageImportTests(unittest.TestCase):
                     'subject': 'language',
                     'checkpoint': 'qwen2.5:7b',
                     'pod_id': 'keep-me',
+                    'base': '',
                 },
             )
             client = mock.Mock()

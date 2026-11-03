@@ -22,6 +22,7 @@ import train_sdxl  # noqa: E402
 
 SCRIPT = COMFYUI / 'train_sdxl.py'
 CLAIM = 'claimed'
+BASE = 'sdxl-people'
 
 
 def queued_job(
@@ -43,9 +44,16 @@ def queued_job(
         'total': None,
         'pid': None,
         'started_at': '2026-10-04T00:00:00Z',
+        'base': BASE,
     }
     if extra:
         job.update(extra)
+    return job
+
+
+def legacy_job(method: str = 'lora') -> dict:
+    job = queued_job(method=method)
+    del job['base']
     return job
 
 
@@ -841,6 +849,97 @@ class StubOnceTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
 
+class LegacyPublishTests(unittest.TestCase):
+    def run_stub(self, models: Path, method: str) -> Path:
+        job_dir = models / '.zone-train' / str(uuid.uuid4())
+        job_dir.mkdir(parents=True)
+        train_sdxl.write_job(job_dir, legacy_job(method=method))
+        write_dataset(job_dir, count=2)
+        train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+        self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+        self.assertFalse(
+            (job_dir / 'jerry.safetensors').exists(),
+            'a job queued before the upgrade has no base, so nothing publishes it from the job directory',
+        )
+        return job_dir
+
+    def sidecar(self, weight: Path) -> dict:
+        self.assertTrue(weight.is_file(), f'{weight} was not published')
+        return json.loads(
+            weight.with_name(weight.name + '.zone.json').read_text(encoding='utf-8')
+        )
+
+    def test_a_lora_queued_before_the_upgrade_publishes_with_its_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            self.run_stub(models, 'lora')
+            sidecar = self.sidecar(models / 'loras' / 'jerry.safetensors')
+            sidecar.pop('generation')
+            self.assertEqual(
+                sidecar,
+                {
+                    'recipe_id': 'sdxl-adapter',
+                    'hf_base': train_sdxl.DEFAULT_HF_BASE,
+                    'trigger': 'ohwx',
+                },
+            )
+
+    def test_a_lora_queued_before_the_upgrade_can_train_again_without_a_restart(self) -> None:
+        for method, folder in (
+            ('lora', 'loras'),
+            ('pivotal', 'loras'),
+            ('finetune', 'checkpoints'),
+        ):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
+                models = Path(directory)
+                self.run_stub(models, method)
+                sidecar = self.sidecar(models / folder / 'jerry.safetensors')
+                self.assertIn(
+                    'generation',
+                    sidecar,
+                    'abnegate-comfy refuses to replace a weight whose sidecar has no generation',
+                )
+                uuid.UUID(sidecar['generation'])
+
+    def test_each_legacy_publish_is_a_new_generation(self) -> None:
+        generations = set()
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as directory:
+                models = Path(directory)
+                self.run_stub(models, 'lora')
+                generations.add(self.sidecar(models / 'loras' / 'jerry.safetensors')['generation'])
+        self.assertEqual(len(generations), 2, generations)
+
+    def test_a_pivotal_lora_queued_before_the_upgrade_keeps_its_embedding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            self.run_stub(models, 'pivotal')
+            sidecar = self.sidecar(models / 'loras' / 'jerry.safetensors')
+            self.assertEqual(sidecar['embedding'], 'jerry.safetensors')
+            self.assertEqual(sidecar['recipe_id'], 'sdxl-adapter')
+            self.assertTrue((models / 'embeddings' / 'jerry.safetensors').is_file())
+
+    def test_a_fine_tune_queued_before_the_upgrade_publishes_among_the_checkpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            self.run_stub(models, 'finetune')
+            sidecar = self.sidecar(models / 'checkpoints' / 'jerry.safetensors')
+            self.assertEqual(sidecar['recipe_id'], 'sdxl')
+            self.assertEqual(sidecar['trigger'], 'ohwx')
+            self.assertFalse((models / 'loras' / 'jerry.safetensors').exists())
+
+    def test_a_job_with_a_base_is_left_in_the_job_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            train_sdxl.write_job(job_dir, queued_job())
+            write_dataset(job_dir, count=2)
+            train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+            self.assertTrue((job_dir / 'jerry.safetensors').is_file())
+            self.assertFalse((models / 'loras').exists())
+
+
 class ClaimTests(unittest.TestCase):
     def stage(self, models: Path, started_at: str = '2026-10-04T00:00:00Z') -> Path:
         job_dir = models / '.zone-train' / str(uuid.uuid4())
@@ -912,6 +1011,22 @@ class ClaimTests(unittest.TestCase):
             self.assertEqual(train_sdxl.find_job(models), job_dir)
             train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
             self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+
+    def test_a_job_that_is_neither_queued_nor_running_is_not_revived(self) -> None:
+        for status in ('failed', 'succeeded'):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                models = Path(directory)
+                job_dir = self.stage(models)
+                job = train_sdxl.load_job(job_dir)
+                job['status'] = status
+                train_sdxl.write_job(job_dir, job)
+                before = (job_dir / 'job.json').read_bytes()
+                self.assertFalse(train_sdxl.claim(job_dir, job))
+                with mock.patch.object(train_sdxl, 'run_stub') as run_stub:
+                    train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+                run_stub.assert_not_called()
+                self.assertEqual((job_dir / 'job.json').read_bytes(), before)
+                self.assertFalse((job_dir / 'pid').exists())
 
     def test_find_job_passes_over_a_claimed_queued_job(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

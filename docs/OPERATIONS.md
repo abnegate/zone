@@ -310,14 +310,21 @@ After the upgrade:
    `ai.zone.train` out and bootstraps it again, so the trainer restarts on
    them and picks up any queued job.
 
-A Runpod pod started before the upgrade keeps running the scripts it was sent
-and returns its artifact in the old layout, with the weight under `loras/` or
-`checkpoints/` beside its sidecar. The reinstalled trainer resumes that pod,
-moves the weight into the job directory, drops the old sidecar, since zone
-writes its own, and puts the embedding, face image or language model under the
-models directory, without replacing any other file already there. A trainer
-that has not been reinstalled cannot read that layout either, and fails the
-run with `the Runpod artifact holds no trained weight`.
+A job zone queued before the upgrade has no `base` in its `job.json`, and zone
+never publishes such a job. The reinstalled trainer publishes it the way the
+old scripts did: it trains the job, moves the weight into `loras/`, or
+`checkpoints/` for a fine-tune, and writes the old `.zone.json` sidecar beside
+it, with the `embedding` of a pivotal run. A Runpod pod started before the
+upgrade keeps running the scripts it was sent and returns its artifact in the
+old layout, with the weight under `loras/` or `checkpoints/` beside its
+sidecar; the reinstalled trainer resumes that pod and puts the weight, its
+sidecar, and the embedding or face image under the models directory, without
+replacing any other file already there. A base-less job still queued for
+Runpod is trained on a new pod, which publishes it the same way before it
+returns. The trainer gives each of those sidecars a fresh `generation`, the
+mark abnegate-comfy looks for before it replaces a weight, so the name trains
+again straight away, with no restart. A language job publishes its model on
+its own path either way.
 
 ## Host trainer on Linux
 

@@ -62,8 +62,7 @@ SCRIPTS = (
 )
 JOB_ARCHIVE = 'job'
 MODELS_ARCHIVE = 'models'
-LEGACY_WEIGHT_FOLDERS = ('loras', 'checkpoints')
-LEGACY_SIDECAR_SUFFIX = '.zone.json'
+LEGACY_WEIGHT_FOLDERS = (train_sdxl.LORAS, train_sdxl.CHECKPOINTS)
 LEGACY_STAGING = '.legacy-artifact'
 
 BOOTSTRAP = r'''from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -456,7 +455,7 @@ def pack_upload(
             if caption.is_file():
                 archive.add(caption, arcname=f'class/{caption.name}')
         stem = Path(str(job.get('filename') or job.get('name') or 'person')).stem
-        face = Path(models_dir) / 'loras' / f'{stem}.face.png'
+        face = Path(models_dir) / train_sdxl.LORAS / f'{stem}.face.png'
         if face.is_file():
             archive.add(face, arcname=f'loras/{face.name}')
     return buffer.getvalue()
@@ -532,6 +531,8 @@ def download_artifact(
         if not job_members and not model_members:
             extract_legacy(archive, Path(models_dir), Path(job_dir), job)
             return
+        for member in job_members + model_members:
+            require_safe(member)
         extract_tar(archive, Path(job_dir), job_members)
         extract_tar(archive, Path(models_dir), model_members)
 
@@ -556,6 +557,7 @@ def extract_legacy(
     try:
         extract_tar(archive, staging, members)
         claim_legacy_weight(staging, job_dir, job)
+        stamp_legacy_sidecar(staging, models_dir, job)
         for staged in sorted(staging.rglob('*')):
             if not staged.is_file():
                 continue
@@ -574,9 +576,22 @@ def claim_legacy_weight(staging: Path, job_dir: Path, job: dict[str, Any]) -> No
         return
     for folder in LEGACY_WEIGHT_FOLDERS:
         staged = staging / folder / weight.name
-        staged.with_name(staged.name + LEGACY_SIDECAR_SUFFIX).unlink(missing_ok=True)
+        train_sdxl.sidecar_path(staged).unlink(missing_ok=True)
         if staged.is_file():
             os.replace(staged, weight)
+
+
+def stamp_legacy_sidecar(staging: Path, models_dir: Path, job: dict[str, Any]) -> None:
+    if not train_sdxl.legacy(job):
+        return
+    published = train_sdxl.sidecar_path(train_sdxl.legacy_destination(models_dir, job))
+    staged = staging / published.relative_to(models_dir)
+    if not staged.is_file():
+        return
+    sidecar = json.loads(staged.read_text(encoding='utf-8'))
+    if not isinstance(sidecar, dict):
+        raise RuntimeError(f'the Runpod artifact holds a malformed sidecar: {staged.name}')
+    train_sdxl.write_json(staged, train_sdxl.with_generation(sidecar))
 
 
 def huggingface_url(repo: str, filename: str) -> str:
@@ -625,12 +640,12 @@ def download_base(job: dict[str, Any], models_dir: Path) -> None:
         if train_flux.is_qwen(job):
             return
         filename = str(job.get('checkpoint') or train_flux.DEFAULT_CHECKPOINT)
-        dest = Path(models_dir) / 'checkpoints' / filename
+        dest = Path(models_dir) / train_sdxl.CHECKPOINTS / filename
         fetch_file(huggingface_url(train_flux.checkpoint_repo(filename), filename), dest)
         return
     filename = str(job.get('checkpoint') or train_sdxl.DEFAULT_CHECKPOINT)
     repo = str(job.get('hf_base') or train_sdxl.DEFAULT_HF_BASE)
-    dest = Path(models_dir) / 'checkpoints' / filename
+    dest = Path(models_dir) / train_sdxl.CHECKPOINTS / filename
     fetch_file(huggingface_url(repo, filename), dest)
 
 
@@ -649,21 +664,30 @@ def ensure_packages() -> None:
 
 
 def trained_weight(job_dir: Path, job: dict[str, Any]) -> Path | None:
-    if str(job.get('subject') or '') == 'language':
+    if str(job.get('subject') or '') == train_sdxl.LANGUAGE_SUBJECT or train_sdxl.legacy(job):
         return None
     return train_sdxl.weight_path(job_dir, job)
+
+
+def returned_weight(models_dir: Path, job_dir: Path, job: dict[str, Any]) -> Path | None:
+    if train_sdxl.legacy(job):
+        return train_sdxl.legacy_destination(models_dir, job)
+    return trained_weight(job_dir, job)
 
 
 def published_destinations(models_dir: Path, job: dict[str, Any]) -> list[Path]:
     models_dir = Path(models_dir)
     destinations = []
+    if train_sdxl.legacy(job):
+        weight = train_sdxl.legacy_destination(models_dir, job)
+        destinations += [weight, train_sdxl.sidecar_path(weight)]
     if str(job.get('method') or 'lora') == 'pivotal':
         destinations.append(train_sdxl.embedding_path(models_dir, job))
     stem = Path(str(job.get('filename') or job.get('name') or '')).stem
     name = str(job.get('name') or stem)
     for candidate in dict.fromkeys([stem, name]):
         if candidate:
-            destinations.append(models_dir / 'loras' / f'{candidate}.face.png')
+            destinations.append(models_dir / train_sdxl.LORAS / f'{candidate}.face.png')
     return destinations
 
 
@@ -725,10 +749,10 @@ def run_remote(root: Path) -> None:
                 shutil.copy2(entry, dest / entry.name)
     loras = root / 'loras'
     if loras.is_dir():
-        (models / 'loras').mkdir(parents=True, exist_ok=True)
+        (models / train_sdxl.LORAS).mkdir(parents=True, exist_ok=True)
         for entry in loras.iterdir():
             if entry.is_file():
-                shutil.copy2(entry, models / 'loras' / entry.name)
+                shutil.copy2(entry, models / train_sdxl.LORAS / entry.name)
     download_base(job, models)
     ensure_packages()
     script = root / remote_script(job)
@@ -820,7 +844,7 @@ def process_job(
             upload_bundle(base, pack_upload(models_dir, job_dir, job, config))
         poll_until_done(base, job_dir, sleep)
         download_artifact(base, Path(models_dir), Path(job_dir), job)
-        weight = trained_weight(job_dir, job)
+        weight = returned_weight(Path(models_dir), Path(job_dir), job)
         if weight is not None and not weight.is_file():
             raise RuntimeError('the Runpod artifact holds no trained weight')
         if str(job.get('subject') or '') == 'language':

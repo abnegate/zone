@@ -81,6 +81,34 @@ def normalize_job(job: dict[str, Any], job_dir: Path) -> dict[str, Any]:
     return job
 
 
+def still_face(models_dir: Path, job: dict[str, Any]) -> str | None:
+    filename = Path(str(job.get('filename') or '')).name
+    stem = filename[:-12] if filename.endswith('.safetensors') else filename
+    if stem.endswith('-wan'):
+        stem = stem[:-4]
+    name = str(job.get('name') or stem)
+    for candidate in (stem, name):
+        if not candidate:
+            continue
+        face = Path(models_dir) / train_sdxl.LORAS / f'{candidate}.face.png'
+        if face.is_file():
+            return face.name
+    return None
+
+
+def sidecar_payload(job: dict[str, Any], models_dir: Path) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        'recipe_id': job.get('recipe_id') or 'wan-adapter',
+        'hf_base': job.get('hf_base') or DEFAULT_HF_BASE,
+        'trigger': job.get('trigger') or '',
+        'architecture': 'wan',
+    }
+    face = still_face(models_dir, job)
+    if face:
+        payload['face'] = face
+    return payload
+
+
 def caption_for(job: dict[str, Any], meta: dict[str, Any]) -> str:
     trigger = str(job.get('trigger') or '').strip()
     pose = str(meta.get('pose') or '').strip()
@@ -324,7 +352,7 @@ def process_job(models_dir: Path, job_dir: Path, stub: bool) -> None:
             run_stub(job_dir, job, config)
         else:
             train(models_dir, job_dir, job, config)
-        train_sdxl.mark_succeeded(job_dir, job)
+        train_sdxl.succeed(models_dir, job_dir, job, sidecar_payload(job, models_dir))
     except Exception as error:
         train_sdxl.mark_failed(job_dir, job, error)
         raise

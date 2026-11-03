@@ -93,6 +93,7 @@ def still_job(name: str = 'jerry', extra: dict | None = None) -> dict:
         'total': None,
         'pid': None,
         'started_at': '2026-10-04T00:00:00Z',
+        'base': 'sdxl-people',
     }
     if extra:
         job.update(extra)

@@ -535,8 +535,9 @@ Before the worker marks a queued job `running` it creates the empty file
 file before it gives up on a job no worker picked up, so only whichever side
 created it moves the job on: the worker passes over a queued job that is
 already claimed and never trains it, and zone never fails a job the worker
-claimed. A job resumed after a crash is already past `queued` and keeps the
-claim it had.
+claimed. A job resumed after a crash is already `running` and keeps the
+claim it had; a job zone failed, or one that already ended, is never picked up
+again.
 
 The worker writes `progress.json` with `phase`, `message`, weighted `percent`,
 `loss`, and a per-phase `eta_seconds`. It leaves the finished weight in the
@@ -544,7 +545,11 @@ job directory under `job.json`'s `filename` and marks the job `succeeded`;
 zone (through `abnegate-comfy`) then publishes it into `loras/` or
 `checkpoints/` with its `.zone.json` sidecar and removes the job's copy. The
 worker never writes into `loras/` or `checkpoints/` itself, and a Runpod run
-brings the weight back into the same job directory. A pivotal run's trigger
+brings the weight back into the same job directory. The exception is a job
+queued before the upgrade, which has no `base`: the worker publishes it
+itself, as
+[Upgrading to abnegate-comfy](OPERATIONS.md#upgrading-to-abnegate-comfy)
+describes. A pivotal run's trigger
 embedding still goes straight to `embeddings/`. Fine-tune phases are queued, loading, class_images, encoding, training,
 publishing. Recreating manager does not cancel a run. LoRA is the path for
 about 20–200 unique stills. Fine-tune starts around 200 unique stills or 20

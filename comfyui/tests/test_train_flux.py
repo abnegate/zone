@@ -36,6 +36,7 @@ def queued_job(name: str = 'jerry', extra: dict | None = None) -> dict:
         'started_at': '2026-10-04T00:00:00Z',
         'recipe_id': 'flux-dev-adapter',
         'hf_base': 'black-forest-labs/FLUX.1-dev',
+        'base': 'flux-dev',
     }
     if extra:
         job.update(extra)
@@ -135,6 +136,45 @@ class StubTrainingTests(unittest.TestCase):
             self.assertEqual(job['hf_base'], 'black-forest-labs/FLUX.1-dev')
             self.assertTrue((job_dir / 'jerry.safetensors').is_file())
             self.assertEqual(list((models / 'loras').iterdir()), [])
+
+
+class LegacyPublishTests(unittest.TestCase):
+    def test_a_lora_queued_before_the_upgrade_publishes_a_sidecar_that_trains_again(self) -> None:
+        for recipe, architecture in (
+            ('flux-dev-adapter', 'flux'),
+            ('qwen-image-edit-adapter', 'qwen_edit'),
+        ):
+            with self.subTest(recipe=recipe), tempfile.TemporaryDirectory() as directory:
+                models = Path(directory)
+                job_dir = models / '.zone-train' / str(uuid.uuid4())
+                job_dir.mkdir(parents=True)
+                write_dataset(job_dir, count=3)
+                job = queued_job(extra={'recipe_id': recipe})
+                del job['base']
+                train_sdxl.write_job(job_dir, job)
+                train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+                self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+                self.assertFalse((job_dir / 'jerry.safetensors').exists())
+                weight = models / 'loras' / 'jerry.safetensors'
+                self.assertTrue(weight.is_file())
+                sidecar = json.loads(
+                    (models / 'loras' / 'jerry.safetensors.zone.json').read_text(encoding='utf-8')
+                )
+                self.assertIn(
+                    'generation',
+                    sidecar,
+                    'abnegate-comfy refuses to replace a weight whose sidecar has no generation',
+                )
+                uuid.UUID(sidecar.pop('generation'))
+                self.assertEqual(
+                    sidecar,
+                    {
+                        'recipe_id': recipe,
+                        'hf_base': 'black-forest-labs/FLUX.1-dev',
+                        'trigger': 'ohwx',
+                        'architecture': architecture,
+                    },
+                )
 
 
 class RemoteScriptTests(unittest.TestCase):
