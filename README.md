@@ -73,7 +73,7 @@ ollama serve
 make up
 ```
 
-`--yes` accepts every feature. That needs **64 GB RAM** (for Wan 2.2 A14B video; `llava:7b` vision alone needs 16 GB) and about **185 GB free disk** (175 GB of models plus 10 GB working space). Setup refuses `all` when RAM or disk cannot cover that full set — pass a smaller list instead of hoping it will trim itself:
+`--yes` accepts every feature. That needs **64 GB RAM** (for Wan 2.2 A14B video; `llava:7b` vision alone needs 16 GB) and about **174 GB free disk** (164 GB of models plus 10 GB working space). Setup refuses `all` when RAM or disk cannot cover that full set — pass a smaller list instead of hoping it will trim itself:
 
 ```bash
 ./scripts/setup.sh --yes --features chat --chat-preset 8gb
@@ -90,7 +90,7 @@ Access the services:
 - **Ollama** installed and listening on port 11434 (host daemon is the default engine)
 - **Docker** (20.10+) and **Docker Compose** (v2.0+)
 - **8 GB RAM** for chat only; **16 GB** for vision (`llava:7b`); **64 GB** for video (Wan 2.2 A14B)
-- **185 GB free disk** for every feature; a chat-only install is a few GB
+- **174 GB free disk** for every feature; a chat-only install is a few GB
 - **NVIDIA GPU** (optional, only for `--profile bundled-ollama`)
 - **VPN subscription** (optional; when enabled, all stack internet traffic uses the tunnel)
 
@@ -473,7 +473,7 @@ zone/
 - 8+ CPU cores
 - 16 GB RAM (required for vision)
 - 64 GB RAM (required for video / `all`)
-- 185 GB free disk for every feature (175 GB models + 10 GB working space)
+- 174 GB free disk for every feature (164 GB models + 10 GB working space)
 - NVIDIA GPU (6GB+ VRAM)
 - Docker 24.0+
 

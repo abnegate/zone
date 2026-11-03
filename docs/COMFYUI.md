@@ -60,8 +60,6 @@ Comfy checkout so core files stay unmodified:
 - Combined size: `64,167,055,143` bytes (approximately 59.77 GiB / 64.17 GB)
 - Model license: Apache-2.0
 - Default output: 1280×704, 81 frames (~5s at 16 fps), WebM VP9
-- The video bundle still includes Wan 2.2 TI2V 5B (`wan2.2_ti2v_5B_fp16.safetensors`)
-  for identity LoRA training. Chat generate always loads A14B.
 
 ### ACE-Step v1 3.5B (audio)
 
@@ -128,7 +126,7 @@ specific `comfyui/requirements*.lock` files.
 - Apple Silicon (arm64); Intel Macs are not supported by this installer
 - Python 3.11 through 3.13, running as arm64
 - Git / Xcode Command Line Tools
-- At least 15 GB free disk space for the SDXL people checkpoint, about 35 GB if
+- At least 15 GB free disk space for the SDXL people checkpoint, about 80 GB if
   also downloading the video bundle, a further 30 GB for the image-edit bundle,
   and a further 8 GB for the audio bundle
 - 32 GB unified memory recommended; 24 GB may work with memory pressure and
@@ -251,7 +249,7 @@ Zone LoRA node decides where each Wan model runs when ComfyUI starts on MPS:
 - NVIDIA Container Toolkit configured for Docker
 - At least 24 GB VRAM recommended
 - At least 25 GB free Docker volume storage for the image checkpoint, about
-  45 GB if also downloading the video bundle, a further 30 GB for the
+  90 GB if also downloading the video bundle, a further 30 GB for the
   image-edit bundle, and a further 8 GB for the audio bundle
 
 Set the manager's internal endpoint in `.env`:

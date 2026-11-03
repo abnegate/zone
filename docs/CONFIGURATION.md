@@ -2077,7 +2077,7 @@ make up
 ./scripts/setup.sh --yes
 ```
 Setup downloads every feature by default. That needs 64 GB RAM (Wan 2.2 A14B
-video) and about 185 GB free disk; it refuses `all` when either is short. Chat-only:
+video) and about 174 GB free disk; it refuses `all` when either is short. Chat-only:
 `./scripts/setup.sh --yes --features chat --chat-preset 8gb`.
 
 ### With VPN Search (1 extra step)

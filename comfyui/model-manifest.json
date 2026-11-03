@@ -99,30 +99,6 @@
       "license": "Apache-2.0"
     },
     {
-      "id": "wan2.2-ti2v-5b",
-      "bundle": "video",
-      "filename": "wan2.2_ti2v_5B_fp16.safetensors",
-      "relative_path": "diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
-      "source_repository": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
-      "source_revision": "c4f60d30c55a624e35427060fdd217579a6c1d77",
-      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/c4f60d30c55a624e35427060fdd217579a6c1d77/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
-      "size_bytes": 9999658848,
-      "sha256": "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e",
-      "license": "Apache-2.0"
-    },
-    {
-      "id": "wan2.2-vae",
-      "bundle": "video",
-      "filename": "wan2.2_vae.safetensors",
-      "relative_path": "vae/wan2.2_vae.safetensors",
-      "source_repository": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
-      "source_revision": "c4f60d30c55a624e35427060fdd217579a6c1d77",
-      "url": "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/c4f60d30c55a624e35427060fdd217579a6c1d77/split_files/vae/wan2.2_vae.safetensors",
-      "size_bytes": 1409400960,
-      "sha256": "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156",
-      "license": "Apache-2.0"
-    },
-    {
       "id": "umt5-xxl-fp8",
       "bundle": "video",
       "filename": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
