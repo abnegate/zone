@@ -4,25 +4,14 @@
 //! directory, and the sessions kept in it, and `ZONE_CONFIG_PATH` names the
 //! file outright.
 
-use abnegate_config::{Application, Loader};
+use abnegate_config::{Application, Error, Loader};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use thiserror::Error;
 
 /// Names the `~/.zone` directory and the `ZONE_CONFIG_*` variables.
 const APPLICATION: &str = "zone";
 
 const SESSIONS: &str = "sessions";
-
-/// Configuration error
-#[derive(Error, Debug)]
-pub enum ConfigError {
-    #[error(transparent)]
-    Config(#[from] abnegate_config::Error),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-}
 
 /// CLI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,32 +68,32 @@ impl Default for Config {
     }
 }
 
-fn application() -> Result<Application, ConfigError> {
-    Ok(Application::new(APPLICATION).map_err(abnegate_config::Error::from)?)
+fn application() -> Result<Application, Error> {
+    Ok(Application::new(APPLICATION)?)
 }
 
 impl Config {
     /// The directory the CLI keeps its files in
-    pub fn directory() -> Result<PathBuf, ConfigError> {
-        Ok(abnegate_config::directory(&application()?)?)
+    pub fn directory() -> Result<PathBuf, Error> {
+        abnegate_config::directory(&application()?)
     }
 
     /// The configuration file
-    pub fn path() -> Result<PathBuf, ConfigError> {
-        Ok(abnegate_config::path(&application()?)?)
+    pub fn path() -> Result<PathBuf, Error> {
+        abnegate_config::path(&application()?)
     }
 
     /// The directory saved sessions are kept in
-    pub fn sessions_directory() -> Result<PathBuf, ConfigError> {
+    pub fn sessions_directory() -> Result<PathBuf, Error> {
         Ok(Self::directory()?.join(SESSIONS))
     }
 
     /// Load configuration from file, creating default if it doesn't exist
-    pub fn load() -> Result<Self, ConfigError> {
+    pub fn load() -> Result<Self, Error> {
         Self::load_from(&Loader::new(&application()?)?)
     }
 
-    fn load_from(loader: &Loader<'_>) -> Result<Self, ConfigError> {
+    fn load_from(loader: &Loader<'_>) -> Result<Self, Error> {
         let mut config = if loader.exists() {
             loader.load()?.into_value()
         } else {
@@ -125,14 +114,14 @@ impl Config {
     }
 
     /// Save configuration to file
-    pub fn save(&self) -> Result<(), ConfigError> {
-        Ok(abnegate_config::Config::new(Self::path()?, self).save()?)
+    pub fn save(&self) -> Result<(), Error> {
+        abnegate_config::Config::new(Self::path()?, self).save()
     }
 
-    /// Ensure sessions directory exists
-    pub fn ensure_sessions_directory() -> Result<PathBuf, ConfigError> {
+    /// The directory saved sessions are kept in, created if it is missing
+    pub fn ensure_sessions_directory() -> Result<PathBuf, Error> {
         let directory = Self::sessions_directory()?;
-        std::fs::create_dir_all(&directory)?;
+        std::fs::create_dir_all(&directory).map_err(|error| Error::write(&directory, error))?;
         Ok(directory)
     }
 }
@@ -153,9 +142,7 @@ mod tests {
 
     #[test]
     fn test_default_editor_from_env() {
-        // Test that it reads from EDITOR or falls back to vim
         let editor = default_editor();
-        // Either should be EDITOR env var or vim
         assert!(!editor.is_empty());
     }
 
@@ -207,19 +194,17 @@ mod tests {
 
     #[test]
     fn test_config_deserialization_defaults() {
-        // Empty TOML should use defaults for optional fields
         let toml_str = "";
 
         let config: Config = toml::from_str(toml_str).unwrap();
 
-        assert_eq!(config.model, "gpt-4o"); // default
+        assert_eq!(config.model, "gpt-4o");
         assert!(config.host.is_none());
-        assert_eq!(config.max_iterations, 50); // default
+        assert_eq!(config.max_iterations, 50);
     }
 
     #[test]
     fn test_config_deserialization_partial() {
-        // Only some fields specified
         let toml_str = r#"
             model = "custom-model"
         "#;
@@ -228,7 +213,7 @@ mod tests {
 
         assert_eq!(config.model, "custom-model");
         assert!(config.host.is_none());
-        assert_eq!(config.max_iterations, 50); // default
+        assert_eq!(config.max_iterations, 50);
     }
 
     #[test]
@@ -284,23 +269,58 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_config_error_display() {
-        let io_err = ConfigError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "File not found",
-        ));
-        assert!(io_err.to_string().contains("IO error"));
+    const CHILD: &str = "ZONE_CLI_CONFIG_TEST_CHILD";
 
-        let no_home = ConfigError::from(abnegate_config::Error::NoHomeDirectory);
-        assert_eq!(no_home.to_string(), "Home directory not found");
+    /// Run `test` again in a child whose only variables are `PATH`, those
+    /// coverage and backtraces need, and `variables`, since the configuration
+    /// variables are read from the process environment every test shares.
+    fn ran_in_child(test: &str, variables: &[(&str, &str)]) -> bool {
+        if std::env::var(CHILD).as_deref() == Ok(test) {
+            return false;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", test, "--nocapture", "--test-threads", "1"])
+            .env_clear()
+            .env(CHILD, test)
+            .envs(variables.iter().copied());
+        for name in ["PATH", "LLVM_PROFILE_FILE", "RUST_BACKTRACE"] {
+            if let Some(value) = std::env::var_os(name) {
+                child.env(name, value);
+            }
+        }
+        let output = child.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
     }
 
     #[test]
-    fn test_config_error_from_io() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Access denied");
-        let config_err: ConfigError = io_err.into();
-        assert!(matches!(config_err, ConfigError::Io(_)));
+    fn a_sessions_directory_that_cannot_be_created_names_its_path() {
+        const NAME: &str =
+            "config::tests::a_sessions_directory_that_cannot_be_created_names_its_path";
+        let blocker = tempfile::NamedTempFile::new().unwrap();
+        let moved = blocker.path().join("zone");
+        if ran_in_child(NAME, &[("ZONE_CONFIG_DIRECTORY", moved.to_str().unwrap())]) {
+            return;
+        }
+        let directory =
+            PathBuf::from(std::env::var("ZONE_CONFIG_DIRECTORY").unwrap()).join("sessions");
+
+        let error = Config::ensure_sessions_directory().unwrap_err();
+
+        assert!(
+            matches!(&error, Error::Write { path, .. } if *path == directory),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("Failed to write '{}'", directory.display())
+        );
     }
 
     #[test]
@@ -311,13 +331,7 @@ mod tests {
 
         let error = Config::load_from(&Loader::at(&path)).unwrap_err();
 
-        assert!(
-            matches!(
-                error,
-                ConfigError::Config(abnegate_config::Error::Parse { .. })
-            ),
-            "{error:?}"
-        );
+        assert!(matches!(error, Error::Parse { .. }), "{error:?}");
     }
 
     /// `zone config` opens the file in an editor, so the first load has to
@@ -374,30 +388,13 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    /// The variables are read from the process environment, which every test
-    /// shares, so this runs again in a child that sets one.
     #[test]
     fn the_config_directory_variable_moves_the_file_and_the_sessions() {
         const NAME: &str =
             "config::tests::the_config_directory_variable_moves_the_file_and_the_sessions";
-        const CHILD: &str = "ZONE_CLI_CONFIG_TEST_CHILD";
         const MOVED: &str = "/nonexistent/zone-moved";
 
-        if std::env::var(CHILD).as_deref() != Ok(NAME) {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", NAME, "--nocapture", "--test-threads", "1"])
-                .env_clear()
-                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-                .env(CHILD, NAME)
-                .env("ZONE_CONFIG_DIRECTORY", MOVED)
-                .output()
-                .unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                output.status.success() && stdout.contains("1 passed"),
-                "{stdout}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if ran_in_child(NAME, &[("ZONE_CONFIG_DIRECTORY", MOVED)]) {
             return;
         }
 
@@ -448,14 +445,12 @@ mod tests {
         };
 
         let toml_str = toml::to_string(&config).unwrap();
-        // host should not appear in output when None
         let deserialized: Config = toml::from_str(&toml_str).unwrap();
         assert!(deserialized.host.is_none());
     }
 
     #[test]
     fn test_max_iterations_range() {
-        // Test that various max_iterations values work
         for iterations in [1, 10, 50, 100, 1000] {
             let config = Config {
                 model: "test".to_string(),

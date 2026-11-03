@@ -7,58 +7,118 @@ use abnegate_exec::{
     JobRegistry, OutboundMessage, RunCancel, RunStart, RunStdin,
 };
 use base64::prelude::*;
-use serde::Serialize;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
-use tokio::sync::{Mutex, mpsc};
-
-/// The answer to a `Ping`.
-///
-/// `OutboundMessage::Pong` cannot be built outside `abnegate-exec`, so the
-/// runner writes the same wire shape itself.
-#[derive(Serialize)]
-#[serde(tag = "type")]
-struct Pong {
-    id: String,
-}
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdin, Stdout};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 /// Run the daemon, communicating over stdio.
 pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
-    let stdin = tokio::io::stdin();
-    let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
-
-    let mut reader = BufReader::new(stdin);
+    let mut reader = BufReader::new(tokio::io::stdin());
 
     let registry = Arc::new(JobRegistry::new());
     let executor = Arc::new(CommandExecutor::with_config(
-        ExecutorConfig::default().with_environment(EnvironmentPolicy::inherit()),
+        ExecutorConfig::default()
+            .with_environment(EnvironmentPolicy::inherit())
+            .with_proxy(zone_routing::proxy()),
     ));
 
-    let (tx, mut rx) = mpsc::channel::<OutboundMessage>(1000);
+    let (sender, mut receiver) = mpsc::channel::<OutboundMessage>(1000);
 
-    let writer_handle = {
-        let stdout = Arc::clone(&stdout);
+    let writer = {
         let registry = Arc::clone(&registry);
         tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                registry.observe(&msg);
-                if !write_line(&stdout, &msg).await {
+            let mut stdout = tokio::io::stdout();
+            while let Some(message) = receiver.recv().await {
+                registry.observe(&message);
+                if !write_line(&mut stdout, &message).await {
                     break;
                 }
             }
         })
     };
 
-    let mut hello_received = false;
-    let mut line = String::new();
+    let served = match handshake(&mut reader, &sender).await {
+        Ok(true) => serve(&mut reader, &registry, &executor, &sender).await,
+        Ok(false) => Ok(()),
+        Err(error) => Err(error),
+    };
 
+    tracing::info!("Shutting down, cancelling {} jobs", registry.active_count());
+    registry.cancel_all();
+
+    drop(sender);
+    writer.await?;
+
+    served
+}
+
+/// Wait for the Hello that opens a session: true once it is acknowledged,
+/// false when stdin closes first. An unsupported version is refused and
+/// ends the session, so no message after it is ever handled.
+async fn handshake(
+    reader: &mut BufReader<Stdin>,
+    sender: &mpsc::Sender<OutboundMessage>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    while let Some(message) = next_message(reader, sender).await? {
+        let InboundMessage::Hello(Hello {
+            protocol_version,
+            capabilities,
+            ..
+        }) = message
+        else {
+            sender
+                .send(protocol_error("Expected Hello message"))
+                .await?;
+            continue;
+        };
+        tracing::info!(
+            "Received Hello: version={}, capabilities={:?}",
+            protocol_version,
+            capabilities
+        );
+
+        if !protocol_version.starts_with("1.") {
+            let refusal =
+                format!("Unsupported protocol version: {protocol_version} (expected 1.x)");
+            sender.send(protocol_error(refusal.clone())).await?;
+            return Err(refusal.into());
+        }
+
+        sender.send(OutboundMessage::hello_acknowledged()).await?;
+        tracing::info!("Handshake complete");
+        return Ok(true);
+    }
+
+    tracing::info!("EOF on stdin, shutting down");
+    Ok(false)
+}
+
+async fn serve(
+    reader: &mut BufReader<Stdin>,
+    registry: &Arc<JobRegistry>,
+    executor: &Arc<CommandExecutor>,
+    sender: &mpsc::Sender<OutboundMessage>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    while let Some(message) = next_message(reader, sender).await? {
+        handle_message(message, registry, executor, sender.clone()).await?;
+    }
+
+    tracing::info!("EOF on stdin, shutting down");
+    Ok(())
+}
+
+/// The next message on stdin, answering each line that is not one; `None`
+/// once stdin closes.
+async fn next_message(
+    reader: &mut BufReader<Stdin>,
+    sender: &mpsc::Sender<OutboundMessage>,
+) -> Result<Option<InboundMessage>, Box<dyn std::error::Error>> {
+    let mut line = String::new();
     loop {
         line.clear();
-        let bytes_read = reader.read_line(&mut line).await?;
-
-        if bytes_read == 0 {
-            tracing::info!("EOF on stdin, shutting down");
-            break;
+        if reader.read_line(&mut line).await? == 0 {
+            return Ok(None);
         }
 
         let line = line.trim();
@@ -66,144 +126,60 @@ pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let msg: InboundMessage = match serde_json::from_str(line) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!("Failed to parse message: {} (line: {})", e, line);
-                tx.send(OutboundMessage::error(
-                    "",
-                    ErrorCode::InvalidMessage,
-                    format!("Failed to parse message: {}", e),
-                ))
-                .await?;
-                continue;
-            }
-        };
-
-        if !hello_received {
-            match msg {
-                InboundMessage::Hello(Hello {
-                    protocol_version,
-                    capabilities,
-                    ..
-                }) => {
-                    tracing::info!(
-                        "Received Hello: version={}, capabilities={:?}",
-                        protocol_version,
-                        capabilities
-                    );
-
-                    if !protocol_version.starts_with("1.") {
-                        tx.send(OutboundMessage::error(
-                            "",
-                            ErrorCode::InvalidMessage,
-                            format!(
-                                "Unsupported protocol version: {} (expected 1.x)",
-                                protocol_version
-                            ),
-                        ))
-                        .await?;
-                        break;
-                    }
-
-                    tx.send(OutboundMessage::hello_acknowledged()).await?;
-                    hello_received = true;
-                    tracing::info!("Handshake complete");
-                }
-                _ => {
-                    tx.send(OutboundMessage::error(
-                        "",
-                        ErrorCode::InvalidMessage,
-                        "Expected Hello message",
-                    ))
+        match serde_json::from_str(line) {
+            Ok(message) => return Ok(Some(message)),
+            Err(error) => {
+                tracing::error!("Failed to parse message: {} (line: {})", error, line);
+                sender
+                    .send(protocol_error(format!("Failed to parse message: {error}")))
                     .await?;
-                }
             }
-            continue;
-        }
-
-        handle_message(msg, &registry, &executor, &stdout, tx.clone()).await?;
-    }
-
-    loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line).await?;
-
-        if bytes_read == 0 {
-            break;
-        }
-
-        let line_trimmed = line.trim();
-        if line_trimmed.is_empty() {
-            continue;
-        }
-
-        let msg: InboundMessage = match serde_json::from_str(line_trimmed) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!("Failed to parse message: {}", e);
-                continue;
-            }
-        };
-
-        if let Err(e) = handle_message(msg, &registry, &executor, &stdout, tx.clone()).await {
-            tracing::error!("Error handling message: {}", e);
         }
     }
-
-    tracing::info!("Shutting down, cancelling {} jobs", registry.active_count());
-    registry.cancel_all();
-
-    drop(tx);
-    writer_handle.await?;
-
-    Ok(())
 }
 
 /// Write `message` as one line of JSON, reporting whether stdout still takes
 /// writes.
-async fn write_line(stdout: &Mutex<Stdout>, message: &impl Serialize) -> bool {
+async fn write_line(stdout: &mut Stdout, message: &OutboundMessage) -> bool {
     let json = match serde_json::to_string(message) {
         Ok(json) => json,
-        Err(e) => {
-            tracing::error!("Failed to serialize message: {}", e);
+        Err(error) => {
+            tracing::error!("Failed to serialize message: {}", error);
             return true;
         }
     };
 
-    let mut stdout = stdout.lock().await;
     for bytes in [json.as_bytes(), b"\n"] {
-        if let Err(e) = stdout.write_all(bytes).await {
-            tracing::error!("Failed to write to stdout: {}", e);
+        if let Err(error) = stdout.write_all(bytes).await {
+            tracing::error!("Failed to write to stdout: {}", error);
             return false;
         }
     }
-    if let Err(e) = stdout.flush().await {
-        tracing::error!("Failed to flush stdout: {}", e);
+    if let Err(error) = stdout.flush().await {
+        tracing::error!("Failed to flush stdout: {}", error);
         return false;
     }
     true
 }
 
-/// Handle an inbound message.
 async fn handle_message(
-    msg: InboundMessage,
+    message: InboundMessage,
     registry: &Arc<JobRegistry>,
     executor: &Arc<CommandExecutor>,
-    stdout: &Mutex<Stdout>,
-    tx: mpsc::Sender<OutboundMessage>,
+    sender: mpsc::Sender<OutboundMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match msg {
+    match message {
         InboundMessage::Hello(_) => {
-            tx.send(OutboundMessage::error(
-                "",
-                ErrorCode::InvalidMessage,
-                "Unexpected Hello message after handshake",
-            ))
-            .await?;
+            sender
+                .send(OutboundMessage::error(
+                    "",
+                    ErrorCode::InvalidMessage,
+                    "Unexpected Hello message after handshake",
+                ))
+                .await?;
         }
 
-        InboundMessage::RunStart(request) => start(request, registry, executor, tx).await?,
+        InboundMessage::RunStart(request) => start(request, registry, executor, sender).await?,
 
         InboundMessage::RunStdin(RunStdin {
             job_id, data, eof, ..
@@ -211,22 +187,35 @@ async fn handle_message(
             tracing::debug!("RunStdin: job_id={}, eof={}", job_id, eof);
 
             let bytes = match BASE64_STANDARD.decode(&data) {
-                Ok(b) => b,
-                Err(e) => {
-                    tx.send(OutboundMessage::error(
-                        &job_id,
-                        ErrorCode::InvalidMessage,
-                        format!("Invalid base64 data: {}", e),
-                    ))
-                    .await?;
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    sender
+                        .send(protocol_error(format!(
+                            "Invalid base64 stdin for job {job_id}: {error}"
+                        )))
+                        .await?;
                     return Ok(());
                 }
             };
 
-            if let Some(stdin_tx) = registry.get_stdin(&job_id)
-                && stdin_tx.send(bytes).await.is_err()
-            {
-                tracing::warn!("Failed to send stdin data: job_id={}", job_id);
+            let Some(stdin) = registry.get_stdin(&job_id) else {
+                sender.send(without_stdin(registry, &job_id)).await?;
+                return Ok(());
+            };
+            if !bytes.is_empty() {
+                let refusal = match stdin.try_send(bytes) {
+                    Ok(()) => None,
+                    Err(TrySendError::Full(_)) => Some("full"),
+                    Err(TrySendError::Closed(_)) => Some("closed"),
+                };
+                if let Some(reason) = refusal {
+                    sender
+                        .send(protocol_error(format!(
+                            "stdin for job {job_id} is {reason}"
+                        )))
+                        .await?;
+                    return Ok(());
+                }
             }
 
             if eof {
@@ -237,39 +226,63 @@ async fn handle_message(
         InboundMessage::RunCancel(RunCancel { job_id, force, .. }) => {
             tracing::info!("RunCancel: job_id={}, force={}", job_id, force);
 
-            if let Err(e) = registry.cancel(&job_id, force) {
-                tx.send(OutboundMessage::error(
-                    &job_id,
-                    ErrorCode::JobNotFound,
-                    e.to_string(),
-                ))
-                .await?;
+            if let Err(error) = registry.cancel(&job_id, force) {
+                sender
+                    .send(OutboundMessage::error(
+                        &job_id,
+                        ErrorCode::JobNotFound,
+                        error.to_string(),
+                    ))
+                    .await?;
             }
         }
 
         InboundMessage::Ping(ping) => {
             tracing::debug!("Ping: id={}", ping.id);
-            write_line(stdout, &Pong { id: ping.id }).await;
+            sender.send(OutboundMessage::pong(ping.id)).await?;
         }
 
         _ => {
-            tx.send(OutboundMessage::error(
-                "",
-                ErrorCode::InvalidMessage,
-                "Unsupported message",
-            ))
-            .await?;
+            sender
+                .send(OutboundMessage::error(
+                    "",
+                    ErrorCode::InvalidMessage,
+                    "Unsupported message",
+                ))
+                .await?;
         }
     }
 
     Ok(())
 }
 
+/// An error about the message itself rather than a job. It names no job, so
+/// the registry never mistakes it for the end of a running one.
+fn protocol_error(message: impl Into<String>) -> OutboundMessage {
+    OutboundMessage::error("", ErrorCode::InvalidMessage, message)
+}
+
+/// A job that is still running answers with a protocol error, since a
+/// RunError carrying its id would end it in the registry; one that is unknown
+/// or already finished answers with its id, which the registry ignores.
+fn without_stdin(registry: &JobRegistry, job_id: &str) -> OutboundMessage {
+    match registry.get_state(job_id) {
+        Some(state) if !state.is_terminal() => {
+            protocol_error(format!("stdin for job {job_id} is closed"))
+        }
+        _ => OutboundMessage::error(
+            job_id,
+            ErrorCode::JobNotFound,
+            format!("No running job {job_id}"),
+        ),
+    }
+}
+
 async fn start(
     request: RunStart,
     registry: &Arc<JobRegistry>,
     executor: &Arc<CommandExecutor>,
-    tx: mpsc::Sender<OutboundMessage>,
+    sender: mpsc::Sender<OutboundMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let job_id = request.job_id.clone();
     tracing::info!(
@@ -281,36 +294,41 @@ async fn start(
 
     let cancellation = match registry.register(job_id.clone()) {
         Ok(token) => token,
-        Err(e) => {
-            tx.send(OutboundMessage::error(
-                &job_id,
-                ErrorCode::InternalError,
-                format!("Failed to register job: {}", e),
-            ))
-            .await?;
+        Err(error) => {
+            sender
+                .send(protocol_error(format!(
+                    "Failed to register job {job_id}: {error}"
+                )))
+                .await?;
             return Ok(());
         }
     };
 
     match executor
-        .spawn_with_cancellation(&request, tx.clone(), cancellation)
+        .spawn_with_cancellation(&request, sender.clone(), cancellation)
         .await
     {
         Ok(handle) => {
-            if let Err(e) = registry.set_process_group(&job_id, handle.process_group.clone()) {
-                tracing::warn!("Failed to store process group: {}", e);
+            if let Err(error) = registry.set_process_group(&job_id, handle.process_group.clone()) {
+                tracing::warn!("Failed to store process group: {}", error);
+            }
+            if let Some(stdin) = handle.stdin
+                && let Err(error) = registry.set_stdin_handle(&job_id, stdin)
+            {
+                tracing::debug!("Job finished before its stdin was stored: {}", error);
             }
             tracing::debug!("Command spawned: job_id={}", job_id);
         }
-        Err(e) => {
-            tracing::error!("Failed to spawn command: {}", e);
+        Err(error) => {
+            tracing::error!("Failed to spawn command: {}", error);
             registry.remove(&job_id);
-            tx.send(OutboundMessage::error(
-                &job_id,
-                e.to_error_code(),
-                e.to_string(),
-            ))
-            .await?;
+            sender
+                .send(OutboundMessage::error(
+                    &job_id,
+                    error.to_error_code(),
+                    error.to_string(),
+                ))
+                .await?;
         }
     }
 
@@ -323,27 +341,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_hello_ack_format() {
-        let msg = OutboundMessage::hello_acknowledged();
-        let json = serde_json::to_string(&msg).unwrap();
+        let message = OutboundMessage::hello_acknowledged();
+        let json = serde_json::to_string(&message).unwrap();
 
         assert!(json.contains("HelloAck"));
         assert!(json.contains("protocol_version"));
         assert!(json.contains("runner_version"));
         assert!(json.contains("capabilities"));
-    }
-
-    #[test]
-    fn a_pong_reads_back_as_the_protocols_own() {
-        let written = serde_json::to_string(&Pong {
-            id: "ping-7".to_string(),
-        })
-        .unwrap();
-
-        let read: OutboundMessage = serde_json::from_str(&written).unwrap();
-
-        assert!(
-            matches!(&read, OutboundMessage::Pong { id, .. } if id == "ping-7"),
-            "{written} is not a Pong: {read:?}"
-        );
     }
 }

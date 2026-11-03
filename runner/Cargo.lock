@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "abnegate-config"
-version = "0.1.3"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd648a5fa3968334c2eaaae6c0b85b56e5b9feb7fbb124a534ce2a82d4834905"
+checksum = "fe0b813def0d6172b35f125394eda189edc7fc4ed26aa27a827bb1ee43c5b03b"
 dependencies = [
  "abnegate-secret",
  "chrono",
@@ -22,9 +22,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-exec"
-version = "0.1.3"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e2d566e072306391d8e17799cc0ee1442aafcf21e06940629af5353d600e1f6"
+checksum = "e16c862f41fef51539e801dd942f6be637da20e00e2259b8e2894f3c6f5c75a6"
 dependencies = [
  "abnegate-secret",
  "base64 0.23.1",
@@ -101,9 +101,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-secret"
-version = "0.1.3"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aa24383e65469ff8390024afe21418dc61eb448c1abf94cc878ff9b6f9df4f7"
+checksum = "0b56e97816885319628656ff867c261ea9d59f372f0c28fd13388769355e40bb"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -9409,6 +9409,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+ "zone_routing",
 ]
 
 [[package]]
@@ -9451,6 +9452,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zone_routing"
+version = "0.1.0"
+dependencies = [
+ "abnegate-exec",
+ "tokio",
+]
+
+[[package]]
 name = "zone_runner"
 version = "0.1.0"
 dependencies = [
@@ -9467,6 +9476,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "zone_routing",
 ]
 
 [[package]]

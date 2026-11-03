@@ -1,4 +1,5 @@
-//! Where the HTTP clients a tool or an MCP server starts send their requests.
+//! Where the HTTP clients started by a tool, an MCP server or a command run
+//! send their requests.
 
 use std::env;
 
@@ -61,21 +62,25 @@ mod tests {
         "all_proxy",
     ];
 
-    /// Run `test` again in a child whose only variables are `PATH` and
-    /// `variables`, since the process environment is shared by every test.
+    /// Run `test` again in a child whose only variables are `PATH`, those
+    /// coverage and backtraces need, and `variables`, since the process
+    /// environment is shared by every test.
     async fn ran_in_child(test: &str, variables: &[(&str, &str)]) -> bool {
         if env::var(CHILD).as_deref() == Ok(test) {
             return false;
         }
-        let output = Command::new(env::current_exe().expect("the test binary"))
+        let mut child = Command::new(env::current_exe().expect("the test binary"));
+        child
             .args(["--exact", test, "--nocapture", "--test-threads", "1"])
             .env_clear()
-            .env("PATH", env::var_os("PATH").unwrap_or_default())
             .env(CHILD, test)
-            .envs(variables.iter().copied())
-            .output()
-            .await
-            .expect("the test binary runs");
+            .envs(variables.iter().copied());
+        for name in ["PATH", "LLVM_PROFILE_FILE", "RUST_BACKTRACE"] {
+            if let Some(value) = env::var_os(name) {
+                child.env(name, value);
+            }
+        }
+        let output = child.output().await.expect("the test binary runs");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success() && stdout.contains("1 passed"),
@@ -98,7 +103,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_documented_variable_routes_every_client_and_keeps_the_stack_direct() {
-        const NAME: &str = "tools::routing::tests::the_documented_variable_routes_every_client_and_keeps_the_stack_direct";
+        const NAME: &str =
+            "tests::the_documented_variable_routes_every_client_and_keeps_the_stack_direct";
         if ran_in_child(NAME, &[(PROXY_URL_VARIABLE, PROXY)]).await {
             return;
         }
@@ -118,7 +124,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_process_started_under_a_routed_tool_routes_its_own_children_the_same_way() {
-        const NAME: &str = "tools::routing::tests::a_process_started_under_a_routed_tool_routes_its_own_children_the_same_way";
+        const NAME: &str =
+            "tests::a_process_started_under_a_routed_tool_routes_its_own_children_the_same_way";
         let bypass = BYPASS.join(",");
         if ran_in_child(
             NAME,
@@ -140,7 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_proxy_nothing_is_routed() {
-        const NAME: &str = "tools::routing::tests::without_a_proxy_nothing_is_routed";
+        const NAME: &str = "tests::without_a_proxy_nothing_is_routed";
         if ran_in_child(NAME, &[]).await {
             return;
         }

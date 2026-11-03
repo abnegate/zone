@@ -54,6 +54,7 @@ runner/
 ├── zone_core/       # Agent loop, LLM client, tools
 ├── zone_context/    # Context gathering, embeddings, heuristics
 ├── zone_runner/     # CLI daemon/one-shot execution
+├── zone_routing/    # Proxy routing for tool, MCP and command runs
 ├── zone_cli/        # User-facing CLI tool
 ├── zone_installer/  # Desktop/mobile client HTTP shell
 └── zone_desktop/    # Tauri desktop, Android, and iOS client

@@ -9,7 +9,6 @@ mod file;
 mod identity;
 pub mod job;
 mod reason;
-pub mod routing;
 pub mod tail;
 mod tier;
 
@@ -17,6 +16,7 @@ pub use command::*;
 pub use file::*;
 pub use reason::{REASON_DESCRIPTION, REASON_PARAM, reason_property};
 pub use tier::{CONFIRMED_FROM, Tier};
+pub use zone_routing as routing;
 
 use abnegate_secret::sanitize_owned;
 use async_trait::async_trait;

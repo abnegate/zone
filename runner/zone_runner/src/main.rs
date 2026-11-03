@@ -15,6 +15,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 use tracing_subscriber::{EnvFilter, fmt};
 
 mod exec;
@@ -102,9 +103,12 @@ async fn main() -> ExitCode {
                     tracing::info!("Daemon exited cleanly");
                     ExitCode::SUCCESS
                 }
-                Err(e) => {
-                    tracing::error!("Daemon error: {}", e);
-                    ExitCode::FAILURE
+                Err(error) => {
+                    tracing::error!("Daemon error: {}", error);
+                    // Tokio reads stdin on a blocking thread that runtime
+                    // shutdown waits for, so returning would hang until the
+                    // host closes stdin.
+                    std::process::exit(1)
                 }
             }
         }
@@ -122,7 +126,7 @@ async fn main() -> ExitCode {
                 workspace.display()
             );
 
-            match exec::run_once(workspace, cmd, args, timeout).await {
+            match exec::run_once(workspace, cmd, args, timeout.map(Duration::from_secs)).await {
                 Ok(code) => code,
                 Err(e) => {
                     tracing::error!("Execution error: {}", e);

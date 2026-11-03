@@ -8,6 +8,7 @@
 
 mod auth;
 mod config;
+mod explanation;
 mod lighthouse;
 mod run;
 mod setup;

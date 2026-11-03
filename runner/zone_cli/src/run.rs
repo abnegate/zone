@@ -14,15 +14,22 @@ use zone_core::{
 };
 
 use crate::auth::AuthManager;
-use crate::config::{Config, ConfigError};
+use crate::config::Config;
+use crate::explanation::Explanation;
 
 /// Run error
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("Not logged in. Run 'zone login <host>' first.")]
     NotLoggedIn,
-    #[error("Configuration error: {0}")]
-    Config(String),
+    #[error("Configuration error: {}", Explanation(.0))]
+    Config(#[from] abnegate_config::Error),
+    #[error("No sessions found")]
+    NoSessions,
+    #[error("Invalid session ID: {0}")]
+    InvalidSession(String),
+    #[error("Prompt error: {0}")]
+    Prompt(#[from] dialoguer::Error),
     #[error(
         "No LLM endpoint is configured. Set llm_base_url in {path} to an OpenAI-compatible base \
          URL (LiteLLM: http://localhost:4000, Ollama: http://127.0.0.1:11434/v1) and llm_api_key \
@@ -35,12 +42,6 @@ pub enum RunError {
     Session(#[from] zone_core::session::SessionError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-}
-
-impl From<ConfigError> for RunError {
-    fn from(e: ConfigError) -> Self {
-        RunError::Config(e.to_string())
-    }
 }
 
 /// CLI callback for agent progress
@@ -166,7 +167,7 @@ fn llm_config(config: &Config) -> Result<LlmConfig, RunError> {
 
 /// Run the agent with a prompt
 pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result<(), RunError> {
-    let config = Config::load().map_err(|e| RunError::Config(e.to_string()))?;
+    let config = Config::load()?;
 
     let auth = AuthManager::new().map_err(|_| RunError::NotLoggedIn)?;
     if !auth.is_logged_in() {
@@ -237,7 +238,7 @@ pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result
 
 /// Resume a session
 pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Result<(), RunError> {
-    let config = Config::load().map_err(|e| RunError::Config(e.to_string()))?;
+    let config = Config::load()?;
     let session_store = FileSessionStore::new(Config::ensure_sessions_directory()?);
 
     // Load session
@@ -245,16 +246,16 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
         session_store
             .most_recent()
             .await?
-            .ok_or_else(|| RunError::Config("No sessions found".to_string()))?
+            .ok_or(RunError::NoSessions)?
     } else if let Some(id) = session_id {
-        let uuid = uuid::Uuid::parse_str(id)
-            .map_err(|_| RunError::Config(format!("Invalid session ID: {}", id)))?;
+        let uuid =
+            uuid::Uuid::parse_str(id).map_err(|_| RunError::InvalidSession(id.to_string()))?;
         session_store.load(uuid).await?
     } else {
         // Interactive selection
         let summaries = session_store.list().await?;
         if summaries.is_empty() {
-            return Err(RunError::Config("No sessions found".to_string()));
+            return Err(RunError::NoSessions);
         }
 
         // Display sessions
@@ -289,8 +290,7 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
                     Err("Invalid selection")
                 }
             })
-            .interact()
-            .map_err(|e| RunError::Config(e.to_string()))?;
+            .interact()?;
 
         session_store.load(summaries[selection - 1].id).await?
     };
@@ -342,8 +342,7 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
     // Get continuation prompt
     let prompt: String = dialoguer::Input::new()
         .with_prompt("Continue with")
-        .interact_text()
-        .map_err(|e| RunError::Config(e.to_string()))?;
+        .interact_text()?;
 
     let callback = CliCallback::new(verbose);
 
@@ -518,19 +517,53 @@ mod tests {
 
     #[test]
     fn test_run_error_display() {
-        let err = RunError::NotLoggedIn;
-        assert!(err.to_string().contains("Not logged in"));
+        let error = RunError::NotLoggedIn;
+        assert!(error.to_string().contains("Not logged in"));
 
-        let err = RunError::Config("test error".to_string());
-        assert!(err.to_string().contains("Configuration error"));
-        assert!(err.to_string().contains("test error"));
+        let error = RunError::InvalidSession("not-a-uuid".to_string());
+        assert_eq!(error.to_string(), "Invalid session ID: not-a-uuid");
+
+        assert_eq!(RunError::NoSessions.to_string(), "No sessions found");
     }
 
     #[test]
     fn test_run_error_from_config_error() {
-        let config_err = ConfigError::from(abnegate_config::Error::NoHomeDirectory);
-        let run_err: RunError = config_err.into();
-        assert!(matches!(run_err, RunError::Config(_)));
+        let error = RunError::from(abnegate_config::Error::NoHomeDirectory);
+        assert!(matches!(error, RunError::Config(_)));
+        assert_eq!(
+            error.to_string(),
+            "Configuration error: Home directory not found"
+        );
+    }
+
+    #[test]
+    fn a_configuration_error_never_quotes_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "llm_api_key = \"sk-secret\n").unwrap();
+
+        let error = RunError::from(
+            abnegate_config::Loader::at(&path)
+                .load::<Config>()
+                .unwrap_err(),
+        );
+
+        let message = error.to_string();
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(!message.contains("sk-secret"), "{message}");
+    }
+
+    #[test]
+    fn a_configuration_error_names_its_cause() {
+        let error = RunError::from(abnegate_config::Error::write(
+            "/zone/sessions",
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        ));
+
+        assert_eq!(
+            error.to_string(),
+            "Configuration error: Failed to write '/zone/sessions': denied"
+        );
     }
 
     /// A run without an endpoint says which key to set and where, rather than

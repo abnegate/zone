@@ -9,6 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+use zone_core::tools::routing;
 
 use super::detector::DetectedTool;
 use super::parser;
@@ -87,7 +88,8 @@ pub async fn capture(
         ExecutorConfig::new()
             .with_timeout(timeout)
             .with_output_limit(settings.capture_limit)
-            .with_environment(EnvironmentPolicy::inherit()),
+            .with_environment(EnvironmentPolicy::inherit())
+            .with_proxy(routing::proxy()),
     );
     // Not confined, and no longer for want of a process tree: the runner
     // now has one, and a real `cargo test` builds, links and runs its test
@@ -218,6 +220,60 @@ mod tests {
         assert_eq!(captured.exit_code, Some(3));
         assert!(captured.stdout.contains("out"));
         assert!(captured.stderr.contains("err"));
+    }
+
+    /// The proxy is read from the process environment, which every test
+    /// shares, so this runs again in a child that names one.
+    #[tokio::test]
+    async fn routes_the_tool_through_the_tool_runner_proxy() {
+        const CHILD: &str = "ZONE_EVALUATION_TEST_CHILD";
+        const PROXY: &str = "http://127.0.0.1:28888";
+        let path = concat!(
+            module_path!(),
+            "::routes_the_tool_through_the_tool_runner_proxy"
+        );
+        let (_, name) = path.split_once("::").expect("a path inside the crate");
+
+        if std::env::var(CHILD).as_deref() != Ok(name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", name, "--nocapture", "--test-threads", "1"])
+                .env_clear()
+                .env(CHILD, name)
+                .env(routing::PROXY_URL_VARIABLE, PROXY);
+            for variable in ["PATH", "LLVM_PROFILE_FILE", "RUST_BACKTRACE"] {
+                if let Some(value) = std::env::var_os(variable) {
+                    child.env(variable, value);
+                }
+            }
+            let output = child.output().await.unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let tool = shell_tool(
+            directory.path().to_path_buf(),
+            "echo \"$HTTPS_PROXY|$NO_PROXY\"",
+            OutputFormat::Generic,
+        );
+
+        let captured = capture(
+            &tool,
+            &EvaluationSettings::default(),
+            Duration::from_secs(30),
+        )
+        .await;
+
+        assert_eq!(
+            captured.stdout.trim(),
+            format!("{PROXY}|{}", routing::BYPASS.join(","))
+        );
     }
 
     #[tokio::test]
