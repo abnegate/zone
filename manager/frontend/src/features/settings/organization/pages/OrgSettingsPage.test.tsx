@@ -10,9 +10,9 @@ import {
   setSystemTime,
 } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { chooseSelect, selectOptionValues } from '../../../../test/select';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { ApiError } from '../../../../api/ApiError';
+import { chooseSelect, selectOptionValues } from '../../../../test/select';
 import type { AiSettings, OrgRole } from '../types';
 
 // Mock client

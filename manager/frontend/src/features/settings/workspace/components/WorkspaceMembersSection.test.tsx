@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { chooseSelectElement } from '../../../../test/select';
 import userEvent from '@testing-library/user-event';
+import { chooseSelectElement } from '../../../../test/select';
 import type { OrganizationMember, WorkspaceMember, WorkspaceRole } from '../types';
 
 // Mock client
