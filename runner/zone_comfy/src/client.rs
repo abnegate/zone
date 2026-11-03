@@ -1395,7 +1395,9 @@ fn configure_upscale_video_workflow(
 
 fn is_a14b_unet(unet: &str) -> bool {
     let lower = unet.to_ascii_lowercase();
-    lower.contains(WAN) && (lower.contains(HIGH_NOISE) || lower.contains(LOW_NOISE))
+    lower.contains(WAN)
+        && (lower.contains(HIGH_NOISE) || lower.contains(LOW_NOISE))
+        && (lower.contains(TEXT_TO_VIDEO) || lower.contains(IMAGE_TO_VIDEO))
 }
 
 pub(crate) fn paired_wan_unets(unet: &str, i2v: bool) -> (String, String) {
@@ -1409,9 +1411,46 @@ pub(crate) fn paired_wan_unets(unet: &str, i2v: bool) -> (String, String) {
     } else {
         (IMAGE_TO_VIDEO, TEXT_TO_VIDEO)
     };
-    let high = expert.replace(from, to).replace(LOW_NOISE, HIGH_NOISE);
-    let low = high.replace(HIGH_NOISE, LOW_NOISE);
+    let high = replace_token(&replace_token(expert, from, to), LOW_NOISE, HIGH_NOISE);
+    let low = replace_token(&high, HIGH_NOISE, LOW_NOISE);
     (high, low)
+}
+
+fn replace_token(name: &str, token: &str, replacement: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let mut replaced = String::with_capacity(name.len());
+    let mut copied = 0;
+    for (start, _) in lower.match_indices(token) {
+        let end = start + token.len();
+        replaced.push_str(&name[copied..start]);
+        replaced.push_str(&cased_like(&name[start..end], replacement));
+        copied = end;
+    }
+    replaced.push_str(&name[copied..]);
+    replaced
+}
+
+fn cased_like(original: &str, replacement: &str) -> String {
+    original
+        .split('_')
+        .zip(replacement.split('_'))
+        .map(|(original, replacement)| {
+            let uppercase = original.bytes().any(|byte| byte.is_ascii_uppercase());
+            let lowercase = original.bytes().any(|byte| byte.is_ascii_lowercase());
+            if uppercase && !lowercase {
+                replacement.to_ascii_uppercase()
+            } else if original.starts_with(|character: char| character.is_ascii_uppercase()) {
+                let mut characters = replacement.chars();
+                characters
+                    .next()
+                    .map(|first| first.to_ascii_uppercase().to_string() + characters.as_str())
+                    .unwrap_or_default()
+            } else {
+                replacement.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 pub(crate) fn validate_video_workflow(workflow: &Value) -> Result<(), Error> {
@@ -1993,6 +2032,42 @@ mod tests {
             (
                 "wan2.2_i2v_high_noise_14B_fp16.safetensors".to_string(),
                 "wan2.2_i2v_low_noise_14B_fp16.safetensors".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn noise_expert_names_pair_whatever_their_case() {
+        assert_eq!(
+            paired_wan_unets("Wan2.2_T2V_HIGH_NOISE_14B_fp8.safetensors", true),
+            (
+                "Wan2.2_I2V_HIGH_NOISE_14B_fp8.safetensors".to_string(),
+                "Wan2.2_I2V_LOW_NOISE_14B_fp8.safetensors".to_string(),
+            )
+        );
+        assert_eq!(
+            paired_wan_unets("WAN2.2_i2v_Low_Noise_14B.safetensors", false),
+            (
+                "WAN2.2_t2v_High_Noise_14B.safetensors".to_string(),
+                "WAN2.2_t2v_Low_Noise_14B.safetensors".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn a_noise_expert_without_a_mode_loads_the_default_pair() {
+        assert_eq!(
+            paired_wan_unets("wan2.2_high_noise_14B_custom.safetensors", true),
+            (
+                "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors".to_string(),
+                "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors".to_string(),
+            )
+        );
+        assert_eq!(
+            paired_wan_unets("wan2.2_low_noise_14B_custom.safetensors", false),
+            (
+                A14B_HIGH_UNET.to_string(),
+                "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors".to_string(),
             )
         );
     }
