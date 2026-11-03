@@ -669,35 +669,8 @@ def write_progress(job_dir: Path, step: int, total: int, **extra: Any) -> None:
     write_json(Path(job_dir) / 'progress.json', payload, pretty=False)
 
 
-def sidecar_path(weight: Path) -> Path:
-    return weight.with_name(weight.name + '.zone.json')
-
-
-def sidecar_payload(job: dict[str, Any]) -> dict[str, Any]:
-    payload = {
-        'recipe_id': job.get('recipe_id') or recipe_for(job.get('method') or 'lora'),
-        'hf_base': job.get('hf_base') or DEFAULT_HF_BASE,
-        'trigger': job.get('trigger') or '',
-    }
-    if (job.get('method') or '') == 'pivotal':
-        payload['embedding'] = embedding_filename(job)
-    return payload
-
-
-def write_sidecar(weight: Path, job: dict[str, Any]) -> None:
-    write_json(sidecar_path(weight), sidecar_payload(job))
-
-
-def publish_directory(models_dir: Path, method: str) -> Path:
-    folder = 'checkpoints' if method == 'finetune' else 'loras'
-    directory = Path(models_dir) / folder
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
-
-
-def publish_path(models_dir: Path, job: dict[str, Any]) -> Path:
-    filename = weight_name(str(job['filename']), 'filename')
-    return publish_directory(models_dir, job['method']) / filename
+def weight_path(job_dir: Path, job: dict[str, Any]) -> Path:
+    return Path(job_dir) / weight_name(str(job['filename']), 'filename')
 
 
 def pid_alive(pid: object) -> bool:
@@ -799,12 +772,11 @@ def write_stub_weights(path: Path) -> None:
     atomic_write(path, b'stub')
 
 
-def publish_stub(models_dir: Path, job: dict[str, Any]) -> Path:
-    destination = publish_path(models_dir, job)
+def write_stub(models_dir: Path, job_dir: Path, job: dict[str, Any]) -> Path:
+    destination = weight_path(job_dir, job)
     write_stub_weights(destination)
     if job.get('method') == 'pivotal':
         write_stub_weights(embedding_path(models_dir, job))
-    write_sidecar(destination, job)
     return destination
 
 
@@ -831,7 +803,7 @@ def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[
         previews=previews,
     )
     progress.emit('publishing', step=0, phase_step=0, phase_total=1)
-    publish_stub(models_dir, job)
+    write_stub(models_dir, job_dir, job)
     job['step'] = total
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     write_job(job_dir, job)
@@ -1759,8 +1731,9 @@ def write_snapshot_previews(
     progress.previews = paths
 
 
-def publish_trained(
+def save_trained(
     models_dir: Path,
+    job_dir: Path,
     job: dict[str, Any],
     *,
     method: str,
@@ -1771,7 +1744,7 @@ def publish_trained(
     alpha: int,
     token_id: int | None = None,
 ) -> Path:
-    destination = publish_path(models_dir, job)
+    destination = weight_path(job_dir, job)
     if method in ADAPTER_METHODS:
         save_safetensors(destination, kohya_state_dict(unet, text_encoder, alpha))
         if method == 'pivotal':
@@ -1788,7 +1761,6 @@ def publish_trained(
             destination,
             pipeline_to_original(unet, vae, text_encoder, text_encoder_2),
         )
-    write_sidecar(destination, job)
     return destination
 
 
@@ -2087,8 +2059,9 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
 
     wait_for_latest_save()
     progress.emit('publishing', step=total, phase_step=0, phase_total=1)
-    destination = publish_trained(
+    destination = save_trained(
         models_dir,
+        job_dir,
         job,
         method=method,
         unet=unet,

@@ -74,6 +74,16 @@ def write_dataset(job_dir: Path, count: int = 1) -> None:
         (dataset / f'{index:04}.txt').write_text('ohwx person', encoding='utf-8')
 
 
+def download_weight(_base: str, _models: Path, job_dir: Path) -> None:
+    (job_dir / 'jerry.safetensors').write_bytes(b'weight')
+
+
+def add_member(archive: tarfile.TarFile, name: str, data: bytes) -> None:
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    archive.addfile(info, BytesIO(data))
+
+
 def stage_job(models: Path, method: str = 'lora', extra: dict | None = None) -> Path:
     job_dir = models / '.zone-train' / str(uuid.uuid4())
     job_dir.mkdir(parents=True)
@@ -223,7 +233,7 @@ class CreateAndKeyTests(unittest.TestCase):
                     train_runpod, 'wait_ready', return_value={'status': 'running'}
                 ),
                 mock.patch.object(train_runpod, 'poll_until_done'),
-                mock.patch.object(train_runpod, 'download_artifact'),
+                mock.patch.object(train_runpod, 'download_artifact', side_effect=download_weight),
             ):
                 train_runpod.process_job(
                     models,
@@ -235,6 +245,33 @@ class CreateAndKeyTests(unittest.TestCase):
                 )
             client.create_pod.assert_not_called()
             client.list_gpus.assert_not_called()
+            client.delete_pod.assert_called_once_with('keep-me')
+
+    def test_an_artifact_without_the_weight_fails_the_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = stage_job(models, extra={'pod_id': 'keep-me'})
+            client = mock.Mock()
+            client.get_pod.return_value = {'id': 'keep-me', 'status': 'RUNNING'}
+            with (
+                mock.patch.object(
+                    train_runpod, 'wait_ready', return_value={'status': 'running'}
+                ),
+                mock.patch.object(train_runpod, 'poll_until_done'),
+                mock.patch.object(train_runpod, 'download_artifact'),
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'no trained weight'):
+                    train_runpod.process_job(
+                        models,
+                        job_dir,
+                        train_sdxl.load_config(),
+                        client=client,
+                        sleep=lambda _interval: None,
+                        proxy_base='http://127.0.0.1:9',
+                    )
+            job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+            self.assertEqual(job['status'], 'failed')
+            self.assertEqual(job['error'], 'the Runpod artifact holds no trained weight')
             client.delete_pod.assert_called_once_with('keep-me')
 
 
@@ -358,18 +395,8 @@ class HttpClientTests(unittest.TestCase):
                 elif path == '/artifact':
                     buffer = BytesIO()
                     with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
-                        data = b'weight'
-                        info = tarfile.TarInfo('loras/jerry.safetensors')
-                        info.size = len(data)
-                        archive.addfile(info, BytesIO(data))
-                        sidecar = b'{"recipe_id":"sdxl-adapter"}\n'
-                        info = tarfile.TarInfo('loras/jerry.safetensors.zone.json')
-                        info.size = len(sidecar)
-                        archive.addfile(info, BytesIO(sidecar))
-                        face = b'face'
-                        info = tarfile.TarInfo('loras/jerry.face.png')
-                        info.size = len(face)
-                        archive.addfile(info, BytesIO(face))
+                        add_member(archive, 'job/jerry.safetensors', b'weight')
+                        add_member(archive, 'models/loras/jerry.face.png', b'face')
                     payload = buffer.getvalue()
                     ctype = 'application/gzip'
                 else:
@@ -425,8 +452,8 @@ class HttpClientTests(unittest.TestCase):
             self.assertNotIn('rp-live', json.dumps(job))
             progress = json.loads((job_dir / 'progress.json').read_text(encoding='utf-8'))
             self.assertEqual(progress['percent'], 100)
-            self.assertEqual((models / 'loras' / 'jerry.safetensors').read_bytes(), b'weight')
-            self.assertTrue((models / 'loras' / 'jerry.safetensors.zone.json').is_file())
+            self.assertEqual((job_dir / 'jerry.safetensors').read_bytes(), b'weight')
+            self.assertFalse((models / 'loras' / 'jerry.safetensors').exists())
             self.assertEqual((models / 'loras' / 'jerry.face.png').read_bytes(), b'face')
 
     def test_bootstrap_is_valid_python(self) -> None:
@@ -537,6 +564,41 @@ class DownloadBaseTests(unittest.TestCase):
             self.assertIn('Comfy-Org/flux1-dev', url)
             self.assertIn('flux1-dev-fp8.safetensors', url)
             self.assertEqual(dest, models / 'checkpoints' / 'flux1-dev-fp8.safetensors')
+
+
+class ArtifactTests(unittest.TestCase):
+    def test_the_artifact_brings_the_weight_back_into_the_local_job_directory(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as remote_directory,
+            tempfile.TemporaryDirectory() as local_directory,
+        ):
+            remote = Path(remote_directory)
+            remote_models = remote / 'models'
+            remote_job = remote_models / '.zone-train' / 'remote-job'
+            remote_job.mkdir(parents=True)
+            job = train_sdxl.normalize_job(queued_job(method='pivotal'), remote_job)
+            (remote_job / 'jerry.safetensors').write_bytes(b'weight')
+            (remote_models / 'embeddings').mkdir()
+            (remote_models / 'embeddings' / 'jerry.safetensors').write_bytes(b'embedding')
+            (remote_models / 'loras').mkdir()
+            (remote_models / 'loras' / 'jerry.face.png').write_bytes(b'face')
+            train_runpod.write_artifact(remote, remote_models, remote_job, job)
+
+            local_models = Path(local_directory)
+            local_job = local_models / '.zone-train' / 'local-job'
+            local_job.mkdir(parents=True)
+            artifact = (remote / 'artifact.tar.gz').read_bytes()
+            with mock.patch.object(train_runpod, 'open_url', return_value=artifact):
+                train_runpod.download_artifact('http://pod', local_models, local_job)
+
+            self.assertEqual((local_job / 'jerry.safetensors').read_bytes(), b'weight')
+            self.assertEqual(
+                (local_models / 'embeddings' / 'jerry.safetensors').read_bytes(),
+                b'embedding',
+            )
+            self.assertEqual((local_models / 'loras' / 'jerry.face.png').read_bytes(), b'face')
+            self.assertFalse((local_models / 'loras' / 'jerry.safetensors').exists())
+            self.assertFalse((local_models / '.zone-train' / 'remote-job').exists())
 
 
 class PublishedFilesTests(unittest.TestCase):

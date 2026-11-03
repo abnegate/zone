@@ -81,47 +81,6 @@ def normalize_job(job: dict[str, Any], job_dir: Path) -> dict[str, Any]:
     return job
 
 
-def still_face(models_dir: Path, job: dict[str, Any]) -> str | None:
-    filename = Path(str(job.get('filename') or '')).name
-    stem = filename[:-12] if filename.endswith('.safetensors') else filename
-    if stem.endswith('-wan'):
-        stem = stem[:-4]
-    name = str(job.get('name') or stem)
-    for candidate in (stem, name):
-        if not candidate:
-            continue
-        face = Path(models_dir) / 'loras' / f'{candidate}.face.png'
-        if face.is_file():
-            return face.name
-    return None
-
-
-def sidecar_payload(job: dict[str, Any], models_dir: Path) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        'recipe_id': job.get('recipe_id') or 'wan-adapter',
-        'hf_base': job.get('hf_base') or DEFAULT_HF_BASE,
-        'trigger': job.get('trigger') or '',
-        'architecture': 'wan',
-    }
-    face = still_face(models_dir, job)
-    if face:
-        payload['face'] = face
-    return payload
-
-
-def publish_path(models_dir: Path, job: dict[str, Any]) -> Path:
-    directory = Path(models_dir) / 'loras'
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / train_sdxl.weight_name(str(job['filename']), 'filename')
-
-
-def publish_stub(models_dir: Path, job: dict[str, Any]) -> Path:
-    destination = publish_path(models_dir, job)
-    train_sdxl.write_stub_weights(destination)
-    train_sdxl.write_json(train_sdxl.sidecar_path(destination), sidecar_payload(job, models_dir))
-    return destination
-
-
 def caption_for(job: dict[str, Any], meta: dict[str, Any]) -> str:
     trigger = str(job.get('trigger') or '').strip()
     pose = str(meta.get('pose') or '').strip()
@@ -130,7 +89,7 @@ def caption_for(job: dict[str, Any], meta: dict[str, Any]) -> str:
     return trigger or pose or 'a person'
 
 
-def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str, Any]) -> None:
+def run_stub(job_dir: Path, job: dict[str, Any], config: dict[str, Any]) -> None:
     total = steps_for(int(job.get('image_count') or 0), config)
     progress = train_sdxl.Progress(job_dir, 'video', total)
     job['total'] = total
@@ -140,7 +99,7 @@ def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[
     progress.emit('encoding', phase_step=1, phase_total=1)
     progress.emit('training', phase_step=total, phase_total=total)
     progress.emit('publishing', step=0, phase_step=0, phase_total=1)
-    publish_stub(models_dir, job)
+    train_sdxl.write_stub_weights(train_sdxl.weight_path(job_dir, job))
     job['step'] = total
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     train_sdxl.write_job(job_dir, job)
@@ -347,9 +306,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
             train_sdxl.write_job(job_dir, job)
 
     progress.emit('publishing', step=0, phase_step=0, phase_total=1)
-    destination = publish_path(models_dir, job)
-    train_sdxl.save_safetensors(destination, wan_lora_state(transformer))
-    train_sdxl.write_json(train_sdxl.sidecar_path(destination), sidecar_payload(job, models_dir))
+    train_sdxl.save_safetensors(train_sdxl.weight_path(job_dir, job), wan_lora_state(transformer))
     job['step'] = total
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     train_sdxl.write_job(job_dir, job)
@@ -362,7 +319,7 @@ def process_job(models_dir: Path, job_dir: Path, stub: bool) -> None:
         job = train_sdxl.mark_running(job_dir, job)
         config = load_config()
         if stub:
-            run_stub(models_dir, job_dir, job, config)
+            run_stub(job_dir, job, config)
         else:
             train(models_dir, job_dir, job, config)
         train_sdxl.mark_succeeded(job_dir, job)

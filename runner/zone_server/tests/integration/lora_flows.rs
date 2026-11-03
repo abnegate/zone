@@ -297,6 +297,29 @@ fn complete_language_host_job(models_directory: PathBuf) {
     });
 }
 
+/// Runs zone's host trainer, `comfyui/train_sdxl.py`, in stub mode on the
+/// first job queued under `models_directory`, the way the `ai.zone.train`
+/// LaunchAgent would.
+fn run_host_trainer(models_directory: PathBuf) -> tokio::task::JoinHandle<std::process::Output> {
+    tokio::spawn(async move {
+        let config = comfy(&models_directory);
+        let deadline = tokio::time::Instant::now() + TRAIN_JOB_BUDGET;
+        while host::current(&config).is_none() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::process::Command::new("python3")
+            .arg(settings::development_directory().join("train_sdxl.py"))
+            .args(["--stub", "--once", "--models-dir"])
+            .arg(&models_directory)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .output()
+            .await
+            .expect("python3 runs the host trainer")
+    })
+}
+
+const TRAIN_JOB_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
 const TRAIN_COMMAND: &str = "printf trained > \"$ZONE_TRAIN_OUTPUT\"";
 
 const LANGUAGE_JSONL: &[u8] =
@@ -477,6 +500,73 @@ async fn train_endpoint_writes_lora_and_lists_it() {
             .iter()
             .any(|model| model["name"] == "studio-style.safetensors"
                 && model["recipe_id"] == "flux-schnell-adapter")
+    );
+    let _ = fs::remove_dir_all(models_directory);
+}
+
+#[tokio::test]
+async fn a_person_lora_the_host_trainer_leaves_in_its_job_is_published_with_its_sidecar() {
+    let models_directory = temp_models();
+    plant_image_bases(&models_directory);
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) =
+        router_tuned(&ollama, &catalog, models_directory.clone(), None, |comfy| {
+            comfy.host_trainer = comfy
+                .host_trainer
+                .take()
+                .map(|trainer| trainer.with_poll_interval(std::time::Duration::from_millis(20)));
+        })
+        .await;
+    let trainer = run_host_trainer(models_directory.clone());
+    let body = json!({
+        "name": "jerry",
+        "base": "sdxl-people",
+        "trigger": "ohwx",
+        "subject": "person",
+        "images": [{
+            "filename": "a.png",
+            "caption": "a portrait",
+            "bytes_base64": TINY_PNG
+        }]
+    });
+    let (status, started) = post_json(router.clone(), &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+
+    let job = wait_train_job(&router, &token).await;
+    let output = trainer.await.unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(job["status"], "succeeded", "{job}");
+    assert_eq!(job["filename"], "jerry.safetensors");
+    let weight = models_directory.join("loras/jerry.safetensors");
+    assert!(
+        weight.is_file(),
+        "the host-trained weight was not published"
+    );
+    let sidecar: Value = serde_json::from_slice(
+        &fs::read(models_directory.join("loras/jerry.safetensors.zone.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sidecar["recipe_id"], "sdxl-adapter");
+    assert_eq!(sidecar["trigger"], "ohwx");
+    assert_eq!(
+        sidecar["hf_base"],
+        "John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl"
+    );
+    let config = comfy(&models_directory);
+    let host = host::current(&config).expect("host job");
+    assert_eq!(host.published.as_deref(), Some("loras/jerry.safetensors"));
+    assert!(
+        !JobDirectory::new(&config, host.id)
+            .path()
+            .join("jerry.safetensors")
+            .exists(),
+        "the job directory gave up its copy once the weight was published"
     );
     let _ = fs::remove_dir_all(models_directory);
 }
@@ -834,7 +924,8 @@ async fn get_bytes(
 }
 
 async fn wait_train_job(router: &axum::Router, token: &str) -> Value {
-    for _ in 0..200 {
+    let deadline = tokio::time::Instant::now() + TRAIN_JOB_BUDGET;
+    while tokio::time::Instant::now() < deadline {
         let (status, body) = get_json(router.clone(), token, "/api/models/train").await;
         if status == StatusCode::NO_CONTENT {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

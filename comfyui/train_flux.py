@@ -115,30 +115,7 @@ def normalize_job(job: dict[str, Any], job_dir: Path) -> dict[str, Any]:
     return job
 
 
-def sidecar_payload(job: dict[str, Any]) -> dict[str, Any]:
-    architecture = 'qwen_edit' if is_qwen(job) else 'flux'
-    return {
-        'recipe_id': job.get('recipe_id') or DEFAULT_RECIPE,
-        'hf_base': job.get('hf_base') or DEFAULT_HF_BASE,
-        'trigger': job.get('trigger') or '',
-        'architecture': architecture,
-    }
-
-
-def publish_path(models_dir: Path, job: dict[str, Any]) -> Path:
-    directory = Path(models_dir) / 'loras'
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / train_sdxl.weight_name(str(job['filename']), 'filename')
-
-
-def publish_stub(models_dir: Path, job: dict[str, Any]) -> Path:
-    destination = publish_path(models_dir, job)
-    train_sdxl.write_stub_weights(destination)
-    train_sdxl.write_json(train_sdxl.sidecar_path(destination), sidecar_payload(job))
-    return destination
-
-
-def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str, Any]) -> None:
+def run_stub(job_dir: Path, job: dict[str, Any], config: dict[str, Any]) -> None:
     total = steps_for(int(job.get('image_count') or 0), config)
     progress = train_sdxl.Progress(job_dir, 'other', total)
     job['total'] = total
@@ -148,7 +125,7 @@ def run_stub(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[
     progress.emit('encoding', phase_step=1, phase_total=1)
     progress.emit('training', phase_step=total, phase_total=total)
     progress.emit('publishing', step=0, phase_step=0, phase_total=1)
-    publish_stub(models_dir, job)
+    train_sdxl.write_stub_weights(train_sdxl.weight_path(job_dir, job))
     job['step'] = total
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     train_sdxl.write_job(job_dir, job)
@@ -429,17 +406,6 @@ def apply_adapter(transformer: Any, targets: list[str], config: dict[str, Any], 
     return transformer
 
 
-def publish_adapter(
-    models_dir: Path,
-    job: dict[str, Any],
-    transformer: Any,
-) -> Path:
-    destination = publish_path(models_dir, job)
-    train_sdxl.save_safetensors(destination, flux_lora_state(transformer))
-    train_sdxl.write_json(train_sdxl.sidecar_path(destination), sidecar_payload(job))
-    return destination
-
-
 def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str, Any]) -> None:
     import torch
 
@@ -538,7 +504,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
             train_sdxl.write_job(job_dir, job)
 
     progress.emit('publishing', step=0, phase_step=0, phase_total=1)
-    publish_adapter(models_dir, job, transformer)
+    train_sdxl.save_safetensors(train_sdxl.weight_path(job_dir, job), flux_lora_state(transformer))
     job['step'] = total
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
     train_sdxl.write_job(job_dir, job)
@@ -566,7 +532,7 @@ def process_job(models_dir: Path, job_dir: Path, stub: bool) -> None:
         job = train_sdxl.mark_running(job_dir, job)
         config = load_config()
         if stub_requested(stub):
-            run_stub(models_dir, job_dir, job, config)
+            run_stub(job_dir, job, config)
         else:
             train(models_dir, job_dir, job, config)
         train_sdxl.mark_succeeded(job_dir, job)

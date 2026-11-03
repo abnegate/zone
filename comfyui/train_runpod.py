@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import os
@@ -59,6 +60,8 @@ SCRIPTS = (
     'train_flux.py',
     'train_flux_config.json',
 )
+JOB_ARCHIVE = 'job'
+MODELS_ARCHIVE = 'models'
 
 BOOTSTRAP = r'''from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -469,12 +472,27 @@ def upload_bundle(base: str, payload: bytes) -> None:
     )
 
 
-def extract_tar(archive: tarfile.TarFile, dest: Path) -> None:
+def extract_tar(
+    archive: tarfile.TarFile,
+    dest: Path,
+    members: list[tarfile.TarInfo] | None = None,
+) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     try:
-        archive.extractall(dest, filter='data')
+        archive.extractall(dest, members=members, filter='data')
     except TypeError:
-        archive.extractall(dest)
+        archive.extractall(dest, members=members)
+
+
+def rebased(archive: tarfile.TarFile, prefix: str) -> list[tarfile.TarInfo]:
+    members = []
+    for member in archive.getmembers():
+        head, separator, rest = member.name.partition('/')
+        if head == prefix and separator and rest:
+            renamed = copy.copy(member)
+            renamed.name = rest
+            members.append(renamed)
+    return members
 
 
 def poll_until_done(
@@ -498,10 +516,11 @@ def poll_until_done(
         sleep(POLL_INTERVAL)
 
 
-def download_artifact(base: str, models_dir: Path) -> None:
+def download_artifact(base: str, models_dir: Path, job_dir: Path) -> None:
     payload = open_url(f'{base}/artifact', timeout=3600)
     with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
-        extract_tar(archive, Path(models_dir))
+        extract_tar(archive, Path(job_dir), rebased(archive, JOB_ARCHIVE))
+        extract_tar(archive, Path(models_dir), rebased(archive, MODELS_ARCHIVE))
 
 
 def huggingface_url(repo: str, filename: str) -> str:
@@ -573,31 +592,23 @@ def ensure_packages() -> None:
     )
 
 
+def trained_weight(job_dir: Path, job: dict[str, Any]) -> Path | None:
+    if str(job.get('subject') or '') == 'language':
+        return None
+    return train_sdxl.weight_path(job_dir, job)
+
+
 def published_files(models_dir: Path, job: dict[str, Any]) -> list[Path]:
     models_dir = Path(models_dir)
     method = str(job.get('method') or 'lora')
-    subject = str(job.get('subject') or '')
-    if subject == 'language':
+    if str(job.get('subject') or '') == 'language':
         import train_llm
 
         directory = train_llm.publish_dir(models_dir, job)
         if not directory.is_dir():
             return []
         return [path for path in directory.rglob('*') if path.is_file()]
-    if method == 'video':
-        import train_wan
-
-        weight = train_wan.publish_path(models_dir, job)
-    elif subject == 'other':
-        import train_flux
-
-        weight = train_flux.publish_path(models_dir, job)
-    else:
-        weight = train_sdxl.publish_path(models_dir, job)
     files = []
-    for path in (weight, train_sdxl.sidecar_path(weight)):
-        if path.is_file():
-            files.append(path)
     if method == 'pivotal':
         embedding = train_sdxl.embedding_path(models_dir, job)
         if embedding.is_file():
@@ -613,12 +624,16 @@ def published_files(models_dir: Path, job: dict[str, Any]) -> list[Path]:
     return files
 
 
-def write_artifact(root: Path, models_dir: Path, job: dict[str, Any]) -> None:
+def write_artifact(root: Path, models_dir: Path, job_dir: Path, job: dict[str, Any]) -> None:
     models_dir = Path(models_dir).resolve()
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+        weight = trained_weight(job_dir, job)
+        if weight is not None and weight.is_file():
+            archive.add(weight, arcname=f'{JOB_ARCHIVE}/{weight.name}')
         for path in published_files(models_dir, job):
-            archive.add(path, arcname=str(path.resolve().relative_to(models_dir)))
+            relative = path.resolve().relative_to(models_dir).as_posix()
+            archive.add(path, arcname=f'{MODELS_ARCHIVE}/{relative}')
     (Path(root) / 'artifact.tar.gz').write_bytes(buffer.getvalue())
 
 
@@ -659,7 +674,7 @@ def run_remote(root: Path) -> None:
         check=True,
         cwd=str(root),
     )
-    write_artifact(root, models, job)
+    write_artifact(root, models, job_dir, job)
 
 
 def remote_script(job: dict[str, Any]) -> str:
@@ -739,7 +754,10 @@ def process_job(
         if str(status.get('status') or 'waiting') == 'waiting':
             upload_bundle(base, pack_upload(models_dir, job_dir, job, config))
         poll_until_done(base, job_dir, sleep)
-        download_artifact(base, Path(models_dir))
+        download_artifact(base, Path(models_dir), Path(job_dir))
+        weight = trained_weight(job_dir, job)
+        if weight is not None and not weight.is_file():
+            raise RuntimeError('the Runpod artifact holds no trained weight')
         if str(job.get('subject') or '') == 'language':
             import train_llm
 

@@ -423,7 +423,7 @@ class StubPublishTests(unittest.TestCase):
                     job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
                     self.assertEqual(job['status'], 'succeeded')
                     self.assertEqual(job['filename'], 'jerry.safetensors')
-                    self.assertTrue((models / 'loras' / 'jerry.safetensors').is_file())
+                    self.assertTrue((job_dir / 'jerry.safetensors').is_file())
 
     def test_finetune_language_does_not_call_weight_name_on_ollama_tag(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

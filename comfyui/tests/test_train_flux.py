@@ -111,8 +111,8 @@ class NormalizeTests(unittest.TestCase):
         )
 
 
-class StubPublishTests(unittest.TestCase):
-    def test_process_job_stub_writes_lora_and_sidecar(self) -> None:
+class StubTrainingTests(unittest.TestCase):
+    def test_process_job_stub_leaves_the_lora_in_the_job_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
             job_dir = models / '.zone-train' / str(uuid.uuid4())
@@ -128,13 +128,10 @@ class StubPublishTests(unittest.TestCase):
             progress = json.loads((job_dir / 'progress.json').read_text(encoding='utf-8'))
             self.assertEqual(progress['phase'], 'publishing')
             self.assertEqual(progress['percent'], 100)
-            weight = models / 'loras' / 'jerry.safetensors'
-            self.assertTrue(weight.is_file())
-            sidecar = json.loads(weight.with_name(weight.name + '.zone.json').read_text())
-            self.assertEqual(sidecar['recipe_id'], 'flux-dev-adapter')
-            self.assertEqual(sidecar['architecture'], 'flux')
-            self.assertEqual(sidecar['trigger'], 'ohwx')
-            self.assertEqual(sidecar['hf_base'], 'black-forest-labs/FLUX.1-dev')
+            self.assertEqual(job['recipe_id'], 'flux-dev-adapter')
+            self.assertEqual(job['hf_base'], 'black-forest-labs/FLUX.1-dev')
+            self.assertTrue((job_dir / 'jerry.safetensors').is_file())
+            self.assertEqual(list((models / 'loras').iterdir()), [])
 
 
 class RemoteScriptTests(unittest.TestCase):

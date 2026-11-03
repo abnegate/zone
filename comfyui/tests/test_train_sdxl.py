@@ -214,34 +214,27 @@ class NormalizeAndPublishTests(unittest.TestCase):
             )
             self.assertEqual(finetune['recipe_id'], 'sdxl')
 
-    def test_stub_publish_writes_weights_and_sidecar(self) -> None:
+    def test_stub_writes_the_weight_into_the_job_directory_without_publishing_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
-            job = queued_job()
-            job = train_sdxl.normalize_job(job, models)
-            destination = train_sdxl.publish_stub(models, job)
+            job_dir = models / '.zone-train' / 'job'
+            job = train_sdxl.normalize_job(queued_job(), job_dir)
+            destination = train_sdxl.write_stub(models, job_dir, job)
+            self.assertEqual(destination, job_dir / 'jerry.safetensors')
             self.assertTrue(destination.is_file())
             self.assertGreater(destination.stat().st_size, 0)
-            sidecar = json.loads(train_sdxl.sidecar_path(destination).read_text(encoding='utf-8'))
-            self.assertEqual(sidecar['recipe_id'], 'sdxl-adapter')
-            self.assertEqual(sidecar['trigger'], 'ohwx')
-            self.assertEqual(
-                sidecar['hf_base'],
-                'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl',
-            )
-            self.assertFalse(sidecar.get('generation'))
+            self.assertFalse((models / 'loras').exists())
+            self.assertEqual(list(job_dir.glob('*.zone.json')), [])
 
-    def test_pivotal_stub_publish_writes_embedding_and_sidecar(self) -> None:
+    def test_pivotal_stub_writes_the_embedding_beside_the_models(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
-            job = train_sdxl.normalize_job(queued_job(method='pivotal'), models)
-            destination = train_sdxl.publish_stub(models, job)
-            self.assertEqual(destination, models / 'loras' / 'jerry.safetensors')
-            embedding = models / 'embeddings' / 'jerry.safetensors'
-            self.assertTrue(embedding.is_file())
-            sidecar = json.loads(train_sdxl.sidecar_path(destination).read_text(encoding='utf-8'))
-            self.assertEqual(sidecar['recipe_id'], 'sdxl-adapter')
-            self.assertEqual(sidecar['embedding'], 'jerry.safetensors')
+            job_dir = models / '.zone-train' / 'job'
+            job = train_sdxl.normalize_job(queued_job(method='pivotal'), job_dir)
+            destination = train_sdxl.write_stub(models, job_dir, job)
+            self.assertEqual(destination, job_dir / 'jerry.safetensors')
+            self.assertTrue((models / 'embeddings' / 'jerry.safetensors').is_file())
+            self.assertFalse((models / 'loras').exists())
 
 
 class CaptionDropoutTests(unittest.TestCase):
@@ -755,7 +748,30 @@ class StubOnceTests(unittest.TestCase):
         (models / 'checkpoints').mkdir(exist_ok=True)
         return job_dir
 
-    def test_stub_once_marks_running_then_succeeds_and_writes_sidecar(self) -> None:
+    def assert_left_in_job_directory(self, models: Path, job_dir: Path) -> None:
+        job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+        self.assertEqual(job['status'], 'succeeded')
+        self.assertTrue(
+            (job_dir / job['filename']).is_file(),
+            'abnegate-comfy publishes the weight it finds in the job directory',
+        )
+        for folder in ('loras', 'checkpoints'):
+            self.assertEqual(
+                sorted(path.name for path in (models / folder).iterdir()),
+                [],
+                f'the trainer published into {folder}/ itself',
+            )
+
+    def test_stub_once_leaves_every_still_weight_for_abnegate_comfy_to_publish(self) -> None:
+        for method in ('lora', 'pivotal', 'finetune'):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
+                models = Path(directory)
+                job_dir = self.stage(models, method=method)
+                result = self.run_worker(models, extra=['--stub'])
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assert_left_in_job_directory(models, job_dir)
+
+    def test_stub_once_marks_running_then_succeeds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
             job_dir = self.stage(models)
@@ -770,11 +786,7 @@ class StubOnceTests(unittest.TestCase):
             self.assertEqual(progress['total'], 500)
             self.assertEqual(progress['phase'], 'publishing')
             self.assertEqual(progress['percent'], 100)
-            weight = models / 'loras' / 'jerry.safetensors'
-            self.assertTrue(weight.is_file())
-            sidecar = json.loads((models / 'loras' / 'jerry.safetensors.zone.json').read_text())
-            self.assertEqual(sidecar['recipe_id'], 'sdxl-adapter')
-            self.assertEqual(sidecar['trigger'], 'ohwx')
+            self.assertTrue((job_dir / 'jerry.safetensors').is_file())
 
     def test_zone_train_stub_env_processes_one_queued_job(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -784,13 +796,7 @@ class StubOnceTests(unittest.TestCase):
             env['ZONE_TRAIN_STUB'] = '1'
             result = self.run_worker(models, env=env)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-            job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
-            self.assertEqual(job['status'], 'succeeded')
-            weight = models / 'checkpoints' / 'jerry.safetensors'
-            self.assertTrue(weight.is_file())
-            sidecar = json.loads(weight.with_name(weight.name + '.zone.json').read_text())
-            self.assertEqual(sidecar['recipe_id'], 'sdxl')
-            self.assertEqual(sidecar['trigger'], 'ohwx')
+            self.assert_left_in_job_directory(models, job_dir)
 
     def test_stub_once_pivotal_writes_lora_embedding_and_previews(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -801,13 +807,8 @@ class StubOnceTests(unittest.TestCase):
             job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
             self.assertEqual(job['status'], 'succeeded')
             self.assertEqual(job['recipe_id'], 'sdxl-adapter')
-            weight = models / 'loras' / 'jerry.safetensors'
-            embedding = models / 'embeddings' / 'jerry.safetensors'
-            self.assertTrue(weight.is_file())
-            self.assertTrue(embedding.is_file())
-            sidecar = json.loads((models / 'loras' / 'jerry.safetensors.zone.json').read_text())
-            self.assertEqual(sidecar['recipe_id'], 'sdxl-adapter')
-            self.assertEqual(sidecar['embedding'], 'jerry.safetensors')
+            self.assertTrue((job_dir / 'jerry.safetensors').is_file())
+            self.assertTrue((models / 'embeddings' / 'jerry.safetensors').is_file())
             progress = json.loads((job_dir / 'progress.json').read_text(encoding='utf-8'))
             self.assertEqual(len(progress['previews']), 4)
             for relative in progress['previews']:

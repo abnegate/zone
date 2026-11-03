@@ -74,27 +74,7 @@ class FilenameTests(unittest.TestCase):
         )
 
 
-class StubPublishTests(unittest.TestCase):
-    def test_stub_publishes_a_tiny_wan_adapter(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            models = Path(directory)
-            job_dir = models / '.zone-train' / str(uuid.uuid4())
-            job_dir.mkdir(parents=True)
-            write_clips(job_dir, count=2)
-            (models / 'loras').mkdir()
-            (models / 'loras' / 'jerry.face.png').write_bytes(b'face')
-            job = train_wan.normalize_job(queued_job(), job_dir)
-            destination = train_wan.publish_stub(models, job)
-            self.assertEqual(destination.name, 'jerry-wan.safetensors')
-            self.assertTrue(destination.is_file())
-            self.assertGreater(destination.stat().st_size, 0)
-            sidecar = json.loads(train_sdxl.sidecar_path(destination).read_text(encoding='utf-8'))
-            self.assertEqual(sidecar['recipe_id'], 'wan-adapter')
-            self.assertEqual(sidecar['architecture'], 'wan')
-            self.assertEqual(sidecar['trigger'], 'ohwx')
-            self.assertEqual(sidecar['hf_base'], 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged')
-            self.assertEqual(sidecar['face'], 'jerry.face.png')
-
+class StubTrainingTests(unittest.TestCase):
     def test_process_job_stub_writes_progress_and_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
@@ -111,11 +91,11 @@ class StubPublishTests(unittest.TestCase):
             self.assertEqual(progress['phase'], 'publishing')
             self.assertEqual(progress['percent'], 100)
             self.assertIn(progress['phase'], {'loading', 'encoding', 'training', 'publishing'})
-            weight = models / 'loras' / 'jerry-wan.safetensors'
+            self.assertEqual(job['recipe_id'], 'wan-adapter')
+            weight = job_dir / 'jerry-wan.safetensors'
             self.assertTrue(weight.is_file())
-            sidecar = json.loads(weight.with_name(weight.name + '.zone.json').read_text())
-            self.assertEqual(sidecar['recipe_id'], 'wan-adapter')
-            self.assertEqual(sidecar['architecture'], 'wan')
+            self.assertGreater(weight.stat().st_size, 0)
+            self.assertEqual(list((models / 'loras').iterdir()), [])
 
     def test_sdxl_worker_dispatches_video_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -128,7 +108,7 @@ class StubPublishTests(unittest.TestCase):
             train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
             job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
             self.assertEqual(job['status'], 'succeeded')
-            self.assertTrue((models / 'loras' / 'jerry-wan.safetensors').is_file())
+            self.assertTrue((job_dir / 'jerry-wan.safetensors').is_file())
 
 
 if __name__ == '__main__':
