@@ -572,6 +572,71 @@ async fn a_person_lora_the_host_trainer_leaves_in_its_job_is_published_with_its_
 }
 
 #[tokio::test]
+async fn a_pivotal_lora_the_host_trainer_leaves_in_its_job_is_published_with_its_embedding() {
+    let models_directory = temp_models();
+    plant_image_bases(&models_directory);
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) =
+        router_tuned(&ollama, &catalog, models_directory.clone(), None, |comfy| {
+            comfy.host_trainer = comfy
+                .host_trainer
+                .take()
+                .map(|trainer| trainer.with_poll_interval(std::time::Duration::from_millis(20)));
+        })
+        .await;
+    let trainer = run_host_trainer(models_directory.clone());
+    let body = json!({
+        "name": "jerry",
+        "base": "sdxl-people",
+        "trigger": "ohwx",
+        "subject": "person",
+        "method": "pivotal",
+        "images": [{
+            "filename": "a.png",
+            "caption": "a portrait",
+            "bytes_base64": TINY_PNG
+        }]
+    });
+    let (status, started) = post_json(router.clone(), &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+
+    let job = wait_train_job(&router, &token).await;
+    let output = trainer.await.unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(job["status"], "succeeded", "{job}");
+    assert_eq!(job["method"], "pivotal", "{job}");
+    assert!(
+        models_directory.join("loras/jerry.safetensors").is_file(),
+        "the host-trained weight was not published"
+    );
+    assert!(
+        models_directory
+            .join("embeddings/jerry.safetensors")
+            .is_file(),
+        "the host trainer left no embedding"
+    );
+    let sidecar: Value = serde_json::from_slice(
+        &fs::read(models_directory.join("loras/jerry.safetensors.zone.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sidecar["embedding"], "jerry.safetensors", "{sidecar}");
+    assert_eq!(sidecar["recipe_id"], "sdxl-adapter");
+    assert_eq!(sidecar["trigger"], "ohwx");
+    let generation = sidecar["generation"].as_str().expect("a generation");
+    assert!(
+        uuid::Uuid::parse_str(generation).is_ok(),
+        "{generation} is not a uuid"
+    );
+    let _ = fs::remove_dir_all(models_directory);
+}
+
+#[tokio::test]
 async fn delete_removes_comfy_lora() {
     let models_directory = temp_models();
     let lora = models_directory.join("loras/custom-style.safetensors");
