@@ -46,6 +46,9 @@ const PACKAGED_UPSCALE_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/upscale-image-api.json");
 const PACKAGED_UPSCALE_VIDEO_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/upscale-video-api.json");
+const DOWNLOAD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(300);
+const QUEUE_ENTRY_PROMPT_ID: usize = 1;
+const LOST_PROMPT: &str = "it no longer has the prompt, most likely because it restarted";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -154,6 +157,25 @@ struct UploadResponse {
     name: String,
     #[serde(default)]
     subfolder: String,
+}
+
+/// ComfyUI lists each queue entry as `[number, prompt_id, prompt, extra_data,
+/// outputs_to_execute]`.
+#[derive(Debug, Deserialize)]
+struct QueueResponse {
+    queue_running: Vec<Value>,
+    queue_pending: Vec<Value>,
+}
+
+impl QueueResponse {
+    fn holds(&self, prompt_id: &str) -> bool {
+        self.queue_running
+            .iter()
+            .chain(&self.queue_pending)
+            .any(|entry| {
+                entry.get(QUEUE_ENTRY_PROMPT_ID).and_then(Value::as_str) == Some(prompt_id)
+            })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -863,6 +885,8 @@ impl Client {
         let _ = progress.send(collection.queued.to_string());
 
         let mut announced_generation = false;
+        let mut failing_since = None;
+        let mut queue_checked = tokio::time::Instant::now();
         loop {
             tokio::select! {
                 biased;
@@ -879,7 +903,18 @@ impl Client {
                         let _ = progress.send(collection.generating.to_string());
                         announced_generation = true;
                     }
-                    match self.history_outputs(&prompt_id, cancel, deadline, collection).await {
+                    let polled = match self
+                        .history_outputs(&prompt_id, cancel, deadline, collection)
+                        .await
+                    {
+                        Ok(None) if queue_checked.elapsed() >= self.queue_check_interval() => {
+                            queue_checked = tokio::time::Instant::now();
+                            self.confirm_pending(&prompt_id, cancel, deadline, collection)
+                                .await
+                        }
+                        polled => polled,
+                    };
+                    match polled {
                         Ok(Some(outputs)) => {
                             let _ = progress.send(collection.saving.to_string());
                             let result = self.fetch_outputs(outputs, cancel, deadline).await;
@@ -889,8 +924,17 @@ impl Client {
                             }
                             return result;
                         }
-                        Ok(None) => {}
+                        Ok(None) => failing_since = None,
                         Err(Error::Http(error)) if is_transient(&error) => {
+                            if self.outage_outlasted(&mut failing_since) {
+                                tracing::warn!(
+                                    prompt_id = %prompt_id,
+                                    error = %error,
+                                    "ComfyUI kept failing; giving up on the prompt"
+                                );
+                                self.cancel(&prompt_id).await;
+                                return Err(Error::Http(error));
+                            }
                             tracing::warn!(
                                 prompt_id = %prompt_id,
                                 error = %error,
@@ -1018,6 +1062,51 @@ impl Client {
         )
     }
 
+    async fn confirm_pending(
+        &self,
+        prompt_id: &str,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+        collection: Collection<'_>,
+    ) -> Result<Option<Vec<OutputImage>>, Error> {
+        let request = self.authorize(self.client.get(format!("{}/queue", self.config.base_url)));
+        let queue = self
+            .bounded(cancel, deadline, async move {
+                request
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<QueueResponse>()
+                    .await
+            })
+            .await?;
+        if queue.holds(prompt_id) {
+            return Ok(None);
+        }
+        match self
+            .history_outputs(prompt_id, cancel, deadline, collection)
+            .await?
+        {
+            Some(outputs) => Ok(Some(outputs)),
+            None => Err(Error::InvalidResponse(LOST_PROMPT)),
+        }
+    }
+
+    fn queue_check_interval(&self) -> Duration {
+        Duration::from_secs(self.config.queue_check_interval_secs)
+    }
+
+    fn outage_outlasted(&self, failing_since: &mut Option<tokio::time::Instant>) -> bool {
+        let since = *failing_since.get_or_insert_with(tokio::time::Instant::now);
+        since.elapsed() >= Duration::from_secs(self.config.outage_window_secs)
+    }
+
+    fn download_timeout(&self, deadline: tokio::time::Instant) -> Duration {
+        let attempt =
+            Duration::from_secs(self.config.request_timeout_secs).max(DOWNLOAD_ATTEMPT_TIMEOUT);
+        attempt.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+    }
+
     async fn fetch_outputs(
         &self,
         outputs: Vec<OutputImage>,
@@ -1050,10 +1139,11 @@ impl Client {
             urlencoding::encode(output.subfolder.as_str()),
             urlencoding::encode(output.r#type.as_str()),
         );
+        let mut failing_since = None;
         loop {
             let request = self
                 .authorize(self.client.get(&url))
-                .timeout(deadline.saturating_duration_since(tokio::time::Instant::now()));
+                .timeout(self.download_timeout(deadline));
             let filename = output.filename.as_str();
             let result = self
                 .bounded(cancel, deadline, async move {
@@ -1076,6 +1166,14 @@ impl Client {
                 .await;
             match result {
                 Err(Error::Http(error)) if is_transient(&error) => {
+                    if self.outage_outlasted(&mut failing_since) {
+                        tracing::warn!(
+                            filename = %output.filename,
+                            error = %error,
+                            "ComfyUI output download kept failing; giving up"
+                        );
+                        return Err(Error::Http(error));
+                    }
                     tracing::warn!(
                         filename = %output.filename,
                         error = %error,
@@ -3188,6 +3286,192 @@ mod tests {
         assert!(
             posted_bodies(&server, "/history").await.is_empty(),
             "history is cleared only after a clip lands"
+        );
+    }
+
+    async fn mock_queue(server: &MockServer, running: Value) {
+        Mock::given(method("GET"))
+            .and(path("/queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "queue_running": running,
+                "queue_pending": []
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn empty_history(prompt_id: &str) -> Mock {
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt_id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+    }
+
+    async fn history_reads(server: &MockServer, prompt_id: &str) -> usize {
+        let expected = format!("/history/{prompt_id}");
+        server
+            .received_requests()
+            .await
+            .expect("the mock server records requests")
+            .iter()
+            .filter(|request| request.method.as_str() == "GET" && request.url.path() == expected)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_prompt_comfyui_lost_fails_long_before_the_deadline() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "lost").await;
+        empty_history("lost").mount(&server).await;
+        mock_queue(&server, json!([])).await;
+        Mock::given(method("POST"))
+            .and(path("/queue"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            queue_check_interval_secs: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let result = tokio::time::timeout(REQUEST_WAIT, generate_clip(client))
+            .await
+            .expect("a lost prompt must fail instead of waiting out the generation deadline");
+        assert!(
+            matches!(result, Err(Error::InvalidResponse(LOST_PROMPT))),
+            "{result:?}"
+        );
+        assert_eq!(
+            history_reads(&server, "lost").await,
+            2,
+            "history is read once more after the queue misses the prompt"
+        );
+        assert_eq!(
+            posted_bodies(&server, "/queue").await,
+            [json!({"delete": ["lost"]})]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_finishes_between_history_and_queue_reads_is_collected() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "raced").await;
+        empty_history("raced").up_to_n_times(1).mount(&server).await;
+        mock_video_output(&server, "raced").await;
+        mock_queue(&server, json!([])).await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            queue_check_interval_secs: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let videos = generate_clip(client)
+            .await
+            .expect("a prompt that left the queue for history is finished, not lost");
+        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+        assert!(posted_bodies(&server, "/queue").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_prompt_still_in_the_queue_keeps_polling() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "queued").await;
+        empty_history("queued")
+            .up_to_n_times(3)
+            .mount(&server)
+            .await;
+        mock_video_output(&server, "queued").await;
+        mock_queue(&server, json!([[0, "queued", {}, {}, []]])).await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            queue_check_interval_secs: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let videos = generate_clip(client)
+            .await
+            .expect("a running prompt must not be taken for a lost one");
+        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(history_reads(&server, "queued").await, 4);
+    }
+
+    #[tokio::test]
+    async fn a_comfyui_that_goes_away_fails_with_a_connect_error_within_the_window() {
+        let server = MockServer::builder().start().await;
+        mock_video_prompt(&server, "dead").await;
+        empty_history("dead").mount(&server).await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            outage_window_secs: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let render = tokio::spawn(generate_clip(client));
+        wait_for_request(&server, "/prompt").await;
+        drop(server);
+        let result = tokio::time::timeout(REQUEST_WAIT, render)
+            .await
+            .expect("a dead ComfyUI must fail within the outage window, not the deadline")
+            .expect("the render task should not panic");
+        assert!(
+            matches!(&result, Err(Error::Http(error)) if error.is_connect()),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_download_that_keeps_failing_gives_up_within_the_window() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "stuck").await;
+        Mock::given(method("GET"))
+            .and(path("/history/stuck"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "stuck": {"status": {"status_str": "success"}, "outputs": {
+                    "10": {"gifs": [{"filename": "zone.webm", "subfolder": "", "type": "output"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/queue"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            outage_window_secs: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let result = tokio::time::timeout(REQUEST_WAIT, generate_clip(client))
+            .await
+            .expect("a failing download must give up within the outage window");
+        assert!(
+            matches!(
+                &result,
+                Err(Error::Http(error))
+                    if error.status() == Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            posted_bodies(&server, "/queue").await,
+            [json!({"delete": ["stuck"]})]
         );
     }
 

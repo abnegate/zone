@@ -2,6 +2,9 @@
 
 use std::env;
 
+const OUTAGE_WINDOW_SECS: u64 = 120;
+const QUEUE_CHECK_INTERVAL_SECS: u64 = 30;
+
 fn env_truthy(name: &str, default: bool) -> bool {
     truthy(env::var(name).ok(), default)
 }
@@ -75,6 +78,13 @@ pub struct Config {
     pub audio_generation_timeout_secs: u64,
     pub upscale_generation_timeout_secs: u64,
     pub poll_interval_ms: u64,
+    /// How long a job keeps retrying ComfyUI requests that fail without a
+    /// lasting status before it gives up on a dead or restarted server.
+    pub outage_window_secs: u64,
+    /// How often a job whose prompt has no history yet confirms ComfyUI still
+    /// queues it, so a prompt lost to a restart fails instead of waiting out
+    /// the generation deadline.
+    pub queue_check_interval_secs: u64,
     /// ComfyUI models root (`checkpoints/`, `loras/`, `diffusion_models/`, ...).
     pub models_dir: std::path::PathBuf,
     /// Optional command used to train a LoRA. Empty uses ComfyUI ZoneTrainLoRA.
@@ -126,6 +136,8 @@ impl Default for Config {
             audio_generation_timeout_secs: 600,
             upscale_generation_timeout_secs: 600,
             poll_interval_ms: 500,
+            outage_window_secs: OUTAGE_WINDOW_SECS,
+            queue_check_interval_secs: QUEUE_CHECK_INTERVAL_SECS,
             models_dir: std::path::PathBuf::from("/app/comfyui/models"),
             train_command: None,
             train_timeout_secs: 3600,
@@ -208,6 +220,8 @@ impl Config {
                 3600,
             ),
             poll_interval_ms: env_u64("COMFYUI_POLL_INTERVAL_MS", 500, 50, 5000),
+            outage_window_secs: OUTAGE_WINDOW_SECS,
+            queue_check_interval_secs: QUEUE_CHECK_INTERVAL_SECS,
             vision_model: env_text("ZONE_VISION_MODEL")
                 .map(std::path::PathBuf::from)
                 .or_else(|| Some(models_dir.join("vision/u2net.onnx")))
