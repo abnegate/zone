@@ -229,7 +229,8 @@ Use the same overrides for later verification and startup.
 Metal kernels corrupt Wan 2.2 frames (Comfy-Org/ComfyUI#15793, #16644), so the
 Zone LoRA node decides where each Wan model runs when ComfyUI starts on MPS:
 
-- The Wan 2.2 TI2V 5B DiT loads and samples on CPU.
+- A Wan 2.2 TI2V 5B DiT, which setup no longer downloads, loads and samples on
+  CPU.
 - Every Wan VAE, 2.1 and 2.2, loads and decodes on CPU. This is a precaution:
   both reports rule the VAE out and blame the DiT's sampled latents. Decoding
   is slow: a 5B 832×480×49 clip took 31 minutes with both its DiT and VAE on
@@ -242,6 +243,25 @@ Zone LoRA node decides where each Wan model runs when ComfyUI starts on MPS:
 - Attention is not patched.
 - No A14B clip has yet been rendered end to end on MPS, so treat Metal video
   as unverified.
+
+#### Memory on a 64 GB Mac
+
+The 64 GB floor setup enforces for video is an estimate, and the arithmetic
+says it is tight. Apple Silicon has one pool of unified memory, so the CPU
+copies below and the Metal working set draw on the same RAM:
+
+- Densifying turns each 14.3 GB FP8 expert into about 28.6 GB of fp16, built
+  on the CPU.
+- A clip runs the high-noise expert and then the low-noise one, and ComfyUI
+  caches both `UNETLoader` outputs, so about 57 GB of expert weights stays
+  resident after the first clip.
+- UMT5-XXL (6.7 GB as FP8 on disk), the Wan 2.1 VAE and its 1280×704×81
+  decode on the CPU, Ollama's loaded models, Postgres and macOS all need room
+  on top of that.
+
+Expect heavy swapping on a 64 GB Mac, with sampling slowed by paging. None of
+this has been measured: no A14B clip has been rendered on Metal, so the floor,
+the resident size and the swap behaviour are all unverified.
 
 ## Bundled NVIDIA Compose profile
 
