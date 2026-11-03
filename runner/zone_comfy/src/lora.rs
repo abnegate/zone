@@ -14,7 +14,6 @@ use crate::quality::Quality;
 use crate::recipe::{Recipe, RecipeCatalog, TrainingModel, sanitize_weight_filename};
 use crate::subject::{CENTRE, SaliencyMap, Subject};
 use crate::train::{Run, TrainProgress};
-use crate::video;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -469,13 +468,7 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
     }
     let _filename = final_filename(&request.name)?;
     if request.images.is_empty() {
-        return Err(TrainError::Invalid(
-            if request.method == TrainMethod::Video {
-                "video training needs clips"
-            } else {
-                "training needs images"
-            },
-        ));
+        return Err(TrainError::Invalid("training needs images"));
     }
     let catalog = RecipeCatalog::load(Some(config.workflow_path.as_path()))
         .map_err(|_| TrainError::Invalid("recipe catalog is missing"))?;
@@ -490,10 +483,10 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
     let trigger = request.trigger.as_deref().unwrap_or_default().trim();
     if request.method.requires_person() && request.subject != TrainSubject::Person {
         return Err(TrainError::Invalid(match request.method {
-            TrainMethod::Finetune => "fine-tune is only available for a person",
             TrainMethod::Pivotal => "pivotal training is only available for a person",
-            TrainMethod::Video => "video training is only available for a person",
-            TrainMethod::Lora => "fine-tune is only available for a person",
+            TrainMethod::Lora | TrainMethod::Finetune | TrainMethod::Video => {
+                "fine-tune is only available for a person"
+            }
         }));
     }
     if request.subject == TrainSubject::Person {
@@ -513,24 +506,6 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
                 return Err(TrainError::Invalid(
                     "download the SDXL people bundle before training a person",
                 ));
-            }
-        }
-        if request.method == TrainMethod::Video {
-            let path = config
-                .models_dir
-                .join("diffusion_models")
-                .join("wan2.2_ti2v_5B_fp16.safetensors");
-            if !request.provider.is_runpod() && !path.is_file() {
-                return Err(TrainError::Invalid(
-                    "download the video bundle before training a person video adapter",
-                ));
-            }
-            if !request
-                .images
-                .iter()
-                .any(|image| video::is_clip_filename(&image.filename))
-            {
-                return Err(TrainError::Invalid("video training needs clips"));
             }
         }
     } else if !edit && trigger.is_empty() {
@@ -559,9 +534,6 @@ async fn train_with_pipeline(
     }
     if request.subject == TrainSubject::Language {
         return train_language(config, request, runpod_api_key.as_deref(), progress).await;
-    }
-    if request.method == TrainMethod::Video {
-        return train_video(config, request, runpod_api_key.as_deref(), progress).await;
     }
     let filename = final_filename(&request.name)?;
     let catalog = RecipeCatalog::load(Some(config.workflow_path.as_path()))
@@ -1426,150 +1398,6 @@ async fn publish_host_other(
         dataset: findings,
         screening,
     })
-}
-
-async fn train_video(
-    config: &Config,
-    request: TrainRequest,
-    runpod_api_key: Option<&str>,
-    progress: Option<mpsc::UnboundedSender<TrainProgress>>,
-) -> Result<TrainOutcome, TrainError> {
-    let trigger = request.trigger.as_deref().unwrap_or_default().trim();
-    let filename = video_filename(&request.name)?;
-    let clips: Vec<&TrainImage> = request
-        .images
-        .iter()
-        .filter(|image| video::is_clip_filename(&image.filename))
-        .collect();
-    if clips.is_empty() {
-        return Err(TrainError::Invalid("video training needs clips"));
-    }
-    if let Some(progress) = &progress {
-        let _ = progress.send(
-            TrainProgress::new(0, host_train::video_steps_for(clips.len().max(1)))
-                .phase("screening", "Staging clip windows"),
-        );
-    }
-    let attempt = Attempt::create(&config.models_dir)?;
-    let clips_root = ensure_child_directory(&attempt.root, dataset::CLIPS_DIRECTORY)?;
-    let mut windows = Vec::new();
-    let mut next = 0u32;
-    for clip in &clips {
-        let bytes = clip.pixels()?;
-        let staged =
-            video::stage_clip_windows(config, &bytes, &clip.filename, &clips_root, next).await?;
-        next += staged.len() as u32;
-        windows.extend(staged);
-    }
-    if windows.is_empty() {
-        return Err(TrainError::Invalid("video training needs clips"));
-    }
-    let findings = dataset::inspect(
-        &windows
-            .iter()
-            .map(|window| window.pose.clone())
-            .collect::<Vec<_>>(),
-        windows.len(),
-    );
-    publish_host_video(
-        config,
-        &request,
-        &filename,
-        trigger,
-        &attempt,
-        findings,
-        Screening {
-            kept: clips.len(),
-            dropped: Vec::new(),
-            attempted: Vec::new(),
-        },
-        windows.len(),
-        runpod_api_key,
-        progress,
-    )
-    .await
-}
-
-async fn publish_host_video(
-    config: &Config,
-    request: &TrainRequest,
-    filename: &str,
-    trigger: &str,
-    attempt: &Attempt,
-    findings: Vec<crate::dataset::Finding>,
-    screening: Screening,
-    window_count: usize,
-    runpod_api_key: Option<&str>,
-    progress: Option<mpsc::UnboundedSender<TrainProgress>>,
-) -> Result<TrainOutcome, TrainError> {
-    let catalog = RecipeCatalog::load(Some(config.workflow_path.as_path()))
-        .or_else(|_| RecipeCatalog::packaged())
-        .map_err(|_| TrainError::Invalid("recipe catalog is missing"))?;
-    let checkpoint = catalog
-        .get(&request.base)
-        .and_then(|recipe| recipe.training_model().ok())
-        .and_then(|model| match model {
-            TrainingModel::Sdxl { checkpoint } => Some(checkpoint),
-            _ => None,
-        })
-        .unwrap_or_else(|| "lustifySDXLNSFW_ggwpV7.safetensors".into());
-    let hf_base = catalog
-        .get("wan-adapter")
-        .and_then(|recipe| recipe.hf_bases.first())
-        .cloned()
-        .unwrap_or_else(|| "Comfy-Org/Wan_2.2_ComfyUI_Repackaged".into());
-    let mut job = host_train::HostJob::create(&request.name, "video", trigger, &checkpoint);
-    job.filename = Some(filename.to_string());
-    job.recipe_id = TrainMethod::Video.person_recipe_id().to_string();
-    job.hf_base = hf_base;
-    job.image_count = window_count;
-    let dir = host_train::job_dir(&config.models_dir, job.id);
-    bind_compute(&mut job, request, &dir, runpod_api_key)?;
-    host_train::stage_clips(&attempt.root, &dir)?;
-    host_train::write_queued_video_progress(&dir, window_count)?;
-    if let Some(progress) = &progress {
-        let _ = progress.send(
-            TrainProgress::new(0, host_train::video_steps_for(window_count))
-                .phase("queued", "Waiting for the host trainer")
-                .percent(0),
-        );
-    }
-    let finished = host_train::wait(&dir, progress).await?;
-    let published = finished.filename.as_deref().unwrap_or(filename);
-    let path = config
-        .models_dir
-        .join(TrainMethod::Video.publish_directory())
-        .join(published);
-    if require_regular_file(
-        &config
-            .models_dir
-            .join(TrainMethod::Video.publish_directory()),
-        &path,
-    )
-    .is_err()
-    {
-        return Err(TrainError::Failed(
-            "host trainer did not write a regular weight file".to_string(),
-        ));
-    }
-    Ok(TrainOutcome {
-        path,
-        quality: None,
-        dataset: findings,
-        screening,
-    })
-}
-
-fn video_filename(name: &str) -> Result<String, TrainError> {
-    let filename = final_filename(name)?;
-    let stem = filename
-        .strip_suffix(".safetensors")
-        .unwrap_or(filename.as_str());
-    if stem.ends_with("-wan") {
-        Ok(filename)
-    } else {
-        Ok(format!("{stem}-wan.safetensors"))
-    }
 }
 
 pub fn identity_caption(caption: &str, trigger: &str) -> String {
@@ -4243,19 +4071,6 @@ mod tests {
                 .iter()
                 .all(|base| !base.id.contains(':') && base.subject != TrainSubject::Language),
             "available_bases must not list Ollama chat models: {bases:?}"
-        );
-    }
-
-    #[test]
-    fn video_adapter_filename_adds_the_wan_suffix() {
-        assert_eq!(video_filename("jerry").unwrap(), "jerry-wan.safetensors");
-        assert_eq!(
-            video_filename("jerry-wan").unwrap(),
-            "jerry-wan.safetensors"
-        );
-        assert_eq!(
-            video_filename("jerry-wan.safetensors").unwrap(),
-            "jerry-wan.safetensors"
         );
     }
 

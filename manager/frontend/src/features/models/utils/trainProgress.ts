@@ -134,9 +134,6 @@ export function methodAdvice(input: {
   const clips = Math.max(0, input.clips);
   const ready = stills >= FINE_TUNE_READY_STILLS || clips >= FINE_TUNE_READY_CLIPS;
   const consider = stills >= FINE_TUNE_MIN_STILLS || clips >= FINE_TUNE_MIN_CLIPS;
-  if (input.method === 'video') {
-    return 'This method trains Wan from the clips (2–3 windows per clip). Run a still method too for image identity.';
-  }
   if (input.method === 'pivotal') {
     return null;
   }

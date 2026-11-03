@@ -140,9 +140,6 @@ describe('trainProgress', () => {
       methodAdvice({ subject: 'language', method: 'lora', stills: 2000, clips: 0 })
     ).toBeNull();
     expect(methodAdvice({ subject: 'person', method: 'pivotal', stills: 80, clips: 0 })).toBeNull();
-    expect(methodAdvice({ subject: 'person', method: 'video', stills: 0, clips: 40 })).toMatch(
-      /trains Wan from the clips/
-    );
   });
 
   it('turns a relative preview path into a train preview url', () => {
