@@ -264,6 +264,8 @@ impl FetchConfig {
             "dist/**".to_string(),
             "build/**".to_string(),
             "__pycache__/**".to_string(),
+            ".venv/**".to_string(),
+            "venv/**".to_string(),
             "*.lock".to_string(),
             "*.min.js".to_string(),
             "*.min.css".to_string(),
@@ -495,6 +497,8 @@ mod tests {
                 .exclude_patterns
                 .contains(&"node_modules/**".to_string())
         );
+        assert!(config.exclude_patterns.contains(&".venv/**".to_string()));
+        assert!(config.exclude_patterns.contains(&"venv/**".to_string()));
         assert!(FetchConfig::for_source_indexing().index_mode);
         assert!(!FetchConfig::for_source_indexing().allow_metadata_only);
     }
