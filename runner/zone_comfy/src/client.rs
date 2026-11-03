@@ -23,9 +23,9 @@ pub const MAX_SOURCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 /// Clips come back from the artifact store rather than a chat upload, so the
 /// cap matches what the store is willing to keep rather than a request body.
 pub const MAX_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
-const PACKAGED_A14B_T2V_WORKFLOW: &str =
+pub(crate) const PACKAGED_A14B_T2V_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/wan2.2-a14b-t2v-api.json");
-const PACKAGED_A14B_I2V_WORKFLOW: &str =
+pub(crate) const PACKAGED_A14B_I2V_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/wan2.2-a14b-i2v-api.json");
 const A14B_VAE: &str = "wan_2.1_vae.safetensors";
 const LEFTOVER_5B_VAE: &str = "wan2.2_vae.safetensors";
@@ -1364,7 +1364,7 @@ fn is_a14b_unet(unet: &str) -> bool {
     lower.contains(WAN) && (lower.contains(HIGH_NOISE) || lower.contains(LOW_NOISE))
 }
 
-fn paired_wan_unets(unet: &str, i2v: bool) -> (String, String) {
+pub(crate) fn paired_wan_unets(unet: &str, i2v: bool) -> (String, String) {
     let expert = if is_a14b_unet(unet) {
         unet
     } else {
@@ -1380,7 +1380,7 @@ fn paired_wan_unets(unet: &str, i2v: bool) -> (String, String) {
     (high, low)
 }
 
-fn validate_video_workflow(workflow: &Value) -> Result<(), Error> {
+pub(crate) fn validate_video_workflow(workflow: &Value) -> Result<(), Error> {
     validate_a14b_workflow(workflow)?;
     if workflow.pointer("/7/class_type").and_then(Value::as_str) != Some("EmptyHunyuanLatentVideo")
     {
@@ -1423,7 +1423,7 @@ fn validate_a14b_workflow(workflow: &Value) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate_i2v_workflow(workflow: &Value) -> Result<(), Error> {
+pub(crate) fn validate_i2v_workflow(workflow: &Value) -> Result<(), Error> {
     validate_a14b_workflow(workflow)?;
     if workflow.pointer("/7/class_type").and_then(Value::as_str) != Some("WanImageToVideo") {
         return Err(Error::Configuration(
@@ -2946,6 +2946,19 @@ mod tests {
         }
     }
 
+    struct VideoPromptStartsWith(&'static str);
+
+    impl wiremock::Match for VideoPromptStartsWith {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| {
+                body["prompt"]["5"]["inputs"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with(self.0))
+                    && body["prompt"]["1"]["inputs"]["unet_name"] == A14B_HIGH_UNET
+            })
+        }
+    }
+
     fn write_still_identity(models: &std::path::Path, trigger: &str) {
         let lora = models.join("loras/jerry.safetensors");
         std::fs::create_dir_all(lora.parent().unwrap()).unwrap();
@@ -3037,6 +3050,43 @@ mod tests {
             .mount(&server)
             .await;
         mock_video_output(&server, "still").await;
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models");
+        write_still_identity(&models, "ohwx");
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            models_dir: models,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let videos = client
+            .generate_video(
+                "ohwx walking on the beach",
+                None,
+                &mut cancel_rx,
+                progress_tx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn generate_video_starts_the_a14b_prompt_with_a_bound_still_trigger() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(VideoPromptStartsWith("ohwx"))
+            .and(BodyDoesNotContain("LoraLoaderModelOnly"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "trigger"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_video_output(&server, "trigger").await;
         let root = tempfile::tempdir().unwrap();
         let models = root.path().join("models");
         write_still_identity(&models, "ohwx");

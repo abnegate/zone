@@ -1134,6 +1134,70 @@ mod tests {
     }
 
     #[test]
+    fn packaged_a14b_graphs_match_the_wan_a14b_recipe() {
+        use crate::client::{
+            PACKAGED_A14B_I2V_WORKFLOW, PACKAGED_A14B_T2V_WORKFLOW, build_wan_i2v_workflow,
+            build_wan_t2v_workflow, paired_wan_unets, validate_i2v_workflow,
+            validate_video_workflow,
+        };
+
+        let catalog = catalog();
+        let recipe = catalog.get("wan-a14b").unwrap();
+        let text_to_video: Value = serde_json::from_str(PACKAGED_A14B_T2V_WORKFLOW).unwrap();
+        let image_to_video: Value = serde_json::from_str(PACKAGED_A14B_I2V_WORKFLOW).unwrap();
+        assert_eq!(recipe.bare, text_to_video);
+        assert_eq!(recipe.with_source.as_ref(), Some(&image_to_video));
+        validate_video_workflow(&text_to_video).unwrap();
+        validate_i2v_workflow(&image_to_video).unwrap();
+
+        let unet = &recipe.defaults["unet"];
+        let clip = &recipe.defaults["clip"];
+        let vae = &recipe.defaults["vae"];
+        let required: Vec<&str> = recipe
+            .required_files
+            .iter()
+            .map(|file| file.filename.as_str())
+            .collect();
+        let built_text_to_video = build_wan_t2v_workflow("a fox", unet, clip, vae, 42).unwrap();
+        let built_image_to_video =
+            build_wan_i2v_workflow("a fox", unet, clip, vae, 42, "zone-i2v-source.png").unwrap();
+        for (packaged, built, i2v) in [
+            (&text_to_video, &built_text_to_video, false),
+            (&image_to_video, &built_image_to_video, true),
+        ] {
+            let (high, low) = paired_wan_unets(unet, i2v);
+            assert_eq!(packaged["1"]["inputs"]["unet_name"], high);
+            assert_eq!(packaged["12"]["inputs"]["unet_name"], low);
+            assert!(required.contains(&high.as_str()), "{high}");
+            assert!(required.contains(&low.as_str()), "{low}");
+            assert_eq!(packaged["2"]["inputs"]["clip_name"], *clip);
+            assert_eq!(packaged["3"]["inputs"]["vae_name"], *vae);
+            for pointer in [&recipe.slots.prompt, &recipe.slots.seed]
+                .into_iter()
+                .chain(recipe.slots.weights.values())
+            {
+                assert!(packaged.pointer(pointer).is_some(), "{pointer}");
+            }
+            assert_eq!(
+                packaged[recipe.slots.output_node.as_str()]["class_type"],
+                "SaveWEBM"
+            );
+            assert_eq!(built["1"]["inputs"]["unet_name"], high);
+            assert_eq!(built["12"]["inputs"]["unet_name"], low);
+            assert_eq!(built["8"]["inputs"]["noise_seed"], 42);
+            assert_eq!(built["14"]["inputs"]["noise_seed"], 42);
+        }
+        let source = recipe.slots.source.as_deref().unwrap();
+        assert!(image_to_video.pointer(source).is_some());
+        assert!(text_to_video.pointer(source).is_none());
+        assert_eq!(
+            recipe.slots.weights.get("unet").map(String::as_str),
+            Some("/1/inputs/unet_name")
+        );
+        assert_eq!(recipe.slots.seed, "/8/inputs/noise_seed");
+    }
+
+    #[test]
     fn applying_a_video_recipe_is_refused() {
         let catalog = catalog();
         let recipe = catalog.get("wan-a14b").unwrap();
