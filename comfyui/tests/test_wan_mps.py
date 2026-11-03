@@ -47,12 +47,17 @@ from custom_nodes.zone_lora.inference_hooks import (  # noqa: E402
 )
 
 
+def mps_available(available: bool):
+    return mock.patch('torch.backends.mps.is_available', return_value=available)
+
+
 class WanMps(unittest.TestCase):
     def test_flux_and_qwen_keep_their_load_device(self) -> None:
-        options = wan_cpu_model_options(
-            'qwen_image_edit_2511_fp8mixed.safetensors',
-            {'dtype': torch.float16},
-        )
+        with mps_available(True):
+            options = wan_cpu_model_options(
+                'qwen_image_edit_2511_fp8mixed.safetensors',
+                {'dtype': torch.float16},
+            )
         self.assertEqual(options, {'dtype': torch.float16})
 
     def test_only_wan_paths_are_wan_14b_experts(self) -> None:
@@ -71,30 +76,30 @@ class WanMps(unittest.TestCase):
         ):
             self.assertFalse(is_wan_14b_path(path), path)
 
-    @unittest.skipIf(torch.backends.mps.is_available(), 'mps pins Wan to CPU')
     def test_wan_keeps_caller_options_without_mps(self) -> None:
-        options = wan_cpu_model_options(
-            'wan2.2_ti2v_5B_fp16.safetensors',
-            {'dtype': torch.float16},
-        )
+        with mps_available(False):
+            options = wan_cpu_model_options(
+                'wan2.2_ti2v_5B_fp16.safetensors',
+                {'dtype': torch.float16},
+            )
         self.assertEqual(options, {'dtype': torch.float16})
 
-    @unittest.skipUnless(torch.backends.mps.is_available(), 'mps is not available')
     def test_wan_weights_are_pinned_to_cpu_on_mps(self) -> None:
-        options = wan_cpu_model_options(
-            '/models/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors',
-            {'dtype': torch.float16},
-        )
+        with mps_available(True):
+            options = wan_cpu_model_options(
+                '/models/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors',
+                {'dtype': torch.float16},
+            )
         self.assertEqual(options['load_device'], torch.device('cpu'))
         self.assertEqual(options['offload_device'], torch.device('cpu'))
         self.assertEqual(options['dtype'], torch.float16)
 
-    @unittest.skipUnless(torch.backends.mps.is_available(), 'mps is not available')
     def test_a14b_weights_stay_on_mps(self) -> None:
-        options = wan_cpu_model_options(
-            '/models/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
-            {'dtype': torch.float16},
-        )
+        with mps_available(True):
+            options = wan_cpu_model_options(
+                '/models/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
+                {'dtype': torch.float16},
+            )
         self.assertEqual(options, {'dtype': torch.float16})
         self.assertNotIn('load_device', options)
 
@@ -274,7 +279,6 @@ class WanMps(unittest.TestCase):
         self.assertIs(once.__wrapped__, original)
         self.assertIs(quantization.dequantize_per_tensor_fp8, once)
 
-    @unittest.skipUnless(torch.backends.mps.is_available(), 'mps is not available')
     def test_a14b_load_materializes_fp16_and_sets_mps(self) -> None:
         import comfy.sd
 
@@ -300,9 +304,10 @@ class WanMps(unittest.TestCase):
 
         comfy.sd.load_diffusion_model = fake_load
         install_wan_mps_cpu_unet()
-        patcher = comfy.sd.load_diffusion_model(
-            '/models/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors'
-        )
+        with mps_available(True):
+            patcher = comfy.sd.load_diffusion_model(
+                '/models/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors'
+            )
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0][1]['load_device'], torch.device('cpu'))
         self.assertTrue(seen[0][2])
@@ -310,6 +315,28 @@ class WanMps(unittest.TestCase):
         self.assertEqual(patcher.offload_device, torch.device('cpu'))
         self.assertEqual(patcher.model.weight.dtype, torch.float16)
         self.assertEqual(patcher.size, 0)
+
+    def test_a14b_load_keeps_caller_options_without_mps(self) -> None:
+        import comfy.sd
+
+        installed = comfy.sd.load_diffusion_model
+        self.addCleanup(setattr, comfy.sd, 'load_diffusion_model', installed)
+        seen: list[tuple] = []
+        loaded = object()
+
+        def fake_load(unet_path, model_options=None, disable_dynamic=False):
+            seen.append((dict(model_options or {}), disable_dynamic))
+            return loaded
+
+        comfy.sd.load_diffusion_model = fake_load
+        install_wan_mps_cpu_unet()
+        with mps_available(False):
+            patcher = comfy.sd.load_diffusion_model(
+                '/models/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
+                model_options={'dtype': torch.float16},
+            )
+        self.assertIs(patcher, loaded)
+        self.assertEqual(seen, [({'dtype': torch.float16}, False)])
 
     def test_installing_the_unet_hook_twice_does_not_stack_wrappers(self) -> None:
         import comfy.sd
@@ -340,7 +367,7 @@ class WanMps(unittest.TestCase):
 
         comfy.sd.load_diffusion_model = fake_load
         install_wan_mps_cpu_unet()
-        with mock.patch('torch.backends.mps.is_available', return_value=True):
+        with mps_available(True):
             patcher = comfy.sd.load_diffusion_model(
                 '/models/diffusion_models/hunyuan_video_14B.safetensors',
                 model_options={'dtype': torch.float16},
@@ -349,16 +376,19 @@ class WanMps(unittest.TestCase):
         self.assertEqual(seen, [({'dtype': torch.float16}, False)])
 
     def test_flux_vae_keeps_caller_device(self) -> None:
-        self.assertIsNone(
-            wan_cpu_vae_device({'decoder.conv_out.weight': torch.zeros(1)}),
-        )
+        with mps_available(True):
+            device = wan_cpu_vae_device({'decoder.conv_out.weight': torch.zeros(1)})
+        self.assertIsNone(device)
 
-    @unittest.skipUnless(torch.backends.mps.is_available(), 'mps is not available')
     def test_wan_vae_is_pinned_to_cpu_on_mps(self) -> None:
-        self.assertEqual(
-            wan_cpu_vae_device({'decoder.middle.0.residual.0.gamma': torch.zeros(1)}),
-            torch.device('cpu'),
-        )
+        with mps_available(True):
+            device = wan_cpu_vae_device({'decoder.middle.0.residual.0.gamma': torch.zeros(1)})
+        self.assertEqual(device, torch.device('cpu'))
+
+    def test_wan_vae_keeps_caller_device_without_mps(self) -> None:
+        with mps_available(False):
+            device = wan_cpu_vae_device({'decoder.middle.0.residual.0.gamma': torch.zeros(1)})
+        self.assertIsNone(device)
 
     def test_wan_vae_keeps_an_explicit_device(self) -> None:
         self.assertEqual(
