@@ -106,8 +106,6 @@ def steps_for(image_count: int, config: dict[str, Any]) -> int:
 def recipe_for(method: str) -> str:
     if method == 'finetune':
         return 'sdxl'
-    if method == 'video':
-        return 'wan-adapter'
     return 'sdxl-adapter'
 
 

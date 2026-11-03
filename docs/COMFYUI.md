@@ -508,7 +508,10 @@ and loads through `sdxl-adapter` (`LoraLoader` on model and CLIP). Method
 recipe, with prior preservation class `person`. Captions are
 `{trigger} person, {scene}`. Mixed subjects fail the job. Video identity
 training is off: it trains Wan 2.2 TI2V 5B adapters, and video generation runs
-Wan 2.2 A14B, which cannot load them, so a `video` method is refused.
+Wan 2.2 A14B, which cannot load them, so a `video` method is refused. A
+**Pivotal** run's name is only letters, digits, dashes and underscores, the
+only names generation prompts its embedding by as `embedding:<name>`, so a
+name with a dot or a space is refused before training.
 
 Person jobs do not go through ComfyUI `/prompt`. Manager writes
 `models/.zone-train/{id}/` on the bind mount; host LaunchAgent `ai.zone.train`
@@ -886,8 +889,8 @@ steps split across high then low noise experts (0–10 leftover enable, 10–end
 add_noise disable), CFG 3.5, ModelSamplingSD3 shift 8, 16 fps. The negative
 prompt stays the packaged Chinese Wan default and is never taken from
 untrusted request data. Identity LoRAs are not applied to video: a trigger
-word in the prompt passes through as plain text, and 5B `wan-adapter` LoRA
-files are not loaded onto A14B.
+word in the prompt passes through as plain text, and no recipe loads a Wan 2.2
+TI2V 5B LoRA onto A14B.
 
 Unlike the image workflows, video uses ComfyUI's built-in `SaveWEBM` node,
 which writes WebM VP9 into ComfyUI's **output** folder rather than temp.

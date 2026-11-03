@@ -5,7 +5,6 @@ use abnegate_comfy::lora::TrainPolicy;
 use abnegate_comfy::lora::TrainRequest;
 use abnegate_comfy::lora::TrainRule;
 use abnegate_comfy::lora::TrainSubject;
-use abnegate_comfy::lora::VIDEO_REFUSAL;
 use abnegate_secret::SecretValue;
 
 /// The one base a person trains on: Lustify, an SDXL checkpoint.
@@ -18,6 +17,10 @@ pub const PEOPLE_CHECKPOINT: &str = "checkpoints/lustifySDXLNSFW_ggwpV7.safetens
 pub const LORAS: &str = "loras";
 pub const CHECKPOINTS: &str = "checkpoints";
 pub const MISSING_RUNPOD_KEY: &str = "Save a Runpod API key in Workspace Settings.";
+pub const VIDEO_REFUSAL: &str = "video identity training is off: it trains Wan 2.2 TI2V 5B adapters, and video generation runs Wan 2.2 A14B, which cannot load them";
+/// The crate's refusal of a pivotal weight whose name its embedding could
+/// not be prompted by, which the train route and the train tool both return.
+pub const PIVOTAL_NAME: &str = "a pivotal weight's name must be letters, digits, dashes or underscores, so its embedding can be prompted";
 
 /// What each base trains and where it publishes: the people base trains a
 /// person's LoRA, pivotal LoRA and fine-tune, and an object or style LoRA;
@@ -65,16 +68,12 @@ pub fn key(
         .ok_or(TrainError::Invalid(MISSING_RUNPOD_KEY))
 }
 
-/// `request` placed on `compute`, carrying the key it trains with. Video
-/// identity training is refused on every compute.
+/// `request` placed on `compute`, carrying the key it trains with.
 pub fn place(
     request: TrainRequest,
     compute: Compute,
     saved: Option<SecretValue>,
 ) -> Result<TrainRequest, TrainError> {
-    if request.method == TrainMethod::Video {
-        return Err(TrainError::Invalid(VIDEO_REFUSAL));
-    }
     let placed = request.with_compute(compute);
     Ok(match key(compute, saved)? {
         Some(key) => placed.with_compute_key(key),
@@ -145,7 +144,6 @@ mod tests {
         ] {
             assert!(person(method), "a person cannot train {method:?}");
         }
-        assert!(policy.rule(PEOPLE_BASE, TrainMethod::Video).is_none());
         let other: Vec<TrainMethod> = policy
             .rules_for(PEOPLE_BASE)
             .filter(|rule| rule.subjects.contains(&TrainSubject::Other))
@@ -221,21 +219,24 @@ mod tests {
     }
 
     #[test]
-    fn video_identity_training_is_refused_even_with_the_bundle_and_a_clip() {
+    fn a_pivotal_name_its_embedding_cannot_be_prompted_by_is_refused() {
         let (_models, config) = harness();
         install(&config, PEOPLE_CHECKPOINT);
-        install(&config, "diffusion_models/wan2.2_ti2v_5B_fp16.safetensors");
-        for subject in [TrainSubject::Person, TrainSubject::Other] {
-            for compute in [Compute::Local, Compute::Runpod] {
-                let mut video = request(PEOPLE_BASE, subject, TrainMethod::Video);
-                video
-                    .images
-                    .push(TrainImage::from_bytes("walk.mp4", "", b"clip".to_vec()));
-                match place(video, compute, Some(SecretValue::new("rp-secret"))) {
-                    Err(TrainError::Invalid(message)) => assert_eq!(message, VIDEO_REFUSAL),
-                    other => panic!("{subject:?} on {compute:?} was not refused: {other:?}"),
-                }
-            }
+        let named = |name: &str, method| {
+            let mut request = request(PEOPLE_BASE, TrainSubject::Person, method);
+            request.name = name.to_string();
+            request
+        };
+        validate_request(&config, &named("jerry_v2-final", TrainMethod::Pivotal))
+            .expect("a plain name trains");
+        for name in ["jerry.v2", "jerry v2"] {
+            assert_eq!(
+                refusal(&config, &named(name, TrainMethod::Pivotal)),
+                PIVOTAL_NAME,
+                "{name:?}"
+            );
+            validate_request(&config, &named(name, TrainMethod::Lora))
+                .unwrap_or_else(|error| panic!("a LoRA may be named {name:?}: {error}"));
         }
     }
 

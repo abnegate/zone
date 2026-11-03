@@ -177,6 +177,7 @@ mod tests {
     use abnegate_comfy::lora::TrainRequest;
     use abnegate_comfy::lora::TrainSubject;
     use abnegate_comfy::lora::validate_request;
+    use abnegate_comfy::recipe::MediaKind;
     use serde_json::json;
 
     const FOREIGN_WEIGHT: &str = "a weight training did not publish already has this name";
@@ -290,7 +291,7 @@ mod tests {
             &config,
             LORAS,
             "walk.safetensors",
-            &json!({"recipe_id": "wan-adapter", "hf_base": "Wan-AI/Wan2.2-T2V-A14B", "trigger": "walk"}),
+            &json!({"recipe_id": "wan-a14b", "hf_base": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged", "trigger": "walk"}),
         );
 
         unchanged(&config, &sidecar);
@@ -361,7 +362,10 @@ mod tests {
                 "{recipe} is missing from {recipes:?}"
             );
         }
-        assert!(!recipes.contains("wan-adapter"), "{recipes:?}");
+        for recipe in &recipes {
+            let kind = catalog.get(recipe).map(|recipe| recipe.kind);
+            assert_ne!(kind, Some(MediaKind::Video), "{recipe} renders video");
+        }
         assert_eq!(
             directories(&policy),
             BTreeSet::from([CHECKPOINTS.to_string(), LORAS.to_string()])

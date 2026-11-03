@@ -32,7 +32,6 @@ def queued_job(name: str = 'jerry', trigger: str = 'ohwx', extra: dict | None = 
         'total': None,
         'pid': None,
         'started_at': '2026-10-04T00:00:00Z',
-        'recipe_id': 'wan-adapter',
         'hf_base': 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
         'base': 'wan-people',
     }
@@ -95,7 +94,7 @@ class StubTrainingTests(unittest.TestCase):
             self.assertEqual(progress['phase'], 'publishing')
             self.assertEqual(progress['percent'], 100)
             self.assertIn(progress['phase'], {'loading', 'encoding', 'training', 'publishing'})
-            self.assertEqual(job['recipe_id'], 'wan-adapter')
+            self.assertNotIn('recipe_id', job)
             weight = job_dir / 'jerry-wan.safetensors'
             self.assertTrue(weight.is_file())
             self.assertGreater(weight.stat().st_size, 0)
@@ -115,35 +114,26 @@ class StubTrainingTests(unittest.TestCase):
             self.assertTrue((job_dir / 'jerry-wan.safetensors').is_file())
 
 
-class LegacyPublishTests(unittest.TestCase):
-    def test_a_video_lora_queued_before_the_upgrade_publishes_with_its_sidecar(self) -> None:
+class LegacyJobTests(unittest.TestCase):
+    def test_a_video_lora_queued_before_the_upgrade_fails_without_training_or_publishing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
             job_dir = models / '.zone-train' / str(uuid.uuid4())
             job_dir.mkdir(parents=True)
             write_clips(job_dir, count=2)
             (models / 'loras').mkdir()
-            (models / 'loras' / 'jerry.face.png').write_bytes(b'face')
             job = queued_job(extra={'filename': 'jerry-wan.safetensors'})
             del job['base']
             train_sdxl.write_job(job_dir, job)
-            train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
-            self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+            with mock.patch.object(train_wan, 'run_stub') as run_stub:
+                with self.assertRaises(ValueError):
+                    train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+            run_stub.assert_not_called()
+            failed = train_sdxl.load_job(job_dir)
+            self.assertEqual(failed['status'], 'failed')
+            self.assertEqual(failed['error'], train_wan.VIDEO_REFUSAL)
+            self.assertEqual(list((models / 'loras').iterdir()), [])
             self.assertFalse((job_dir / 'jerry-wan.safetensors').exists())
-            self.assertTrue((models / 'loras' / 'jerry-wan.safetensors').is_file())
-            sidecar = json.loads(
-                (models / 'loras' / 'jerry-wan.safetensors.zone.json').read_text(encoding='utf-8')
-            )
-            self.assertEqual(
-                sidecar,
-                {
-                    'recipe_id': 'wan-adapter',
-                    'hf_base': 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
-                    'trigger': 'ohwx',
-                    'architecture': 'wan',
-                    'face': 'jerry.face.png',
-                },
-            )
 
 
 class ClaimTests(unittest.TestCase):

@@ -324,7 +324,9 @@ Runpod is trained on a new pod, which publishes it the same way before it
 returns. The trainer gives each of those sidecars a fresh `generation`, the
 mark abnegate-comfy looks for before it replaces a weight, so the name trains
 again straight away, with no restart. A language job publishes its model on
-its own path either way.
+its own path either way. A base-less Wan video job, which only a zone from
+before video identity training was turned off could have queued, fails with
+that refusal instead of training an adapter no video graph loads.
 
 ## Host trainer on Linux
 

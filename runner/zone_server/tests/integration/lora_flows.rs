@@ -29,7 +29,7 @@ use zone_server::auth::create_session_access_token;
 use zone_server::config::DEFAULT_HUGGINGFACE_MODELS_URL;
 use zone_server::db::{sessions, users};
 use zone_server::routes::models::{BrowseQuery, HuggingFaceProvider, ModelMediumFilter, ModelSort};
-use zone_server::services::comfy::settings;
+use zone_server::services::comfy::{policy, settings};
 
 async fn token(pool: &PgPool, secret: &str) -> String {
     let user = users::create_user(
@@ -694,6 +694,37 @@ async fn a_pivotal_lora_the_host_trainer_leaves_in_its_job_is_published_with_its
     assert!(
         uuid::Uuid::parse_str(generation).is_ok(),
         "{generation} is not a uuid"
+    );
+    let _ = fs::remove_dir_all(models_directory);
+}
+
+#[tokio::test]
+async fn a_pivotal_lora_named_with_a_dot_is_refused_before_it_trains() {
+    let models_directory = temp_models();
+    plant_image_bases(&models_directory);
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
+    let body = json!({
+        "name": "jerry.v2",
+        "base": "sdxl-people",
+        "trigger": "ohwx",
+        "subject": "person",
+        "method": "pivotal",
+        "images": [{
+            "filename": "a.png",
+            "caption": "a portrait",
+            "bytes_base64": TINY_PNG
+        }]
+    });
+    let (status, response) = post_json(router.clone(), &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"], policy::PIVOTAL_NAME);
+    let (status, job) = get_json(router, &token, "/api/models/train").await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "a refused run left a job: {job}"
     );
     let _ = fs::remove_dir_all(models_directory);
 }
@@ -2034,7 +2065,7 @@ async fn train_upload_refuses_video_identity_training() {
     let (status, response) =
         post_multipart(router, &token, "/api/models/train", content_type, body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"], abnegate_comfy::lora::VIDEO_REFUSAL);
+    assert_eq!(response["error"], policy::VIDEO_REFUSAL);
     let _ = fs::remove_dir_all(models_dir);
 }
 

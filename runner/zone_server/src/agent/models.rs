@@ -5,14 +5,14 @@ use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
 use crate::db::workspace_members::{self, WorkspaceRole};
 use crate::pull::Pull;
 use crate::routes::models::{
-    self, CatalogError, DismissError, ListModelsQuery, Subject, TrainForm, browse_models,
+    self, CatalogError, DismissError, ListModelsQuery, Method, Subject, TrainForm, browse_models,
     catalog_pull_start, current_train_job, delete_named, dismiss_train_job, filesystem_usage,
     list_comfy_models, list_ollama_model_rows, show_model, start_job, train_bases_list,
     validate_model_name,
 };
 use crate::state::AppState;
 use abnegate_comfy::host::Compute;
-use abnegate_comfy::lora::{TrainError, TrainImage, TrainMethod};
+use abnegate_comfy::lora::{TrainError, TrainImage};
 use abnegate_comfy::{train, video};
 use async_trait::async_trait;
 use serde::Serialize;
@@ -26,6 +26,7 @@ const LIST_CAP: usize = 25;
 const START_TIMEOUT_SECS: u64 = 600;
 const NO_DOCUMENTS: &str = "training needs documents";
 const NO_IMAGES: &str = "training needs images";
+const CLIP_EXTENSIONS: [&str; 6] = ["mp4", "mov", "m4v", "webm", "mkv", "avi"];
 
 pub(crate) const NAMES: [&str; 10] = [
     "cancel_model_install",
@@ -202,7 +203,7 @@ impl Tool for ModelTool {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Adapter or chat-model name to publish as."
+                        "description": "Adapter or chat-model name to publish as. A pivotal adapter's name is only letters, digits, dashes or underscores."
                     },
                     "base": {
                         "type": "string",
@@ -515,7 +516,7 @@ async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> Tool
             Ok(method) => method,
             Err(error) => return error,
         },
-        None => TrainMethod::Lora,
+        None => Method::Lora,
     };
     let subject = match optional_string_arg(params, "subject") {
         Some(value) => match parse_subject(value) {
@@ -574,13 +575,13 @@ fn empty_paths_message(subject: Subject) -> &'static str {
     }
 }
 
-async fn infer_subject(state: &AppState, base: &str, method: TrainMethod) -> Subject {
+async fn infer_subject(state: &AppState, base: &str, method: Method) -> Subject {
     if let Ok(bases) = train_bases_list(state).await
         && let Some(found) = bases.into_iter().find(|item| item.id == base)
     {
         return found.subject;
     }
-    if method == TrainMethod::Lora {
+    if method == Method::Lora {
         Subject::Other
     } else {
         Subject::Person
@@ -592,11 +593,11 @@ fn parse_subject(value: &str) -> Result<Subject, ToolResult> {
         .ok_or_else(|| ToolResult::error("subject must be person, other, or language"))
 }
 
-fn parse_method(value: &str) -> Result<TrainMethod, ToolResult> {
+fn parse_method(value: &str) -> Result<Method, ToolResult> {
     match value {
-        "lora" => Ok(TrainMethod::Lora),
-        "finetune" => Ok(TrainMethod::Finetune),
-        "pivotal" => Ok(TrainMethod::Pivotal),
+        "lora" => Ok(Method::Lora),
+        "finetune" => Ok(Method::Finetune),
+        "pivotal" => Ok(Method::Pivotal),
         _ => Err(ToolResult::error(
             "method must be lora, finetune, or pivotal",
         )),
@@ -670,7 +671,7 @@ async fn load_training_paths(
             images.push(image_from_bytes(filename, bytes, None));
             continue;
         }
-        if video::is_clip(&filename) {
+        if is_clip(&filename) {
             let clip = extract_clip(state, &bytes, &filename).await?;
             let max_group = clip
                 .frames
@@ -692,6 +693,17 @@ async fn load_training_paths(
         }
     }
     Ok(images)
+}
+
+fn is_clip(filename: &str) -> bool {
+    Path::new(filename)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            CLIP_EXTENSIONS
+                .iter()
+                .any(|clip| extension.eq_ignore_ascii_case(clip))
+        })
 }
 
 fn resolve_path(cwd: &Path, given: &str) -> PathBuf {
@@ -805,7 +817,7 @@ mod tests {
             base: base.into(),
             trigger: trigger.map(str::to_string),
             subject,
-            method: TrainMethod::Lora,
+            method: Method::Lora,
             images: vec![still("shot.png")],
             compute: Compute::Local,
         }
@@ -886,15 +898,50 @@ mod tests {
             base: policy::PEOPLE_BASE.into(),
             trigger: Some("ada".into()),
             subject: Subject::Person,
-            method: TrainMethod::Video,
+            method: Method::Video,
             images: vec![image_from_bytes("walk.mp4".into(), b"clip".to_vec(), None)],
             compute: Compute::Local,
         };
         let error = start_job(&state, request, None)
             .await
             .expect_err("video identity training is off");
-        assert_eq!(error.message(), abnegate_comfy::lora::VIDEO_REFUSAL);
+        assert_eq!(error.message(), policy::VIDEO_REFUSAL);
         assert!(state.train_jobs().current().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pivotal_name_with_a_dot_is_refused_before_a_job_starts() {
+        let (directory, state) = train_state();
+        let checkpoint = directory.path().join(policy::PEOPLE_CHECKPOINT);
+        std::fs::create_dir_all(checkpoint.parent().expect("checkpoints")).expect("checkpoints");
+        std::fs::write(&checkpoint, b"weights").expect("checkpoint");
+        let request = TrainForm {
+            name: "ada.v2".into(),
+            method: Method::Pivotal,
+            ..form(policy::PEOPLE_BASE, Some("ada"), Subject::Person)
+        };
+        let error = start_job(&state, request, None)
+            .await
+            .expect_err("an embedding named ada.v2 cannot be prompted");
+        assert_eq!(error.message(), policy::PIVOTAL_NAME);
+        assert!(state.train_jobs().current().is_none());
+    }
+
+    #[test]
+    fn a_clip_is_a_file_in_a_container_ffmpeg_reads_frames_from() {
+        for clip in [
+            "walk.mp4",
+            "walk.MOV",
+            "walk.webm",
+            "walk.m4v",
+            "walk.mkv",
+            "walk.avi",
+        ] {
+            assert!(is_clip(clip), "{clip}");
+        }
+        for still in ["walk.png", "walk.mp4.png", "walk", "mp4"] {
+            assert!(!is_clip(still), "{still}");
+        }
     }
 
     #[tokio::test]

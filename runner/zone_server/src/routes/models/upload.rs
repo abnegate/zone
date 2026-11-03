@@ -467,24 +467,24 @@ fn parse_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::models::Method;
     use abnegate_comfy::host::Compute;
-    use abnegate_comfy::lora::TrainMethod;
 
     #[test]
     fn a_multipart_field_reads_the_name_a_json_form_carries() {
         for method in [
-            TrainMethod::Lora,
-            TrainMethod::Finetune,
-            TrainMethod::Pivotal,
-            TrainMethod::Video,
+            Method::Lora,
+            Method::Finetune,
+            Method::Pivotal,
+            Method::Video,
         ] {
-            assert_eq!(wire_name::<TrainMethod>(Some(method.as_str())), method);
+            assert_eq!(wire_name::<Method>(Some(method.as_str())), method);
         }
         for compute in [Compute::Local, Compute::Runpod] {
             assert_eq!(wire_name::<Compute>(Some(compute.as_str())), compute);
         }
         for unknown in [None, Some(""), Some("Runpod"), Some("dreambooth")] {
-            assert_eq!(wire_name::<TrainMethod>(unknown), TrainMethod::Lora);
+            assert_eq!(wire_name::<Method>(unknown), Method::Lora);
             assert_eq!(wire_name::<Compute>(unknown), Compute::Local);
         }
     }

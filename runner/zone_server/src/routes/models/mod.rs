@@ -2,6 +2,7 @@
 //!
 //! Handles listing, pulling, and deleting models from various sources.
 
+mod method;
 mod providers;
 mod setup;
 mod subject;
@@ -11,6 +12,7 @@ mod training;
 mod types;
 mod upload;
 
+pub use method::Method;
 pub use providers::{
     DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider, MAX_PAGE_SIZE, ModelProvider,
     ProviderError, get_provider, get_provider_with_proxy, huggingface_hub_origin,
@@ -52,7 +54,7 @@ use abnegate_comfy::Captioner;
 use abnegate_comfy::Config as ComfyConfig;
 use abnegate_comfy::host;
 use abnegate_comfy::inventory;
-use abnegate_comfy::lora::{self, TrainError, TrainMethod};
+use abnegate_comfy::lora::{self, TrainError};
 use abnegate_comfy::recipe::{self, RecipeCatalog};
 use abnegate_comfy::train;
 use abnegate_comfy::video;
@@ -1191,13 +1193,13 @@ async fn prepare_training(
         let bases = chat_train_bases(state).await;
         match language_train_base(&bases, form.base.trim()) {
             None => return Err(StartTrainError::UnknownBase),
-            Some(base) if form.method == TrainMethod::Finetune && !base.finetune => {
+            Some(base) if form.method == Method::Finetune && !base.finetune => {
                 return Err(StartTrainError::FineTuneTooLarge);
             }
             Some(_) => {}
         }
         let compute = form.compute;
-        let request = form.language();
+        let request = form.language().map_err(StartTrainError::from_train)?;
         language::validate(config, &request).map_err(StartTrainError::from_train)?;
         let key = policy::key(compute, saved).map_err(StartTrainError::from_train)?;
         return Ok(Training::Language {
@@ -1207,8 +1209,10 @@ async fn prepare_training(
         });
     };
     let compute = form.compute;
-    let request =
-        policy::place(form.image(subject), compute, saved).map_err(StartTrainError::from_train)?;
+    let request = form
+        .image(subject)
+        .and_then(|request| policy::place(request, compute, saved))
+        .map_err(StartTrainError::from_train)?;
     lora::validate_request(config, &request).map_err(StartTrainError::from_train)?;
     Ok(Training::Image(request))
 }

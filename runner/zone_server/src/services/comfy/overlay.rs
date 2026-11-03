@@ -48,13 +48,7 @@ mod tests {
     #[test]
     fn the_repository_catalog_loads_through_the_crate() {
         let catalog = repository();
-        for id in [
-            PEOPLE_BASE,
-            "sdxl-adapter",
-            "sdxl",
-            "wan-adapter",
-            "flux-schnell",
-        ] {
+        for id in [PEOPLE_BASE, "sdxl-adapter", "sdxl", "flux-schnell"] {
             assert!(catalog.get(id).is_some(), "{id} is missing");
         }
         let video = catalog.get("wan-a14b").expect("wan-a14b is missing");

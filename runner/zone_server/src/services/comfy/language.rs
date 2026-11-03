@@ -282,13 +282,11 @@ mod tests {
             Err(TrainError::Invalid(dataset::EMPTY))
         ));
         request.documents = vec![document("chat.json", CHAT)];
-        for method in [TrainMethod::Video, TrainMethod::Pivotal] {
-            request.method = method;
-            assert!(matches!(
-                validate(&config, &request),
-                Err(TrainError::Invalid(UNAVAILABLE_METHOD))
-            ));
-        }
+        request.method = TrainMethod::Pivotal;
+        assert!(matches!(
+            validate(&config, &request),
+            Err(TrainError::Invalid(UNAVAILABLE_METHOD))
+        ));
         request.method = TrainMethod::Lora;
         request.base = "  ".into();
         assert!(matches!(
