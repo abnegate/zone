@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 COMFYUI = Path(__file__).parents[1]
 if str(COMFYUI) not in sys.path:
@@ -13,6 +14,8 @@ if str(COMFYUI) not in sys.path:
 
 import train_sdxl  # noqa: E402
 import train_wan  # noqa: E402
+
+CLAIM = 'claimed'
 
 
 def queued_job(name: str = 'jerry', trigger: str = 'ohwx', extra: dict | None = None) -> dict:
@@ -109,6 +112,43 @@ class StubTrainingTests(unittest.TestCase):
             job = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
             self.assertEqual(job['status'], 'succeeded')
             self.assertTrue((job_dir / 'jerry-wan.safetensors').is_file())
+
+
+class ClaimTests(unittest.TestCase):
+    def stage(self, models: Path) -> Path:
+        job_dir = models / '.zone-train' / str(uuid.uuid4())
+        job_dir.mkdir(parents=True)
+        write_clips(job_dir, count=3)
+        (models / 'loras').mkdir(exist_ok=True)
+        train_sdxl.write_job(job_dir, queued_job())
+        return job_dir
+
+    def test_the_claim_is_taken_before_the_job_is_marked_running(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            claimed_when_running: list[bool] = []
+            mark_running = train_sdxl.mark_running
+
+            def spy(path: Path, job: dict) -> dict:
+                claimed_when_running.append((Path(path) / CLAIM).is_file())
+                return mark_running(path, job)
+
+            with mock.patch.object(train_sdxl, 'mark_running', side_effect=spy):
+                train_wan.process_job(models, job_dir, stub=True)
+            self.assertEqual(claimed_when_running, [True])
+            self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+
+    def test_a_job_claimed_elsewhere_is_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            (job_dir / CLAIM).touch()
+            before = (job_dir / 'job.json').read_bytes()
+            with mock.patch.object(train_wan, 'run_stub') as run_stub:
+                train_wan.process_job(models, job_dir, stub=True)
+            run_stub.assert_not_called()
+            self.assertEqual((job_dir / 'job.json').read_bytes(), before)
 
 
 if __name__ == '__main__':

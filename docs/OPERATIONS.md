@@ -289,7 +289,9 @@ its `.zone.json` sidecar. The scripts the `ai.zone.train` LaunchAgent runs are
 copies in the ComfyUI install directory, and upgrading zone does not refresh
 them. A trainer left on the old scripts publishes into `loras/` itself and
 leaves nothing in the job directory, so every run it trains fails when zone
-publishes it.
+publishes it. It also starts a job without
+[claiming](COMFYUI.md#person-sdxl-lora-and-fine-tune) it first, so zone can
+give up on a job the old trainer has just picked up.
 
 After the upgrade:
 

@@ -790,6 +790,8 @@ def process_job(
     proxy_base: str | None = None,
 ) -> None:
     job = train_sdxl.load_job(job_dir)
+    if not train_sdxl.claim(job_dir, job):
+        return
     pod_id = str(job.get('pod_id') or '') or None
     active = client
     try:

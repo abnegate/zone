@@ -28,6 +28,7 @@ DEFAULT_HF_BASE = 'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl'
 DEFAULT_CHECKPOINT = 'lustifySDXLNSFW_ggwpV7.safetensors'
 CONFIG_PATH = Path(__file__).with_name('train_sdxl_config.json')
 TRAIN_ROOT = '.zone-train'
+CLAIM_FILE = 'claimed'
 LATEST_SNAPSHOT = 'latest.pt'
 STILL_METHODS = {'lora', 'finetune', 'pivotal'}
 ADAPTER_METHODS = {'lora', 'pivotal'}
@@ -716,7 +717,7 @@ def find_job(models_dir: Path) -> Path | None:
             continue
         status = job.get('status')
         started = str(job.get('started_at') or '')
-        if status == 'queued':
+        if status == 'queued' and not (entry / CLAIM_FILE).exists():
             queued.append((started, entry))
         elif status == 'running' and not pid_alive(job.get('pid')):
             resumable.append((started, entry))
@@ -727,6 +728,21 @@ def find_job(models_dir: Path) -> Path | None:
     if resumable:
         return resumable[0][1]
     return None
+
+
+def claim(job_dir: Path, job: dict[str, Any]) -> bool:
+    # abnegate-comfy creates the same claim before it gives up on a queued job;
+    # a job past queued was claimed by this trainer before it crashed.
+    if job.get('status') != 'queued':
+        return True
+    try:
+        descriptor = os.open(
+            Path(job_dir) / CLAIM_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+    except FileExistsError:
+        return False
+    os.close(descriptor)
+    return True
 
 
 def mark_running(job_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
@@ -935,6 +951,8 @@ def process_job(
         import train_wan
 
         train_wan.process_job(models_dir, job_dir, stub)
+        return
+    if not claim(job_dir, job):
         return
     try:
         job = normalize_job(job, job_dir)

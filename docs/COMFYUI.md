@@ -530,6 +530,14 @@ Save a Runpod API key under Workspace or organization AI settings; GET returns
 deletes the pod when the job ends. A card below the VRAM floor fails closed
 instead of dropping precision.
 
+Before the worker marks a queued job `running` it creates the empty file
+`claimed` in the job directory with exclusive create. Zone creates the same
+file before it gives up on a job no worker picked up, so only whichever side
+created it moves the job on: the worker passes over a queued job that is
+already claimed and never trains it, and zone never fails a job the worker
+claimed. A job resumed after a crash is already past `queued` and keeps the
+claim it had.
+
 The worker writes `progress.json` with `phase`, `message`, weighted `percent`,
 `loss`, and a per-phase `eta_seconds`. It leaves the finished weight in the
 job directory under `job.json`'s `filename` and marks the job `succeeded`;

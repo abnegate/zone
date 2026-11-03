@@ -19,6 +19,7 @@ if str(COMFYUI) not in sys.path:
 import train_runpod  # noqa: E402
 import train_sdxl  # noqa: E402
 
+CLAIM = 'claimed'
 RTX_4090 = {
     'id': 'NVIDIA GeForce RTX 4090',
     'name': 'RTX 4090',
@@ -292,6 +293,61 @@ class CreateAndKeyTests(unittest.TestCase):
             self.assertEqual(job['status'], 'failed')
             self.assertEqual(job['error'], 'the Runpod artifact holds no trained weight')
             client.delete_pod.assert_called_once_with('keep-me')
+
+
+class ClaimTests(unittest.TestCase):
+    def test_the_claim_is_taken_before_the_job_is_marked_running(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = stage_job(models, extra={'pod_id': 'keep-me'})
+            client = mock.Mock()
+            client.get_pod.return_value = {'id': 'keep-me', 'status': 'RUNNING'}
+            claimed_when_running: list[bool] = []
+            mark_running = train_sdxl.mark_running
+
+            def spy(path: Path, job: dict) -> dict:
+                claimed_when_running.append((Path(path) / CLAIM).is_file())
+                return mark_running(path, job)
+
+            with (
+                mock.patch.object(train_sdxl, 'mark_running', side_effect=spy),
+                mock.patch.object(
+                    train_runpod, 'wait_ready', return_value={'status': 'running'}
+                ),
+                mock.patch.object(train_runpod, 'poll_until_done'),
+                mock.patch.object(train_runpod, 'download_artifact', side_effect=download_weight),
+            ):
+                train_runpod.process_job(
+                    models,
+                    job_dir,
+                    train_sdxl.load_config(),
+                    client=client,
+                    sleep=lambda _interval: None,
+                    proxy_base='http://127.0.0.1:9',
+                )
+            self.assertEqual(claimed_when_running, [True])
+            self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+
+    def test_a_job_claimed_elsewhere_is_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = stage_job(models)
+            (job_dir / CLAIM).touch()
+            before = (job_dir / 'job.json').read_bytes()
+            client = mock.Mock()
+            train_runpod.process_job(
+                models,
+                job_dir,
+                train_sdxl.load_config(),
+                client=client,
+                sleep=lambda _interval: None,
+            )
+            self.assertEqual(client.method_calls, [])
+            self.assertEqual((job_dir / 'job.json').read_bytes(), before)
+            self.assertTrue(
+                (job_dir / 'runpod.key').is_file(),
+                'the key belongs to whoever holds the claim',
+            )
 
 
 class HttpClientTests(unittest.TestCase):

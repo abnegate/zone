@@ -527,6 +527,8 @@ def stub_requested(stub: bool) -> bool:
 
 def process_job(models_dir: Path, job_dir: Path, stub: bool) -> None:
     job = train_sdxl.load_job(job_dir)
+    if not train_sdxl.claim(job_dir, job):
+        return
     try:
         job = normalize_job(job, job_dir)
         job = train_sdxl.mark_running(job_dir, job)

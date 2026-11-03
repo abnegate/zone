@@ -21,6 +21,7 @@ if str(COMFYUI) not in sys.path:
 import train_sdxl  # noqa: E402
 
 SCRIPT = COMFYUI / 'train_sdxl.py'
+CLAIM = 'claimed'
 
 
 def queued_job(
@@ -839,6 +840,104 @@ class StubOnceTests(unittest.TestCase):
             result = self.run_worker(Path(directory), extra=['--stub'])
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+
+class ClaimTests(unittest.TestCase):
+    def stage(self, models: Path, started_at: str = '2026-10-04T00:00:00Z') -> Path:
+        job_dir = models / '.zone-train' / str(uuid.uuid4())
+        job_dir.mkdir(parents=True)
+        train_sdxl.write_job(job_dir, queued_job(extra={'started_at': started_at}))
+        write_dataset(job_dir, count=2)
+        (models / 'loras').mkdir(exist_ok=True)
+        return job_dir
+
+    def test_the_claim_is_taken_before_the_job_is_marked_running(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            claimed_when_running: list[bool] = []
+            mark_running = train_sdxl.mark_running
+
+            def spy(path: Path, job: dict) -> dict:
+                claimed_when_running.append((Path(path) / CLAIM).is_file())
+                return mark_running(path, job)
+
+            with mock.patch.object(train_sdxl, 'mark_running', side_effect=spy):
+                train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+            self.assertEqual(claimed_when_running, [True])
+            self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+
+    def test_a_job_claimed_elsewhere_is_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            (job_dir / CLAIM).touch()
+            before = (job_dir / 'job.json').read_bytes()
+            with mock.patch.object(train_sdxl, 'run_stub') as run_stub:
+                train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+            run_stub.assert_not_called()
+            self.assertEqual((job_dir / 'job.json').read_bytes(), before)
+            self.assertFalse((job_dir / 'pid').exists())
+
+    def test_two_trainers_holding_the_same_queued_job_run_it_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            stale = train_sdxl.load_job(job_dir)
+            config = train_sdxl.load_config()
+            with mock.patch.object(train_sdxl, 'run_stub', wraps=train_sdxl.run_stub) as run_stub:
+                train_sdxl.process_job(models, job_dir, config, stub=True)
+                with mock.patch.object(train_sdxl, 'load_job', return_value=dict(stale)):
+                    train_sdxl.process_job(models, job_dir, config, stub=True)
+            self.assertEqual(run_stub.call_count, 1)
+            self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+
+    def test_a_queued_job_is_claimed_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            job = train_sdxl.load_job(job_dir)
+            self.assertTrue(train_sdxl.claim(job_dir, job))
+            self.assertFalse(train_sdxl.claim(job_dir, job))
+            self.assertTrue((job_dir / CLAIM).is_file())
+
+    def test_a_job_resumed_after_a_crash_runs_under_its_own_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = self.stage(models)
+            job = train_sdxl.load_job(job_dir)
+            job['status'] = 'running'
+            job['pid'] = train_sdxl.unused_pid()
+            train_sdxl.write_job(job_dir, job)
+            (job_dir / CLAIM).touch()
+            self.assertEqual(train_sdxl.find_job(models), job_dir)
+            train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=True)
+            self.assertEqual(train_sdxl.load_job(job_dir)['status'], 'succeeded')
+
+    def test_find_job_passes_over_a_claimed_queued_job(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            claimed = self.stage(models, started_at='2026-10-04T00:00:00Z')
+            unclaimed = self.stage(models, started_at='2026-10-04T00:00:01Z')
+            (claimed / CLAIM).touch()
+            self.assertEqual(train_sdxl.find_job(models), unclaimed)
+            (unclaimed / CLAIM).touch()
+            self.assertIsNone(train_sdxl.find_job(models))
+
+    def test_once_trains_the_unclaimed_job_and_leaves_the_claimed_one_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            claimed = self.stage(models, started_at='2026-10-04T00:00:00Z')
+            unclaimed = self.stage(models, started_at='2026-10-04T00:00:01Z')
+            (claimed / CLAIM).touch()
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), '--models-dir', str(models), '--once', '--stub'],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(train_sdxl.load_job(claimed)['status'], 'queued')
+            self.assertEqual(train_sdxl.load_job(unclaimed)['status'], 'succeeded')
+            self.assertTrue((unclaimed / CLAIM).is_file())
 
 class CrashResumeTests(unittest.TestCase):
     def test_latent_sidecar_sits_next_to_the_png(self) -> None:
