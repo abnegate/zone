@@ -147,6 +147,8 @@ def wrap_mps_baddbmm(original):
 
 
 def install_mps_kernel_workarounds() -> None:
+    if not torch.backends.mps.is_available():
+        return
     if getattr(torch.nn.functional.pad, '_zone_patched', False):
         return
     original_pad = torch.nn.functional.pad

@@ -154,40 +154,59 @@ class WanMps(unittest.TestCase):
         wrapped(input, batch1, batch2, beta=0)
         self.assertEqual(seen, [(0.0, 1.0)])
 
+    def unwrap_mps_kernels(self) -> dict[str, object]:
+        kernels = {
+            'pad': (torch.nn.functional, 'pad'),
+            'bmm': (torch, 'bmm'),
+            'tensor_bmm': (torch.Tensor, 'bmm'),
+            'baddbmm': (torch, 'baddbmm'),
+            'tensor_baddbmm': (torch.Tensor, 'baddbmm'),
+        }
+        originals = {}
+        for name, (owner, attribute) in kernels.items():
+            installed = getattr(owner, attribute)
+            self.addCleanup(setattr, owner, attribute, installed)
+            original = installed
+            while hasattr(original, '__wrapped__'):
+                original = original.__wrapped__
+            setattr(owner, attribute, original)
+            originals[name] = original
+        return originals
+
+    def installed_mps_kernels(self) -> dict[str, object]:
+        return {
+            'pad': torch.nn.functional.pad,
+            'bmm': torch.bmm,
+            'tensor_bmm': torch.Tensor.bmm,
+            'baddbmm': torch.baddbmm,
+            'tensor_baddbmm': torch.Tensor.baddbmm,
+        }
+
+    def test_mps_workarounds_leave_every_kernel_alone_without_mps(self) -> None:
+        originals = self.unwrap_mps_kernels()
+        with mps_available(False):
+            install_mps_kernel_workarounds()
+        for name, kernel in self.installed_mps_kernels().items():
+            with self.subTest(kernel=name):
+                self.assertIs(kernel, originals[name])
+
+    def test_mps_workarounds_wrap_every_kernel_on_mps(self) -> None:
+        originals = self.unwrap_mps_kernels()
+        with mps_available(True):
+            install_mps_kernel_workarounds()
+        for name, kernel in self.installed_mps_kernels().items():
+            with self.subTest(kernel=name):
+                self.assertTrue(getattr(kernel, '_zone_patched', False))
+                self.assertIs(kernel.__wrapped__, originals[name])
+
     def test_installing_mps_workarounds_twice_does_not_stack_wrappers(self) -> None:
-        installed = torch.nn.functional.pad
-        self.addCleanup(setattr, torch.nn.functional, 'pad', installed)
-        original_bmm = torch.bmm
-        original_tensor_bmm = torch.Tensor.bmm
-        original_baddbmm = torch.baddbmm
-        original_tensor_baddbmm = torch.Tensor.baddbmm
-        self.addCleanup(setattr, torch, 'bmm', original_bmm)
-        self.addCleanup(setattr, torch.Tensor, 'bmm', original_tensor_bmm)
-        self.addCleanup(setattr, torch, 'baddbmm', original_baddbmm)
-        self.addCleanup(setattr, torch.Tensor, 'baddbmm', original_tensor_baddbmm)
-        original = installed
-        while hasattr(original, '__wrapped__'):
-            original = original.__wrapped__
-        torch.nn.functional.pad = original
-        torch.bmm = original_bmm
-        while hasattr(torch.bmm, '__wrapped__'):
-            torch.bmm = torch.bmm.__wrapped__
-        torch.Tensor.bmm = original_tensor_bmm
-        while hasattr(torch.Tensor.bmm, '__wrapped__'):
-            torch.Tensor.bmm = torch.Tensor.bmm.__wrapped__
-        torch.baddbmm = original_baddbmm
-        while hasattr(torch.baddbmm, '__wrapped__'):
-            torch.baddbmm = torch.baddbmm.__wrapped__
-        torch.Tensor.baddbmm = original_tensor_baddbmm
-        while hasattr(torch.Tensor.baddbmm, '__wrapped__'):
-            torch.Tensor.baddbmm = torch.Tensor.baddbmm.__wrapped__
-        install_mps_kernel_workarounds()
-        once = torch.nn.functional.pad
-        once_bmm = torch.bmm
-        install_mps_kernel_workarounds()
-        self.assertIs(torch.nn.functional.pad, once)
-        self.assertIs(torch.bmm, once_bmm)
-        self.assertIs(once.__wrapped__, original)
+        originals = self.unwrap_mps_kernels()
+        with mps_available(True):
+            install_mps_kernel_workarounds()
+            once = self.installed_mps_kernels()
+            install_mps_kernel_workarounds()
+        self.assertEqual(self.installed_mps_kernels(), once)
+        self.assertIs(once['pad'].__wrapped__, originals['pad'])
 
     @unittest.skipUnless(torch.backends.mps.is_available(), 'mps is not available')
     def test_rewritten_5d_pad_on_mps_matches_cpu(self) -> None:
