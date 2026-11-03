@@ -464,6 +464,7 @@ mod tests {
     use zone_core::variables::Variables;
 
     const REDIS_URL: &str = "REDIS_URL";
+    const REFUSED_REDIS_URL: &str = "redis://127.0.0.1:1";
 
     fn test_cache_url() -> Option<String> {
         std::env::var(REDIS_URL).ok()
@@ -753,6 +754,12 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "REDIS_URL must point to a reachable cache")]
     async fn a_redis_url_that_cannot_connect_fails_the_cache_test() {
+        connect_test_cache(Some(REFUSED_REDIS_URL.to_string())).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "REDIS_URL must point to a reachable cache")]
+    async fn a_malformed_redis_url_fails_the_cache_test() {
         connect_test_cache(Some("not a redis url".to_string())).await;
     }
 }
