@@ -11,11 +11,12 @@ use uuid::Uuid;
 
 use crate::auth::AuthUser;
 use crate::db::projects::{self, NewProject, ProjectRow};
-use crate::db::{auto_projects, chats, sources, workspace_members};
+use crate::db::{auto_projects, chats, sources, sync_config, workspace_members};
 use crate::error::ServerError;
 use crate::services::model::Model;
 use crate::services::route::Route;
 use crate::state::AppState;
+use crate::sync::hook;
 
 use super::common::Timestamps;
 
@@ -465,6 +466,7 @@ pub async fn delete(
 ) -> Result<Response, ServerError> {
     writable(&state, &auth, id).await?;
 
+    remove_hooks(&state, id).await?;
     if projects::delete_project(state.db(), id).await? {
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {
@@ -535,7 +537,17 @@ pub async fn unlink_github(
 ) -> Result<Response, ServerError> {
     writable(&state, &auth, id).await?;
 
+    remove_hooks(&state, id).await?;
     respond(&state, projects::unlink_github(state.db(), id).await?).await
+}
+
+/// Remove the webhooks Zone registered for project `id`'s syncs while the
+/// project still holds the token they were registered with.
+async fn remove_hooks(state: &AppState, id: Uuid) -> Result<(), ServerError> {
+    for row in sync_config::list_sync_configs(state.db(), id).await? {
+        hook::remove(state, &row).await;
+    }
+    Ok(())
 }
 
 /// One task of a project as automation sees it.

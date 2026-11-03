@@ -200,14 +200,16 @@ export function SyncConfigCard({
         <p className="sync-rotate-warning">
           {registered ? (
             <>
-              Zone generates a new secret and gives it to the {providerName} webhook it registered,
-              which signs with it from then on.
+              Zone generates a new secret and gives it to the {providerName} webhook it registered.
+              If {providerName} refuses the update, Zone shows the new secret to paste into the
+              webhook&apos;s settings instead.
             </>
           ) : (
             <>
-              Zone generates a new secret and stops accepting the current one straight away. The{' '}
-              {providerName} webhook keeps signing with the old secret, so its deliveries are
-              refused until you paste the new one into the webhook&apos;s settings.
+              Zone generates a new secret and stops accepting the current one straight away. Zone
+              has no {providerName} webhook registered for this sync: a webhook added by hand keeps
+              signing with the old secret, so its deliveries are refused until you paste the new one
+              into its settings, and without one you add a webhook with the new secret.
             </>
           )}
         </p>

@@ -12,6 +12,8 @@ use sha2::Sha256;
 use sqlx::Executor;
 use tower::ServiceExt;
 use uuid::Uuid;
+use wiremock::matchers::{body_partial_json, header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use zone_server::{
     config::Config,
@@ -3420,10 +3422,11 @@ async fn an_admin_adds_and_removes_a_sync_and_each_is_recorded_without_the_secre
 }
 
 const CONSOLE: &str = "https://console.example.test";
+const HOOKS: &str = "/repos/acme/project/hooks";
 
 /// A client whose GitHub is `github`, signed in as an admin of a project
 /// connected to it with a token.
-async fn connected(github: &wiremock::MockServer) -> (common::TestClient, String, String) {
+async fn connected(github: &MockServer) -> (common::TestClient, String, String) {
     let mut config = common::test_config();
     config.github_api_url = github.uri();
     config.github_api_allows_http = true;
@@ -3451,15 +3454,67 @@ fn connected_sync() -> serde_json::Value {
     })
 }
 
+async fn registers(github: &MockServer, id: u64) {
+    Mock::given(method("POST"))
+        .and(path(HOOKS))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": id })))
+        .up_to_n_times(1)
+        .mount(github)
+        .await;
+}
+
+async fn answers(github: &MockServer, verb: &str, route: String, status: u16) {
+    Mock::given(method(verb))
+        .and(path(route))
+        .respond_with(ResponseTemplate::new(status).set_body_json(json!({ "message": "stub" })))
+        .mount(github)
+        .await;
+}
+
+/// The secret GitHub was last sent, by registration or update.
+async fn last_secret(github: &MockServer) -> String {
+    let requests = github.received_requests().await.unwrap();
+    let body: serde_json::Value = requests
+        .iter()
+        .rev()
+        .find(|request| request.method.as_str() != "DELETE")
+        .unwrap()
+        .body_json()
+        .unwrap();
+    body["config"]["secret"]
+        .as_str()
+        .or(body["secret"].as_str())
+        .unwrap()
+        .to_string()
+}
+
+async fn deletions(github: &MockServer) -> Vec<String> {
+    github
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.method.as_str() == "DELETE")
+        .map(|request| request.url.path().to_string())
+        .collect()
+}
+
+async fn stored(client: &common::TestClient, config: &str) -> Option<sync_config::SyncConfigRow> {
+    sync_config::get_sync_config(client.state().db(), Uuid::parse_str(config).unwrap())
+        .await
+        .unwrap()
+}
+
+fn id_of(response: &serde_json::Value) -> String {
+    response["config"]["id"].as_str().unwrap().to_string()
+}
+
 #[tokio::test]
 async fn a_github_sync_on_a_connected_project_registers_rotates_and_removes_its_webhook() {
-    use wiremock::matchers::{body_partial_json, header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
     let github = MockServer::start().await;
     let (client, token, project) = connected(&github).await;
     Mock::given(method("POST"))
-        .and(path("/repos/acme/project/hooks"))
+        .and(path(HOOKS))
         .and(header("authorization", "Bearer ghp_hooks"))
         .and(body_partial_json(json!({
             "name": "web",
@@ -3471,24 +3526,14 @@ async fn a_github_sync_on_a_connected_project_registers_rotates_and_removes_its_
         .expect(1)
         .mount(&github)
         .await;
-    Mock::given(method("PATCH"))
-        .and(path("/repos/acme/project/hooks/42/config"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-        .expect(1)
-        .mount(&github)
-        .await;
-    Mock::given(method("DELETE"))
-        .and(path("/repos/acme/project/hooks/42"))
-        .respond_with(ResponseTemplate::new(204))
-        .expect(1)
-        .mount(&github)
-        .await;
+    answers(&github, "PATCH", format!("{HOOKS}/42/config"), 200).await;
+    answers(&github, "DELETE", format!("{HOOKS}/42"), 204).await;
 
     let created = configure(&client, &token, &project, &connected_sync()).await;
-    let config = created["config"]["id"].as_str().unwrap().to_string();
+    let config = id_of(&created);
     assert!(
         created["webhook_secret"].is_null(),
-        "a registered webhook already has its secret: {created}"
+        "a registered webhook already has its secret"
     );
     assert!(created["webhook_registration_error"].is_null());
     assert_eq!(created["config"]["webhook_registered"], true);
@@ -3499,94 +3544,177 @@ async fn a_github_sync_on_a_connected_project_registers_rotates_and_removes_its_
         registration["config"]["url"],
         format!("{CONSOLE}/api/webhooks/sync/{config}/github")
     );
-    let secret = registration["config"]["secret"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert!(is_generated_secret(&secret), "{secret:?}");
+    let secret = last_secret(&github).await;
+    assert!(
+        is_generated_secret(&secret),
+        "GitHub was given a generated secret"
+    );
     assert_verified(&deliver_github(&client, &config, &secret).await);
 
     let rotated = set_secret(&client, &token, &project, &config, &json!({})).await;
     rotated.assert_status(StatusCode::OK);
     let rotated = rotated.json_value();
-    assert!(rotated["webhook_secret"].is_null(), "{rotated}");
-    let requests = github.received_requests().await.unwrap();
-    let update: serde_json::Value = requests[1].body_json().unwrap();
-    let new_secret = update["secret"].as_str().unwrap();
+    assert!(
+        rotated["webhook_secret"].is_null(),
+        "the webhook was given the new secret"
+    );
+    assert_eq!(rotated["config"]["webhook_registered"], true);
+    let new_secret = last_secret(&github).await;
     assert_ne!(new_secret, secret);
-    assert_verified(&deliver_github(&client, &config, new_secret).await);
+    assert_verified(&deliver_github(&client, &config, &new_secret).await);
 
     remove(&client, &token, &project, &config)
         .await
         .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(deletions(&github).await, [format!("{HOOKS}/42")]);
 }
 
 #[tokio::test]
 async fn a_webhook_github_refuses_leaves_its_secret_to_add_by_hand() {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
     let github = MockServer::start().await;
     let (client, token, project) = connected(&github).await;
-    Mock::given(method("POST"))
-        .and(path("/repos/acme/project/hooks"))
-        .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!({ "message": "Must have admin rights" })),
-        )
-        .mount(&github)
-        .await;
+    answers(&github, "POST", HOOKS.to_string(), 403).await;
 
     let created = configure(&client, &token, &project, &connected_sync()).await;
     let secret = created["webhook_secret"].as_str().unwrap_or_default();
-    assert!(is_generated_secret(secret), "{created}");
-    assert_eq!(created["config"]["webhook_registered"], false);
     assert!(
-        created["webhook_registration_error"]
-            .as_str()
-            .is_some_and(|error| error.starts_with("Zone could not register the webhook")),
-        "{created}"
+        is_generated_secret(secret),
+        "the secret is shown to add by hand"
+    );
+    assert_eq!(created["config"]["webhook_registered"], false);
+    let refusal = created["webhook_registration_error"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        refusal.starts_with("Zone could not register the webhook: GitHub refused"),
+        "the refusal says why: {refusal}"
+    );
+}
+
+#[tokio::test]
+async fn a_rotation_github_refuses_shows_the_new_secret_and_stops_calling_the_webhook_registered() {
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    registers(&github, 5).await;
+    answers(&github, "PATCH", format!("{HOOKS}/5/config"), 403).await;
+    let config = id_of(&configure(&client, &token, &project, &connected_sync()).await);
+
+    let rotated = set_secret(&client, &token, &project, &config, &json!({})).await;
+    rotated.assert_status(StatusCode::OK);
+    let rotated = rotated.json_value();
+    let secret = rotated["webhook_secret"].as_str().unwrap_or_default();
+    assert!(
+        is_generated_secret(secret),
+        "the new secret is shown to paste in"
+    );
+    assert!(rotated["webhook_registration_error"].is_string());
+    assert_eq!(rotated["config"]["webhook_registered"], false);
+    assert_eq!(
+        listed_config(&client, &token, &project).await.json_value()["configs"][0]["webhook_registered"],
+        false
     );
 }
 
 #[tokio::test]
 async fn a_github_webhook_deleted_on_github_is_registered_again_on_rotation() {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
     let github = MockServer::start().await;
     let (client, token, project) = connected(&github).await;
-    Mock::given(method("POST"))
-        .and(path("/repos/acme/project/hooks"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 7 })))
-        .up_to_n_times(1)
-        .mount(&github)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/repos/acme/project/hooks"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 8 })))
-        .mount(&github)
-        .await;
-    Mock::given(method("PATCH"))
-        .and(path("/repos/acme/project/hooks/7/config"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })))
-        .expect(1)
-        .mount(&github)
-        .await;
-
-    let created = configure(&client, &token, &project, &connected_sync()).await;
-    let config = created["config"]["id"].as_str().unwrap().to_string();
+    registers(&github, 7).await;
+    answers(&github, "PATCH", format!("{HOOKS}/7/config"), 404).await;
+    let config = id_of(&configure(&client, &token, &project, &connected_sync()).await);
+    registers(&github, 8).await;
 
     let rotated = set_secret(&client, &token, &project, &config, &json!({})).await;
     rotated.assert_status(StatusCode::OK);
     let rotated = rotated.json_value();
-    assert!(rotated["webhook_secret"].is_null(), "{rotated}");
-    let stored =
-        sync_config::get_sync_config(client.state().db(), Uuid::parse_str(&config).unwrap())
-            .await
-            .unwrap()
-            .unwrap();
-    assert_eq!(stored.config["github_webhook_id"], 8);
+    assert!(
+        rotated["webhook_secret"].is_null(),
+        "the new webhook has the secret"
+    );
+    assert_eq!(rotated["config"]["webhook_registered"], true);
+    assert_eq!(
+        stored(&client, &config).await.unwrap().config["github_webhook_id"],
+        8
+    );
+    let secret = last_secret(&github).await;
+    assert_verified(&deliver_github(&client, &config, &secret).await);
+}
+
+#[tokio::test]
+async fn a_rotation_after_the_token_is_gone_shows_the_secret_and_says_why() {
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    registers(&github, 9).await;
+    let config = id_of(&configure(&client, &token, &project, &connected_sync()).await);
+    sqlx::query("UPDATE projects SET github_access_token = NULL WHERE id = $1")
+        .bind(Uuid::parse_str(&project).unwrap())
+        .execute(client.state().db())
+        .await
+        .unwrap();
+
+    let rotated = set_secret(&client, &token, &project, &config, &json!({})).await;
+    rotated.assert_status(StatusCode::OK);
+    let rotated = rotated.json_value();
+    assert!(is_generated_secret(
+        rotated["webhook_secret"].as_str().unwrap_or_default()
+    ));
+    assert_eq!(
+        rotated["webhook_registration_error"],
+        "Zone could not register the webhook: the project holds no GitHub token to update the webhook with"
+    );
+    assert_eq!(rotated["config"]["webhook_registered"], false);
+}
+
+#[tokio::test]
+async fn a_sync_is_removed_even_when_github_refuses_to_delete_its_webhook() {
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    registers(&github, 11).await;
+    answers(&github, "DELETE", format!("{HOOKS}/11"), 500).await;
+    let config = id_of(&configure(&client, &token, &project, &connected_sync()).await);
+
+    remove(&client, &token, &project, &config)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert!(stored(&client, &config).await.is_none());
+    assert_eq!(deletions(&github).await, [format!("{HOOKS}/11")]);
+}
+
+#[tokio::test]
+async fn unlinking_github_removes_and_forgets_the_webhooks_zone_registered() {
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    registers(&github, 12).await;
+    answers(&github, "DELETE", format!("{HOOKS}/12"), 204).await;
+    let config = id_of(&configure(&client, &token, &project, &connected_sync()).await);
+
+    client
+        .delete_auth(&format!("/api/projects/{project}/github"), &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    assert_eq!(deletions(&github).await, [format!("{HOOKS}/12")]);
+    assert_eq!(
+        listed_config(&client, &token, &project).await.json_value()["configs"][0]["webhook_registered"],
+        false
+    );
+    assert!(stored(&client, &config).await.unwrap().config["github_webhook_id"].is_null());
+}
+
+#[tokio::test]
+async fn deleting_a_project_removes_the_webhooks_zone_registered() {
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    registers(&github, 13).await;
+    answers(&github, "DELETE", format!("{HOOKS}/13"), 204).await;
+    configure(&client, &token, &project, &connected_sync()).await;
+
+    client
+        .delete_auth(&format!("/api/projects/{project}"), &token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    assert_eq!(deletions(&github).await, [format!("{HOOKS}/13")]);
 }
 
 #[tokio::test]

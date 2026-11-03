@@ -3,12 +3,15 @@
 //! A project connected to GitHub already holds a token for its repository, so
 //! Zone registers the webhook itself rather than asking for it to be added by
 //! hand, keeps it signing with the current secret, and removes it with the
-//! sync. The webhook's identifier is kept in the sync's configuration.
+//! sync or the project's GitHub connection. The webhook's identifier, and
+//! whether it was last given the secret Zone keeps, live in the sync's
+//! configuration.
 
 use abnegate_secret::SecretValue;
 use abnegate_vcs::pull_request::{Repository, WebhookEvent};
 use abnegate_vcs::{PullRequestError, PullRequestService};
 use reqwest::Url;
+use serde_json::Value;
 use thiserror::Error;
 
 use super::{Provider, webhook_path};
@@ -19,10 +22,17 @@ use crate::state::AppState;
 /// Where a sync's configuration keeps the identifier GitHub gave its webhook.
 pub const HOOK_ID: &str = "github_webhook_id";
 
+/// Where a sync's configuration keeps whether its webhook was given the
+/// secret Zone verifies deliveries with.
+pub const HOOK_SIGNED: &str = "github_webhook_signed";
+
 const EVENTS: [WebhookEvent; 1] = [WebhookEvent::Issues];
 
 #[derive(Debug, Error)]
 pub enum HookError {
+    #[error("the project holds no GitHub token to update the webhook with")]
+    Tokenless,
+
     #[error("the GitHub origin is misconfigured: {0}")]
     Origin(PullRequestError),
 
@@ -34,6 +44,9 @@ pub enum HookError {
 
     #[error("GitHub refused: {0}")]
     GitHub(#[from] PullRequestError),
+
+    #[error("the sync was removed while its webhook was being registered")]
+    Deleted,
 
     #[error("the sync could not be read or recorded: {0}")]
     Database(#[from] sqlx::Error),
@@ -101,7 +114,8 @@ impl Hook {
                 .update_webhook(&self.repository, &self.token, id, &self.url, &secret)
                 .await
             {
-                Ok(()) => return Ok(row),
+                Ok(()) if registered(&row) => return Ok(row),
+                Ok(()) => return record(state, &row, Some(id), true).await,
                 Err(PullRequestError::NotFound) => {}
                 Err(error) => return Err(error.into()),
             }
@@ -110,29 +124,14 @@ impl Hook {
             .service
             .create_webhook(&self.repository, &self.token, &self.url, &secret, &EVENTS)
             .await?;
-        let mut config = row.config.clone();
-        config[HOOK_ID] = id.into();
-        match sync_config::update_sync_config(state.db(), row.id, None, Some(config), None).await {
-            Ok(Some(updated)) => Ok(updated),
-            Ok(None) => {
-                self.remove(id).await;
-                Ok(row)
-            }
-            Err(error) => {
-                self.remove(id).await;
-                Err(error.into())
-            }
+        let recorded = record(state, &row, Some(id), true).await;
+        if recorded.is_err() {
+            self.delete(id).await;
         }
+        recorded
     }
 
-    /// Remove the webhook Zone registered for `row`, if it registered one.
-    pub async fn remove_for(&self, row: &SyncConfigRow) {
-        if let Some(id) = id_of(row) {
-            self.remove(id).await;
-        }
-    }
-
-    async fn remove(&self, id: u64) {
+    async fn delete(&self, id: u64) {
         if let Err(error) = self
             .service
             .delete_webhook(&self.repository, &self.token, id)
@@ -148,7 +147,75 @@ impl Hook {
     }
 }
 
+/// Remove the webhook Zone registered for `row`, if it did, and forget it.
+/// A webhook that cannot be removed only delivers to a path that no longer
+/// verifies, so a failure is logged rather than refused.
+pub async fn remove(state: &AppState, row: &SyncConfigRow) {
+    let Some(id) = id_of(row) else {
+        return;
+    };
+    match Hook::of(state, row).await {
+        Ok(Some(hook)) => hook.delete(id).await,
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(config = %row.id, %error, "Failed to remove a sync's webhook");
+        }
+    }
+    if let Err(error) = record(state, row, None, false).await
+        && !matches!(error, HookError::Deleted)
+    {
+        tracing::warn!(config = %row.id, %error, "Failed to forget a sync's webhook");
+    }
+}
+
+/// Record that `row`'s webhook still signs with a secret Zone no longer
+/// verifies with, so the console stops calling it registered. Answers the row
+/// as stored.
+pub async fn unsigned(state: &AppState, row: SyncConfigRow) -> SyncConfigRow {
+    let Some(id) = id_of(&row) else {
+        return row;
+    };
+    match record(state, &row, Some(id), false).await {
+        Ok(updated) => updated,
+        Err(error) => {
+            tracing::warn!(config = %row.id, %error, "Failed to record a sync's stale webhook");
+            row
+        }
+    }
+}
+
 /// The identifier of the webhook Zone registered for `row`.
 pub fn id_of(row: &SyncConfigRow) -> Option<u64> {
-    row.config.get(HOOK_ID).and_then(|value| value.as_u64())
+    row.config.get(HOOK_ID).and_then(Value::as_u64)
+}
+
+/// Whether Zone registered `row`'s webhook and last gave it the secret Zone
+/// verifies deliveries with.
+pub fn registered(row: &SyncConfigRow) -> bool {
+    id_of(row).is_some() && row.config.get(HOOK_SIGNED).and_then(Value::as_bool) == Some(true)
+}
+
+async fn record(
+    state: &AppState,
+    row: &SyncConfigRow,
+    id: Option<u64>,
+    signed: bool,
+) -> Result<SyncConfigRow, HookError> {
+    let mut config = row.config.clone();
+    let Some(fields) = config.as_object_mut() else {
+        return Ok(row.clone());
+    };
+    match id {
+        Some(id) => {
+            fields.insert(HOOK_ID.to_string(), id.into());
+            fields.insert(HOOK_SIGNED.to_string(), signed.into());
+        }
+        None => {
+            fields.remove(HOOK_ID);
+            fields.remove(HOOK_SIGNED);
+        }
+    }
+    sync_config::update_sync_config(state.db(), row.id, None, Some(config), None)
+        .await?
+        .ok_or(HookError::Deleted)
 }

@@ -111,6 +111,8 @@ export default function ProjectsPage() {
         registrationError,
         revision: reveals.current,
       });
+    } else {
+      setRevealedSecret((current) => (current?.configId === config.id ? null : current));
     }
   };
 
