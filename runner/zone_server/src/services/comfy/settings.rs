@@ -367,8 +367,14 @@ mod tests {
     }
 
     #[test]
-    fn a_caption_timeout_the_environment_names_is_kept_up_to_an_hour() {
-        for (seconds, expected) in [("1200", 1200), ("3600", 3600), ("7200", 3600)] {
+    fn a_caption_timeout_the_environment_names_is_kept_between_five_seconds_and_an_hour() {
+        for (seconds, expected) in [
+            ("0", 5),
+            ("4", 5),
+            ("1200", 1200),
+            ("3600", 3600),
+            ("7200", 3600),
+        ] {
             let mut variables = Variables::isolated(&[CAPTION_TIMEOUT_VARIABLE]);
             variables.set(CAPTION_TIMEOUT_VARIABLE, seconds);
             let config = load().expect("zone's settings");
