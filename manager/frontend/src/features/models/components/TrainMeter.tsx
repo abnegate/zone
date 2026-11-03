@@ -1,4 +1,5 @@
 import type { TrainJob } from '../../../api/models';
+import { AuthenticatedImage } from '../../chats/components/AuthenticatedImage';
 import {
   formatEta,
   formatLoss,
@@ -49,13 +50,16 @@ export default function TrainMeter({ job, detail }: { job: TrainJob; detail?: st
       {previews.length > 0 && (
         <div className="train-meter-previews">
           {previews.map((value, index) => (
-            <img
+            <AuthenticatedImage
               key={value}
               className="train-meter-preview"
+              linkClassName="train-meter-preview-link"
+              fallbackClassName="train-meter-preview"
               src={previewSrc(value)}
               alt={`Training preview ${index + 1} of ${previews.length}`}
               width={72}
               height={72}
+              compact
             />
           ))}
         </div>
