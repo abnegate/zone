@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["zone_runner", "zone_core", "zone_routing", "zone_chat", "zone_comfy", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_vision", "zone_desktop"]
-default-members = ["zone_runner", "zone_core", "zone_routing", "zone_chat", "zone_comfy", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_vision"]
+members = ["zone_runner", "zone_core", "zone_routing", "zone_chat", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_desktop"]
+default-members = ["zone_runner", "zone_core", "zone_routing", "zone_chat", "zone_server", "zone_cli", "zone_installer", "zone_context"]
 
 [workspace.package]
 version = "0.1.0"

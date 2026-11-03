@@ -383,8 +383,9 @@ To add another family, drop two API-format graphs in `comfyui/workflows/`
 (generate + edit) and list them in `comfyui/recipes/catalog.json` with slot
 pointers. Do not add settings fields or sampler controls. Compose bind-mounts
 those directories, so a catalog on disk replaces the packaged catalog. To bake
-a new graph into the manager binary (no bind mounts), also add the filename to
-`packaged_workflow` in `runner/zone_comfy/src/recipe.rs`. To make the weights
+a new graph into the manager binary (no bind mounts), it has to ship in
+`abnegate-comfy`: add the filename to `packaged_workflow` in that crate's
+`src/recipe.rs` and release it. To make the weights
 downloadable, add an entry to `comfyui/model-manifest.json` with a bundle,
 pinned revision, size, and SHA-256.
 
@@ -394,10 +395,13 @@ neither is in the image catalog yet.
 
 ## LoRA training
 
-The Rust side lives in the `zone_comfy` crate, which owns generation, the recipe
-catalog, weight inventory, training, and captioning. It has no web framework,
-database, or application state, so it can be reused outside Zone; a host that
-wants request metrics installs a hook with `zone_comfy::observe_requests`.
+The Rust side is the `abnegate-comfy` crate, which owns generation, the recipe
+catalog, weight inventory, training, and captioning, with `abnegate-vision` for
+subject detection. Neither has a web framework, database, or application state.
+Zone's side lives in `zone_server::services::comfy`: the contract that names
+Zone's node pack (`ZoneTrainLoRA` and the rest), its file prefixes and its
+sidecar suffix, and the wiring into the server. A host that wants request
+metrics installs a hook with `abnegate_comfy::observe_requests`.
 
 
 Training runs through `ZoneTrainLoRA` in `comfyui/custom_nodes/zone_lora/`.
@@ -475,7 +479,7 @@ training resolution rather than handed to the loader whole. The loader fits what
 it is given onto a white square, so an uncropped photo trains on its own
 letterboxing and on however much background the shot happened to include.
 
-Which square is chosen is `zone_vision`'s port of
+Which square is chosen is `abnegate-vision`'s port of
 [autogravity](https://github.com/appwrite/autogravity): U2-Net segments what
 looks like a subject, and the crop is centred on the centre of mass of that,
 then slid back inside the frame so a subject near an edge stays whole. Weights
@@ -655,10 +659,11 @@ them images still train and a submitted video is refused with a message saying
 why. `TRAIN_UPLOAD_LIMIT_MB` (512) bounds one upload; clips are posted inline as
 base64 and held in memory while the request is read.
 
-To see what a clip becomes without going through the UI:
+To see what a clip becomes without going through the UI, run the `frames`
+example from a checkout of [abnegate/crates](https://github.com/abnegate/crates):
 
 ```bash
-cd runner && cargo run --example frames -p zone_comfy -- clip.mp4 /tmp/frames
+cargo run --example frames -p abnegate-comfy -- clip.mp4 /tmp/frames
 ```
 
 It writes every frame the trainer would see, and prints the timestamp, shot, and

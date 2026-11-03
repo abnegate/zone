@@ -1,4 +1,4 @@
-.PHONY: help setup up down restart logs logs-follow ps health check vision-model test-vision \
+.PHONY: help setup up down restart logs logs-follow ps health check vision-model \
 	test-lora-live \
 	pull-models clean clean-volumes backup restore migrate-pgdata stop \
 	setup-auth add-user setup-comfyui-macos setup-comfyui-model \
@@ -627,11 +627,11 @@ test-runner: ## Run Rust tool runner tests
 	cd runner && cargo test
 	@echo "$(GREEN)Tool runner tests passed!$(NC)"
 
-VISION_MODEL := runner/zone_vision/models/u2net.onnx
+VISION_MODEL := comfyui/models/vision/u2net.onnx
 VISION_MODEL_URL := https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx
 VISION_MODEL_SHA256 := 8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491
 
-vision-model: ## Download the U2-Net model zone_vision needs (~168 MiB, not vendored)
+vision-model: ## Download the U2-Net model subject-aware crops need (~168 MiB, not vendored)
 	@echo "$(BLUE)Fetching U2-Net...$(NC)"
 	@mkdir -p $(dir $(VISION_MODEL))
 	@if [ ! -f "$(VISION_MODEL)" ]; then \
@@ -639,14 +639,6 @@ vision-model: ## Download the U2-Net model zone_vision needs (~168 MiB, not vend
 	fi
 	@echo "$(VISION_MODEL_SHA256)  $(VISION_MODEL)" | shasum -a 256 -c
 	@echo "$(GREEN)Model ready: $(VISION_MODEL)$(NC)"
-
-test-vision: vision-model ## Run the subject-detection tests against the real model
-	@echo "$(BLUE)Running subject detection tests...$(NC)"
-	cd runner && ZONE_VISION_MODEL=$(CURDIR)/$(VISION_MODEL) \
-		cargo test --package zone_vision --features saliency
-	cd runner && ZONE_VISION_MODEL=$(CURDIR)/$(VISION_MODEL) \
-		cargo test --package zone_comfy --features saliency
-	@echo "$(GREEN)Subject detection tests passed!$(NC)"
 
 COMFYUI_INSTALL_DIR ?= $(HOME)/Library/Application Support/Zone/ComfyUI
 COMFYUI_PYTHON := $(COMFYUI_INSTALL_DIR)/.venv/bin/python

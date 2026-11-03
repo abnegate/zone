@@ -5,6 +5,7 @@ use abnegate_comfy::lora::TrainPolicy;
 use abnegate_comfy::lora::TrainRequest;
 use abnegate_comfy::lora::TrainRule;
 use abnegate_comfy::lora::TrainSubject;
+use abnegate_comfy::lora::VIDEO_REFUSAL;
 use abnegate_secret::SecretValue;
 
 /// The one base a person trains on: Lustify, an SDXL checkpoint.
@@ -13,21 +14,16 @@ pub const PEOPLE_BASE: &str = "sdxl-people";
 pub const PEOPLE_ADAPTER: &str = "sdxl-adapter";
 /// Runs a fine-tuned people checkpoint.
 pub const PEOPLE_FINETUNE: &str = "sdxl";
-/// Runs a person's video adapter.
-pub const VIDEO_ADAPTER: &str = "wan-adapter";
 pub const PEOPLE_CHECKPOINT: &str = "checkpoints/lustifySDXLNSFW_ggwpV7.safetensors";
-pub const VIDEO_MODEL: &str = "diffusion_models/wan2.2_ti2v_5B_fp16.safetensors";
-/// Marks a person's video adapter apart from their image LoRA of the same name.
-pub const VIDEO_SUFFIX: &str = "-wan";
 pub const LORAS: &str = "loras";
 pub const CHECKPOINTS: &str = "checkpoints";
 pub const MISSING_RUNPOD_KEY: &str = "Save a Runpod API key in Workspace Settings.";
 pub const REMOTE_SUBJECT_UNAVAILABLE: &str = "this subject trains only on this machine";
 
 /// What each base trains and where it publishes: the people base trains a
-/// person's LoRA, pivotal LoRA, fine-tune and video adapter, and an object
-/// or style LoRA; every other base keeps the crate's default, a LoRA of
-/// anything but a person.
+/// person's LoRA, pivotal LoRA and fine-tune, and an object or style LoRA;
+/// every other base keeps the crate's default, a LoRA of anything but a
+/// person.
 pub fn train_policy() -> TrainPolicy {
     TrainPolicy::new()
         .with_rule(
@@ -49,13 +45,6 @@ pub fn train_policy() -> TrainPolicy {
             )
             .with_subjects([TrainSubject::Person])
             .with_required(PEOPLE_CHECKPOINT),
-        )
-        .with_rule(
-            TrainRule::new(PEOPLE_BASE, TrainMethod::Video, VIDEO_ADAPTER, LORAS)
-                .with_subjects([TrainSubject::Person])
-                .with_required(PEOPLE_CHECKPOINT)
-                .with_required(VIDEO_MODEL)
-                .with_suffix(VIDEO_SUFFIX),
         )
 }
 
@@ -86,12 +75,16 @@ pub fn key(
         .ok_or(TrainError::Invalid(MISSING_RUNPOD_KEY))
 }
 
-/// `request` placed on `compute`, carrying the key it trains with.
+/// `request` placed on `compute`, carrying the key it trains with. Video
+/// identity training is refused on every compute.
 pub fn place(
     request: TrainRequest,
     compute: Compute,
     saved: Option<SecretValue>,
 ) -> Result<TrainRequest, TrainError> {
+    if request.method == TrainMethod::Video {
+        return Err(TrainError::Invalid(VIDEO_REFUSAL));
+    }
     if !allows(request.subject, compute) {
         return Err(TrainError::Invalid(REMOTE_SUBJECT_UNAVAILABLE));
     }
@@ -162,10 +155,10 @@ mod tests {
             TrainMethod::Lora,
             TrainMethod::Pivotal,
             TrainMethod::Finetune,
-            TrainMethod::Video,
         ] {
             assert!(person(method), "a person cannot train {method:?}");
         }
+        assert!(policy.rule(PEOPLE_BASE, TrainMethod::Video).is_none());
         let other: Vec<TrainMethod> = policy
             .rules_for(PEOPLE_BASE)
             .filter(|rule| rule.subjects.contains(&TrainSubject::Other))
@@ -185,9 +178,6 @@ mod tests {
             assert_eq!(rule(method).directory, "loras");
             assert_eq!(rule(method).recipe_id, "sdxl-adapter");
         }
-        assert_eq!(rule(TrainMethod::Video).directory, "loras");
-        assert_eq!(rule(TrainMethod::Video).recipe_id, "wan-adapter");
-        assert_eq!(rule(TrainMethod::Video).suffix.as_deref(), Some("-wan"));
     }
 
     #[test]
@@ -200,11 +190,7 @@ mod tests {
             ),
             "this base does not train that subject"
         );
-        for method in [
-            TrainMethod::Finetune,
-            TrainMethod::Pivotal,
-            TrainMethod::Video,
-        ] {
+        for method in [TrainMethod::Finetune, TrainMethod::Pivotal] {
             assert_eq!(
                 refusal(
                     &config,
@@ -248,21 +234,22 @@ mod tests {
     }
 
     #[test]
-    fn a_person_video_adapter_needs_the_video_bundle_and_a_clip() {
+    fn video_identity_training_is_refused_even_with_the_bundle_and_a_clip() {
         let (_models, config) = harness();
         install(&config, PEOPLE_CHECKPOINT);
-        let mut video = request(PEOPLE_BASE, TrainSubject::Person, TrainMethod::Video);
-        assert_eq!(
-            refusal(&config, &video),
-            "install the files this base needs before training on it"
-        );
-        install(&config, VIDEO_MODEL);
-        assert_eq!(refusal(&config, &video), "video training needs clips");
-        video
-            .images
-            .push(TrainImage::from_bytes("walk.mp4", "", b"clip".to_vec()));
-        validate_request(&config, &video)
-            .expect("the video bundle and a clip on disk are enough to start");
+        install(&config, "diffusion_models/wan2.2_ti2v_5B_fp16.safetensors");
+        for subject in [TrainSubject::Person, TrainSubject::Other] {
+            for compute in [Compute::Local, Compute::Runpod] {
+                let mut video = request(PEOPLE_BASE, subject, TrainMethod::Video);
+                video
+                    .images
+                    .push(TrainImage::from_bytes("walk.mp4", "", b"clip".to_vec()));
+                match place(video, compute, Some(SecretValue::new("rp-secret"))) {
+                    Err(TrainError::Invalid(message)) => assert_eq!(message, VIDEO_REFUSAL),
+                    other => panic!("{subject:?} on {compute:?} was not refused: {other:?}"),
+                }
+            }
+        }
     }
 
     #[test]

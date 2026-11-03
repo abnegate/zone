@@ -5,7 +5,8 @@ on:
     branches: [main]
     paths:
       - 'comfyui/**'
-      - 'runner/zone_comfy/**'
+      - 'runner/Cargo.lock'
+      - 'runner/zone_server/src/services/comfy/**'
       - 'scripts/setup-comfyui-macos.sh'
       - 'scripts/comfyui-loopback-bridge.py'
       # tests/test_comfy_stub.py pins the live rig's ComfyUI stand-in against
@@ -15,7 +16,8 @@ on:
   pull_request:
     paths:
       - 'comfyui/**'
-      - 'runner/zone_comfy/**'
+      - 'runner/Cargo.lock'
+      - 'runner/zone_server/src/services/comfy/**'
       - 'scripts/setup-comfyui-macos.sh'
       - 'scripts/comfyui-loopback-bridge.py'
       # tests/test_comfy_stub.py pins the live rig's ComfyUI stand-in against
@@ -77,6 +79,40 @@ jobs:
         run: |
           rm -rf .comfyui-runtime/custom_nodes/zone_lora
           cp -R comfyui/custom_nodes/zone_lora .comfyui-runtime/custom_nodes/zone_lora
+
+      - name: Fetch locked abnegate-comfy source
+        run: |
+          locked=$(python - <<'PY'
+          import re
+          import sys
+          import tomllib
+
+          with open('runner/Cargo.lock', 'rb') as lock:
+              packages = [
+                  package
+                  for package in tomllib.load(lock).get('package', [])
+                  if package['name'] == 'abnegate-comfy'
+              ]
+          if len(packages) != 1:
+              sys.exit(f'runner/Cargo.lock locks {len(packages)} abnegate-comfy, expected one')
+          version = packages[0]['version']
+          checksum = packages[0].get('checksum', '')
+          if not re.fullmatch(r'[0-9A-Za-z.+-]+', version):
+              sys.exit(f'runner/Cargo.lock locks abnegate-comfy at an unusable version {version!r}')
+          if not re.fullmatch(r'[0-9a-f]{64}', checksum):
+              sys.exit('runner/Cargo.lock has no crates.io checksum for abnegate-comfy')
+          print(version, checksum)
+          PY
+          )
+          read -r version checksum <<< "$locked"
+          archive="$RUNNER_TEMP/abnegate-comfy-$version.crate"
+          curl --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://static.crates.io/crates/abnegate-comfy/abnegate-comfy-$version.crate"
+          printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/crates"
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP/crates"
+          test -f "$RUNNER_TEMP/crates/abnegate-comfy-$version/src/lib.rs"
+          printf 'ABNEGATE_COMFY_SOURCE=%s\n' "$RUNNER_TEMP/crates/abnegate-comfy-$version" >> "$GITHUB_ENV"
 
       - name: Install locked ComfyUI requirements
         run: >-

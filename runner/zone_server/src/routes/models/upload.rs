@@ -10,11 +10,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
-use zone_comfy::caption::{CaptionImage, CaptionRequest};
-use zone_comfy::lora::{TrainImage, TrainMethod, TrainProvider, TrainRequest, TrainSubject};
-use zone_comfy::video::FrameRequest;
 
+use super::subject::Subject;
+use super::train_form::TrainForm;
 use super::types::ErrorResponse;
+use abnegate_comfy::host::Compute;
+use abnegate_comfy::lora::{TrainImage, TrainMethod};
+use abnegate_comfy::video::FrameRequest;
+use abnegate_comfy::{CaptionImage, CaptionRequest};
 
 pub const UPLOAD_ROOT: &str = ".zone-train-upload";
 
@@ -33,7 +36,7 @@ impl IntoResponse for UploadError {
 }
 
 #[derive(Deserialize)]
-struct ImageMeta {
+struct ImageMetadata {
     filename: String,
     #[serde(default)]
     caption: String,
@@ -44,13 +47,13 @@ struct ImageMeta {
 #[derive(Deserialize)]
 struct TrainJson {
     #[serde(flatten)]
-    request: TrainRequest,
+    form: TrainForm,
     #[serde(default)]
     upload_id: Option<Uuid>,
 }
 
 pub struct ParsedTrain {
-    pub request: TrainRequest,
+    pub form: TrainForm,
     pub upload_id: Option<Uuid>,
 }
 
@@ -85,7 +88,7 @@ pub async fn train_request(request: Request) -> Result<ParsedTrain, UploadError>
 async fn json_train(request: Request) -> Result<ParsedTrain, UploadError> {
     let body = json_body::<TrainJson>(request).await?;
     Ok(ParsedTrain {
-        request: body.request,
+        form: body.form,
         upload_id: body.upload_id,
     })
 }
@@ -176,24 +179,22 @@ async fn multipart_train(request: Request) -> Result<ParsedTrain, UploadError> {
         train_images_from_parts(&parts)?
     };
     Ok(ParsedTrain {
-        request: TrainRequest {
+        form: TrainForm {
             name,
             base,
             trigger,
-            subject: match optional_text(&parts, "subject").unwrap_or("other") {
-                "person" => TrainSubject::Person,
-                "language" => TrainSubject::Language,
-                _ => TrainSubject::Other,
-            },
-            method: match optional_text(&parts, "method").unwrap_or("lora") {
-                "finetune" => TrainMethod::Finetune,
-                "pivotal" => TrainMethod::Pivotal,
-                "video" => TrainMethod::Video,
+            subject: optional_text(&parts, "subject")
+                .and_then(Subject::parse)
+                .unwrap_or_default(),
+            method: match optional_text(&parts, "method") {
+                Some("finetune") => TrainMethod::Finetune,
+                Some("pivotal") => TrainMethod::Pivotal,
+                Some("video") => TrainMethod::Video,
                 _ => TrainMethod::Lora,
             },
-            provider: match optional_text(&parts, "provider").unwrap_or("local") {
-                "runpod" => TrainProvider::Runpod,
-                _ => TrainProvider::Local,
+            compute: match optional_text(&parts, "provider") {
+                Some("runpod") => Compute::Runpod,
+                _ => Compute::Local,
             },
             images,
         },
@@ -212,26 +213,42 @@ fn train_images_from_parts(parts: &Parts) -> Result<Vec<TrainImage>, UploadError
         .get("images")
         .map(String::as_str)
         .ok_or_else(|| fail("images is required"))?;
-    let meta: Vec<ImageMeta> =
+    let metadata: Vec<ImageMetadata> =
         serde_json::from_str(raw).map_err(|_| fail("images metadata is not valid JSON"))?;
-    let mut images = Vec::with_capacity(meta.len());
-    for (index, image) in meta.into_iter().enumerate() {
+    let mut images = Vec::with_capacity(metadata.len());
+    for (index, image) in metadata.into_iter().enumerate() {
         let bytes = file_bytes(parts, &format!("image_{index}"))?;
         let before = parts
             .files
             .get(&format!("before_{index}"))
             .map(|(_, bytes)| bytes.clone());
-        images.push(TrainImage {
-            filename: image.filename,
-            caption: image.caption,
-            bytes_base64: String::new(),
-            bytes: Some(bytes),
-            before_base64: None,
+        images.push(train_image(
+            image.filename,
+            image.caption,
+            bytes,
             before,
-            group: image.group,
-        });
+            image.group,
+        ));
     }
     Ok(images)
+}
+
+fn train_image(
+    filename: String,
+    caption: String,
+    bytes: Vec<u8>,
+    before: Option<Vec<u8>>,
+    group: Option<usize>,
+) -> TrainImage {
+    let image = TrainImage::from_bytes(filename, caption, bytes);
+    let image = match before {
+        Some(before) => image.with_before(before),
+        None => image,
+    };
+    match group {
+        Some(group) => image.with_group(group),
+        None => image,
+    }
 }
 
 fn parse_upload_id(value: Option<&str>) -> Result<Option<Uuid>, UploadError> {
@@ -243,31 +260,31 @@ fn parse_upload_id(value: Option<&str>) -> Result<Option<Uuid>, UploadError> {
     }
 }
 
-fn upload_dir(models_dir: &Path, id: Uuid) -> PathBuf {
-    models_dir.join(UPLOAD_ROOT).join(id.to_string())
+fn upload_directory(models_directory: &Path, id: Uuid) -> PathBuf {
+    models_directory.join(UPLOAD_ROOT).join(id.to_string())
 }
 
-fn read_manifest(dir: &Path) -> Result<Manifest, UploadError> {
-    let bytes =
-        fs::read(dir.join("manifest.json")).map_err(|_| fail("training upload is missing"))?;
+fn read_manifest(directory: &Path) -> Result<Manifest, UploadError> {
+    let bytes = fs::read(directory.join("manifest.json"))
+        .map_err(|_| fail("training upload is missing"))?;
     serde_json::from_slice(&bytes).map_err(|_| fail("training upload is unreadable"))
 }
 
-fn write_manifest(dir: &Path, manifest: &Manifest) -> Result<(), UploadError> {
+fn write_manifest(directory: &Path, manifest: &Manifest) -> Result<(), UploadError> {
     let encoded =
         serde_json::to_vec_pretty(manifest).map_err(|_| fail("training upload is unreadable"))?;
-    let temporary = dir.join("manifest.json.tmp");
+    let temporary = directory.join("manifest.json.tmp");
     fs::write(&temporary, encoded).map_err(|_| fail("training upload could not be saved"))?;
-    fs::rename(temporary, dir.join("manifest.json"))
+    fs::rename(temporary, directory.join("manifest.json"))
         .map_err(|_| fail("training upload could not be saved"))
 }
 
-pub fn create_staging(models_dir: &Path, user_id: Uuid) -> Result<Uuid, UploadError> {
+pub fn create_staging(models_directory: &Path, user_id: Uuid) -> Result<Uuid, UploadError> {
     let id = Uuid::new_v4();
-    let dir = upload_dir(models_dir, id);
-    fs::create_dir_all(&dir).map_err(|_| fail("training upload could not be saved"))?;
+    let directory = upload_directory(models_directory, id);
+    fs::create_dir_all(&directory).map_err(|_| fail("training upload could not be saved"))?;
     write_manifest(
-        &dir,
+        &directory,
         &Manifest {
             user_id,
             items: Vec::new(),
@@ -277,13 +294,13 @@ pub fn create_staging(models_dir: &Path, user_id: Uuid) -> Result<Uuid, UploadEr
 }
 
 pub fn append_staging(
-    models_dir: &Path,
+    models_directory: &Path,
     id: Uuid,
     user_id: Uuid,
     images: Vec<TrainImage>,
 ) -> Result<usize, UploadError> {
-    let dir = upload_dir(models_dir, id);
-    let mut manifest = read_manifest(&dir)?;
+    let directory = upload_directory(models_directory, id);
+    let mut manifest = read_manifest(&directory)?;
     if manifest.user_id != user_id {
         return Err(fail("training upload is missing"));
     }
@@ -295,12 +312,12 @@ pub fn append_staging(
             .as_deref()
             .filter(|bytes| !bytes.is_empty())
             .ok_or_else(|| fail("image is empty"))?;
-        fs::write(dir.join(&file), bytes)
+        fs::write(directory.join(&file), bytes)
             .map_err(|_| fail("training upload could not be saved"))?;
         let before = match image.before.as_deref().filter(|bytes| !bytes.is_empty()) {
             Some(bytes) => {
                 let name = format!("{index:06}.before.bin");
-                fs::write(dir.join(&name), bytes)
+                fs::write(directory.join(&name), bytes)
                     .map_err(|_| fail("training upload could not be saved"))?;
                 Some(name)
             }
@@ -315,71 +332,71 @@ pub fn append_staging(
         });
     }
     let count = manifest.items.len();
-    write_manifest(&dir, &manifest)?;
+    write_manifest(&directory, &manifest)?;
     Ok(count)
 }
 
 pub fn take_staging(
-    models_dir: &Path,
+    models_directory: &Path,
     id: Uuid,
     user_id: Uuid,
 ) -> Result<Vec<TrainImage>, UploadError> {
-    let dir = upload_dir(models_dir, id);
-    let manifest = read_manifest(&dir)?;
+    let directory = upload_directory(models_directory, id);
+    let manifest = read_manifest(&directory)?;
     if manifest.user_id != user_id {
         return Err(fail("training upload is missing"));
     }
     let mut images = Vec::with_capacity(manifest.items.len());
     for item in &manifest.items {
         let bytes =
-            fs::read(dir.join(&item.file)).map_err(|_| fail("training upload is missing"))?;
+            fs::read(directory.join(&item.file)).map_err(|_| fail("training upload is missing"))?;
         let before = match &item.before {
-            Some(name) => {
-                Some(fs::read(dir.join(name)).map_err(|_| fail("training upload is missing"))?)
-            }
+            Some(name) => Some(
+                fs::read(directory.join(name)).map_err(|_| fail("training upload is missing"))?,
+            ),
             None => None,
         };
-        images.push(TrainImage {
-            filename: item.filename.clone(),
-            caption: item.caption.clone(),
-            bytes_base64: String::new(),
-            bytes: Some(bytes),
-            before_base64: None,
+        images.push(train_image(
+            item.filename.clone(),
+            item.caption.clone(),
+            bytes,
             before,
-            group: item.group,
-        });
+            item.group,
+        ));
     }
-    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&directory);
     Ok(images)
 }
 
-pub fn drop_staging(models_dir: &Path, id: Uuid, user_id: Uuid) -> Result<(), UploadError> {
-    let dir = upload_dir(models_dir, id);
-    let manifest = read_manifest(&dir)?;
+pub fn drop_staging(models_directory: &Path, id: Uuid, user_id: Uuid) -> Result<(), UploadError> {
+    let directory = upload_directory(models_directory, id);
+    let manifest = read_manifest(&directory)?;
     if manifest.user_id != user_id {
         return Err(fail("training upload is missing"));
     }
-    fs::remove_dir_all(&dir).map_err(|_| fail("training upload is missing"))?;
+    fs::remove_dir_all(&directory).map_err(|_| fail("training upload is missing"))?;
     Ok(())
 }
 
 async fn multipart_captions(request: Request) -> Result<CaptionRequest, UploadError> {
     let parts = read_parts(request).await?;
     let trigger = optional_text(&parts, "trigger").map(str::to_string);
-    let meta: Vec<ImageMeta> = serde_json::from_str(required_text(&parts, "images")?)
+    let metadata: Vec<ImageMetadata> = serde_json::from_str(required_text(&parts, "images")?)
         .map_err(|_| fail("images metadata is not valid JSON"))?;
-    let mut images = Vec::with_capacity(meta.len());
-    for (index, image) in meta.into_iter().enumerate() {
+    let mut images = Vec::with_capacity(metadata.len());
+    for (index, image) in metadata.into_iter().enumerate() {
         let bytes = file_bytes(&parts, &format!("image_{index}"))?;
-        images.push(CaptionImage {
-            filename: image.filename,
-            bytes_base64: String::new(),
-            bytes: Some(bytes),
-            caption: image.caption,
-            group: image.group,
+        let caption = CaptionImage::from_bytes(image.filename, bytes).with_caption(image.caption);
+        images.push(match image.group {
+            Some(group) => caption.with_group(group),
+            None => caption,
         });
     }
-    Ok(CaptionRequest { trigger, images })
+    let request = CaptionRequest::new(images);
+    Ok(match trigger {
+        Some(trigger) => request.with_trigger(trigger),
+        None => request,
+    })
 }
 
 async fn multipart_frames(request: Request) -> Result<FrameRequest, UploadError> {
@@ -404,12 +421,14 @@ async fn multipart_frames(request: Request) -> Result<FrameRequest, UploadError>
         Some(value) => Some(parse_bool(value).ok_or_else(|| fail("mirror is not a boolean"))?),
         None => None,
     };
-    Ok(FrameRequest {
-        filename,
-        bytes_base64: String::new(),
-        bytes: Some(bytes),
-        fps,
-        mirror,
+    let request = FrameRequest::from_bytes(filename, bytes);
+    let request = match fps {
+        Some(fps) => request.with_fps(fps),
+        None => request,
+    };
+    Ok(match mirror {
+        Some(mirror) => request.with_mirror(mirror),
+        None => request,
     })
 }
 

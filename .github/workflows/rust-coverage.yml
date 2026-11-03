@@ -75,7 +75,7 @@ jobs:
           shared-key: coverage
           cache-on-failure: true
 
-      # zone_comfy turns a submitted clip into training frames through ffmpeg.
+      # abnegate-comfy turns a submitted clip into training frames through ffmpeg.
       # Without it that path's end-to-end test skips itself and reads as uncovered.
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg

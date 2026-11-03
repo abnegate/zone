@@ -57,7 +57,7 @@ async fn main() {
 
     tracing::info!("Starting Zone server...");
 
-    zone_comfy::observe_requests(zone_server::metrics::record_comfyui);
+    abnegate_comfy::observe_requests(zone_server::metrics::record_comfyui);
     abnegate_search::observe_searches(zone_server::metrics::record_searxng);
 
     // Load config

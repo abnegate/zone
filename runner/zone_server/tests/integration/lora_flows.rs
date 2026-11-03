@@ -2,6 +2,8 @@
 //! extraction, and delete.
 use crate::common;
 
+use abnegate_comfy::host::{self, Job, JobDirectory, PREVIEWS_DIRECTORY, Status};
+use abnegate_comfy::train::TrainProgress;
 use axum::{
     Json, Router,
     body::Body,
@@ -15,7 +17,7 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -27,6 +29,7 @@ use zone_server::auth::create_session_access_token;
 use zone_server::config::DEFAULT_HUGGINGFACE_MODELS_URL;
 use zone_server::db::{sessions, users};
 use zone_server::routes::models::{BrowseQuery, HuggingFaceProvider, ModelMediumFilter, ModelSort};
+use zone_server::services::comfy::settings;
 
 async fn token(pool: &PgPool, secret: &str) -> String {
     let user = users::create_user(
@@ -150,22 +153,22 @@ fn split_catalog(query: &str) -> Value {
 async fn router_with(
     ollama: &str,
     catalog: &str,
-    models_dir: PathBuf,
+    models_directory: PathBuf,
     train_command: Option<String>,
 ) -> (axum::Router, String) {
-    router_tuned(ollama, catalog, models_dir, train_command, |_| {}).await
+    router_tuned(ollama, catalog, models_directory, train_command, |_| {}).await
 }
 
 async fn router_tuned(
     ollama: &str,
     catalog: &str,
-    models_dir: PathBuf,
+    models_directory: PathBuf,
     train_command: Option<String>,
-    tune: impl FnOnce(&mut zone_comfy::Config),
+    tune: impl FnOnce(&mut abnegate_comfy::Config),
 ) -> (axum::Router, String) {
     let mut config = common::test_config_with_ollama_host(ollama);
     config.huggingface_models_url = catalog.to_string();
-    config.comfyui.models_dir = models_dir;
+    config.comfyui.models_directory = models_directory;
     config.comfyui.train_command = train_command;
     tune(&mut config.comfyui);
     let pool = common::create_test_pool().await;
@@ -234,19 +237,19 @@ async fn mock_ollama() -> String {
     format!("http://{addr}")
 }
 
-fn plant_image_bases(models_dir: &std::path::Path) {
+fn plant_image_bases(models_directory: &std::path::Path) {
     fs::write(
-        models_dir.join("checkpoints/flux1-schnell-fp8.safetensors"),
+        models_directory.join("checkpoints/flux1-schnell-fp8.safetensors"),
         b"ckpt",
     )
     .unwrap();
     fs::write(
-        models_dir.join("loras/flux-uncensored.safetensors"),
+        models_directory.join("loras/flux-uncensored.safetensors"),
         b"uncensored",
     )
     .unwrap();
     fs::write(
-        models_dir.join("checkpoints/lustifySDXLNSFW_ggwpV7.safetensors"),
+        models_directory.join("checkpoints/lustifySDXLNSFW_ggwpV7.safetensors"),
         b"people",
     )
     .unwrap();
@@ -258,16 +261,33 @@ fn finetune(base: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn complete_language_host_job(models_dir: PathBuf) {
+fn comfy(models_directory: &Path) -> abnegate_comfy::Config {
+    let mut config = settings::development();
+    config.models_directory = models_directory.to_path_buf();
+    config
+}
+
+fn host_job(name: &str, method: &str) -> Job {
+    Job::new(name, method, "base.safetensors").with_trigger("ohwx")
+}
+
+fn write_host_job(models_directory: &Path, job: &Job) -> JobDirectory {
+    let directory = JobDirectory::new(&comfy(models_directory), job.id);
+    directory.write_job(job).unwrap();
+    directory
+}
+
+fn complete_language_host_job(models_directory: PathBuf) {
     tokio::spawn(async move {
+        let config = comfy(&models_directory);
         for _ in 0..500 {
-            if let Some(job) = zone_comfy::host_train::current(&models_dir) {
-                let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
-                if dir.join("data/train.jsonl").is_file() {
-                    let mut finished = zone_comfy::host_train::read_job(&dir).unwrap();
+            if let Some(job) = host::current(&config) {
+                let directory = JobDirectory::new(&config, job.id);
+                if directory.path().join("data/train.jsonl").is_file() {
+                    let mut finished = directory.read_job().unwrap();
                     if finished.busy() {
-                        finished.status = zone_comfy::host_train::HostStatus::Succeeded;
-                        zone_comfy::host_train::write_job(&dir, &finished).unwrap();
+                        finished.status = Status::Succeeded;
+                        directory.write_job(&finished).unwrap();
                     }
                     return;
                 }
@@ -276,6 +296,8 @@ fn complete_language_host_job(models_dir: PathBuf) {
         }
     });
 }
+
+const TRAIN_COMMAND: &str = "printf trained > \"$ZONE_TRAIN_OUTPUT\"";
 
 const LANGUAGE_JSONL: &[u8] =
     br#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#;
@@ -367,11 +389,11 @@ async fn browse_huggingface_empty_query_stays_gguf() {
 
 #[tokio::test]
 async fn list_models_includes_unready_adapter() {
-    let models_dir = temp_models();
-    let lora = models_dir.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors");
+    let models_directory = temp_models();
+    let lora = models_directory.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors");
     fs::write(&lora, b"lora").unwrap();
     fs::write(
-        models_dir.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors.zone.json"),
+        models_directory.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors.zone.json"),
         serde_json::to_vec(&serde_json::json!({
             "recipe_id": "qwen-image-edit-adapter",
             "hf_base": "Qwen/Qwen-Image-Edit-2511"
@@ -381,7 +403,7 @@ async fn list_models_includes_unready_adapter() {
     .unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir, None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_directory, None).await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models")
@@ -404,14 +426,14 @@ async fn list_models_includes_unready_adapter() {
 
 #[tokio::test]
 async fn train_endpoint_writes_lora_and_lists_it() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
     let (router, token) = router_with(
         &ollama,
         &catalog,
-        models_dir.clone(),
-        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
     )
     .await;
     let request = axum::http::Request::builder()
@@ -438,7 +460,7 @@ async fn train_endpoint_writes_lora_and_lists_it() {
     let job = wait_train_job(&router, &token).await;
     assert_eq!(job["status"], "succeeded", "{job}");
     assert_eq!(job["filename"], "studio-style.safetensors");
-    let output = models_dir.join("loras/studio-style.safetensors");
+    let output = models_directory.join("loras/studio-style.safetensors");
     assert_eq!(fs::read(&output).unwrap(), b"trained");
 
     let list = axum::http::Request::builder()
@@ -456,16 +478,16 @@ async fn train_endpoint_writes_lora_and_lists_it() {
             .any(|model| model["name"] == "studio-style.safetensors"
                 && model["recipe_id"] == "flux-schnell-adapter")
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn delete_removes_comfy_lora() {
-    let models_dir = temp_models();
-    let lora = models_dir.join("loras/custom-style.safetensors");
+    let models_directory = temp_models();
+    let lora = models_directory.join("loras/custom-style.safetensors");
     fs::write(&lora, b"lora").unwrap();
     fs::write(
-        models_dir.join("loras/custom-style.safetensors.zone.json"),
+        models_directory.join("loras/custom-style.safetensors.zone.json"),
         serde_json::to_vec(&serde_json::json!({
             "recipe_id": "flux-schnell-adapter",
             "hf_base": "black-forest-labs/FLUX.1-schnell"
@@ -475,7 +497,7 @@ async fn delete_removes_comfy_lora() {
     .unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
     let request = axum::http::Request::builder()
         .method("DELETE")
         .uri("/api/models/custom-style.safetensors")
@@ -485,12 +507,12 @@ async fn delete_removes_comfy_lora() {
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(!lora.exists());
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn comfy_pull_writes_lora_from_hub_origin() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = hits.clone();
     let hub = Router::new().fallback(move |request: Request| {
@@ -519,7 +541,7 @@ async fn comfy_pull_writes_lora_from_hub_origin() {
 
     let mut config = common::test_config_with_ollama_host(common::REFUSED_URL);
     config.huggingface_models_url = format!("http://{hub_addr}/api/models");
-    config.comfyui.models_dir = models_dir.clone();
+    config.comfyui.models_directory = models_directory.clone();
     let pool = common::create_test_pool().await;
     let token = token(&pool, config.jwt_secret()).await;
     let router = common::create_test_router(common::create_test_state(config, pool));
@@ -565,15 +587,17 @@ async fn comfy_pull_writes_lora_from_hub_origin() {
     }
     assert!(complete);
     assert!(hits.load(Ordering::SeqCst) >= 1);
-    let dest = models_dir.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors");
+    let dest = models_directory.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors");
     assert_eq!(fs::read(&dest).unwrap(), vec![1, 2, 3, 4]);
     let sidecar: Value = serde_json::from_slice(
-        &fs::read(models_dir.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors.zone.json"))
-            .unwrap(),
+        &fs::read(
+            models_directory.join("loras/qwen-image-edit-plus-nsfw-lora.safetensors.zone.json"),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(sidecar["recipe_id"], "qwen-image-edit-adapter");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
@@ -583,12 +607,12 @@ async fn frames_endpoint_turns_a_clip_into_training_images() {
         return;
     }
     use base64::Engine;
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
 
-    let clip = models_dir.join("clip.mp4");
+    let clip = models_directory.join("clip.mp4");
     let built = std::process::Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -645,7 +669,7 @@ async fn frames_endpoint_turns_a_clip_into_training_images() {
             && !frame["bytes_base64"].as_str().unwrap().is_empty()),
         "every frame carries its shot and its pixels"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
@@ -655,10 +679,10 @@ async fn frames_endpoint_rejects_a_file_that_is_not_a_video() {
         return;
     }
     use base64::Engine;
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
 
     let request = axum::http::Request::builder()
         .method("POST")
@@ -687,7 +711,7 @@ async fn frames_endpoint_rejects_a_file_that_is_not_a_video() {
             .is_some_and(|error| !error.is_empty()),
         "the failure has to say what went wrong: {body}"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 async fn post_frames(router: axum::Router, token: &str, body: Value) -> (StatusCode, Value) {
@@ -827,10 +851,10 @@ async fn wait_train_job(router: &axum::Router, token: &str) -> Value {
 
 #[tokio::test]
 async fn frames_endpoint_rejects_a_body_that_is_not_base64() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
 
     let (status, body) = post_frames(
         router,
@@ -845,15 +869,15 @@ async fn frames_endpoint_rejects_a_body_that_is_not_base64() {
             .is_some_and(|error| error.contains("base64")),
         "the failure has to name what was wrong: {body}"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn frames_endpoint_rejects_an_empty_clip() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
 
     let (status, body) = post_frames(
         router,
@@ -863,18 +887,24 @@ async fn frames_endpoint_rejects_an_empty_clip() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().is_some(), "{body}");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn frames_endpoint_says_so_when_the_decoder_is_not_installed() {
     use base64::Engine;
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
-        comfyui.ffmpeg = "zone-has-no-such-decoder".into();
-    })
+    let (router, token) = router_tuned(
+        &ollama,
+        &catalog,
+        models_directory.clone(),
+        None,
+        |comfyui| {
+            comfyui.ffmpeg = "zone-has-no-such-decoder".into();
+        },
+    )
     .await;
 
     let (status, body) = post_frames(
@@ -897,20 +927,26 @@ async fn frames_endpoint_says_so_when_the_decoder_is_not_installed() {
             .is_some_and(|error| error.contains("zone-has-no-such-decoder")),
         "the reply has to name the binary an operator needs to install: {body}"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn frames_endpoint_maps_decoder_execution_failures() {
     use base64::Engine;
-    let models_dir = temp_models();
-    let decoder = models_dir.join("not-executable");
+    let models_directory = temp_models();
+    let decoder = models_directory.join("not-executable");
     fs::write(&decoder, "not an executable").unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
-        comfyui.ffmpeg = decoder.display().to_string();
-    })
+    let (router, token) = router_tuned(
+        &ollama,
+        &catalog,
+        models_directory.clone(),
+        None,
+        |comfyui| {
+            comfyui.ffmpeg = decoder.display().to_string();
+        },
+    )
     .await;
 
     let (status, body) = post_frames(
@@ -929,18 +965,24 @@ async fn frames_endpoint_maps_decoder_execution_failures() {
             .is_some_and(|message| !message.is_empty()),
         "the server should preserve the operating-system execution failure: {body}"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn concurrent_frame_extracts_queue_instead_of_429() {
     use base64::Engine;
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
-        comfyui.ffmpeg = "zone-has-no-such-decoder".into();
-    })
+    let (router, token) = router_tuned(
+        &ollama,
+        &catalog,
+        models_directory.clone(),
+        None,
+        |comfyui| {
+            comfyui.ffmpeg = "zone-has-no-such-decoder".into();
+        },
+    )
     .await;
 
     let clip = json!({
@@ -976,17 +1018,23 @@ async fn concurrent_frame_extracts_queue_instead_of_429() {
         StatusCode::SERVICE_UNAVAILABLE,
         "{second_body}"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn frames_endpoint_accepts_a_multipart_clip() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
-        comfyui.ffmpeg = "zone-has-no-such-decoder".into();
-    })
+    let (router, token) = router_tuned(
+        &ollama,
+        &catalog,
+        models_directory.clone(),
+        None,
+        |comfyui| {
+            comfyui.ffmpeg = "zone-has-no-such-decoder".into();
+        },
+    )
     .await;
 
     let (content_type, body) = multipart(
@@ -1012,16 +1060,16 @@ async fn frames_endpoint_accepts_a_multipart_clip() {
             .is_some_and(|error| error.contains("zone-has-no-such-decoder")),
         "{response}"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_endpoint_accepts_multipart_images() {
     use base64::Engine;
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
     let png = base64::engine::general_purpose::STANDARD
         .decode(TINY_PNG)
         .unwrap();
@@ -1043,16 +1091,16 @@ async fn train_endpoint_accepts_multipart_images() {
         response["error"],
         "LoRA training is not configured on this server"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_endpoint_accepts_a_staged_upload() {
     use base64::Engine;
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
     let png = base64::engine::general_purpose::STANDARD
         .decode(TINY_PNG)
         .unwrap();
@@ -1104,15 +1152,15 @@ async fn train_endpoint_accepts_a_staged_upload() {
         response["error"],
         "LoRA training is not configured on this server"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn frames_endpoint_needs_authentication() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, _) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, _) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
 
     let request = axum::http::Request::builder()
         .method("POST")
@@ -1124,25 +1172,29 @@ async fn frames_endpoint_needs_authentication() {
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_bases_lists_flux_when_checkpoint_present() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     fs::write(
-        models_dir.join("checkpoints/flux1-schnell-fp8.safetensors"),
+        models_directory.join("checkpoints/flux1-schnell-fp8.safetensors"),
         b"ckpt",
     )
     .unwrap();
     fs::write(
-        models_dir.join("loras/flux-uncensored.safetensors"),
+        models_directory.join("loras/flux-uncensored.safetensors"),
         b"uncensored",
     )
     .unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) =
+        router_tuned(&ollama, &catalog, models_directory.clone(), None, |comfy| {
+            comfy.enabled = true;
+        })
+        .await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models/train/bases")
@@ -1158,23 +1210,24 @@ async fn train_bases_lists_flux_when_checkpoint_present() {
             .iter()
             .any(|base| base["id"] == "flux-schnell" && base["edit"] == false)
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_bases_rejects_an_invalid_overlay_without_packaged_fallback() {
-    let models_dir = temp_models();
-    let workflows = models_dir.join("workflows");
-    let recipes = models_dir.join("recipes");
+    let models_directory = temp_models();
+    let workflows = models_directory.join("workflows");
+    let recipes = models_directory.join("recipes");
     fs::create_dir(&workflows).unwrap();
     fs::create_dir(&recipes).unwrap();
     fs::write(recipes.join("catalog.json"), b"{\"schema_version\":1}").unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfy| {
-        comfy.workflow_path = workflows.join("unused.json");
-    })
-    .await;
+    let (router, token) =
+        router_tuned(&ollama, &catalog, models_directory.clone(), None, |comfy| {
+            comfy.workflow_path = Some(workflows.join("unused.json"));
+        })
+        .await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models/train/bases")
@@ -1185,15 +1238,15 @@ async fn train_bases_rejects_an_invalid_overlay_without_packaged_fallback() {
     let response = router.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn captions_report_configuration_and_preserve_user_drafts() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (disabled, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (disabled, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
     let body = json!({
         "trigger": "ohwx",
         "images": [{
@@ -1212,19 +1265,23 @@ async fn captions_report_configuration_and_preserve_user_drafts() {
             .is_some_and(|message| message.contains("no vision model is available"))
     );
 
-    let (enabled, token) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
-        comfyui.caption_model = "vision".to_string()
-    })
+    let (enabled, token) = router_tuned(
+        &ollama,
+        &catalog,
+        models_directory.clone(),
+        None,
+        |comfyui| comfyui.caption_model = "vision".to_string(),
+    )
     .await;
     let (status, response) = post_json(enabled, &token, "/api/models/train/captions", body).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["captions"], json!(["ohwx, side light"]));
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_maps_disabled_invalid_and_runner_failures() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
     let request = json!({
@@ -1238,7 +1295,7 @@ async fn train_maps_disabled_invalid_and_runner_failures() {
         }]
     });
 
-    let (disabled, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (disabled, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
     let (status, body) = post_json(disabled, &token, "/api/models/train", request.clone()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(
@@ -1249,8 +1306,8 @@ async fn train_maps_disabled_invalid_and_runner_failures() {
     let (invalid, token) = router_with(
         &ollama,
         &catalog,
-        models_dir.clone(),
-        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
     )
     .await;
     let mut invalid_request = request.clone();
@@ -1263,19 +1320,24 @@ async fn train_maps_disabled_invalid_and_runner_failures() {
             .is_some_and(|message| !message.is_empty())
     );
 
-    let (failed, token) =
-        router_with(&ollama, &catalog, models_dir.clone(), Some("exit 7".into())).await;
+    let (failed, token) = router_with(
+        &ollama,
+        &catalog,
+        models_directory.clone(),
+        Some("exit 7".into()),
+    )
+    .await;
     let (status, body) = post_json(failed.clone(), &token, "/api/models/train", request).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     let job = wait_train_job(&failed, &token).await;
     assert_eq!(job["status"], "failed", "{job}");
     assert_eq!(job["error"], "trainer exited 7", "{job}");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_is_a_background_job_that_survives_the_request() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
     let body = json!({
@@ -1291,7 +1353,7 @@ async fn train_is_a_background_job_that_survives_the_request() {
     let (idle, token) = router_with(
         &ollama,
         &catalog,
-        models_dir.clone(),
+        models_directory.clone(),
         Some("sleep 1; printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
     )
     .await;
@@ -1311,43 +1373,39 @@ async fn train_is_a_background_job_that_survives_the_request() {
     let job = wait_train_job(&idle, &token).await;
     assert_eq!(job["status"], "succeeded", "{job}");
     assert_eq!(job["filename"], "studio-style.safetensors");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_status_reads_a_host_job_when_the_registry_is_empty() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let mut job =
-        zone_comfy::host_train::HostJob::create("jerry", "lora", "ohwx", "base.safetensors");
-    job.status = zone_comfy::host_train::HostStatus::Running;
-    job.step = Some(9);
-    job.total = Some(40);
-    let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
-    zone_comfy::host_train::write_job(&dir, &job).unwrap();
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let mut job = host_job("jerry", "lora");
+    job.status = Status::Running;
+    write_host_job(&models_directory, &job)
+        .write_progress(&TrainProgress::new(9, 40))
+        .unwrap();
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
     let (status, body) = get_json(router, &token, "/api/models/train").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["name"], "jerry");
     assert_eq!(body["status"], "running");
     assert_eq!(body["step"], 9);
     assert_eq!(body["total"], 40);
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn dismiss_clears_a_finished_host_job() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let mut job =
-        zone_comfy::host_train::HostJob::create("yvonne", "finetune", "ohwx", "base.safetensors");
-    job.status = zone_comfy::host_train::HostStatus::Failed;
+    let mut job = host_job("yvonne", "finetune");
+    job.status = Status::Failed;
     job.error = Some("cancelled".into());
-    let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
-    zone_comfy::host_train::write_job(&dir, &job).unwrap();
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    write_host_job(&models_directory, &job);
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
 
     let (status, body) = get_json(router.clone(), &token, "/api/models/train").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1362,32 +1420,30 @@ async fn dismiss_clears_a_finished_host_job() {
 
     let (status, body) = delete_json(router, &token, "/api/models/train").await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn dismiss_refuses_a_running_host_job() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let mut job =
-        zone_comfy::host_train::HostJob::create("yvonne", "finetune", "ohwx", "base.safetensors");
-    job.status = zone_comfy::host_train::HostStatus::Running;
-    let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
-    zone_comfy::host_train::write_job(&dir, &job).unwrap();
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let mut job = host_job("yvonne", "finetune");
+    job.status = Status::Running;
+    write_host_job(&models_directory, &job);
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
     let (status, body) = delete_json(router.clone(), &token, "/api/models/train").await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"], "a training job is already running");
     let (status, body) = get_json(router, &token, "/api/models/train").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["name"], "yvonne");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn dismiss_clears_a_finished_in_process_job() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
     let request = json!({
@@ -1400,8 +1456,13 @@ async fn dismiss_clears_a_finished_in_process_job() {
             "bytes_base64": TINY_PNG
         }]
     });
-    let (router, token) =
-        router_with(&ollama, &catalog, models_dir.clone(), Some("exit 7".into())).await;
+    let (router, token) = router_with(
+        &ollama,
+        &catalog,
+        models_directory.clone(),
+        Some("exit 7".into()),
+    )
+    .await;
     let (status, body) = post_json(router.clone(), &token, "/api/models/train", request).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     let job = wait_train_job(&router, &token).await;
@@ -1410,23 +1471,20 @@ async fn dismiss_clears_a_finished_in_process_job() {
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     let (status, body) = get_json(router, &token, "/api/models/train").await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn a_busy_host_job_refuses_a_second_train() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let job =
-        zone_comfy::host_train::HostJob::create("jerry", "finetune", "ohwx", "base.safetensors");
-    let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
-    zone_comfy::host_train::write_job(&dir, &job).unwrap();
+    write_host_job(&models_directory, &host_job("jerry", "finetune"));
     let (router, token) = router_with(
         &ollama,
         &catalog,
-        models_dir.clone(),
-        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
     )
     .await;
     let body = json!({
@@ -1442,23 +1500,22 @@ async fn a_busy_host_job_refuses_a_second_train() {
     let (status, conflict) = post_json(router, &token, "/api/models/train", body).await;
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
     assert_eq!(conflict["error"], "a training job is already running");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_preview_serves_png_rejects_traversal_and_missing_job() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let mut job =
-        zone_comfy::host_train::HostJob::create("jerry", "lora", "ohwx", "base.safetensors");
-    job.status = zone_comfy::host_train::HostStatus::Running;
-    let dir = zone_comfy::host_train::job_dir(&models_dir, job.id);
-    zone_comfy::host_train::write_job(&dir, &job).unwrap();
-    let previews = dir.join("previews");
+    let mut job = host_job("jerry", "lora");
+    job.status = Status::Running;
+    let previews = write_host_job(&models_directory, &job)
+        .path()
+        .join(PREVIEWS_DIRECTORY);
     fs::create_dir_all(&previews).unwrap();
     fs::write(previews.join("step-250-0.png"), b"preview-png").unwrap();
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_directory.clone(), None).await;
 
     let (status, body, content_type) = get_bytes(
         router.clone(),
@@ -1487,7 +1544,7 @@ async fn train_preview_serves_png_rejects_traversal_and_missing_job() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
     let _ = fs::remove_dir_all(empty);
 }
 
@@ -1508,11 +1565,17 @@ fn language_multipart(name: &[u8], base: &[u8], method: &[u8]) -> (String, Vec<u
 
 #[tokio::test]
 async fn train_bases_lists_chat_models_alongside_image_rows() {
-    let models_dir = temp_models();
-    plant_image_bases(&models_dir);
+    let models_directory = temp_models();
+    plant_image_bases(&models_directory);
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(
+        &ollama,
+        &catalog,
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
+    )
+    .await;
     let (status, body) = get_json(router, &token, "/api/models/train/bases").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let bases = body.as_array().expect("bases list");
@@ -1555,16 +1618,84 @@ async fn train_bases_lists_chat_models_alongside_image_rows() {
         bases.iter().all(|base| base["id"] != "llava:7b"),
         "vision-only models are not training bases: {bases:?}"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
+}
+
+#[tokio::test]
+async fn runpod_training_without_a_saved_key_is_refused() {
+    let models_directory = temp_models();
+    plant_image_bases(&models_directory);
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(
+        common::REFUSED_URL,
+        &catalog,
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
+    )
+    .await;
+    let body = json!({
+        "name": "jerry",
+        "base": "sdxl-people",
+        "trigger": "ohwx",
+        "subject": "person",
+        "provider": "runpod",
+        "images": [{
+            "filename": "a.png",
+            "caption": "a portrait",
+            "bytes_base64": TINY_PNG
+        }]
+    });
+    let (status, response) = post_json(router.clone(), &token, "/api/models/train", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(
+        response["error"],
+        "Save a Runpod API key in Workspace Settings."
+    );
+    let (status, body) = get_json(router, &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let _ = fs::remove_dir_all(models_directory);
+}
+
+#[tokio::test]
+async fn train_bases_omit_a_base_nothing_configured_can_train() {
+    let models_directory = temp_models();
+    plant_image_bases(&models_directory);
+    let catalog = start_catalog(split_catalog).await;
+    let (router, token) = router_with(
+        common::REFUSED_URL,
+        &catalog,
+        models_directory.clone(),
+        None,
+    )
+    .await;
+    let (status, body) = get_json(router, &token, "/api/models/train/bases").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let bases = body.as_array().expect("bases list");
+    assert!(
+        bases.iter().all(|base| base["id"] != "flux-schnell"),
+        "with ComfyUI off and no train command nothing trains a flux LoRA: {bases:?}"
+    );
+    let people = bases
+        .iter()
+        .find(|base| base["id"] == "sdxl-people")
+        .expect("the host trainer still trains the people base");
+    assert_eq!(people["subject"], "person");
+    assert!(finetune(people));
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_bases_keep_image_rows_when_ollama_is_down() {
-    let models_dir = temp_models();
-    plant_image_bases(&models_dir);
+    let models_directory = temp_models();
+    plant_image_bases(&models_directory);
     let catalog = start_catalog(split_catalog).await;
-    let (router, token) =
-        router_with(common::REFUSED_URL, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(
+        common::REFUSED_URL,
+        &catalog,
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
+    )
+    .await;
     let (status, body) = get_json(router, &token, "/api/models/train/bases").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let bases = body.as_array().expect("bases list");
@@ -1582,20 +1713,20 @@ async fn train_bases_keep_image_rows_when_ollama_is_down() {
             && !base["id"].as_str().unwrap_or("").contains(':')),
         "chat bases are omitted when Ollama is unreachable: {bases:?}"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_language_multipart_starts_a_host_job() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    complete_language_host_job(models_dir.clone());
+    complete_language_host_job(models_directory.clone());
     let (router, token) = router_with(
         &ollama,
         &catalog,
-        models_dir.clone(),
-        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
     )
     .await;
     let (content_type, body) = language_multipart(b"support-bot", b"llama3.2:1b", b"lora");
@@ -1610,28 +1741,31 @@ async fn train_language_multipart_starts_a_host_job() {
     assert_eq!(status, StatusCode::ACCEPTED, "{response}");
     let job = wait_train_job(&router, &token).await;
     assert_eq!(job["status"], "succeeded", "{job}");
-    let host = zone_comfy::host_train::current(&models_dir).expect("host job");
+    let config = comfy(&models_directory);
+    let host = host::current(&config).expect("host job");
     assert_eq!(host.subject, "language");
     assert_eq!(host.checkpoint, "llama3.2:1b");
     assert_eq!(host.method, "lora");
-    let dir = zone_comfy::host_train::job_dir(&models_dir, host.id);
     assert!(
-        dir.join("data/train.jsonl").is_file(),
+        JobDirectory::new(&config, host.id)
+            .path()
+            .join("data/train.jsonl")
+            .is_file(),
         "language dumps are staged as jsonl"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_language_rejects_finetune_on_a_large_chat_model() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
     let (router, token) = router_with(
         &ollama,
         &catalog,
-        models_dir.clone(),
-        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
     )
     .await;
     let body = json!({
@@ -1651,7 +1785,7 @@ async fn train_language_rejects_finetune_on_a_large_chat_model() {
         response["error"],
         "fine-tune is only available for small chat models"
     );
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
@@ -1682,20 +1816,20 @@ async fn train_upload_refuses_video_identity_training() {
     let (status, response) =
         post_multipart(router, &token, "/api/models/train", content_type, body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"], zone_comfy::lora::VIDEO_REFUSAL);
+    assert_eq!(response["error"], abnegate_comfy::lora::VIDEO_REFUSAL);
     let _ = fs::remove_dir_all(models_dir);
 }
 
 #[tokio::test]
 async fn train_language_rejects_video() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
     let (router, token) = router_with(
         &ollama,
         &catalog,
-        models_dir.clone(),
-        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
     )
     .await;
     let body = json!({
@@ -1712,20 +1846,20 @@ async fn train_language_rejects_video() {
     let (status, response) = post_json(router, &token, "/api/models/train", body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert_eq!(response["error"], "not available for a chat model");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_language_rejects_mixed_document_formats() {
     use base64::Engine;
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
     let (router, token) = router_with(
         &ollama,
         &catalog,
-        models_dir.clone(),
-        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
     )
     .await;
     let chat =
@@ -1751,19 +1885,19 @@ async fn train_language_rejects_mixed_document_formats() {
     let (status, response) = post_json(router, &token, "/api/models/train", body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert_eq!(response["error"], "training documents must be one format");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }
 
 #[tokio::test]
 async fn train_language_rejects_an_unknown_base() {
-    let models_dir = temp_models();
+    let models_directory = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
     let (router, token) = router_with(
         &ollama,
         &catalog,
-        models_dir.clone(),
-        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+        models_directory.clone(),
+        Some(TRAIN_COMMAND.into()),
     )
     .await;
     let body = json!({
@@ -1780,5 +1914,5 @@ async fn train_language_rejects_an_unknown_base() {
     let (status, response) = post_json(router, &token, "/api/models/train", body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert_eq!(response["error"], "unknown training base");
-    let _ = fs::remove_dir_all(models_dir);
+    let _ = fs::remove_dir_all(models_directory);
 }

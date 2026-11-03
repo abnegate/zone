@@ -1,16 +1,27 @@
 //! One in-process LoRA training job. The request that starts it returns before
 //! the trainer finishes, so a refresh does not cancel the run.
 
+mod screening_view;
+
+pub use screening_view::ScreeningView;
+
+use crate::services::comfy::language;
+use abnegate_comfy::dataset::Finding;
+use abnegate_comfy::host;
+use abnegate_comfy::host::Status;
+use abnegate_comfy::lora::TrainError;
+use abnegate_comfy::lora::TrainOutcome;
+use abnegate_comfy::quality::Quality;
+use abnegate_comfy::train::Phase;
+use abnegate_comfy::train::TrainProgress;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
-use zone_comfy::TrainProgress;
-use zone_comfy::dataset::Finding;
-use zone_comfy::host_train::{HostJob, HostStatus};
-use zone_comfy::lora::{Screening, TrainError, TrainOutcome};
-use zone_comfy::quality::Quality;
+
+const DISABLED: &str = "LoRA training is not configured on this server";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,7 +43,7 @@ pub struct TrainJobView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dataset: Option<Vec<Finding>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub screening: Option<Screening>,
+    pub screening: Option<ScreeningView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,7 +94,7 @@ struct Snapshot {
     filename: Option<String>,
     quality: Option<Quality>,
     dataset: Option<Vec<Finding>>,
-    screening: Option<Screening>,
+    screening: Option<ScreeningView>,
     error: Option<String>,
     step: Option<u32>,
     total: Option<u32>,
@@ -217,11 +228,11 @@ impl Job {
         }
         snapshot.step = Some(update.step.min(update.total));
         snapshot.total = Some(update.total);
-        snapshot.phase = update.phase;
+        snapshot.phase = update.phase.map(String::from);
         snapshot.message = update.message;
         snapshot.percent = update.percent;
         snapshot.loss = update.loss;
-        snapshot.eta_override = update.eta_seconds;
+        snapshot.eta_override = update.eta.map(|eta| eta.as_secs());
         snapshot.previews = update.previews;
         if update.step > 0 && snapshot.step_started.is_none() {
             snapshot.step_started = Some(Instant::now());
@@ -229,25 +240,49 @@ impl Job {
     }
 
     pub fn succeed(&self, outcome: TrainOutcome) {
-        let filename = outcome
-            .path
+        self.finish(
+            &outcome.path,
+            outcome.quality,
+            outcome.dataset,
+            outcome.screening.into(),
+        );
+    }
+
+    pub fn succeed_language(&self, outcome: language::Outcome) {
+        self.finish(
+            &outcome.path,
+            None,
+            Vec::new(),
+            ScreeningView::kept(outcome.examples),
+        );
+    }
+
+    fn finish(
+        &self,
+        path: &Path,
+        quality: Option<Quality>,
+        dataset: Vec<Finding>,
+        screening: ScreeningView,
+    ) {
+        let filename = path
             .file_name()
             .and_then(|name| name.to_str())
             .map(str::to_string);
         let mut snapshot = self.snapshot.lock().expect("train job");
         snapshot.status = TrainJobStatus::Succeeded;
         snapshot.filename = filename;
-        snapshot.quality = outcome.quality;
-        snapshot.dataset = Some(outcome.dataset);
-        snapshot.screening = Some(outcome.screening);
+        snapshot.quality = quality;
+        snapshot.dataset = Some(dataset);
+        snapshot.screening = Some(screening);
         snapshot.error = None;
     }
 
     pub fn fail(&self, error: TrainError) {
         let message = match error {
-            TrainError::Disabled => "LoRA training is not configured on this server".to_string(),
+            TrainError::Disabled => DISABLED.to_string(),
             TrainError::Invalid(message) => message.to_string(),
             TrainError::Failed(message) => message,
+            other => other.to_string(),
         };
         let mut snapshot = self.snapshot.lock().expect("train job");
         snapshot.status = TrainJobStatus::Failed;
@@ -256,24 +291,40 @@ impl Job {
 }
 
 impl TrainJobView {
-    pub fn from_host(job: HostJob) -> Self {
+    pub fn from_host(job: host::Job) -> Self {
         let status = match job.status {
-            HostStatus::Queued | HostStatus::Running => TrainJobStatus::Running,
-            HostStatus::Succeeded => TrainJobStatus::Succeeded,
-            HostStatus::Failed => TrainJobStatus::Failed,
+            Status::Succeeded => TrainJobStatus::Succeeded,
+            Status::Failed => TrainJobStatus::Failed,
+            _ => TrainJobStatus::Running,
         };
         let elapsed = Utc::now()
             .signed_duration_since(job.started_at)
             .to_std()
             .ok();
-        let phase = job.phase;
-        let eta_seconds =
-            job.eta_seconds
-                .filter(|seconds| *seconds > 0)
-                .or_else(|| match phase.as_deref() {
-                    Some("training") | None => eta_seconds(job.step, job.total, elapsed),
-                    _ => None,
-                });
+        let progress = job.progress;
+        let step = progress.as_ref().map(|progress| progress.step);
+        let total = progress.as_ref().map(|progress| progress.total);
+        let phase = progress
+            .as_ref()
+            .and_then(|progress| progress.phase.clone());
+        let eta_seconds = progress
+            .as_ref()
+            .and_then(|progress| progress.eta)
+            .map(|eta| eta.as_secs())
+            .filter(|seconds| *seconds > 0)
+            .or_else(|| match phase {
+                Some(Phase::Training) | None => eta_seconds(step, total, elapsed),
+                _ => None,
+            });
+        let (message, percent, loss, previews) = match progress {
+            Some(progress) => (
+                progress.message,
+                progress.percent,
+                progress.loss,
+                progress.previews,
+            ),
+            None => (None, None, None, Vec::new()),
+        };
         Self {
             id: job.id,
             name: job.name,
@@ -283,19 +334,19 @@ impl TrainJobView {
             dataset: None,
             screening: None,
             error: job.error,
-            step: job.step,
-            total: job.total,
-            phase,
-            message: job.message,
-            percent: job.percent,
-            loss: job.loss,
+            step,
+            total,
+            phase: phase.map(String::from),
+            message,
+            percent,
+            loss,
             eta_seconds,
             method: Some(job.method),
             subject: (!job.subject.is_empty()).then_some(job.subject),
-            provider: Some(job.provider.as_str().to_string()),
+            provider: Some(job.compute.as_str().to_string()),
             gpu: job.gpu,
             pod_id: job.pod_id,
-            previews: job.previews,
+            previews,
             started_at: job.started_at,
         }
     }
@@ -311,10 +362,21 @@ fn eta_seconds(step: Option<u32>, total: Option<u32>, elapsed: Option<Duration>)
 
 #[cfg(test)]
 mod tests {
-    use super::{TrainJobStatus, TrainRegistry, eta_seconds};
+    use super::{TrainJobStatus, TrainJobView, TrainRegistry, eta_seconds};
+    use crate::services::comfy::language;
+    use abnegate_comfy::host::Compute;
+    use abnegate_comfy::host::Job;
+    use abnegate_comfy::lora::TrainError;
+    use abnegate_comfy::train::Phase;
+    use abnegate_comfy::train::TrainProgress;
+    use std::path::PathBuf;
     use std::time::Duration;
-    use zone_comfy::TrainProgress;
-    use zone_comfy::lora::TrainError;
+
+    const CHECKPOINT: &str = "lustifySDXLNSFW_ggwpV7.safetensors";
+
+    fn host_job(name: &str, method: &str, trigger: &str, checkpoint: &str) -> Job {
+        Job::new(name, method, checkpoint).with_trigger(trigger)
+    }
 
     #[test]
     fn a_running_job_refuses_a_second_start() {
@@ -358,9 +420,10 @@ mod tests {
             .expect("start");
         job.progress(
             TrainProgress::new(0, 8000)
-                .phase("class_images", "Generating class image 12 of 2000")
-                .percent(8)
-                .eta_seconds(14400),
+                .with_phase(Phase::ClassImages)
+                .with_message("Generating class image 12 of 2000")
+                .with_percent(8)
+                .with_eta(Duration::from_secs(14400)),
         );
         let view = registry.current().unwrap();
         assert_eq!(view.step, Some(0));
@@ -370,7 +433,7 @@ mod tests {
         assert_eq!(view.eta_seconds, Some(14400));
         assert_eq!(view.method.as_deref(), Some("finetune"));
         assert_eq!(view.provider.as_deref(), Some("runpod"));
-        job.progress(TrainProgress::new(12, 400).loss(0.21));
+        job.progress(TrainProgress::new(12, 400).with_loss(0.21));
         let view = registry.current().unwrap();
         assert_eq!(view.step, Some(12));
         assert_eq!(view.total, Some(400));
@@ -399,15 +462,9 @@ mod tests {
 
     #[test]
     fn a_queued_host_job_looks_running_to_the_client() {
-        let mut job = zone_comfy::host_train::HostJob::create(
-            "jerry",
-            "finetune",
-            "ohwx",
-            "lustifySDXLNSFW_ggwpV7.safetensors",
-        );
-        job.step = Some(4);
-        job.total = Some(20);
-        let view = super::TrainJobView::from_host(job);
+        let mut job = host_job("jerry", "finetune", "ohwx", CHECKPOINT);
+        job.progress = Some(TrainProgress::new(4, 20));
+        let view = TrainJobView::from_host(job);
         assert_eq!(view.name, "jerry");
         assert_eq!(view.status, TrainJobStatus::Running);
         assert_eq!(view.step, Some(4));
@@ -421,16 +478,11 @@ mod tests {
 
     #[test]
     fn host_job_compute_is_surfaced_when_set() {
-        let mut job = zone_comfy::host_train::HostJob::create(
-            "jerry",
-            "finetune",
-            "ohwx",
-            "lustifySDXLNSFW_ggwpV7.safetensors",
-        );
-        job.provider = zone_comfy::TrainProvider::Runpod;
+        let mut job =
+            host_job("jerry", "finetune", "ohwx", CHECKPOINT).with_compute(Compute::Runpod);
         job.gpu = Some("A40".into());
         job.pod_id = Some("pod-1".into());
-        let view = super::TrainJobView::from_host(job);
+        let view = TrainJobView::from_host(job);
         assert_eq!(view.provider.as_deref(), Some("runpod"));
         assert_eq!(view.gpu.as_deref(), Some("A40"));
         assert_eq!(view.pod_id.as_deref(), Some("pod-1"));
@@ -442,10 +494,8 @@ mod tests {
 
     #[test]
     fn host_job_subject_is_surfaced_when_set() {
-        let mut job =
-            zone_comfy::host_train::HostJob::create("support-bot", "lora", "", "llama3.2:1b");
-        job.subject = "language".into();
-        let view = super::TrainJobView::from_host(job);
+        let job = host_job("support-bot", "lora", "", "llama3.2:1b").with_subject("language");
+        let view = TrainJobView::from_host(job);
         assert_eq!(view.subject.as_deref(), Some("language"));
         let encoded = serde_json::to_value(&view).unwrap();
         assert_eq!(encoded["subject"], "language");
@@ -453,23 +503,72 @@ mod tests {
 
     #[test]
     fn host_eta_prefers_the_sidecar_over_job_age() {
-        let mut job = zone_comfy::host_train::HostJob::create(
-            "jerry",
-            "finetune",
-            "ohwx",
-            "lustifySDXLNSFW_ggwpV7.safetensors",
+        let mut job = host_job("jerry", "finetune", "ohwx", CHECKPOINT);
+        job.progress = Some(
+            TrainProgress::new(0, 8000)
+                .with_phase(Phase::ClassImages)
+                .with_message("Generating class image 12 of 2000")
+                .with_percent(8)
+                .with_eta(Duration::from_secs(14_400))
+                .with_loss(0.21)
+                .with_previews(vec!["previews/step-250-0.png".into()]),
         );
-        job.step = Some(0);
-        job.total = Some(8000);
-        job.phase = Some("class_images".into());
-        job.message = Some("Generating class image 12 of 2000".into());
-        job.percent = Some(8);
-        job.eta_seconds = Some(14_400);
-        job.loss = Some(0.21);
-        let view = super::TrainJobView::from_host(job);
+        let view = TrainJobView::from_host(job);
         assert_eq!(view.eta_seconds, Some(14_400));
         assert_eq!(view.percent, Some(8));
         assert_eq!(view.phase.as_deref(), Some("class_images"));
+        assert_eq!(
+            view.message.as_deref(),
+            Some("Generating class image 12 of 2000")
+        );
         assert_eq!(view.loss, Some(0.21));
+        assert_eq!(view.previews, ["previews/step-250-0.png"]);
+    }
+
+    #[test]
+    fn a_host_job_without_progress_shows_no_steps() {
+        let view = TrainJobView::from_host(host_job("jerry", "lora", "ohwx", CHECKPOINT));
+        assert_eq!(view.step, None);
+        assert_eq!(view.total, None);
+        assert_eq!(view.phase, None);
+        assert_eq!(view.eta_seconds, None);
+        assert!(view.previews.is_empty());
+    }
+
+    #[test]
+    fn a_finished_language_run_reports_its_examples_as_kept() {
+        let registry = TrainRegistry::new();
+        let job = registry
+            .start(
+                "support-bot".into(),
+                Some("lora".into()),
+                Some("local".into()),
+            )
+            .expect("start");
+        job.succeed_language(language::Outcome {
+            path: PathBuf::from("/models/.zone-train/job/support-bot"),
+            examples: 42,
+        });
+        let view = registry.current().unwrap();
+        assert_eq!(view.status, TrainJobStatus::Succeeded);
+        assert_eq!(view.filename.as_deref(), Some("support-bot"));
+        assert!(view.quality.is_none());
+        let encoded = serde_json::to_value(&view).unwrap();
+        assert_eq!(encoded["dataset"], serde_json::json!([]));
+        assert_eq!(
+            encoded["screening"],
+            serde_json::json!({"kept": 42, "dropped": [], "attempted": []})
+        );
+    }
+
+    #[test]
+    fn a_failed_run_reads_the_reason_the_client_shows() {
+        let registry = TrainRegistry::new();
+        let job = registry.start("jerry".into(), None, None).expect("start");
+        job.fail(TrainError::Disabled);
+        assert_eq!(
+            registry.current().unwrap().error.as_deref(),
+            Some("LoRA training is not configured on this server")
+        );
     }
 }

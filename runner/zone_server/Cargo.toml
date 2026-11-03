@@ -13,9 +13,9 @@ default = ["local-embeddings", "saliency"]
 # In-process embeddings (EMBEDDING_ENGINE=local). Links ONNX Runtime, which
 # publishes no musl prebuilts, so any image building this must be glibc-based.
 local-embeddings = ["zone_context/local-embeddings"]
-# Subject detection for LoRA training crops. Links the same ONNX Runtime, and
-# is inert until ZONE_VISION_MODEL points at a U2-Net model.
-saliency = ["zone_comfy/saliency"]
+# Subject detection for LoRA training crops, through abnegate-vision. Links the
+# same ONNX Runtime, and is inert until ZONE_VISION_MODEL points at a U2-Net model.
+saliency = ["abnegate-comfy/saliency"]
 
 [lib]
 name = "zone_server"
@@ -106,7 +106,6 @@ abnegate-search = { workspace = true }
 abnegate-secret = { workspace = true, features = ["sqlx"] }
 abnegate-vcs = { workspace = true, features = ["github"] }
 zone_chat = { path = "../zone_chat" }
-zone_comfy = { path = "../zone_comfy" }
 zone_core = { path = "../zone_core", features = ["sqlx"] }
 zone_context = { path = "../zone_context" }
 

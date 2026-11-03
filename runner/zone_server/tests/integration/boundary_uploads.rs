@@ -72,7 +72,7 @@ async fn a_submitted_clip_name_cannot_choose_where_the_clip_lands() {
     let root = std::env::temp_dir().join(format!("zone-boundary-upload-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     let mut config = test_config();
-    config.comfyui.models_dir = root.clone();
+    config.comfyui.models_directory = root.clone();
     let client = TestClient::with_config(config).await;
     let token = registered(&client).await;
 
