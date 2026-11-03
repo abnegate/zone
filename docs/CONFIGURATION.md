@@ -1644,6 +1644,21 @@ that still sets an old name gets the default instead:
 - **Description**: Per-request budget for one captioning call. A timeout leaves
   the caption as the trigger word alone rather than failing the training job.
 
+### `COMFYUI_REQUEST_TIMEOUT_SECONDS`
+- **Default**: `15`
+- **Description**: Ceiling on any one HTTP request to ComfyUI, such as
+  queueing a graph, polling its history or uploading a source image.
+  Generation and training have their own deadlines and are not bounded by
+  this. A value above `600` is capped at ten minutes, and one that is not a
+  whole number of seconds gets the default.
+
+### `COMFYUI_POSES_DIRECTORY`
+- **Default**: `poses/` beside the directory of `COMFYUI_WORKFLOW_PATH`, which
+  is `/app/comfyui/poses` in the container
+- **Description**: OpenPose images, one per pose cluster, that a person's
+  generation can be posed with. The server image ships the repository's
+  `comfyui/poses`. A directory that does not exist poses nothing.
+
 ### `COMFYUI_TRAIN_TIMEOUT_SECONDS`
 - **Default**: `3600`
 - **Description**: Wall-clock budget for a ComfyUI `ZoneTrainLoRA` job
@@ -2173,7 +2188,8 @@ Need to find a specific config? Quick lookup:
   ZONE_IN_CONTAINER
 - **Image, video, and audio generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
   COMFYUI_API_TOKEN, COMFYUI_TOKEN_HEADER, COMFYUI_MODELS_DIRECTORY,
-  COMFYUI_ARTIFACT_ROOT, COMFYUI_TRAIN_COMMAND,
+  COMFYUI_ARTIFACT_ROOT, COMFYUI_TRAIN_COMMAND, COMFYUI_REQUEST_TIMEOUT_SECONDS,
+  COMFYUI_POSES_DIRECTORY,
   COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_VIDEO_WORKFLOW_PATH,
   COMFYUI_VIDEO_UNET, COMFYUI_VIDEO_CLIP, COMFYUI_VIDEO_VAE,
   COMFYUI_VIDEO_GENERATION_TIMEOUT_SECONDS, COMFYUI_AUDIO_WORKFLOW_PATH,

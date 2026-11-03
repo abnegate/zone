@@ -521,13 +521,14 @@ non-zero `lr`. The trainer therefore sets `lr` to 1.0 on every group and logs
 `text_encoder_lr` in `comfyui/train_sdxl_config.json` only take effect with
 `"optimizer": "adamw"`, and CLIP-L moves at the UNet's step. Compute on the
 Train form is **Local** (CUDA if `torch.cuda.is_available()`, else MPS, else
-CPU) or **Runpod**. Runpod is Person-only (LoRA, fine-tune, pivotal).
+CPU) or **Runpod**. Runpod takes every subject: Person (LoRA, fine-tune,
+pivotal), Other, and Language.
 Save a Runpod API key under Workspace or organization AI settings; GET returns
 `has_runpod_api_key` and never the secret. The host worker writes
 `job_dir/runpod.key` mode `0600`, auto-picks a GPU from the Runpod catalog
 (fine-tune ≥48 GB, LoRA/pivotal ≥24 GB, Community then Secure), and
 deletes the pod when the job ends. A card below the VRAM floor fails closed
-instead of dropping precision. Language and Flux/Qwen Other stay Local.
+instead of dropping precision.
 
 The worker writes `progress.json` with `phase`, `message`, weighted `percent`,
 `loss`, and a per-phase `eta_seconds`, and publishes the weight plus sidecar.
@@ -543,6 +544,15 @@ clips; 500 stills or 50 clips is the strong set. Install the worker with:
 
 `COMFYUI_TRAIN_TIMEOUT_SECONDS` does not apply to the host worker. Person LoRA
 is hours; fine-tune is unbounded and resumes from snapshots.
+
+Each job directory under `models/.zone-train/` is readable only by its owner
+(`0700`), and `runpod.key` inside it only by its owner too (`0600`). Docker
+Desktop on macOS shows bind-mounted files on the host as owned by the user
+running Docker Desktop, the same user whose LaunchAgent trains, so nothing
+more is needed there. A Linux bind mount keeps the uid as it is:
+run the host trainer as the uid of the container's `zone` user
+(`docker compose exec manager id -u zone`), or it cannot read the jobs the
+manager queues, and the manager cannot read what it writes back.
 
 For a clip the two signals are combined rather than ranked. Saliency leads, and
 a frame's motion doubles the weight of the region that moved, which is enough to

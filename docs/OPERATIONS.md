@@ -280,6 +280,15 @@ reads need egress to `api.anthropic.com` and `chatgpt.com`, or the hosts
 `networkPolicy.enabled` is on; see
 [helm/zone-apps/README.md](../helm/zone-apps/README.md).
 
+## Host trainer on Linux
+
+The manager creates each training job under `models/.zone-train/` readable
+only by its owner (`0700`). On a Linux bind mount the uid is not translated,
+so the host trainer must run as the uid of the container's `zone` user, which
+`docker compose exec manager id -u zone` prints. Run as anyone else, the
+trainer cannot read a queued job and the manager cannot read its progress or
+publish its weight. See the host worker in [COMFYUI.md](COMFYUI.md).
+
 ## Pulling models into the bundled Ollama
 
 With `PROFILES=bundled-ollama`, `ollama-init` pulls `OLLAMA_MODEL_FAST`,

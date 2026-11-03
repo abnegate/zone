@@ -59,3 +59,6 @@ runner/zone_desktop/gen
 runner/zone_desktop/icons
 runner/zone_desktop/capabilities
 runner/zone_desktop/*.conf.json
+
+# Model weights fetched into the checkout (make vision-model); images mount them
+comfyui/models
