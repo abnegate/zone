@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Once;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
@@ -38,6 +39,7 @@ const IMAGE_TO_VIDEO: &str = "i2v";
 const A14B_T2V_GRAPH: &str = "wan2.2-a14b-t2v-api.json";
 const A14B_I2V_GRAPH: &str = "wan2.2-a14b-i2v-api.json";
 const LEFTOVER_5B_GRAPH: &str = "wan2.2-ti2v-5b-api.json";
+static LEFTOVER_5B_GRAPH_WARNING: Once = Once::new();
 const PACKAGED_AUDIO_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/ace-step-v1-3.5b-api.json");
 const PACKAGED_UPSCALE_WORKFLOW: &str =
@@ -380,11 +382,12 @@ impl Client {
         ))
     }
 
-    fn video_workflows(&self) -> Result<(Value, Value), Error> {
-        let _ = self.video_model_names()?;
-        let video_workflow = load_video_workflow(&self.config.video_workflow_path)?;
-        let i2v_workflow = load_i2v_workflow(&self.config.video_workflow_path)?;
-        Ok((video_workflow, i2v_workflow))
+    fn video_workflow(&self, image_to_video: bool) -> Result<Value, Error> {
+        if image_to_video {
+            load_i2v_workflow(&self.config.video_workflow_path)
+        } else {
+            load_video_workflow(&self.config.video_workflow_path)
+        }
     }
 
     fn audio_workflow(&self) -> Result<Value, Error> {
@@ -653,21 +656,14 @@ impl Client {
         } else {
             prompt
         };
+        let workflow = self.video_workflow(source.is_some())?;
         let seed = rand::random::<u64>() & i64::MAX as u64;
         let workflow = if let Some(source) = source {
             let _ = progress.send("Uploading source image...".to_string());
             let uploaded = self.upload_source(source, cancel, deadline).await?;
-            configure_wan_i2v_workflow(
-                self.video_workflows()?.1,
-                prompt,
-                unet,
-                clip,
-                vae,
-                seed,
-                &uploaded,
-            )?
+            configure_wan_i2v_workflow(workflow, prompt, unet, clip, vae, seed, &uploaded)?
         } else {
-            configure_wan_t2v_workflow(self.video_workflows()?.0, prompt, unet, clip, vae, seed)?
+            configure_wan_t2v_workflow(workflow, prompt, unet, clip, vae, seed)?
         };
         self.submit_and_collect(
             workflow,
@@ -1204,10 +1200,12 @@ fn load_i2v_workflow(text_to_video_path: &std::path::Path) -> Result<Value, Erro
 fn video_graph_path(configured: &std::path::Path) -> Option<std::path::PathBuf> {
     match configured.file_name().and_then(|name| name.to_str()) {
         Some(LEFTOVER_5B_GRAPH) => {
-            tracing::warn!(
-                path = %configured.display(),
-                "COMFYUI_VIDEO_WORKFLOW_PATH names the retired Wan 2.2 TI2V 5B graph; loading the A14B graph instead"
-            );
+            LEFTOVER_5B_GRAPH_WARNING.call_once(|| {
+                tracing::warn!(
+                    path = %configured.display(),
+                    "COMFYUI_VIDEO_WORKFLOW_PATH names the retired Wan 2.2 TI2V 5B graph; loading the A14B graph instead"
+                );
+            });
             sibling_graph_path(configured, A14B_T2V_GRAPH)
         }
         Some(A14B_T2V_GRAPH) if !configured.is_file() => None,
@@ -3446,6 +3444,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(videos[0].bytes.as_ref(), &[9, 8, 7, 6]);
+    }
+
+    #[tokio::test]
+    async fn a_broken_text_to_video_graph_leaves_image_to_video_working() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "uploaded-source.png",
+                "subfolder": "",
+                "type": "input"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains("WanImageToVideo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "i2v"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_video_output(&server, "i2v").await;
+        let directory = tempfile::tempdir().unwrap();
+        let configured = directory.path().join("my-video.json");
+        let mut single_expert = packaged_graph(PACKAGED_A14B_T2V_WORKFLOW);
+        single_expert.as_object_mut().unwrap().remove("14");
+        write_graph(&configured, &single_expert);
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            video_workflow_path: configured,
+            ..Default::default()
+        })
+        .unwrap();
+        let source = SourceImage::new(vec![1, 2, 3, 4], "image/png").unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let videos = client
+            .generate_video("make it move", Some(&source), &mut cancel_rx, progress_tx)
+            .await
+            .expect("image-to-video must not load the text-to-video graph");
+        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+        assert!(matches!(
+            generate_clip(client).await,
+            Err(Error::Configuration(_))
+        ));
     }
 
     #[tokio::test]
