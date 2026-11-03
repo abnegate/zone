@@ -513,6 +513,11 @@ impl Recipe {
     }
 
     pub fn apply(&self, fill: Fill<'_>) -> Result<Value, Error> {
+        if self.kind != MediaKind::Image {
+            return Err(Error::Configuration(
+                "only image recipes are filled from their slots",
+            ));
+        }
         if fill.prompt.trim().is_empty() || fill.prompt.len() > 100_000 {
             return Err(Error::Configuration("prompt is empty or too long"));
         }
@@ -1126,6 +1131,30 @@ mod tests {
         assert_eq!(workflow["5"]["inputs"]["width"], 1024);
         assert!(workflow.get("10").is_none());
         assert_eq!(workflow["7"]["inputs"]["text"], "");
+    }
+
+    #[test]
+    fn applying_a_video_recipe_is_refused() {
+        let catalog = catalog();
+        let recipe = catalog.get("wan-a14b").unwrap();
+        let weights: HashMap<&str, &str> = recipe
+            .defaults
+            .iter()
+            .map(|(name, filename)| (name.as_str(), filename.as_str()))
+            .collect();
+        for source in [None, Some("zone-i2v-source.png")] {
+            let result = recipe.apply(Fill {
+                prompt: "a fox running",
+                negative: None,
+                seed: 42,
+                weights: weights.clone(),
+                source,
+            });
+            assert!(
+                matches!(result, Err(Error::Configuration(_))),
+                "a video recipe filled from slots would mix the A14B experts: {result:?}"
+            );
+        }
     }
 
     #[test]
