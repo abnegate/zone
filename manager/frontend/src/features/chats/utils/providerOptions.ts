@@ -8,6 +8,7 @@ import {
   REASONING_EFFORT_LABELS,
   type ReasoningEffort,
 } from '../provider';
+import type { Chat } from '../types';
 import { AUTO_MODEL, modelLabel } from './modelOptions';
 
 export const DEFAULT_PROVIDER = 'default';
@@ -20,6 +21,12 @@ export const AUTO_EFFORT: ReasoningEffort = 'auto';
 
 export function isAgentOffer(offer: ChatProviderOffer): boolean {
   return isAgentProvider(offer.provider);
+}
+
+export function requestedModel(
+  chat: Pick<Chat, 'model_name' | 'provider' | 'provider_model'>
+): string {
+  return chat.provider ? (chat.provider_model ?? AUTO_MODEL) : chat.model_name;
 }
 
 export function effectiveOffer(providers: ChatProviders): ChatProviderOffer {

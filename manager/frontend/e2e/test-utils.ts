@@ -1,5 +1,8 @@
 import type { Page, BrowserContext, Route } from '@playwright/test';
 
+export const CHAT_PROVIDERS = /\/api\/chats\/[^/?]+\/providers(\?|$)/;
+export const WORKSPACE_CHAT_PROVIDERS = /\/api\/workspaces\/[^/?]+\/chat-providers(\?|$)/;
+
 // Block service worker to allow Playwright route interception to work
 export async function blockServiceWorker(context: BrowserContext) {
   await context.route('**/service-worker.js', (route) => {

@@ -2947,6 +2947,36 @@ describe('context freshness', () => {
     expect(result.current.context).toBeNull();
     unmount();
   });
+  it('measures a chat on a chosen provider against the model it asks that provider for', async () => {
+    mockGetChat.mockResolvedValue({
+      ...contextChat,
+      provider: 'openai',
+      provider_model: 'gpt-5.5',
+      context: { ...usage, model: 'gpt-5.5' },
+    });
+    mockPreviewContext.mockResolvedValue({ ...usage, model: 'gpt-5.5', used: 120 });
+    const { result, unmount } = renderHook(() =>
+      useChat('context', undefined, { content: 'draft' })
+    );
+    await waitFor(() => expect(mockPreviewContext).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.context?.used).toBe(120));
+    expect(result.current.contextError).toBeNull();
+    unmount();
+  });
+  it('measures a chat on a chosen provider with no model against Automatic', async () => {
+    mockGetChat.mockResolvedValue({
+      ...contextChat,
+      provider: 'claude_code',
+      provider_model: null,
+      context: { ...usage, model: 'auto' },
+    });
+    mockPreviewContext.mockResolvedValue({ ...usage, model: 'auto', used: 130 });
+    const { result, unmount } = renderHook(() =>
+      useChat('context', undefined, { content: 'draft' })
+    );
+    await waitFor(() => expect(result.current.context?.used).toBe(130));
+    unmount();
+  });
   it('re-previews when the chosen context window changes', async () => {
     mockGetChat.mockResolvedValue({ ...contextChat, context_tokens: 32768 });
     mockPreviewContext.mockResolvedValue({ ...usage, limit: 32768 });

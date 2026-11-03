@@ -80,15 +80,23 @@ describe('chats layout', () => {
     expect(rule(chats, '.chat-group')).not.toContain('overflow');
   });
 
-  it('uses the shared select trigger for chat header context and reasoning', () => {
+  it('uses the shared select trigger for every chat header select', () => {
     const trigger = rule(
       chats,
-      '.reasoning-effort.ui-select-trigger, .context-tokens.ui-select-trigger'
+      '.chat-provider.ui-select-trigger, .chat-provider-model.ui-select-trigger, .reasoning-effort.ui-select-trigger, .context-tokens.ui-select-trigger'
     );
     expect(trigger).toContain('height: var(--ui-control-height-sm)');
     expect(trigger).toContain('border-radius: var(--ui-radius-full)');
     expect(chats).not.toContain('.reasoning-effort select');
     expect(chats).not.toContain('.context-tokens select');
+  });
+
+  it('grows the chat header to fit a provider error under its controls', () => {
+    expect(chats).not.toContain('.chat-header:has(.chat-provider-error)');
+    const error = rule(chats, '.chat-provider-error');
+    expect(error).toContain('order: 1');
+    expect(error).toContain('flex: 1 1 100%');
+    expect(error).toContain('color: var(--ui-error)');
   });
 
   it('leaves chat list width to SubNav', () => {
@@ -127,10 +135,15 @@ describe('chats layout', () => {
     expect(rule(chats, '.message-markdown')).toContain('position: relative');
   });
 
-  it('holds the conversation header to one 48px row', () => {
+  it('holds the conversation header to one 48px row until its controls would crowd out the title', () => {
     const header = rule(chats, '.chat-header');
-    expect(header).toContain('flex-wrap: nowrap');
-    expect(header).toContain('height: var(--ui-header-height)');
+    expect(header).toContain('flex-wrap: wrap');
+    expect(header).toContain('min-height: var(--ui-header-height)');
+    expect(header).not.toMatch(/(^|[^-])height: var\(--ui-header-height\)/m);
+    expect(rule(chats, '.chat-header-info')).toContain('flex: 1 1 14rem');
+    const actions = rule(chats, '.chat-header-actions');
+    expect(actions).toContain('flex-wrap: wrap');
+    expect(actions).toContain('justify-content: flex-end');
     expect(rule(chats, '.chat-header-info h3')).toContain('white-space: nowrap');
   });
 
@@ -143,6 +156,7 @@ describe('chats layout', () => {
     expect(rule(phone, '.chat-header-info')).toContain('flex-wrap: wrap');
     expect(rule(phone, '.chat-header-actions')).toContain('flex-wrap: wrap');
     expect(rule(phone, '.chat-header-actions')).toContain('flex: 1 1 100%');
+    expect(rule(phone, '.chat-header-actions')).toContain('justify-content: flex-start');
   });
 
   it('draws the reader bubble at most 72% wide with the time outside it', () => {

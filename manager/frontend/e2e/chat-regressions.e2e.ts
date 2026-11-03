@@ -7,7 +7,7 @@ import {
   installChatSocketMock,
   type ChatSocketController,
 } from './helpers/chatSocket';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 
 const chat = {
   id: 'chat-1',
@@ -85,6 +85,7 @@ test.describe('Chat regressions', () => {
   ) {
     let listGets = 0;
     await routeApi(page, /\/api\/chats($|\?|\/)/i, async (route) => {
+      if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
       const url = route.request().url();
       const method = route.request().method();
       if (url.includes('/chat-1') && method === 'GET' && !url.includes('/context')) {
@@ -518,6 +519,7 @@ test.describe('Chat regressions', () => {
     await mockChatRoutes(page, []);
     await page.unroute(/\/api\/chats($|\?|\/)/i);
     await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+      if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
       const url = route.request().url();
       const method = route.request().method();
       if (url.includes('/chat-1') && method === 'GET' && !url.includes('/context')) {
