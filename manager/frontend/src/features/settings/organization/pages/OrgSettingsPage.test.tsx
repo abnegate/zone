@@ -12,6 +12,7 @@ import {
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
 import { ApiError } from '../../../../api/ApiError';
+import { clientModule } from '../../../../test/client';
 import { chooseSelect, selectOptionValues } from '../../../../test/select';
 import type { AiSettings, OrgRole } from '../types';
 
@@ -24,9 +25,7 @@ const mockClient = {
   getWorkspaces: mock(),
 };
 
-mock.module('../../../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../../../api/client', () => clientModule(mockClient));
 
 const agentsApi = {
   list: mock(),
