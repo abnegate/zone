@@ -171,7 +171,14 @@ export function AuthProvider({
         clearTimeout(refreshTimeoutRef.current);
       }
 
-      const refreshTime = Math.min((expiresIn - 60) * 1000, LONGEST_TIMER_MILLISECONDS);
+      const refreshTime = (expiresIn - 60) * 1000;
+      if (refreshTime > LONGEST_TIMER_MILLISECONDS) {
+        const expiresAt = Date.now() + expiresIn * 1000;
+        refreshTimeoutRef.current = setTimeout(() => {
+          scheduleRefreshRef.current?.((expiresAt - Date.now()) / 1000);
+        }, LONGEST_TIMER_MILLISECONDS);
+        return;
+      }
       if (refreshTime > 0) {
         refreshTimeoutRef.current = setTimeout(async () => {
           const currentRefreshToken = storage.getItem(REFRESH_TOKEN_KEY);

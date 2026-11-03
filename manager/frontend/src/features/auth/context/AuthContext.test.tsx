@@ -490,5 +490,60 @@ describe('AuthContext', () => {
       expect(result.current.isAuthenticated).toBe(true);
       expect(storage.getItem('manager_refresh_token')).toBe('refresh-token');
     });
+
+    it('waits out the rest of the lifetime when the longest timer fires first', async () => {
+      const longestTimer = 2_147_483_647;
+      const thirtyDays = 30 * 24 * 60 * 60;
+      const payload = {
+        sub: '1',
+        email: 'test@test.com',
+        roles: ['user'],
+        permissions: ['chats:read'],
+        exp: Math.floor(Date.now() / 1000) + thirtyDays,
+      };
+      storage.setItem('manager_access_token', `header.${btoa(JSON.stringify(payload))}.signature`);
+      storage.setItem('manager_refresh_token', 'refresh-token');
+      let refreshes = 0;
+      refreshTokenImpl = async () => {
+        refreshes += 1;
+        throw new RefreshError('Token refresh failed: 401', 401);
+      };
+      const longDelays: number[] = [];
+      const longCallbacks: Array<() => void> = [];
+      const realSetTimeout = globalThis.setTimeout;
+      globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+        if ((delay ?? 0) > 60_000) {
+          longDelays.push(delay ?? 0);
+          longCallbacks.push(callback);
+          return 0;
+        }
+        return realSetTimeout(callback, delay);
+      }) as typeof setTimeout;
+      const realNow = Date.now;
+
+      try {
+        const { result } = renderHook(() => useAuth(), { wrapper });
+        await waitFor(() => {
+          expect(longCallbacks.length).toBeGreaterThan(0);
+        });
+        expect(longDelays.at(-1)).toBe(longestTimer);
+
+        const firedAt = realNow() + longestTimer;
+        Date.now = () => firedAt;
+        await act(async () => {
+          longCallbacks.at(-1)?.();
+        });
+
+        expect(refreshes).toBe(0);
+        expect(result.current.isAuthenticated).toBe(true);
+        expect(longDelays).toHaveLength(2);
+        const remaining = longDelays.at(-1) ?? 0;
+        const expected = (thirtyDays - 60) * 1000 - longestTimer;
+        expect(Math.abs(remaining - expected)).toBeLessThan(5_000);
+      } finally {
+        Date.now = realNow;
+        globalThis.setTimeout = realSetTimeout;
+      }
+    });
   });
 });
