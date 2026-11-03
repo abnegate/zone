@@ -204,10 +204,10 @@ describe('FeaturesPanel', () => {
     );
     render(<FeaturesPanel pull={pull} onInstalled={mock()} />);
     expect(await screen.findByText('Installed')).toBeInTheDocument();
-    expect(screen.getByLabelText('Chat: Installed')).toBeInTheDocument();
-    expect(screen.getByLabelText('Vision: 3.7 GB left')).toBeInTheDocument();
-    expect(screen.getByLabelText('Pictures: 18 GB')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Pictures: Installed')).not.toBeInTheDocument();
+    expect(screen.getByRole('note', { name: 'Chat: Installed' })).toHaveTextContent('Installed');
+    expect(screen.getByRole('note', { name: 'Vision: 3.7 GB left' })).toBeInTheDocument();
+    expect(screen.getByRole('note', { name: 'Pictures: 18 GB' })).toBeInTheDocument();
+    expect(screen.queryByRole('note', { name: 'Pictures: Installed' })).not.toBeInTheDocument();
   });
 
   it('keeps Installed after unchecking an installed feature', async () => {

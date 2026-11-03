@@ -254,6 +254,7 @@ export default function FeaturesPanel({
               />
               <span
                 className={`models-feature-size models-feature-size--${size.state}`}
+                role="note"
                 aria-label={`${feature.label}: ${size.label}`}
               >
                 {size.label}
