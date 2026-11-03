@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import random
@@ -487,17 +489,75 @@ class OptimizerTests(unittest.TestCase):
             def __init__(self, groups: list[dict]) -> None:
                 captured['groups'] = groups
 
+        output = io.StringIO()
         with mock.patch.object(train_sdxl, 'load_prodigy', return_value=FakeProdigy):
-            optimizer = train_sdxl.make_optimizer(
-                'lora',
-                [
-                    {'params': [object()], 'lr': 0.0001},
-                    {'params': [object()], 'lr': 0.00001},
-                ],
-                {'optimizer': 'prodigy'},
-            )
+            with contextlib.redirect_stdout(output):
+                optimizer = train_sdxl.make_optimizer(
+                    'lora',
+                    [
+                        {'params': [object()], 'lr': 0.0001},
+                        {'params': [object()], 'lr': 0.00001},
+                    ],
+                    {'optimizer': 'prodigy'},
+                )
         self.assertIsInstance(optimizer, FakeProdigy)
         self.assertEqual([group['lr'] for group in captured['groups']], [1.0, 1.0])
+        self.assertIn('prodigy ignores lr=0.0001, lr=1e-05', output.getvalue())
+
+    def test_prodigy_says_it_ignores_the_configured_rates(self) -> None:
+        class FakeProdigy:
+            def __init__(self, groups: list[dict]) -> None:
+                self.groups = groups
+
+        output = io.StringIO()
+        with mock.patch.object(train_sdxl, 'load_prodigy', return_value=FakeProdigy):
+            with contextlib.redirect_stdout(output):
+                train_sdxl.make_optimizer(
+                    'lora',
+                    [
+                        {'params': [object()], 'lr': 0.0001},
+                        {'params': [object()], 'lr': 0.00001},
+                    ],
+                    {'optimizer': 'prodigy', 'unet_lr': 0.0001, 'text_encoder_lr': 0.00001},
+                )
+        self.assertEqual(
+            output.getvalue().strip(),
+            'prodigy ignores unet_lr=0.0001, text_encoder_lr=1e-05: every parameter '
+            'group steps at one adaptive rate (lr=1.0), so the text encoder moves as '
+            'fast as the unet',
+        )
+
+    def test_prodigy_stays_quiet_when_every_group_already_uses_its_rate(self) -> None:
+        class FakeProdigy:
+            def __init__(self, groups: list[dict]) -> None:
+                self.groups = groups
+
+        output = io.StringIO()
+        with mock.patch.object(train_sdxl, 'load_prodigy', return_value=FakeProdigy):
+            with contextlib.redirect_stdout(output):
+                train_sdxl.make_optimizer(
+                    'lora',
+                    [{'params': [object()], 'lr': train_sdxl.PRODIGY_LR}],
+                    {'optimizer': 'prodigy'},
+                )
+        self.assertEqual(output.getvalue(), '')
+
+    def test_adamw_does_not_claim_its_rates_are_ignored(self) -> None:
+        class FakeAdamW:
+            def __init__(self, groups: list[dict]) -> None:
+                self.groups = groups
+
+        fake_torch = mock.MagicMock()
+        fake_torch.optim.AdamW = FakeAdamW
+        output = io.StringIO()
+        with mock.patch.dict(sys.modules, {'torch': fake_torch}):
+            with contextlib.redirect_stdout(output):
+                train_sdxl.make_optimizer(
+                    'lora',
+                    [{'params': [object()], 'lr': 0.0001}],
+                    {'optimizer': 'adamw', 'unet_lr': 0.0001},
+                )
+        self.assertEqual(output.getvalue(), '')
 
     def test_adamw_keeps_configured_group_rates(self) -> None:
         captured: dict[str, list] = {}

@@ -483,7 +483,13 @@ Wan 2.2 A14B, which cannot load them, so a `video` method is refused.
 Person jobs do not go through ComfyUI `/prompt`. Manager writes
 `models/.zone-train/{id}/` on the bind mount; host LaunchAgent `ai.zone.train`
 runs the same gold recipe on every backend (float32, AdamW for fine-tune,
-Prodigy for LoRA and pivotal, no AMP, no 8-bit Adam, TF32 off). Compute on the
+Prodigy for LoRA and pivotal, no AMP, no 8-bit Adam, TF32 off). Prodigy steps
+every parameter group at one adaptive rate: prodigyopt (1.0 through 1.1.2)
+scales a single D estimate by the largest group `lr` and refuses any other
+non-zero `lr`. The trainer therefore sets `lr` to 1.0 on every group and logs
+`prodigy ignores unet_lr=…, text_encoder_lr=…`, so `unet_lr` and
+`text_encoder_lr` in `comfyui/train_sdxl_config.json` only take effect with
+`"optimizer": "adamw"`, and CLIP-L moves at the UNet's step. Compute on the
 Train form is **Local** (CUDA if `torch.cuda.is_available()`, else MPS, else
 CPU) or **Runpod**. Runpod is Person-only (LoRA, fine-tune, pivotal).
 Save a Runpod API key under Workspace or organization AI settings; GET returns

@@ -363,18 +363,42 @@ PRODIGY_LR = 1.0
 
 
 def prodigy_param_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Prodigy treats `lr` as a multiplier on its adaptive D estimate.
+    """Every group gets Prodigy's documented `lr` of 1.0, so no group keeps its own rate.
 
-    Distinct non-zero group rates (UNet 1e-4 vs CLIP-L 1e-5) raise
-    `Setting different lr values in different parameter groups is only
-    supported for values of 0`. Share the documented default of 1.0.
+    prodigyopt 1.0 through 1.1.2 steps every group at `d * max(group lr)`:
+    `lr` only multiplies the one adaptive D estimate. A group whose `lr` is
+    neither that maximum nor 0 makes `step()` raise `Setting different lr
+    values in different parameter groups is only supported for values of 0`.
+    A per-group rate cannot be expressed, so CLIP-L moves at the UNet's
+    adaptive step and `unet_lr` / `text_encoder_lr` only shape AdamW.
     """
     return [{**group, 'lr': PRODIGY_LR} for group in groups]
+
+
+def prodigy_rate_keys(method: str) -> tuple[str, ...]:
+    if method == 'finetune':
+        return ('finetune_lr',)
+    return ('unet_lr', 'text_encoder_lr')
+
+
+def prodigy_rate_notice(
+    method: str,
+    groups: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> str:
+    configured = [f'{key}={config[key]}' for key in prodigy_rate_keys(method) if key in config]
+    rates = ', '.join(configured or [f"lr={group.get('lr')}" for group in groups])
+    return (
+        f'prodigy ignores {rates}: every parameter group steps at one adaptive '
+        f'rate (lr={PRODIGY_LR}), so the text encoder moves as fast as the unet'
+    )
 
 
 def make_optimizer(method: str, groups: list[dict[str, Any]], config: dict[str, Any]) -> Any:
     kind = optimizer_kind(method, config)
     if kind == 'prodigy':
+        if any(group.get('lr') != PRODIGY_LR for group in groups):
+            print(prodigy_rate_notice(method, groups, config), flush=True)
         return load_prodigy()(prodigy_param_groups(groups))
     import torch
 
