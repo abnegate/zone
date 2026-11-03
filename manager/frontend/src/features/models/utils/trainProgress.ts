@@ -1,4 +1,4 @@
-export const TRAIN_PREVIEW_PATH = '/api/models/train/previews/';
+import { TRAIN_PREVIEW_PATH } from '../../../api/protectedImages';
 
 export const LORA_MIN_STILLS = 20;
 export const FINE_TUNE_MIN_STILLS = 200;

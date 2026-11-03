@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { isProtectedArtifactUrl, isProtectedImageUrl } from '../api/protectedImages';
+import { isProtectedArtifactUrl, isProtectedImageUrl } from '../../../api/protectedImages';
 import { AuthenticatedImage } from './AuthenticatedImage';
 
 const originalFetch = globalThis.fetch;

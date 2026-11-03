@@ -1,5 +1,5 @@
 import { type ImgHTMLAttributes, type MouseEvent, useEffect, useState } from 'react';
-import { fetchProtectedImage, isProtectedImageUrl } from '../api/protectedImages';
+import { fetchProtectedImage, isProtectedImageUrl } from '../../../api/protectedImages';
 
 interface AuthenticatedImageProps extends Omit<ImgHTMLAttributes<HTMLImageElement>, 'src' | 'alt'> {
   src: string;

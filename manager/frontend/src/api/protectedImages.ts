@@ -1,6 +1,6 @@
-import { API_BASE, client } from '../../../api/client';
-import { TRAIN_PREVIEW_PATH } from '../../models/utils/trainProgress';
+import { API_BASE, client } from './client';
 
+export const TRAIN_PREVIEW_PATH = '/api/models/train/previews/';
 const PROTECTED_ARTIFACT_PREFIX = '/api/artifacts/';
 const PROTECTED_IMAGE_PREFIXES = [PROTECTED_ARTIFACT_PREFIX, TRAIN_PREVIEW_PATH] as const;
 

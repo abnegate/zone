@@ -16,6 +16,7 @@ import {
 } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { isProtectedArtifactUrl } from '../../../api/protectedImages';
 import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
@@ -24,7 +25,6 @@ import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
 import { useProjects } from '../../projects/hooks';
 import { useSources } from '../../sources/hooks/useSources';
-import { isProtectedArtifactUrl } from '../api/protectedImages';
 import {
   ActionReceipts,
   AuthenticatedAudio,

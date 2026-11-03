@@ -1,5 +1,5 @@
 import { type AudioHTMLAttributes, useEffect, useState } from 'react';
-import { fetchSignedArtifactUrl, isProtectedArtifactUrl } from '../api/protectedImages';
+import { fetchSignedArtifactUrl, isProtectedArtifactUrl } from '../../../api/protectedImages';
 
 interface AuthenticatedAudioProps
   extends Omit<AudioHTMLAttributes<HTMLAudioElement>, 'src' | 'aria-label'> {
