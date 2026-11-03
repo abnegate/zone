@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
+use abnegate_llm::{Message, Role};
 use abnegate_search::SearchContext;
 use zone_core::context::Entry;
-use zone_core::llm::{Message, Role};
 
 use super::{INSTRUCTIONS, RunContext, prompt};
 

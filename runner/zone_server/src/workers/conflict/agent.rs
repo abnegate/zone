@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_llm::{Message, ToolDefinition};
 use abnegate_vcs::conflict::Conflict;
 use async_trait::async_trait;
-use zone_core::llm::{LlmClient, Message, ToolDefinition};
+use zone_core::llm::LlmClient;
 use zone_core::tools::{
     ReadFileTool, Session, Tool, ToolContext, ToolRegistry, ToolResult, WriteFileTool,
 };

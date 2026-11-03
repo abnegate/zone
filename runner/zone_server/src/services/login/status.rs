@@ -366,8 +366,9 @@ mod tests {
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use tempfile::TempDir;
+    use zone_core::llm::window;
 
-    use zone_core::llm::Window;
+    use abnegate_llm::Window;
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
@@ -444,13 +445,11 @@ mod tests {
 
     fn snapshot(used_percent: f64, fetched_at: DateTime<Utc>) -> Snapshot {
         Snapshot {
-            windows: vec![Window {
-                name: "5h".to_string(),
-                used_percent: Some(used_percent),
-                used: None,
-                limit: None,
-                resets_at: Some((fetched_at + TimeDelta::hours(3)).trunc_subsecs(0)),
-            }],
+            windows: vec![
+                Window::new(window::FIVE_HOURS)
+                    .with_used_percent(used_percent)
+                    .with_resets_at((fetched_at + TimeDelta::hours(3)).trunc_subsecs(0)),
+            ],
             headroom: Some(100.0 - used_percent),
             fetched_at: fetched_at.trunc_subsecs(0),
         }
@@ -834,20 +833,12 @@ mod tests {
                     exhausted_until: None,
                     usage: Some(UsageStatus {
                         windows: vec![
-                            Window {
-                                name: "5h".to_string(),
-                                used_percent: Some(62.0),
-                                used: None,
-                                limit: None,
-                                resets_at: Some(at(1_790_143_800)),
-                            },
-                            Window {
-                                name: "7d".to_string(),
-                                used_percent: Some(31.0),
-                                used: None,
-                                limit: None,
-                                resets_at: Some(at(1_790_568_000)),
-                            },
+                            Window::new(window::FIVE_HOURS)
+                                .with_used_percent(62.0)
+                                .with_resets_at(at(1_790_143_800)),
+                            Window::new(window::SEVEN_DAYS)
+                                .with_used_percent(31.0)
+                                .with_resets_at(at(1_790_568_000)),
                         ],
                         headroom: Some(38.0),
                         fetched_at: at(1_790_136_000),

@@ -1,5 +1,5 @@
+use abnegate_llm::Limit;
 use serde::Serialize;
-use zone_core::llm::Limit;
 
 /// Why a turn left the login it ran on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

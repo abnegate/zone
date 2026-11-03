@@ -1,11 +1,11 @@
 //! The coding agent sign-ins Zone keeps for each organization, several per agent.
 
+use abnegate_llm::Window;
 use abnegate_secret::SecretValue;
 use chrono::{DateTime, Utc};
 use sqlx::types::Json;
 use sqlx::{Executor, PgConnection, Postgres};
 use uuid::Uuid;
-use zone_core::llm::Window;
 
 use super::DbResult;
 use crate::services::login::usage::Snapshot;
@@ -279,7 +279,7 @@ where
 mod tests {
     use chrono::TimeZone;
     use sqlx::PgPool;
-    use zone_core::llm::AgentKind;
+    use zone_core::llm::{AgentKind, window};
 
     use super::*;
 
@@ -372,20 +372,14 @@ mod tests {
     fn snapshot(used_percent: f64, headroom: f64) -> Snapshot {
         Snapshot {
             windows: vec![
-                Window {
-                    name: "5h".to_string(),
-                    used_percent: Some(used_percent),
-                    used: None,
-                    limit: None,
-                    resets_at: Some(at(23)),
-                },
-                Window {
-                    name: "7d".to_string(),
-                    used_percent: Some(31.0),
-                    used: Some(310),
-                    limit: Some(1_000),
-                    resets_at: Some(at(28)),
-                },
+                Window::new(window::FIVE_HOURS)
+                    .with_used_percent(used_percent)
+                    .with_resets_at(at(23)),
+                Window::new(window::SEVEN_DAYS)
+                    .with_used_percent(31.0)
+                    .with_used(310)
+                    .with_limit(1_000)
+                    .with_resets_at(at(28)),
             ],
             headroom: Some(headroom),
             fetched_at: at(22),

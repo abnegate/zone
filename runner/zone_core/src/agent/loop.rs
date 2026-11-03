@@ -1,12 +1,13 @@
 //! ReAct agent loop implementation
 
+use abnegate_llm::{Message, RequestOptions, Role, ToolCall, finish_reason};
 use futures::future::join_all;
 use std::collections::HashSet;
 use std::time::Instant;
 use thiserror::Error;
 
 use crate::context::{self, ContextError, ContextSource, Entry, Policy};
-use crate::llm::{LlmClient, LlmError, Message, RequestOptions, Role, ToolCall, finish_reason};
+use crate::llm::LlmClient;
 use crate::tools::{ToolContext, ToolRegistry, ToolResult};
 
 use super::state::{AgentConfig, AgentPhase, AgentState, AgentStep, ToolCallResult};
@@ -15,7 +16,7 @@ use super::state::{AgentConfig, AgentPhase, AgentState, AgentStep, ToolCallResul
 #[derive(Debug, Error)]
 pub enum AgentError {
     #[error("LLM error: {0}")]
-    Llm(#[from] LlmError),
+    Llm(#[from] abnegate_llm::Error),
     #[error("Context error: {0}")]
     Context(#[from] ContextError),
     #[error("Tool error: {0}")]
@@ -176,9 +177,7 @@ impl Agent {
                     &self.llm.config().default_model,
                     &prepared.messages,
                     Some(&tool_definitions),
-                    RequestOptions {
-                        reserved: self.policy.reserved,
-                    },
+                    RequestOptions::new(self.policy.reserved),
                 )
                 .await?;
             state.summary = prepared.summary;

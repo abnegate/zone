@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::llm::{Message, Role};
+use abnegate_llm::{Message, Role};
 
 const SYSTEM: &str = "System";
 const USER: &str = "User";
@@ -34,9 +34,10 @@ pub fn render_tail(messages: &[Message], from: usize) -> String {
         }
         let label = match message.role {
             Role::System => SYSTEM,
-            Role::User => USER,
             Role::Assistant => ASSISTANT,
             Role::Tool => TOOL,
+            Role::User => USER,
+            _ => USER,
         };
         if !prompt.is_empty() {
             prompt.push_str("\n\n");
@@ -50,7 +51,7 @@ pub fn render_tail(messages: &[Message], from: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{FunctionCall, ToolCall};
+    use abnegate_llm::ToolCall;
 
     #[test]
     fn every_role_is_named_in_the_prompt() {
@@ -72,14 +73,7 @@ mod tests {
     fn a_message_carrying_only_tool_calls_contributes_nothing() {
         let prompt = render(&[
             Message::user("Read it."),
-            Message::assistant_with_tools(vec![ToolCall {
-                id: "toolu_01".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: "read".to_string(),
-                    arguments: "{}".to_string(),
-                },
-            }]),
+            Message::assistant_with_tools(vec![ToolCall::function("toolu_01", "read", "{}")]),
         ]);
 
         assert_eq!(prompt, "User:\nRead it.");

@@ -10,6 +10,7 @@
 //! 5. Client can send "cancel" to interrupt generation
 //! 6. Connection closes on error or client disconnect
 
+use abnegate_llm::{Message as LlmMessage, Role as LlmRole, Usage};
 use axum::{
     body::Bytes,
     extract::{
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_comfy::MediaType;
-use zone_core::llm::{BuiltinTools, LlmBackend, Message as LlmMessage, Role as LlmRole, Usage};
+use zone_core::llm::{BuiltinTools, LlmBackend};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -3148,7 +3149,7 @@ async fn pin(
             pinned.keep(replay);
         }
         None => {
-            let backend = pinned.renew(preparation.llm.config().backend.clone());
+            let backend = pinned.renew(preparation.llm.backend().clone());
             preparation.llm = preparation.llm.clone().with_backend(backend);
             pinned.keep(preparation.context.clone());
         }
@@ -3207,7 +3208,7 @@ async fn handle_chat_generation(
     let mut agent_tools = agentic
         .then(|| {
             crate::mcp::AgentTools::serve(
-                &llm_client.config().backend,
+                llm_client.backend(),
                 &mut tools,
                 crate::mcp::Scope {
                     workspace: workspace_id,
@@ -3577,7 +3578,7 @@ async fn handle_chat_generation(
                             if handover.is_some() {
                                 handing = Some(Cause::limited(limit));
                             } else {
-                                failure = Some(self::failure(&endpoint, &llm_client.config().backend, limit.message));
+                                failure = Some(self::failure(&endpoint, llm_client.backend(), limit.message));
                             }
                             break;
                         }
@@ -3589,7 +3590,7 @@ async fn handle_chat_generation(
                                 refused = true;
                                 break;
                             }
-                            let remedied = crate::services::backend::remedied(&llm_client.config().backend, message);
+                            let remedied = crate::services::backend::remedied(llm_client.backend(), message);
                             if remedied.signed_out && handover.is_some() {
                                 handing = Some(Cause::signed_out(remedied.message));
                             } else {
@@ -3646,7 +3647,7 @@ async fn handle_chat_generation(
             && !cancelled
             && let Some((whole, backend)) = pinned
                 .as_mut()
-                .and_then(|pinned| pinned.restart(llm_client.config().backend.clone()))
+                .and_then(|pinned| pinned.restart(llm_client.backend().clone()))
         {
             llm_client = llm_client.with_backend(backend);
             replay = whole.clone();
@@ -3674,9 +3675,7 @@ async fn handle_chat_generation(
                 Err(ended) => {
                     failure = Some(match ended {
                         Some(error) => error.to_string(),
-                        None => {
-                            self::failure(&endpoint, &llm_client.config().backend, cause.message)
-                        }
+                        None => self::failure(&endpoint, llm_client.backend(), cause.message),
                     });
                     break;
                 }
@@ -4097,7 +4096,7 @@ async fn forget(state: &AppState, chat_id: Uuid) {
 /// Brings what the organization knows of `login`'s usage up to date once a turn on it has
 /// ended, starting from the `windows` the turn observed on it, without holding the answer up for
 /// it.
-fn settle(state: &AppState, login: Uuid, windows: Vec<zone_core::llm::Window>) {
+fn settle(state: &AppState, login: Uuid, windows: Vec<abnegate_llm::Window>) {
     let state = state.clone();
     tokio::spawn(async move {
         router::observe(&state, login, &windows).await;
@@ -4736,7 +4735,7 @@ mod tests {
             let preparation =
                 prepared.unwrap_or_else(|error| panic!("the turn was not prepared: {error}"));
             assert!(
-                matches!(preparation.llm.config().backend, LlmBackend::Http),
+                matches!(preparation.llm.backend(), LlmBackend::Http),
                 "the chat ran on its workspace's agent rather than the provider it chose"
             );
             assert_eq!(
@@ -5124,7 +5123,7 @@ mod tests {
             });
             assert!(
                 matches!(
-                    following.llm.config().backend,
+                    following.llm.backend(),
                     LlmBackend::Cli {
                         agent: AgentKind::Codex,
                         ..
@@ -5730,7 +5729,6 @@ cat 'DIR/reply.jsonl'
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
         use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
-        use zone_core::llm::LlmClient;
 
         const KEY: &str = "sk-organization-0123456789abcdef";
         const MASKED: &str = "sk-org************cdef";
@@ -5749,7 +5747,7 @@ cat 'DIR/reply.jsonl'
         saved.litellm_host = Some(provider.uri());
         saved.litellm_key = Some(SecretValue::new(KEY.to_string()));
         let endpoint = Endpoint::resolve(&crate::state::test_config(), &saved);
-        let llm = LlmClient::new(endpoint.llm("llama3.2:3b", 0.7, 64, LlmBackend::Http));
+        let llm = endpoint.llm("llama3.2:3b", 0.7, 64, LlmBackend::Http);
 
         let Err(error) = llm.chat_stream(&[LlmMessage::user("Hello")], None).await else {
             panic!("the provider rejected the key, so the completion must fail");
@@ -5998,11 +5996,7 @@ cat 'DIR/reply.jsonl'
 
     #[test]
     fn an_answer_that_moved_keeps_each_move_and_what_every_login_spent() {
-        let spent = Usage {
-            prompt_tokens: 120,
-            completion_tokens: 30,
-            total_tokens: 150,
-        };
+        let spent = Usage::new(120, 30);
 
         let merged = merge_metadata(None, &[], &[], &[], None, &[moved(10)], Some(spent))
             .expect("a move produces metadata");

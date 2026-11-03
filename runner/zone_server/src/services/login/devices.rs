@@ -23,8 +23,8 @@ use futures::future::{BoxFuture, FutureExt, Shared};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+use zone_core::environment;
 use zone_core::llm::AgentKind;
-use zone_core::llm::provider::environment;
 
 use super::codex::{self, Account, CREDENTIALS, Device, Prompt, Staging};
 use super::error::Error;

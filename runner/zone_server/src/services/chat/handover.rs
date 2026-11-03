@@ -15,11 +15,12 @@ pub use switch::Switch;
 
 use std::time::Duration;
 
+use abnegate_llm::Message;
 use chrono::Utc;
 use uuid::Uuid;
 use zone_chat::history::NewEntry;
 use zone_core::context::Entry;
-use zone_core::llm::{AgentKind, LlmBackend, Message, Session};
+use zone_core::llm::{AgentKind, LlmBackend, Session};
 
 use super::session::RunContext;
 use crate::config::Config;
@@ -385,13 +386,14 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use abnegate_llm::Limit;
     use abnegate_secret::SecretValue;
     use chrono::{DateTime, SecondsFormat, TimeDelta, TimeZone};
     use sqlx::PgPool;
     use tempfile::TempDir;
     use zone_core::context::project;
+    use zone_core::llm::CliSettings;
     use zone_core::llm::provider::render;
-    use zone_core::llm::{CliSettings, Limit};
 
     use super::*;
     use crate::config::AgentConfig;
@@ -428,12 +430,9 @@ mod tests {
     }
 
     fn limit(credits: bool) -> Cause {
-        Cause::limited(Limit {
-            message: LIMITED.to_string(),
-            resets_at: (!credits).then(resets),
-            credits,
-            window: None,
-        })
+        let mut limit = Limit::new(LIMITED).with_credits(credits);
+        limit.resets_at = (!credits).then(resets);
+        Cause::limited(limit)
     }
 
     fn identity(agent: AgentKind, label: &str) -> LoginIdentity {
@@ -459,7 +458,7 @@ mod tests {
 
         let mut context = replayed(&whole);
 
-        assert_eq!(written.message.role, zone_core::llm::Role::Assistant);
+        assert_eq!(written.message.role, abnegate_llm::Role::Assistant);
         assert_eq!(written.message.content.as_deref(), Some(PARTIAL));
         assert_eq!(
             sent(&context),

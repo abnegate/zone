@@ -3,6 +3,7 @@
 //! Executes agentic tasks in the background using the same streaming agent
 //! loop as chat, with a task budget and a sandboxed tool context.
 
+use abnegate_llm::{Limit, Message as LlmMessage};
 use futures::StreamExt;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use uuid::Uuid;
 use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
 use zone_core::llm::provider::{OUTGROWN, UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{BuiltinTools, Limit, LlmBackend, LlmClient, Message as LlmMessage};
+use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient};
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
@@ -659,9 +660,9 @@ fn classify(message: &str) -> Failure {
 
 /// [`classify`] for a coding agent's own words, where a failure no retry
 /// survives is terminal and a subscription that ran out, in any of
-/// [`zone_core::llm::LIMIT_WORDINGS`], backs off like any rate limit. Only a
-/// coding agent's own words are read for those: an endpoint's failure that
-/// happens to use them is judged by [`classify`] alone.
+/// [`abnegate_llm::provider::LIMIT_WORDINGS`], backs off like any rate
+/// limit. Only a coding agent's own words are read for those: an endpoint's
+/// failure that happens to use them is judged by [`classify`] alone.
 fn classify_agent(words: &str) -> Failure {
     if AGENT_TERMINAL_MARKERS
         .iter()
@@ -2296,8 +2297,7 @@ async fn attempt_run(
 
     let capacity = endpoint.capacity(state.config()).resolve(model).await;
     let policy = session::policy(&state.config().chat, &capacity);
-    let mut llm =
-        LlmClient::new(endpoint.llm(model, TASK_TEMPERATURE, policy.reserved, backend.clone()));
+    let mut llm = endpoint.llm(model, TASK_TEMPERATURE, policy.reserved, backend.clone());
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(model, limit);
     }
@@ -2377,7 +2377,7 @@ async fn attempt_run(
             )
             .await
             {
-                Err(halt) => return Err(halt.fault(&llm.config().backend)),
+                Err(halt) => return Err(halt.fault(llm.backend())),
                 Ok(TurnOutcome::Finished(outcome)) => {
                     carried.absorb(outcome);
                     return Ok(carried);
@@ -3158,7 +3158,7 @@ async fn run_task_loop(
 mod tests {
     use super::*;
     use crate::db::{ai_settings, workspaces};
-    use zone_core::llm::LlmConfig;
+    use abnegate_llm::LlmConfig;
 
     #[test]
     fn test_semaphore_initialization() {
@@ -3644,10 +3644,7 @@ mod tests {
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             run_task_loop(
-                LlmClient::new(LlmConfig {
-                    base_url: provider.uri(),
-                    ..LlmConfig::default()
-                }),
+                LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", "")),
                 "test".into(),
                 tools,
                 RunContext::from_messages(vec![LlmMessage::user(
@@ -4236,7 +4233,7 @@ mod retry_tests {
                 .iter()
                 .find_map(|event| match event {
                     zone_core::llm::provider::AgentEvent::Failed(message)
-                    | zone_core::llm::provider::AgentEvent::Limited(zone_core::llm::Limit {
+                    | zone_core::llm::provider::AgentEvent::Limited(abnegate_llm::Limit {
                         message,
                         ..
                     }) => Some(message),
@@ -4296,7 +4293,7 @@ mod retry_tests {
         let outcome = tokio::time::timeout(
             Duration::from_secs(30),
             run_task_loop(
-                LlmClient::new(zone_core::llm::LlmConfig::default().with_backend(backend.clone())),
+                LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(backend.clone()),
                 "sonnet".to_string(),
                 ChatTools::empty(),
                 RunContext::from_messages(vec![LlmMessage::user("Write the file.")]),
@@ -4916,12 +4913,10 @@ mod retry_tests {
         drop(held);
     }
     fn limit(resets_at: Option<chrono::DateTime<chrono::Utc>>, credits: bool) -> Box<Limit> {
-        Box::new(Limit {
-            message: format!("Stream error: claude: {SESSION_LIMIT}"),
-            resets_at,
-            credits,
-            window: None,
-        })
+        let mut limit =
+            Limit::new(format!("Stream error: claude: {SESSION_LIMIT}")).with_credits(credits);
+        limit.resets_at = resets_at;
+        Box::new(limit)
     }
 
     fn login(agent: AgentKind, label: &str) -> LoginIdentity {
@@ -5059,8 +5054,8 @@ mod retry_tests {
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+    use abnegate_llm::Role as LlmRole;
     use std::sync::Mutex;
-    use zone_core::llm::Role as LlmRole;
 
     /// A run that is working announces nothing: the watchdog is there for the
     /// silence, and firing on a busy run would bury the log it writes to.
@@ -6830,6 +6825,7 @@ mod cli_tests {
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, users, workspace_members, workspaces};
     use crate::services::login::claude::Tokens;
+    use abnegate_llm::{Credential, LlmConfig};
     use abnegate_secret::SecretValue;
     use axum::http::{HeaderMap, HeaderValue, header};
     use chrono::{TimeDelta, Utc};
@@ -6839,7 +6835,7 @@ mod cli_tests {
     use tempfile::TempDir;
     use wiremock::MockServer;
     use zone_core::llm::provider::SignIn;
-    use zone_core::llm::{AgentKind, CliSettings, Credential, LlmConfig, Toolset};
+    use zone_core::llm::{AgentKind, CliSettings, Toolset};
 
     const ANSWER: &str = "Wrote it.";
     const EXECUTABLE: &str = "claude";
@@ -8173,10 +8169,7 @@ mod cli_tests {
         };
 
         run_task_loop(
-            LlmClient::new(LlmConfig {
-                base_url: provider.uri(),
-                ..LlmConfig::default()
-            }),
+            LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", "")),
             "test".to_string(),
             ChatTools::empty(),
             RunContext::from_messages(vec![LlmMessage::user("Read both files.")]),
@@ -8333,7 +8326,7 @@ mod cli_tests {
         let windows = snapshot.expect("a snapshot of the login's usage").windows;
         let window = windows
             .iter()
-            .find(|window| window.name == zone_core::llm::Window::FIVE_HOURS)
+            .find(|window| window.name == zone_core::llm::window::FIVE_HOURS)
             .unwrap_or_else(|| panic!("no five-hour window in {windows:?}"));
         assert_eq!(window.used_percent, Some(50.0));
     }
@@ -8427,13 +8420,11 @@ mod cli_tests {
         agent.first_attempt().await;
         for (login, headroom) in [(&first, 10.0), (&second, 90.0)] {
             let snapshot = Snapshot {
-                windows: vec![zone_core::llm::Window {
-                    name: "5h".to_string(),
-                    used_percent: Some(100.0 - headroom),
-                    used: None,
-                    limit: None,
-                    resets_at: Some(Utc::now() + TimeDelta::hours(3)),
-                }],
+                windows: vec![
+                    abnegate_llm::Window::new(zone_core::llm::window::FIVE_HOURS)
+                        .with_used_percent(100.0 - headroom)
+                        .with_resets_at(Utc::now() + TimeDelta::hours(3)),
+                ],
                 headroom: Some(headroom),
                 fetched_at: Utc::now(),
             };

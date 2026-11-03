@@ -4,7 +4,7 @@
 //! next turn. Official models already stop; this filter is the safety net so
 //! those tokens never appear in the transcript.
 
-use zone_core::llm::TEMPLATE_STOPS;
+use abnegate_llm::TEMPLATE_STOPS;
 
 pub fn default_stop_strings() -> Vec<String> {
     TEMPLATE_STOPS

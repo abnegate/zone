@@ -1,7 +1,6 @@
+use abnegate_llm::Message;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use crate::llm::{LlmError, Message};
 
 /// An immutable replay message plus request-local eligibility flags.
 #[derive(Debug, Clone)]
@@ -130,5 +129,5 @@ pub enum ContextError {
     #[error("Conversation summary failed: {0}")]
     Summary(String),
     #[error("Conversation summary transport failed: {0}")]
-    Transport(#[from] LlmError),
+    Transport(#[from] abnegate_llm::Error),
 }

@@ -8,6 +8,7 @@ pub mod tail;
 pub use generation::Generation;
 pub use pinned::Pinned;
 
+use abnegate_llm::{Message, Role};
 use abnegate_search::SearchContext;
 use base64::Engine;
 use serde_json::Value;
@@ -15,7 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
-use zone_core::llm::{LlmClient, Message, ReasoningEffort, Role};
+use zone_core::llm::{LlmClient, ReasoningEffort};
 
 use crate::agent::prompt::Environment;
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
@@ -151,7 +152,7 @@ impl RunContext {
     pub fn usage(
         &self,
         model: &str,
-        tools: Option<&[zone_core::llm::ToolDefinition]>,
+        tools: Option<&[abnegate_llm::ToolDefinition]>,
     ) -> ContextUsage {
         let mut usage = context::estimate(
             model,
@@ -520,13 +521,14 @@ pub async fn build(
             .map(|card| card.stop_sequences.as_slice())
             .unwrap_or(&[]),
     );
-    let mut llm = LlmClient::new(endpoint.llm(
-        chat.model_name.clone(),
-        TEMPERATURE,
-        policy.reserved,
-        backend,
-    ))
-    .with_stop(stop.clone());
+    let mut llm = endpoint
+        .llm(
+            chat.model_name.clone(),
+            TEMPERATURE,
+            policy.reserved,
+            backend,
+        )
+        .with_stop(stop.clone());
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(&chat.model_name, limit);
     }
@@ -1374,7 +1376,7 @@ mod tests {
         let LlmBackend::Cli {
             agent: kind,
             settings,
-        } = &agent.llm.config().backend
+        } = agent.llm.backend()
         else {
             panic!("an agent turn runs on its CLI");
         };
@@ -1392,7 +1394,7 @@ mod tests {
 
         let http = http.unwrap_or_else(|error| panic!("an endpoint turn prepares: {error}"));
         assert_eq!(http.effort, ReasoningEffort::Max);
-        assert!(matches!(http.llm.config().backend, LlmBackend::Http));
+        assert!(matches!(http.llm.backend(), LlmBackend::Http));
         let answered = answered.expect("the endpoint turn was sent");
         assert!(answered.is_ok(), "{answered:?}");
         let sent = requests

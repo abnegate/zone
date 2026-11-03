@@ -1,4 +1,5 @@
-use zone_core::llm::{Limit, LlmBackend};
+use abnegate_llm::Limit;
+use zone_core::llm::LlmBackend;
 
 use super::Fault;
 

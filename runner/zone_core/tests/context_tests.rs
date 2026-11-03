@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use abnegate_llm::{
+    LlmConfig, Message, RequestOptions, Role, ToolCall, ToolDefinition, finish_reason,
+};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,10 +11,7 @@ use tokio::sync::{Mutex, Notify};
 use zone_core::context::{
     self, ContextError, ContextSource, ContextStatus, Coverage, Entry, Policy, Summary,
 };
-use zone_core::llm::{
-    FunctionCall, LlmClient, LlmConfig, Message, RequestOptions, Role, ToolCall, ToolDefinition,
-    finish_reason,
-};
+use zone_core::llm::LlmClient;
 
 struct Provider {
     client: LlmClient,
@@ -77,12 +77,9 @@ async fn provider(
         }
     });
     Provider {
-        client: LlmClient::new(LlmConfig {
-            base_url: format!("http://{address}/v1"),
-            default_model: "test".into(),
-            max_tokens: 1024,
-            ..Default::default()
-        }),
+        client: LlmClient::new(
+            LlmConfig::new(format!("http://{address}/v1"), "test", "").with_maximum_tokens(1024),
+        ),
         requests,
         task,
     }
@@ -110,14 +107,7 @@ fn entry(id: &str, message: Message, preserve: bool, consumed: bool) -> Entry {
 }
 
 fn call(id: &str) -> ToolCall {
-    ToolCall {
-        id: id.into(),
-        call_type: "function".into(),
-        function: FunctionCall {
-            name: "read_file".into(),
-            arguments: r#"{"path":"evidence.txt"}"#.into(),
-        },
-    }
+    ToolCall::function(id, "read_file", r#"{"path":"evidence.txt"}"#)
 }
 
 fn policy(limit: u64) -> Policy {
@@ -386,9 +376,7 @@ async fn fresh_seven_results_and_long_suffix_reach_actual_provider_unchanged() {
             "test",
             &prepared.messages,
             None,
-            RequestOptions {
-                reserved: settings.reserved,
-            },
+            RequestOptions::new(settings.reserved),
         )
         .await
         .unwrap();
@@ -736,9 +724,7 @@ async fn summaries_clear_character_stops_without_changing_ordinary_generation() 
             "test",
             &prepared.messages,
             None,
-            RequestOptions {
-                reserved: settings.reserved,
-            },
+            RequestOptions::new(settings.reserved),
         )
         .await
         .unwrap();
@@ -770,12 +756,7 @@ async fn runtime_context_is_model_bound_and_identical_on_summary_and_ordinary_re
         .await
         .unwrap();
     client
-        .chat_with_options(
-            "test",
-            &prepared.messages,
-            None,
-            RequestOptions { reserved: 1024 },
-        )
+        .chat_with_options("test", &prepared.messages, None, RequestOptions::new(1024))
         .await
         .unwrap();
     client
@@ -783,7 +764,7 @@ async fn runtime_context_is_model_bound_and_identical_on_summary_and_ordinary_re
             "other-provider",
             &[Message::user("Hi")],
             None,
-            RequestOptions { reserved: 512 },
+            RequestOptions::new(512),
         )
         .await
         .unwrap();
@@ -802,19 +783,14 @@ async fn reasoning_is_enabled_on_ordinary_requests_and_stripped_from_summaries()
     let client = provider
         .client
         .clone()
-        .with_reasoning("test", zone_core::llm::Effort::Medium)
+        .with_reasoning("test", abnegate_llm::Effort::Medium)
         .with_ollama_context("test", 5_000);
     let history = active_history();
     let prepared = context::prepare(&client, "test", &history, None, &policy(5_000), None)
         .await
         .unwrap();
     client
-        .chat_with_options(
-            "test",
-            &prepared.messages,
-            None,
-            RequestOptions { reserved: 4096 },
-        )
+        .chat_with_options("test", &prepared.messages, None, RequestOptions::new(4096))
         .await
         .unwrap();
     let requests = provider.requests.lock().await;
@@ -835,7 +811,7 @@ async fn streaming_usage_after_finish_reason_is_preserved() {
             "test",
             &[Message::user("Hi")],
             None,
-            RequestOptions { reserved: 100 },
+            RequestOptions::new(100),
         )
         .await
         .unwrap();
@@ -868,10 +844,7 @@ async fn cancelling_summarization_keeps_checkpoint_and_canonical_evidence_unchan
         notified.notify_one();
         std::future::pending::<()>().await;
     });
-    let client = LlmClient::new(LlmConfig {
-        base_url: format!("http://{address}/v1"),
-        ..Default::default()
-    });
+    let client = LlmClient::new(LlmConfig::new(format!("http://{address}/v1"), "test", ""));
     let history = active_history();
     let original = context::coverage(&history, &["calls-a".into(), "result-a".into()]).unwrap();
     let settings = policy(5_000);
@@ -1216,13 +1189,8 @@ async fn a_compaction_the_endpoint_refuses_never_reports_its_key() {
         )))
         .mount(&server)
         .await;
-    let client = LlmClient::new(LlmConfig {
-        base_url: server.uri(),
-        api_key: KEY.into(),
-        default_model: "test".into(),
-        max_tokens: 1024,
-        ..Default::default()
-    });
+    let client =
+        LlmClient::new(LlmConfig::new(server.uri(), "test", KEY).with_maximum_tokens(1024));
     let history = vec![
         entry("old", Message::user("x".repeat(40_000)), false, true),
         entry("current", Message::user("Current"), true, false),

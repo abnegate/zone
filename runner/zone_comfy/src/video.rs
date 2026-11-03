@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
-use zone_core::llm::provider::environment;
+use zone_core::environment;
 use zone_vision::crop::{self, Region, Rendered, Target};
 use zone_vision::gravity::{self, Point};
 use zone_vision::{Raster, decode};

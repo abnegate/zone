@@ -12,11 +12,12 @@
 
 use std::path::PathBuf;
 
+use abnegate_llm::{Credential, LlmConfig, Message};
 use axum::http::StatusCode;
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, Credential, LlmBackend, LlmClient, LlmConfig, Message};
+use zone_core::llm::{AgentKind, LlmBackend, LlmClient};
 use zone_server::config::{AgentConfig, Config};
 use zone_server::services::route::Route;
 use zone_server::services::stages::AUTO;
@@ -105,17 +106,16 @@ async fn an_organization_without_a_sign_in_of_its_own_runs_the_hosts_claude() {
     assert_eq!(settings.working_directory.as_deref(), Some(work.as_path()));
 
     let nonce = format!("zone-host-login-{}", Uuid::new_v4().simple());
-    let response = LlmClient::new(LlmConfig {
-        default_model: AUTO.to_string(),
-        backend,
-        ..LlmConfig::default()
-    })
-    .chat(
-        &[Message::user(format!("Reply with exactly: {nonce}"))],
-        None,
-    )
-    .await
-    .expect("claude to answer through the host's sign-in");
+    let mut config = LlmConfig::default();
+    config.default_model = AUTO.to_string();
+    let response = LlmClient::new(config)
+        .with_backend(backend)
+        .chat(
+            &[Message::user(format!("Reply with exactly: {nonce}"))],
+            None,
+        )
+        .await
+        .expect("claude to answer through the host's sign-in");
 
     let answer = response
         .choices

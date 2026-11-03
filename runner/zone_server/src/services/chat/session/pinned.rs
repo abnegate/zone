@@ -165,8 +165,9 @@ impl Pinned {
 
 #[cfg(test)]
 mod tests {
+    use abnegate_llm::Message;
     use uuid::Uuid;
-    use zone_core::llm::{AgentKind, CliSettings, Message};
+    use zone_core::llm::{AgentKind, CliSettings};
 
     use super::*;
     use crate::services::backend::Resolved;
