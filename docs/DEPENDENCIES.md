@@ -73,24 +73,22 @@ cargo tree --workspace --all-features --target all -e all -i crypto-bigint
 
 Both report no match.
 
-## Lighthouse archive advisory exception
+## Frontend advisory exception
 
-`GHSA-7pqw-9j4j-h8q3` is excepted in `manager/frontend`'s audit script. The
-advisory describes arbitrary file writes through symlink entries in an archive
-handed to extract-zip, and covers every published release: 2.0.1 is the latest,
-so there is nothing to upgrade to.
+`GHSA-gcqx-w48m-w2h4` is excepted in `manager/frontend`'s audit script. The
+advisory describes prototype poisoning in deepmerge's `mergeObject()` when a
+caller merges an attacker-supplied object, and covers every release from 4.2.0
+through 4.3.1, the latest, so there is nothing to upgrade to.
 
-The single path is
-`@lhci/cli > lighthouse > puppeteer-core > @puppeteer/browsers > extract-zip`.
-`@lhci/cli` is a devDependency, so extract-zip is never bundled into the
-manager frontend or any shipped artifact; it runs only in CI, and the only
-archive it opens is the Chrome build `@puppeteer/browsers` downloads from
-Google's endpoint. Reaching the vulnerable path means that download is already
-attacker-controlled.
+The single path is `vite-plugin-pwa > workbox-build >
+@rollup/plugin-node-resolve > deepmerge`, a build-time devDependency that is
+never bundled into the manager frontend. Its one call merges the plugin's own
+constant defaults into an empty object when the module loads; no
+configuration, package metadata or request data reaches it.
 
-This exception must be revisited if extract-zip publishes a patched release, if
-`@lhci/cli` moves out of devDependencies, or if a caller extracts an archive from
-a source outside the Chrome download. All other frontend advisories remain fatal.
+This exception must be revisited if deepmerge publishes a patched release, if
+the plugin starts merging caller-supplied objects, or if deepmerge reaches a
+runtime dependency. All other frontend advisories remain fatal.
 
 ## aiusg
 
