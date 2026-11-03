@@ -230,12 +230,15 @@ Metal kernels corrupt Wan 2.2 frames (Comfy-Org/ComfyUI#15793, #16644), so the
 Zone LoRA node decides where each Wan model runs when ComfyUI starts on MPS:
 
 - The Wan 2.2 TI2V 5B DiT loads and samples on CPU.
-- Every Wan VAE, 2.1 and 2.2, loads and decodes on CPU. Decoding is slow: a
-  5B 832×480×49 clip took 31 minutes with both its DiT and VAE on CPU.
+- Every Wan VAE, 2.1 and 2.2, loads and decodes on CPU. This is a precaution:
+  both reports rule the VAE out and blame the DiT's sampled latents. Decoding
+  is slow: a 5B 832×480×49 clip took 31 minutes with both its DiT and VAE on
+  CPU.
 - The A14B FP8 experts load on CPU, are densified to fp16 (Metal has no float8
   kernels) and then sample on Metal. Three Metal kernels they hit are patched:
-  5D constant `pad` is rebuilt with concatenation, `bmm` gets contiguous
-  inputs, and `baddbmm` with `beta=0` starts from zeros.
+  5D constant `pad` is rebuilt with concatenation (pytorch/pytorch#194922),
+  `bmm` gets contiguous inputs (pytorch/pytorch#197636), and `baddbmm` with
+  `beta=0` starts from zeros (Comfy-Org/ComfyUI#15804).
 - Attention is not patched.
 - No A14B clip has yet been rendered end to end on MPS, so treat Metal video
   as unverified.

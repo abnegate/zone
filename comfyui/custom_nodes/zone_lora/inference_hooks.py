@@ -57,7 +57,7 @@ def install_contiguous_tiled_scale() -> None:
 
 
 def should_rewrite_mps_pad(tensor, pad, mode) -> bool:
-    """MPS F.pad on 5D constant tensors corrupts the temporal axis (PyTorch #194922)."""
+    """MPS F.pad on 5D constant tensors corrupts the temporal axis (pytorch/pytorch#194922)."""
     if mode not in (None, 'constant'):
         return False
     device = getattr(tensor, 'device', None)
@@ -108,7 +108,7 @@ def constant_pad_with_cat(tensor, pad, value=0):
 
 
 def wrap_mps_bmm(original):
-    """Non-contiguous bmm on MPS overflows past 2^32 elements (PyTorch #197636)."""
+    """Non-contiguous bmm on MPS overflows past 2^32 elements (pytorch/pytorch#197636)."""
 
     def bmm(input, mat2, *args, **kwargs):
         if getattr(input, 'device', None) is not None and input.device.type == 'mps':
@@ -124,7 +124,10 @@ def wrap_mps_bmm(original):
 
 
 def wrap_mps_baddbmm(original):
-    """MPS baddbmm with beta=0 ignores the zeroing and writes garbage (#15804)."""
+    """MPS baddbmm with beta=0 still reads its input, so NaN in it propagates.
+
+    Comfy-Org/ComfyUI#15804 traces all-NaN attention on Apple Silicon to this.
+    """
 
     def baddbmm(input, batch1, batch2, *args, **kwargs):
         if getattr(input, 'device', None) is not None and input.device.type == 'mps':
@@ -258,7 +261,10 @@ def is_wan_14b_path(unet_path) -> bool:
 
 
 def wan_cpu_model_options(unet_path, model_options=None) -> dict:
-    """Metal kernels scramble Wan 5B video-token shapes on M4 (Comfy-Org/ComfyUI#15793)."""
+    """Wan sampling on Metal silently corrupts every generated frame.
+
+    Comfy-Org/ComfyUI#15793 and #16644 reproduce it with Wan 2.2 TI2V 5B.
+    """
     options = dict(model_options or {})
     path = str(unet_path).lower()
     if 'wan' not in path:
@@ -312,7 +318,7 @@ def is_wan_vae_state_dict(sd) -> bool:
 
 
 def wan_cpu_vae_device(sd, device=None):
-    """The MPS 3D conv decoder posterizes Wan video frames (Comfy-Org/ComfyUI#15793, #16644)."""
+    """A precaution: Comfy-Org/ComfyUI#15793 and #16644 both rule the Wan VAE out on Metal."""
     if device is not None:
         return device
     if not torch.backends.mps.is_available():
