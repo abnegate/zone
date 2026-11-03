@@ -218,7 +218,8 @@ fn bundled_candidates(exe_dir: &Path, kind: FrontendKind) -> Vec<PathBuf> {
 }
 
 fn read_host_from_path(path: &Path) -> Option<String> {
-    toml_string_from_path(path, "host").map(|value| value.trim_end_matches('/').to_string())
+    let content = std::fs::read_to_string(path).ok()?;
+    host_from_toml(&content)
 }
 
 fn read_device_id_from_path(path: &Path) -> Option<uuid::Uuid> {
