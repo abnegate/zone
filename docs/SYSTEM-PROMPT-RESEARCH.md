@@ -38,7 +38,7 @@ Two things to know before reading the per-source detail. First, four of the five
 | Conflict repair | `runner/zone_server/src/workers/conflict/prompt.rs:20` | Scoped system prompt with a strong data-not-instructions sentence |
 | Chat titles | `runner/zone_server/src/workers/titles.rs:78` | One-line summariser with an untrusted-content clause |
 | Character cards | `runner/zone_server/src/services/character.rs` | V1/V2/V3 card to system prompt |
-| Reasoning effort | `runner/zone_core/src/llm/reasoning.rs:116` `classify` | Heuristic auto effort from the prompt text; per-chat override in the console |
+| Reasoning effort | `abnegate_llm::reasoning::classify` | Heuristic auto effort from the prompt text; per-chat override in the console |
 
 ### 1.2 Tool catalog
 

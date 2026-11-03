@@ -6,8 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::session::Session;
-use crate::llm::ReasoningEffort;
-use abnegate_llm::Credential;
+use abnegate_llm::{Credential, ReasoningEffort};
 use abnegate_secret::SecretValue;
 
 /// Thirty minutes is the chat turn's own budget, which is what a coding agent

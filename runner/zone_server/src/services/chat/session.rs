@@ -8,7 +8,7 @@ pub mod tail;
 pub use generation::Generation;
 pub use pinned::Pinned;
 
-use abnegate_llm::{Message, Role};
+use abnegate_llm::{Message, ReasoningEffort, Role};
 use abnegate_search::SearchContext;
 use base64::Engine;
 use serde_json::Value;
@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
-use zone_core::llm::{LlmClient, ReasoningEffort};
+use zone_core::llm::LlmClient;
 
 use crate::agent::prompt::Environment;
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};

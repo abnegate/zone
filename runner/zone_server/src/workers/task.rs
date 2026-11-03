@@ -2303,7 +2303,7 @@ async fn attempt_run(
     }
     let effort = capacity
         .reasoning
-        .then(|| zone_core::llm::ReasoningEffort::Auto.resolve(task_prompt))
+        .then(|| abnegate_llm::ReasoningEffort::Auto.resolve(task_prompt))
         .flatten();
     let mut environment = environment.clone();
     if let Some(effort) = effort {

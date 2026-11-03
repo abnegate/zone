@@ -422,7 +422,7 @@ async fn both_surfaces_read_the_waiting_rules_and_no_surviving_poll_instruction(
     );
 }
 
-use zone_core::llm::ReasoningEffort;
+use abnegate_llm::ReasoningEffort;
 use zone_server::agent::memory::render;
 use zone_server::agent::memory::{
     MEMORY_APPEND, MEMORY_DELETE, MEMORY_LIST, MEMORY_READ, MEMORY_WRITE,

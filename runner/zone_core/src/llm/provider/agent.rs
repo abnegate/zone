@@ -3,13 +3,13 @@
 use std::fmt;
 use std::time::Duration;
 
+use abnegate_llm::ReasoningEffort;
 use serde_json::{Map, Value, json};
 
 use super::event::AgentEvent;
 use super::parser;
 use super::session::Session;
 use super::settings::{BuiltinTools, CodexSandbox, DEFAULT_TIMEOUT, Toolset};
-use crate::llm::ReasoningEffort;
 
 const MODEL: &str = "--model";
 const EFFORT: &str = "--effort";
@@ -1808,7 +1808,7 @@ mod tests {
             "claude-haiku-4-5",
             "claude-haiku-4-5-20251001",
         ] {
-            for effort in ReasoningEffort::ALL {
+            for effort in ReasoningEffort::ALL.iter().copied() {
                 let arguments = effortful(AgentKind::Claude, Some(model), effort, None);
                 assert_eq!(
                     value_after(&arguments, MODEL),
@@ -2000,8 +2000,9 @@ mod tests {
             .iter()
             .map(|level| {
                 let level = level.as_str().expect("an effort's name");
-                ReasoningEffort::parse(level)
-                    .unwrap_or_else(|| panic!("an effort zone does not know: {level}"))
+                level
+                    .parse::<ReasoningEffort>()
+                    .unwrap_or_else(|error| panic!("an effort zone does not know: {error}"))
             })
             .collect()
     }
@@ -2086,7 +2087,8 @@ mod tests {
         }
 
         let shared: Vec<ReasoningEffort> = ReasoningEffort::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|effort| listed.iter().all(|(_, efforts)| efforts.contains(effort)))
             .collect();
         assert_eq!(AgentKind::Codex.efforts(None), shared);

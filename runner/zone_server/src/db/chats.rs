@@ -3,6 +3,7 @@
 pub mod provider;
 mod session;
 
+use abnegate_llm::ReasoningEffort;
 use chrono::NaiveDateTime;
 use sqlx::{Executor, PgPool, Postgres};
 use std::collections::HashMap;
@@ -10,14 +11,14 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::services::character::ChatCharacter;
-use zone_core::llm::{AgentKind, ReasoningEffort};
+use zone_core::llm::AgentKind;
 
 use super::DbResult;
 
 pub use session::ChatSession;
 
 fn effort(value: &str) -> ReasoningEffort {
-    ReasoningEffort::parse(value).unwrap_or_default()
+    value.parse().unwrap_or_default()
 }
 
 /// Chat row from database
@@ -897,24 +898,31 @@ mod tests {
             .expect("the test database accepts connections")
     }
 
-    #[tokio::test]
-    async fn a_chat_remembers_its_login_and_session_until_that_login_goes() {
-        let pool = pool().await;
+    async fn tenant(pool: &PgPool, name: &str) -> (Uuid, Uuid) {
         let organization = Uuid::new_v4();
-        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Sessions', $1::text)")
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, $2, $1::text)")
             .bind(organization)
-            .execute(&pool)
+            .bind(name)
+            .execute(pool)
             .await
             .expect("an organization");
         let workspace = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Sessions', $1::text)",
+            "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, $3, $1::text)",
         )
         .bind(workspace)
         .bind(organization)
-        .execute(&pool)
+        .bind(name)
+        .execute(pool)
         .await
         .expect("a workspace");
+        (organization, workspace)
+    }
+
+    #[tokio::test]
+    async fn a_chat_remembers_its_login_and_session_until_that_login_goes() {
+        let pool = pool().await;
+        let (organization, workspace) = tenant(&pool, "Sessions").await;
         let chat = create_chat(&pool, Some(workspace), "Sessions", "auto", true, true)
             .await
             .expect("a chat")
@@ -1003,21 +1011,7 @@ mod tests {
     #[tokio::test]
     async fn a_chat_keeps_the_model_it_is_moved_to() {
         let pool = pool().await;
-        let organization = Uuid::new_v4();
-        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Models', $1::text)")
-            .bind(organization)
-            .execute(&pool)
-            .await
-            .expect("an organization");
-        let workspace = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Models', $1::text)",
-        )
-        .bind(workspace)
-        .bind(organization)
-        .execute(&pool)
-        .await
-        .expect("a workspace");
+        let (organization, workspace) = tenant(&pool, "Models").await;
         let chat = create_chat(&pool, Some(workspace), "Models", "sonnet", true, true)
             .await
             .expect("a chat");
@@ -1076,5 +1070,113 @@ mod tests {
         );
         assert_eq!(bystander.model_name, "sonnet", "only the chat itself moves");
         assert!(missing.is_none(), "an absent chat has no row to return");
+    }
+
+    const STORED_EFFORTS: [(&str, ReasoningEffort); 8] = [
+        ("auto", ReasoningEffort::Auto),
+        ("off", ReasoningEffort::Off),
+        ("low", ReasoningEffort::Low),
+        ("medium", ReasoningEffort::Medium),
+        ("high", ReasoningEffort::High),
+        ("xhigh", ReasoningEffort::XHigh),
+        ("max", ReasoningEffort::Max),
+        ("ultra", ReasoningEffort::Ultra),
+    ];
+
+    #[test]
+    fn a_stored_effort_keeps_its_spelling() {
+        assert_eq!(
+            ReasoningEffort::ALL,
+            STORED_EFFORTS.map(|(_, level)| level),
+            "every level the crate offers is one the chats column accepts"
+        );
+        for (stored, level) in STORED_EFFORTS {
+            assert_eq!(effort(stored), level, "{stored:?} is read from the column");
+            assert_eq!(level.as_str(), stored, "{level:?} is written to the column");
+            assert_eq!(
+                serde_json::to_value(level).expect("an effort serialises"),
+                serde_json::json!(stored),
+                "{level:?} goes over the wire as the column spells it"
+            );
+            assert_eq!(
+                serde_json::from_value::<ReasoningEffort>(serde_json::json!(stored))
+                    .expect("a stored effort deserialises"),
+                level
+            );
+        }
+        for unknown in ["", "x_high", "XHIGH", "extreme", " max", "max ", "High"] {
+            assert_eq!(
+                effort(unknown),
+                ReasoningEffort::Auto,
+                "{unknown:?} falls back to the default"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_chat_reads_back_each_stored_effort() {
+        let pool = pool().await;
+        let (organization, workspace) = tenant(&pool, "Efforts").await;
+        let chat = create_chat(&pool, Some(workspace), "Efforts", "sonnet", true, true)
+            .await
+            .expect("a chat");
+
+        let mut read = Vec::new();
+        for (stored, _) in STORED_EFFORTS {
+            sqlx::query("UPDATE chats SET reasoning_effort = $2 WHERE id = $1")
+                .bind(chat.id)
+                .bind(stored)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|error| panic!("{stored} is a reasoning effort: {error}"));
+            let row = get_chat(&pool, chat.id).await.unwrap().expect("the chat");
+            read.push((stored, row.reasoning_effort));
+        }
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization can be deleted");
+
+        assert_eq!(read, STORED_EFFORTS);
+    }
+
+    #[tokio::test]
+    async fn every_effort_the_crate_offers_is_saved_and_read_back() {
+        let pool = pool().await;
+        let (organization, workspace) = tenant(&pool, "Levels").await;
+        let chat = create_chat(&pool, Some(workspace), "Levels", "sonnet", true, true)
+            .await
+            .expect("a chat");
+
+        let mut saved = Vec::new();
+        for level in ReasoningEffort::ALL.iter().copied() {
+            let updated = update_chat(
+                &pool,
+                chat.id,
+                None,
+                None,
+                None,
+                None,
+                Some(level),
+                None,
+                None,
+            )
+            .await;
+            let read = get_chat(&pool, chat.id).await.unwrap().expect("the chat");
+            saved.push((level, updated.map(|_| read.reasoning_effort)));
+        }
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization can be deleted");
+
+        for (level, saved) in saved {
+            match saved {
+                Ok(read) => assert_eq!(read, level, "{level:?} reads back as itself"),
+                Err(error) => panic!("the chats column refuses {level:?}: {error}"),
+            }
+        }
     }
 }
