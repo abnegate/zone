@@ -99,22 +99,47 @@ export default function ProjectsPage() {
     setWebhookSecret: setWebhookSecretMutation,
     deleteSyncConfig: deleteSyncConfigMutation,
   } = useSyncConfigs(selectedProject?.id || null);
-  const [revealedSecret, setRevealedSecret] = useState<RevealedSecret | null>(null);
+  const [revealedSecrets, setRevealedSecrets] = useState<Record<string, RevealedSecret>>({});
   const secretRequests = useRef(0);
+  const answeredRequests = useRef<Record<string, number>>({});
+  const selections = useRef(0);
+
+  const forgetSecret = (configId: string) => {
+    setRevealedSecrets(({ [configId]: _forgotten, ...kept }) => kept);
+  };
+
+  const forgetSecrets = () => {
+    selections.current += 1;
+    setRevealedSecrets({});
+  };
+
+  /** A request for a secret, whose answer shows only while it is its sync's latest and its project is still open */
+  const secretRequest = () => {
+    secretRequests.current += 1;
+    return { order: secretRequests.current, selection: selections.current };
+  };
 
   const reveal = (
     { config, webhookSecret, registrationError }: SyncConfigSecret,
-    request: number
+    { order, selection }: ReturnType<typeof secretRequest>
   ) => {
-    setRevealedSecret((current) => {
-      if (current?.configId === config.id && current.revision > request) {
-        return current;
-      }
-      if (webhookSecret) {
-        return { configId: config.id, secret: webhookSecret, registrationError, revision: request };
-      }
-      return current?.configId === config.id ? null : current;
-    });
+    if (selection !== selections.current || order < (answeredRequests.current[config.id] ?? 0)) {
+      return;
+    }
+    answeredRequests.current[config.id] = order;
+    if (!webhookSecret) {
+      forgetSecret(config.id);
+      return;
+    }
+    setRevealedSecrets((current) => ({
+      ...current,
+      [config.id]: {
+        configId: config.id,
+        secret: webhookSecret,
+        registrationError,
+        revision: order,
+      },
+    }));
   };
 
   // A link such as /projects?id=… (from a planner receipt) selects that project once
@@ -138,7 +163,7 @@ export default function ProjectsPage() {
   // An automation error belongs to the project it happened on
   const selectProject = (project: Project) => {
     setAutomationActionError(null);
-    setRevealedSecret(null);
+    forgetSecrets();
     setSelectedProject(project);
   };
 
@@ -146,7 +171,7 @@ export default function ProjectsPage() {
   const closeDetails = () => {
     setSelectedProject(null);
     setAutomationActionError(null);
-    setRevealedSecret(null);
+    forgetSecrets();
     if (searchParams.has('id')) {
       const next = new URLSearchParams(searchParams);
       next.delete('id');
@@ -337,9 +362,8 @@ export default function ProjectsPage() {
     setSubmitting(true);
     setOperationError(null);
     try {
-      secretRequests.current += 1;
-      const order = secretRequests.current;
-      reveal(await createSyncConfigMutation(request), order);
+      const pending = secretRequest();
+      reveal(await createSyncConfigMutation(request), pending);
       setShowSyncModal(false);
       resetForm();
     } catch (err) {
@@ -355,7 +379,7 @@ export default function ProjectsPage() {
     setOperationError(null);
     try {
       await deleteSyncConfigMutation(configId);
-      setRevealedSecret((current) => (current?.configId === configId ? null : current));
+      forgetSecret(configId);
     } catch (err) {
       failed(err, 'Failed to remove sync');
     }
@@ -366,9 +390,8 @@ export default function ProjectsPage() {
 
     setOperationError(null);
     try {
-      secretRequests.current += 1;
-      const order = secretRequests.current;
-      reveal(await setWebhookSecretMutation(config.id, secret), order);
+      const pending = secretRequest();
+      reveal(await setWebhookSecretMutation(config.id, secret), pending);
       return true;
     } catch (err) {
       failed(err, 'Failed to set the webhook secret');
@@ -700,10 +723,8 @@ export default function ProjectsPage() {
                             key={config.id}
                             config={config}
                             canAdminister={canAdministerSync}
-                            revealed={
-                              revealedSecret?.configId === config.id ? revealedSecret : null
-                            }
-                            onDismissSecret={() => setRevealedSecret(null)}
+                            revealed={revealedSecrets[config.id] ?? null}
+                            onDismissSecret={() => forgetSecret(config.id)}
                             onSetSecret={(secret) => handleSetWebhookSecret(config, secret)}
                             onRemove={() => handleDeleteSyncConfig(config.id)}
                           />

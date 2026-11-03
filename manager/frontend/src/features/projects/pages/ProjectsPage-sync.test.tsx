@@ -574,6 +574,64 @@ describe('ProjectsPage - Sync Configuration', () => {
       expect(screen.getByTestId('sync-secret-value').textContent).toBe(rotated);
     });
 
+    it('shows no stale secret when an earlier refused rotation answers after a newer one succeeded', async () => {
+      let answerEarlier: (value: SyncConfigSecret) => void = () => {};
+      mockGetSyncConfigs.mockResolvedValue([githubConfig]);
+      mockSetWebhookSecret
+        .mockImplementationOnce(
+          () =>
+            new Promise<SyncConfigSecret>((resolve) => {
+              answerEarlier = resolve;
+            })
+        )
+        .mockResolvedValueOnce({
+          config: { ...githubConfig, webhook_registered: true },
+          webhookSecret: null,
+          registrationError: null,
+        });
+
+      await openProject();
+      await rotateConfirmed();
+      fireEvent.click(screen.getByLabelText('Close'));
+      fireEvent.click(screen.getByText('Test Project').closest('.project-card')!);
+      await rotateConfirmed();
+      await waitFor(() => {
+        expect(mockSetWebhookSecret).toHaveBeenCalledTimes(2);
+      });
+
+      answerEarlier({
+        config: githubConfig,
+        webhookSecret: rotated,
+        registrationError: 'Zone could not register the webhook: GitHub refused',
+      });
+
+      await new Promise((settle) => setTimeout(settle, 50));
+      expect(screen.queryByTestId('sync-secret')).toBeNull();
+    });
+
+    it("keeps one sync's revealed secret when another sync's rotation answers", async () => {
+      const other: SyncConfig = { ...githubConfig, id: 'sync-9' };
+      mockGetSyncConfigs.mockResolvedValue([githubConfig, other]);
+      mockSetWebhookSecret
+        .mockResolvedValueOnce({
+          config: githubConfig,
+          webhookSecret: rotated,
+          registrationError: null,
+        })
+        .mockResolvedValueOnce({ config: other, webhookSecret: secret, registrationError: null });
+
+      await openProject();
+      const rotations = await screen.findAllByRole('button', { name: 'Rotate secret' });
+      fireEvent.click(rotations[0]);
+      fireEvent.click(await screen.findByRole('button', { name: 'Generate new secret' }));
+      await screen.findByText(rotated);
+      fireEvent.click(screen.getAllByRole('button', { name: 'Rotate secret' })[1]);
+      fireEvent.click(await screen.findByRole('button', { name: 'Generate new secret' }));
+
+      await screen.findByText(secret);
+      expect(screen.getByText(rotated)).toBeInTheDocument();
+    });
+
     it('offers rotation where the server says Zone issues the secret, whatever the provider', async () => {
       mockGetSyncConfigs.mockResolvedValue([
         { ...githubConfig, webhook_secret_issued_by_zone: false },

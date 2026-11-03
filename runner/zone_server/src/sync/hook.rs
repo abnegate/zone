@@ -135,18 +135,23 @@ impl Hook {
         recorded
     }
 
-    async fn delete(&self, id: u64) {
-        if let Err(error) = self
+    /// Whether GitHub no longer holds webhook `id`.
+    async fn delete(&self, id: u64) -> bool {
+        match self
             .service
             .delete_webhook(&self.repository, &self.token, id)
             .await
         {
-            tracing::warn!(
-                repository = %self.repository,
-                id,
-                %error,
-                "Failed to remove a sync's GitHub webhook"
-            );
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    repository = %self.repository,
+                    id,
+                    %error,
+                    "Failed to remove a sync's GitHub webhook"
+                );
+                false
+            }
         }
     }
 }
@@ -157,6 +162,22 @@ impl Hook {
 pub struct Removal(Vec<(Hook, u64, Uuid)>);
 
 impl Removal {
+    /// The webhooks of every sync in workspace `workspace_id`.
+    pub async fn of_workspace(state: &AppState, workspace_id: Uuid) -> Result<Self, sqlx::Error> {
+        let rows = sync_config::list_sync_configs_in_workspace(state.db(), workspace_id).await?;
+        Ok(Self::of(state, &rows).await)
+    }
+
+    /// The webhooks of every sync in organization `organization_id`.
+    pub async fn of_organization(
+        state: &AppState,
+        organization_id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        let rows =
+            sync_config::list_sync_configs_in_organization(state.db(), organization_id).await?;
+        Ok(Self::of(state, &rows).await)
+    }
+
     pub async fn of(state: &AppState, rows: &[SyncConfigRow]) -> Self {
         let mut hooks = Vec::new();
         for row in rows {
@@ -179,8 +200,9 @@ impl Removal {
     /// logged rather than refused.
     pub async fn run(self, state: &AppState) {
         for (hook, id, config) in self.0 {
-            hook.delete(id).await;
-            forget(state, config, id).await;
+            if hook.delete(id).await {
+                forget(state, config, id).await;
+            }
         }
     }
 }
@@ -207,14 +229,18 @@ async fn forget(state: &AppState, config: Uuid, id: u64) {
     }
 }
 
-/// Record that the webhook of configuration `row` still signs with a secret
-/// Zone no longer verifies with, so the console stops calling it registered.
-/// Answers the row as stored, or as it would read had the write landed.
-pub async fn unsigned(state: &AppState, row: SyncConfigRow) -> SyncConfigRow {
+/// Record that the webhook of configuration `row` could not be given the
+/// secret `failed`, so the console stops calling it registered, unless a newer
+/// secret was committed since. Answers the row as stored, or as it would read
+/// had the write landed.
+pub async fn unsigned(state: &AppState, row: SyncConfigRow, failed: Option<&str>) -> SyncConfigRow {
     let current = match sync_config::get_sync_config(state.db(), row.id).await {
         Ok(Some(current)) => current,
         Ok(None) | Err(_) => row,
     };
+    if current.webhook_secret_encrypted.as_deref() != failed {
+        return current;
+    }
     let Some(id) = id_of(&current) else {
         return current;
     };

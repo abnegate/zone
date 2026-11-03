@@ -13,6 +13,7 @@ use crate::auth::{OrgMember, WorkspaceAdmin, WorkspaceMember, WorkspaceOwner};
 use crate::db::audit::{actions, resources};
 use crate::db::{workspace_members, workspaces};
 use crate::state::AppState;
+use crate::sync::hook::Removal;
 
 use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
 
@@ -195,8 +196,20 @@ pub async fn delete_workspace(
         }
     };
 
+    let removal = match Removal::of_workspace(&state, owner.workspace_id).await {
+        Ok(removal) => removal,
+        Err(error) => {
+            tracing::error!(%error, "Failed to read the syncs whose webhooks the delete removes");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
     match workspaces::delete_workspace(state.db(), owner.workspace_id).await {
         Ok(true) => {
+            removal.run(&state).await;
             audit(
                 state.db(),
                 AuditEvent {

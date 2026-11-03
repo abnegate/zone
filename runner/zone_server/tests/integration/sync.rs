@@ -3569,6 +3569,12 @@ async fn a_github_sync_on_a_connected_project_registers_rotates_and_removes_its_
         "the webhook was given the new secret"
     );
     assert_eq!(rotated["config"]["webhook_registered"], true);
+    let requests = github.received_requests().await.unwrap();
+    let update: serde_json::Value = requests.last().unwrap().body_json().unwrap();
+    assert_eq!(
+        update["url"],
+        format!("{CONSOLE}/api/webhooks/sync/{config}/github")
+    );
     let new_secret = last_secret(&github).await;
     assert_ne!(new_secret, secret);
     assert_verified(&deliver_github(&client, &config, &new_secret).await);
@@ -3728,7 +3734,7 @@ async fn deleting_a_project_removes_the_webhooks_zone_registered() {
 }
 
 #[tokio::test]
-async fn unlinking_github_succeeds_and_forgets_the_webhook_even_when_github_refuses_to_delete_it() {
+async fn unlinking_github_succeeds_and_keeps_the_webhook_id_when_github_refuses_to_delete_it() {
     let github = MockServer::start().await;
     let (client, token, project) = connected(&github).await;
     registers(&github, 14).await;
@@ -3741,7 +3747,11 @@ async fn unlinking_github_succeeds_and_forgets_the_webhook_even_when_github_refu
         .assert_status(StatusCode::OK);
 
     assert_eq!(deletions(&github).await, [format!("{HOOKS}/14")]);
-    assert!(stored(&client, &config).await.unwrap().config["github_webhook_id"].is_null());
+    assert_eq!(
+        stored(&client, &config).await.unwrap().config["github_webhook_id"],
+        14,
+        "a webhook GitHub still holds stays recorded so it can be removed later"
+    );
 }
 
 #[tokio::test]
@@ -3759,6 +3769,31 @@ async fn deleting_a_project_succeeds_even_when_github_refuses_to_delete_its_webh
 
     assert_eq!(deletions(&github).await, [format!("{HOOKS}/15")]);
     assert!(stored(&client, &config).await.is_none());
+}
+
+#[tokio::test]
+async fn deleting_a_workspace_removes_the_webhooks_zone_registered_for_its_syncs() {
+    let github = MockServer::start().await;
+    let (client, token, project) = connected(&github).await;
+    registers(&github, 16).await;
+    answers(&github, "DELETE", format!("{HOOKS}/16"), 204).await;
+    configure(&client, &token, &project, &connected_sync()).await;
+    let workspace: Uuid = sqlx::query_scalar("SELECT workspace_id FROM projects WHERE id = $1")
+        .bind(Uuid::parse_str(&project).unwrap())
+        .fetch_one(client.state().db())
+        .await
+        .unwrap();
+
+    let response = client
+        .delete_auth(&format!("/api/workspaces/{workspace}"), &token)
+        .await;
+    assert!(
+        response.status.is_success(),
+        "the workspace delete answered {}",
+        response.status
+    );
+
+    assert_eq!(deletions(&github).await, [format!("{HOOKS}/16")]);
 }
 
 #[tokio::test]

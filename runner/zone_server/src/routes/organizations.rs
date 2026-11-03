@@ -14,6 +14,7 @@ use crate::db::audit::{actions, resources};
 use crate::db::{organization_members, organizations, workspaces};
 use crate::services::login::devices;
 use crate::state::AppState;
+use crate::sync::hook::Removal;
 
 use super::common::{AuditEvent, ErrorResponse, Timestamps, audit};
 
@@ -326,8 +327,20 @@ pub async fn update(
 
 /// DELETE /api/organizations/:org_id - Delete org (requires owner)
 pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl IntoResponse {
+    let removal = match Removal::of_organization(&state, owner.org_id).await {
+        Ok(removal) => removal,
+        Err(error) => {
+            tracing::error!(%error, "Failed to read the syncs whose webhooks the delete removes");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
     match organizations::delete_organization(state.db(), owner.org_id).await {
         Ok(true) => {
+            removal.run(&state).await;
             audit(
                 state.db(),
                 AuditEvent {
@@ -544,8 +557,20 @@ pub async fn delete_workspace(
         }
     };
 
+    let removal = match Removal::of_workspace(&state, admin.workspace_id).await {
+        Ok(removal) => removal,
+        Err(error) => {
+            tracing::error!(%error, "Failed to read the syncs whose webhooks the delete removes");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
     match workspaces::delete_workspace(state.db(), admin.workspace_id).await {
         Ok(true) => {
+            removal.run(&state).await;
             audit(
                 state.db(),
                 AuditEvent {

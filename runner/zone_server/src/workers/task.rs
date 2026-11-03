@@ -2452,7 +2452,10 @@ async fn attempt_run(
         }
     };
 
+    // The agent's own timeout is the budget left at `deadline`, so a turn it
+    // ended reaches this point no earlier than the deadline itself.
     let outcome = match tokio::time::timeout_at(deadline, turns).await {
+        Ok(Err(_)) if tokio::time::Instant::now() >= deadline => Err(Fault::timeout()),
         Ok(outcome) => outcome,
         Err(_) => Err(Fault::timeout()),
     };
