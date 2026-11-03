@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "abnegate-comfy"
-version = "0.1.8"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa64765c9a7c0181abd8e4f29e955f20686264a830e780bd075c337e84aa2cd8"
+checksum = "0c1cb15f5bcd4d5dff051a5f61c0302fae29c6ce9983fe05cfebc451c0d23103"
 dependencies = [
  "abnegate-exec",
  "abnegate-llm",
@@ -16,6 +16,7 @@ dependencies = [
  "bytes",
  "chrono",
  "image",
+ "nix",
  "rand 0.10.2",
  "reqwest 0.13.5",
  "serde",
@@ -94,9 +95,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-llm"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cde74282486f2fced0798ce09a21dd7b81dca63e2dac4ce009ea4e7598c3e743"
+checksum = "70dc6b5b7286ae8997423ed7b5042d9b8bad569094c06d565cb5c6a69cc804f0"
 dependencies = [
  "abnegate-http",
  "abnegate-secret",
@@ -191,9 +192,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-vision"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaf6e8b5696f417bf2d5f9f0d4dee41318ab7db546ab9ca807ef66a776e145b8"
+checksum = "00aff324e63b4c89c117ff4ed8381b3720dae0cc4cda258bb64b6f6d9919699c"
 dependencies = [
  "fast_image_resize",
  "image",
@@ -2667,8 +2668,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.1.3",
- "windows-result 0.3.4",
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
 ]
 
 [[package]]
@@ -3224,7 +3225,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
