@@ -4187,12 +4187,10 @@ mod tests {
             before: None,
             group: None,
         });
-        let refusal = "video identity training is off: it trains Wan 2.2 TI2V 5B adapters, \
-                       and video generation runs Wan 2.2 A14B, which cannot load them";
         for provider in [TrainProvider::Local, TrainProvider::Runpod] {
             person.provider = provider;
             match validate_request(&config, &person) {
-                Err(TrainError::Invalid(message)) => assert_eq!(message, refusal),
+                Err(TrainError::Invalid(message)) => assert_eq!(message, VIDEO_REFUSAL),
                 other => panic!("{provider:?} video training was not refused: {other:?}"),
             }
         }
