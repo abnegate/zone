@@ -28,7 +28,7 @@ pub use agent::{
     Agent, AgentCallback, AgentConfig, AgentError, AgentPhase, AgentState, NoOpCallback,
 };
 pub use error::CoreError;
-pub use llm::{LlmClient, LlmConfig, LlmError};
+pub use llm::LlmClient;
 pub use mcp::{McpConfig, McpHub, McpServerSpec};
 pub use session::{FileSessionStore, Session, SessionStore, SessionSummary};
 pub use tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};

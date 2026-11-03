@@ -1,9 +1,11 @@
-//! Completion providers.
+//! The coding-agent CLI provider.
 //!
-//! A task runs on a local model through LiteLLM or shells out to a coding
-//! agent CLI, and nothing above this module needs to know which. Both satisfy
-//! [`CompletionProvider`]; [`Router`] satisfies it too, over a set of them, so
-//! selection, A/B splitting, and fallback are invisible to the consumer.
+//! A task can shell out to a coding agent CLI instead of calling a model over
+//! HTTP. [`CliProvider`] satisfies
+//! [`CompletionProvider`](abnegate_llm::CompletionProvider) like the crate's
+//! [`HttpProvider`](abnegate_llm::HttpProvider) does, so a
+//! [`Router`](abnegate_llm::Router) can select, split, and fall back between
+//! them without the consumer knowing which ran.
 //!
 //! # Failure classification
 //!
@@ -30,12 +32,6 @@ mod session;
 mod settings;
 mod transcript;
 
-pub use crate::environment;
-pub use abnegate_llm::provider::{LIMIT_WORDINGS, choose, sample};
-pub use abnegate_llm::{
-    Completion, CompletionProvider, CompletionRequest, Credential, ExitStatus, HttpProvider, Limit,
-    ProviderError, ProviderKind, Router, SelectionStrategy, Weighted, Window,
-};
 pub use agent::{AgentKind, Delivery};
 pub use cli::{AgentStream, CliProvider, OUTGROWN, STDERR_HEADING};
 pub use event::AgentEvent;
