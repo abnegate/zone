@@ -1,8 +1,8 @@
 //! Feature catalog and RAM/disk planner for console model setup.
 //!
-//! The same numbers as `scripts/setup-models.py`: vision needs 16 GiB, all is
-//! refused (not trimmed) when free space cannot cover the full set, and chat
-//! stays on.
+//! The same numbers as `scripts/setup-models.py`: a feature is refused below its
+//! RAM floor, all is refused (not trimmed) when free space cannot cover the full
+//! set, and chat stays on.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -19,6 +19,14 @@ static MANIFEST: Lazy<Manifest> =
     Lazy::new(|| serde_json::from_str(MANIFEST_JSON).expect("model-manifest.json"));
 
 const GIB: u64 = 1024 * 1024 * 1024;
+
+const VISION: &str = "vision";
+const VIDEO: &str = "video";
+const ALL_RAM: &str = "all-ram";
+const VISION_RAM: &str = "vision-ram";
+const VIDEO_RAM: &str = "video-ram";
+const FEATURE_RAM: &str = "feature-ram";
+const VISION_FALLBACK: &str = "8 GB can run chat only.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanError {
@@ -66,6 +74,8 @@ struct Feature {
     required: bool,
     #[serde(default)]
     min_ram_bytes: Option<u64>,
+    #[serde(default)]
+    ram_model: Option<String>,
     #[serde(default)]
     ollama_slots: Vec<String>,
     #[serde(default)]
@@ -376,27 +386,13 @@ pub fn make_plan(input: PlanInput) -> Result<Plan, PlanError> {
 }
 
 pub fn enforce_gates(plan: &Plan) -> Result<(), PlanError> {
-    let catalog = catalog();
-    let vision_min = catalog.vision_min_ram_bytes;
-    if plan.features.iter().any(|id| id == "vision") && plan.ram_bytes < vision_min {
-        if plan.wants_all {
-            return Err(PlanError {
-                code: "all-ram",
-                message: format!(
-                    "Cannot select all features: vision needs {} RAM (llava:7b). This machine has {}. 8 GB can run chat only.",
-                    format_ram(vision_min),
-                    format_ram(plan.ram_bytes)
-                ),
-            });
+    for feature in &catalog().features {
+        let Some(minimum) = feature.min_ram_bytes else {
+            continue;
+        };
+        if plan.ram_bytes < minimum && plan.features.contains(&feature.id) {
+            return Err(ram_error(plan, feature, minimum));
         }
-        return Err(PlanError {
-            code: "vision-ram",
-            message: format!(
-                "Vision needs {} RAM (llava:7b). This machine has {}. Drop vision or use a machine with at least 16 GB.",
-                format_ram(vision_min),
-                format_ram(plan.ram_bytes)
-            ),
-        });
     }
     if plan.disk_free_bytes < plan.required_free_bytes() {
         let report = disk_report(plan);
@@ -680,7 +676,7 @@ fn ollama_names(
         ("reason".into(), preset.reason.clone()),
         ("embed".into(), catalog.embed.clone()),
     ]);
-    if selected.contains("vision") {
+    if selected.contains(VISION) {
         names.insert("vision".into(), catalog.vision_model.clone());
     }
     names
@@ -864,6 +860,36 @@ fn isolation_sizes(plan: &Plan) -> HashMap<String, u64> {
     sizes
 }
 
+fn ram_error(plan: &Plan, feature: &Feature, minimum: u64) -> PlanError {
+    let id = feature.id.as_str();
+    let model = feature.ram_model.as_deref().unwrap_or(&feature.label);
+    let needed = format_ram(minimum);
+    let available = format_ram(plan.ram_bytes);
+    if plan.wants_all {
+        let fallback = match id {
+            VISION => VISION_FALLBACK.to_string(),
+            _ => format!("Turn {id} off to set up the rest."),
+        };
+        return PlanError {
+            code: ALL_RAM,
+            message: format!(
+                "Cannot select all features: {id} needs {needed} RAM ({model}). This machine has {available}. {fallback}"
+            ),
+        };
+    }
+    PlanError {
+        code: match id {
+            VISION => VISION_RAM,
+            VIDEO => VIDEO_RAM,
+            _ => FEATURE_RAM,
+        },
+        message: format!(
+            "{} needs {needed} RAM ({model}). This machine has {available}. Drop {id} or use a machine with at least {needed}.",
+            feature.label
+        ),
+    }
+}
+
 fn feature_block(feature: &Feature, ram_bytes: u64) -> (bool, Option<String>) {
     let Some(min) = feature.min_ram_bytes else {
         return (false, None);
@@ -1027,6 +1053,104 @@ mod tests {
         )
         .unwrap();
         assert_eq!(built.vision.as_deref(), Some("llava:7b"));
+    }
+
+    #[test]
+    fn vision_refusals_keep_their_wording() {
+        let vision = plan(
+            FeatureSelect::Ids(vec!["chat".into(), "vision".into()]),
+            8 * GIB,
+            500 * GB,
+            "8gb",
+        );
+        assert_eq!(
+            enforce_gates(&vision).unwrap_err(),
+            PlanError {
+                code: "vision-ram",
+                message: "Vision needs 16 GB RAM (llava:7b). This machine has 8 GB. Drop vision or use a machine with at least 16 GB.".into(),
+            }
+        );
+        let all = plan(FeatureSelect::All, 8 * GIB, 500 * GB, "8gb");
+        assert_eq!(
+            enforce_gates(&all).unwrap_err(),
+            PlanError {
+                code: "all-ram",
+                message: "Cannot select all features: vision needs 16 GB RAM (llava:7b). This machine has 8 GB. 8 GB can run chat only.".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn video_on_32gb_ram_is_blocked() {
+        let error = resolve(
+            FeatureSelect::Ids(vec!["chat".into(), "video".into()]),
+            32 * GIB,
+            10_000 * GB,
+            "32gb",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PlanError {
+                code: "video-ram",
+                message: "Video needs 64 GB RAM (Wan 2.2 A14B). This machine has 32 GB. Drop video or use a machine with at least 64 GB.".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn video_one_byte_under_64_gib_is_blocked() {
+        let error = resolve(
+            FeatureSelect::Ids(vec!["chat".into(), "video".into()]),
+            64 * GIB - 1,
+            10_000 * GB,
+            "32gb",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "video-ram");
+    }
+
+    #[test]
+    fn video_on_exactly_64_gib_is_allowed() {
+        let built = resolve(
+            FeatureSelect::Ids(vec!["chat".into(), "video".into()]),
+            68_719_476_736,
+            10_000 * GB,
+            "32gb",
+        )
+        .expect("64 GiB is the floor, not below it");
+        assert!(built.features.contains(&"video".to_string()));
+        assert!(built.comfy_bundles.contains(&"video".to_string()));
+    }
+
+    #[test]
+    fn all_on_32gb_ram_is_blocked_by_video() {
+        let error = resolve(FeatureSelect::All, 32 * GIB, 10_000 * GB, "32gb").unwrap_err();
+        assert_eq!(
+            error,
+            PlanError {
+                code: "all-ram",
+                message: "Cannot select all features: video needs 64 GB RAM (Wan 2.2 A14B). This machine has 32 GB. Turn video off to set up the rest.".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn video_on_32gb_ram_is_refused_by_the_console_view() {
+        let built = plan(
+            FeatureSelect::Ids(vec!["chat".into(), "video".into()]),
+            32 * GIB,
+            10_000 * GB,
+            "32gb",
+        );
+        let view = view_plan(&built);
+        assert_eq!(view.gate.as_ref().map(|gate| gate.code), Some("video-ram"));
+        let video = view
+            .features
+            .iter()
+            .find(|feature| feature.id == "video")
+            .expect("video is in the catalog");
+        assert!(video.blocked);
     }
 
     #[test]
