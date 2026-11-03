@@ -23,6 +23,11 @@ for path in (str(INSTALL), str(COMFYUI)):
 sys.path.insert(0, str(INSTALL))
 sys.path.insert(0, str(COMFYUI))
 
+from comfy.cli_args import args  # noqa: E402
+
+# ComfyUI picks CUDA while importing comfy.model_management unless --cpu is set first.
+args.cpu = True
+
 from custom_nodes.zone_lora.inference_hooks import (  # noqa: E402
     constant_pad_with_cat,
     densify_tensor,
