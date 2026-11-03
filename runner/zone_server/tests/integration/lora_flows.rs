@@ -1666,7 +1666,19 @@ async fn train_upload_refuses_video_identity_training() {
         Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
     )
     .await;
-    let (content_type, body) = language_multipart(b"support-bot", b"llama3.2:1b", b"video");
+    let images = json!([{ "filename": "walk.mp4", "caption": "" }]).to_string();
+    let (content_type, body) = multipart(
+        "ZoneTrainBoundary",
+        &[
+            ("name", None, b"jerry"),
+            ("base", None, b"sdxl-people"),
+            ("trigger", None, b"ohwx"),
+            ("subject", None, b"person"),
+            ("method", None, b"video"),
+            ("images", None, images.as_bytes()),
+            ("image_0", Some("walk.mp4"), b"pretend clip"),
+        ],
+    );
     let (status, response) =
         post_multipart(router, &token, "/api/models/train", content_type, body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
