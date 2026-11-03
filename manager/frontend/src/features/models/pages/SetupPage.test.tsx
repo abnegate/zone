@@ -210,6 +210,18 @@ describe('SetupPage', () => {
     expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true });
   });
 
+  it('marks only the current step as current', async () => {
+    render(<SetupPage />);
+    await screen.findByRole('heading', { name: 'Set up Zone' });
+    expect(screen.getByText('1 Features')).toHaveAttribute('aria-current', 'step');
+    expect(screen.getByText('2 Folders')).not.toHaveAttribute('aria-current');
+    expect(screen.getByText('1 Features').parentElement).not.toHaveAttribute('aria-current');
+    fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
+    await screen.findByRole('heading', { name: 'Host folders' });
+    expect(screen.getByText('1 Features')).not.toHaveAttribute('aria-current');
+    expect(screen.getByText('2 Folders')).toHaveAttribute('aria-current', 'step');
+  });
+
   it('shows per-piece download progress on the setup step', async () => {
     pull.jobs = [
       {
