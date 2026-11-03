@@ -47,7 +47,7 @@ abnegate-secret = "0.1.3"
 axum = { version = "=0.8.9", features = ["ws", "macros", "multipart"] }
 sqlx = { version = "=0.9.0", features = ["postgres", "runtime-tokio", "uuid", "chrono", "ipnetwork", "bigdecimal", "macros"] }
 redis = { version = "=1.6.0", features = ["tokio-comp"] }
-jsonwebtoken = { version = "=11.0.0", features = ["rust_crypto"] }
+jsonwebtoken = { version = "=11.0.0", features = ["aws_lc_rs"] }
 argon2 = "=0.6.0"
 tower = "=0.5.3"
 tower-http = { version = "=0.7.1", features = ["cors", "trace", "fs"] }

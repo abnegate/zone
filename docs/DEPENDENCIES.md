@@ -53,38 +53,25 @@ reviewed name/version/license passes, while a new version, another package,
 another license and absent licensing all fail. The full workspace scan separately
 checks the actual dependency graph.
 
-## Existing RSA advisory exception
+## jsonwebtoken crypto backend
 
-`RUSTSEC-2023-0071` is already excepted in `runner/.cargo/audit.toml`; cargo-deny
-now applies the same exception with a current rationale. The locked RSA 0.9.10
-paths are jsonwebtoken 11.0.0 through zone_server and jsonwebtoken 10.4.0 through
-octocrab 0.54.1 in zone_context. Server JWT creation and validation use
-`Header::default()` / `Validation::default()` (HS256) with secret-based keys in
-`runner/zone_server/src/auth/jwt.rs`; they do not use RSA private keys. Octocrab
-has no source callers in zone_context. The earlier audit comment's SQLx-MySQL
-path is no longer present in this graph.
+`jsonwebtoken` 11.0.0 is built with `aws_lc_rs` only, the same aws-lc-rs that
+rustls already links, so no new native build requirement comes with it. Its
+`rust_crypto` backend would bring back `rsa` (RUSTSEC-2023-0071, no fixed
+release), which the GitHub App's RS256 signing in
+`runner/zone_server/src/services/github_app/jwt.rs` would exercise with a private
+key, and `crypto-bigint` 0.5 through p256/p384 (RUSTSEC-2026-0387). Enabling both
+features also makes jsonwebtoken panic on its first sign or verify, because it
+cannot pick a default provider.
 
-The [advisory](https://rustsec.org/advisories/RUSTSEC-2023-0071) describes timing
-exposure of RSA private-key operations and has no patched release. This existing
-exception must be revisited if an RSA private-key operation or an Octocrab caller
-is introduced. All other vulnerability advisories remain fatal; no new advisory
-ID is suppressed by this change.
+Check from `runner` that neither crate comes back:
 
-## crypto-bigint advisory exception
+```sh
+cargo tree --workspace --all-features --target all -e all -i rsa
+cargo tree --workspace --all-features --target all -e all -i crypto-bigint
+```
 
-`RUSTSEC-2026-0387` is excepted in `runner/deny.toml` and `runner/.cargo/audit.toml`.
-The [advisory](https://rustsec.org/advisories/RUSTSEC-2026-0387) describes timing
-variability in crypto-bigint operations meant to be constant-time; the fix is
-crypto-bigint 0.7.6. The locked crypto-bigint 0.5.5 is reached only through
-elliptic-curve 0.13 for p256/p384, which jsonwebtoken 11.0.0 (zone_server) and
-10.4.0 (octocrab in zone_context) enable with `rust_crypto`. No jsonwebtoken
-release, including 11.1.0, depends on an elliptic-curve that uses crypto-bigint 0.7.
-
-Zone never signs or verifies an ECDSA token: server JWTs use HS256 with
-secret-based keys in `runner/zone_server/src/auth/jwt.rs`, and the GitHub App JWT
-in `runner/zone_server/src/services/github_app/jwt.rs` uses RS256. This exception
-must be revisited if an ES256/ES384 key is introduced or when jsonwebtoken moves
-to elliptic-curve 0.14.
+Both report no match.
 
 ## Lighthouse archive advisory exception
 
