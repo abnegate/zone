@@ -12,7 +12,7 @@ use crate::agent::readiness::{
 };
 use crate::config::AutoProjectConfig;
 use crate::db::auto_projects::{Finding, ReviewRow, Verdict};
-use zone_vcs::pull_request::{IssueComment, ReviewThreadRecord, SubmittedReviewRecord};
+use abnegate_vcs::{IssueComment, ReviewRecord, ReviewThreadRecord};
 
 /// Characters of a thread's opening comment kept as a finding's title.
 const TITLE_CHARS: usize = 140;
@@ -109,7 +109,7 @@ struct Score {
 pub fn round(
     kind: SignalKind,
     comments: &[IssueComment],
-    reviews: &[SubmittedReviewRecord],
+    reviews: &[ReviewRecord],
     threads: &[ReviewThreadRecord],
     head: &str,
 ) -> Option<BotRound> {
@@ -195,7 +195,7 @@ fn summarized(
 fn reviewed(
     kind: SignalKind,
     signal: &dyn ReviewSignal,
-    reviews: &[SubmittedReviewRecord],
+    reviews: &[ReviewRecord],
     head: &CommitSha,
 ) -> Option<Score> {
     if !kind.scores_in_reviews() {
@@ -205,14 +205,22 @@ fn reviewed(
         .iter()
         .filter(|review| {
             signal.authored(&review.author)
-                && CommitSha::parse(&review.commit_id).as_ref() == Some(head)
+                && review
+                    .commit
+                    .as_ref()
+                    .is_some_and(|commit| commit.as_str() == head.as_str())
         })
         .filter_map(|review| {
             signal
                 .confidence(&review.body)
                 .map(|confidence| (review, confidence))
         })
-        .max_by_key(|(review, _)| (published_at(&review.submitted_at), review.id))
+        .max_by_key(|(review, _)| {
+            (
+                published_at(review.submitted_at.as_deref().unwrap_or_default()),
+                review.id,
+            )
+        })
         .map(|(review, confidence)| Score {
             confidence,
             text: excerpt(&review.body, SUMMARY_CHARS),
@@ -253,7 +261,7 @@ pub fn display_name(reviewer: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zone_vcs::pull_request::ThreadComment;
+    use abnegate_vcs::ThreadComment;
 
     const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -276,31 +284,29 @@ mod tests {
     }
 
     fn comment(author: &str, body: &str) -> IssueComment {
-        IssueComment {
-            id: 41,
-            author: author.into(),
-            body: body.into(),
-            url: "https://github.com/acme/shop/pull/4#issuecomment-41".into(),
-            created_at: "2026-09-20T10:00:00Z".into(),
-        }
+        IssueComment::new(
+            41,
+            author,
+            body,
+            "https://github.com/acme/shop/pull/4#issuecomment-41",
+            "2026-09-20T10:00:00Z",
+        )
     }
 
     fn thread(author: &str, resolved: bool) -> ReviewThreadRecord {
-        ReviewThreadRecord {
-            id: "PRRT_9".into(),
-            resolved,
-            outdated: false,
-            path: Some("src/cart.ts".into()),
-            line: Some(12),
-            comments: vec![ThreadComment {
-                database_id: Some(99),
-                author: author.into(),
-                body: "**Handle the empty cart.**\n\ncheckout() calls items[0] without a guard."
-                    .into(),
-                url: String::new(),
-                created_at: "2026-09-20T10:01:00Z".into(),
-            }],
-        }
+        ReviewThreadRecord::new(
+            "PRRT_9",
+            vec![ThreadComment::new(
+                Some(99),
+                author,
+                "**Handle the empty cart.**\n\ncheckout() calls items[0] without a guard.",
+                "",
+                "2026-09-20T10:01:00Z",
+            )],
+        )
+        .with_resolved(resolved)
+        .with_path("src/cart.ts")
+        .with_line(12)
     }
 
     #[test]
@@ -376,17 +382,23 @@ mod tests {
         )
     }
 
-    fn review(id: u64, body: &str, commit_id: &str, submitted_at: &str) -> SubmittedReviewRecord {
-        SubmittedReviewRecord {
-            id,
-            author: "coderabbitai[bot]".into(),
-            body: body.into(),
-            commit_id: commit_id.into(),
-            submitted_at: submitted_at.into(),
-        }
+    fn review(id: u64, body: &str, commit: &str, submitted_at: &str) -> ReviewRecord {
+        authored_review("coderabbitai[bot]", id, body, commit, submitted_at)
     }
 
-    fn paid_reviews(body: &str, commit_id: &str) -> Vec<SubmittedReviewRecord> {
+    fn authored_review(
+        author: &str,
+        id: u64,
+        body: &str,
+        commit: &str,
+        submitted_at: &str,
+    ) -> ReviewRecord {
+        ReviewRecord::new(id, author, body)
+            .with_commit(abnegate_vcs::CommitSha::parse(commit).expect("a commit"))
+            .with_submitted_at(submitted_at)
+    }
+
+    fn paid_reviews(body: &str, commit_id: &str) -> Vec<ReviewRecord> {
         vec![
             review(5333502514, body, commit_id, "2026-09-28T02:51:09Z"),
             review(5333523878, "", commit_id, "2026-09-28T02:55:47Z"),
@@ -454,10 +466,13 @@ mod tests {
 
     #[test]
     fn a_greptile_score_is_never_read_from_a_pull_request_review() {
-        let reviews = vec![SubmittedReviewRecord {
-            author: "greptile-apps[bot]".into(),
-            ..review(7, "Confidence Score: 5/5", HEAD, "2026-09-28T02:51:09Z")
-        }];
+        let reviews = vec![authored_review(
+            "greptile-apps[bot]",
+            7,
+            "Confidence Score: 5/5",
+            HEAD,
+            "2026-09-28T02:51:09Z",
+        )];
         assert_eq!(round(SignalKind::Greptile, &[], &reviews, &[], HEAD), None);
     }
 

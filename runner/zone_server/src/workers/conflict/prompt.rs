@@ -6,7 +6,7 @@
 //! conflict markers has one job. The file list is also the scope the tools
 //! enforce, so the prompt and the permission set never disagree.
 
-use zone_vcs::conflict::{CommitSha, ConflictedPath};
+use abnegate_vcs::conflict::{CommitSha, ConflictedPath};
 
 /// What a repair agent is told about the conflict it has been handed.
 #[derive(Debug, Clone)]

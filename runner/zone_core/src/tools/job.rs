@@ -777,7 +777,7 @@ mod tests {
         git(root, &["commit", "--message", "seed"]);
     }
 
-    /// A checkout shaped the way `zone_vcs` leaves one. It clones with
+    /// A checkout shaped the way `abnegate-vcs` leaves one. It clones with
     /// `--template=`, and an empty template means git writes no `info`
     /// directory at all -- so there is nothing for an append to open.
     fn untemplated_repository(root: &Path) {

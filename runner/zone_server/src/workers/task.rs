@@ -1020,6 +1020,20 @@ async fn reap(run_id: Uuid) {
 }
 
 async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
+    let mut checkout = None;
+    execute_in_checkout(state, execution, &mut checkout).await;
+    if let Some(checkout) = checkout {
+        checkout.finish().await;
+    }
+}
+
+/// Run the task in a checkout left in `slot`, for the caller to finish once
+/// the run is over however it ended; a run cancelled meanwhile drops it.
+async fn execute_in_checkout(
+    state: &AppState,
+    execution: tasks::Execution,
+    slot: &mut Option<crate::services::checkout::Checkout>,
+) {
     let tasks::Execution {
         task: task_id,
         run: run_id,
@@ -1165,32 +1179,34 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
         }
     };
 
-    let checkout = match crate::services::checkout::Checkout::prepare(
-        state.db(),
-        state.encryption_key(),
-        &task,
-        execution,
-    )
-    .await
-    {
-        Ok(checkout) => checkout,
-        Err(error) => {
-            obs.set_status("failed");
-            if let Err(failure) = tasks::complete_owned_task_run(
-                state.db(),
-                run_id,
-                Some(owner),
-                "failed",
-                Some(&error),
-                None,
-            )
-            .await
-            {
-                tracing::error!(%run_id, %failure, "Failed to record checkout failure");
+    let checkout = &*slot.insert(
+        match crate::services::checkout::Checkout::prepare(
+            state.db(),
+            state.encryption_key(),
+            &task,
+            execution,
+        )
+        .await
+        {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                obs.set_status("failed");
+                if let Err(failure) = tasks::complete_owned_task_run(
+                    state.db(),
+                    run_id,
+                    Some(owner),
+                    "failed",
+                    Some(&error),
+                    None,
+                )
+                .await
+                {
+                    tracing::error!(%run_id, %failure, "Failed to record checkout failure");
+                }
+                return;
             }
-            return;
-        }
-    };
+        },
+    );
     let workspace_path = checkout.path().to_path_buf();
 
     let run = match tasks::get_task_run(state.db(), run_id).await {
@@ -1240,8 +1256,8 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     };
     let environment = match checkout.baseline() {
         Some(baseline) => environment.with_vcs(Vcs {
-            branch: baseline.branch.clone(),
-            head: baseline.commit.clone(),
+            branch: baseline.branch.to_string(),
+            head: baseline.commit.to_string(),
         }),
         None => environment,
     };
@@ -1355,31 +1371,8 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
             ) {
                 return;
             }
-            let publication = create_pr_for_task(
-                state,
-                execution,
-                &workspace_path,
-                checkout.baseline(),
-                &summary,
-            )
-            .await;
-            // What the service pushed was recorded at the push itself,
-            // whatever publication did afterwards; the guard is told it here,
-            // so the worktree may go while it is on that commit. Recovery
-            // reads the same record. A record that cannot be read only keeps
-            // the worktree.
-            match tasks::run_checkout(state.db(), run_id).await {
-                Ok(Some(tasks::RunCheckout {
-                    published: Some(commit),
-                    ..
-                })) => checkout.mark_published(commit),
-                Ok(_) => {}
-                Err(error) => tracing::warn!(
-                    %run_id,
-                    %error,
-                    "Could not read the run's publication record; keeping the worktree"
-                ),
-            }
+            let publication =
+                create_pr_for_task(state, execution, checkout.baseline(), &summary).await;
             obs.set_status(
                 complete_publication(
                     state,

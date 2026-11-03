@@ -3,9 +3,15 @@
 //! Creates pull requests when a task completes with code changes.
 //! Called by the task worker after successful task execution.
 
-use std::path::Path;
 use std::time::Duration;
 
+use abnegate_secret::SecretValue;
+use abnegate_vcs::Checkout as GitCheckout;
+use abnegate_vcs::git::GitResult;
+use abnegate_vcs::{
+    BranchName, CommitSha, Description, GitError, GitService, PullRequestReception,
+    PullRequestService, PullRequestState, RepositoryUrl, Subject,
+};
 use uuid::Uuid;
 
 use serde_json::{Value, json};
@@ -13,19 +19,19 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::db::{projects, tasks};
 use crate::services::backend;
-use crate::services::checkout::{Baseline, Repository};
+use crate::services::checkout::{self, Baseline, Repository};
 use crate::services::endpoint::{Endpoint, Error as EndpointError};
 use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
 use crate::workers::conflict::agent::ModelRepairAgent;
-use crate::workers::conflict::{RepairOutcome, RepairRequest, repair};
+use crate::workers::conflict::{self, RepairOutcome, RepairRequest, repair};
 use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
 use zone_core::llm::{LlmBackend, LlmClient, Message};
-use zone_vcs::conflict::{BranchName, ConflictService};
-use zone_vcs::git::GitService;
-use zone_vcs::pull_request::{Description, PrService, PullRequestReception};
-use zone_vcs::subject::Subject;
+
+/// Times a publication step meets a repository configuration a run wrote,
+/// restores it, and tries again before the publication fails.
+const SANITIZE_ATTEMPTS: usize = 3;
 
 /// Temperature for a repair: a merge resolution is a mechanical edit, not a draft.
 const REPAIR_TEMPERATURE: f32 = 0.0;
@@ -80,25 +86,23 @@ pub enum PrCreationResult {
 trait Remote: Send + Sync {
     async fn push(
         &self,
-        path: &Path,
-        branch: &str,
-        url: &str,
-        token: &str,
-    ) -> Result<String, String>;
+        worktree: &GitCheckout,
+        branch: &BranchName,
+        url: &RepositoryUrl,
+        token: &SecretValue,
+    ) -> GitResult<CommitSha>;
 }
 
 #[async_trait::async_trait]
 impl Remote for GitService {
     async fn push(
         &self,
-        path: &Path,
-        branch: &str,
-        url: &str,
-        token: &str,
-    ) -> Result<String, String> {
-        self.push_with_token(path, branch, url, token)
-            .await
-            .map_err(|error| error.to_string())
+        worktree: &GitCheckout,
+        branch: &BranchName,
+        url: &RepositoryUrl,
+        token: &SecretValue,
+    ) -> GitResult<CommitSha> {
+        self.push_with_token(worktree, branch, url, token).await
     }
 }
 
@@ -110,20 +114,24 @@ impl Remote for GitService {
 pub async fn create_pr_for_task(
     state: &AppState,
     execution: tasks::Execution,
-    workspace_path: &Path,
     baseline: Option<&Baseline>,
     report: &str,
 ) -> PrCreationResult {
-    let git = GitService::new();
+    let service = match state.config().pull_requests() {
+        Ok(service) => service,
+        Err(error) => {
+            return PrCreationResult::Error(format!("GitHub origin is misconfigured: {error}"));
+        }
+    };
+    let git = checkout::git();
     Publication {
         state,
         execution,
-        path: workspace_path,
         baseline,
         report,
         git: &git,
         remote: &git,
-        service: PrService::configured(state.config().github_api_url.clone()),
+        service,
     }
     .run()
     .await
@@ -133,15 +141,41 @@ pub async fn create_pr_for_task(
 struct Publication<'a> {
     state: &'a AppState,
     execution: tasks::Execution,
-    path: &'a Path,
     baseline: Option<&'a Baseline>,
     report: &'a str,
     git: &'a GitService,
     remote: &'a dyn Remote,
-    service: PrService,
+    service: PullRequestService,
 }
 
 impl Publication<'_> {
+    /// Run one git step of the publication. The base's configuration is
+    /// shared with every run of the repository, and a sibling run's tools may
+    /// write it while this one publishes, which the host's git refuses: the
+    /// configuration is then put back to what Zone knows and the step run
+    /// again, a bounded number of times.
+    async fn retried<T, Step>(
+        &self,
+        baseline: &Baseline,
+        step: impl Fn() -> Step,
+    ) -> Result<T, String>
+    where
+        Step: Future<Output = GitResult<T>>,
+    {
+        let mut attempt = 1;
+        loop {
+            match step().await {
+                Err(GitError::UnsafeConfig(key)) if attempt < SANITIZE_ATTEMPTS => {
+                    tracing::info!(%key, attempt, "The repository's configuration was written during publication; restoring it");
+                    checkout::sanitize(baseline.worktree.repository(), &baseline.repository)
+                        .await?;
+                    attempt += 1;
+                }
+                result => return result.map_err(|error| error.to_string()),
+            }
+        }
+    }
+
     async fn authorized(&self) -> Result<(), String> {
         match self.execution.authorized(self.state.db(), true).await {
             Ok(true) => Ok(()),
@@ -149,8 +183,16 @@ impl Publication<'_> {
         }
     }
 
-    async fn record(&self, url: &str, branch: &str, status: &str) -> Result<(), String> {
-        match tasks::update_task_pr(self.state.db(), &self.execution, url, branch, status).await {
+    async fn record(&self, url: &str, branch: &BranchName, status: &str) -> Result<(), String> {
+        match tasks::update_task_pr(
+            self.state.db(),
+            &self.execution,
+            url,
+            branch.as_str(),
+            status,
+        )
+        .await
+        {
             Ok(true) => Ok(()),
             _ => Err("Task publication no longer owns its metadata".to_string()),
         }
@@ -166,36 +208,36 @@ impl Publication<'_> {
             .await?
             .ok_or("Task repository changed during execution")?;
         if repository.url != baseline.repository
-            || task.branch_name.as_deref() != Some(&baseline.branch)
+            || task.branch_name.as_deref() != Some(baseline.branch.as_str())
         {
             return Err("Task repository or branch changed during execution".into());
         }
+        let worktree = &baseline.worktree;
         if self
-            .git
-            .get_remote_url(self.path, "origin")
-            .await
-            .map_err(|error| error.to_string())?
-            != baseline.repository
+            .retried(baseline, || self.git.get_remote_url(worktree, "origin"))
+            .await?
+            != baseline.repository.as_str()
         {
             return Err("Checkout repository no longer matches the task repository".into());
         }
         if self
-            .git
-            .current_branch(self.path)
-            .await
-            .map_err(|error| error.to_string())?
-            != baseline.branch
+            .retried(baseline, || self.git.current_branch(worktree))
+            .await?
+            != baseline.branch.as_str()
         {
             return Err(
                 "Task changed the checkout branch; publication requires the original task branch"
                     .into(),
             );
         }
+        let head = self
+            .retried(baseline, || self.git.revision(worktree, "HEAD"))
+            .await?;
         if !self
-            .git
-            .is_ancestor(self.path, &baseline.commit, "HEAD")
-            .await
-            .map_err(|error| error.to_string())?
+            .retried(baseline, || {
+                self.git.is_ancestor(worktree, &baseline.commit, &head)
+            })
+            .await?
         {
             return Err(
                 "Task rewrote the checkout baseline; publication requires its original history"
@@ -232,26 +274,24 @@ impl Publication<'_> {
         let baseline = self
             .baseline
             .ok_or("Task has no captured checkout baseline")?;
+        checkout::sanitize(baseline.worktree.repository(), &baseline.repository).await?;
         self.identity(baseline).await?;
+        let worktree = &baseline.worktree;
         let dirty = self
-            .git
-            .has_changes(self.path)
-            .await
-            .map_err(|error| error.to_string())?;
+            .retried(baseline, || self.git.has_changes(worktree))
+            .await?;
         let head = self
-            .git
-            .revision(self.path, "HEAD")
-            .await
-            .map_err(|error| error.to_string())?;
+            .retried(baseline, || self.git.revision(worktree, "HEAD"))
+            .await?;
         // A retry may resume already-pushed work whose PR was never created.
         // Only a clean branch already included in the captured default base is a no-op.
         if !dirty
             && head == baseline.commit
             && self
-                .git
-                .is_ancestor(self.path, &head, &baseline.base)
-                .await
-                .map_err(|error| error.to_string())?
+                .retried(baseline, || {
+                    self.git.is_ancestor(worktree, &head, &baseline.base)
+                })
+                .await?
         {
             self.identity(baseline).await?;
             return Ok(PrCreationResult::NoChanges);
@@ -263,49 +303,47 @@ impl Publication<'_> {
             .token
             .ok_or("No access token configured for the selected repository")?;
         let branch = &baseline.branch;
-        let (owner, repository_name) = self
+        let target = self
             .service
-            .parse_github_url(&baseline.repository)
+            .parse_github_url(baseline.repository.as_str())
             .map_err(|error| error.to_string())?;
         self.authorized().await?;
         let base = self
             .service
-            .get_default_branch(&owner, &repository_name, &token)
+            .get_default_branch(&target, &token)
             .await
             .map_err(|error| error.to_string())?;
         self.authorized().await?;
         let existing = self
             .service
-            .pr_exists_for_branch(&owner, &repository_name, &token, branch)
+            .pull_request_exists_for_branch(&target, &token, branch)
             .await
             .map_err(|error| error.to_string())?;
         self.identity(baseline).await?;
         let subject = subject(self.state, &task, self.report).await;
         if dirty {
-            self.git
-                .stage_all(self.path)
-                .await
-                .map_err(|error| error.to_string())?;
+            self.retried(baseline, || self.git.stage_all(worktree))
+                .await?;
             self.authorized().await?;
             let message = match self.report.trim() {
                 "" => format!("{subject}\n\nTask ID: {}\n", task.id),
                 report => format!("{subject}\n\n{report}\n\nTask ID: {}\n", task.id),
             };
-            self.git
-                .commit(self.path, &message)
-                .await
-                .map_err(|error| error.to_string())?;
+            self.retried(baseline, || self.git.commit(worktree, &message))
+                .await?;
         }
         self.identity(baseline).await?;
         let files = self
-            .git
-            .changed_files(self.path, &baseline.base)
-            .await
-            .map_err(|error| error.to_string())?;
+            .retried(baseline, || {
+                self.git.changed_files(worktree, &baseline.base)
+            })
+            .await?;
         self.authorized().await?;
         let commit = self
-            .remote
-            .push(self.path, branch, &baseline.repository, &token)
+            .retried(baseline, || {
+                self.remote
+                    .push(worktree, branch, &baseline.repository, &token)
+            })
             .await?;
         // The push is the fact, and it is recorded the moment it succeeded,
         // under the run's lease: whatever publication does after this, the
@@ -316,7 +354,7 @@ impl Publication<'_> {
             self.state.db(),
             self.execution.run,
             self.execution.owner,
-            &commit,
+            commit.as_str(),
         )
         .await
         {
@@ -337,7 +375,7 @@ impl Publication<'_> {
             report_repair(self.state, task.id).await;
             return Ok(PrCreationResult::PrAlreadyExists {
                 pr_url: url,
-                commit,
+                commit: commit.to_string(),
             });
         }
         let changes = files
@@ -350,36 +388,24 @@ impl Publication<'_> {
             description => format!("{}\n\n{description}", task.title),
         };
         let title = subject.to_string();
-        let body = Description {
-            problem: &asked,
-            report: Some(self.report),
-            changes: Some(&changes),
-            task: task.id,
-            url: None,
-        }
-        .render();
+        let body = Description::new(&asked, task.id)
+            .with_report(self.report)
+            .with_changes(&changes)
+            .render();
         self.authorized().await?;
         let created = self
             .service
-            .create_pr(
-                &owner,
-                &repository_name,
-                &token,
-                branch,
-                &base,
-                &title,
-                &body,
-                false,
-            )
+            .create_pull_request(&target, &token, branch, &base, &title, &body, false)
             .await
             .map_err(|error| error.to_string())?;
         self.identity(baseline).await?;
-        self.record(&created.url, branch, &created.state).await?;
+        self.record(&created.url, branch, status(created.state))
+            .await?;
         report_repair(self.state, task.id).await;
         Ok(PrCreationResult::Created {
             pr_url: created.url,
-            branch_name: branch.clone(),
-            commit,
+            branch_name: branch.to_string(),
+            commit: commit.to_string(),
         })
     }
 }
@@ -423,12 +449,19 @@ pub fn reception_artifacts(reception: &PullRequestReception) -> (Value, Value) {
 /// The `pr_status` a task carries for a reception: merged once GitHub says so,
 /// closed when the pull request was shut without merging, otherwise still open.
 pub fn pr_status_from(reception: &PullRequestReception) -> &'static str {
-    if reception.merged_at.is_some() {
-        "merged"
-    } else if reception.state.as_deref() == Some("closed") {
-        "closed"
-    } else {
-        "open"
+    match (&reception.merged_at, reception.state) {
+        (Some(_), _) => "merged",
+        (None, Some(state)) => status(state),
+        (None, None) => "open",
+    }
+}
+
+/// The `pr_status` a pull request in `state` reads as before it merges: closed
+/// once it was shut, otherwise open.
+fn status(state: PullRequestState) -> &'static str {
+    match state {
+        PullRequestState::Closed => "closed",
+        _ => "open",
     }
 }
 
@@ -484,7 +517,12 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
         return ReceptionSyncResult::NoPullRequest;
     };
 
-    let service = PrService::configured(state.config().github_api_url.clone());
+    let service = match state.config().pull_requests() {
+        Ok(service) => service,
+        Err(error) => {
+            return ReceptionSyncResult::Error(format!("GitHub origin is misconfigured: {error}"));
+        }
+    };
     let reference = match service.pull_request(pr_url) {
         Ok(reference) => reference,
         Err(error) => {
@@ -547,20 +585,33 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
     else {
         return RepairOutcome::Failed("No GitHub repository configured".to_string());
     };
-    let access_token = &crate::crypto::open(state.encryption_key(), stored_token);
+    let access_token = SecretValue::new(crate::crypto::open(state.encryption_key(), stored_token));
 
-    let pr_service = PrService::configured(state.config().github_api_url.clone());
-    let (owner, repo) = match pr_service.parse_github_url(repo_url) {
+    let pull_requests = match state.config().pull_requests() {
+        Ok(service) => service,
+        Err(error) => {
+            return RepairOutcome::Failed(format!("GitHub origin is misconfigured: {error}"));
+        }
+    };
+    let parsed = pull_requests
+        .parse_github_url(repo_url)
+        .map_err(|error| error.to_string())
+        .and_then(|repository| {
+            RepositoryUrl::parse(repo_url)
+                .map(|remote| (repository, remote))
+                .map_err(|error| error.to_string())
+        });
+    let (repository, remote) = match parsed {
         Ok(parsed) => parsed,
-        Err(error) => return RepairOutcome::Failed(format!("Invalid GitHub URL: {}", error)),
+        Err(error) => return RepairOutcome::Failed(format!("Invalid GitHub URL: {error}")),
     };
 
-    if !conflicted(&pr_service, task.pr_url.as_deref(), access_token).await {
+    if !conflicted(&pull_requests, task.pr_url.as_deref(), &access_token).await {
         return RepairOutcome::NotConflicted;
     }
 
-    let base = match pr_service
-        .get_default_branch(&owner, &repo, access_token)
+    let base = match pull_requests
+        .get_default_branch(&repository, &access_token)
         .await
     {
         Ok(base) => base,
@@ -569,9 +620,8 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         }
     };
 
-    let (head, base) = match (BranchName::parse(branch_name), BranchName::parse(&base)) {
-        (Ok(head), Ok(base)) => (head, base),
-        _ => return RepairOutcome::Failed("Branch names are not repairable".to_string()),
+    let Ok(head) = BranchName::parse(branch_name) else {
+        return RepairOutcome::Failed("Branch names are not repairable".to_string());
     };
 
     let route = Route::for_workspace(state, task.workspace_id).await;
@@ -600,11 +650,11 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
     );
 
     let outcome = repair(
-        &ConflictService::new(),
+        &conflict::service(),
         &repairer,
         &RepairRequest {
-            remote: repo_url.clone(),
-            token: Some(access_token.clone()),
+            remote,
+            token: Some(access_token),
             head,
             base,
             expected_head: None,
@@ -654,7 +704,11 @@ async fn report_repair(state: &AppState, task_id: Uuid) {
 /// reproducing a merge. A branch GitHub has not finished checking answers no: a
 /// pull request opened seconds ago is not yet known to conflict, and repairing on
 /// a guess is how a repair ends up running against a tree nobody asked about.
-async fn conflicted(service: &PrService, pr_url: Option<&str>, access_token: &str) -> bool {
+async fn conflicted(
+    service: &PullRequestService,
+    pr_url: Option<&str>,
+    access_token: &SecretValue,
+) -> bool {
     let Some(pr_url) = pr_url else {
         return false;
     };
@@ -758,12 +812,15 @@ async fn repair_model(
 }
 
 /// The first linked project's repository token, opened from how it is stored.
-pub(crate) async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Option<String> {
+pub(crate) async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Option<SecretValue> {
     for project_id in &task.project_ids {
         if let Ok(Some(project)) = projects::get_project(state.db(), *project_id).await
             && let Some(token) = project.github_access_token
         {
-            return Some(crate::crypto::open(state.encryption_key(), &token));
+            return Some(SecretValue::new(crate::crypto::open(
+                state.encryption_key(),
+                &token,
+            )));
         }
     }
     None
@@ -771,13 +828,13 @@ pub(crate) async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Opt
 
 /// The commit a checkout is on, as a remote double reports having received it.
 #[cfg(test)]
-fn head(directory: &Path) -> String {
+fn head(worktree: &GitCheckout) -> CommitSha {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--verify", "HEAD^{commit}"])
-        .current_dir(directory)
+        .current_dir(worktree.top())
         .output()
         .expect("git runs");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    CommitSha::parse(&String::from_utf8_lossy(&output.stdout)).expect("HEAD is a commit")
 }
 
 #[cfg(test)]
@@ -1140,8 +1197,6 @@ mod tests {
             let path = checkout.path().to_path_buf();
             for arguments in [
                 vec!["init", "--quiet", "--initial-branch=main"],
-                vec!["config", "user.name", "Fixture"],
-                vec!["config", "user.email", "fixture@example.test"],
                 vec![
                     "remote",
                     "add",
@@ -1149,30 +1204,14 @@ mod tests {
                     "https://github.com/owner/repository.git",
                 ],
             ] {
-                assert!(
-                    std::process::Command::new("git")
-                        .args(arguments)
-                        .current_dir(&path)
-                        .output()
-                        .unwrap()
-                        .status
-                        .success()
-                );
+                fixture_git(&path, &arguments);
             }
             std::fs::write(path.join("sentinel"), "original").unwrap();
             for arguments in [
                 vec!["add", "sentinel"],
                 vec!["commit", "--quiet", "-m", "fixture"],
             ] {
-                assert!(
-                    std::process::Command::new("git")
-                        .args(arguments)
-                        .current_dir(&path)
-                        .output()
-                        .unwrap()
-                        .status
-                        .success()
-                );
+                fixture_git(&path, &arguments);
             }
             let execution = tasks::Execution {
                 task: task.id,
@@ -1184,8 +1223,8 @@ mod tests {
                 &pool,
                 &task,
                 execution,
-                &path,
-                "https://github.com/owner/repository.git".into(),
+                &GitCheckout::base(&path),
+                RepositoryUrl::parse("https://github.com/owner/repository.git").unwrap(),
             )
             .await
             .unwrap();
@@ -1221,19 +1260,40 @@ mod tests {
         }
     }
 
+    /// Git in a fixture repository, as a person commits there: under an
+    /// identity from the environment, since a checkout whose own
+    /// configuration names one is refused.
+    pub(super) fn fixture_git(directory: &std::path::Path, arguments: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .env("GIT_AUTHOR_NAME", "Fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.test")
+            .env("GIT_COMMITTER_NAME", "Fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.test")
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
     struct RecordingRemote(Arc<AtomicUsize>);
 
     #[async_trait::async_trait]
     impl Remote for RecordingRemote {
         async fn push(
             &self,
-            path: &Path,
-            _branch: &str,
-            _url: &str,
-            _token: &str,
-        ) -> Result<String, String> {
+            worktree: &GitCheckout,
+            _branch: &BranchName,
+            _url: &RepositoryUrl,
+            _token: &SecretValue,
+        ) -> GitResult<CommitSha> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(head(path))
+            Ok(head(worktree))
         }
     }
 
@@ -1267,20 +1327,18 @@ mod tests {
         });
         let state = fixture.state.clone();
         let execution = fixture.execution;
-        let path = fixture.path.clone();
         let baseline = fixture.baseline.clone();
         let remote = RecordingRemote(pushes.clone());
         let mut pipeline = tokio::spawn(async move {
-            let git = GitService::new();
+            let git = checkout::git();
             Publication {
                 state: &state,
                 execution,
-                path: &path,
                 baseline: Some(&baseline),
                 report: "Revoked mid-publication.",
                 git: &git,
                 remote: &remote,
-                service: PrService::standing_in_for("github.com", endpoint),
+                service: PullRequestService::standing_in_for("github.com", &endpoint).unwrap(),
             }
             .run()
             .await
@@ -1388,24 +1446,10 @@ mod tests {
 
 #[cfg(test)]
 mod publication_tests {
-    use super::tests::Fixture;
+    use super::tests::{Fixture, fixture_git as git};
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn git(directory: &Path, arguments: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .args(arguments)
-            .current_dir(directory)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    }
 
     struct LocalRemote(std::path::PathBuf);
 
@@ -1431,20 +1475,22 @@ mod publication_tests {
     impl Remote for LocalRemote {
         async fn push(
             &self,
-            directory: &Path,
-            branch: &str,
-            _url: &str,
-            _token: &str,
-        ) -> Result<String, String> {
+            worktree: &GitCheckout,
+            branch: &BranchName,
+            _url: &RepositoryUrl,
+            _token: &SecretValue,
+        ) -> GitResult<CommitSha> {
             let output = std::process::Command::new("git")
-                .args(["push", "--", self.0.to_str().unwrap(), branch])
-                .current_dir(directory)
+                .args(["push", "--", self.0.to_str().unwrap(), branch.as_str()])
+                .current_dir(worktree.top())
                 .output()
                 .unwrap();
             if output.status.success() {
-                Ok(head(directory))
+                Ok(head(worktree))
             } else {
-                Err("Git push rejected; remote work was not overwritten".to_string())
+                Err(GitError::CommandFailed(
+                    "Git push rejected; remote work was not overwritten".to_string(),
+                ))
             }
         }
     }
@@ -1483,19 +1529,18 @@ mod publication_tests {
 
     async fn publish(
         fixture: &Fixture,
-        remote: &LocalRemote,
+        remote: &dyn Remote,
         server: &MockServer,
     ) -> PrCreationResult {
-        let git = GitService::new();
+        let git = checkout::git();
         Publication {
             state: &fixture.state,
             execution: fixture.execution,
-            path: &fixture.path,
             baseline: Some(&fixture.baseline),
             report: REPORT,
             git: &git,
             remote,
-            service: PrService::standing_in_for("github.com", server.uri()),
+            service: PullRequestService::standing_in_for("github.com", &server.uri()).unwrap(),
         }
         .run()
         .await
@@ -1515,7 +1560,9 @@ mod publication_tests {
             matches!(result, PrCreationResult::Created { .. }),
             "{result:?}"
         );
-        let branch = GitService::new().generate_branch_name(fixture.execution.task, "Publication");
+        let branch = checkout::git()
+            .generate_branch_name(fixture.execution.task, "Publication")
+            .unwrap();
         assert_eq!(
             git(&remote.0, &["show", &format!("{branch}:sentinel")]),
             "changed"
@@ -1531,8 +1578,10 @@ mod publication_tests {
         let remote = LocalRemote::new(&fixture);
         let server = api(false).await;
         let result = publish(&fixture, &remote, &server).await;
-        let branch = GitService::new().generate_branch_name(fixture.execution.task, "Publication");
-        let message = git(&remote.0, &["log", "-1", "--format=%B", &branch]);
+        let branch = checkout::git()
+            .generate_branch_name(fixture.execution.task, "Publication")
+            .unwrap();
+        let message = git(&remote.0, &["log", "-1", "--format=%B", branch.as_str()]);
         fixture.cleanup().await;
 
         assert!(
@@ -1552,6 +1601,135 @@ mod publication_tests {
         );
     }
 
+    /// A run's tools write the configuration of the repository they work
+    /// in: husky's `npm install` sets `core.hooksPath`, `git submodule
+    /// update` adds `submodule.*`, an agent sets `user.email`. The host's git
+    /// refuses such a repository, so publication puts the configuration back
+    /// to what Zone knows first: the run still publishes. The crate already
+    /// pins every hooks path it runs git with, so the sentinel only confirms
+    /// that; the publication succeeding is what this test turns on.
+    #[tokio::test]
+    async fn publication_survives_a_run_that_wrote_the_repository_configuration() {
+        let fixture = Fixture::new().await;
+        let remote = LocalRemote::new(&fixture);
+        let server = api(false).await;
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = outside.path().join("hook-ran");
+        let hooks = outside.path().join("hooks");
+        std::fs::create_dir(&hooks).unwrap();
+        for hook in [
+            "pre-commit",
+            "commit-msg",
+            "post-commit",
+            "reference-transaction",
+            "pre-push",
+        ] {
+            let script = hooks.join(hook);
+            std::fs::write(
+                &script,
+                format!("#!/bin/sh\ntouch '{}'\n", sentinel.display()),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        git(
+            &fixture.path,
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+        );
+        git(
+            &fixture.path,
+            &[
+                "config",
+                "submodule.vendor.url",
+                "https://github.com/owner/vendor.git",
+            ],
+        );
+        git(
+            &fixture.path,
+            &["config", "user.email", "agent@example.test"],
+        );
+
+        let result = publish(&fixture, &remote, &server).await;
+        let configured = std::fs::read_to_string(fixture.path.join(".git").join("config")).unwrap();
+        fixture.cleanup().await;
+
+        assert!(
+            matches!(result, PrCreationResult::Created { .. }),
+            "{result:?}"
+        );
+        assert!(
+            !sentinel.exists(),
+            "a hook the run installed ran on the host"
+        );
+        assert!(!configured.contains("hooksPath"), "{configured}");
+        assert!(!configured.contains("submodule"), "{configured}");
+        assert!(!configured.contains("agent@example.test"), "{configured}");
+    }
+
+    /// A sibling run of the same repository writing the base's shared
+    /// configuration while this one publishes: on the first push it plants a
+    /// hooks path, then pushes through the host's own git, which refuses a
+    /// repository configured beyond a clone.
+    struct SiblingWritesBeforePush {
+        remote: LocalRemote,
+        planted: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Remote for SiblingWritesBeforePush {
+        async fn push(
+            &self,
+            worktree: &GitCheckout,
+            branch: &BranchName,
+            _url: &RepositoryUrl,
+            token: &SecretValue,
+        ) -> GitResult<CommitSha> {
+            if !self.planted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                git(worktree.repository(), &["config", "core.hooksPath", "/tmp"]);
+            }
+            let local = RepositoryUrl::local(&self.remote.0).expect("a local remote");
+            checkout::git()
+                .push_with_token(worktree, branch, &local, token)
+                .await
+        }
+    }
+
+    /// Publication restores the configuration once before it starts, but a
+    /// sibling run can write it again at any step; each step that meets the
+    /// refusal restores it and runs again.
+    #[tokio::test]
+    async fn publication_restores_a_configuration_a_sibling_run_wrote_mid_publication() {
+        let fixture = Fixture::new().await;
+        let remote = SiblingWritesBeforePush {
+            remote: LocalRemote::new(&fixture),
+            planted: std::sync::atomic::AtomicBool::new(false),
+        };
+        let server = api(false).await;
+
+        let result = publish(&fixture, &remote, &server).await;
+        let configured = std::fs::read_to_string(fixture.path.join(".git").join("config")).unwrap();
+        let branch = checkout::git()
+            .generate_branch_name(fixture.execution.task, "Publication")
+            .unwrap();
+        let pushed = git(&remote.remote.0, &["show", &format!("{branch}:sentinel")]);
+        fixture.cleanup().await;
+
+        assert!(
+            matches!(result, PrCreationResult::Created { .. }),
+            "{result:?}"
+        );
+        assert!(
+            remote.planted.load(std::sync::atomic::Ordering::SeqCst),
+            "the sibling never wrote the configuration"
+        );
+        assert!(!configured.contains("hooksPath"), "{configured}");
+        assert_eq!(pushed, "changed");
+    }
+
     #[tokio::test]
     async fn publication_updates_existing_pr_before_returning() {
         let fixture = Fixture::new().await;
@@ -1563,7 +1741,9 @@ mod publication_tests {
             matches!(result, PrCreationResult::PrAlreadyExists { .. }),
             "{result:?}"
         );
-        let branch = GitService::new().generate_branch_name(fixture.execution.task, "Publication");
+        let branch = checkout::git()
+            .generate_branch_name(fixture.execution.task, "Publication")
+            .unwrap();
         assert_eq!(
             git(&remote.0, &["show", &format!("{branch}:sentinel")]),
             "changed"
@@ -1584,16 +1764,15 @@ mod publication_tests {
         let remote = LocalRemote::new(&fixture);
         let server = api(false).await;
         sqlx::query("UPDATE projects SET github_repo_url=NULL, github_access_token=NULL WHERE workspace_id=$1").bind(fixture.workspace).execute(fixture.state.db()).await.unwrap();
-        let git = GitService::new();
+        let git = checkout::git();
         let result = Publication {
             state: &fixture.state,
             execution: fixture.execution,
-            path: &fixture.path,
             baseline: None,
             report: REPORT,
             git: &git,
             remote: &remote,
-            service: PrService::standing_in_for("github.com", server.uri()),
+            service: PullRequestService::standing_in_for("github.com", &server.uri()).unwrap(),
         }
         .run()
         .await
@@ -1731,8 +1910,8 @@ mod publication_tests {
             fixture.state.db(),
             &task,
             fixture.execution,
-            &fixture.path,
-            "https://github.com/owner/repository.git".into(),
+            &GitCheckout::base(&fixture.path),
+            RepositoryUrl::parse("https://github.com/owner/repository.git").unwrap(),
         )
         .await
         .unwrap();
@@ -1792,8 +1971,9 @@ mod publication_tests {
             "{result:?}"
         );
         if matches!(result, PrCreationResult::Created { .. }) {
-            let branch =
-                GitService::new().generate_branch_name(fixture.execution.task, "Publication");
+            let branch = checkout::git()
+                .generate_branch_name(fixture.execution.task, "Publication")
+                .unwrap();
             assert_eq!(
                 git(&remote.0, &["show", &format!("{branch}:sentinel")]),
                 "changed"
@@ -1808,7 +1988,12 @@ mod publication_tests {
         git(&fixture.path, &["add", "."]);
         git(&fixture.path, &["commit", "-m", "pushed before crash"]);
         remote
-            .push(&fixture.path, &fixture.baseline.branch, "", "")
+            .push(
+                &GitCheckout::base(&fixture.path),
+                &fixture.baseline.branch,
+                &fixture.baseline.repository,
+                &SecretValue::new(""),
+            )
             .await
             .unwrap();
         std::fs::remove_dir_all(&fixture.path).unwrap();
@@ -1838,8 +2023,8 @@ mod publication_tests {
             fixture.state.db(),
             &task,
             fixture.execution,
-            &fixture.path,
-            "https://github.com/owner/repository.git".into(),
+            &GitCheckout::base(&fixture.path),
+            RepositoryUrl::parse("https://github.com/owner/repository.git").unwrap(),
         )
         .await
         .unwrap();
@@ -1928,7 +2113,10 @@ mod publication_tests {
         git(&fixture.path, &["checkout", "--orphan", "forged-history"]);
         git(&fixture.path, &["add", "."]);
         git(&fixture.path, &["commit", "-m", "unrelated history"]);
-        git(&fixture.path, &["branch", "-M", &fixture.baseline.branch]);
+        git(
+            &fixture.path,
+            &["branch", "-M", fixture.baseline.branch.as_str()],
+        );
         let head = git(&fixture.path, &["rev-parse", "HEAD"]);
         if legacy {
             std::fs::write(
@@ -1939,7 +2127,12 @@ mod publication_tests {
         } else {
             git(
                 &fixture.path,
-                &["replace", "--graft", "HEAD", &fixture.baseline.commit],
+                &[
+                    "replace",
+                    "--graft",
+                    "HEAD",
+                    fixture.baseline.commit.as_str(),
+                ],
             );
         }
         let actual = std::process::Command::new("git")
@@ -1947,7 +2140,7 @@ mod publication_tests {
                 "--no-replace-objects",
                 "merge-base",
                 "--is-ancestor",
-                &fixture.baseline.commit,
+                fixture.baseline.commit.as_str(),
                 "HEAD",
             ])
             .env("GIT_GRAFT_FILE", "/dev/null")
@@ -2028,7 +2221,10 @@ mod publication_tests {
                     git(&fixture.path, &["checkout", "--orphan", "replacement"]);
                     git(&fixture.path, &["add", "."]);
                     git(&fixture.path, &["commit", "-m", "rewritten history"]);
-                    git(&fixture.path, &["branch", "-M", &fixture.baseline.branch]);
+                    git(
+                        &fixture.path,
+                        &["branch", "-M", fixture.baseline.branch.as_str()],
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -2120,7 +2316,9 @@ mod publication_tests {
         let fixture = Fixture::new().await;
         let remote = LocalRemote::new(&fixture);
         let server = api(false).await;
-        let branch = GitService::new().generate_branch_name(fixture.execution.task, "Publication");
+        let branch = checkout::git()
+            .generate_branch_name(fixture.execution.task, "Publication")
+            .unwrap();
         let baseline = git(&fixture.path, &["rev-parse", "HEAD"]);
         std::fs::write(fixture.path.join("remote-work"), "preserve").unwrap();
         git(&fixture.path, &["add", "remote-work"]);
@@ -2158,7 +2356,7 @@ mod publication_tests {
         fixture.cleanup().await;
         drop(fixture);
         assert!(!directory.exists(), "rejected publication checkout leaked");
-        assert_eq!(git(&remote.0, &["rev-parse", &branch]), moved);
+        assert_eq!(git(&remote.0, &["rev-parse", branch.as_str()]), moved);
         assert_eq!(run.status, "failed");
         assert_eq!(task.status, "blocked");
         assert!(run.error_message.unwrap().contains("push rejected"));
@@ -2197,18 +2395,18 @@ mod reception_tests {
     }
 
     fn reception() -> PullRequestReception {
-        PullRequestReception {
-            opened_at: Some("2026-09-04T09:00:00Z".to_string()),
-            merged_at: Some("2026-09-04T11:00:00Z".to_string()),
-            minutes_to_merge: Some(120),
-            review_cycles: 1,
-            approvals: 2,
-            state: Some("closed".to_string()),
-            comments: vec![
-                "needs a regression test".to_string(),
-                "rename this".to_string(),
-            ],
-        }
+        let mut reception = PullRequestReception::default();
+        reception.opened_at = Some("2026-09-04T09:00:00Z".to_string());
+        reception.merged_at = Some("2026-09-04T11:00:00Z".to_string());
+        reception.minutes_to_merge = Some(120);
+        reception.review_cycles = 1;
+        reception.approvals = 2;
+        reception.state = Some(PullRequestState::Closed);
+        reception.comments = vec![
+            "needs a regression test".to_string(),
+            "rename this".to_string(),
+        ];
+        reception
     }
 
     #[test]
@@ -2224,7 +2422,7 @@ mod reception_tests {
         assert_eq!(pr_status_from(&shut), "closed");
 
         let mut open = shut.clone();
-        open.state = Some("open".to_string());
+        open.state = Some(PullRequestState::Open);
         assert_eq!(pr_status_from(&open), "open");
 
         let mut unknown = shut;
@@ -2315,11 +2513,9 @@ mod reception_tests {
 
     #[test]
     fn an_unmerged_pull_request_records_no_merge_time_at_all() {
-        let open = PullRequestReception {
-            opened_at: Some("2026-09-04T09:00:00Z".to_string()),
-            state: Some("open".to_string()),
-            ..PullRequestReception::default()
-        };
+        let mut open = PullRequestReception::default();
+        open.opened_at = Some("2026-09-04T09:00:00Z".to_string());
+        open.state = Some(PullRequestState::Open);
 
         let artifacts = merged(json!({}), &open);
         assert!(artifacts["pr"].get("merged_at").is_none());

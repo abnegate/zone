@@ -1791,6 +1791,20 @@ Inside Docker the manager image does not include magents. Install it on the host
 
 ---
 
+## 🐙 GitHub
+
+Publication, pull-request sync, conflict repair, auto-project reviews and merges, and the planner's repository creation all reach GitHub through one origin.
+
+### `GITHUB_API_URL`
+- **Default**: `https://api.github.com`
+- **Description**: The GitHub REST origin. Set it for GitHub Enterprise Server, e.g. `https://github.example.com/api/v3`. It must be an absolute URL with a host and no credentials, query or fragment. The origin answers only for repositories on the host it names, so pointing it elsewhere does not send a github.com repository's token there.
+
+### `GITHUB_API_ALLOW_HTTP`
+- **Default**: `false`
+- **Description**: Accept a plain `http://` `GITHUB_API_URL`, such as a loopback or LAN host you run. The repository token then crosses the network unencrypted, so an `http://` origin is refused at startup unless this is `true`. Once it is, repository and pull request links on that origin's host may use `http://` too.
+
+---
+
 ## 🤖 Auto projects
 
 An auto project runs itself: every agentic task in it is executed unattended, its pull request waits for checks, is reviewed by a model other than the one that wrote it and by the review bots already installed on the repository (CodeRabbit, Greptile), is fixed until nothing raised is left open, is merged — with administrator privileges when branch protection would otherwise refuse — and is reported with a high-level and a low-level summary. Start one from **Projects → Auto project**, which opens a planner chat that interviews you and creates the project and its tasks, or turn **Auto** on for an existing project. All settings are optional.

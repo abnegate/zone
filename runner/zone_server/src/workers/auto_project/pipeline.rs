@@ -7,13 +7,15 @@
 
 use std::collections::HashSet;
 
+use abnegate_secret::SecretValue;
+use abnegate_vcs::{
+    ChecksOutcome, CommitSha, ConflictError, ConflictRequest, MergeMethod, MergeableState,
+    MergedPullRequest, PullRequestDetail, PullRequestError, PullRequestReference,
+    PullRequestService, PullRequestState, RepositoryUrl, ReviewEvent, ReviewRecord,
+    ReviewThreadRecord,
+};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use zone_vcs::conflict::{BranchName, ConflictError, ConflictRequest};
-use zone_vcs::pull_request::{
-    ChecksOutcome, MergeMethod, MergedPr, PrError, PrService, PullRequestDetail,
-    PullRequestReference, ReviewEvent, SubmittedReviewRecord,
-};
 
 use crate::agent::readiness::SignalKind;
 use crate::db::auto_projects::{
@@ -61,7 +63,7 @@ struct Step<'a> {
     task: &'a TaskAutomation,
     row: TaskRow,
     reference: PullRequestReference,
-    token: String,
+    token: SecretValue,
     pr_url: String,
 }
 
@@ -194,7 +196,7 @@ async fn settled_elsewhere(step: &Step<'_>, pull: &PullRequestDetail) -> Result<
             .await
             .map_err(|error| error.to_string())?;
         if let Some(sha) = &pull.merge_commit_sha {
-            auto_projects::set_merge_sha(pool, step.task.task_id, sha)
+            auto_projects::set_merge_sha(pool, step.task.task_id, sha.as_str())
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -202,7 +204,7 @@ async fn settled_elsewhere(step: &Step<'_>, pull: &PullRequestDetail) -> Result<
             .await?;
         return Ok(true);
     }
-    if pull.state == "closed" {
+    if pull.state == PullRequestState::Closed {
         tasks::mark_pr_status(pool, step.task.task_id, "closed")
             .await
             .map_err(|error| error.to_string())?;
@@ -227,9 +229,15 @@ async fn awaiting_checks(step: &Step<'_>) -> Result<(), String> {
         match repair_conflicts_for_task(step.drive.state, step.task.task_id).await {
             RepairOutcome::Repaired { commit, .. } => {
                 tracing::info!(task_id = %step.task.task_id, %commit, "Repaired a conflict; re-reading the head");
-                auto_projects::set_head(pool, step.task.task_id, &head, Some("conflicted"), true)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                auto_projects::set_head(
+                    pool,
+                    step.task.task_id,
+                    head.as_str(),
+                    Some("conflicted"),
+                    true,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
                 return Ok(());
             }
             RepairOutcome::NotConflicted => {}
@@ -246,17 +254,18 @@ async fn awaiting_checks(step: &Step<'_>) -> Result<(), String> {
         .drive
         .services
         .pr
-        .fetch_checks(
-            &step.reference.owner,
-            &step.reference.repository,
-            &head,
-            &step.token,
-        )
+        .fetch_checks(step.reference.repository(), &step.token, &head)
         .await
         .map_err(|error| error.to_string())?;
-    auto_projects::set_head(pool, step.task.task_id, &head, Some(checks.label()), fresh)
-        .await
-        .map_err(|error| error.to_string())?;
+    auto_projects::set_head(
+        pool,
+        step.task.task_id,
+        head.as_str(),
+        Some(checks.label()),
+        fresh,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let elapsed = if fresh {
         0
     } else {
@@ -275,7 +284,7 @@ async fn awaiting_checks(step: &Step<'_>) -> Result<(), String> {
             if elapsed >= i64::try_from(config.checks_timeout_secs).unwrap_or(i64::MAX) {
                 step.pause(&format!(
                     "checks on {} were still pending after {} seconds",
-                    short(&head),
+                    short(head.as_str()),
                     config.checks_timeout_secs
                 ))
                 .await
@@ -290,7 +299,7 @@ async fn awaiting_checks(step: &Step<'_>) -> Result<(), String> {
                 Some(&format!(
                     "checks failed on {}: {}. Read the failing job, fix the cause on this branch, \
                      and make the checks pass.",
-                    short(&head),
+                    short(head.as_str()),
                     names.join(", ")
                 )),
             )
@@ -303,6 +312,10 @@ async fn awaiting_checks(step: &Step<'_>) -> Result<(), String> {
                     .await;
             }
             absent_checks(step, &pull).await
+        }
+        _ => {
+            step.set(Stage::AwaitingChecks, Some("waiting for checks"))
+                .await
         }
     }
 }
@@ -397,36 +410,38 @@ async fn refresh_from_base(
     purpose: Refresh,
 ) -> Result<(), String> {
     let pool = step.drive.state.db();
-    let Some(remote) = step.drive.project.repository_url.clone() else {
+    let Some(remote) = step.drive.project.repository_url.as_deref() else {
         return step
             .pause("the project has no repository URL to refresh from")
             .await;
     };
-    let head = BranchName::parse(&pull.head_ref).map_err(|error| error.to_string())?;
-    let base = BranchName::parse(&pull.base_ref).map_err(|error| error.to_string())?;
-    let request = ConflictRequest {
-        remote,
-        token: Some(step.token.clone()),
-        head: head.clone(),
-        base,
-        expected_head: None,
-        expected_base: None,
+    let remote = match RepositoryUrl::parse(remote) {
+        Ok(remote) => remote,
+        Err(error) => {
+            return step
+                .pause(&format!(
+                    "the project's repository URL cannot be refreshed from: {error}"
+                ))
+                .await;
+        }
     };
+    let request = ConflictRequest::new(remote, pull.head.clone(), pull.base.clone())
+        .with_token(step.token.clone());
     let message = match purpose {
         Refresh::Workflows => format!(
             "Merge {} into {} to pick up its workflows",
-            pull.base_ref, pull.head_ref
+            pull.base, pull.head
         ),
         Refresh::Behind => format!(
             "Merge {} into {} to bring it up to date before merging",
-            pull.base_ref, pull.head_ref
+            pull.base, pull.head
         ),
     };
     match step
         .drive
         .services
         .conflicts
-        .refresh(&request, &head, &message)
+        .refresh(&request, &message)
         .await
     {
         Ok(refreshed) if refreshed.pushed => {
@@ -519,7 +534,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             )
             .await;
     }
-    let head = pull.head_sha.clone();
+    let head = pull.head_sha.to_string();
     let mut rows = auto_projects::reviews(pool, step.task.task_id)
         .await
         .map_err(|error| error.to_string())?;
@@ -616,7 +631,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
         if !asked {
             for kind in &waiting {
                 if let Err(error) = pr
-                    .post_issue_comment(&step.reference, kind.trigger_command(), &step.token)
+                    .post_issue_comment(&step.reference, &step.token, kind.trigger_command())
                     .await
                 {
                     tracing::warn!(task_id = %step.task.task_id, %error, "Could not ask a review bot to review");
@@ -711,7 +726,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 task: &step.row,
                 brief: step.drive.project.brief.as_ref(),
                 pull: &pull,
-                diff,
+                diff: diff.to_string(),
                 files,
                 open: &open,
                 prior: &rows,
@@ -733,7 +748,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                     .submit_review(
                         &step.reference,
                         &step.token,
-                        &head,
+                        &pull.head_sha,
                         ReviewEvent::Comment,
                         &body,
                     )
@@ -856,11 +871,11 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
 /// The reviews submitted on the pull request, read only when an `expected`
 /// bot can score in one. A failed read counts as none, as the changed files do.
 async fn submitted_reviews(
-    pr: &PrService,
+    pr: &PullRequestService,
     reference: &PullRequestReference,
-    token: &str,
+    token: &SecretValue,
     expected: &[SignalKind],
-) -> Vec<SubmittedReviewRecord> {
+) -> Vec<ReviewRecord> {
     if !expected.iter().any(|kind| kind.scores_in_reviews()) {
         return Vec::new();
     }
@@ -868,9 +883,8 @@ async fn submitted_reviews(
         .await
         .unwrap_or_else(|error| {
             tracing::warn!(
-                owner = %reference.owner,
-                repository = %reference.repository,
-                number = reference.number,
+                repository = %reference.repository(),
+                number = reference.number(),
                 %error,
                 "Could not read the pull request's reviews; reading bot scores from summaries alone"
             );
@@ -895,7 +909,7 @@ async fn answer_bot_threads(
     step: &Step<'_>,
     open: &[Finding],
     addressed: &[String],
-    threads: &[zone_vcs::pull_request::ReviewThreadRecord],
+    threads: &[ReviewThreadRecord],
     head: &str,
 ) {
     let pr = &step.drive.services.pr;
@@ -914,12 +928,12 @@ async fn answer_bot_threads(
             && let Err(error) = pr
                 .reply_to_review_comment(
                     &step.reference,
+                    &step.token,
                     comment,
                     &format!(
                         "Addressed in {} (verified by Zone's reviewer).",
                         short(head)
                     ),
-                    &step.token,
                 )
                 .await
         {
@@ -1216,7 +1230,7 @@ async fn merging(step: &Step<'_>) -> Result<(), String> {
             )
             .await;
     }
-    if pull.mergeable_state.as_deref() == Some("behind") {
+    if pull.mergeable_state == MergeableState::Behind {
         // A repository that requires branches to be up to date refuses a
         // merge behind the base; refreshing gives a new head, which is
         // checked and reviewed again before it is merged.
@@ -1250,18 +1264,18 @@ async fn merging(step: &Step<'_>) -> Result<(), String> {
         .await
     {
         Ok(merged) => finish_merged(step, &pull, merged, &rows, high_level).await,
-        Err(PrError::HeadMoved) => {
+        Err(PullRequestError::HeadMoved) => {
             step.set(Stage::AwaitingChecks, Some("the head moved during the merge"))
                 .await
         }
-        Err(PrError::Protected(reason)) => {
+        Err(PullRequestError::Protected(reason)) => {
             step.pause(&format!(
                 "branch protection refused the merge and the project token cannot bypass it: {reason}. \
                  Grant the token administrator access, relax the rule, or merge by hand."
             ))
             .await
         }
-        Err(PrError::NotMergeable(reason)) => {
+        Err(PullRequestError::NotMergeable(reason)) => {
             if pull.mergeable.conflicted() {
                 return step
                     .set(Stage::AwaitingChecks, Some("the branch conflicts; repairing"))
@@ -1272,7 +1286,7 @@ async fn merging(step: &Step<'_>) -> Result<(), String> {
         }
         // A revoked or under-scoped token fails the same way every tick; a
         // person has to relink the repository, so stop asking.
-        Err(PrError::AuthFailed) => {
+        Err(PullRequestError::AuthenticationFailed | PullRequestError::Forbidden) => {
             step.pause(
                 "GitHub no longer accepts the project token for this pull request; relink the \
                  repository with a token that can merge it",
@@ -1303,7 +1317,7 @@ fn reviewer_names(rows: &[ReviewRow]) -> Vec<String> {
 async fn finish_merged(
     step: &Step<'_>,
     pull: &PullRequestDetail,
-    merged: MergedPr,
+    merged: MergedPullRequest,
     rows: &[ReviewRow],
     high_level: String,
 ) -> Result<(), String> {
@@ -1312,12 +1326,7 @@ async fn finish_merged(
     let pr = &step.drive.services.pr;
     if config.delete_branch
         && let Err(error) = pr
-            .delete_branch(
-                &step.reference.owner,
-                &step.reference.repository,
-                &pull.head_ref,
-                &step.token,
-            )
+            .delete_branch(step.reference.repository(), &step.token, &pull.head)
             .await
     {
         tracing::warn!(task_id = %step.task.task_id, %error, "Could not delete the merged branch");
@@ -1328,9 +1337,15 @@ async fn finish_merged(
     if !completed {
         tracing::warn!(task_id = %step.task.task_id, "The pull request merged but the task could not be marked complete: a run is active or its pull request changed");
     }
-    auto_projects::set_merge_sha(pool, step.task.task_id, &merged.sha)
-        .await
-        .map_err(|error| error.to_string())?;
+    let sha = merge_commit(pr, &step.reference, &step.token, &merged).await;
+    match &sha {
+        Some(sha) => auto_projects::set_merge_sha(pool, step.task.task_id, sha.as_str())
+            .await
+            .map_err(|error| error.to_string())?,
+        None => {
+            tracing::warn!(task_id = %step.task.task_id, "The pull request merged but no merge commit was read; post-merge asks again")
+        }
+    }
     if let Some(run) = step.task.last_run_id {
         let state = step.drive.state.clone();
         let task_id = step.task.task_id;
@@ -1386,17 +1401,19 @@ async fn finish_merged(
             Some(other) => other.to_string(),
             None => "not recorded".to_string(),
         },
-        admin_merge: merged.admin,
-        merge_sha: merged.sha.clone(),
+        admin_merge: merged.administrator,
+        merge_sha: sha.as_ref().map(ToString::to_string),
         post_merge: None,
     };
     step.drive
         .notify("merged", notification::merged(&report))
         .await;
-    tracing::info!(task_id = %step.task.task_id, sha = %merged.sha, admin = merged.admin, "Auto project merged a pull request");
-    auto_projects::set_head(pool, step.task.task_id, &merged.sha, Some("pending"), true)
-        .await
-        .map_err(|error| error.to_string())?;
+    tracing::info!(task_id = %step.task.task_id, sha = ?sha, admin = merged.administrator, "Auto project merged a pull request");
+    if let Some(sha) = &sha {
+        auto_projects::set_head(pool, step.task.task_id, sha.as_str(), Some("pending"), true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     let note = (!completed).then_some(
         "merged, but the task could not be marked complete: a run is active or its pull request \
          changed; mark it complete by hand",
@@ -1404,11 +1421,62 @@ async fn finish_merged(
     step.set(Stage::PostMerge, note).await
 }
 
+/// The commit a merge made: the one GitHub answered the merge with, or, when
+/// its answer named none, the one the merged pull request reads back with.
+async fn merge_commit(
+    pr: &PullRequestService,
+    reference: &PullRequestReference,
+    token: &SecretValue,
+    merged: &MergedPullRequest,
+) -> Option<CommitSha> {
+    if let Some(sha) = &merged.sha {
+        return Some(sha.clone());
+    }
+    match pr.fetch_pull(reference, token).await {
+        Ok(pull) => pull.merge_commit_sha,
+        Err(error) => {
+            tracing::warn!(%error, "Could not read back the merged pull request's merge commit");
+            None
+        }
+    }
+}
+
+/// Read back the commit a merge made when none was recorded at the merge:
+/// a read that fails is an error the next tick retries, and only a merged
+/// pull request GitHub answers without a commit settles the task unwatched.
+async fn read_merge_commit(step: &Step<'_>) -> Result<(), String> {
+    let pool = step.drive.state.db();
+    let pull = step
+        .drive
+        .services
+        .pr
+        .fetch_pull(&step.reference, &step.token)
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(sha) = pull.merge_commit_sha else {
+        return step
+            .set(Stage::Merged, Some("post-merge: no merge commit recorded"))
+            .await;
+    };
+    auto_projects::set_merge_sha(pool, step.task.task_id, sha.as_str())
+        .await
+        .map_err(|error| error.to_string())?;
+    auto_projects::set_head(pool, step.task.task_id, sha.as_str(), Some("pending"), true)
+        .await
+        .map_err(|error| error.to_string())?;
+    step.set(Stage::PostMerge, Some("waiting for post-merge jobs"))
+        .await
+}
+
 /// Watch the jobs the merge triggered and file a fix task when one fails.
 async fn post_merge(step: &Step<'_>) -> Result<(), String> {
     let pool = step.drive.state.db();
     let config = step.drive.config;
-    let Some(sha) = step.task.merge_sha.clone() else {
+    let sha = match step.task.merge_sha.as_deref() {
+        None => return read_merge_commit(step).await,
+        Some(sha) => CommitSha::parse(sha).ok(),
+    };
+    let Some(sha) = sha else {
         return step
             .set(Stage::Merged, Some("post-merge: no merge commit recorded"))
             .await;
@@ -1422,12 +1490,7 @@ async fn post_merge(step: &Step<'_>) -> Result<(), String> {
         .drive
         .services
         .pr
-        .fetch_checks(
-            &step.reference.owner,
-            &step.reference.repository,
-            &sha,
-            &step.token,
-        )
+        .fetch_checks(step.reference.repository(), &step.token, &sha)
         .await
         .map_err(|error| error.to_string())?;
     let elapsed = step.seconds_since_checks();
@@ -1476,7 +1539,7 @@ async fn post_merge(step: &Step<'_>) -> Result<(), String> {
                      Read the failing job logs, fix the cause, and make the jobs pass again. Do not \
                      revert the merged change unless nothing else can make the jobs pass.",
                     step.pr_url,
-                    short(&sha),
+                    short(sha.as_str()),
                     names.join(", ")
                 );
                 step.drive
@@ -1507,6 +1570,10 @@ async fn post_merge(step: &Step<'_>) -> Result<(), String> {
                 )
                 .await
             }
+        }
+        _ => {
+            step.set(Stage::PostMerge, Some("waiting for post-merge jobs"))
+                .await
         }
     }
 }
@@ -1941,11 +2008,14 @@ mod tests {
     }
 
     fn reference() -> PullRequestReference {
-        PullRequestReference {
-            owner: "acme".into(),
-            repository: "shop".into(),
-            number: 7,
-        }
+        PullRequestService::new()
+            .expect("GitHub's own origin")
+            .pull_request("https://github.com/acme/shop/pull/7")
+            .expect("a pull request URL")
+    }
+
+    fn token() -> SecretValue {
+        SecretValue::new("token")
     }
 
     async fn github(status: u16) -> wiremock::MockServer {
@@ -1972,11 +2042,12 @@ mod tests {
     #[tokio::test]
     async fn reviews_are_read_only_when_an_expected_bot_scores_in_them() {
         let server = github(200).await;
-        let pr = PrService::standing_in_for("github.com", server.uri());
+        let pr = PullRequestService::standing_in_for("github.com", &server.uri())
+            .expect("a stand-in for GitHub");
 
         for expected in [&[][..], &[SignalKind::Greptile][..]] {
             assert!(
-                submitted_reviews(&pr, &reference(), "token", expected)
+                submitted_reviews(&pr, &reference(), &token(), expected)
                     .await
                     .is_empty()
             );
@@ -1990,7 +2061,7 @@ mod tests {
         submitted_reviews(
             &pr,
             &reference(),
-            "token",
+            &token(),
             &[SignalKind::Greptile, SignalKind::CodeRabbit],
         )
         .await;
@@ -2001,13 +2072,416 @@ mod tests {
     async fn a_refused_read_of_the_reviews_counts_as_none_rather_than_failing_the_tick() {
         for status in [403, 429, 502] {
             let server = github(status).await;
-            let pr = PrService::standing_in_for("github.com", server.uri());
+            let pr = PullRequestService::standing_in_for("github.com", &server.uri())
+                .expect("a stand-in for GitHub");
 
             let reviews =
-                submitted_reviews(&pr, &reference(), "token", &[SignalKind::CodeRabbit]).await;
+                submitted_reviews(&pr, &reference(), &token(), &[SignalKind::CodeRabbit]).await;
 
             assert!(reviews.is_empty(), "{status}");
             assert!(requests(&server).await >= 1, "{status}");
         }
+    }
+
+    fn commit(seed: char) -> CommitSha {
+        CommitSha::parse(&seed.to_string().repeat(40)).expect("a commit")
+    }
+
+    /// GitHub's answer to a merge does not always name the commit it made, and
+    /// without one the post-merge jobs on the base are never watched: the
+    /// merged pull request is read back for it instead.
+    #[tokio::test]
+    async fn a_merge_answered_without_its_commit_reads_it_back_from_the_pull_request() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_id": "PR_7",
+                "number": 7,
+                "title": "Add a cart",
+                "state": "closed",
+                "head": {"ref": "zone/task-1a2b3c4d-add-a-cart", "sha": commit('a').as_str()},
+                "base": {"ref": "main", "sha": commit('b').as_str()},
+                "html_url": "https://github.com/acme/shop/pull/7",
+                "merged": true,
+                "merge_commit_sha": commit('c').as_str(),
+            })))
+            .mount(&server)
+            .await;
+        let pr = PullRequestService::standing_in_for("github.com", &server.uri())
+            .expect("a stand-in for GitHub");
+
+        assert_eq!(
+            merge_commit(
+                &pr,
+                &reference(),
+                &token(),
+                &MergedPullRequest::new(Some(commit('d')), false)
+            )
+            .await,
+            Some(commit('d')),
+            "the commit the merge answered with is the one recorded"
+        );
+        assert_eq!(requests(&server).await, 0);
+
+        assert_eq!(
+            merge_commit(
+                &pr,
+                &reference(),
+                &token(),
+                &MergedPullRequest::new(None, true)
+            )
+            .await,
+            Some(commit('c')),
+            "a merge answered without its commit falls back to the pull request's"
+        );
+        assert_eq!(requests(&server).await, 1);
+    }
+
+    /// A task of an auto project, its pull request merged and the project's
+    /// token on file, driven against a stand-in for GitHub.
+    struct Merged {
+        state: crate::state::AppState,
+        services: super::super::Services,
+        config: crate::config::AutoProjectConfig,
+        project: crate::db::auto_projects::ProjectAutomation,
+        workspace: Uuid,
+        actor: Uuid,
+        organization: Uuid,
+        task: Uuid,
+    }
+
+    impl Merged {
+        async fn new(server: &wiremock::MockServer) -> Self {
+            use crate::db::auto_projects::{PlannedRepository, PlannedTask, ProjectPlan};
+            use crate::db::{organizations, users, workspace_members, workspaces};
+
+            let pool = sqlx::PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .expect("the test database");
+            let suffix = Uuid::new_v4().simple().to_string();
+            let organization = organizations::create_organization(&pool, "Merged", &suffix, None)
+                .await
+                .expect("an organization");
+            let workspace =
+                workspaces::create_workspace(&pool, organization.id, "Merged", &suffix, None)
+                    .await
+                    .expect("a workspace");
+            let user = users::create_user(
+                &pool,
+                &format!("{suffix}@example.test"),
+                "unused",
+                Some("Actor"),
+                false,
+            )
+            .await
+            .expect("a user");
+            workspace_members::add_member(
+                &pool,
+                workspace.id,
+                user.id,
+                workspace_members::WorkspaceRole::Member,
+                None,
+            )
+            .await
+            .expect("a membership");
+            let finalized = auto_projects::finalize(
+                &pool,
+                workspace.id,
+                user.id,
+                None,
+                &ProjectPlan {
+                    name: "Shop",
+                    description: None,
+                    repository: Some(PlannedRepository {
+                        url: "https://github.com/acme/shop",
+                        token: Some("token"),
+                    }),
+                    brief: &json!({}),
+                    tasks: &[PlannedTask {
+                        kind: Kind::Feature,
+                        title: "Add a cart".into(),
+                        description: "Shoppers want more than one item.".into(),
+                        acceptance_criteria: None,
+                        depends_on: Vec::new(),
+                        priority: None,
+                    }],
+                },
+            )
+            .await
+            .expect("an auto project");
+            let task = finalized.task_ids[0];
+            sqlx::query(
+                "UPDATE tasks SET pr_url = 'https://github.com/acme/shop/pull/7' WHERE id = $1",
+            )
+            .bind(task)
+            .execute(&pool)
+            .await
+            .expect("the task's pull request");
+            let project = auto_projects::automation(&pool, finalized.project_id)
+                .await
+                .expect("the project's automation")
+                .expect("an automated project");
+            Self {
+                state: crate::state::AppState::new(crate::state::test_config(), pool, None),
+                services: super::super::Services::standing_in_for(
+                    PullRequestService::standing_in_for("github.com", &server.uri())
+                        .expect("a stand-in for GitHub"),
+                ),
+                config: crate::config::AutoProjectConfig::default(),
+                project,
+                workspace: workspace.id,
+                actor: user.id,
+                organization: organization.id,
+                task,
+            }
+        }
+
+        fn drive(&self) -> Drive<'_> {
+            Drive {
+                state: &self.state,
+                services: &self.services,
+                config: &self.config,
+                project: &self.project,
+                workspace_id: self.workspace,
+                actor: self.actor,
+            }
+        }
+
+        async fn automation(&self) -> TaskAutomation {
+            auto_projects::task_stage(self.state.db(), self.task)
+                .await
+                .expect("the task's automation")
+                .expect("an automated task")
+        }
+
+        async fn remove(&self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(self.state.db())
+                .await
+                .expect("the organization to be removed");
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(self.actor)
+                .execute(self.state.db())
+                .await
+                .expect("the user to be removed");
+        }
+    }
+
+    /// A merge whose commit GitHub never named, not in its answer and not on
+    /// the pull request read back, records none: the notice says so, and
+    /// post-merge finishes the task rather than asking about an empty commit.
+    #[tokio::test]
+    async fn a_merge_whose_commit_was_never_named_finishes_without_watching_jobs() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_id": "PR_7",
+                "number": 7,
+                "title": "Add a cart",
+                "state": "closed",
+                "head": {"ref": "zone/task-1a2b3c4d-add-a-cart", "sha": commit('a').as_str()},
+                "base": {"ref": "main", "sha": commit('b').as_str()},
+                "html_url": "https://github.com/acme/shop/pull/7",
+                "merged": true,
+            })))
+            .mount(&server)
+            .await;
+        let merged = Merged::new(&server).await;
+        let drive = merged.drive();
+        auto_projects::set_stage(
+            merged.state.db(),
+            merged.task,
+            merged.project.project_id,
+            Stage::Merging,
+            None,
+        )
+        .await
+        .expect("the task is merging");
+        let task = merged.automation().await;
+        let row = tasks::get_task(merged.state.db(), merged.task)
+            .await
+            .expect("the task")
+            .expect("a task");
+        let step = Step {
+            drive: &drive,
+            task: &task,
+            row,
+            reference: reference(),
+            token: token(),
+            pr_url: "https://github.com/acme/shop/pull/7".to_string(),
+        };
+        let pull = step.pull().await.expect("the merged pull request");
+
+        let finished = finish_merged(
+            &step,
+            &pull,
+            MergedPullRequest::new(None, false),
+            &[],
+            "Shoppers can buy several items.".to_string(),
+        )
+        .await;
+        let after_merge = merged.automation().await;
+        let settled = advance(&drive, &after_merge).await;
+        let after_post_merge = merged.automation().await;
+        merged.remove().await;
+
+        finished.expect("a merge without its commit still finishes");
+        assert_eq!(after_merge.stage(), Stage::PostMerge);
+        assert_eq!(after_merge.merge_sha, None, "no empty commit is recorded");
+        settled.expect("post-merge settles a merge without its commit");
+        assert_eq!(after_post_merge.stage(), Stage::Merged);
+        assert_eq!(
+            after_post_merge.reason.as_deref(),
+            Some("post-merge: no merge commit recorded")
+        );
+    }
+
+    /// The merged pull request GitHub answers, its head and base fixed and its
+    /// merge commit `merge_commit`, if any.
+    async fn serve_merged_pull(server: &wiremock::MockServer, merge_commit: Option<&str>) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_id": "PR_7",
+                "number": 7,
+                "title": "Add a cart",
+                "state": "closed",
+                "head": {"ref": "zone/task-1a2b3c4d-add-a-cart", "sha": commit('a').as_str()},
+                "base": {"ref": "main", "sha": commit('b').as_str()},
+                "html_url": "https://github.com/acme/shop/pull/7",
+                "merged": true,
+                "merge_commit_sha": merge_commit,
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// A merge that recorded no commit, because reading it back failed at
+    /// the merge, has post-merge read it again rather than settle the task
+    /// without watching the jobs the merge started.
+    #[tokio::test]
+    async fn post_merge_reads_back_a_merge_commit_the_merge_did_not_record() {
+        let server = wiremock::MockServer::start().await;
+        serve_merged_pull(&server, Some(commit('c').as_str())).await;
+        let merged = Merged::new(&server).await;
+        auto_projects::set_stage(
+            merged.state.db(),
+            merged.task,
+            merged.project.project_id,
+            Stage::PostMerge,
+            None,
+        )
+        .await
+        .expect("the task is in post-merge");
+        let task = merged.automation().await;
+
+        let settled = advance(&merged.drive(), &task).await;
+        let after = merged.automation().await;
+        merged.remove().await;
+
+        settled.expect("post-merge reads the commit back");
+        assert_eq!(after.stage(), Stage::PostMerge, "{:?}", after.reason);
+        assert_eq!(
+            after.merge_sha.as_deref(),
+            Some(commit('c').as_str()),
+            "the commit read back is recorded, so its jobs are watched"
+        );
+        assert_eq!(after.reason.as_deref(), Some("waiting for post-merge jobs"));
+    }
+
+    /// A stored repository URL that does not parse pauses the task with the
+    /// reason, as a missing one does, instead of failing every tick unseen.
+    #[tokio::test]
+    async fn a_refresh_from_an_unparseable_repository_url_pauses_the_task() {
+        let server = wiremock::MockServer::start().await;
+        serve_merged_pull(&server, None).await;
+        let mut merged = Merged::new(&server).await;
+        merged.project.repository_url = Some("not a repository".to_string());
+        auto_projects::set_stage(
+            merged.state.db(),
+            merged.task,
+            merged.project.project_id,
+            Stage::Merging,
+            None,
+        )
+        .await
+        .expect("the task is merging");
+        let drive = merged.drive();
+        let task = merged.automation().await;
+        let row = tasks::get_task(merged.state.db(), merged.task)
+            .await
+            .expect("the task")
+            .expect("a task");
+        let step = Step {
+            drive: &drive,
+            task: &task,
+            row,
+            reference: reference(),
+            token: token(),
+            pr_url: "https://github.com/acme/shop/pull/7".to_string(),
+        };
+        let pull = step.pull().await.expect("the pull request");
+
+        let refreshed = refresh_from_base(&step, &pull, Refresh::Behind).await;
+        let after = merged.automation().await;
+        merged.remove().await;
+
+        refreshed.expect("an unparseable URL pauses rather than failing the tick");
+        assert_eq!(after.stage(), Stage::Paused);
+        assert!(
+            after.reason.as_deref().is_some_and(|reason| reason
+                .starts_with("the project's repository URL cannot be refreshed from: ")),
+            "{:?}",
+            after.reason
+        );
+    }
+
+    /// Rows written before merges recorded no commit hold an empty one. It
+    /// is no commit, so post-merge finishes the task instead of failing on
+    /// it every tick.
+    #[tokio::test]
+    async fn a_post_merge_task_with_an_empty_recorded_commit_reaches_merged() {
+        let server = wiremock::MockServer::start().await;
+        let merged = Merged::new(&server).await;
+        auto_projects::set_stage(
+            merged.state.db(),
+            merged.task,
+            merged.project.project_id,
+            Stage::PostMerge,
+            None,
+        )
+        .await
+        .expect("the task is in post-merge");
+        auto_projects::set_merge_sha(merged.state.db(), merged.task, "")
+            .await
+            .expect("the legacy empty commit");
+        let task = merged.automation().await;
+
+        let settled = advance(&merged.drive(), &task).await;
+        let after = merged.automation().await;
+        let asked = requests(&server).await;
+        merged.remove().await;
+
+        settled.expect("an empty recorded commit is not an error");
+        assert_eq!(after.stage(), Stage::Merged);
+        assert_eq!(
+            after.reason.as_deref(),
+            Some("post-merge: no merge commit recorded")
+        );
+        assert_eq!(asked, 0, "nothing is asked of GitHub about no commit");
     }
 }
