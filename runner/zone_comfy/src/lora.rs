@@ -30,6 +30,8 @@ use zone_vision::crop::{self, Region, Target};
 use zone_vision::gravity::Point;
 use zone_vision::{Raster, Rendered, decode};
 
+pub const VIDEO_REFUSAL: &str = "video identity training is off: it trains Wan 2.2 TI2V 5B adapters, and video generation runs Wan 2.2 A14B, which cannot load them";
+
 #[derive(Debug, thiserror::Error)]
 pub enum TrainError {
     #[error("training is not configured")]
@@ -458,6 +460,9 @@ fn nonempty_key(value: Option<&str>) -> Option<&str> {
 pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), TrainError> {
     if config.train_command.is_none() && !config.enabled {
         return Err(TrainError::Disabled);
+    }
+    if request.method == TrainMethod::Video {
+        return Err(TrainError::Invalid(VIDEO_REFUSAL));
     }
     if request.subject == TrainSubject::Language {
         return validate_language(request);
@@ -4319,33 +4324,8 @@ mod tests {
         person.method = TrainMethod::Video;
         assert!(matches!(
             validate_request(&config, &person),
-            Err(TrainError::Invalid(
-                "download the video bundle before training a person video adapter"
-            ))
+            Err(TrainError::Invalid(VIDEO_REFUSAL))
         ));
-        fs::create_dir_all(config.models_dir.join("diffusion_models")).unwrap();
-        fs::write(
-            config
-                .models_dir
-                .join("diffusion_models/wan2.2_ti2v_5B_fp16.safetensors"),
-            b"wan",
-        )
-        .unwrap();
-        assert!(matches!(
-            validate_request(&config, &person),
-            Err(TrainError::Invalid("video training needs clips"))
-        ));
-        person.images.push(TrainImage {
-            filename: "walk.mp4".into(),
-            caption: String::new(),
-            bytes_base64: String::new(),
-            bytes: Some(b"clip".to_vec()),
-            before_base64: None,
-            before: None,
-            group: None,
-        });
-        validate_request(&config, &person)
-            .expect("video bundle and a clip on disk are enough to start");
         let mut other_pivotal = request("jerry", "flux-schnell", Some("ohwx"));
         other_pivotal.method = TrainMethod::Pivotal;
         assert!(matches!(
@@ -4357,10 +4337,50 @@ mod tests {
         other_pivotal.method = TrainMethod::Video;
         assert!(matches!(
             validate_request(&config, &other_pivotal),
-            Err(TrainError::Invalid(
-                "video training is only available for a person"
-            ))
+            Err(TrainError::Invalid(VIDEO_REFUSAL))
         ));
+    }
+
+    #[test]
+    fn video_identity_training_is_refused_even_with_the_bundle_and_a_clip() {
+        let (_root, config) = harness("unused");
+        fs::create_dir_all(config.models_dir.join("checkpoints")).unwrap();
+        fs::write(
+            config
+                .models_dir
+                .join("checkpoints/lustifySDXLNSFW_ggwpV7.safetensors"),
+            b"lustify",
+        )
+        .unwrap();
+        fs::create_dir_all(config.models_dir.join("diffusion_models")).unwrap();
+        fs::write(
+            config
+                .models_dir
+                .join("diffusion_models/wan2.2_ti2v_5B_fp16.safetensors"),
+            b"wan",
+        )
+        .unwrap();
+        let mut person = request("jerry", "sdxl-people", Some("ohwx"));
+        person.subject = TrainSubject::Person;
+        person.method = TrainMethod::Video;
+        person.images.push(TrainImage {
+            filename: "walk.mp4".into(),
+            caption: String::new(),
+            bytes_base64: String::new(),
+            bytes: Some(b"clip".to_vec()),
+            before_base64: None,
+            before: None,
+            group: None,
+        });
+        let refusal = "video identity training is off: it trains Wan 2.2 TI2V 5B adapters, \
+                       and video generation runs Wan 2.2 A14B, which cannot load them";
+        for provider in [TrainProvider::Local, TrainProvider::Runpod] {
+            person.provider = provider;
+            match validate_request(&config, &person) {
+                Err(TrainError::Invalid(message)) => assert_eq!(message, refusal),
+                other => panic!("{provider:?} video training was not refused: {other:?}"),
+            }
+        }
     }
 
     fn language_request(name: &str, base: &str, documents: Vec<TrainImage>) -> TrainRequest {
@@ -4402,7 +4422,7 @@ mod tests {
         empty.method = TrainMethod::Video;
         assert!(matches!(
             validate_request(&config, &empty),
-            Err(TrainError::Invalid("not available for a chat model"))
+            Err(TrainError::Invalid(VIDEO_REFUSAL))
         ));
         empty.method = TrainMethod::Pivotal;
         assert!(matches!(

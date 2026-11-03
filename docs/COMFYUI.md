@@ -478,18 +478,20 @@ bundle `image-people`). Person LoRA is rank 64 with the CLIP-L text encoder trai
 and loads through `sdxl-adapter` (`LoraLoader` on model and CLIP). Method
 **Fine-tune** writes a full SDXL checkpoint (~7 GB) onto the generic `sdxl`
 recipe, with prior preservation class `person`. Captions are
-`{trigger} person, {scene}`. Mixed subjects fail the job.
+`{trigger} person, {scene}`. Mixed subjects fail the job. Video identity
+training is off: it trains Wan 2.2 TI2V 5B adapters, and video generation runs
+Wan 2.2 A14B, which cannot load them, so a `video` method is refused.
 
 Person jobs do not go through ComfyUI `/prompt`. Manager writes
 `models/.zone-train/{id}/` on the bind mount; host LaunchAgent `ai.zone.train`
 runs the same gold recipe on every backend (float32, AdamW for fine-tune,
 Prodigy for LoRA and pivotal, no AMP, no 8-bit Adam, TF32 off). Compute on the
 Train form is **Local** (CUDA if `torch.cuda.is_available()`, else MPS, else
-CPU) or **Runpod**. Runpod is Person-only (LoRA, fine-tune, pivotal, video).
+CPU) or **Runpod**. Runpod is Person-only (LoRA, fine-tune, pivotal).
 Save a Runpod API key under Workspace or organization AI settings; GET returns
 `has_runpod_api_key` and never the secret. The host worker writes
 `job_dir/runpod.key` mode `0600`, auto-picks a GPU from the Runpod catalog
-(fine-tune ≥48 GB, LoRA/pivotal/video ≥24 GB, Community then Secure), and
+(fine-tune ≥48 GB, LoRA/pivotal ≥24 GB, Community then Secure), and
 deletes the pod when the job ends. A card below the VRAM floor fails closed
 instead of dropping precision. Language and Flux/Qwen Other stay Local.
 
