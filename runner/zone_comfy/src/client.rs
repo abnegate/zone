@@ -28,6 +28,7 @@ const PACKAGED_A14B_T2V_WORKFLOW: &str =
 const PACKAGED_A14B_I2V_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/wan2.2-a14b-i2v-api.json");
 const A14B_VAE: &str = "wan_2.1_vae.safetensors";
+const LEFTOVER_5B_VAE: &str = "wan2.2_vae.safetensors";
 const A14B_HIGH_UNET: &str = "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors";
 const PACKAGED_AUDIO_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/ace-step-v1-3.5b-api.json");
@@ -1523,11 +1524,19 @@ fn apply_wan_workflow_inputs(
     workflow["1"]["inputs"]["unet_name"] = json!(high);
     workflow["12"]["inputs"]["unet_name"] = json!(low);
     workflow["2"]["inputs"]["clip_name"] = json!(clip);
-    workflow["3"]["inputs"]["vae_name"] = json!(A14B_VAE);
+    workflow["3"]["inputs"]["vae_name"] = json!(a14b_vae(vae));
     workflow["5"]["inputs"]["text"] = json!(prompt);
     workflow["8"]["inputs"]["noise_seed"] = json!(seed);
     workflow["14"]["inputs"]["noise_seed"] = json!(seed);
     Ok(())
+}
+
+fn a14b_vae(vae: &str) -> &str {
+    if vae == LEFTOVER_5B_VAE {
+        A14B_VAE
+    } else {
+        vae
+    }
 }
 
 fn configure_ace_step_workflow(
@@ -1869,6 +1878,49 @@ mod tests {
     }
 
     #[test]
+    fn video_workflow_uses_the_configured_vae() {
+        let text_to_video = build_wan_t2v_workflow(
+            "a moving fox",
+            A14B_HIGH_UNET,
+            "custom-clip.safetensors",
+            "custom-vae.safetensors",
+            7,
+        )
+        .unwrap();
+        let image_to_video = build_wan_i2v_workflow(
+            "make it move",
+            A14B_HIGH_UNET,
+            "custom-clip.safetensors",
+            "custom-vae.safetensors",
+            7,
+            "zone-i2v-source.png",
+        )
+        .unwrap();
+        for workflow in [text_to_video, image_to_video] {
+            assert_eq!(
+                workflow["3"]["inputs"]["vae_name"],
+                "custom-vae.safetensors"
+            );
+        }
+    }
+
+    #[test]
+    fn leftover_5b_vae_maps_to_the_wan_21_vae() {
+        let workflow = build_wan_t2v_workflow(
+            "a moving fox",
+            A14B_HIGH_UNET,
+            "custom-clip.safetensors",
+            "wan2.2_vae.safetensors",
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            workflow["3"]["inputs"]["vae_name"],
+            "wan_2.1_vae.safetensors"
+        );
+    }
+
+    #[test]
     fn i2v_workflow_mutates_only_approved_inputs() {
         let workflow = build_wan_i2v_workflow(
             "make it move",
@@ -1889,7 +1941,7 @@ mod tests {
         );
         assert_eq!(
             workflow["3"]["inputs"]["vae_name"],
-            "wan_2.1_vae.safetensors"
+            "custom-vae.safetensors"
         );
         assert_eq!(workflow["7"]["class_type"], "WanImageToVideo");
         assert_eq!(workflow["8"]["inputs"]["positive"], json!(["7", 0]));

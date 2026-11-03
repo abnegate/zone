@@ -782,7 +782,8 @@ only these inputs:
   the A14B high-noise expert
 - node `12`: paired low-noise UNET (`high_noise` → `low_noise`, `t2v` ↔ `i2v`)
 - node `2`: CLIP filename (`COMFYUI_VIDEO_CLIP`)
-- node `3`: VAE filename (always `wan_2.1_vae.safetensors`)
+- node `3`: VAE filename (`COMFYUI_VIDEO_VAE`); a leftover 5B
+  `wan2.2_vae.safetensors` is rewritten to `wan_2.1_vae.safetensors`
 - node `5`: positive prompt text
 - node `8` and node `14`: `noise_seed`
 

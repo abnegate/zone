@@ -1626,7 +1626,9 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ### `COMFYUI_VIDEO_VAE`
 - **Default**: `wan_2.1_vae.safetensors`
-- **Description**: VAE loaded with the Wan A14B video workflow
+- **Description**: VAE loaded with the Wan A14B video workflow. A leftover 5B
+  `wan2.2_vae.safetensors` is rewritten to `wan_2.1_vae.safetensors`, the VAE
+  the A14B experts decode with.
 
 ### `COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS`
 - **Default**: `7200`
