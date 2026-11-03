@@ -1611,6 +1611,7 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: In-container path to the versioned Wan 2.2 A14B
   text-to-video API workflow. Image-to-video uses the sibling file
   `wan2.2-a14b-i2v-api.json` in the same directory.
+- **RAM**: 64 GB; setup refuses video (and `all`) on smaller machines.
 
 ### `COMFYUI_VIDEO_UNET`
 - **Default**: `wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors`
@@ -2060,8 +2061,8 @@ make up
 ```bash
 ./scripts/setup.sh --yes
 ```
-Setup downloads every feature by default. That needs 16 GB RAM and about 185 GB
-free disk; it refuses `all` when either is short. Chat-only:
+Setup downloads every feature by default. That needs 64 GB RAM (Wan 2.2 A14B
+video) and about 185 GB free disk; it refuses `all` when either is short. Chat-only:
 `./scripts/setup.sh --yes --features chat --chat-preset 8gb`.
 
 ### With VPN Search (1 extra step)

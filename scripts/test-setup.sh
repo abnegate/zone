@@ -17,7 +17,9 @@ printf '%s\n' "$help" | grep -q -- '--host-root' \
 printf '%s\n' "$help" | grep -q -- '--skip-host-root' \
     || fail 'Expected --help to list --skip-host-root'
 printf '%s\n' "$help" | grep -q '16 GB RAM' \
-    || fail 'Expected --help to state the 16 GB RAM floor for vision/all'
+    || fail 'Expected --help to state the 16 GB RAM floor for vision'
+printf '%s\n' "$help" | grep -q 'Video and all need 64 GB RAM' \
+    || fail 'Expected --help to state the 64 GB RAM floor for video/all'
 printf '%s\n' "$help" | grep -q '185 GB' \
     || fail 'Expected --help to state the full-install disk need'
 

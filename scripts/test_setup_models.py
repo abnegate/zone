@@ -109,6 +109,35 @@ class SetupModelsTest(unittest.TestCase):
         self.assertEqual(plan.env["OLLAMA_MODEL_VISION"], "llava:7b")
         self.assertEqual(plan.env["ZONE_SETUP_RAM_BYTES"], str(16 * GIB))
 
+    def test_video_needs_64_gib_ram(self) -> None:
+        with self.assertRaises(setup_models.PlanError) as raised:
+            self.plan('chat,video', ram=32 * GIB, disk=500 * GB, preset='32gb')
+        self.assertEqual(raised.exception.code, 'video-ram')
+        self.assertIn('64 GB', str(raised.exception))
+        self.assertIn('Wan 2.2 A14B', str(raised.exception))
+
+    def test_video_on_exactly_64_gib_is_allowed(self) -> None:
+        plan = self.plan('chat,video', ram=68719476736, disk=500 * GB, preset='32gb')
+        self.assertIn('video', plan.features)
+        self.assertIn('video', plan.comfy_bundles)
+
+    def test_all_on_32gb_ram_is_blocked_by_video(self) -> None:
+        with self.assertRaises(setup_models.PlanError) as raised:
+            self.plan('all', ram=32 * GIB, disk=500 * GB, preset='32gb')
+        self.assertEqual(raised.exception.code, 'all-ram')
+        self.assertIn('Cannot select all features', str(raised.exception))
+        self.assertIn('video needs 64 GB', str(raised.exception))
+
+    def test_every_ram_fallback_drops_its_feature(self) -> None:
+        for feature in self.catalog['features']:
+            if 'min_ram_bytes' not in feature:
+                continue
+            with self.subTest(feature=feature['id']):
+                fallback = feature['ram_fallback']
+                features = fallback.split('--features ', 1)[1].split()[0]
+                selected, _ = setup_models.parse_features(features, self.catalog)
+                self.assertNotIn(feature['id'], selected)
+
     def test_subset_on_short_disk_is_blocked(self) -> None:
         with self.assertRaises(setup_models.PlanError) as raised:
             self.plan("pictures", ram=64 * GIB, disk=1 * GB, preset="32gb")

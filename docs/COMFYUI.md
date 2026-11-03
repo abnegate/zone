@@ -132,7 +132,8 @@ specific `comfyui/requirements*.lock` files.
   also downloading the video bundle, a further 30 GB for the image-edit bundle,
   and a further 8 GB for the audio bundle
 - 32 GB unified memory recommended; 24 GB may work with memory pressure and
-  substantially lower resolutions. Video generation needs the higher figure.
+  substantially lower resolutions. Video generation needs 64 GB for Wan 2.2
+  A14B, and setup refuses the video feature on smaller machines.
 
 Install the pinned runtime without downloading model weights:
 

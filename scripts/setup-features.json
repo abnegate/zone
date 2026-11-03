@@ -49,6 +49,8 @@
       "label": "Vision",
       "description": "Image attachments and train captions (llava:7b). Needs 16 GB RAM.",
       "min_ram_bytes": 17179869184,
+      "ram_model": "llava:7b",
+      "ram_fallback": "8 GB can run chat only: --features chat --chat-preset 8gb",
       "ollama_slots": ["vision"]
     },
     {
@@ -72,7 +74,10 @@
     {
       "id": "video",
       "label": "Video",
-      "description": "Text-to-video and image-to-video with Wan 2.2 A14B (27B MoE, ~720p)",
+      "description": "Text-to-video and image-to-video with Wan 2.2 A14B (27B MoE, ~720p). Needs 64 GB RAM.",
+      "min_ram_bytes": 68719476736,
+      "ram_model": "Wan 2.2 A14B",
+      "ram_fallback": "Drop video with --features, for example --features chat,vision,pictures,edits,audio,upscale,train",
       "comfy_bundles": ["video"]
     },
     {
