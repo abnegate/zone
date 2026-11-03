@@ -71,6 +71,21 @@ mod tests {
         assert_eq!(claims, Claims::issue(ApplicationId::new(12345), now));
     }
 
+    /// `openssl dgst -sha256 -sign` over this token's header and claims with
+    /// [`TEST_PRIVATE_KEY`], so the expected signature owes nothing to `jsonwebtoken`.
+    const OPENSSL_SIGNED_JWT: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJpYXQiOjE2OTk5OTk5NDAsImV4cCI6MTcwMDAwMDQ4MCwiaXNzIjoiMTIzNDUifQ.s-lV36kULTAVFysUYkpQT7-REG0frHVaOrcQZy3zk60Ob_p-SOh4ESN6hjsS3y4qwcuJAPNsT5lsLJg7lYabSpNflnqJlqHNACgkwgCk-Er8GTLV2ENU_hFcY4g6BcW7-ZyKo6bMDsR6ZnhIZNqGwOonNAT31WQnmePvTVUekTQvkGUA4oLHdsEdIdiCdHSR9z8jLfUanjy1aYqhupr1ppAFsrw1U_InDKN0urpCrTnUavd5lucjJqPBGIasPOHuT5tfUnLbbYxnmAE4aQwcByI92MUrxskfwSTc3J4y2kePVUUesZX99gfSKKfyTN87Pwi7thLnlpigfjWh8GAkcg";
+
+    #[test]
+    fn the_signature_matches_an_independent_pkcs1_v1_5_signer() {
+        let jwt = sign(&configuration(TEST_PRIVATE_KEY), at(1_700_000_000)).expect("sign");
+
+        assert_eq!(
+            jwt.expose(),
+            OPENSSL_SIGNED_JWT,
+            "RS256 is deterministic RSASSA-PKCS1-v1_5 with SHA-256, so OpenSSL must produce the same bytes"
+        );
+    }
+
     #[test]
     fn a_jwt_with_forged_claims_fails_verification() {
         let jwt = sign(&configuration(TEST_PRIVATE_KEY), Utc::now()).expect("sign");
