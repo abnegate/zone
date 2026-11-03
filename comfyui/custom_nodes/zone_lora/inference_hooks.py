@@ -263,17 +263,15 @@ def is_wan_14b_path(unet_path) -> bool:
 
 
 def wan_cpu_model_options(unet_path, model_options=None) -> dict:
-    """Wan sampling on Metal silently corrupts every generated frame.
+    """Every Wan DiT loads on CPU under MPS; only a 14B expert later samples on Metal.
 
+    Wan sampling on Metal silently corrupts every generated frame:
     Comfy-Org/ComfyUI#15793 and #16644 reproduce it with Wan 2.2 TI2V 5B.
     """
     options = dict(model_options or {})
-    path = str(unet_path).lower()
-    if 'wan' not in path:
+    if 'wan' not in str(unet_path).lower():
         return options
     if not torch.backends.mps.is_available():
-        return options
-    if is_wan_14b_path(path):
         return options
     cpu = torch.device('cpu')
     options['load_device'] = cpu
@@ -294,14 +292,11 @@ def install_wan_mps_cpu_unet() -> None:
     def load_diffusion_model(unet_path, model_options=None, disable_dynamic=False):
         options = wan_cpu_model_options(unet_path, model_options)
         if is_wan_14b_path(unet_path) and torch.backends.mps.is_available():
-            cpu = torch.device('cpu')
-            options['load_device'] = cpu
-            options['offload_device'] = cpu
             logging.info('Zone LoRA: Wan 14B FP8 loads on CPU then materializes fp16')
             patcher = original(unet_path, model_options=options, disable_dynamic=True)
             converted = materialize_quantized_to_float16(patcher)
             patcher.load_device = torch.device('mps')
-            patcher.offload_device = cpu
+            patcher.offload_device = options['offload_device']
             patcher.size = 0
             logging.info('Zone LoRA: materialized %s 14B tensors to fp16 for Metal', converted)
             return patcher

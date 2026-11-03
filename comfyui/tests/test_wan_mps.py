@@ -94,14 +94,20 @@ class WanMps(unittest.TestCase):
         self.assertEqual(options['offload_device'], torch.device('cpu'))
         self.assertEqual(options['dtype'], torch.float16)
 
-    def test_a14b_weights_stay_on_mps(self) -> None:
+    def test_a14b_weights_load_on_cpu_on_mps(self) -> None:
         with mps_available(True):
             options = wan_cpu_model_options(
                 '/models/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
                 {'dtype': torch.float16},
             )
-        self.assertEqual(options, {'dtype': torch.float16})
-        self.assertNotIn('load_device', options)
+        self.assertEqual(
+            options,
+            {
+                'dtype': torch.float16,
+                'load_device': torch.device('cpu'),
+                'offload_device': torch.device('cpu'),
+            },
+        )
 
     def test_constant_pad_with_cat_matches_functional_pad(self) -> None:
         tensor = torch.arange(2 * 3 * 4 * 5 * 6, dtype=torch.float32).reshape(2, 3, 4, 5, 6)
@@ -329,6 +335,7 @@ class WanMps(unittest.TestCase):
             )
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0][1]['load_device'], torch.device('cpu'))
+        self.assertEqual(seen[0][1]['offload_device'], torch.device('cpu'))
         self.assertTrue(seen[0][2])
         self.assertEqual(patcher.load_device, torch.device('mps'))
         self.assertEqual(patcher.offload_device, torch.device('cpu'))
