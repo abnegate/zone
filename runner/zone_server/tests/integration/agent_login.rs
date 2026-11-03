@@ -2827,6 +2827,16 @@ async fn a_codex_sign_in_is_audited_before_it_reads_as_signed_in() {
         .await
         .expect("the audit log locks");
     codex.approve();
+    for _ in 0..ATTEMPTS {
+        if stage.login_row(organization, "codex").await.is_some() {
+            break;
+        }
+        tokio::time::sleep(PAUSE).await;
+    }
+    assert!(
+        stage.login_row(organization, "codex").await.is_some(),
+        "codex never finished signing in"
+    );
     for _ in 0..20 {
         tokio::time::sleep(PAUSE).await;
         let status = stage.status(organization, "codex", &owner).await;
