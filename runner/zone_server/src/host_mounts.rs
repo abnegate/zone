@@ -162,10 +162,10 @@ impl HostMounts {
     /// First mapped folder that exists here, otherwise `fallback`.
     pub fn chat_cwd(&self, directories: &[String], fallback: PathBuf) -> PathBuf {
         for host in directories {
-            if let Ok(mapped) = self.map(host) {
-                if mapped.is_dir() {
-                    return mapped;
-                }
+            if let Ok(mapped) = self.map(host)
+                && mapped.is_dir()
+            {
+                return mapped;
             }
         }
         fallback
