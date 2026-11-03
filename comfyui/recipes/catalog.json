@@ -223,11 +223,32 @@
         "negative": "/7/inputs/text",
         "seed": "/3/inputs/seed",
         "source": "/10/inputs/image",
+        "pose": "/20/inputs/image",
         "weights": {
           "checkpoint": "/4/inputs/ckpt_name"
         }
       },
       "files": [],
+      "pose_required_files": [
+        {
+          "filename": "thibaud_xl_openpose.safetensors",
+          "directory": "controlnet"
+        }
+      ],
+      "face_required_files": [
+        {
+          "filename": "ip-adapter-plus-face_sdxl_vit-h.safetensors",
+          "directory": "ipadapter"
+        },
+        {
+          "filename": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+          "directory": "clip_vision"
+        }
+      ],
+      "extras": [
+        "face",
+        "identity_refine"
+      ],
       "base_models": [
         "SDXL 1.0",
         "SDXL Turbo",
@@ -257,6 +278,7 @@
         "negative": "/7/inputs/text",
         "seed": "/3/inputs/seed",
         "source": "/10/inputs/image",
+        "pose": "/20/inputs/image",
         "weights": {
           "checkpoint": "/4/inputs/ckpt_name"
         }
@@ -277,6 +299,26 @@
           "filename": "lustifySDXLNSFW_ggwpV7.safetensors",
           "directory": "checkpoints"
         }
+      ],
+      "pose_required_files": [
+        {
+          "filename": "thibaud_xl_openpose.safetensors",
+          "directory": "controlnet"
+        }
+      ],
+      "face_required_files": [
+        {
+          "filename": "ip-adapter-plus-face_sdxl_vit-h.safetensors",
+          "directory": "ipadapter"
+        },
+        {
+          "filename": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+          "directory": "clip_vision"
+        }
+      ],
+      "extras": [
+        "face",
+        "refine"
       ],
       "hf_bases": [
         "John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl"
@@ -299,6 +341,7 @@
         "negative": "/7/inputs/text",
         "seed": "/3/inputs/seed",
         "source": "/10/inputs/image",
+        "pose": "/20/inputs/image",
         "weights": {
           "checkpoint": "/4/inputs/ckpt_name",
           "lora": "/13/inputs/lora_name"
@@ -312,6 +355,26 @@
           "filename": "lustifySDXLNSFW_ggwpV7.safetensors",
           "directory": "checkpoints"
         }
+      ],
+      "pose_required_files": [
+        {
+          "filename": "thibaud_xl_openpose.safetensors",
+          "directory": "controlnet"
+        }
+      ],
+      "face_required_files": [
+        {
+          "filename": "ip-adapter-plus-face_sdxl_vit-h.safetensors",
+          "directory": "ipadapter"
+        },
+        {
+          "filename": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+          "directory": "clip_vision"
+        }
+      ],
+      "extras": [
+        "face",
+        "refine"
       ],
       "hf_bases": [
         "John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl"
