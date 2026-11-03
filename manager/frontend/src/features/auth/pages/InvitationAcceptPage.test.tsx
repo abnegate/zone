@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { clientModule } from '../../../test/client';
 import type { InvitationDetails } from '../types';
 
 const mockNavigate = mock();
@@ -8,12 +9,12 @@ const mockUseSearchParams = mock(() => [new URLSearchParams('?token=test-token')
 const mockGetInvitationByToken = mock();
 const mockAcceptInvitation = mock();
 
-mock.module('../../../api/client', () => ({
-  client: {
+mock.module('../../../api/client', () =>
+  clientModule({
     getInvitationByToken: mockGetInvitationByToken,
     acceptInvitation: mockAcceptInvitation,
-  },
-}));
+  })
+);
 
 mock.module('../hooks', () => ({
   useAuth: mockUseAuth,

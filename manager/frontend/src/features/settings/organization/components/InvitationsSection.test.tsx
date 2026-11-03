@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { clientModule } from '../../../../test/client';
 import { chooseSelect } from '../../../../test/select';
 import type { Invitation, Workspace } from '../types';
 
@@ -7,13 +8,13 @@ const mockGetInvitations = mock();
 const mockCreateInvitation = mock();
 const mockRevokeInvitation = mock();
 
-mock.module('../../../../api/client', () => ({
-  client: {
+mock.module('../../../../api/client', () =>
+  clientModule({
     getInvitations: mockGetInvitations,
     createInvitation: mockCreateInvitation,
     revokeInvitation: mockRevokeInvitation,
-  },
-}));
+  })
+);
 
 let InvitationsSection: typeof import('./InvitationsSection').InvitationsSection;
 

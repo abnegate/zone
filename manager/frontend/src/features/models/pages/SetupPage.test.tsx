@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { SetupPlan } from '../../../api/models';
+import { clientModule } from '../../../test/client';
 import { setupCompleteKey } from '../setupComplete';
 
 const mockGetSetup = mock();
@@ -28,13 +29,13 @@ const mockGetHostMounts = mock();
 const mockGetWorkspaceHostDirectories = mock();
 const mockUpdateWorkspaceHostDirectories = mock();
 
-mock.module('../../../api/client', () => ({
-  client: {
+mock.module('../../../api/client', () =>
+  clientModule({
     getHostMounts: mockGetHostMounts,
     getWorkspaceHostDirectories: mockGetWorkspaceHostDirectories,
     updateWorkspaceHostDirectories: mockUpdateWorkspaceHostDirectories,
-  },
-}));
+  })
+);
 
 mock.module('../../auth', () => ({
   useAuth: () => ({

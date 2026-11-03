@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { clientModule } from '../../../test/client';
 
 mock.module('react-router-dom', () => ({
   BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -33,14 +34,13 @@ mock.module('react-router-dom', () => ({
   },
 }));
 
-// Mock the client
-mock.module('../../../api/client', () => ({
-  client: {
+mock.module('../../../api/client', () =>
+  clientModule({
     getOrganizations: mock(() => Promise.resolve([])),
     getWorkspaces: mock(() => Promise.resolve([])),
     setAccessToken: mock(),
-  },
-}));
+  })
+);
 
 // Mock auth context
 mock.module('../../../features/auth/context', () => ({

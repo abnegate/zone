@@ -39,7 +39,6 @@ const agentsApi = {
 
 mock.module('../../../../api/agents', () => ({ agentsApi }));
 
-// Mock OrgMembersSection, InvitationsSection, BillingSection, and AuditLogsSection components
 mock.module('../components', () => ({
   Button: ({ children, ...props }: React.ComponentProps<'button'>) => (
     <button {...props}>{children}</button>
@@ -54,6 +53,9 @@ mock.module('../components', () => ({
   ),
   BillingSection: ({ orgId }: { orgId: string }) => (
     <div data-testid="billing-section">BillingSection: {orgId}</div>
+  ),
+  DevicesSection: ({ orgId }: { orgId: string }) => (
+    <div data-testid="devices-section">DevicesSection: {orgId}</div>
   ),
   AuditLogsSection: ({ orgId }: { orgId: string }) => (
     <div data-testid="audit-logs-section">AuditLogsSection: {orgId}</div>

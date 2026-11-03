@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
+import { clientModule } from '../../../test/client';
 
 // Mock client
 const mockVerifyEmail = mock();
@@ -8,9 +9,7 @@ const mockClient = {
   verifyEmail: mockVerifyEmail,
 };
 
-mock.module('../../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../../api/client', () => clientModule(mockClient));
 
 // Mock useNavigate and useSearchParams
 const mockNavigate = mock();

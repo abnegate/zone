@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { clientModule } from '../../test/client';
 import type { Organization, Workspace } from '../../types';
 
 const mockClient = {
@@ -15,9 +16,7 @@ let authState = {
 };
 const useAuthHook = () => authState;
 
-mock.module('../../api/client', () => ({
-  client: mockClient,
-}));
+mock.module('../../api/client', () => clientModule(mockClient));
 
 let WorkspaceProvider: typeof import('./WorkspaceContext').WorkspaceProvider;
 let useWorkspace: typeof import('./WorkspaceContext').useWorkspace;
