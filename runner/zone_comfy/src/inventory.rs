@@ -94,12 +94,6 @@ pub struct Identity {
     pub trigger: String,
 }
 
-/// Video generate bind: prefix the trigger. 5B wan-adapter files stay unloaded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VideoIdentity {
-    pub trigger: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct WeightDocument {
     #[serde(flatten)]
@@ -231,15 +225,6 @@ pub fn identity_for_prompt(
     identity_among(&scan(models_dir, catalog), haystack)
 }
 
-pub fn bind_video_identity(
-    models_dir: &Path,
-    workflow_path: &Path,
-    haystack: &str,
-) -> Option<VideoIdentity> {
-    let catalog = load_catalog(workflow_path)?;
-    video_identity_among(&scan(models_dir, &catalog), haystack)
-}
-
 fn load_catalog(workflow_path: &Path) -> Option<RecipeCatalog> {
     RecipeCatalog::load(Some(workflow_path))
         .or_else(|_| RecipeCatalog::packaged())
@@ -250,16 +235,6 @@ fn is_identity(item: &InventoryItem) -> bool {
     item.ready
         && item.recipe_id != "wan-adapter"
         && (item.adapter || item.kind == CHECKPOINT)
-        && item
-            .trigger
-            .as_deref()
-            .is_some_and(|trigger| !trigger.trim().is_empty())
-}
-
-fn is_wan_adapter(item: &InventoryItem) -> bool {
-    item.ready
-        && item.recipe_id == "wan-adapter"
-        && item.adapter
         && item
             .trigger
             .as_deref()
@@ -315,36 +290,6 @@ fn identity_among(items: &[InventoryItem], haystack: &str) -> Option<Identity> {
             .unwrap_or_default()
             .trim()
             .to_string(),
-    })
-}
-
-fn video_identity_among(items: &[InventoryItem], haystack: &str) -> Option<VideoIdentity> {
-    let matches: Vec<&InventoryItem> = items
-        .iter()
-        .filter(|item| (is_wan_adapter(item) || is_identity(item)) && names_trigger(item, haystack))
-        .collect();
-    if matches.is_empty() {
-        return None;
-    }
-    let longest = matches
-        .iter()
-        .filter_map(|item| item.trigger.as_deref())
-        .map(|trigger| trigger.trim().chars().count())
-        .max()
-        .unwrap_or(0);
-    let mut triggers: Vec<&str> = matches
-        .iter()
-        .filter_map(|item| item.trigger.as_deref())
-        .map(str::trim)
-        .filter(|trigger| trigger.chars().count() == longest)
-        .collect();
-    triggers.sort_unstable();
-    triggers.dedup();
-    if triggers.len() != 1 {
-        return None;
-    }
-    Some(VideoIdentity {
-        trigger: triggers[0].to_string(),
     })
 }
 
@@ -835,8 +780,6 @@ mod tests {
         assert!(item.ready);
         assert!(item.adapter);
         assert!(identities_among(&items).is_empty());
-        let bound = video_identity_among(&items, "portrait of ohwx").unwrap();
-        assert_eq!(bound.trigger, "ohwx");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -856,54 +799,6 @@ mod tests {
             .map(|item| item.filename)
             .collect();
         assert_eq!(listed, ["qwen_image_edit_2511_fp8mixed.safetensors"]);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn video_bind_prefixes_a_still_identity() {
-        let root = temp_models();
-        write_identity(&root, "jerry.safetensors", "ohwx");
-        let catalog = RecipeCatalog::packaged().unwrap();
-        let items = scan(&root, &catalog);
-        let bound = video_identity_among(&items, "ohwx walking on the beach").unwrap();
-        assert_eq!(bound.trigger, "ohwx");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn video_bind_prefixes_the_trigger_a_wan_adapter_shares_with_a_still_identity() {
-        let root = temp_models();
-        write_identity(&root, "jerry.safetensors", "ohwx");
-        let lora = root.join("loras/jerry-wan.safetensors");
-        fs::write(&lora, b"lora").unwrap();
-        write_sidecar(
-            &lora,
-            &WeightSidecar {
-                recipe_id: "wan-adapter".into(),
-                hf_base: Some("Comfy-Org/Wan_2.2_ComfyUI_Repackaged".into()),
-                trigger: Some("ohwx".into()),
-                architecture: Some("wan".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        for (directory, filename) in [
-            ("diffusion_models", "wan2.2_ti2v_5B_fp16.safetensors"),
-            ("text_encoders", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
-            ("vae", "wan2.2_vae.safetensors"),
-        ] {
-            fs::create_dir_all(root.join(directory)).unwrap();
-            fs::write(root.join(directory).join(filename), b"wan").unwrap();
-        }
-        let catalog = RecipeCatalog::packaged().unwrap();
-        let items = scan(&root, &catalog);
-        let bound = video_identity_among(&items, "ohwx at dusk").unwrap();
-        assert_eq!(bound.trigger, "ohwx");
-        assert!(
-            identities_among(&items)
-                .iter()
-                .any(|item| item.filename == "jerry.safetensors")
-        );
         let _ = fs::remove_dir_all(root);
     }
 

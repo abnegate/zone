@@ -1541,6 +1541,8 @@ details, and native macOS / bundled NVIDIA instructions.
   edit prompt names the trigger word stored on a ready identity LoRA's sidecar,
   that adapter is used instead of the pin, and the trigger is added to the
   CLIP prompt if it is missing. An unmatched or ambiguous name keeps the pin.
+  Video generation applies no identity LoRA; a trigger word in a video prompt
+  passes through as plain text.
 
 ### `COMFYUI_MODELS_DIR`
 - **Default**: `/app/comfyui/models`

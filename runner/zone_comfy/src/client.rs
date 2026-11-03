@@ -644,30 +644,22 @@ impl Client {
         let (unet, clip, vae) = self.video_model_names()?;
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(self.config.video_generation_timeout_secs);
-        let mut prompt = if prompt.trim().is_empty() {
+        let prompt = if prompt.trim().is_empty() {
             if source.is_some() {
-                "animate this image".to_string()
+                "animate this image"
             } else {
                 return Err(Error::Configuration("prompt is empty or too long"));
             }
         } else {
-            prompt.to_string()
+            prompt
         };
-        let identity = crate::inventory::bind_video_identity(
-            &self.config.models_dir,
-            &self.config.workflow_path,
-            &prompt,
-        );
-        if let Some(bound) = identity.as_ref() {
-            prompt = crate::identity_caption(&prompt, &bound.trigger);
-        }
         let seed = rand::random::<u64>() & i64::MAX as u64;
         let workflow = if let Some(source) = source {
             let _ = progress.send("Uploading source image...".to_string());
             let uploaded = self.upload_source(source, cancel, deadline).await?;
             configure_wan_i2v_workflow(
                 self.video_workflows()?.1,
-                &prompt,
+                prompt,
                 unet,
                 clip,
                 vae,
@@ -675,7 +667,7 @@ impl Client {
                 &uploaded,
             )?
         } else {
-            configure_wan_t2v_workflow(self.video_workflows()?.0, &prompt, unet, clip, vae, seed)?
+            configure_wan_t2v_workflow(self.video_workflows()?.0, prompt, unet, clip, vae, seed)?
         };
         self.submit_and_collect(
             workflow,
@@ -3134,19 +3126,6 @@ mod tests {
         }
     }
 
-    struct VideoPromptStartsWith(&'static str);
-
-    impl wiremock::Match for VideoPromptStartsWith {
-        fn matches(&self, request: &wiremock::Request) -> bool {
-            serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| {
-                body["prompt"]["5"]["inputs"]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.starts_with(self.0))
-                    && body["prompt"]["1"]["inputs"]["unet_name"] == A14B_HIGH_UNET
-            })
-        }
-    }
-
     fn write_still_identity(models: &std::path::Path, trigger: &str) {
         let lora = models.join("loras/jerry.safetensors");
         std::fs::create_dir_all(lora.parent().unwrap()).unwrap();
@@ -3227,11 +3206,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_video_prefixes_a_still_identity_without_loading_wan_lora() {
+    async fn generate_video_posts_the_prompt_unchanged_when_an_identity_exists() {
+        const PROMPT: &str = "  ohwx walking on the beach\n";
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/prompt"))
-            .and(wiremock::matchers::body_string_contains("ohwx"))
             .and(BodyDoesNotContain("LoraLoaderModelOnly"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "still"})))
             .expect(1)
@@ -3252,52 +3231,15 @@ mod tests {
         let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, _) = mpsc::unbounded_channel();
         let videos = client
-            .generate_video(
-                "ohwx walking on the beach",
-                None,
-                &mut cancel_rx,
-                progress_tx,
-            )
+            .generate_video(PROMPT, None, &mut cancel_rx, progress_tx)
             .await
             .unwrap();
         assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
-    }
-
-    #[tokio::test]
-    async fn generate_video_starts_the_a14b_prompt_with_a_bound_still_trigger() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/prompt"))
-            .and(VideoPromptStartsWith("ohwx"))
-            .and(BodyDoesNotContain("LoraLoaderModelOnly"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "trigger"})))
-            .expect(1)
-            .mount(&server)
-            .await;
-        mock_video_output(&server, "trigger").await;
-        let root = tempfile::tempdir().unwrap();
-        let models = root.path().join("models");
-        write_still_identity(&models, "ohwx");
-        let client = Client::new(Config {
-            enabled: true,
-            base_url: server.uri(),
-            poll_interval_ms: 50,
-            models_dir: models,
-            ..Default::default()
-        })
-        .unwrap();
-        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
-        let (progress_tx, _) = mpsc::unbounded_channel();
-        let videos = client
-            .generate_video(
-                "ohwx walking on the beach",
-                None,
-                &mut cancel_rx,
-                progress_tx,
-            )
-            .await
-            .unwrap();
-        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+        let posted = posted_bodies(&server, "/prompt").await;
+        assert_eq!(
+            posted[0]["prompt"]["5"]["inputs"]["text"], PROMPT,
+            "a video prompt reaches the graph exactly as written"
+        );
     }
 
     #[tokio::test]

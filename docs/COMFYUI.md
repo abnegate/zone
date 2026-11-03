@@ -816,8 +816,9 @@ Packaged defaults are Wan 2.2 A14B: 1280×704, length 81, 20 `euler`/`simple`
 steps split across high then low noise experts (0–10 leftover enable, 10–end
 add_noise disable), CFG 3.5, ModelSamplingSD3 shift 8, 16 fps. The negative
 prompt stays the packaged Chinese Wan default and is never taken from
-untrusted request data. Identity trigger words are still prefixed; 5B
-`wan-adapter` LoRA files are not loaded onto A14B.
+untrusted request data. Identity LoRAs are not applied to video: a trigger
+word in the prompt passes through as plain text, and 5B `wan-adapter` LoRA
+files are not loaded onto A14B.
 
 Unlike the image workflows, video uses ComfyUI's built-in `SaveWEBM` node,
 which writes WebM VP9 into ComfyUI's **output** folder rather than temp.
