@@ -34,9 +34,10 @@ pub fn sign(
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as BASE64};
+    use jsonwebtoken::{DecodingKey, Validation, decode};
 
     use crate::services::github_app::identifier::{ApplicationId, InstallationId};
-    use crate::services::github_app::testing::{TEST_PRIVATE_KEY, at};
+    use crate::services::github_app::testing::{TEST_PRIVATE_KEY, TEST_PUBLIC_KEY, at};
 
     fn configuration(private_key: &str) -> AppConfiguration {
         AppConfiguration::new(
@@ -49,6 +50,38 @@ mod tests {
     fn part(jwt: &str, index: usize) -> serde_json::Value {
         let encoded = jwt.split('.').nth(index).expect("jwt part");
         serde_json::from_slice(&BASE64.decode(encoded).expect("base64")).expect("json")
+    }
+
+    fn verify(jwt: &str) -> jsonwebtoken::errors::Result<Claims> {
+        let key = DecodingKey::from_rsa_pem(TEST_PUBLIC_KEY.as_bytes()).expect("public key");
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_issuer(&["12345"]);
+
+        decode::<Claims>(jwt, &key, &validation).map(|data| data.claims)
+    }
+
+    #[test]
+    fn a_signed_jwt_verifies_with_the_apps_public_key() {
+        let now = Utc::now();
+        let jwt = sign(&configuration(TEST_PRIVATE_KEY), now).expect("sign");
+
+        let claims =
+            verify(jwt.expose()).expect("GitHub verifies the JWT with the App's public key");
+
+        assert_eq!(claims, Claims::issue(ApplicationId::new(12345), now));
+    }
+
+    #[test]
+    fn a_jwt_with_forged_claims_fails_verification() {
+        let jwt = sign(&configuration(TEST_PRIVATE_KEY), Utc::now()).expect("sign");
+        let forged = BASE64.encode(r#"{"iat":0,"exp":4102444800,"iss":"12345"}"#);
+        let mut parts: Vec<&str> = jwt.expose().split('.').collect();
+        parts[1] = &forged;
+
+        assert!(
+            verify(&parts.join(".")).is_err(),
+            "a signature must not carry over to claims it did not sign"
+        );
     }
 
     #[test]

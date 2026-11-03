@@ -31,6 +31,18 @@ snLljJnOKrZGf+JfNkPul+la0f9cJo9Ka/oCy6X243y8VmzRG6/BX6eEfnWEJ+NB
 +ehfHUDVhe3oJRr15Rw1gt7CrSORoe46YkbnxO3H80of1gn9Vyw=
 -----END RSA PRIVATE KEY-----";
 
+/// The public half of [`TEST_PRIVATE_KEY`], standing in for the key GitHub
+/// holds to verify the App's JWT.
+pub const TEST_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu5dqhjvoHZtbdSz9bGJA
+Mp3r+1bqzy/9lhjVz5crI2yWhz7Iz3M0H74MQPCHhlOn8nyeOs1cclBLRt7iX7/w
+gkaP9mGGpvCzLXYdLH4JrrMZj7r5Pjt0KHrrouTvYXjuCTu2F6QnBcIe+Esz5Vs/
++V2fa73I+M1C0sHdX22YNIazcAcBI9gnaEeS+gINe8LUZDf72lJQc4z+gmVb7dd2
+R9YEAc90NPpkoeGl7pFwrVHRFlsYAbJAz6pKc1dVkfTU/yFuw/0d0117InbS1RxT
+VFEunMWqDJLFwl01THIuVzLDtX938cmeMZMcys+n74ZNoA9W6Pv9P2GVQsbnnZV4
+3QIDAQAB
+-----END PUBLIC KEY-----";
+
 /// A fixed instant, so a test asserting on `iat` and `exp` cannot flake.
 pub fn at(timestamp: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(timestamp, 0).expect("timestamp in range")

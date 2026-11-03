@@ -35,9 +35,6 @@ tiktoken-rs = "=0.12.0"
 # Streaming
 async-stream = "=0.3.6"
 
-# HTTP clients for adapters
-octocrab = "=0.54.1"
-
 # Content parsing
 scraper = "=0.27.0"
 

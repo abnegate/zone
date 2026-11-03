@@ -7,12 +7,6 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # Keep reporting all unmaintained advisories; CI preserves warning severity.
 unmaintained = "all"
 yanked = "warn"
-# Match the existing cargo-audit exception. Server JWTs use HMAC secrets only;
-# octocrab is not called by zone_context. See docs/DEPENDENCIES.md.
-ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "Existing audit exception: no RSA private-key operations; server JWT uses HMAC, and octocrab is unused by zone_context." },
-    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 is reached only through jsonwebtoken's p256/p384; zone signs and verifies HS256 and RS256 only, never ECDSA, and no jsonwebtoken release moves to crypto-bigint 0.7." },
-]
 
 [licenses]
 allow = [

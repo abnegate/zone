@@ -710,6 +710,42 @@ mod tests {
     }
 
     #[test]
+    fn test_access_and_refresh_tokens_are_hs256_and_round_trip() {
+        let user_id = Uuid::new_v4();
+        let secret = "access-secret-must-be-32-chars-or-longer-here";
+        let access = create_access_token(
+            user_id,
+            "test@example.com",
+            vec!["user".to_string()],
+            vec!["read".to_string()],
+            false,
+            secret,
+            Duration::hours(1),
+        )
+        .unwrap();
+        let refresh = create_refresh_token(user_id, secret, Duration::days(7)).unwrap();
+
+        for token in [&access, &refresh] {
+            assert_eq!(
+                jsonwebtoken::decode_header(token).unwrap().alg,
+                jsonwebtoken::Algorithm::HS256
+            );
+        }
+        assert_eq!(
+            validate_access_token(&access, secret)
+                .unwrap()
+                .claims
+                .user_id()
+                .unwrap(),
+            user_id
+        );
+        assert_eq!(
+            validate_token(&refresh, secret).unwrap().user_id().unwrap(),
+            user_id
+        );
+    }
+
+    #[test]
     fn test_refresh_token_has_different_jti() {
         let user_id = Uuid::new_v4();
         let secret = "refresh-secret-must-be-32-chars-or-longer-here";
