@@ -1533,6 +1533,12 @@ async fn await_media<T>(
     }
 }
 
+async fn relay_progress(stream: Arc<ChatStream>, mut progress: mpsc::UnboundedReceiver<String>) {
+    while let Some(message) = progress.recv().await {
+        publish(&stream, ServerMessage::Status { message }).await;
+    }
+}
+
 /// How a finished ComfyUI job names itself in the message it saves and in the
 /// errors it reports, so image, video, and upscale jobs deliver the same way.
 #[derive(Clone, Copy)]
@@ -1795,13 +1801,8 @@ async fn handle_image_generation(
         return Ok(());
     };
 
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = stream.clone();
-    let progress_task = tokio::spawn(async move {
-        while let Some(message) = progress_rx.recv().await {
-            publish(&progress_sender, ServerMessage::Status { message }).await;
-        }
-    });
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let progress_task = tokio::spawn(relay_progress(stream.clone(), progress_rx));
 
     session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
@@ -1927,13 +1928,8 @@ async fn handle_video_generation(
     let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
         return Ok(());
     };
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = stream.clone();
-    let progress_task = tokio::spawn(async move {
-        while let Some(message) = progress_rx.recv().await {
-            publish(&progress_sender, ServerMessage::Status { message }).await;
-        }
-    });
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let progress_task = tokio::spawn(relay_progress(stream.clone(), progress_rx));
 
     session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
@@ -2074,13 +2070,8 @@ async fn handle_upscale(
         return Ok(());
     };
 
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = stream.clone();
-    let progress_task = tokio::spawn(async move {
-        while let Some(message) = progress_rx.recv().await {
-            publish(&progress_sender, ServerMessage::Status { message }).await;
-        }
-    });
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let progress_task = tokio::spawn(relay_progress(stream.clone(), progress_rx));
 
     session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
@@ -2245,13 +2236,8 @@ async fn handle_audio_generation(
     let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
         return Ok(());
     };
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = stream.clone();
-    let progress_task = tokio::spawn(async move {
-        while let Some(message) = progress_rx.recv().await {
-            publish(&progress_sender, ServerMessage::Status { message }).await;
-        }
-    });
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let progress_task = tokio::spawn(relay_progress(stream.clone(), progress_rx));
 
     session.store.assert_current(&session.lease).await?;
     let cancellation = generation.cancellation();
