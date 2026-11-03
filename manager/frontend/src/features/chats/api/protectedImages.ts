@@ -1,14 +1,15 @@
 import { API_BASE, client } from '../../../api/client';
+import { TRAIN_PREVIEW_PATH } from '../../models/utils/trainProgress';
 
 const PROTECTED_ARTIFACT_PREFIX = '/api/artifacts/';
-const PROTECTED_TRAIN_PREVIEW_PREFIX = '/api/models/train/previews/';
+const PROTECTED_IMAGE_PREFIXES = [PROTECTED_ARTIFACT_PREFIX, TRAIN_PREVIEW_PATH] as const;
 
 export function isProtectedArtifactUrl(url: string): boolean {
   return url.startsWith(PROTECTED_ARTIFACT_PREFIX);
 }
 
 export function isProtectedImageUrl(url: string): boolean {
-  return isProtectedArtifactUrl(url) || url.startsWith(PROTECTED_TRAIN_PREVIEW_PREFIX);
+  return PROTECTED_IMAGE_PREFIXES.some((prefix) => url.startsWith(prefix));
 }
 
 export async function fetchProtectedImage(

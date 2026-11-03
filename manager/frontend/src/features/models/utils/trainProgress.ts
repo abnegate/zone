@@ -1,3 +1,5 @@
+export const TRAIN_PREVIEW_PATH = '/api/models/train/previews/';
+
 export const LORA_MIN_STILLS = 20;
 export const FINE_TUNE_MIN_STILLS = 200;
 export const FINE_TUNE_MIN_CLIPS = 20;
@@ -118,7 +120,7 @@ export function previewSrc(value: string): string {
     return value;
   }
   const name = value.split(/[\\/]/).pop() ?? value;
-  return `/api/models/train/previews/${encodeURIComponent(name)}`;
+  return `${TRAIN_PREVIEW_PATH}${encodeURIComponent(name)}`;
 }
 
 export function methodAdvice(input: {

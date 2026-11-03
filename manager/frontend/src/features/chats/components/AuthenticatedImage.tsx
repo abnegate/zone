@@ -28,12 +28,12 @@ export function AuthenticatedImage({
   fallbackClassName,
   ...imageProps
 }: AuthenticatedImageProps) {
-  const protectedArtifact = isProtectedImageUrl(src);
+  const protectedImage = isProtectedImageUrl(src);
   const [loadedImage, setLoadedImage] = useState<LoadedImage | null>(null);
   const [failedSource, setFailedSource] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!protectedArtifact) {
+    if (!protectedImage) {
       return;
     }
 
@@ -66,9 +66,9 @@ export function AuthenticatedImage({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [accessToken, protectedArtifact, src]);
+  }, [accessToken, protectedImage, src]);
 
-  if (protectedArtifact && failedSource === src) {
+  if (protectedImage && failedSource === src) {
     return (
       <span
         className={
@@ -82,7 +82,7 @@ export function AuthenticatedImage({
     );
   }
 
-  const displaySrc = protectedArtifact
+  const displaySrc = protectedImage
     ? loadedImage?.source === src
       ? loadedImage.objectUrl
       : null
@@ -109,7 +109,7 @@ export function AuthenticatedImage({
   }
 
   const openFullSize = async (event: MouseEvent<HTMLAnchorElement>) => {
-    if (!protectedArtifact) {
+    if (!protectedImage) {
       return;
     }
     event.preventDefault();
@@ -124,7 +124,7 @@ export function AuthenticatedImage({
   return (
     <a
       className={linkClassName}
-      href={protectedArtifact ? src : displaySrc}
+      href={protectedImage ? src : displaySrc}
       target="_blank"
       rel="noreferrer"
       aria-label={openLabel}
