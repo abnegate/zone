@@ -895,17 +895,22 @@ impl Client {
                         Ok(Some(outputs)) => {
                             let _ = progress.send(collection.saving.to_string());
                             let result = self.fetch_outputs(outputs, cancel, deadline).await;
-                            self.clear_history(&prompt_id).await;
-                            if matches!(result, Err(Error::Cancelled | Error::Timeout)) {
-                                self.cancel(&prompt_id).await;
+                            match &result {
+                                Ok(_) => self.clear_history(&prompt_id).await,
+                                Err(_) => self.cancel(&prompt_id).await,
                             }
                             return result;
                         }
                         Ok(None) => {}
+                        Err(Error::Http(error)) if is_transient(&error) => {
+                            tracing::warn!(
+                                prompt_id = %prompt_id,
+                                error = %error,
+                                "ComfyUI history poll failed; polling again"
+                            );
+                        }
                         Err(error) => {
-                            if matches!(error, Error::Cancelled | Error::Timeout) {
-                                self.cancel(&prompt_id).await;
-                            }
+                            self.cancel(&prompt_id).await;
                             return Err(error);
                         }
                     }
@@ -1033,17 +1038,36 @@ impl Client {
     ) -> Result<Vec<GeneratedImage>, Error> {
         let mut generated = Vec::with_capacity(outputs.len());
         for output in outputs {
-            let filename = output.filename.clone();
-            // reqwest 0.13 dropped RequestBuilder::query; encode onto the URL.
-            let url = format!(
-                "{}/view?filename={}&subfolder={}&type={}",
-                self.config.base_url,
-                urlencoding::encode(output.filename.as_str()),
-                urlencoding::encode(output.subfolder.as_str()),
-                urlencoding::encode(output.r#type.as_str()),
-            );
-            let request = self.authorize(self.client.get(url));
-            let (bytes, mime) = self
+            let (bytes, mime) = self.fetch_output(&output, cancel, deadline).await?;
+            generated.push(GeneratedImage {
+                bytes,
+                mime,
+                filename: output.filename,
+            });
+        }
+        Ok(generated)
+    }
+
+    async fn fetch_output(
+        &self,
+        output: &OutputImage,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+    ) -> Result<(bytes::Bytes, String), Error> {
+        // reqwest 0.13 dropped RequestBuilder::query; encode onto the URL.
+        let url = format!(
+            "{}/view?filename={}&subfolder={}&type={}",
+            self.config.base_url,
+            urlencoding::encode(output.filename.as_str()),
+            urlencoding::encode(output.subfolder.as_str()),
+            urlencoding::encode(output.r#type.as_str()),
+        );
+        loop {
+            let request = self
+                .authorize(self.client.get(&url))
+                .timeout(deadline.saturating_duration_since(tokio::time::Instant::now()));
+            let filename = output.filename.as_str();
+            let result = self
                 .bounded(cancel, deadline, async move {
                     let response = request.send().await?.error_for_status()?;
                     let mime = response
@@ -1058,17 +1082,35 @@ impl Client {
                                 || value.starts_with("audio/")
                         })
                         .map(str::to_string)
-                        .unwrap_or_else(|| mime_for_filename(&filename));
+                        .unwrap_or_else(|| mime_for_filename(filename));
                     Ok((response.bytes().await?, mime))
                 })
-                .await?;
-            generated.push(GeneratedImage {
-                bytes,
-                mime,
-                filename: output.filename,
-            });
+                .await;
+            match result {
+                Err(Error::Http(error)) if is_transient(&error) => {
+                    tracing::warn!(
+                        filename = %output.filename,
+                        error = %error,
+                        "ComfyUI output download failed; retrying"
+                    );
+                    self.pause(cancel, deadline).await?;
+                }
+                result => return result,
+            }
         }
-        Ok(generated)
+    }
+
+    async fn pause(
+        &self,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), Error> {
+        tokio::select! {
+            biased;
+            _ = cancel.recv() => Err(Error::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => Err(Error::Timeout),
+            _ = tokio::time::sleep(Duration::from_millis(self.config.poll_interval_ms)) => Ok(()),
+        }
     }
 
     async fn cancel(&self, prompt_id: &str) {
@@ -1609,6 +1651,15 @@ fn extension_for_video_mime(mime: &str) -> &'static str {
         "video/mp4" => "mp4",
         _ => "webm",
     }
+}
+
+fn is_transient(error: &reqwest::Error) -> bool {
+    !error.is_builder()
+        && error.status().is_none_or(|status| {
+            status.is_server_error()
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        })
 }
 
 fn is_model_filename(name: &str) -> bool {
@@ -2936,6 +2987,143 @@ mod tests {
         assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
         assert_eq!(videos[0].mime, "video/webm");
         assert_eq!(progress_rx.recv().await.as_deref(), Some("Video queued..."));
+    }
+
+    async fn mock_video_prompt(server: &MockServer, prompt_id: &str) {
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": prompt_id})))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    async fn generate_clip(client: Client) -> Result<Vec<GeneratedImage>, Error> {
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        client
+            .generate_video("a fox running", None, &mut cancel_rx, progress_tx)
+            .await
+    }
+
+    async fn posted_bodies(server: &MockServer, endpoint: &str) -> Vec<Value> {
+        server
+            .received_requests()
+            .await
+            .expect("the mock server records requests")
+            .into_iter()
+            .filter(|request| request.method.as_str() == "POST" && request.url.path() == endpoint)
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_failed_history_poll_keeps_the_render_alive() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "flaky").await;
+        Mock::given(method("GET"))
+            .and(path("/history/flaky"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_video_output(&server, "flaky").await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let videos = generate_clip(client)
+            .await
+            .expect("one failed poll must not discard the render");
+        assert_eq!(videos[0].bytes.as_ref(), &[1, 2, 3, 4]);
+        assert!(
+            posted_bodies(&server, "/queue").await.is_empty(),
+            "a finished render must not be cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_download_slower_than_the_request_timeout_still_lands() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "slow").await;
+        Mock::given(method("GET"))
+            .and(path("/history/slow"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "slow": {"status": {"status_str": "success"}, "outputs": {
+                    "10": {"gifs": [{"filename": "zone.webm", "subfolder": "", "type": "output"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "video/webm")
+                    .set_body_bytes(vec![5, 6, 7])
+                    .set_delay(Duration::from_millis(2500)),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            request_timeout_secs: 1,
+            video_generation_timeout_secs: 60,
+            ..Default::default()
+        })
+        .unwrap();
+        let videos = generate_clip(client)
+            .await
+            .expect("a download inside the render deadline must land");
+        assert_eq!(videos[0].bytes.as_ref(), &[5, 6, 7]);
+    }
+
+    #[tokio::test]
+    async fn a_terminal_http_error_cancels_the_prompt_and_keeps_its_history() {
+        let server = MockServer::start().await;
+        mock_video_prompt(&server, "gone").await;
+        Mock::given(method("GET"))
+            .and(path("/history/gone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "gone": {"status": {"status_str": "success"}, "outputs": {
+                    "10": {"gifs": [{"filename": "zone.webm", "subfolder": "", "type": "output"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/queue"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(matches!(generate_clip(client).await, Err(Error::Http(_))));
+        assert_eq!(
+            posted_bodies(&server, "/queue").await,
+            [json!({"delete": ["gone"]})],
+            "a terminal error must delete the accepted prompt"
+        );
+        assert!(
+            posted_bodies(&server, "/history").await.is_empty(),
+            "history is cleared only after a clip lands"
+        );
     }
 
     struct BodyDoesNotContain(&'static str);
