@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use abnegate_llm::{LlmConfig, Message};
 use futures::StreamExt;
 use futures_util::SinkExt;
 use serde_json::{Value, json};
@@ -19,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_core::llm::{LlmClient, LlmConfig, Message};
+use zone_core::llm::LlmClient;
 use zone_core::tools::Session;
 use zone_core::tools::job::{self, JobCommand, Jobs};
 use zone_server::agent::{

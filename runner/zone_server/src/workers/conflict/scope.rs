@@ -8,10 +8,10 @@
 
 use std::sync::Arc;
 
+use abnegate_llm::ToolDefinition;
 use abnegate_vcs::conflict::{Conflict, ConflictedPath};
 use async_trait::async_trait;
 use serde_json::Value;
-use zone_core::llm::ToolDefinition;
 use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolResult};
 
 /// The parameter every file tool names its target with.

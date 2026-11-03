@@ -1,5 +1,5 @@
+use abnegate_llm::Window;
 use uuid::Uuid;
-use zone_core::llm::Window;
 
 use crate::services::login::router::Observed;
 use crate::state::AppState;

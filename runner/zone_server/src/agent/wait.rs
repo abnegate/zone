@@ -12,6 +12,7 @@
 //! timeout and a commit nothing is reporting on both have to be unphrasable as
 //! a pass, or a model reads "no news" as "green".
 
+use abnegate_llm::{Message as LlmMessage, ToolCall};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use dashmap::DashMap;
@@ -27,7 +28,6 @@ use tokio::time::Instant;
 use uuid::Uuid;
 use zone_chat::history;
 use zone_core::context::Entry;
-use zone_core::llm::{Message as LlmMessage, ToolCall};
 use zone_core::tools::job::{JobExited, Jobs};
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
@@ -1000,12 +1000,12 @@ mod tests {
 
     use crate::agent::integrations::{PENDING_ASSESSMENT, SUCCESS_ASSESSMENT};
     use crate::state::{AppState, test_config};
+    use abnegate_llm::Role;
     use std::collections::{HashMap, VecDeque};
     use std::path::Path;
     use std::sync::Mutex as Lock;
     use tempfile::TempDir;
     use zone_core::context;
-    use zone_core::llm::Role;
     use zone_core::tools::job::{JobCommand, JobStarted};
 
     const POLL: Duration = Duration::from_millis(20);

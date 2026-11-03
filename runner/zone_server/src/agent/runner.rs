@@ -6,13 +6,14 @@
 //! streams every completion and yields events instead. The websocket handler
 //! consumes the result exactly like the plain completion stream it replaces.
 
+use abnegate_llm::{
+    Error, Limit, Message as LlmMessage, RequestOptions, Role as LlmRole, StreamToolCall,
+    ToolCall as LlmToolCall, Usage, Window,
+};
 use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
-use zone_core::llm::{
-    AgentKind, BuiltinTools, Limit, LlmBackend, LlmClient, LlmError, Message as LlmMessage,
-    Role as LlmRole, StreamToolCall, ToolCall as LlmToolCall, Window,
-};
+use zone_core::llm::{AgentKind, BuiltinTools, LlmBackend, LlmClient};
 
 use super::Citation;
 use super::approval::ApprovalPolicy;
@@ -27,7 +28,6 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
-use zone_core::llm::{RequestOptions, Usage};
 use zone_core::tools::{Session, is_vision_url};
 
 /// What the calls queued behind a turn-ending question are told.
@@ -698,10 +698,10 @@ impl Parked {
 }
 
 /// The event a stream that broke off with `error` ends the turn on.
-fn halted(error: LlmError) -> AgentEvent {
+fn halted(error: Error) -> AgentEvent {
     let message = format!("Stream error: {error}");
     match error {
-        LlmError::Limited { limit, .. } => AgentEvent::Limited(limit.with_message(message)),
+        Error::Limited { limit, .. } => AgentEvent::Limited(limit.with_message(message)),
         _ => AgentEvent::Failed(message),
     }
 }
@@ -1234,7 +1234,7 @@ impl ToolCallAccumulator {
                                 format!("call_{index}_{offset}")
                             }
                         });
-                        let arguments = zone_core::llm::wire_arguments(&call.arguments);
+                        let arguments = abnegate_llm::wire_arguments(&call.arguments);
                         LlmToolCall::function(id, call.name, arguments)
                     })
             })
@@ -1909,6 +1909,7 @@ mod tests {
     /// fail every agentic turn instead of answering it.
     mod host_agent_backend {
         use super::*;
+        use abnegate_llm::LlmConfig;
         use serde_json::{Value, json};
         use std::path::PathBuf;
         use std::sync::{Arc, Mutex};
@@ -1916,7 +1917,7 @@ mod tests {
         use tempfile::TempDir;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-        use zone_core::llm::{CliSettings, LlmConfig, Toolset};
+        use zone_core::llm::{CliSettings, Toolset};
 
         const ANSWER: &str = "Ready.";
         const SESSION: &str = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f";

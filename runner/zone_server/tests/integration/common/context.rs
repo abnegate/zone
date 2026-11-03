@@ -545,8 +545,8 @@ pub fn pairs(request: &Value) -> usize {
 }
 
 pub async fn seed_evidence(harness: &Harness, count: usize) -> Vec<String> {
+    use abnegate_llm::{Message, ToolCall};
     use zone_chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
-    use zone_core::llm::{Message, ToolCall};
 
     let store = harness.store();
     let lease = store.acquire(Uuid::new_v4(), LEASE_LIFETIME).await.unwrap();

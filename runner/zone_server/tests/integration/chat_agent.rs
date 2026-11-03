@@ -1,6 +1,7 @@
 //! Exercise the real streaming loop against deterministic provider responses.
 use crate::common;
 
+use abnegate_llm::{LlmConfig, Message, Role, ToolCall};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
@@ -11,7 +12,7 @@ use std::time::Duration;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_core::llm::{LlmClient, LlmConfig, Message, Role, ToolCall};
+use zone_core::llm::LlmClient;
 use zone_core::tools::job::{self, Jobs};
 use zone_core::tools::{Session, Tool};
 use zone_core::variables::Variables;

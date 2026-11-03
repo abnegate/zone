@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+use abnegate_llm::Message;
 use abnegate_secret::SecretValue;
 use abnegate_vcs::Checkout as GitCheckout;
 use abnegate_vcs::git::GitResult;
@@ -27,7 +28,7 @@ use crate::state::AppState;
 use crate::workers::conflict::agent::ModelRepairAgent;
 use crate::workers::conflict::{self, RepairOutcome, RepairRequest, repair};
 use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
-use zone_core::llm::{LlmBackend, Message};
+use zone_core::llm::LlmBackend;
 
 /// Times a publication step meets a repository configuration a run wrote,
 /// restores it, and tries again before the publication fails.

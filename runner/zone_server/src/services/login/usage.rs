@@ -12,6 +12,7 @@ pub use snapshot::Snapshot;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use abnegate_llm::Window;
 use aiusg::provider::{claude, codex, is_signed_out};
 use aiusg::store::Credential;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -19,7 +20,7 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use futures::future::join_all;
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, Window};
+use zone_core::llm::AgentKind;
 
 use super::credential::{self, Login};
 use super::router::Chosen;

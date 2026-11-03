@@ -368,7 +368,7 @@ mod tests {
     use tempfile::TempDir;
     use zone_core::llm::window;
 
-    use zone_core::llm::Window;
+    use abnegate_llm::Window;
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};

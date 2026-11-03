@@ -14,10 +14,11 @@ pub use observed::Observed;
 
 use std::cmp::Ordering;
 
+use abnegate_llm::{Limit, Window};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::join_all;
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, Limit, Window};
+use zone_core::llm::AgentKind;
 
 use super::credential;
 use super::usage::{self, Availability, Snapshot};

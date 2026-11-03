@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
+use abnegate_llm::Window;
 use uuid::Uuid;
-use zone_core::llm::Window;
 
 use crate::state::AppState;
 

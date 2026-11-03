@@ -1,11 +1,11 @@
 //! The coding agent sign-ins Zone keeps for each organization, several per agent.
 
+use abnegate_llm::Window;
 use abnegate_secret::SecretValue;
 use chrono::{DateTime, Utc};
 use sqlx::types::Json;
 use sqlx::{Executor, PgConnection, Postgres};
 use uuid::Uuid;
-use zone_core::llm::Window;
 
 use super::DbResult;
 use crate::services::login::usage::Snapshot;

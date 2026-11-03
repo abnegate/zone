@@ -10,6 +10,7 @@
 //! 5. Client can send "cancel" to interrupt generation
 //! 6. Connection closes on error or client disconnect
 
+use abnegate_llm::{Message as LlmMessage, Role as LlmRole, Usage};
 use axum::{
     body::Bytes,
     extract::{
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_comfy::MediaType;
-use zone_core::llm::{BuiltinTools, LlmBackend, Message as LlmMessage, Role as LlmRole, Usage};
+use zone_core::llm::{BuiltinTools, LlmBackend};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -4095,7 +4096,7 @@ async fn forget(state: &AppState, chat_id: Uuid) {
 /// Brings what the organization knows of `login`'s usage up to date once a turn on it has
 /// ended, starting from the `windows` the turn observed on it, without holding the answer up for
 /// it.
-fn settle(state: &AppState, login: Uuid, windows: Vec<zone_core::llm::Window>) {
+fn settle(state: &AppState, login: Uuid, windows: Vec<abnegate_llm::Window>) {
     let state = state.clone();
     tokio::spawn(async move {
         router::observe(&state, login, &windows).await;

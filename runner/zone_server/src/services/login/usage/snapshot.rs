@@ -1,6 +1,6 @@
+use abnegate_llm::Window;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use zone_core::llm::Window;
 
 use super::availability::Availability;
 

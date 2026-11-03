@@ -17,13 +17,14 @@ pub mod verdict;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_llm::{Message, ToolDefinition};
 use abnegate_secret::SecretValue;
 use abnegate_vcs::{ChangedFile, PullRequestDetail, PullRequestReference, PullRequestService};
 use reqwest::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
+use zone_core::llm::LlmBackend;
 use zone_core::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{LlmBackend, LlmError, Message, ToolDefinition};
 use zone_core::tools::{ToolContext, ToolResult};
 
 use crate::db::auto_projects::{Finding, ReviewRow};
@@ -64,13 +65,13 @@ pub enum ReviewError {
 
 impl ReviewError {
     /// `error`, what failed the `reviewer` model the review ran on `backend`.
-    fn model(backend: &LlmBackend, reviewer: &str, error: LlmError) -> Self {
+    fn model(backend: &LlmBackend, reviewer: &str, error: abnegate_llm::Error) -> Self {
         if unreachable(&error) {
             return Self::Unreachable(error.to_string());
         }
         let message = error.to_string();
         let words = backend::own_words(&message);
-        let credits = matches!(&error, LlmError::Limited { limit, .. } if limit.credits);
+        let credits = matches!(&error, abnegate_llm::Error::Limited { limit, .. } if limit.credits);
         let unfunded = credits
             || matches!(backend, LlmBackend::Cli { .. })
                 && UNFUNDED_MARKERS.iter().any(|marker| words.contains(marker));
@@ -109,22 +110,22 @@ impl ReviewError {
 /// connection, no answer in time, or a status that says the server in front
 /// of it is overloaded or restarting. A proxy's 5xx that carries the model's
 /// refusal of tools is the model's.
-fn unreachable(error: &LlmError) -> bool {
+fn unreachable(error: &abnegate_llm::Error) -> bool {
     match error {
-        LlmError::Http(error) => !error.is_decode(),
-        LlmError::Api { status, .. } => {
+        abnegate_llm::Error::Http(error) => !error.is_decode(),
+        abnegate_llm::Error::Api { status, .. } => {
             let status = StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (status.is_server_error()
                 || status == StatusCode::TOO_MANY_REQUESTS
                 || status == StatusCode::REQUEST_TIMEOUT)
                 && !error.unsupported_tools()
         }
-        LlmError::Timeout(_) => true,
-        LlmError::Json(_)
-        | LlmError::Stream(_)
-        | LlmError::InvalidConfig(_)
-        | LlmError::Agent(_)
-        | LlmError::Limited { .. } => false,
+        abnegate_llm::Error::Timeout(_) => true,
+        abnegate_llm::Error::Json(_)
+        | abnegate_llm::Error::Stream(_)
+        | abnegate_llm::Error::InvalidConfig(_)
+        | abnegate_llm::Error::Agent(_)
+        | abnegate_llm::Error::Limited { .. } => false,
         _ => false,
     }
 }
@@ -242,12 +243,13 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_llm::Limit;
     use abnegate_vcs::{BranchName, CommitSha, Mergeability};
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use uuid::Uuid;
-    use zone_core::llm::{AgentKind, Limit};
+    use zone_core::llm::AgentKind;
 
     use crate::config::{Config, ModelBackend};
 
@@ -503,7 +505,7 @@ mod tests {
         let error = ReviewError::model(
             &LlmBackend::Http,
             "qwen3:32b",
-            LlmError::Timeout(std::time::Duration::from_secs(600)),
+            abnegate_llm::Error::Timeout(std::time::Duration::from_secs(600)),
         );
 
         assert!(matches!(error, ReviewError::Unreachable(_)), "{error:?}");
@@ -515,7 +517,7 @@ mod tests {
         let error = ReviewError::model(
             &LlmBackend::Http,
             "fable",
-            LlmError::api(
+            abnegate_llm::Error::api(
                 StatusCode::BAD_REQUEST.as_u16(),
                 format!("{UNFUNDED}: {REFUSAL}"),
             ),
@@ -536,14 +538,14 @@ mod tests {
         );
 
         assert!(matches!(
-            ReviewError::model(&agent, "fable", LlmError::Agent(stderr_only)),
+            ReviewError::model(&agent, "fable", abnegate_llm::Error::Agent(stderr_only)),
             ReviewError::Model(_)
         ));
         assert!(matches!(
             ReviewError::model(
                 &agent,
                 "sonnet[1m]",
-                LlmError::Agent(format!(
+                abnegate_llm::Error::Agent(format!(
                     "claude: {UNFUNDED_CONTEXT}: API Error: Usage credits required for 1M context"
                 ))
             ),
@@ -558,7 +560,7 @@ mod tests {
     fn a_credits_limit_is_an_unfunded_reviewer_and_any_other_limit_a_model_failure() {
         let agent = LlmBackend::cli(AgentKind::Claude, zone_core::llm::CliSettings::default());
         let limited = |message: &str, credits: bool| {
-            LlmError::limited("claude", Limit::new(message).with_credits(credits))
+            abnegate_llm::Error::limited("claude", Limit::new(message).with_credits(credits))
         };
 
         let error = ReviewError::model(

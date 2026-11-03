@@ -2,12 +2,12 @@
 
 use crate::common;
 
+use abnegate_llm::{Message, Role, ToolCall};
 use serde_json::json;
 use sqlx::{Executor, PgPool};
 use std::time::Duration;
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
-use zone_core::llm::{Message, Role, ToolCall};
 use zone_server::db::chats;
 use zone_server::db::context::{Error, Lease, Store};
 

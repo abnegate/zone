@@ -8,6 +8,7 @@ pub mod tail;
 pub use generation::Generation;
 pub use pinned::Pinned;
 
+use abnegate_llm::{Message, Role};
 use abnegate_search::SearchContext;
 use base64::Engine;
 use serde_json::Value;
@@ -15,7 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
-use zone_core::llm::{LlmClient, Message, ReasoningEffort, Role};
+use zone_core::llm::{LlmClient, ReasoningEffort};
 
 use crate::agent::prompt::Environment;
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
@@ -151,7 +152,7 @@ impl RunContext {
     pub fn usage(
         &self,
         model: &str,
-        tools: Option<&[zone_core::llm::ToolDefinition]>,
+        tools: Option<&[abnegate_llm::ToolDefinition]>,
     ) -> ContextUsage {
         let mut usage = context::estimate(
             model,

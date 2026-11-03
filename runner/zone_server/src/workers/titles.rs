@@ -1,10 +1,10 @@
 //! First-message titles are best-effort and never delay chat responses.
 
+use abnegate_llm::Message;
 use once_cell::sync::Lazy;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use uuid::Uuid;
-use zone_core::llm::Message;
 
 use crate::db::chats;
 use crate::services::route::Route;

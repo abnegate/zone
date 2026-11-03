@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
+use abnegate_llm::{Message, finish_reason};
 use abnegate_vcs::PullRequestDetail;
-use zone_core::llm::{Message, finish_reason};
 
 use crate::db::tasks::TaskRow;
 use crate::services::stages;

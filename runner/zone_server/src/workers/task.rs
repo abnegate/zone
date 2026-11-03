@@ -3,6 +3,7 @@
 //! Executes agentic tasks in the background using the same streaming agent
 //! loop as chat, with a task budget and a sandboxed tool context.
 
+use abnegate_llm::{Limit, Message as LlmMessage};
 use futures::StreamExt;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use uuid::Uuid;
 use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
 use zone_core::llm::provider::{OUTGROWN, UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{BuiltinTools, Limit, LlmBackend, LlmClient, Message as LlmMessage};
+use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient};
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
@@ -659,9 +660,9 @@ fn classify(message: &str) -> Failure {
 
 /// [`classify`] for a coding agent's own words, where a failure no retry
 /// survives is terminal and a subscription that ran out, in any of
-/// [`zone_core::llm::LIMIT_WORDINGS`], backs off like any rate limit. Only a
-/// coding agent's own words are read for those: an endpoint's failure that
-/// happens to use them is judged by [`classify`] alone.
+/// [`abnegate_llm::provider::LIMIT_WORDINGS`], backs off like any rate
+/// limit. Only a coding agent's own words are read for those: an endpoint's
+/// failure that happens to use them is judged by [`classify`] alone.
 fn classify_agent(words: &str) -> Failure {
     if AGENT_TERMINAL_MARKERS
         .iter()
@@ -3157,7 +3158,7 @@ async fn run_task_loop(
 mod tests {
     use super::*;
     use crate::db::{ai_settings, workspaces};
-    use zone_core::llm::LlmConfig;
+    use abnegate_llm::LlmConfig;
 
     #[test]
     fn test_semaphore_initialization() {
@@ -4232,7 +4233,7 @@ mod retry_tests {
                 .iter()
                 .find_map(|event| match event {
                     zone_core::llm::provider::AgentEvent::Failed(message)
-                    | zone_core::llm::provider::AgentEvent::Limited(zone_core::llm::Limit {
+                    | zone_core::llm::provider::AgentEvent::Limited(abnegate_llm::Limit {
                         message,
                         ..
                     }) => Some(message),
@@ -4292,7 +4293,7 @@ mod retry_tests {
         let outcome = tokio::time::timeout(
             Duration::from_secs(30),
             run_task_loop(
-                LlmClient::new(zone_core::llm::LlmConfig::default()).with_backend(backend.clone()),
+                LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(backend.clone()),
                 "sonnet".to_string(),
                 ChatTools::empty(),
                 RunContext::from_messages(vec![LlmMessage::user("Write the file.")]),
@@ -5053,8 +5054,8 @@ mod retry_tests {
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+    use abnegate_llm::Role as LlmRole;
     use std::sync::Mutex;
-    use zone_core::llm::Role as LlmRole;
 
     /// A run that is working announces nothing: the watchdog is there for the
     /// silence, and firing on a busy run would bury the log it writes to.
@@ -6824,6 +6825,7 @@ mod cli_tests {
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, users, workspace_members, workspaces};
     use crate::services::login::claude::Tokens;
+    use abnegate_llm::{Credential, LlmConfig};
     use abnegate_secret::SecretValue;
     use axum::http::{HeaderMap, HeaderValue, header};
     use chrono::{TimeDelta, Utc};
@@ -6833,7 +6835,7 @@ mod cli_tests {
     use tempfile::TempDir;
     use wiremock::MockServer;
     use zone_core::llm::provider::SignIn;
-    use zone_core::llm::{AgentKind, CliSettings, Credential, LlmConfig, Toolset};
+    use zone_core::llm::{AgentKind, CliSettings, Toolset};
 
     const ANSWER: &str = "Wrote it.";
     const EXECUTABLE: &str = "claude";
@@ -8419,7 +8421,7 @@ mod cli_tests {
         for (login, headroom) in [(&first, 10.0), (&second, 90.0)] {
             let snapshot = Snapshot {
                 windows: vec![
-                    zone_core::llm::Window::new("5h")
+                    abnegate_llm::Window::new(zone_core::llm::window::FIVE_HOURS)
                         .with_used_percent(100.0 - headroom)
                         .with_resets_at(Utc::now() + TimeDelta::hours(3)),
                 ],

@@ -7,11 +7,12 @@
 use std::fmt;
 
 use abnegate_http::metadata;
+use abnegate_llm::{Dialect, LlmConfig, Trust};
 use abnegate_secret::{REDACTED, SecretValue, conceal, redact};
 use reqwest::Url;
 use zone_chat::capacity::Resolver;
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
-use zone_core::llm::{self, Dialect, LlmBackend, LlmClient, LlmConfig, Trust};
+use zone_core::llm::{self, LlmBackend, LlmClient};
 
 use crate::config::Config;
 use crate::db::ai_settings::{EffectiveAiSettings, PROVIDER_ANTHROPIC};
@@ -336,8 +337,8 @@ fn same_origin(url: &Url, instance: &str) -> bool {
 pub(crate) mod testing {
     use super::{Endpoint, Origin};
     use crate::db::ai_settings::EffectiveAiSettings;
+    use abnegate_llm::Dialect;
     use abnegate_secret::SecretValue;
-    use zone_core::llm::Dialect;
 
     /// The instance's endpoint at `url` under `key`.
     pub fn endpoint(url: &str, key: &str) -> Endpoint {
@@ -1052,7 +1053,7 @@ mod tests {
 
         let failure = endpoint
             .llm("model", 0.2, 64, LlmBackend::Http)
-            .chat(&[zone_core::llm::Message::user("hi")], None)
+            .chat(&[abnegate_llm::Message::user("hi")], None)
             .await
             .expect_err("the endpoint refused the turn")
             .to_string();
@@ -1178,7 +1179,7 @@ mod tests {
         let answered = endpoint
             .llm(model, temperature, 512, LlmBackend::Http)
             .with_stop(stops)
-            .chat(&[zone_core::llm::Message::user("hi")], None)
+            .chat(&[abnegate_llm::Message::user("hi")], None)
             .await;
 
         assert!(answered.is_ok(), "{provider} {model}: {answered:?}");

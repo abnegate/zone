@@ -4,13 +4,14 @@
 //! transport for a server that never pushes. The bearer token names the turn;
 //! no other route accepts it, and this route accepts nothing else.
 
+use abnegate_llm::ToolDefinition;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response as HttpResponse};
 use rmcp::model::{CallToolRequestParams, ErrorCode, ErrorData, ProtocolVersion, Tool as McpTool};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
-use zone_core::llm::{ToolDefinition, Toolset};
+use zone_core::llm::Toolset;
 
 use super::protocol::{self, Request, Response};
 use super::turn::Turn;
