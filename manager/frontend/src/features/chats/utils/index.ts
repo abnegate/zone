@@ -8,3 +8,4 @@ export * from './handover';
 export * from './links';
 export * from './modelOptions';
 export * from './plainText';
+export * from './providerOptions';

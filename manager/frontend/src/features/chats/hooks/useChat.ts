@@ -1307,6 +1307,9 @@ export function useChat(
   const setReasoningEffort = (effort: ReasoningEffort): Promise<void> =>
     updateAgentSettings({ reasoning_effort: effort });
 
+  const setModelName = (modelName: string): Promise<void> =>
+    updateAgentSettings({ model_name: modelName });
+
   const setContextTokens = (tokens: number): Promise<void> =>
     updateAgentSettings({ context_tokens: tokens });
 
@@ -1345,6 +1348,7 @@ export function useChat(
     setAutoApprove,
     setAgentSandboxed,
     setReasoningEffort,
+    setModelName,
     setContextTokens,
     setCharacter,
     clearCharacter,

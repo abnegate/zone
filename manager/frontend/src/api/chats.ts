@@ -1,4 +1,5 @@
 import {
+  ChatProvidersSchema,
   ChatResponseSchema,
   ChatSearchResponseSchema,
   ChatSourcesResponseSchema,
@@ -6,9 +7,11 @@ import {
   ContextResponseSchema,
   MessageResponseSchema,
   MessagesResponseSchema,
+  WorkspaceChatProvidersSchema,
 } from '../features/chats/schemas';
 import type {
   Chat,
+  ChatProviders,
   ChatSearchOptions,
   ChatSearchResponse,
   ChatSource,
@@ -17,7 +20,9 @@ import type {
   CreateChatRequest,
   Message,
   SendMessageRequest,
+  SetChatProviderRequest,
   UpdateChatRequest,
+  WorkspaceChatProviders,
 } from '../features/chats/types';
 import { parse } from '../validation';
 import { ApiError } from './ApiError';
@@ -227,6 +232,42 @@ class ChatsApi {
       throw await ApiError.from(response, 'Failed to attach sources');
     }
     return parse(ChatSourcesResponseSchema, await response.json()).sources;
+  }
+
+  async getChatProviders(chatId: string): Promise<ChatProviders> {
+    const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/providers`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load AI providers');
+    }
+    return parse(ChatProvidersSchema, await response.json());
+  }
+
+  async setChatProvider(
+    chatId: string,
+    request: SetChatProviderRequest
+  ): Promise<ChatWithMessages> {
+    const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/provider`, {
+      method: 'PUT',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ provider: request.provider, model: request.model ?? null }),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to change the AI provider');
+    }
+    return parse(ChatResponseSchema, await response.json()).chat;
+  }
+
+  async getWorkspaceChatProviders(workspaceId: string): Promise<WorkspaceChatProviders> {
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/chat-providers`,
+      { headers: this.getHeaders() }
+    );
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load AI providers');
+    }
+    return parse(WorkspaceChatProvidersSchema, await response.json());
   }
 
   async searchChatMessages(options: ChatSearchOptions): Promise<ChatSearchResponse> {

@@ -849,6 +849,25 @@ describe('useChat', () => {
     expect(result.current.chat?.messages).toHaveLength(2);
   });
 
+  it('persists a model change on the chat', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    mockUpdateChat.mockResolvedValue({ ...mockChat, model_name: 'opus' });
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await result.current.setModelName('opus');
+
+    expect(mockUpdateChat).toHaveBeenCalledWith('1', { model_name: 'opus' });
+    await waitFor(() => {
+      expect(result.current.chat?.model_name).toBe('opus');
+    });
+    expect(result.current.chat?.messages).toHaveLength(2);
+  });
+
   it('persists auto-approve on the chat', async () => {
     mockGetChat.mockResolvedValue({ ...mockChat, agent_enabled: true });
     mockUpdateChat.mockResolvedValue({ ...mockChat, agent_enabled: true, auto_approve: true });
