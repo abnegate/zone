@@ -131,6 +131,26 @@ impl AgentStatus {
         Ok(status)
     }
 
+    /// Whether `organization` can start `agent`: one of its logins is signed in as last stored,
+    /// or, holding none, the host's own sign-in stands in. No login's usage is read again.
+    pub async fn signed_in(
+        state: &AppState,
+        organization: Uuid,
+        agent: AgentKind,
+    ) -> Result<bool, sqlx::Error> {
+        let logins = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
+        if logins.is_empty() {
+            return Ok(host(state.config(), agent).await.is_some());
+        }
+        let now = Utc::now();
+        Ok(logins.iter().any(|login| {
+            read(state, login, login.snapshot(), logins.len(), now)
+                .login
+                .state
+                == State::SignedIn
+        }))
+    }
+
     /// Summarises the agent's status as `best`, the login a turn would start on.
     fn lead(&mut self, best: &LoginStatus) {
         self.state = best.state;
@@ -948,6 +968,133 @@ mod tests {
             Some(resets),
             "a login with no snapshot hid that it is spent"
         );
+    }
+
+    #[tokio::test]
+    async fn signed_in_judges_stored_logins_without_reading_their_usage() {
+        let usage = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&usage)
+            .await;
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .expect("the test database accepts connections");
+        let organization = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Signed', $1::text)")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization to sign in");
+        let directory = TempDir::new().expect("a state root");
+        let mut config = config(&directory);
+        config.agents.host_login = false;
+        config.agents.claude_api_url = usage.uri();
+        config.agents.codex_api_url = usage.uri();
+        let state = AppState::new(config, pool.clone(), None);
+        let lasting = Utc::now() + TimeDelta::days(365);
+        let credential = subscribed(state.encryption_key(), lasting, Some("fake-refresh"));
+        agent_logins::insert(
+            &pool,
+            &Insert {
+                organization_id: organization,
+                agent: AgentKind::Claude.as_str(),
+                account: Some(JAKE),
+                credential: Some(&credential),
+                label: Some(JAKE),
+                expires_at: Some(lasting),
+            },
+        )
+        .await
+        .expect("a stored login whose usage was never read");
+
+        let claude = tokio::time::timeout(
+            Duration::from_secs(2),
+            AgentStatus::signed_in(&state, organization, AgentKind::Claude),
+        )
+        .await
+        .expect("signed_in answers without waiting on the usage service")
+        .expect("the logins are read");
+        let codex = AgentStatus::signed_in(&state, organization, AgentKind::Codex)
+            .await
+            .expect("the logins are read");
+
+        assert!(claude, "the stored Claude login is signed in");
+        assert!(!codex, "the organization holds no codex login");
+        assert_eq!(
+            usage
+                .received_requests()
+                .await
+                .map(|requests| requests.len()),
+            Some(0),
+            "signed_in read a login's usage"
+        );
+
+        let viewer = Viewer {
+            user: Uuid::new_v4(),
+            manages: false,
+        };
+        AgentStatus::read(&state, organization, AgentKind::Claude, viewer, None)
+            .await
+            .expect("the status");
+        assert!(
+            usage
+                .received_requests()
+                .await
+                .is_some_and(|requests| !requests.is_empty()),
+            "a full status reads the stale login's usage from the same service"
+        );
+
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization can be deleted");
+    }
+
+    #[tokio::test]
+    async fn signed_in_holds_an_expired_login_signed_out() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .expect("the test database accepts connections");
+        let organization = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Lapsed', $1::text)")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization to sign in");
+        let directory = TempDir::new().expect("a state root");
+        let mut config = config(&directory);
+        config.agents.host_login = false;
+        let state = AppState::new(config, pool.clone(), None);
+        let lapsed = Utc::now() - TimeDelta::days(1);
+        let credential = subscribed(state.encryption_key(), lapsed, None);
+        agent_logins::insert(
+            &pool,
+            &Insert {
+                organization_id: organization,
+                agent: AgentKind::Claude.as_str(),
+                account: Some(OLD),
+                credential: Some(&credential),
+                label: Some(OLD),
+                expires_at: Some(lapsed),
+            },
+        )
+        .await
+        .expect("a stored login that can't renew");
+
+        let signed_in = AgentStatus::signed_in(&state, organization, AgentKind::Claude)
+            .await
+            .expect("the logins are read");
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization can be deleted");
+
+        assert!(!signed_in, "a lapsed login can't start a turn");
     }
 
     #[test]

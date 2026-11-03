@@ -1,5 +1,6 @@
 //! Chat database queries
 
+pub mod provider;
 mod session;
 
 use chrono::NaiveDateTime;
@@ -331,6 +332,20 @@ pub async fn update_chat(
         Some(r) => get_chat(pool, r.id).await,
         None => Ok(None),
     }
+}
+
+/// Replace a chat's model, then return the fresh row.
+pub async fn set_model_name(pool: &PgPool, id: Uuid, model: &str) -> DbResult<Option<ChatRow>> {
+    let updated = sqlx::query("UPDATE chats SET model_name = $2, updated_at = NOW() WHERE id = $1")
+        .bind(id)
+        .bind(model)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if updated == 0 {
+        return Ok(None);
+    }
+    get_chat(pool, id).await
 }
 
 /// Save a generated title only while its original claim still owns the title.
@@ -984,5 +999,58 @@ mod tests {
             .execute(&pool)
             .await
             .expect("the organization can be deleted");
+    }
+
+    #[tokio::test]
+    async fn a_chat_keeps_the_model_it_is_moved_to() {
+        let pool = pool().await;
+        let organization = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Models', $1::text)")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+        let workspace = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Models', $1::text)",
+        )
+        .bind(workspace)
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("a workspace");
+        let chat = create_chat(&pool, Some(workspace), "Models", "sonnet", true, true)
+            .await
+            .expect("a chat");
+        let other = create_chat(&pool, Some(workspace), "Bystander", "sonnet", true, true)
+            .await
+            .expect("another chat");
+
+        let moved = set_model_name(&pool, chat.id, "opus")
+            .await
+            .expect("the model to be saved")
+            .expect("the chat");
+        let missing = set_model_name(&pool, Uuid::new_v4(), "opus")
+            .await
+            .expect("an absent chat to be a no-op");
+        let read = get_chat(&pool, chat.id).await.unwrap().expect("the chat");
+        let bystander = get_chat(&pool, other.id)
+            .await
+            .unwrap()
+            .expect("the other chat");
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization can be deleted");
+
+        assert_eq!(moved.model_name, "opus");
+        assert_eq!(read.model_name, "opus", "the new model is persisted");
+        assert!(
+            read.updated_at >= chat.updated_at,
+            "moving the model touches the chat"
+        );
+        assert_eq!(bystander.model_name, "sonnet", "only the chat itself moves");
+        assert!(missing.is_none(), "an absent chat has no row to return");
     }
 }
