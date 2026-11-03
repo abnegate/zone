@@ -24,17 +24,17 @@ make previously undeclared dependency coverage explicit; they are not blanket
 license approval. New packages, versions or license expressions must pass the
 policy again. In cargo-deny 0.20.2, `crate@version` selects an exact version.
 
-| Package and version                         | SPDX expression              | Dependency path                                     | Inspected packaged evidence                                                                 |
-| ------------------------------------------- | ---------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| cssparser 0.36.0, 0.37.0                    | MPL-2.0                      | Tauri/dom_query and scraper                         | Cargo.toml and LICENSE                                                                      |
-| cssparser-macros 0.6.1, 0.7.0               | MPL-2.0                      | cssparser                                           | Cargo.toml and LICENSE                                                                      |
-| dtoa-short 0.3.5                            | MPL-2.0                      | cssparser                                           | Cargo.toml and LICENSE                                                                      |
-| selectors 0.36.1, 0.38.0                    | MPL-2.0                      | Tauri/dom_query and scraper                         | Cargo.toml and lib.rs MPL-2.0 notice                                                        |
-| option-ext 0.2.0                            | MPL-2.0                      | dirs-sys through dirs/hf-hub                        | Cargo.toml and LICENSE.txt                                                                  |
-| libfuzzer-sys 0.4.13                        | (MIT OR Apache-2.0) AND NCSA | rav1e's cfg(fuzzing) dependency through ravif/image | Cargo.toml, LICENSE-MIT, LICENSE-APACHE and README's NCSA attribution for libfuzzer sources |
-| quoted_printable 0.5.2                      | 0BSD                         | lettre                                              | Cargo.toml and LICENSE                                                                      |
-| webpki-root-certs 1.0.9, webpki-roots 1.0.9 | CDLA-Permissive-2.0          | rustls-platform-verifier/reqwest and ureq/hf-hub    | Cargo.toml and LICENSE                                                                      |
-| xxhash-rust 0.8.18                          | BSL-1.0                      | redis                                               | Cargo.toml and LICENSE                                                                      |
+| Package and version                                    | SPDX expression              | Dependency path                                                     | Inspected packaged evidence                                                                 |
+| ------------------------------------------------------ | ---------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| cssparser 0.36.0, 0.37.0                               | MPL-2.0                      | Tauri/dom_query and scraper                                         | Cargo.toml and LICENSE                                                                      |
+| cssparser-macros 0.6.1, 0.7.0                          | MPL-2.0                      | cssparser                                                           | Cargo.toml and LICENSE                                                                      |
+| dtoa-short 0.3.5                                       | MPL-2.0                      | cssparser                                                           | Cargo.toml and LICENSE                                                                      |
+| selectors 0.36.1, 0.38.0                               | MPL-2.0                      | Tauri/dom_query and scraper                                         | Cargo.toml and lib.rs MPL-2.0 notice                                                        |
+| option-ext 0.2.0                                       | MPL-2.0                      | dirs-sys through dirs/hf-hub                                        | Cargo.toml and LICENSE.txt                                                                  |
+| libfuzzer-sys 0.4.13                                   | (MIT OR Apache-2.0) AND NCSA | rav1e's cfg(fuzzing) dependency through ravif/image                 | Cargo.toml, LICENSE-MIT, LICENSE-APACHE and README's NCSA attribution for libfuzzer sources |
+| quoted_printable 0.5.2                                 | 0BSD                         | lettre                                                              | Cargo.toml and LICENSE                                                                      |
+| webpki-root-certs 1.0.11, webpki-roots 0.26.11, 1.0.11 | CDLA-Permissive-2.0          | rustls-platform-verifier/reqwest, ureq/hf-hub and tokio-tungstenite | Cargo.toml and LICENSE                                                                      |
+| xxhash-rust 0.8.18                                     | BSL-1.0                      | redis                                                               | Cargo.toml and LICENSE                                                                      |
 
 The prior `copyleft = "warn"` expressed a warning policy for MPL dependencies.
 The NCSA, 0BSD, CDLA-Permissive-2.0 and BSL-1.0 entries are newly explicit,
@@ -70,6 +70,22 @@ exception must be revisited if an RSA private-key operation or an Octocrab calle
 is introduced. All other vulnerability advisories remain fatal; no new advisory
 ID is suppressed by this change.
 
+## crypto-bigint advisory exception
+
+`RUSTSEC-2026-0387` is excepted in `runner/deny.toml` and `runner/.cargo/audit.toml`.
+The [advisory](https://rustsec.org/advisories/RUSTSEC-2026-0387) describes timing
+variability in crypto-bigint operations meant to be constant-time; the fix is
+crypto-bigint 0.7.6. The locked crypto-bigint 0.5.5 is reached only through
+elliptic-curve 0.13 for p256/p384, which jsonwebtoken 11.0.0 (zone_server) and
+10.4.0 (octocrab in zone_context) enable with `rust_crypto`. No jsonwebtoken
+release, including 11.1.0, depends on an elliptic-curve that uses crypto-bigint 0.7.
+
+Zone never signs or verifies an ECDSA token: server JWTs use HS256 with
+secret-based keys in `runner/zone_server/src/auth/jwt.rs`, and the GitHub App JWT
+in `runner/zone_server/src/services/github_app/jwt.rs` uses RS256. This exception
+must be revisited if an ES256/ES384 key is introduced or when jsonwebtoken moves
+to elliptic-curve 0.14.
+
 ## Lighthouse archive advisory exception
 
 `GHSA-7pqw-9j4j-h8q3` is excepted in `manager/frontend`'s audit script. The
@@ -78,11 +94,12 @@ handed to extract-zip, and covers every published release: 2.0.1 is the latest,
 so there is nothing to upgrade to.
 
 The single path is `@lhci/cli > lighthouse > puppeteer-core > @puppeteer/browsers
-> extract-zip`. `@lhci/cli` is a devDependency, so extract-zip is never bundled
+
+> extract-zip`. `@lhci/cli`is a devDependency, so extract-zip is never bundled
 into the manager frontend or any shipped artifact; it runs only in CI, and the
-only archive it opens is the Chrome build `@puppeteer/browsers` downloads from
-Google's endpoint. Reaching the vulnerable path means that download is already
-attacker-controlled.
+only archive it opens is the Chrome build`@puppeteer/browsers` downloads from
+> Google's endpoint. Reaching the vulnerable path means that download is already
+> attacker-controlled.
 
 This exception must be revisited if extract-zip publishes a patched release, if
 `@lhci/cli` moves out of devDependencies, or if a caller extracts an archive from
