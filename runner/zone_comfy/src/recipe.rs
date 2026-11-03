@@ -64,6 +64,12 @@ fn packaged_workflow(name: &str) -> Option<&'static str> {
         "qwen-image-edit-2511-adapter-edit-api.json" => Some(include_str!(
             "../../../comfyui/workflows/qwen-image-edit-2511-adapter-edit-api.json"
         )),
+        "wan2.2-a14b-t2v-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/wan2.2-a14b-t2v-api.json"
+        )),
+        "wan2.2-a14b-i2v-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/wan2.2-a14b-i2v-api.json"
+        )),
         "wan-adapter-api.json" => Some(include_str!(
             "../../../comfyui/workflows/wan-adapter-api.json"
         )),
@@ -790,6 +796,13 @@ mod tests {
         assert!(wan.adapter);
         assert!(wan.has_lora_slot());
         assert_eq!(wan.kind, MediaKind::Video);
+        let a14b = catalog.get("wan-a14b").unwrap();
+        assert!(!a14b.adapter);
+        assert_eq!(a14b.kind, MediaKind::Video);
+        assert_eq!(
+            a14b.defaults.get("unet").map(String::as_str),
+            Some("wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors")
+        );
         for name in [
             "flux1-schnell-fp8-api.json",
             "flux1-schnell-fp8-img2img-api.json",
@@ -809,6 +822,8 @@ mod tests {
             "qwen-image-edit-2511-edit-api.json",
             "qwen-image-edit-2511-adapter-api.json",
             "qwen-image-edit-2511-adapter-edit-api.json",
+            "wan2.2-a14b-t2v-api.json",
+            "wan2.2-a14b-i2v-api.json",
             "wan-adapter-api.json",
             "wan-adapter-i2v-api.json",
         ] {

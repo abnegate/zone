@@ -286,10 +286,10 @@ class SetupModelsTest(unittest.TestCase):
             set(plan.comfy_bundles),
             set(self.download_models.VALID_BUNDLES) - {"image"},
         )
-        self.assertGreater(plan.total_bytes, 110 * GB)
-        self.assertLess(plan.total_bytes, 130 * GB)
-        self.assertGreater(plan.required_free_bytes, 120 * GB)
-        self.assertLess(plan.required_free_bytes, 140 * GB)
+        self.assertGreater(plan.total_bytes, 170 * GB)
+        self.assertLess(plan.total_bytes, 180 * GB)
+        self.assertGreater(plan.required_free_bytes, 180 * GB)
+        self.assertLess(plan.required_free_bytes, 190 * GB)
 
 
 def make_all_plan(test: SetupModelsTest) -> setup_models.Plan:

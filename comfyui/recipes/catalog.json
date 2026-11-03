@@ -427,6 +427,71 @@
       ]
     },
     {
+      "id": "wan-a14b",
+      "kind": "video",
+      "label": "Wan 2.2 A14B",
+      "bare": "wan2.2-a14b-t2v-api.json",
+      "with_source": "wan2.2-a14b-i2v-api.json",
+      "output_node": "10",
+      "output": "save_webm",
+      "slots": {
+        "prompt": "/5/inputs/text",
+        "seed": "/8/inputs/noise_seed",
+        "source": "/11/inputs/image",
+        "weights": {
+          "unet": "/1/inputs/unet_name",
+          "clip": "/2/inputs/clip_name",
+          "vae": "/3/inputs/vae_name"
+        }
+      },
+      "defaults": {
+        "unet": "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+        "clip": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "vae": "wan_2.1_vae.safetensors"
+      },
+      "files": [
+        "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+        "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+        "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+        "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+      ],
+      "required_files": [
+        {
+          "filename": "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+          "directory": "diffusion_models"
+        },
+        {
+          "filename": "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+          "directory": "diffusion_models"
+        },
+        {
+          "filename": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+          "directory": "diffusion_models"
+        },
+        {
+          "filename": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+          "directory": "diffusion_models"
+        },
+        {
+          "filename": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+          "directory": "text_encoders"
+        },
+        {
+          "filename": "wan_2.1_vae.safetensors",
+          "directory": "vae"
+        }
+      ],
+      "hf_bases": [
+        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
+      ],
+      "filename_hints": [
+        "wan2.2_t2v",
+        "wan2.2_i2v",
+        "high_noise",
+        "low_noise"
+      ]
+    },
+    {
       "id": "wan-adapter",
       "kind": "video",
       "label": "Wan 2.2 identity adapter",

@@ -72,7 +72,7 @@
     {
       "id": "video",
       "label": "Video",
-      "description": "Text-to-video and image-to-video with Wan 2.2 TI2V 5B",
+      "description": "Text-to-video and image-to-video with Wan 2.2 A14B (27B MoE, ~720p)",
       "comfy_bundles": ["video"]
     },
     {

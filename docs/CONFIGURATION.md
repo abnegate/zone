@@ -2058,7 +2058,7 @@ make up
 ```bash
 ./scripts/setup.sh --yes
 ```
-Setup downloads every feature by default. That needs 16 GB RAM and about 145 GB
+Setup downloads every feature by default. That needs 16 GB RAM and about 185 GB
 free disk; it refuses `all` when either is short. Chat-only:
 `./scripts/setup.sh --yes --features chat --chat-preset 8gb`.
 

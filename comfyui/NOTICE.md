@@ -37,18 +37,32 @@ These weights are not included in Zone images or source distributions. They
 are downloaded only when the operator runs the explicit image-edit model setup
 command.
 
-## Wan 2.2 TI2V 5B
+## Wan 2.2 A14B
 
 - Packaged models: <https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged>
-- Original model: <https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B>
-- Files: `wan2.2_ti2v_5B_fp16.safetensors`, `wan2.2_vae.safetensors`,
-  `umt5_xxl_fp8_e4m3fn_scaled.safetensors`
+- Original model: <https://huggingface.co/Wan-AI/Wan2.2-T2V-A14B>
+- Files: `wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors`,
+  `wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors`,
+  `wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors`,
+  `wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors`,
+  `wan_2.1_vae.safetensors`, `umt5_xxl_fp8_e4m3fn_scaled.safetensors`
 - License: Apache License 2.0
 - License text: <https://www.apache.org/licenses/LICENSE-2.0>
 
 These weights are not included in Zone images or source distributions. They
 are downloaded only when the operator runs the explicit video model setup
-command.
+command. Chat generate always uses A14B.
+
+## Wan 2.2 TI2V 5B
+
+- Packaged models: <https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged>
+- Original model: <https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B>
+- Files: `wan2.2_ti2v_5B_fp16.safetensors`, `wan2.2_vae.safetensors`
+- License: Apache License 2.0
+- License text: <https://www.apache.org/licenses/LICENSE-2.0>
+
+Kept in the video bundle for identity LoRA training. Generate does not load
+these weights.
 
 ## ACE-Step v1 3.5B
 

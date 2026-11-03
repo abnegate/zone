@@ -45,6 +45,8 @@ class LaneDetection(unittest.TestCase):
             'sdxl-api.json': 'image',
             'qwen-image-edit-2511-api.json': 'image',
             'qwen-image-edit-2511-edit-api.json': 'image',
+            'wan2.2-a14b-t2v-api.json': 'video',
+            'wan2.2-a14b-i2v-api.json': 'video',
             'wan2.2-ti2v-5b-api.json': 'video',
             'wan2.2-ti2v-5b-i2v-api.json': 'video',
             'ace-step-v1-3.5b-api.json': 'audio',
@@ -82,6 +84,7 @@ class OutputAttribution(unittest.TestCase):
     def test_a_sweeping_lane_answers_on_the_graph_sink(self) -> None:
         for name, lane, sink in [
             ('flux1-schnell-fp8-api.json', 'image', '9'),
+            ('wan2.2-a14b-t2v-api.json', 'video', '10'),
             ('wan2.2-ti2v-5b-api.json', 'video', '10'),
             ('ace-step-v1-3.5b-api.json', 'audio', '10'),
         ]:
