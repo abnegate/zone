@@ -252,6 +252,8 @@ def materialize_quantized_to_float16(model, dtype=torch.float16) -> int:
 
 def is_wan_14b_path(unet_path) -> bool:
     path = str(unet_path).lower()
+    if 'wan' not in path:
+        return False
     return '14b' in path or 'high_noise' in path or 'low_noise' in path
 
 

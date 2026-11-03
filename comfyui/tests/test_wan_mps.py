@@ -6,6 +6,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -35,6 +36,7 @@ from custom_nodes.zone_lora.inference_hooks import (  # noqa: E402
     install_mps_kernel_workarounds,
     install_wan_mps_cpu_unet,
     install_wan_mps_cpu_vae,
+    is_wan_14b_path,
     materialize_quantized_to_float16,
     should_rewrite_mps_pad,
     wan_cpu_model_options,
@@ -52,6 +54,22 @@ class WanMps(unittest.TestCase):
             {'dtype': torch.float16},
         )
         self.assertEqual(options, {'dtype': torch.float16})
+
+    def test_only_wan_paths_are_wan_14b_experts(self) -> None:
+        for path in (
+            '/models/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
+            '/models/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors',
+            'Wan2.1_T2V_14B.safetensors',
+        ):
+            self.assertTrue(is_wan_14b_path(path), path)
+        for path in (
+            '/models/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors',
+            '/models/diffusion_models/hunyuan_video_14B.safetensors',
+            '/models/diffusion_models/cosmos_predict2_14B.safetensors',
+            '/models/diffusion_models/high_noise_refiner.safetensors',
+            '/models/diffusion_models/low_noise_refiner.safetensors',
+        ):
+            self.assertFalse(is_wan_14b_path(path), path)
 
     @unittest.skipIf(torch.backends.mps.is_available(), 'mps pins Wan to CPU')
     def test_wan_keeps_caller_options_without_mps(self) -> None:
@@ -307,6 +325,28 @@ class WanMps(unittest.TestCase):
         install_wan_mps_cpu_unet()
         self.assertIs(comfy.sd.load_diffusion_model, once)
         self.assertIs(once.__wrapped__, original)
+
+    def test_a_non_wan_14b_model_loads_untouched_on_mps(self) -> None:
+        import comfy.sd
+
+        installed = comfy.sd.load_diffusion_model
+        self.addCleanup(setattr, comfy.sd, 'load_diffusion_model', installed)
+        seen: list[tuple] = []
+        loaded = object()
+
+        def fake_load(unet_path, model_options=None, disable_dynamic=False):
+            seen.append((dict(model_options or {}), disable_dynamic))
+            return loaded
+
+        comfy.sd.load_diffusion_model = fake_load
+        install_wan_mps_cpu_unet()
+        with mock.patch('torch.backends.mps.is_available', return_value=True):
+            patcher = comfy.sd.load_diffusion_model(
+                '/models/diffusion_models/hunyuan_video_14B.safetensors',
+                model_options={'dtype': torch.float16},
+            )
+        self.assertIs(patcher, loaded)
+        self.assertEqual(seen, [({'dtype': torch.float16}, False)])
 
     def test_flux_vae_keeps_caller_device(self) -> None:
         self.assertIsNone(
