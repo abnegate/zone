@@ -137,9 +137,11 @@ pub async fn reread(state: &AppState, chosen: &Chosen) -> Option<Snapshot> {
         credential,
         chosen.login.snapshot(),
     );
-    board(chosen.login.id, ttl, true, || Flight::start(reading))
-        .landed()
-        .await
+    board(&FLIGHTS, chosen.login.id, ttl, true, || {
+        Flight::start(reading)
+    })
+    .landed()
+    .await
 }
 
 /// The time a snapshot no reading of the agent began is taken at: as long ago as the TTL, so the
@@ -154,7 +156,7 @@ async fn read(state: &AppState, chosen: &Chosen) -> Option<Snapshot> {
     let credential = readable(chosen)?;
     let login = chosen.login.id;
     let ttl = state.config().agents.usage_ttl;
-    board(login, ttl, false, || {
+    board(&FLIGHTS, login, ttl, false, || {
         Flight::start(fly(state.clone(), login, chosen.agent, credential))
     })
     .landed()
@@ -175,11 +177,18 @@ fn readable(chosen: &Chosen) -> Option<Credential> {
         .ok()
 }
 
-/// The reading of `login`'s usage a refresh waits on: the one under way or started within `ttl`,
-/// unless `anew`, else the one `start` starts. Readings past their TTL are let go of first.
-fn board(login: Uuid, ttl: Duration, anew: bool, start: impl FnOnce() -> Flight) -> Flight {
-    FLIGHTS.retain(|_, flight| flight.current(ttl));
-    match FLIGHTS.entry(login) {
+/// The reading of `login`'s usage a refresh waits on in `flights`: the one under way or started
+/// within `ttl`, unless `anew`, else the one `start` starts. Readings past their TTL are let go of
+/// first.
+fn board(
+    flights: &DashMap<Uuid, Flight>,
+    login: Uuid,
+    ttl: Duration,
+    anew: bool,
+    start: impl FnOnce() -> Flight,
+) -> Flight {
+    flights.retain(|_, flight| flight.current(ttl));
+    match flights.entry(login) {
         Entry::Occupied(entry) if !anew && entry.get().current(ttl) => entry.get().clone(),
         entry => {
             let flight = start();
@@ -512,41 +521,45 @@ mod tests {
 
     #[tokio::test]
     async fn a_reading_past_its_ttl_is_let_go_of_once_another_login_is_read() {
+        let flights = DashMap::new();
         let (spent, current) = (Uuid::new_v4(), Uuid::new_v4());
-        board(spent, Duration::ZERO, false, || {
+        board(&flights, spent, Duration::ZERO, false, || {
             Flight::start(async { None })
         })
         .landed()
         .await;
 
-        board(current, Duration::ZERO, false, || {
+        board(&flights, current, Duration::ZERO, false, || {
             Flight::start(std::future::pending())
         });
 
         assert!(
-            !FLIGHTS.contains_key(&spent),
+            !flights.contains_key(&spent),
             "a login's last reading was kept forever"
         );
-        assert!(FLIGHTS.contains_key(&current));
+        assert!(flights.contains_key(&current));
     }
 
     #[tokio::test]
     async fn a_forced_reading_replaces_the_one_a_refresh_would_share() {
+        let flights = DashMap::new();
         let login = Uuid::new_v4();
         let ttl = Duration::from_secs(60);
         let shared = Snapshot::new(Vec::new(), at("2026-09-23T06:10:00Z"));
         let forced = Snapshot::new(Vec::new(), at("2026-09-23T06:20:00Z"));
-        board(login, ttl, false, {
+        board(&flights, login, ttl, false, {
             let shared = shared.clone();
             move || Flight::start(async move { Some(shared) })
         })
         .landed()
         .await;
 
-        let again = board(login, ttl, false, || Flight::start(async { None }))
-            .landed()
-            .await;
-        let anew = board(login, ttl, true, {
+        let again = board(&flights, login, ttl, false, || {
+            Flight::start(async { None })
+        })
+        .landed()
+        .await;
+        let anew = board(&flights, login, ttl, true, {
             let forced = forced.clone();
             move || Flight::start(async move { Some(forced) })
         })
