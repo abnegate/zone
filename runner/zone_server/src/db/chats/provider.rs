@@ -66,7 +66,7 @@ mod tests {
 
     use super::*;
     use crate::db::chats::{ChatRow, create_chat, create_chat_with_title, get_chat};
-    use zone_core::llm::ReasoningEffort;
+    use abnegate_llm::ReasoningEffort;
 
     #[test]
     fn a_chat_following_its_workspace_asks_for_its_stored_model() {

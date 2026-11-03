@@ -10,6 +10,7 @@ use crate::common::{
     next_frame, seed_chat, serve, setup_test_data, setup_workspace_member, test_config, test_email,
     test_password,
 };
+use abnegate_llm::ReasoningEffort;
 use futures_util::SinkExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -21,7 +22,6 @@ use tokio_tungstenite::tungstenite::Message as Frame;
 use uuid::Uuid;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_core::llm::ReasoningEffort;
 use zone_server::config::Config;
 use zone_server::db::{ai_settings, chats, tasks};
 use zone_server::services::endpoint::{self, Endpoint};

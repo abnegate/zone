@@ -6,7 +6,6 @@
 
 mod client;
 pub mod provider;
-mod reasoning;
 pub mod window;
 
 pub use client::{ChatStream, LlmBackend, LlmClient, READ_TIMEOUT, TIMEOUT};
@@ -14,4 +13,3 @@ pub use provider::{
     AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, CodexSandbox,
     Session, Toolset,
 };
-pub use reasoning::ReasoningEffort;

@@ -11,11 +11,11 @@ pub use routing::Routing;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use abnegate_llm::Credential;
+use abnegate_llm::{Credential, ReasoningEffort};
 use chrono::{DateTime, SecondsFormat, Utc};
 use uuid::Uuid;
 use zone_core::llm::provider::{STDERR_HEADING, SignIn};
-use zone_core::llm::{AgentKind, CliSettings, LlmBackend, ReasoningEffort, Session};
+use zone_core::llm::{AgentKind, CliSettings, LlmBackend, Session};
 
 use crate::config::Config;
 use crate::db::agent_logins;

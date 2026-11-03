@@ -1833,7 +1833,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         answered(
             recorder
                 .settings()
-                .with_effort(crate::llm::ReasoningEffort::Max),
+                .with_effort(abnegate_llm::ReasoningEffort::Max),
         )
         .await;
 
@@ -1852,7 +1852,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             recorder.settings(),
             recorder
                 .settings()
-                .with_effort(crate::llm::ReasoningEffort::Auto),
+                .with_effort(abnegate_llm::ReasoningEffort::Auto),
         ] {
             answered(settings).await;
             let arguments = recorder.arguments();

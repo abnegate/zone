@@ -129,7 +129,7 @@ pub struct ChatResponse {
     offline: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_tokens: Option<i64>,
-    reasoning_effort: zone_core::llm::ReasoningEffort,
+    reasoning_effort: abnegate_llm::ReasoningEffort,
     #[serde(skip_serializing_if = "Option::is_none")]
     character: Option<ChatCharacter>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -417,7 +417,7 @@ pub struct CreateChatRequest {
     #[serde(default)]
     context_tokens: Option<i64>,
     #[serde(default)]
-    reasoning_effort: Option<zone_core::llm::ReasoningEffort>,
+    reasoning_effort: Option<abnegate_llm::ReasoningEffort>,
     #[serde(default)]
     character: Option<ChatCharacter>,
     #[serde(default)]
@@ -449,7 +449,7 @@ pub struct UpdateChatRequest {
     agent_enabled: Option<bool>,
     agent_sandboxed: Option<bool>,
     auto_approve: Option<bool>,
-    reasoning_effort: Option<zone_core::llm::ReasoningEffort>,
+    reasoning_effort: Option<abnegate_llm::ReasoningEffort>,
     context_tokens: Option<i64>,
     #[serde(default)]
     character: Option<ChatCharacter>,

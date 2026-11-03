@@ -1,7 +1,8 @@
+use abnegate_llm::ReasoningEffort;
 use futures::future::try_join_all;
 use serde::Serialize;
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, ReasoningEffort};
+use zone_core::llm::AgentKind;
 
 use super::{Availability, Offered, Provider, Refusal};
 use crate::config::Config;
@@ -40,7 +41,7 @@ impl Offer {
                 let requires_model = saved.is_empty();
                 (
                     saved.into_iter().map(http_model).collect(),
-                    &ReasoningEffort::HTTP[..],
+                    ReasoningEffort::HTTP,
                     requires_model,
                 )
             }
@@ -49,10 +50,10 @@ impl Offer {
                     .completions()
                     .map(|installed| http_model(installed.name.clone()))
                     .collect(),
-                &ReasoningEffort::HTTP[..],
+                ReasoningEffort::HTTP,
                 false,
             ),
-            (None, None) => (Vec::new(), &ReasoningEffort::HTTP[..], false),
+            (None, None) => (Vec::new(), ReasoningEffort::HTTP, false),
         };
         Self {
             provider,
@@ -229,7 +230,7 @@ fn http_model(name: String) -> Offered {
     Offered {
         label: name.clone(),
         name,
-        efforts: &ReasoningEffort::HTTP,
+        efforts: ReasoningEffort::HTTP,
     }
 }
 
