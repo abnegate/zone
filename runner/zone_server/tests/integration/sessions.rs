@@ -3,7 +3,7 @@
 //! Tests for the session tracking and management system.
 
 use chrono::{Duration, Utc};
-use tokio::sync::RwLock;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::common::{create_test_pool, test_password};
@@ -11,8 +11,38 @@ use zone_server::db::sessions;
 use zone_server::utils::crypto::hash_token;
 
 /// `cleanup_expired_sessions` deletes every expired or revoked row in the
-/// table, so the test that exercises it has to run alone.
-static SESSIONS: RwLock<()> = RwLock::const_new(());
+/// table, so the test that exercises it holds this lock alone and every other
+/// test here shares it. In the database rather than in the process, because CI
+/// runs these under `cargo nextest`, which gives every test a process of its
+/// own.
+const SESSIONS: i64 = 0x7A6F_6E65_5345_5353;
+
+/// The sessions lock, shared with the other tests that only touch their own
+/// rows.
+async fn sharing(pool: &PgPool) -> PgConnection {
+    locked(pool, "SELECT pg_advisory_lock_shared($1)").await
+}
+
+/// The sessions lock, held alone.
+async fn alone(pool: &PgPool) -> PgConnection {
+    locked(pool, "SELECT pg_advisory_lock($1)").await
+}
+
+/// Held for the length of the test, on a connection detached from the pool
+/// so that returning it cannot return the lock with it.
+async fn locked(pool: &PgPool, statement: &'static str) -> PgConnection {
+    let mut connection = pool
+        .acquire()
+        .await
+        .expect("a connection to hold the sessions lock")
+        .detach();
+    sqlx::query(statement)
+        .bind(SESSIONS)
+        .execute(&mut connection)
+        .await
+        .expect("the sessions lock is takeable");
+    connection
+}
 
 fn unique_token(prefix: &str) -> String {
     format!("{}-{}", prefix, Uuid::new_v4())
@@ -37,8 +67,8 @@ async fn create_test_user(pool: &sqlx::PgPool, prefix: &str) -> Uuid {
 
 #[tokio::test]
 async fn test_create_session() {
-    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
+    let _sessions = sharing(&pool).await;
 
     let user_id = create_test_user(&pool, "session_create@test.com").await;
     let token = unique_token("test_refresh_token_12345");
@@ -79,8 +109,8 @@ async fn test_create_session() {
 
 #[tokio::test]
 async fn test_get_session_by_token() {
-    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
+    let _sessions = sharing(&pool).await;
 
     let user_id = create_test_user(&pool, "session_get@test.com").await;
     let token = unique_token("test_refresh_token_get_12345");
@@ -119,8 +149,8 @@ async fn test_get_session_by_token() {
 
 #[tokio::test]
 async fn test_get_session_by_token_not_found() {
-    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
+    let _sessions = sharing(&pool).await;
 
     let token_hash = hash_token(&unique_token("nonexistent_token"));
 
@@ -134,8 +164,8 @@ async fn test_get_session_by_token_not_found() {
 
 #[tokio::test]
 async fn test_update_last_active() {
-    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
+    let _sessions = sharing(&pool).await;
 
     let user_id = create_test_user(&pool, "session_active@test.com").await;
     let token = unique_token("test_refresh_token_active_12345");
@@ -183,8 +213,8 @@ async fn test_update_last_active() {
 
 #[tokio::test]
 async fn test_revoke_session() {
-    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
+    let _sessions = sharing(&pool).await;
 
     let user_id = create_test_user(&pool, "session_revoke@test.com").await;
     let token = unique_token("test_refresh_token_revoke_12345");
@@ -231,8 +261,8 @@ async fn test_revoke_session() {
 
 #[tokio::test]
 async fn test_revoke_all_user_sessions() {
-    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
+    let _sessions = sharing(&pool).await;
 
     let user_id = create_test_user(&pool, "session_revoke_all@test.com").await;
     let expires_at = Utc::now() + Duration::days(7);
@@ -308,8 +338,8 @@ async fn test_revoke_all_user_sessions() {
 
 #[tokio::test]
 async fn test_list_user_sessions() {
-    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
+    let _sessions = sharing(&pool).await;
 
     let user_id = create_test_user(&pool, "session_list@test.com").await;
     let expires_at = Utc::now() + Duration::days(7);
@@ -363,8 +393,8 @@ async fn test_list_user_sessions() {
 
 #[tokio::test]
 async fn test_cleanup_expired_sessions() {
-    let _sessions = SESSIONS.write().await;
     let pool = create_test_pool().await;
+    let _sessions = alone(&pool).await;
 
     let user_id = create_test_user(&pool, "session_cleanup@test.com").await;
 
@@ -427,8 +457,8 @@ async fn test_cleanup_expired_sessions() {
 
 #[tokio::test]
 async fn test_session_cascade_delete_on_user_deletion() {
-    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
+    let _sessions = sharing(&pool).await;
 
     let user_id = create_test_user(&pool, "session_cascade@test.com").await;
     let expires_at = Utc::now() + Duration::days(7);
@@ -466,8 +496,8 @@ async fn test_session_cascade_delete_on_user_deletion() {
 
 #[tokio::test]
 async fn test_list_active_sessions_only() {
-    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
+    let _sessions = sharing(&pool).await;
 
     let user_id = create_test_user(&pool, "session_active_only@test.com").await;
     let expires_at = Utc::now() + Duration::days(7);
@@ -524,8 +554,8 @@ async fn test_list_active_sessions_only() {
 
 #[tokio::test]
 async fn test_revoke_session_idempotent() {
-    let _sessions = SESSIONS.read().await;
     let pool = create_test_pool().await;
+    let _sessions = sharing(&pool).await;
 
     let user_id = create_test_user(&pool, "session_idempotent@test.com").await;
     let expires_at = Utc::now() + Duration::days(7);

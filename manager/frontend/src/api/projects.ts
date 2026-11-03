@@ -263,7 +263,11 @@ class ProjectsApi {
 
   private async parseSecretResponse(response: Response): Promise<SyncConfigSecret> {
     const data = parse(SyncConfigSecretResponseSchema, await response.json());
-    return { config: data.config, webhookSecret: data.webhook_secret };
+    return {
+      config: data.config,
+      webhookSecret: data.webhook_secret,
+      registrationError: data.webhook_registration_error ?? null,
+    };
   }
 
   private async parseErrorResponse(response: Response): Promise<{ message?: string }> {

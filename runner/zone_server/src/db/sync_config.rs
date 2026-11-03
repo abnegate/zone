@@ -350,6 +350,70 @@ pub async fn update_sync_config(
 /// the ciphertext the caller read. `None` when another change landed first or
 /// the configuration is gone, so no caller is shown a secret that was
 /// overwritten before it could be used.
+/// Every sync configuration of the projects in workspace `workspace_id`.
+pub async fn list_sync_configs_in_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Vec<SyncConfigRow>> {
+    sqlx::query_as(
+        r#"
+        SELECT s.id, s.project_id, s.provider, s.enabled, s.config, s.webhook_secret_encrypted,
+               s.created_at, s.updated_at
+        FROM sync_configs s
+        JOIN projects p ON p.id = s.project_id
+        WHERE p.workspace_id = $1
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Every sync configuration of the projects in organization `organization_id`.
+pub async fn list_sync_configs_in_organization(
+    pool: &PgPool,
+    organization_id: Uuid,
+) -> DbResult<Vec<SyncConfigRow>> {
+    sqlx::query_as(
+        r#"
+        SELECT s.id, s.project_id, s.provider, s.enabled, s.config, s.webhook_secret_encrypted,
+               s.created_at, s.updated_at
+        FROM sync_configs s
+        JOIN projects p ON p.id = s.project_id
+        JOIN workspaces w ON w.id = p.workspace_id
+        WHERE w.organization_id = $1
+        "#,
+    )
+    .bind(organization_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Replace configuration `id`'s config with `config`, provided it still holds
+/// `prior`.
+pub async fn replace_config(
+    pool: &PgPool,
+    id: Uuid,
+    prior: &JsonValue,
+    config: &JsonValue,
+) -> DbResult<Option<SyncConfigRow>> {
+    sqlx::query_as(
+        r#"
+        UPDATE sync_configs
+        SET config = $3,
+            updated_at = NOW()
+        WHERE id = $1 AND config = $2
+        RETURNING id, project_id, provider, enabled, config, webhook_secret_encrypted,
+                  created_at, updated_at
+        "#,
+    )
+    .bind(id)
+    .bind(prior)
+    .bind(config)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn replace_webhook_secret(
     pool: &PgPool,
     id: Uuid,

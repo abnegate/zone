@@ -4,6 +4,7 @@
 //! like GitHub Issues and Linear.
 
 pub mod github;
+pub mod hook;
 pub mod linear;
 
 use async_trait::async_trait;
@@ -53,6 +54,11 @@ pub enum SyncError {
 }
 
 pub type SyncResult<T> = Result<T, SyncError>;
+
+/// The path a provider's webhooks are received on for one configuration.
+pub fn webhook_path(id: Uuid, provider: &str) -> String {
+    format!("/api/webhooks/sync/{id}/{provider}")
+}
 
 /// The issue trackers a project can sync with; each value is one the
 /// `sync_configs.provider` CHECK constraint accepts.

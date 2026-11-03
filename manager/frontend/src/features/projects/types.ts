@@ -122,18 +122,23 @@ export interface SyncConfig {
   webhook_secret_configured?: boolean;
   /** Zone generates this secret and can rotate it; otherwise the provider issues it to paste in */
   webhook_secret_issued_by_zone: boolean;
+  /** Zone registered the provider's webhook and keeps it signing with the current secret */
+  webhook_registered?: boolean;
 }
 
 export interface RevealedSecret {
   configId: string;
   secret: string;
-  /** Counts reveals, so each new secret mounts a fresh callout */
+  /** Why Zone could not register the webhook, so the secret has to be added by hand */
+  registrationError: string | null;
+  /** The request that revealed it: a response to an earlier one leaves it alone, and each new secret mounts a fresh callout */
   revision: number;
 }
 
 export interface SyncConfigSecret {
   config: SyncConfig;
   webhookSecret: string | null;
+  registrationError: string | null;
 }
 
 export interface CreateSyncConfigRequest {
