@@ -309,9 +309,6 @@ class WanMps(unittest.TestCase):
 
         installed = comfy.sd.load_diffusion_model
         self.addCleanup(setattr, comfy.sd, 'load_diffusion_model', installed)
-        original = installed
-        while hasattr(original, '__wrapped__'):
-            original = original.__wrapped__
 
         class FakePatcher:
             def __init__(self):
