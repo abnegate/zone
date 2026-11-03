@@ -1711,7 +1711,7 @@ async fn train_language_rejects_video() {
     });
     let (status, response) = post_json(router, &token, "/api/models/train", body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(response["error"], zone_comfy::lora::VIDEO_REFUSAL);
+    assert_eq!(response["error"], "not available for a chat model");
     let _ = fs::remove_dir_all(models_dir);
 }
 

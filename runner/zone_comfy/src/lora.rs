@@ -461,11 +461,11 @@ pub fn validate_request(config: &Config, request: &TrainRequest) -> Result<(), T
     if config.train_command.is_none() && !config.enabled {
         return Err(TrainError::Disabled);
     }
-    if request.method == TrainMethod::Video {
-        return Err(TrainError::Invalid(VIDEO_REFUSAL));
-    }
     if request.subject == TrainSubject::Language {
         return validate_language(request);
+    }
+    if request.method == TrainMethod::Video {
+        return Err(TrainError::Invalid(VIDEO_REFUSAL));
     }
     let _filename = final_filename(&request.name)?;
     if request.images.is_empty() {
@@ -4408,6 +4408,25 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_model_asked_for_video_keeps_the_chat_model_message() {
+        let (_root, config) = harness("unused");
+        let mut chat = language_request("support-bot", "qwen2.5:7b", Vec::new());
+        chat.method = TrainMethod::Video;
+        assert!(matches!(
+            validate_request(&config, &chat),
+            Err(TrainError::Invalid("training needs documents"))
+        ));
+        chat.images = vec![document(
+            "chat.json",
+            r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#,
+        )];
+        assert!(matches!(
+            validate_request(&config, &chat),
+            Err(TrainError::Invalid("not available for a chat model"))
+        ));
+    }
+
+    #[test]
     fn language_training_validates_documents_without_weights() {
         let (_root, config) = harness("unused");
         let mut empty = language_request("support-bot", "qwen2.5:7b", Vec::new());
@@ -4419,11 +4438,6 @@ mod tests {
             "chat.json",
             r#"{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#,
         )];
-        empty.method = TrainMethod::Video;
-        assert!(matches!(
-            validate_request(&config, &empty),
-            Err(TrainError::Invalid(VIDEO_REFUSAL))
-        ));
         empty.method = TrainMethod::Pivotal;
         assert!(matches!(
             validate_request(&config, &empty),
