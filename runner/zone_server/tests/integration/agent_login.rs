@@ -2814,6 +2814,44 @@ async fn codex_has_no_code_to_paste() {
 }
 
 #[tokio::test]
+async fn a_codex_sign_in_is_audited_before_it_reads_as_signed_in() {
+    let codex = Codex::new();
+    let stage = Stage::codex(&codex.executable).await;
+    let owner = person(&stage.client).await;
+    let organization = organization(&stage.client, &owner).await;
+    stage.start(organization, "codex", json!({}), &owner).await;
+
+    let mut held = stage.pool().begin().await.expect("a transaction");
+    sqlx::query("LOCK TABLE audit_logs IN EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .expect("the audit log locks");
+    codex.approve();
+    for _ in 0..20 {
+        tokio::time::sleep(PAUSE).await;
+        let status = stage.status(organization, "codex", &owner).await;
+        assert_eq!(
+            status["state"], "pending",
+            "the sign-in read as finished before the audit log recorded it: {status}"
+        );
+    }
+    held.commit().await.expect("the audit log unlocks");
+
+    assert_eq!(
+        stage.settled(organization, &owner).await["state"],
+        "signed_in"
+    );
+    assert_eq!(
+        stage.audited(organization).await,
+        [(
+            "agent.signed_in".to_string(),
+            Some(owner.id),
+            Some(json!({ "agent": "codex", "source": "zone" }))
+        )]
+    );
+}
+
+#[tokio::test]
 async fn a_codex_sign_in_stays_pending_until_codex_saves_its_login() {
     let codex = Codex::new();
     let stage = Stage::codex(&codex.executable).await;
