@@ -1406,13 +1406,20 @@ mod tests {
     }
 
     #[test]
-    fn all_union_needs_about_128_gb_free() {
+    fn all_union_needs_about_165_gb_of_models() {
         let built = plan(FeatureSelect::All, 64 * GIB, 500 * GB, "32gb");
-        assert!(built.total_bytes() > 110 * GB);
-        assert!(built.total_bytes() < 130 * GB);
+        let total = built.total_bytes();
+        assert!(
+            (160 * GB..180 * GB).contains(&total),
+            "every feature's models come to {}",
+            format_disk(total)
+        );
         let required = built.required_free_bytes();
-        assert!(required > 120 * GB);
-        assert!(required < 140 * GB);
+        assert!(
+            (170 * GB..190 * GB).contains(&required),
+            "every feature needs {} free",
+            format_disk(required)
+        );
         assert_eq!(format_disk(catalog().disk_margin_bytes), "10 GB");
         assert_eq!(
             format_disk(required),
