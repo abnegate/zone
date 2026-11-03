@@ -396,8 +396,11 @@ impl RecipeCatalog {
 
     pub fn is_explicit_image_match(&self, filename: &str) -> bool {
         let trimmed = filename.trim();
-        self.files.contains_key(trimmed)
-            || self.resolve_image_id(trimmed) != self.default_image.as_str()
+        let id = self.resolve_image_id(trimmed);
+        (self.files.contains_key(trimmed) || id != self.default_image.as_str())
+            && self
+                .get(id)
+                .is_some_and(|recipe| recipe.kind == MediaKind::Image)
     }
 
     fn resolve_image_id(&self, checkpoint: &str) -> &str {
@@ -781,6 +784,26 @@ mod tests {
                 "{checkpoint} resolved to adapter recipe {}",
                 recipe.id
             );
+        }
+    }
+
+    #[test]
+    fn only_image_recipes_count_as_an_explicit_image_match() {
+        let catalog = catalog();
+        for image in [
+            "qwen_image_edit_2511_fp8mixed.safetensors",
+            "flux1-schnell-fp8.safetensors",
+            "juggernautXL_v9.safetensors",
+        ] {
+            assert!(catalog.is_explicit_image_match(image), "{image}");
+        }
+        for other in [
+            "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+            "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+            "my_wan2.2_t2v_finetune.safetensors",
+            "unrelated-model.safetensors",
+        ] {
+            assert!(!catalog.is_explicit_image_match(other), "{other}");
         }
     }
 
