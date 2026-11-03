@@ -1,3 +1,4 @@
+pub mod adoption;
 pub mod contract;
 pub mod language;
 pub mod overlay;

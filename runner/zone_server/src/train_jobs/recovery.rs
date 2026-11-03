@@ -1,4 +1,5 @@
 use super::TrainRegistry;
+use crate::services::comfy::adoption;
 use abnegate_comfy::Config;
 use abnegate_comfy::host;
 use abnegate_comfy::host::Job;
@@ -6,13 +7,20 @@ use abnegate_comfy::lora::TrainError;
 use std::path::PathBuf;
 use tokio::sync::watch;
 
-/// Picks up the host jobs a restart left behind. Every job that finished
-/// while the server was down is published, and the one still running is
-/// followed in `registry` until it ends, then published too. A job with no
-/// base, such as a chat model, is the host's to publish and is left alone.
+/// Adopts the weights zone trained before abnegate-comfy, so their names
+/// train again, then picks up the host jobs a restart left behind. Every job
+/// that finished while the server was down is published, and the one still
+/// running is followed in `registry` until it ends, then published too. A job
+/// with no base, such as a chat model, is the host's to publish and is left
+/// alone.
 pub async fn recover(config: Config, registry: TrainRegistry) {
     let scan = config.clone();
-    let (published, running) = match tokio::task::spawn_blocking(move || scan_jobs(&scan)).await {
+    let (published, running) = match tokio::task::spawn_blocking(move || {
+        adoption::adopt(&scan);
+        scan_jobs(&scan)
+    })
+    .await
+    {
         Ok(found) => found,
         Err(error) => {
             tracing::warn!(%error, "Could not look for training jobs a restart left behind");
@@ -127,6 +135,33 @@ mod tests {
         assert!(
             registry.current().is_none(),
             "a job that already ended is not followed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_that_finished_over_a_weight_trained_before_the_upgrade_is_published() {
+        let (_models, config) = hosted();
+        let weight = config.models_directory.join(PUBLISHED);
+        fs::create_dir_all(weight.parent().expect("loras")).expect("loras");
+        fs::write(&weight, b"previous").expect("previous weight");
+        let sidecar = weight.with_file_name(format!("{WEIGHT}{}", config.contract.sidecar_suffix));
+        fs::write(
+            &sidecar,
+            br#"{"recipe_id": "sdxl-adapter", "hf_base": "stabilityai/stable-diffusion-xl-base-1.0", "trigger": "ohwx"}"#,
+        )
+        .expect("a sidecar written before abnegate-comfy");
+        finish(&write(&config, &person(Status::Running)));
+
+        recover(config.clone(), TrainRegistry::new()).await;
+
+        assert_eq!(fs::read(&weight).expect("published weight"), b"adapter");
+        let published: serde_json::Value =
+            serde_json::from_slice(&fs::read(&sidecar).expect("sidecar")).expect("sidecar");
+        assert!(
+            published["generation"]
+                .as_str()
+                .is_some_and(|generation| uuid::Uuid::parse_str(generation).is_ok()),
+            "{published}"
         );
     }
 
