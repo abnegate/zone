@@ -27,6 +27,7 @@ import {
   AuthenticatedAudio,
   AuthenticatedImage,
   AuthenticatedVideo,
+  AutomationBadge,
   ChatMenu,
   ChatSources,
   Citations,
@@ -1463,6 +1464,7 @@ export default function ChatsPage() {
                     >
                       <div className="message-header">
                         {message.role === 'system' && <span className="message-role">System</span>}
+                        <AutomationBadge metadata={message.metadata} />
                         <MemoryBadge used={memoryUsed} />
                         <span className="message-time">{formatDate(message.created_at)}</span>
                       </div>

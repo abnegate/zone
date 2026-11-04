@@ -767,6 +767,12 @@
   font-weight: 500;
 }
 
+.automation-badge-icon {
+  flex: none;
+  width: var(--ui-space-3);
+  height: var(--ui-space-3);
+}
+
 .message-content {
   word-wrap: break-word;
 }

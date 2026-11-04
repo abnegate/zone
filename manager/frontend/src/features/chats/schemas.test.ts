@@ -74,6 +74,28 @@ describe('declaring the memory-read flag costs no message', () => {
   });
 });
 
+describe('what wrote a message', () => {
+  const turn = { ...reply, role: 'user', content: 'Check the deploy queue' };
+
+  it('keeps the source and reminder the server stamped on a fired turn', () => {
+    const parsed = MessageSchema.parse({
+      ...turn,
+      metadata: { source: 'reminder', reminder_id: 'reminder-1', actor_id: 'user-1' },
+    });
+
+    expect(parsed.metadata?.source).toBe('reminder');
+    expect(parsed.metadata?.reminder_id).toBe('reminder-1');
+  });
+
+  it('drops a source that is not a string, keeping the message', () => {
+    const parsed = MessageSchema.parse({ ...turn, metadata: { source: 7, reminder_id: false } });
+
+    expect(parsed.metadata?.source).toBeUndefined();
+    expect(parsed.metadata?.reminder_id).toBeUndefined();
+    expect(parsed.content).toBe('Check the deploy queue');
+  });
+});
+
 describe('a memory receipt', () => {
   const stored = {
     id: 'call_1',

@@ -2260,6 +2260,56 @@ describe('ChatsPage', () => {
       expect(screen.getByText('Hello').closest('.message')).toHaveClass('message-user');
     });
 
+    it('marks the turn a reminder sent, and no turn the person typed', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-reminder',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: 'Check the deploy queue',
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: { source: 'reminder', reminder_id: 'reminder-1' },
+          },
+          ...mockChatWithMessages.messages,
+          {
+            id: 'msg-unknown',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: 'Posted elsewhere',
+            created_at: '2024-01-01T00:02:00Z',
+            metadata: { source: 'somewhere_new' },
+          },
+        ],
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Check the deploy queue')).toBeInTheDocument();
+      });
+      const badges = screen.getAllByTestId('automation-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toHaveTextContent('Reminder');
+      expect(badges[0].closest('.message-header')).not.toBeNull();
+      expect(badges[0].closest('.message')).toBe(
+        screen.getByText('Check the deploy queue').closest('.message')
+      );
+      expect(
+        screen.getByText('Hello').closest('.message')?.querySelector('.automation-badge')
+      ).toBeNull();
+      expect(
+        screen.getByText('Posted elsewhere').closest('.message')?.querySelector('.automation-badge')
+      ).toBeNull();
+    });
+
     it('selects chat via keyboard Enter', async () => {
       renderChatsPage();
 
