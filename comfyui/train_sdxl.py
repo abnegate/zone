@@ -16,9 +16,45 @@ import time
 import traceback
 import uuid
 import zlib
+from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+METAL_HIGH_WATERMARK_VARIABLE = 'PYTORCH_MPS_HIGH_WATERMARK_RATIO'
+METAL_LOW_WATERMARK_VARIABLE = 'PYTORCH_MPS_LOW_WATERMARK_RATIO'
+METAL_WATERMARK_VARIABLES = (METAL_HIGH_WATERMARK_VARIABLE, METAL_LOW_WATERMARK_VARIABLE)
+METAL_HIGH_WATERMARK = '1.0'
+METAL_LOW_WATERMARK = '0.8'
+METAL_LOW_WATERMARK_FLOOR = '0.0'
+METAL_WATERMARK_TOO_LATE = (
+    'warning: torch was imported before train_sdxl, so the Metal memory watermarks '
+    'it sets may be ignored and an overcommit can hang macOS'
+)
+
+
+def apply_metal_watermarks(environment: MutableMapping[str, str] = os.environ) -> None:
+    """Cap Metal at its recommended working set so an overcommit raises instead of hanging macOS.
+
+    torch defaults the high watermark to 1.7x the recommended working set, and the low one to
+    1.4x on unified memory; it rejects a high watermark below the low one, so both are set.
+    """
+    changed = METAL_HIGH_WATERMARK_VARIABLE not in environment
+    environment.setdefault(METAL_HIGH_WATERMARK_VARIABLE, METAL_HIGH_WATERMARK)
+    high = float(environment[METAL_HIGH_WATERMARK_VARIABLE])
+    if high > 0:
+        low = environment.get(METAL_LOW_WATERMARK_VARIABLE)
+        if low is None or float(low) > high:
+            reachable = high >= float(METAL_LOW_WATERMARK)
+            environment[METAL_LOW_WATERMARK_VARIABLE] = (
+                METAL_LOW_WATERMARK if reachable else METAL_LOW_WATERMARK_FLOOR
+            )
+            changed = True
+    if changed and 'torch' in sys.modules:
+        print(METAL_WATERMARK_TOO_LATE, file=sys.stderr)
+
+
+apply_metal_watermarks()
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:

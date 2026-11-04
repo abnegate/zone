@@ -1515,5 +1515,101 @@ class RunpodDispatchTests(unittest.TestCase):
         normalize.assert_not_called()
 
 
+def import_in_clean_process(
+    module: str,
+    preset: dict[str, str] | None = None,
+    preload_torch: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in train_sdxl.METAL_WATERMARK_VARIABLES
+    }
+    environment.update(preset or {})
+    preload = "import sys, types; sys.modules['torch'] = types.ModuleType('torch'); "
+    variables = train_sdxl.METAL_WATERMARK_VARIABLES
+    code = (
+        f"{preload if preload_torch else ''}import json, os, {module}; "
+        f'print(json.dumps({{key: os.environ.get(key) for key in {variables!r}}}))'
+    )
+    return subprocess.run(
+        [sys.executable, '-c', code],
+        cwd=COMFYUI,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+class MetalWatermarkTests(unittest.TestCase):
+    def test_import_caps_metal_at_the_recommended_working_set(self) -> None:
+        result = import_in_clean_process('train_sdxl')
+
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: train_sdxl.METAL_HIGH_WATERMARK,
+                train_sdxl.METAL_LOW_WATERMARK_VARIABLE: train_sdxl.METAL_LOW_WATERMARK,
+            },
+        )
+        self.assertNotIn(train_sdxl.METAL_WATERMARK_TOO_LATE, result.stderr)
+
+    def test_every_trainer_that_imports_train_sdxl_inherits_the_cap(self) -> None:
+        for module in ('train_flux', 'train_wan', 'train_runpod'):
+            with self.subTest(module=module):
+                result = import_in_clean_process(module)
+                self.assertEqual(
+                    json.loads(result.stdout)[train_sdxl.METAL_HIGH_WATERMARK_VARIABLE],
+                    train_sdxl.METAL_HIGH_WATERMARK,
+                )
+
+    def test_import_keeps_preset_values(self) -> None:
+        preset = {
+            train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: '0.9',
+            train_sdxl.METAL_LOW_WATERMARK_VARIABLE: '0.5',
+        }
+
+        result = import_in_clean_process('train_sdxl', preset, preload_torch=True)
+
+        self.assertEqual(json.loads(result.stdout), preset)
+        self.assertNotIn(train_sdxl.METAL_WATERMARK_TOO_LATE, result.stderr)
+
+    def test_import_after_torch_warns(self) -> None:
+        result = import_in_clean_process('train_sdxl', preload_torch=True)
+
+        self.assertIn(train_sdxl.METAL_WATERMARK_TOO_LATE, result.stderr)
+
+    def test_low_is_capped_to_high(self) -> None:
+        environment = {
+            train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: '0.5',
+            train_sdxl.METAL_LOW_WATERMARK_VARIABLE: '0.9',
+        }
+
+        train_sdxl.apply_metal_watermarks(environment)
+
+        self.assertEqual(
+            environment[train_sdxl.METAL_LOW_WATERMARK_VARIABLE],
+            train_sdxl.METAL_LOW_WATERMARK_FLOOR,
+        )
+
+    def test_low_defaults_below_high(self) -> None:
+        environment = {train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: '1.2'}
+
+        train_sdxl.apply_metal_watermarks(environment)
+
+        self.assertEqual(
+            environment[train_sdxl.METAL_LOW_WATERMARK_VARIABLE],
+            train_sdxl.METAL_LOW_WATERMARK,
+        )
+
+    def test_disabled_high_leaves_low_alone(self) -> None:
+        environment = {train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: '0.0'}
+
+        train_sdxl.apply_metal_watermarks(environment)
+
+        self.assertNotIn(train_sdxl.METAL_LOW_WATERMARK_VARIABLE, environment)
+
+
 if __name__ == '__main__':
     unittest.main()
