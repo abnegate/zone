@@ -12,6 +12,7 @@ import threading
 import unittest
 import uuid
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 COMFYUI = Path(__file__).parents[1]
@@ -1613,6 +1614,214 @@ class RunpodDispatchTests(unittest.TestCase):
         train.assert_not_called()
         run_stub.assert_not_called()
         normalize.assert_not_called()
+
+
+def real_torch(test: unittest.TestCase) -> Any:
+    try:
+        import torch
+    except ImportError:
+        test.skipTest('torch is not installed')
+    return torch
+
+
+def snapshot_modules(torch: Any, seed: int) -> tuple[Any, Any, Any]:
+    torch.manual_seed(seed)
+    unet = torch.nn.Linear(4, 4)
+    text_encoder = torch.nn.Linear(4, 4)
+    optimizer = torch.optim.AdamW([*unet.parameters(), *text_encoder.parameters()], lr=0.01)
+    return unet, text_encoder, optimizer
+
+
+def snapshot_step(torch: Any, unet: Any, text_encoder: Any, optimizer: Any) -> float:
+    optimizer.zero_grad(set_to_none=True)
+    sample = torch.linspace(-1.0, 1.0, 4, device=unet.weight.device)
+    noise = torch.randn(sample.shape, device=sample.device)
+    loss = torch.nn.functional.mse_loss(unet(text_encoder(sample) + noise), noise)
+    loss.backward()
+    optimizer.step()
+    return float(loss.detach().cpu())
+
+
+def save_and_restore(
+    torch: Any, directory: Path, device: Any
+) -> tuple[tuple[Any, Any, Any], tuple[Any, Any, Any], list[dict[str, Any]]]:
+    saved = snapshot_modules(torch, 0)
+    for module in saved[:2]:
+        module.to(device)
+    snapshot_step(torch, *saved)
+    path = directory / train_sdxl.LATEST_SNAPSHOT
+    train_sdxl.save_snapshot(
+        path,
+        method=train_sdxl.FINETUNE_METHOD,
+        step=1,
+        loss=0.5,
+        best_loss=0.5,
+        best_step=1,
+        optimizer=saved[2],
+        unet=saved[0],
+        text_encoder=saved[1],
+        sample_rng=random.Random(0),
+        dropout_rng=random.Random(1),
+    )
+    restored = snapshot_modules(torch, 99)
+    for module in restored[:2]:
+        module.to(device)
+    loaded: list[dict[str, Any]] = []
+    load = torch.load
+
+    def recording_load(*args: Any, **kwargs: Any) -> Any:
+        payload = load(*args, **kwargs)
+        loaded.append(payload)
+        return payload
+
+    with mock.patch.object(torch, 'load', side_effect=recording_load):
+        train_sdxl.restore_snapshot(
+            path,
+            method=train_sdxl.FINETUNE_METHOD,
+            device=device,
+            optimizer=restored[2],
+            unet=restored[0],
+            text_encoder=restored[1],
+            sample_rng=random.Random(5),
+            dropout_rng=random.Random(6),
+        )
+    return saved, restored, loaded
+
+
+class SnapshotRestoreTests(unittest.TestCase):
+    def restore_with(self, module: mock.MagicMock) -> tuple[int, float, int | None]:
+        modules = {'torch': module, 'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
+        with mock.patch.dict(sys.modules, modules):
+            return train_sdxl.restore_snapshot(
+                Path('latest.pt'),
+                method='finetune',
+                device=self.device('mps'),
+                optimizer=mock.Mock(state={}, param_groups=[]),
+                unet=mock.Mock(),
+                text_encoder=mock.Mock(),
+            )
+
+    def device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            'step': 3,
+            'best_loss': 0.5,
+            'best_step': 2,
+            'unet': {},
+            'text_encoder': {},
+            'optimizer': {},
+        }
+
+    def test_restore_memory_maps_the_snapshot_onto_the_host_not_the_training_device(self) -> None:
+        module = mock.MagicMock()
+        module.load.return_value = self.payload()
+
+        self.assertEqual(self.restore_with(module), (3, 0.5, 2))
+
+        module.load.assert_called_once_with(
+            Path('latest.pt'), map_location='cpu', mmap=True, weights_only=False
+        )
+
+    def test_restore_falls_back_to_the_host_without_mmap_support(self) -> None:
+        module = mock.MagicMock()
+        module.load.side_effect = [TypeError('mmap'), self.payload()]
+
+        self.assertEqual(self.restore_with(module), (3, 0.5, 2))
+
+        self.assertEqual(
+            module.load.call_args_list[1], mock.call(Path('latest.pt'), map_location='cpu')
+        )
+
+    def test_rng_states_mapped_onto_a_device_are_restored_from_the_host(self) -> None:
+        module = mock.MagicMock()
+        payload = {'torch_rng': mock.Mock(), 'torch_mps_rng': mock.Mock()}
+
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.apply_rng_state(payload)
+
+        module.set_rng_state.assert_called_once_with(payload['torch_rng'].cpu.return_value)
+        module.mps.set_rng_state.assert_called_once_with(
+            payload['torch_mps_rng'].cpu.return_value
+        )
+
+    def test_restore_leaves_no_optimizer_tensor_on_the_snapshot_mapping(self) -> None:
+        torch = real_torch(self)
+        with tempfile.TemporaryDirectory() as directory:
+            _, restored, loaded = save_and_restore(torch, Path(directory), torch.device('cpu'))
+
+        def storages(states: Any) -> set[int]:
+            return {
+                value.untyped_storage().data_ptr()
+                for state in states
+                for value in state.values()
+                if isinstance(value, torch.Tensor)
+            }
+
+        mapped = storages(loaded[0]['optimizer']['state'].values())
+        kept = storages(restored[2].state.values())
+        self.assertTrue(mapped)
+        self.assertEqual(len(kept), len(mapped))
+        self.assertFalse(mapped & kept)
+
+    def test_a_metal_snapshot_resumes_on_metal(self) -> None:
+        torch = real_torch(self)
+        if not torch.backends.mps.is_available():
+            self.skipTest('Metal is not available')
+        device = torch.device('mps')
+        with tempfile.TemporaryDirectory() as directory:
+            saved, restored, _ = save_and_restore(torch, Path(directory), device)
+        for expected, actual in zip(
+            [*saved[0].parameters(), *saved[1].parameters()],
+            [*restored[0].parameters(), *restored[1].parameters()],
+            strict=True,
+        ):
+            self.assertEqual(actual.device.type, 'mps')
+            self.assertTrue(torch.equal(expected, actual))
+            state = restored[2].state[actual]
+            self.assertEqual(state['exp_avg'].device.type, 'mps')
+            self.assertEqual(state['step'].device.type, 'cpu')
+
+    def test_resume_rewinds_the_job_step_to_the_restored_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            job = queued_job(method='finetune')
+            job['status'] = 'running'
+            job['step'] = 9
+            train_sdxl.write_job(job_dir, job)
+            checkpoint = models / 'checkpoints' / job['checkpoint']
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b'checkpoint')
+            frame = {'image': job_dir / 'dataset' / '0000.png', 'mask': None, 'caption': 'ohwx'}
+            config = train_sdxl.load_config()
+            config['prior_preservation'] = False
+            modules = {'torch': mock.MagicMock(), 'diffusers': mock.MagicMock()}
+            with (
+                mock.patch.dict(sys.modules, modules),
+                mock.patch.multiple(
+                    train_sdxl,
+                    list_frames=mock.Mock(return_value=[frame]),
+                    steps_for=mock.Mock(return_value=12),
+                    select_device=mock.Mock(return_value=self.device('cpu')),
+                    assert_device_capacity=mock.DEFAULT,
+                    load_base_pipeline=mock.MagicMock(),
+                    make_optimizer=mock.MagicMock(),
+                    load_or_encode_latents=mock.Mock(return_value=(mock.Mock(), 64, 64)),
+                    resume_snapshot_path=mock.Mock(return_value=job_dir / 'latest.pt'),
+                    restore_snapshot=mock.Mock(return_value=(7, 0.25, 7)),
+                    pose_sample_weights=mock.Mock(return_value=[1.0]),
+                    weighted_index=mock.Mock(side_effect=MemoryError('mps')),
+                ),
+            ):
+                with self.assertRaises(MemoryError):
+                    train_sdxl.train(models, job_dir, job, config)
+            saved = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+            self.assertEqual(saved['step'], 7)
 
 
 def import_in_clean_process(

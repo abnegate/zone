@@ -1652,10 +1652,10 @@ def apply_rng_state(
     import torch
 
     if payload.get('torch_rng') is not None:
-        torch.set_rng_state(payload['torch_rng'])
+        torch.set_rng_state(payload['torch_rng'].cpu())
     if payload.get('torch_mps_rng') is not None and hasattr(torch, 'mps'):
         try:
-            torch.mps.set_rng_state(payload['torch_mps_rng'])
+            torch.mps.set_rng_state(payload['torch_mps_rng'].cpu())
         except (RuntimeError, AttributeError):
             pass
 
@@ -1705,6 +1705,26 @@ def save_snapshot(
     os.replace(temporary, path)
 
 
+def clone_host_tensors(values: dict[str, Any]) -> None:
+    import torch
+
+    for key, value in list(values.items()):
+        if isinstance(value, torch.Tensor) and value.device.type == HOST_DEVICE:
+            values[key] = value.clone()
+
+
+def release_snapshot_storage(optimizer: Any) -> None:
+    """Copy the optimizer's host tensors out of the memory-mapped snapshot.
+
+    load_state_dict leaves tensors that stay on the host, such as AdamW's step counters, as
+    views of the mapping, which would keep a replaced latest.pt alive for the whole run.
+    """
+    for state in optimizer.state.values():
+        clone_host_tensors(state)
+    for group in optimizer.param_groups:
+        clone_host_tensors(group)
+
+
 def restore_snapshot(
     path: Path,
     *,
@@ -1725,9 +1745,9 @@ def restore_snapshot(
         from peft import set_peft_model_state_dict
 
     try:
-        payload = torch.load(path, map_location=device, weights_only=False)
+        payload = torch.load(path, map_location=HOST_DEVICE, mmap=True, weights_only=False)
     except TypeError:
-        payload = torch.load(path, map_location=device)
+        payload = torch.load(path, map_location=HOST_DEVICE)
     if method in ADAPTER_METHODS:
         set_peft_model_state_dict(unet, payload['unet_lora'])
         if 'text_encoder_lora' in payload:
@@ -1742,6 +1762,7 @@ def restore_snapshot(
         unet.load_state_dict(payload['unet'])
         text_encoder.load_state_dict(payload['text_encoder'])
     optimizer.load_state_dict(payload['optimizer'])
+    release_snapshot_storage(optimizer)
     apply_rng_state(payload, sample_rng=sample_rng, dropout_rng=dropout_rng)
     return (
         int(payload['step']),
@@ -2137,6 +2158,8 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         )
         resume_step = start_step
         start_step += 1
+        job['step'] = resume_step
+        write_job(job_dir, job)
         print(f'resume from step {resume_step}', flush=True)
         progress.emit(
             'training',
