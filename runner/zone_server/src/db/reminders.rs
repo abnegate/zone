@@ -149,35 +149,51 @@ impl Zoned {
     }
 }
 
-/// Refuses a repeat whose `due_at` was written in another zone's offset.
+/// Refuses a repeat whose `due_at` would not keep its time on the zone's clock.
 ///
-/// A repeat keeps due_at's wall-clock time in its zone, so 09:00+01:00 read
-/// in a zone at +00:00 that day would repeat at 08:00, an hour from the time
-/// the person named, and they would find out by being interrupted.
-fn agrees(due: DateTime<FixedOffset>, zoned: Zoned) -> Result<(), String> {
+/// The rule is read on the zone's wall clock, so a due_at written in another
+/// offset, or at a time the rule's own clauses do not select, means the first
+/// firing and the repeats land at different times — 09:00+01:00 read in a zone
+/// at +00:00 repeats at 08:00 — and the person finds out by being interrupted.
+fn agrees(
+    due: DateTime<FixedOffset>,
+    rule: &Recurrence,
+    rrule: &str,
+    zoned: Zoned,
+) -> Result<(), String> {
     let zone = zoned.zone();
-    let offset = zone.offset(due.with_timezone(&Utc));
-    if offset == *due.offset() {
-        return Ok(());
-    }
+    let instant = due.with_timezone(&Utc);
+    let offset = zone.offset(instant);
     let written = due.format("%Y-%m-%dT%H:%M:%S%:z");
-    let there = due.with_timezone(&offset).format("%Y-%m-%dT%H:%M:%S%:z");
     let read = match zoned {
-        Zoned::Given(_) => format!("{} is at {offset} then", zone.name()),
-        Zoned::Reported(_) => format!(
-            "the person's own zone, {}, is at {offset} then",
+        Zoned::Given(_) => zone.name().to_string(),
+        Zoned::Reported(_) => format!("the person's own zone, {}", zone.name()),
+        Zoned::Unknown => "UTC, as no time zone is known for this person".to_string(),
+    };
+    let remedy = match zoned {
+        Zoned::Given(_) | Zoned::Reported(_) => format!(
+            "Pass time_zone with the IANA zone the person meant, or write due_at in {}'s offset.",
             zone.name()
         ),
-        Zoned::Unknown => {
-            "no time zone is known for this person, so a repeat would be read in UTC".to_string()
-        }
+        Zoned::Unknown => "Pass time_zone with the IANA zone the person meant.".to_string(),
     };
-    Err(format!(
-        "due_at {written} is at {}, but {read}. A repeat keeps due_at's wall-clock time in its \
-         time_zone, so the two must agree: pass time_zone with the IANA zone the person meant, \
-         or write due_at as {there}.",
-        due.offset()
-    ))
+    if offset != *due.offset() {
+        return Err(format!(
+            "due_at {written} is at {}, but a repeat is read in {read} ({offset} then). A repeat \
+             keeps due_at's wall-clock time in its time_zone, so the two must agree. {remedy}",
+            due.offset()
+        ));
+    }
+    let local = zone.local(instant);
+    if !rule.admits(local) {
+        return Err(format!(
+            "due_at {written} is {} in {read}, which {rrule} does not select, so the first firing \
+             and the repeats would land at different times. Make due_at the first time the rule \
+             selects there. {remedy}",
+            local.format("%A %H:%M")
+        ));
+    }
+    Ok(())
 }
 
 /// Both instants in the caller's own offset. A model that wrote 19:23+12:00
@@ -240,8 +256,8 @@ pub async fn create(
             .await?
             .map_or(Zoned::Unknown, Zoned::Reported),
     };
-    if rule.is_some() {
-        agrees(input.due_at, zoned).map_err(|why| actions::invalid(&why))?;
+    if let (Some(rule), Some(rrule)) = (&rule, input.rrule.as_deref()) {
+        agrees(input.due_at, rule, rrule.trim(), zoned).map_err(|why| actions::invalid(&why))?;
     }
     let result = sqlx::query_scalar(
         "INSERT INTO reminders (workspace_id, created_by, chat_id, content, due_at, rrule, \
@@ -376,13 +392,17 @@ fn reschedule(
     due_at: DateTime<Utc>,
     expires_at: Option<DateTime<Utc>>,
     fired: i32,
-    zone: TimeZone,
+    time_zone: &str,
 ) -> Option<DateTime<Utc>> {
     let now = Utc::now();
     if expires_at.is_some_and(|expires| expires <= now) {
         return None;
     }
     let rule = Recurrence::parse(rrule?).ok()?;
+    let zone = TimeZone::parse(time_zone).unwrap_or_else(|why| {
+        tracing::warn!(reminder_id = %id, %why, "Reminder zone unreadable; repeating it in UTC");
+        TimeZone::UTC
+    });
     let fired = u32::try_from(fired).unwrap_or(u32::MAX);
     // The row still holds the count from before this firing -- the increment
     // shares the transaction that is delivering it -- so the delivery in hand
@@ -426,10 +446,6 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
     else {
         return Ok(Delivered::Nothing);
     };
-    let zone = TimeZone::parse(&time_zone).unwrap_or_else(|why| {
-        tracing::warn!(reminder_id = %id, %why, "Reminder zone unreadable; repeating it in UTC");
-        TimeZone::UTC
-    });
 
     // A schedule whose lifetime ran out before this claim ends without
     // delivering. The row went past its week while it sat due -- the server was
@@ -499,7 +515,7 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
             due_at,
             expires_at,
             fired_count,
-            zone,
+            &time_zone,
         ) {
             Some(next) if rrule.is_some() => {
                 sqlx::query(

@@ -670,7 +670,7 @@ async fn generate_tokens(
     if let Some(zone) = crate::auth::time_zone::claim(headers)
         && let Err(error) = users::set_time_zone(state.db(), user.user.id, zone).await
     {
-        tracing::warn!(%error, "Failed to record the console's time zone");
+        tracing::warn!(user_id = %user.user.id, %error, "Failed to record the console's time zone");
     }
     let claim = crate::auth::device::claim(headers);
     let ip_address = claim.ip_address.as_deref();

@@ -201,6 +201,39 @@ fn an_hourly_rule_counts_elapsed_hours_through_a_repeated_hour() {
     );
 }
 
+#[test]
+fn a_monthly_first_at_plus_twelve_stays_on_the_first_there() {
+    assert_eq!(
+        firings(
+            "FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=8",
+            "2027-07-01T08:00:00+12:00",
+            "Pacific/Auckland",
+            2
+        ),
+        [
+            at("2027-08-01T08:00:00+12:00"),
+            at("2027-09-01T08:00:00+12:00")
+        ],
+        "read in UTC, the 1st at 08:00 +12:00 is the last day of the month before"
+    );
+}
+
+#[test]
+fn until_is_an_instant_however_the_zone_reads_it() {
+    let rule = Recurrence::parse("FREQ=DAILY;BYHOUR=9;UNTIL=20270706T210000Z").unwrap();
+    let anchor = at("2027-07-05T09:00:00+12:00");
+    let auckland = zone("Pacific/Auckland");
+    let second = rule.next_after(anchor, anchor, 1, auckland);
+    assert_eq!(second, Some(at("2027-07-06T09:00:00+12:00")));
+    let third = rule.next_after(anchor, second.unwrap(), 2, auckland);
+    assert_eq!(
+        third,
+        Some(at("2027-07-07T09:00:00+12:00")),
+        "UNTIL includes the instant it names"
+    );
+    assert_eq!(rule.next_after(anchor, third.unwrap(), 3, auckland), None);
+}
+
 /// The member a harness chat belongs to, who is the one a reminder runs as.
 async fn owner(harness: &Harness) -> Uuid {
     sqlx::query_scalar(
@@ -362,6 +395,21 @@ async fn a_repeat_with_no_zone_known_is_read_in_utc_and_says_so() {
     assert!(refused.contains("no time zone is known"), "{refused}");
     assert!(refused.contains("UTC"), "{refused}");
 
+    let eight_utc = nine_in_two_days(TimeZone::UTC) - Duration::hours(1);
+    let refused = refusal(
+        reminders::create(
+            &harness.pool,
+            harness.workspace,
+            user,
+            harness.chat,
+            daily(eight_utc, None),
+        )
+        .await
+        .expect_err("a first firing the rule does not select is refused"),
+    );
+    assert!(refused.contains("does not select"), "{refused}");
+    assert!(refused.contains("time_zone"), "{refused}");
+
     let created = reminders::create(
         &harness.pool,
         harness.workspace,
@@ -414,17 +462,16 @@ async fn a_reminder_stored_before_zones_keeps_firing_in_utc() {
     );
 }
 
-async fn post_auth(client: &TestClient, uri: &str, body: &Value, zone: &str) -> Value {
+async fn post_auth(client: &TestClient, uri: &str, body: &Value, zone: Option<&str>) -> Value {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("Content-Type", "application/json");
+    if let Some(zone) = zone {
+        request = request.header("x-zone-time-zone", zone);
+    }
     let response = client
-        .send_request(
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header("Content-Type", "application/json")
-                .header("x-zone-time-zone", zone)
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .send_request(request.body(Body::from(body.to_string())).unwrap())
         .await;
     assert!(
         response.status == StatusCode::OK || response.status == StatusCode::CREATED,
@@ -444,21 +491,31 @@ async fn reported(client: &TestClient, user: Uuid) -> Option<&'static str> {
 #[tokio::test]
 async fn the_console_s_zone_is_kept_on_sign_in_and_refresh() {
     let client = TestClient::with_db().await;
+    let (email, password) = (test_email(), test_password());
     let registered = post_auth(
         &client,
         "/api/auth/register",
-        &json!({"email": test_email(), "password": test_password(), "display_name": "Ari"}),
-        "Pacific/Auckland",
+        &json!({"email": email, "password": password, "display_name": "Ari"}),
+        Some("Pacific/Auckland"),
     )
     .await;
     let user = Uuid::parse_str(registered["user"]["id"].as_str().unwrap()).unwrap();
     assert_eq!(reported(&client, user).await, Some("Pacific/Auckland"));
 
+    let signed_in = post_auth(
+        &client,
+        "/api/auth/login",
+        &json!({"email": email, "password": password}),
+        Some("America/New_York"),
+    )
+    .await;
+    assert_eq!(reported(&client, user).await, Some("America/New_York"));
+
     let refreshed = post_auth(
         &client,
         "/api/auth/refresh",
-        &json!({"refresh_token": registered["refresh_token"]}),
-        "Europe/London",
+        &json!({"refresh_token": signed_in["refresh_token"]}),
+        Some("Europe/London"),
     )
     .await;
     assert_eq!(
@@ -467,17 +524,24 @@ async fn the_console_s_zone_is_kept_on_sign_in_and_refresh() {
         "a person who travels is followed"
     );
 
-    post_auth(
+    let unnamed = post_auth(
         &client,
         "/api/auth/refresh",
         &json!({"refresh_token": refreshed["refresh_token"]}),
-        "Middle/Earth",
+        Some("Middle/Earth"),
+    )
+    .await;
+    post_auth(
+        &client,
+        "/api/auth/refresh",
+        &json!({"refresh_token": unnamed["refresh_token"]}),
+        None,
     )
     .await;
     assert_eq!(
         reported(&client, user).await,
         Some("Europe/London"),
-        "a name that is not a zone leaves the last real one in place"
+        "a name that is not a zone, or no name at all, leaves the last real one in place"
     );
 }
 

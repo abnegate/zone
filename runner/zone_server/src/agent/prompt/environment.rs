@@ -22,6 +22,9 @@ const UNKNOWN_TIMEZONE: &str = "UTC";
 pub struct Environment {
     pub now: DateTime<FixedOffset>,
     pub timezone: String,
+    /// Whether `timezone` is the user's own, as their console reported it,
+    /// rather than the zone this server runs in.
+    pub reported: bool,
     pub directory: PathBuf,
     pub platform: &'static str,
     pub vcs: Option<Vcs>,
@@ -37,6 +40,7 @@ impl Environment {
             now: Local::now().fixed_offset(),
             timezone: iana_time_zone::get_timezone()
                 .unwrap_or_else(|_| UNKNOWN_TIMEZONE.to_string()),
+            reported: false,
             directory: host_root(),
             platform: std::env::consts::OS,
             vcs: None,
@@ -51,6 +55,7 @@ impl Environment {
         Self {
             now,
             timezone: timezone.into(),
+            reported: true,
             directory,
             platform: std::env::consts::OS,
             vcs: None,
@@ -85,11 +90,11 @@ impl Environment {
         self
     }
 
-    /// The same instant on another zone's clock.
     pub fn with_time_zone(mut self, zone: TimeZone) -> Self {
         let instant = self.now.with_timezone(&Utc);
         self.now = instant.with_timezone(&zone.offset(instant));
         self.timezone = zone.name().to_string();
+        self.reported = true;
         self
     }
 }

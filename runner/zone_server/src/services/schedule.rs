@@ -348,6 +348,15 @@ impl Recurrence {
         Ok(())
     }
 
+    /// Whether the rule's own clauses select this wall-clock time.
+    pub fn admits(&self, local: NaiveDateTime) -> bool {
+        let named = |values: &[u32], value: u32| values.is_empty() || values.contains(&value);
+        named(&self.by_hour, local.hour())
+            && named(&self.by_minute, local.minute())
+            && named(&self.by_month_day, local.day())
+            && (self.by_day.is_empty() || self.by_day.contains(&local.weekday()))
+    }
+
     /// The first firing strictly after `after`, or `None` once the rule is
     /// spent.
     ///
