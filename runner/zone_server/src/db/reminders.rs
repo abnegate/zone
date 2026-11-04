@@ -1,8 +1,9 @@
 //! Durable reminders delivered atomically to their originating chat, and the
 //! recurring automations they become when one carries a rule for its own next
 //! firing.
-use super::{DbResult, actions};
+use super::{DbResult, actions, users};
 use crate::services::schedule::{self, MAX_LIFETIME, Recurrence};
+use crate::services::time_zone::TimeZone;
 use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -59,6 +60,10 @@ pub struct Reminder {
     pub prompt: Option<String>,
     #[serde(default)]
     pub timing_mode: Option<String>,
+    /// The IANA zone a repeat is read in. Absent is the person's own zone
+    /// when their console has reported one, and UTC when nothing has.
+    #[serde(default)]
+    pub time_zone: Option<String>,
 }
 
 /// Reads and checks the automation half of a create.
@@ -127,6 +132,72 @@ fn rfc3339<'de, D: Deserializer<'de>>(deserializer: D) -> Result<DateTime<FixedO
     })
 }
 
+/// Where a reminder's zone came from, which decides how a refusal names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Zoned {
+    Given(TimeZone),
+    Reported(TimeZone),
+    Unknown,
+}
+
+impl Zoned {
+    fn zone(self) -> TimeZone {
+        match self {
+            Self::Given(zone) | Self::Reported(zone) => zone,
+            Self::Unknown => TimeZone::UTC,
+        }
+    }
+}
+
+/// Refuses a repeat whose `due_at` would not keep its time on the zone's clock.
+///
+/// The rule is read on the zone's wall clock, so a due_at written in another
+/// offset, or at a time the rule itself would not fire, means the first firing
+/// and the repeats land at different times — 09:00+01:00 read in a zone at
+/// +00:00 repeats at 08:00 — and the person finds out by being interrupted.
+fn agrees(due: DateTime<FixedOffset>, rule: &Recurrence, zoned: Zoned) -> Result<(), String> {
+    let zone = zoned.zone();
+    let instant = due.with_timezone(&Utc);
+    let offset = zone.offset(instant);
+    let written = due.format("%Y-%m-%dT%H:%M:%S%:z");
+    let ask = "Pass time_zone with the IANA zone the person meant";
+    let (read, unknown) = match zoned {
+        Zoned::Given(_) => (zone.name().to_string(), ""),
+        Zoned::Reported(_) => (format!("the person's own zone, {}", zone.name()), ""),
+        Zoned::Unknown => (
+            "UTC".to_string(),
+            " No time zone is known for this person, so UTC is what it is read in.",
+        ),
+    };
+    if offset != *due.offset() {
+        let remedy = match zoned {
+            Zoned::Unknown => format!("{ask}."),
+            Zoned::Given(_) | Zoned::Reported(_) => {
+                format!("{ask}, or write due_at in {}'s offset.", zone.name())
+            }
+        };
+        return Err(format!(
+            "due_at {written} is at {}, but a repeat is read in {read}, at {offset} then.{unknown} \
+             A repeat keeps due_at's wall-clock time in its time_zone, so the two must agree. \
+             {remedy}",
+            due.offset()
+        ));
+    }
+    if !rule.fires_at(instant, zone) {
+        let remedy = match zoned {
+            Zoned::Unknown => format!(" {ask}."),
+            Zoned::Given(_) | Zoned::Reported(_) => String::new(),
+        };
+        return Err(format!(
+            "due_at {written} is {} in {read}, a time the rule does not fire at, so the first \
+             firing and the repeats would land at different times.{unknown} Make due_at the first \
+             time the rule fires there.{remedy}",
+            zone.local(instant).format("%A %Y-%m-%d %H:%M")
+        ));
+    }
+    Ok(())
+}
+
 /// Both instants in the caller's own offset. A model that wrote 19:23+12:00
 /// needs to read that it is 19:29+12:00 now, not that the format was wrong:
 /// told the latter it retries the same past instant in every spelling it knows.
@@ -161,6 +232,15 @@ pub async fn create(
         return Err(actions::invalid(&past_due(input.due_at, now)));
     }
     let (rule, mode) = automation(&input)?;
+    let given = match input
+        .time_zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => Some(TimeZone::parse(name).map_err(|why| actions::invalid(&why))?),
+        None => None,
+    };
     // The first firing is the anchor: a recurrence is measured from a fixed
     // point, because due_at moves on every firing and measuring from it would
     // let "every second Monday" drift a period each time one landed late.
@@ -172,10 +252,19 @@ pub async fn create(
     let mut transaction = pool.begin().await?;
     actions::authorize(&mut transaction, workspace_id, user_id, true).await?;
     actions::chat(&mut transaction, workspace_id, chat_id).await?;
+    let zoned = match given {
+        Some(zone) => Zoned::Given(zone),
+        None => users::time_zone(&mut *transaction, user_id)
+            .await?
+            .map_or(Zoned::Unknown, Zoned::Reported),
+    };
+    if let Some(rule) = &rule {
+        agrees(input.due_at, rule, zoned).map_err(|why| actions::invalid(&why))?;
+    }
     let result = sqlx::query_scalar(
         "INSERT INTO reminders (workspace_id, created_by, chat_id, content, due_at, rrule, \
-         prompt, timing_mode, anchor_at, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING to_jsonb(reminders.*)",
+         prompt, timing_mode, anchor_at, expires_at, time_zone) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING to_jsonb(reminders.*)",
     )
     .bind(workspace_id)
     .bind(user_id)
@@ -199,6 +288,7 @@ pub async fn create(
     .bind(mode)
     .bind(anchor)
     .bind(expires)
+    .bind(zoned.zone().name())
     .fetch_one(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -251,6 +341,7 @@ struct Due {
     expires_at: Option<DateTime<Utc>>,
     fired_count: i32,
     prompt: Option<String>,
+    time_zone: String,
 }
 
 /// What one claim did.
@@ -303,18 +394,23 @@ fn reschedule(
     due_at: DateTime<Utc>,
     expires_at: Option<DateTime<Utc>>,
     fired: i32,
+    time_zone: &str,
 ) -> Option<DateTime<Utc>> {
     let now = Utc::now();
     if expires_at.is_some_and(|expires| expires <= now) {
         return None;
     }
     let rule = Recurrence::parse(rrule?).ok()?;
+    let zone = TimeZone::parse(time_zone).unwrap_or_else(|why| {
+        tracing::warn!(reminder_id = %id, %why, "Reminder zone unreadable; repeating it in UTC");
+        TimeZone::UTC
+    });
     let fired = u32::try_from(fired).unwrap_or(u32::MAX);
     // The row still holds the count from before this firing -- the increment
     // shares the transaction that is delivering it -- so the delivery in hand
     // is added here. Without it COUNT=1 schedules a second firing, and every
     // finite rule delivers one more than it was asked for.
-    let next = rule.next_after(anchor.unwrap_or(due_at), now, fired.saturating_add(1))?
+    let next = rule.next_after(anchor.unwrap_or(due_at), now, fired.saturating_add(1), zone)?
         + schedule::jitter(id, rule.period());
     // A firing past the lifetime is not scheduled at all, rather than scheduled
     // and then refused when it arrives.
@@ -329,7 +425,8 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
     let mut transaction = pool.begin().await?;
     let next = sqlx::query_as::<_, Due>(
         "SELECT id, workspace_id, created_by, chat_id, content, rrule, anchor_at, due_at, \
-         expires_at, fired_count, prompt FROM reminders WHERE status = 'pending' AND due_at <= NOW() \
+         expires_at, fired_count, prompt, time_zone FROM reminders WHERE status = 'pending' \
+         AND due_at <= NOW() \
          ORDER BY due_at, id LIMIT 1 FOR UPDATE SKIP LOCKED",
     )
     .fetch_optional(&mut *transaction)
@@ -346,6 +443,7 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
         expires_at,
         fired_count,
         prompt,
+        time_zone,
     }) = next
     else {
         return Ok(Delivered::Nothing);
@@ -419,6 +517,7 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
             due_at,
             expires_at,
             fired_count,
+            &time_zone,
         ) {
             Some(next) if rrule.is_some() => {
                 sqlx::query(
@@ -647,6 +746,7 @@ mod tests {
             rrule: None,
             prompt: None,
             timing_mode: None,
+            time_zone: None,
         }
     }
 

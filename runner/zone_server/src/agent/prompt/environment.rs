@@ -1,11 +1,12 @@
 //! Where and when this turn runs.
 
 use abnegate_llm::Effort;
-use chrono::{DateTime, FixedOffset, Local};
+use chrono::{DateTime, FixedOffset, Local, Utc};
 use std::path::PathBuf;
 
 use super::Vcs;
 use crate::agent::tools::host_root;
+use crate::services::time_zone::TimeZone;
 
 /// Fallback zone name when the host exposes no IANA identifier.
 const UNKNOWN_TIMEZONE: &str = "UTC";
@@ -21,6 +22,9 @@ const UNKNOWN_TIMEZONE: &str = "UTC";
 pub struct Environment {
     pub now: DateTime<FixedOffset>,
     pub timezone: String,
+    /// Whether `timezone` is the user's own, as their console reported it,
+    /// rather than the zone this server runs in.
+    pub reported: bool,
     pub directory: PathBuf,
     pub platform: &'static str,
     pub vcs: Option<Vcs>,
@@ -36,6 +40,7 @@ impl Environment {
             now: Local::now().fixed_offset(),
             timezone: iana_time_zone::get_timezone()
                 .unwrap_or_else(|_| UNKNOWN_TIMEZONE.to_string()),
+            reported: false,
             directory: host_root(),
             platform: std::env::consts::OS,
             vcs: None,
@@ -50,6 +55,7 @@ impl Environment {
         Self {
             now,
             timezone: timezone.into(),
+            reported: true,
             directory,
             platform: std::env::consts::OS,
             vcs: None,
@@ -81,6 +87,14 @@ impl Environment {
 
     pub fn with_effort(mut self, effort: Effort) -> Self {
         self.effort = Some(effort);
+        self
+    }
+
+    pub fn with_time_zone(mut self, zone: TimeZone) -> Self {
+        let instant = self.now.with_timezone(&Utc);
+        self.now = instant.with_timezone(&zone.offset(instant));
+        self.timezone = zone.name().to_string();
+        self.reported = true;
         self
     }
 }
@@ -120,6 +134,17 @@ mod tests {
         assert_eq!(filled.user.as_deref(), Some("Ari"));
         assert_eq!(filled.workspace.as_deref(), Some("Zone"));
         assert_eq!(filled.effort, Some(Effort::High));
+    }
+
+    #[test]
+    fn a_person_s_zone_restates_the_same_instant_on_their_clock() {
+        let environment = fixed().with_time_zone(TimeZone::parse("Europe/London").expect("a zone"));
+        assert_eq!(environment.timezone, "Europe/London");
+        assert_eq!(
+            environment.now.to_rfc3339(),
+            "2026-09-08T22:30:00+01:00",
+            "09:30 in Auckland is 22:30 the evening before in London"
+        );
     }
 
     #[test]

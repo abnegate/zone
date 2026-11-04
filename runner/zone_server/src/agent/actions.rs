@@ -322,9 +322,10 @@ impl Tool for WorkspaceAction {
                 json!({
                     "content":{"type":"string","minLength":1,"description":"The words each firing delivers. With a prompt they are not delivered at all and this is the schedule's name instead, so keep it short enough to recognise in a list."},
                     "due_at":{"type":"string","format":"date-time","description":"RFC3339 with explicit timezone offset, e.g. 2026-09-20T19:30:00+12:00. The first firing, and the exact time the person named. It must still be in the future when the call is made: a turn can take minutes, so leave room rather than naming the next minute."},
-                    "rrule":{"type":"string","description":"RFC 5545 rule to repeat it, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9. FREQ may be HOURLY, DAILY, WEEKLY or MONTHLY; FREQ=HOURLY is the finest cadence and MINUTELY or SECONDLY is refused. Omit for a single reminder."},
+                    "rrule":{"type":"string","description":"RFC 5545 rule to repeat it, e.g. FREQ=WEEKLY;BYDAY=MO;BYHOUR=9. FREQ may be HOURLY, DAILY, WEEKLY or MONTHLY; FREQ=HOURLY is the finest cadence and MINUTELY or SECONDLY is refused. Its hours and days are wall-clock times in time_zone. Omit for a single reminder."},
                     "prompt":{"type":"string","description":"An instruction to your future self, run as a turn at each firing instead of delivering content. End it with the rule that if nothing changed, say nothing — except under condition_watch, which supplies its own rule and answers an unchanged firing in one short line."},
-                    "timing_mode":{"type":"string","enum":["exact_schedule","condition_watch"],"description":"exact_schedule, the default, fires at the time named. condition_watch fires on the rrule and reports what differs from the last firing, and requires both rrule and prompt. It cannot see a change that appears and disappears between two firings."}
+                    "timing_mode":{"type":"string","enum":["exact_schedule","condition_watch"],"description":"exact_schedule, the default, fires at the time named. condition_watch fires on the rrule and reports what differs from the last firing, and requires both rrule and prompt. It cannot see a change that appears and disappears between two firings."},
+                    "time_zone":{"type":"string","description":"IANA zone a repeat is read in, e.g. Europe/London. BYHOUR, BYMINUTE, BYDAY, BYMONTHDAY and the time of due_at are wall-clock times there and stay put across daylight saving. Omit it to use the person's own zone when Zone knows it, and UTC when it does not; the stored reminder's time_zone says which. due_at's offset must be this zone's offset at that moment."}
                 }),
                 json!(["content", "due_at"]),
             ),
@@ -611,6 +612,21 @@ mod tests {
             due_at.contains("+12:00"),
             "an example offset is shown: {due_at}"
         );
+    }
+
+    #[tokio::test]
+    async fn create_reminder_says_which_zone_a_repeat_is_read_in() {
+        let schema = tool(Action::CreateReminder).parameters_schema();
+        let rrule = schema["properties"]["rrule"]["description"]
+            .as_str()
+            .expect("rrule is described");
+        assert!(rrule.contains("time_zone"), "{rrule}");
+        let zone = schema["properties"]["time_zone"]["description"]
+            .as_str()
+            .expect("time_zone is described");
+        for clause in ["IANA", "BYHOUR", "BYDAY", "daylight saving", "UTC"] {
+            assert!(zone.contains(clause), "{clause} missing: {zone}");
+        }
     }
 
     #[test]
