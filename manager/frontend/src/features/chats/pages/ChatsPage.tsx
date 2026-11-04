@@ -245,6 +245,13 @@ export default function ChatsPage() {
     refresh: refreshProviders,
   } = useChatProviders(selectedChatId);
   const [changingProvider, setChangingProvider] = useState(false);
+  const wasStreaming = useRef(streaming);
+
+  useEffect(() => {
+    if (wasStreaming.current === streaming) return;
+    wasStreaming.current = streaming;
+    void refreshProviders();
+  }, [streaming, refreshProviders]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -340,9 +347,9 @@ export default function ChatsPage() {
   const chatSettingsSummary = [providerName, modelName, chatEffortName].filter(Boolean).join(' · ');
   const autoApproved = Boolean(displayedChat?.auto_approve);
   const sandboxed = displayedChat?.agent_sandboxed !== false;
+  const cli = providersError ? undefined : chatProviders?.cli;
   const showSandbox = Boolean(
-    displayedChat?.agent_enabled &&
-      (chatProviders?.cli === undefined ? !sandboxed : chatProviders.cli)
+    displayedChat?.agent_enabled && (cli === undefined ? !sandboxed : cli)
   );
   const permissionSummary = [
     `auto-approve ${autoApproved ? 'on' : 'off'}`,

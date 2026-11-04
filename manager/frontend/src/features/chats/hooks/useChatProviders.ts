@@ -8,8 +8,9 @@ const LOAD_FAILED = 'Failed to load AI providers';
 /**
  * The providers one chat may run on, its own choice among them and the
  * workspace default it otherwise follows. A refetch that fails keeps this
- * chat's last list and reports the error; a load that lands after the chat
- * changed never shows another chat's list.
+ * chat's last list and reports the error until a later one succeeds, so the
+ * list reads as stale throughout; a load that lands after the chat changed
+ * never shows another chat's list.
  */
 export function useChatProviders(chatId: string | null) {
   const [providers, setProviders] = useState<ChatProviders | null>(null);
@@ -20,7 +21,6 @@ export function useChatProviders(chatId: string | null) {
 
   const load = useCallback(async (id: string | null): Promise<void> => {
     const current = ++request.current;
-    setError(null);
     if (!id) {
       setProviders(null);
       setLoading(false);
@@ -29,7 +29,10 @@ export function useChatProviders(chatId: string | null) {
     setLoading(true);
     try {
       const loaded = await chatsApi.getChatProviders(id);
-      if (current === request.current) setProviders(loaded);
+      if (current === request.current) {
+        setProviders(loaded);
+        setError(null);
+      }
     } catch (error) {
       if (current !== request.current) return;
       setError(error instanceof Error ? error.message : LOAD_FAILED);
@@ -41,6 +44,7 @@ export function useChatProviders(chatId: string | null) {
   useEffect(() => {
     latestChatId.current = chatId;
     setProviders(null);
+    setError(null);
     void load(chatId);
   }, [chatId, load]);
 

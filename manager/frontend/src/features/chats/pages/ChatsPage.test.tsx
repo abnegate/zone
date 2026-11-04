@@ -2779,6 +2779,90 @@ describe('ChatsPage', () => {
       );
     });
 
+    const openUnsandboxedChat = async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: false }));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      await waitFor(() =>
+        expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument()
+      );
+    };
+
+    const sendTurn = () => {
+      fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {
+        target: { value: 'Next turn' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    };
+
+    it('warns when a provider change lands but reading the providers back fails', async () => {
+      await openUnsandboxedChat();
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+        provider: 'claude_code',
+      });
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+
+      chooseSelectOption('chat-provider', 'Claude Code');
+
+      await screen.findByTestId('chat-providers-error');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByTestId('agent-permissions')).toHaveTextContent('Host tools');
+    });
+
+    it('picks up a default that changed between turns as the next turn starts', async () => {
+      await openUnsandboxedChat();
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+
+      sendTurn();
+
+      await screen.findByTestId('agent-sandbox-toggle');
+      expect(screen.getByTestId('agent-permissions')).toHaveTextContent('Host tools');
+    });
+
+    it('reads the providers again when a turn ends', async () => {
+      await openUnsandboxedChat();
+      sendTurn();
+      await waitFor(() => expect(mockWsSend).toHaveBeenCalled());
+      await waitFor(() => expect(mockGetChatProviders.mock.calls.length).toBe(2));
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+
+      act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
+      act(() => socket.emit({ type: 'message_end', message_id: 'reply', content: 'Done' }));
+
+      await screen.findByTestId('agent-sandbox-toggle');
+    });
+
+    it('sends the turn without waiting for a slow read of the providers', async () => {
+      await openUnsandboxedChat();
+      mockGetChatProviders.mockReturnValue(new Promise(() => {}));
+
+      sendTurn();
+
+      await waitFor(() => expect(mockWsSend).toHaveBeenCalled());
+      expect(await screen.findByRole('status')).toHaveTextContent('Generating response…');
+    });
+
+    it('keeps the turn running when reading the providers fails', async () => {
+      await openUnsandboxedChat();
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+
+      sendTurn();
+
+      await screen.findByTestId('chat-providers-error');
+      expect(mockWsSend).toHaveBeenCalled();
+      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
+    });
+
     it('follows the provider as it changes in the picker', async () => {
       await openAgentChat(chatProviders({ cli: false }));
       expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
