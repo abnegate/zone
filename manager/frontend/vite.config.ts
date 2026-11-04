@@ -1,3 +1,4 @@
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer, defineConfig, type Plugin } from 'vite';
@@ -5,6 +6,7 @@ import react from '@vitejs/plugin-react';
 import tailwind from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+import { SERVICE_WORKER_FILE } from './src/shared/serviceWorker';
 import { FEATURE_STYLESHEET_ATTRIBUTE } from './src/shared/stylesheet';
 
 const frontendRoot = fileURLToPath(new URL('.', import.meta.url));
@@ -22,6 +24,33 @@ const SIGNED_OUT_STYLESHEET = 'styles-signed-out';
 const FEATURE_STYLESHEET = 'styles-features';
 const STYLESHEETS = [SIGNED_OUT_STYLESHEET, FEATURE_STYLESHEET, SHARED_STYLESHEET];
 const SHELL_MARKER = '<!--signed-out-shell-->';
+const APP_CHUNK = 'app';
+const RENDERER_CHUNK = 'renderer';
+const EAGER_CHUNKS = [APP_CHUNK, RENDERER_CHUNK];
+const EAGER_COMPILE_HINT = '//# allFunctionsCalledOnLoad';
+
+function compileEagerly(): Plugin {
+  return {
+    name: 'zone:compile-eagerly',
+    apply: 'build',
+    enforce: 'post',
+    writeBundle: async (options, bundle) => {
+      const chunks = Object.values(bundle).filter(
+        (output) => output.type === 'chunk' && EAGER_CHUNKS.includes(output.name)
+      );
+      if (chunks.length !== EAGER_CHUNKS.length) {
+        throw new Error(`Found ${chunks.length} of the chunks ${EAGER_CHUNKS.join(', ')}`);
+      }
+      for (const chunk of chunks) {
+        const file = path.join(options.dir ?? '', chunk.fileName);
+        await writeFile(file, `${EAGER_COMPILE_HINT}\n${await readFile(file, 'utf8')}`);
+        const map = JSON.parse(await readFile(`${file}.map`, 'utf8')) as { mappings: string };
+        map.mappings = `;${map.mappings}`;
+        await writeFile(`${file}.map`, JSON.stringify(map));
+      }
+    },
+  };
+}
 
 function deferFeatureStylesheet(): Plugin {
   return {
@@ -98,10 +127,12 @@ export default defineConfig(({ command }) => {
       tailwind(),
       deferFeatureStylesheet(),
       signedOutShell(),
+      compileEagerly(),
       VitePWA({
         disable: process.env.VITE_DISABLE_PWA === '1',
         registerType: 'autoUpdate',
-        injectRegister: 'script-defer',
+        injectRegister: false,
+        filename: SERVICE_WORKER_FILE,
         includeAssets: ['favicon.ico', 'logo192.png', 'logo512.png'],
         manifest: {
           name: 'Zone Dashboard',
@@ -186,7 +217,17 @@ export default defineConfig(({ command }) => {
                 priority: 3,
               },
               { name: FEATURE_STYLESHEET, test: /\.css($|\?)/, priority: 2 },
-              { name: 'boot', test: /\/src\/main\.tsx$/, priority: 1 },
+              {
+                name: RENDERER_CHUNK,
+                test: /\/src\/renderer\.ts$|\/node_modules\/(\.bun\/[^/]+\/node_modules\/)?(react-dom\/(client\.js|cjs\/react-dom-client\.)|scheduler\/)/,
+                priority: 2,
+              },
+              {
+                name: 'react',
+                test: /\/node_modules\/(\.bun\/[^/]+\/node_modules\/)?(react\/|react-dom\/(index\.js|cjs\/react-dom\.))/,
+                priority: 3,
+              },
+              { name: APP_CHUNK, test: /\/src\/main\.tsx$/, priority: 1 },
             ],
           },
         },
