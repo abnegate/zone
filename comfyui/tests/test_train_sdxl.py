@@ -2226,6 +2226,26 @@ class FreeSpaceTests(unittest.TestCase):
             save.assert_not_called()
             self.assertEqual(train_sdxl.snapshot_steps(checkpoint_dir), [50, 100])
 
+    def test_reclaiming_keeps_the_snapshot_a_resume_would_use(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            for step in (50, 100):
+                train_sdxl.snapshot_path(checkpoint_dir, step).write_bytes(b'x' * 100)
+            train_sdxl.reclaim_snapshots(checkpoint_dir, 1, None)
+            self.assertEqual(train_sdxl.snapshot_steps(checkpoint_dir), [100])
+
+    def test_a_transient_crash_while_saving_is_not_taken_for_a_full_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            with (
+                mock.patch.object(shutil, 'disk_usage', return_value=disk(GIBIBYTE)),
+                mock.patch.object(
+                    train_sdxl, 'save_snapshot', side_effect=MemoryError('host allocation')
+                ),
+            ):
+                with self.assertRaises(MemoryError):
+                    train_sdxl.save_latest(checkpoint_dir, 50, 30 * GIBIBYTE, {}, {})
+
     def test_a_write_that_fails_partway_leaves_no_partial_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             latest = Path(directory) / 'latest.pt'
@@ -2320,7 +2340,10 @@ class FreeSpaceTests(unittest.TestCase):
             written = read_job(job_dir)
             self.assertEqual(written['step'], 50)
             self.assertEqual(written['transient_attempts'], 1)
-            self.assertIn('after its write ran out of space', stderr.getvalue())
+            self.assertIn(
+                "after its write failed with RuntimeError('unexpected pos 576 vs 534')",
+                stderr.getvalue(),
+            )
 
     def test_a_write_that_fails_with_room_to_spare_still_fails_the_step(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

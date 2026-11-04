@@ -1171,9 +1171,10 @@ def reclaim_snapshots(directory: Path, keep: int, best_step: int | None) -> None
     retain = set(steps[len(steps) - newer :]) if newer else set()
     if best_step is not None:
         retain.add(best_step)
+    resume = resume_snapshot_path(directory)
     for step in steps:
         path = snapshot_path(directory, step)
-        if step not in retain and path.stat().st_nlink == 1:
+        if step not in retain and path != resume and path.stat().st_nlink == 1:
             path.unlink(missing_ok=True)
 
 
@@ -1302,7 +1303,9 @@ def save_latest(
         space = free_space(directory, snapshot_size(directory, estimate), config)
         if space.fits:
             raise
-        warn_skipped(f'the step {step} snapshot after its write ran out of space', directory, space)
+        warn_skipped(
+            f'the step {step} snapshot after its write failed with {error!r}', directory, space
+        )
         return False
     return True
 
