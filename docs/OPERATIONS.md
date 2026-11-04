@@ -53,7 +53,9 @@ the name the script printed: `docker volume rm <64-hex-name>`.
 the shell running the backup: `zone_postgres_data` (the cluster, under
 `postgres/`), `zone_valkey_data`, `zone_ollama_data`, `zone_manager_repos`,
 `zone_manager_artifacts`, `zone_manager_agent_state`, `zone_prometheus_data`,
-`zone_grafana_data` and `zone_traefik_letsencrypt`. It leaves out
+`zone_grafana_data` and `zone_traefik_letsencrypt`. `zone_manager_repos` holds
+the clones that project chats work in, along with whatever they left there
+([`ZONE_PROJECT_CLONE_DIR`](CONFIGURATION.md#zone_project_clone_dir)). It leaves out
 `zone_comfyui_models` (downloaded weights, and the LoRAs Zone trains),
 `zone_comfyui_output`, `zone_manager_embed_cache`, and every volume of the
 `dev` profile, `zone_dev_agent_state` included. It checks that

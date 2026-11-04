@@ -35,10 +35,12 @@ services:
       - cargo-target:/app/runner/target
       - embed-cache:/app/embed-cache
       - agent-state:/app/agent-state
+      - clones:/app/clones
     environment:
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD_URLENCODED}@postgres:5432/${MANAGER_POSTGRES_DB:-manager}
       - REDIS_URL=redis://valkey:6379
       - LITELLM_HOST=http://litellm:4000
+      - ZONE_PROJECT_CLONE_DIR=/app/clones
       - ZONE_CHAT_ROUNDS=${ZONE_CHAT_ROUNDS:-64}
       - ZONE_CHAT_CALLS=${ZONE_CHAT_CALLS:-256}
       - ZONE_CHAT_TIMEOUT_SECONDS=${ZONE_CHAT_TIMEOUT_SECONDS:-1800}
@@ -144,5 +146,7 @@ volumes:
     name: zone_dev_embed_cache
   agent-state:
     name: zone_dev_agent_state
+  clones:
+    name: zone_dev_clones
   console-workspace-modules:
     name: zone_dev_console_workspace_modules

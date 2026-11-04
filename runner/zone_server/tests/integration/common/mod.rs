@@ -98,6 +98,7 @@ pub fn test_config() -> Config {
         endpoint_hosts: Default::default(),
         auto: Default::default(),
         host_mounts: Default::default(),
+        clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
     }
 }
@@ -474,6 +475,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         endpoint_hosts: Default::default(),
         auto: Default::default(),
         host_mounts: Default::default(),
+        clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
     }
 }

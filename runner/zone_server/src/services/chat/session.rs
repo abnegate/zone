@@ -28,6 +28,7 @@ use crate::services::backend;
 use crate::services::chat::handover::Handover;
 use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
+use crate::services::project_directory::{self, Start};
 use crate::state::AppState;
 use zone_chat::{capacity, history};
 
@@ -312,6 +313,9 @@ pub struct Preparation {
     /// The logins the turn may move to when the one it runs on can no longer run it: none over
     /// HTTP, or under the instance's or the host's sign-in.
     pub handover: Option<Handover>,
+    /// Why the chat's project could not give this turn its directory, which the answer opens by
+    /// saying.
+    pub displaced: Option<String>,
     /// The chat's reasoning effort, which a coding agent the turn hands over to
     /// is told again.
     pub effort: ReasoningEffort,
@@ -339,13 +343,20 @@ pub async fn build(
         user_id: user,
         offline: chat.offline,
     };
+    let directory = match &mode {
+        Mode::Generation(generation) => generation.directory.clone(),
+        Mode::Preview => match project_directory::locate(state, chat.id, workspace).await {
+            Start::Directory(directory) => Some(directory),
+            Start::Elsewhere | Start::Missing(_) | Start::Unavailable(_) => None,
+        },
+    };
     let catalog = async {
         let tools = if matches!(mode, Mode::Generation(_)) && chat.agent_enabled {
             ChatTools::build(scope).await
         } else {
             ChatTools::preview(scope).await
         };
-        tools.using_workspace_directories().await
+        tools.starting_in(directory).await
     };
     let resolver = endpoint.capacity(state.config());
     let requested = chat
@@ -566,6 +577,7 @@ pub async fn build(
         skills,
         session,
         handover: None,
+        displaced: None,
         effort: chat.reasoning_effort,
     })
 }

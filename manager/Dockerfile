@@ -126,9 +126,9 @@ RUN chmod +x /app/zone-server /app/zone-runner
 # Docker seeds a new named volume from the image directory, so create these
 # paths up front to give first-time volumes zone's ownership. zone owns nothing
 # else under /app, so neither the server nor an agent it runs can rewrite it.
-RUN mkdir -p /app/workspace /app/agent-state /app/artifacts /app/embed-cache \
-    && chown -R zone:zone /app/workspace /app/agent-state /app/artifacts /app/embed-cache \
-    && chmod 0700 /app/agent-state
+RUN mkdir -p /app/workspace /app/agent-state /app/artifacts /app/embed-cache /tmp/repos \
+    && chown -R zone:zone /app/workspace /app/agent-state /app/artifacts /app/embed-cache /tmp/repos \
+    && chmod 0700 /app/agent-state /tmp/repos
 
 COPY manager/docker-entrypoint.sh /usr/local/bin/manager-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/manager-entrypoint.sh

@@ -15,6 +15,7 @@ reclaim() {
 if [ "$(id -u)" -eq 0 ]; then
     reclaim /app/artifacts 0755
     reclaim /app/agent-state 0700
+    reclaim /tmp/repos 0700
     exec runuser -u zone -- "$@"
 fi
 

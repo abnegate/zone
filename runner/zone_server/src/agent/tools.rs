@@ -310,6 +310,18 @@ impl ChatTools {
         Self::assemble(Some(scope), ToolProfile::Chat, None, false, denied).await
     }
 
+    /// Point relative paths at `directory`, which a chat's project gave it, or
+    /// otherwise at [`Self::using_workspace_directories`].
+    pub async fn starting_in(mut self, directory: Option<std::path::PathBuf>) -> Self {
+        match directory {
+            Some(directory) => {
+                self.context.cwd = directory;
+                self
+            }
+            None => self.using_workspace_directories().await,
+        }
+    }
+
     /// Point relative paths at the first host folder this workspace mounted
     /// that exists here. Falls back to [`host_root`] when none do.
     pub async fn using_workspace_directories(mut self) -> Self {

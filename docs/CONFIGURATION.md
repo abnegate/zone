@@ -617,7 +617,72 @@ setting a monthly cap, at claude.ai/settings/usage.
   directory the `zone` user can write, and `/app/workspace` is one. A
   workspace **Folders** list overrides this for that workspace: the first
   selected host directory that exists inside the manager becomes the working
-  directory.
+  directory. A chat that belongs to a project overrides both; see
+  [Where a project's chat starts](#where-a-projects-chat-starts).
+
+### Where a project's chat starts
+
+A chat that belongs to a project starts in the project's source on this
+machine. Zone's tools, the working directory in the prompt, and a Claude Code or
+Codex turn all use that directory. It decides where relative paths resolve and
+nothing else: it is not a sandbox, and a chat reaches other mounted folders by
+their absolute paths as before.
+
+| The project names | The chat starts in |
+|-------------------|--------------------|
+| A **Local Directory** source | That folder, mapped through `ZONE_HOST_ROOT` |
+| A **GitHub** source, or a linked GitHub repository, checked out in one of the workspace's **Folders** | That checkout, as it stands. Zone never fetches, resets or writes to it |
+| A GitHub repository that is not checked out there | Zone's own clone under `ZONE_PROJECT_CLONE_DIR`, made on the first turn that needs it and reused after that |
+| A **GitLab** source checked out in one of the workspace's **Folders** | That checkout. Zone does not clone GitLab repositories |
+| Any other source, or no project | Where any chat starts: the first of the workspace's **Folders** that exists, else `ZONE_CHAT_AGENT_CWD`, and on Claude Code or Codex the organization's `work` directory |
+
+- **Which source**: a project has one source and may have one linked GitHub
+  repository. The source comes first, and the linked repository is used when the
+  source has no directory to give. An inactive source is skipped.
+- **Finding a checkout**: Zone walks each of the workspace's **Folders** in
+  order, shallowest first and at most three levels down, skipping hidden folders,
+  `node_modules`, `target`, `vendor` and links. A folder is a checkout of the
+  repository only when its `.git/config` names the repository as `origin`, in any
+  spelling (`https`, `ssh`, `git@host:`, with or without `.git`, in any case). A
+  folder's name, another remote and a linked worktree do not count. The file is
+  read as data, and git is not run in the checkout.
+- **Cloning**: the clone uses the source's credentials, or the token linked with
+  the repository, sent as a header that never reaches the URL, `.git/config`, the
+  process list or a log. While it runs the chat shows *Cloning …* and **Stop** ends
+  it. Chats starting together wait for one clone. Zone does not fetch a clone
+  again after that: an agent that wants the latest commits pulls them itself, and
+  a private repository's token is not left in the clone for that.
+- **When it can't**: a folder that is gone, a clone that fails or a GitLab
+  repository with no checkout never fails the turn. The chat starts where any chat
+  does, and the answer opens by saying why. Each turn tries again.
+- **A session keeps going**: Claude finds a session by the directory it runs in,
+  so when a chat's directory changes, Zone moves the session's file to the new
+  directory's folder in that sign-in's home before resuming it. If the file can't
+  be moved, the turn replays the chat in a fresh session.
+- **A project's own configuration applies**: a CLI that runs in a project's
+  directory reads that project's `CLAUDE.md`, `AGENTS.md` and settings, including
+  any hooks they name. Point a project only at repositories you would run an
+  agent in. Under `ZONE_CODEX_SANDBOX=workspace-write`, Codex can write only inside
+  the directory it starts in, so other mounted folders are read-only to it. The
+  compose default, `danger-full-access`, has no such limit.
+
+### `ZONE_PROJECT_CLONE_DIR`
+- **Default**: `clones` beside `ZONE_AGENT_STATE_DIR`, so
+  `$XDG_STATE_HOME/zone/clones`, falling back to
+  `$HOME/.local/state/zone/clones`
+- **Compose**: `/tmp/repos`, on the `zone_manager_repos` volume, which
+  `make backup` archives. **Helm**: `/app/clones`, a `clones` directory on the
+  agent-state claim.
+- **Description**: Where Zone clones a project's GitHub repository when no folder
+  of its workspace holds a checkout, at `<dir>/<workspace id>/<digest of the URL>`.
+  A clone belongs to its workspace, so a private repository is never handed to
+  another workspace's chat. Two projects of one workspace on one repository share
+  a clone. Each workspace's directory has mode 0700.
+- **Refused at boot**: a relative path, or one inside `ZONE_AGENT_STATE_DIR`, which
+  every chat's tools are denied.
+- **Note**: This has to survive a restart. A clone holds whatever a chat left in
+  it, and Zone never removes one. Delete a workspace's directory by hand to reclaim
+  the space, and the next chat that needs a clone makes it again.
 
 ### `ZONE_HOST_ROOT`
 - **Default**: empty. Compose then bind-mounts `./.zone/host-empty` at
@@ -1410,7 +1475,8 @@ once approved, and its file tools read whatever else the server's user can.
   `ZONE_AGENT_HOST_LOGIN` (default `false`), `ZONE_LLM_BACKEND` (default
   `litellm`), `ZONE_CHAT_AGENT_CWD` (default `/app/workspace`),
   `ZONE_HOST_ROOT` (empty by default, mounted at `/host`),
-  `ZONE_IN_CONTAINER` (`1`),
+  `ZONE_IN_CONTAINER` (`1`), `ZONE_PROJECT_CLONE_DIR` (`/tmp/repos`, on the
+  `zone_manager_repos` volume),
   `ZONE_AGENT_ENV_PASSTHROUGH`, `ZONE_CODEX_SANDBOX` (default
   `danger-full-access`), `ZONE_CLAUDE_TOKEN_URL` (empty by default, which
   keeps Claude's own endpoint), `ZONE_AGENT_CALLBACK`,
@@ -1479,7 +1545,8 @@ once approved, and its file tools read whatever else the server's user can.
   cross-home resume is unverified; handover falls back to transcript replay if the CLI refuses.
   Zone reproduces how Claude Code 2.1.285 names a working directory's project
   folder, which a later claude may change; a session file Zone cannot find
-  replays the same way.
+  replays the same way. The same goes for a session moved when a chat's directory
+  changes.
 - The usage endpoints are the ones each agent's own apps read, not documented
   APIs, so either may change without notice. A usage endpoint that refuses an
   account's token, with a 401 or 403, does not take the account out of
@@ -2197,7 +2264,7 @@ Need to find a specific config? Quick lookup:
   ZONE_CODEX_API_URL, ZONE_AGENT_CALLBACK, ZONE_AGENT_CALLBACK_BIND,
   ZONE_AGENT_CALLBACK_PORT, ZONE_CONSOLE_ORIGINS, ZONE_CODEX_SANDBOX,
   ZONE_AGENT_ENV_PASSTHROUGH, ZONE_CHAT_AGENT_CWD, ZONE_HOST_ROOT,
-  ZONE_IN_CONTAINER
+  ZONE_IN_CONTAINER, ZONE_PROJECT_CLONE_DIR
 - **Image, video, and audio generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
   COMFYUI_API_TOKEN, COMFYUI_TOKEN_HEADER, COMFYUI_MODELS_DIRECTORY,
   COMFYUI_ARTIFACT_ROOT, COMFYUI_TRAIN_COMMAND, COMFYUI_REQUEST_TIMEOUT_SECONDS,

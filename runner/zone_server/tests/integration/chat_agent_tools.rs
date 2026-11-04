@@ -58,6 +58,7 @@ struct Agent {
     arguments: PathBuf,
     token: PathBuf,
     release: PathBuf,
+    directory: PathBuf,
 }
 
 impl Agent {
@@ -71,13 +72,16 @@ impl Agent {
             arguments: directory.join("arguments"),
             token: directory.join("token"),
             release: directory.join("release"),
+            directory: directory.join("directory"),
         };
         let mut file = std::fs::File::create(&agent.executable).expect("the stand-in agent");
         writeln!(
             file,
-            "#!/bin/sh\ncat > {prompt}\nprintf '%s' \"$ZONE_MCP_TOKEN\" > {token}\nprintf \
-             '%s' \"$*\" > {arguments}.partial\nmv {arguments}.partial {arguments}\nwhile [ ! \
-             -f {release} ]; do sleep 0.05; done\necho '{assistant}'\necho '{result}'",
+            "#!/bin/sh\ncat > {prompt}\npwd -P > {directory}\nprintf '%s' \"$ZONE_MCP_TOKEN\" > \
+             {token}\nprintf '%s' \"$*\" > {arguments}.partial\nmv {arguments}.partial \
+             {arguments}\nwhile [ ! -f {release} ]; do sleep 0.05; done\necho \
+             '{assistant}'\necho '{result}'",
+            directory = agent.directory.display(),
             prompt = agent.prompt.display(),
             arguments = agent.arguments.display(),
             token = agent.token.display(),
@@ -241,6 +245,8 @@ async fn rpc(endpoint: &str, token: &str, method: &str, params: Value) -> (Statu
 }
 
 struct Harness {
+    pool: PgPool,
+    workspace: String,
     token: String,
     chat: Uuid,
     address: String,
@@ -296,7 +302,7 @@ impl Harness {
             executable: Some(agent.executable.clone()),
         };
 
-        let router = create_test_router(create_test_state(config, pool));
+        let router = create_test_router(create_test_state(config, pool.clone()));
         let client = TestClient::new(router.clone());
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
@@ -358,6 +364,8 @@ impl Harness {
             .expect("a chat id");
 
         Self {
+            pool,
+            workspace,
             token,
             chat,
             address: address.to_string(),
@@ -366,6 +374,41 @@ impl Harness {
             _directory: directory,
             server,
         }
+    }
+
+    /// Puts the chat in a new project whose source is the folder `directory`.
+    async fn belong_to_project_in(&self, directory: &Path) {
+        let workspace = self.workspace.parse().expect("a workspace id");
+        let source = zone_server::db::sources::create_source(
+            &self.pool,
+            workspace,
+            &Uuid::new_v4().to_string(),
+            "filesystem",
+            json!({"base_path": directory}),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("a source");
+        let project = zone_server::db::projects::create(
+            &self.pool,
+            zone_server::db::projects::NewProject {
+                name: "Project",
+                description: None,
+                workspace_id: Some(workspace),
+                source_id: Some(source.id),
+                status: None,
+            },
+        )
+        .await
+        .expect("a project");
+        sqlx::query("UPDATE chats SET project_id = $1 WHERE id = $2")
+            .bind(project.id)
+            .bind(self.chat)
+            .execute(&self.pool)
+            .await
+            .expect("the chat in the project");
     }
 
     async fn socket(&self) -> Socket {
@@ -385,6 +428,49 @@ impl Harness {
             finish(&mut socket).await
         })
     }
+}
+
+/// A coding agent's turn runs where the chat's tools and its prompt say it does: in the folder
+/// its project's source names.
+#[tokio::test]
+async fn a_project_chats_agent_runs_in_the_directory_its_prompt_names() {
+    let harness = Harness::start(true, false).await;
+    let project = TempDir::new().expect("a project folder");
+    let physical = std::fs::canonicalize(project.path()).expect("the project's real path");
+    harness.belong_to_project_in(project.path()).await;
+
+    let turn = harness.turn("Where are you?").await;
+    harness.agent.spawned().await;
+    let ran_in = std::fs::read_to_string(&harness.agent.directory).expect("the agent's directory");
+    let prompt = std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt");
+    harness.agent.finish();
+    turn.await.expect("the turn ends");
+
+    assert_eq!(ran_in.trim(), physical.to_str().expect("a UTF-8 path"));
+    assert!(
+        prompt.contains(&format!(
+            "Working directory {} on",
+            project.path().display()
+        )),
+        "the prompt names another directory than the one the agent runs in"
+    );
+}
+
+/// A chat with no project runs its agent where it always has, which the instance's own agent
+/// leaves to the server.
+#[tokio::test]
+async fn a_chat_with_no_project_runs_its_agent_where_it_always_did() {
+    let harness = Harness::start(true, false).await;
+
+    let turn = harness.turn("Where are you?").await;
+    harness.agent.spawned().await;
+    let ran_in = std::fs::read_to_string(&harness.agent.directory).expect("the agent's directory");
+    harness.agent.finish();
+    turn.await.expect("the turn ends");
+
+    let server = std::fs::canonicalize(std::env::current_dir().expect("the server's directory"))
+        .expect("the server's real path");
+    assert_eq!(ran_in.trim(), server.to_str().expect("a UTF-8 path"));
 }
 
 /// The whole arrangement, in one turn: zone mints a lease, points the agent at

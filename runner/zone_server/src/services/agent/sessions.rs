@@ -4,7 +4,8 @@
 //! Claude keeps a session at `projects/<sanitized work>/<id>.jsonl` in its config directory;
 //! Codex at `sessions/<yyyy>/<mm>/<dd>/rollout-<stamp>-<id>.jsonl` in its home. Both resume a
 //! session by reading that file, so a carried copy under the same relative path is all the other
-//! home needs.
+//! home needs. Claude finds a session by the directory it runs in, so a session whose chat now
+//! starts somewhere else is moved to that directory's folder within its home.
 
 mod carried;
 mod error;
@@ -57,11 +58,17 @@ pub fn carry(
     work: &Path,
     id: &str,
 ) -> Result<Carried, Error> {
-    let relative = relative(from, agent, work, id).ok_or_else(|| Error::Missing {
-        agent,
-        id: id.to_string(),
-    })?;
-    let source = from.join(&relative);
+    let found = relative(from, agent, work, id)
+        .or_else(|| elsewhere(from, agent, id))
+        .ok_or_else(|| Error::Missing {
+            agent,
+            id: id.to_string(),
+        })?;
+    let relative = match agent {
+        AgentKind::Claude => claude(work, id),
+        AgentKind::Codex => found.clone(),
+    };
+    let source = from.join(&found);
     let path = to.join(&relative);
     let parent = path.parent().unwrap_or(to);
 
@@ -84,6 +91,28 @@ pub fn carry(
         })?;
 
     Ok(Carried { path, bytes })
+}
+
+/// Moves session `id` within `home` to where `agent` looks for it when it runs in `work`. Claude
+/// looks in a folder named for the directory it runs in, and a session stays with its folder when
+/// a chat starts somewhere new, so a chat that changes directory would otherwise lose its
+/// session. Codex finds a session by its id alone. A session already in place is left as it is.
+pub fn relocate(home: &Path, agent: AgentKind, work: &Path, id: &str) -> Result<(), Error> {
+    if agent == AgentKind::Codex || relative(home, agent, work, id).is_some() {
+        return Ok(());
+    }
+    let found = elsewhere(home, agent, id).ok_or_else(|| Error::Missing {
+        agent,
+        id: id.to_string(),
+    })?;
+    let relative = claude(work, id);
+    let path = home.join(&relative);
+    directories(home, relative.parent().unwrap_or(Path::new("")))
+        .and_then(|()| fs::rename(home.join(&found), &path))
+        .map_err(|source| Error::Filesystem {
+            path: path.clone(),
+            source,
+        })
 }
 
 /// Claude's project folder name for a working directory: every UTF-16 unit that is not an ASCII
@@ -120,13 +149,43 @@ fn relative(home: &Path, agent: AgentKind, work: &Path, id: &str) -> Option<Path
 
     let relative = match agent {
         AgentKind::Claude => {
-            let relative = Path::new(PROJECTS)
-                .join(sanitized(&physical(work)))
-                .join(format!("{id}{EXTENSION}"));
+            let relative = claude(work, id);
             regular(&home.join(&relative)).then_some(relative)
         }
         AgentKind::Codex => rollout(home, Path::new(SESSIONS), &format!("-{id}{EXTENSION}")),
     }?;
+    relative
+        .parent()
+        .is_none_or(|parent| unlinked(home, parent))
+        .then_some(relative)
+}
+
+/// Where claude keeps session `id` for turns run in `work`, relative to its home.
+fn claude(work: &Path, id: &str) -> PathBuf {
+    Path::new(PROJECTS)
+        .join(sanitized(&physical(work)))
+        .join(format!("{id}{EXTENSION}"))
+}
+
+/// Session `id` wherever in `home` `agent` left it, whichever directory it last ran in.
+fn elsewhere(home: &Path, agent: AgentKind, id: &str) -> Option<PathBuf> {
+    if !named(id) {
+        return None;
+    }
+    let relative = match agent {
+        AgentKind::Claude => {
+            fs::read_dir(home.join(PROJECTS))
+                .ok()?
+                .flatten()
+                .find_map(|folder| {
+                    let relative = Path::new(PROJECTS)
+                        .join(folder.file_name())
+                        .join(format!("{id}{EXTENSION}"));
+                    regular(&home.join(&relative)).then_some(relative)
+                })?
+        }
+        AgentKind::Codex => rollout(home, Path::new(SESSIONS), &format!("-{id}{EXTENSION}"))?,
+    };
     relative
         .parent()
         .is_none_or(|parent| unlinked(home, parent))
@@ -372,6 +431,137 @@ mod tests {
             empty(homes.to.path()),
             "nothing is written for a missing session"
         );
+    }
+
+    #[test]
+    fn a_claude_session_moves_to_the_folder_of_the_directory_its_chat_starts_in() {
+        let homes = Homes::new();
+        let left = homes.claude();
+        homes.write(&left);
+        let project = TempDir::new().unwrap();
+        let expected = homes
+            .from
+            .path()
+            .join(PROJECTS)
+            .join(sanitized(&fs::canonicalize(project.path()).unwrap()))
+            .join(format!("{CLAUDE_ID}{EXTENSION}"));
+
+        relocate(
+            homes.from.path(),
+            AgentKind::Claude,
+            project.path(),
+            CLAUDE_ID,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&expected).unwrap(), TRANSCRIPT);
+        assert!(
+            !homes.from.path().join(&left).exists(),
+            "one session stays in one place"
+        );
+        assert_eq!(
+            locate(
+                homes.from.path(),
+                AgentKind::Claude,
+                project.path(),
+                CLAUDE_ID
+            ),
+            Some(expected.clone())
+        );
+
+        relocate(
+            homes.from.path(),
+            AgentKind::Claude,
+            homes.work.path(),
+            CLAUDE_ID,
+        )
+        .unwrap();
+        assert_eq!(fs::read(homes.from.path().join(&left)).unwrap(), TRANSCRIPT);
+        assert!(!expected.exists(), "and it can move back");
+    }
+
+    #[test]
+    fn a_session_in_place_is_left_alone_and_a_codex_session_is_found_from_anywhere() {
+        let homes = Homes::new();
+        let claude = homes.claude();
+        let codex = homes.codex();
+        homes.write(&claude);
+        homes.write(&codex);
+        let elsewhere = TempDir::new().unwrap();
+
+        relocate(
+            homes.from.path(),
+            AgentKind::Claude,
+            homes.work.path(),
+            CLAUDE_ID,
+        )
+        .unwrap();
+        relocate(
+            homes.from.path(),
+            AgentKind::Codex,
+            elsewhere.path(),
+            CODEX_ID,
+        )
+        .unwrap();
+
+        assert!(homes.from.path().join(&claude).exists());
+        assert!(homes.from.path().join(&codex).exists());
+        assert!(
+            locate(
+                homes.from.path(),
+                AgentKind::Codex,
+                elsewhere.path(),
+                CODEX_ID
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn moving_a_session_that_does_not_exist_is_reported() {
+        let homes = Homes::new();
+        assert!(matches!(
+            relocate(
+                homes.from.path(),
+                AgentKind::Claude,
+                homes.work.path(),
+                CLAUDE_ID
+            ),
+            Err(Error::Missing { .. })
+        ));
+    }
+
+    #[test]
+    fn a_session_id_that_names_a_path_is_never_moved() {
+        let homes = Homes::new();
+        let outside = homes.from.path().join("secret.jsonl");
+        fs::write(&outside, TRANSCRIPT).unwrap();
+
+        assert!(matches!(
+            relocate(
+                homes.from.path(),
+                AgentKind::Claude,
+                homes.work.path(),
+                "../../secret"
+            ),
+            Err(Error::Missing { .. })
+        ));
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn a_session_is_carried_to_another_home_from_the_directory_it_last_ran_in() {
+        let homes = Homes::new();
+        let previous = TempDir::new().unwrap();
+        let left = Path::new(PROJECTS)
+            .join(sanitized(&fs::canonicalize(previous.path()).unwrap()))
+            .join(format!("{CLAUDE_ID}{EXTENSION}"));
+        homes.write(&left);
+
+        let carried = homes.carry(AgentKind::Claude, CLAUDE_ID).unwrap();
+
+        assert_eq!(carried.path, homes.to.path().join(homes.claude()));
+        assert_eq!(fs::read(&carried.path).unwrap(), TRANSCRIPT);
     }
 
     #[test]

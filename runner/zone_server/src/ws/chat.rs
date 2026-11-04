@@ -51,6 +51,7 @@ use crate::services::chat::session::{self, Session};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::login::router;
+use crate::services::project_directory::{self, Start};
 use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
@@ -2877,6 +2878,42 @@ fn stamp(chat_id: Uuid, hit: &mut SearchHit, observed: db::DbResult<chat_sources
     }
 }
 
+/// The directory this turn's project starts it in, cloning its repository first when that is what
+/// it takes, and why not when it should have had one. The caller's Stop drops this, which ends
+/// the clone. Neither a clone that fails nor a project that can't be read fails the turn. A chat
+/// with its agent off has no tools to use a directory with, so it isn't worth a clone, or a word
+/// about not having one.
+async fn project_directory(
+    state: &AppState,
+    stream: &ChatStream,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    agentic: bool,
+) -> (Option<std::path::PathBuf>, Option<String>) {
+    match project_directory::locate(state, chat_id, workspace_id).await {
+        Start::Elsewhere => (None, None),
+        Start::Directory(directory) => (Some(directory), None),
+        Start::Missing(_) | Start::Unavailable(_) if !agentic => (None, None),
+        Start::Unavailable(reason) => (None, Some(reason)),
+        Start::Missing(missing) => {
+            publish(
+                stream,
+                ServerMessage::Status {
+                    message: format!("Cloning {}…", missing.url()),
+                },
+            )
+            .await;
+            match missing.clone_repository().await {
+                Ok(directory) => (Some(directory), None),
+                Err(reason) => {
+                    tracing::warn!(%chat_id, %reason, "Could not clone the project's repository");
+                    (None, Some(reason))
+                }
+            }
+        }
+    }
+}
+
 async fn prepare_chat(
     state: &AppState,
     stream: &ChatStream,
@@ -2889,6 +2926,8 @@ async fn prepare_chat(
     route: Route,
     web_search_requested: bool,
 ) -> Result<ChatPreparation, Box<dyn std::error::Error + Send + Sync>> {
+    let (directory, displaced) =
+        project_directory(state, stream, chat_id, workspace_id, chat.agent_enabled).await;
     let previous = match chats::session(state.db(), chat_id).await {
         Ok(previous) => previous,
         Err(error) => {
@@ -2908,6 +2947,9 @@ async fn prepare_chat(
     let mut resolved = route
         .chat(state, &[], previous.as_ref(), running.as_deref())
         .await?;
+    if let Some(directory) = &directory {
+        resolved.backend = crate::services::backend::in_directory(resolved.backend, directory);
+    }
     let organization = configured.and_then(|agent| route.organization_on(agent));
     let opening = match organization.zip(configured) {
         Some((organization, configured)) => {
@@ -2918,11 +2960,15 @@ async fn prepare_chat(
                 previous.as_ref(),
                 &mut resolved,
                 running.as_deref(),
+                directory.as_deref(),
             )
             .await
         }
         None => None,
     };
+    if let Some(organization) = organization {
+        handover::settle(state.config(), organization, &resolved);
+    }
     let current = resolved.login.clone();
     let chosen = route.chosen().is_some();
     let endpoint = route.into_endpoint()?;
@@ -2954,13 +3000,16 @@ async fn prepare_chat(
         session::Mode::Generation(session::Generation {
             resolved,
             session: previous.clone(),
+            directory: directory.clone(),
         }),
         endpoint,
     )
     .await?;
+    preparation.displaced = displaced;
     preparation.handover = match (organization, current, &preparation.session) {
         (Some(organization), Some(current), Some(_)) => {
-            let handover = Handover::new(organization, current, model, previous.as_ref(), opening);
+            let handover = Handover::new(organization, current, model, previous.as_ref(), opening)
+                .in_directory(directory);
             Some(match chosen {
                 true => handover.strict(),
                 false => handover,
@@ -3198,9 +3247,11 @@ async fn handle_chat_generation(
         skills: _,
         session: mut pinned,
         mut handover,
+        displaced,
         effort,
     } = preparation;
     let offline = tools.offline();
+    let directory = tools.working_directory().to_path_buf();
     let mut replay = context.clone();
     let definitions = agentic.then(|| tools.definitions().to_vec());
     // Bound for the whole turn on purpose. The token is revoked when the lease
@@ -3282,6 +3333,20 @@ async fn handle_chat_generation(
     // Whether the round is the answer going on from what another login wrote of it, which a
     // refused resume replays with that part and the instruction to go on.
     let mut continuing = false;
+
+    if let Some(reason) = displaced {
+        emit_chunk(
+            stream,
+            &mut full_content,
+            &mut chunk_index,
+            format!(
+                "> {reason} This chat is working in {} instead.\n\n",
+                directory.display()
+            ),
+            &mut response_truncated,
+        )
+        .await;
+    }
 
     loop {
         wait::set_ceiling(ToolSession::Chat(chat_id), stream_deadline);
@@ -3878,7 +3943,7 @@ async fn handle_chat_generation(
             offline,
         })
         .await
-        .using_workspace_directories()
+        .starting_in(Some(directory.clone()))
         .await;
         // A planner chat keeps its two closing calls across a rebuilt
         // catalog, as `session::build` gave them to the first turn.
@@ -5213,6 +5278,8 @@ for argument in "$@"; do
 done
 cat >> 'DIR/stdin'
 printf '\036' >> 'DIR/stdin'
+pwd -P >> 'DIR/directories'
+printf '\036' >> 'DIR/directories'
 printf '%s\0' "$@" >> 'DIR/arguments'
 printf '\036' >> 'DIR/arguments'
 if [ -n "$refused" ]; then
@@ -5235,6 +5302,7 @@ cat 'DIR/reply.jsonl'
             struct Run {
                 arguments: Vec<String>,
                 stdin: String,
+                directory: String,
             }
 
             impl Run {
@@ -5297,12 +5365,14 @@ cat 'DIR/reply.jsonl'
                     self.recorded("arguments")
                         .into_iter()
                         .zip(self.recorded("stdin"))
-                        .map(|(arguments, stdin)| Run {
+                        .zip(self.recorded("directories"))
+                        .map(|((arguments, stdin), directory)| Run {
                             arguments: arguments
                                 .split_terminator('\0')
                                 .map(str::to_string)
                                 .collect(),
                             stdin,
+                            directory: directory.trim().to_string(),
                         })
                         .filter(|run| run.flag("--session-id").or(run.flag("--resume")).is_some())
                         .collect()
@@ -5320,6 +5390,10 @@ cat 'DIR/reply.jsonl'
 
             impl Chat {
                 async fn on_claude() -> Self {
+                    Self::cloning_under(std::env::temp_dir().join("zone-clones")).await
+                }
+
+                async fn cloning_under(clones: std::path::PathBuf) -> Self {
                     let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
                     let agent = Agent::new();
                     let agents = TempDir::new().expect("an agent state root");
@@ -5335,6 +5409,7 @@ cat 'DIR/reply.jsonl'
                                 state: agents.path().to_path_buf(),
                                 ..crate::state::test_agents()
                             },
+                            clones,
                             ..crate::state::test_config()
                         },
                         organization.pool.clone(),
@@ -5380,6 +5455,93 @@ cat 'DIR/reply.jsonl'
                         None,
                     )
                     .await;
+                }
+
+                /// Puts the chat in a new project whose source is the folder `path`.
+                async fn in_project(&self, path: &std::path::Path) {
+                    self.sourced("filesystem", serde_json::json!({"base_path": path}))
+                        .await;
+                }
+
+                /// Puts the chat in a new project whose source is `kind` with `config`.
+                async fn sourced(&self, kind: &str, config: serde_json::Value) {
+                    let pool = &self.organization.pool;
+                    let source = db::sources::create_source(
+                        pool,
+                        self.organization.workspace,
+                        &Uuid::new_v4().to_string(),
+                        kind,
+                        config,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .expect("a source");
+                    let project = db::projects::create(
+                        pool,
+                        db::projects::NewProject {
+                            name: "Project",
+                            description: None,
+                            workspace_id: Some(self.organization.workspace),
+                            source_id: Some(source.id),
+                            status: None,
+                        },
+                    )
+                    .await
+                    .expect("a project");
+                    sqlx::query("UPDATE chats SET project_id = $1 WHERE id = $2")
+                        .bind(project.id)
+                        .bind(self.organization.chat)
+                        .execute(pool)
+                        .await
+                        .expect("the chat in the project");
+                }
+
+                /// Turns the chat's agent on, which is what a chat needs a directory for.
+                async fn with_agent(&self) {
+                    sqlx::query("UPDATE chats SET agent_enabled = true WHERE id = $1")
+                        .bind(self.organization.chat)
+                        .execute(&self.organization.pool)
+                        .await
+                        .expect("the chat's agent on");
+                }
+
+                fn home(&self) -> std::path::PathBuf {
+                    self.state.config().agents.login_home(
+                        self.organization.id,
+                        AgentKind::Claude,
+                        self.login,
+                    )
+                }
+
+                fn work(&self) -> std::path::PathBuf {
+                    std::fs::canonicalize(
+                        self.state
+                            .config()
+                            .agents
+                            .work(self.organization.id, AgentKind::Claude),
+                    )
+                    .expect("the working directory")
+                }
+
+                /// The file the real claude keeps session `id` in, for turns run in `directory`.
+                fn transcript(&self, directory: &std::path::Path, id: &str) -> std::path::PathBuf {
+                    self.home()
+                        .join("projects")
+                        .join(crate::services::agent::sessions::sanitized(directory))
+                        .join(format!("{id}.jsonl"))
+                }
+
+                async fn answer(&self) -> String {
+                    sqlx::query_scalar(
+                        "SELECT content FROM messages WHERE chat_id = $1 AND role = 'assistant' \
+                         ORDER BY created_at DESC LIMIT 1",
+                    )
+                    .bind(self.organization.chat)
+                    .fetch_one(&self.organization.pool)
+                    .await
+                    .expect("the chat's answer")
                 }
 
                 async fn session(&self) -> Option<chats::ChatSession> {
@@ -5649,6 +5811,162 @@ cat 'DIR/reply.jsonl'
                 assert_eq!(back.agent, AgentKind::Claude);
                 assert_eq!(back.id, pinned);
                 assert_eq!(back.login, Some(chat.login));
+            }
+
+            #[tokio::test]
+            async fn a_project_chats_turn_runs_its_agent_in_the_projects_folder() {
+                let chat = Chat::on_claude().await;
+                let project = TempDir::new().expect("a project folder");
+                let physical = std::fs::canonicalize(project.path()).expect("the real path");
+                chat.in_project(project.path()).await;
+
+                chat.ask(FIRST).await;
+                let runs = chat.agent.runs();
+                let answer = chat.answer().await;
+                chat.remove().await;
+
+                let [run] = runs.as_slice() else {
+                    panic!("expected one sessioned run, got {}", runs.len());
+                };
+                assert_eq!(run.directory, physical.to_str().expect("a UTF-8 path"));
+                assert_eq!(answer, ANSWER, "a chat in its directory is told of nothing");
+            }
+
+            #[tokio::test]
+            async fn a_chat_with_no_project_runs_its_agent_in_the_organizations_directory() {
+                let chat = Chat::on_claude().await;
+
+                chat.ask(FIRST).await;
+                let runs = chat.agent.runs();
+                let work = chat.work();
+                chat.remove().await;
+
+                let [run] = runs.as_slice() else {
+                    panic!("expected one sessioned run, got {}", runs.len());
+                };
+                assert_eq!(run.directory, work.to_str().expect("a UTF-8 path"));
+            }
+
+            /// The session a chat started before it had a project, or before its project had a
+            /// folder here, is the one it goes on in: claude finds a session by the directory it
+            /// runs in, so the file moves with the chat.
+            #[tokio::test]
+            async fn a_chat_that_comes_to_start_in_a_folder_resumes_the_session_it_had() {
+                let chat = Chat::on_claude().await;
+                let project = TempDir::new().expect("a project folder");
+                let physical = std::fs::canonicalize(project.path()).expect("the real path");
+
+                chat.ask(FIRST).await;
+                let first = chat.session().await.expect("the first turn's session");
+                let work = chat.work();
+                let before = chat.transcript(&work, &first.id);
+                std::fs::create_dir_all(before.parent().expect("a folder")).expect("the folder");
+                std::fs::write(&before, "{}\n").expect("the transcript claude keeps");
+
+                chat.in_project(project.path()).await;
+                chat.ask(SECOND).await;
+                let second = chat.session().await.expect("the second turn's session");
+                let runs = chat.agent.runs();
+                let after = chat.transcript(&physical, &first.id);
+                let (moved, left) = (after.is_file(), before.exists());
+                chat.remove().await;
+
+                let [opening, resumed] = runs.as_slice() else {
+                    panic!("expected two sessioned runs, got {}", runs.len());
+                };
+                assert_eq!(opening.directory, work.to_str().expect("a UTF-8 path"));
+                assert_eq!(resumed.directory, physical.to_str().expect("a UTF-8 path"));
+                assert_eq!(resumed.flag("--resume"), Some(first.id.as_str()));
+                assert_eq!(second.id, first.id);
+                assert!(
+                    moved,
+                    "claude would not find its session from the new directory"
+                );
+                assert!(!left, "a session stays in one place");
+            }
+
+            #[tokio::test]
+            async fn a_project_folder_that_is_gone_leaves_the_turn_answering_and_says_why() {
+                let chat = Chat::on_claude().await;
+                let removed = TempDir::new().expect("a parent");
+                let gone = removed.path().join("gone");
+                chat.in_project(&gone).await;
+                chat.with_agent().await;
+
+                chat.ask(FIRST).await;
+                let runs = chat.agent.runs();
+                let answer = chat.answer().await;
+                let work = chat.work();
+                chat.remove().await;
+
+                let [run] = runs.as_slice() else {
+                    panic!("expected one sessioned run, got {}", runs.len());
+                };
+                assert_eq!(run.directory, work.to_str().expect("a UTF-8 path"));
+                assert!(answer.starts_with("> "), "{answer}");
+                assert!(
+                    answer.contains(gone.to_str().expect("a UTF-8 path")),
+                    "{answer}"
+                );
+                assert!(
+                    answer.ends_with(ANSWER),
+                    "the turn was not answered: {answer}"
+                );
+            }
+
+            /// A clone root nothing can be made in would say so, were anything cloned.
+            #[tokio::test]
+            async fn a_chat_with_its_agent_off_is_not_cloned_for_or_told_of_it() {
+                let blocked = TempDir::new().expect("a parent");
+                let file = blocked.path().join("file");
+                std::fs::write(&file, "").expect("a file where the clones would go");
+                let chat = Chat::cloning_under(file.join("clones")).await;
+                chat.sourced(
+                    "github",
+                    serde_json::json!({"owner": "owner", "repo": "repository"}),
+                )
+                .await;
+
+                chat.ask(FIRST).await;
+                let answer = chat.answer().await;
+                chat.remove().await;
+
+                assert_eq!(answer, ANSWER);
+            }
+
+            /// A clone root nothing can be made in stands in for every way a clone fails, with no
+            /// network in the test.
+            #[tokio::test]
+            async fn a_clone_that_fails_leaves_the_turn_answering_and_says_why() {
+                let blocked = TempDir::new().expect("a parent");
+                let file = blocked.path().join("file");
+                std::fs::write(&file, "").expect("a file where the clones would go");
+                let chat = Chat::cloning_under(file.join("clones")).await;
+                chat.sourced(
+                    "github",
+                    serde_json::json!({"owner": "owner", "repo": "repository"}),
+                )
+                .await;
+                chat.with_agent().await;
+
+                chat.ask(FIRST).await;
+                let runs = chat.agent.runs();
+                let answer = chat.answer().await;
+                let work = chat.work();
+                chat.remove().await;
+
+                let [run] = runs.as_slice() else {
+                    panic!("expected one sessioned run, got {}", runs.len());
+                };
+                assert_eq!(run.directory, work.to_str().expect("a UTF-8 path"));
+                assert!(
+                    answer.starts_with("> Zone couldn't clone https://github.com/owner/repository"),
+                    "{answer}"
+                );
+                assert!(
+                    answer.ends_with(ANSWER),
+                    "the turn was not answered: {answer}"
+                );
             }
 
             #[tokio::test]

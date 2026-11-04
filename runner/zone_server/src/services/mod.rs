@@ -22,6 +22,7 @@ pub mod mail;
 pub mod media_source;
 pub mod model;
 pub mod prioritisation;
+pub mod project_directory;
 pub mod provider;
 pub mod route;
 pub mod runner;

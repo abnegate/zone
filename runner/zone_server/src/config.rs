@@ -62,6 +62,10 @@ pub struct Config {
     pub model_backend: ModelBackend,
     /// Coding agent CLIs that organizations sign in to.
     pub agents: AgentConfig,
+    /// Where the repositories of projects whose chats found no checkout are cloned, one
+    /// directory per workspace. It must outlive the process, and lie outside the agents' state,
+    /// which every chat's tools are denied.
+    pub clones: PathBuf,
     /// LiteLLM host URL. Empty when a CLI backend serves completions.
     pub litellm_host: String,
     /// LiteLLM API key. Empty when a CLI backend serves completions.
@@ -185,6 +189,12 @@ impl ModelBackend {
 
 /// Root of every organization's agent homes.
 const AGENT_STATE: &str = "ZONE_AGENT_STATE_DIR";
+
+/// Where the repositories of projects whose chats found no checkout are cloned.
+const CLONE_ROOT: &str = "ZONE_PROJECT_CLONE_DIR";
+
+/// The clone root beside the agents' state, when nothing names one.
+const DEFAULT_CLONES: &str = "clones";
 
 /// Whether an organization with no sign-in of its own may use the host's.
 const AGENT_HOST_LOGIN: &str = "ZONE_AGENT_HOST_LOGIN";
@@ -469,6 +479,29 @@ fn state_root(
         })
         .map(|directory| directory.join(STATE_ROOT))
         .ok_or(ConfigError::Missing(AGENT_STATE))
+}
+
+/// The configured root, else one beside the agents' state. Inside that state no chat's tools
+/// could reach what was cloned for them.
+fn clone_root(configured: Option<PathBuf>, state: &Path) -> Result<PathBuf, ConfigError> {
+    let root = match configured {
+        Some(configured) if configured.is_absolute() => configured,
+        Some(_) => {
+            return Err(ConfigError::Invalid(
+                "ZONE_PROJECT_CLONE_DIR must be an absolute path",
+            ));
+        }
+        None => state
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .join(DEFAULT_CLONES),
+    };
+    if root.starts_with(state) {
+        return Err(ConfigError::Invalid(
+            "ZONE_PROJECT_CLONE_DIR must be outside ZONE_AGENT_STATE_DIR",
+        ));
+    }
+    Ok(root)
 }
 
 /// A path from the environment, trimmed, with blank meaning unset.
@@ -1141,6 +1174,8 @@ impl Config {
             }
         }
 
+        let agents = AgentConfig::from_env()?;
+        let clones = clone_root(env_path(CLONE_ROOT), &agents.state)?;
         let model_backend = ModelBackend::from_env()?;
         let litellm_host = env::var("LITELLM_HOST").ok();
         let litellm_key = env::var("LITELLM_KEY").ok();
@@ -1172,7 +1207,8 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(604_800),
             model_backend,
-            agents: AgentConfig::from_env()?,
+            agents,
+            clones,
             litellm_host: litellm_host.unwrap_or_default(),
             litellm_key: litellm_key.unwrap_or_default(),
             ollama_host: env::var("OLLAMA_HOST")
@@ -1247,6 +1283,7 @@ impl std::fmt::Debug for Config {
             .field("auto", &self.auto)
             .field("endpoint_hosts", &self.endpoint_hosts)
             .field("host_mounts", &self.host_mounts)
+            .field("clones", &self.clones)
             .field("connect_urls", &self.connect_urls)
             .finish()
     }
@@ -1280,6 +1317,7 @@ mod tests {
             jwt_refresh_lifetime: 604800,
             model_backend: ModelBackend::default(),
             agents: AgentConfig::default(),
+            clones: std::env::temp_dir().join(DEFAULT_CLONES),
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),
@@ -1302,6 +1340,32 @@ mod tests {
             auto: Default::default(),
             host_mounts: Default::default(),
             connect_urls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_clone_root_defaults_beside_the_agents_state_and_stays_outside_it() {
+        let state = Path::new("/srv/zone/agents");
+        assert_eq!(
+            clone_root(None, state).unwrap(),
+            PathBuf::from("/srv/zone/clones")
+        );
+        assert_eq!(
+            clone_root(Some(PathBuf::from("/data/clones")), state).unwrap(),
+            PathBuf::from("/data/clones")
+        );
+        for configured in [
+            "relative/clones",
+            "/srv/zone/agents",
+            "/srv/zone/agents/clones",
+        ] {
+            assert!(
+                matches!(
+                    clone_root(Some(PathBuf::from(configured)), state),
+                    Err(ConfigError::Invalid(_))
+                ),
+                "{configured}"
+            );
         }
     }
 

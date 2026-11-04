@@ -358,6 +358,17 @@ pub fn bounded(backend: LlmBackend, timeout: Duration) -> LlmBackend {
     }
 }
 
+/// `backend` with a coding agent run in `directory`, where a chat's tools run, in place of the
+/// directory it was resolved with. An endpoint runs nowhere.
+pub fn in_directory(backend: LlmBackend, directory: &Path) -> LlmBackend {
+    match backend {
+        LlmBackend::Cli { agent, settings } => {
+            LlmBackend::cli(agent, settings.with_working_directory(directory))
+        }
+        LlmBackend::Http => LlmBackend::Http,
+    }
+}
+
 /// `backend` with a coding agent told to think at a chat's `effort`. An
 /// endpoint takes its effort in each request's body instead.
 pub fn effort(backend: LlmBackend, effort: ReasoningEffort) -> LlmBackend {
