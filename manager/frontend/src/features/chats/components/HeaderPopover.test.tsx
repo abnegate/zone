@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { HeaderPopover } from './HeaderPopover';
+import { ModelNameInput } from './ModelNameInput';
 
 function renderPopover(disabled = false) {
   return render(
@@ -26,6 +27,14 @@ function selectMenu(): HTMLElement {
   menu.setAttribute('data-radix-popper-content-wrapper', '');
   document.body.append(menu);
   return menu;
+}
+
+function openSelectInside(): HTMLElement {
+  const select = document.createElement('button');
+  select.setAttribute('role', 'combobox');
+  select.setAttribute('aria-expanded', 'true');
+  screen.getByRole('dialog').append(select);
+  return select;
 }
 
 describe('HeaderPopover', () => {
@@ -67,9 +76,9 @@ describe('HeaderPopover', () => {
     renderPopover();
     const trigger = screen.getByTestId('trigger');
     fireEvent.click(trigger);
-    fireEvent.mouseDown(screen.getByRole('button', { name: 'Inside' }));
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Inside' }));
     expect(trigger).toHaveAttribute('aria-expanded', 'true');
-    fireEvent.mouseDown(screen.getByRole('button', { name: 'Elsewhere' }));
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Elsewhere' }));
     expect(trigger).toHaveAttribute('aria-expanded', 'false');
   });
 
@@ -77,16 +86,69 @@ describe('HeaderPopover', () => {
     renderPopover();
     const trigger = screen.getByTestId('trigger');
     fireEvent.click(trigger);
+    const select = openSelectInside();
     const menu = selectMenu();
     try {
-      fireEvent.keyDown(document.body, { key: 'Escape' });
-      fireEvent.mouseDown(menu);
+      fireEvent.keyDown(menu, { key: 'Escape' });
+      fireEvent.pointerDown(menu);
+      fireEvent.pointerDown(screen.getByRole('button', { name: 'Elsewhere' }));
+      expect(trigger).toHaveAttribute('aria-expanded', 'true');
+
+      select.setAttribute('aria-expanded', 'false');
+      fireEvent.keyDown(menu, { key: 'Escape' });
       expect(trigger).toHaveAttribute('aria-expanded', 'true');
     } finally {
       menu.remove();
     }
     fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('closes when focus moves out, but not into a select menu', () => {
+    renderPopover();
+    const trigger = screen.getByTestId('trigger');
+    const inside = screen.getByRole('button', { name: 'Inside', hidden: true });
+    fireEvent.click(trigger);
+    const menu = selectMenu();
+    try {
+      fireEvent.focusOut(inside, { relatedTarget: menu });
+      fireEvent.focusOut(inside, { relatedTarget: trigger });
+      fireEvent.focusOut(inside, { relatedTarget: null });
+      expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    } finally {
+      menu.remove();
+    }
+    fireEvent.focusOut(inside, {
+      relatedTarget: screen.getByRole('button', { name: 'Elsewhere' }),
+    });
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('closes on Escape from a half-typed model name without choosing it', () => {
+    const onSubmit = mock();
+    render(
+      <HeaderPopover
+        className="pill"
+        testId="trigger"
+        label="Settings"
+        triggerLabel="Open settings"
+        title="Settings"
+        trigger={<span>Summary</span>}
+      >
+        <ModelNameInput provider="OpenAI" value="" onSubmit={onSubmit} />
+      </HeaderPopover>
+    );
+    const trigger = screen.getByTestId('trigger');
+    fireEvent.click(trigger);
+    const field = screen.getByRole('textbox', { name: 'Provider model name' });
+    field.focus();
+
+    fireEvent.change(field, { target: { value: 'gpt-' } });
+    fireEvent.keyDown(field, { key: 'Escape' });
+
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    expect(document.activeElement).toBe(trigger);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('stays shut while disabled', () => {

@@ -228,6 +228,18 @@ describe('ProviderPicker', () => {
     expect(screen.queryByTestId('chat-provider-model')).toBeNull();
   });
 
+  it('drops a half-typed name on Escape instead of choosing it when focus leaves', () => {
+    const { onChoose } = renderPicker({ selected: selection(openai) });
+    const field = screen.getByRole('textbox', { name: 'Provider model name' });
+
+    fireEvent.change(field, { target: { value: 'gpt-' } });
+    fireEvent.keyDown(field, { key: 'Escape' });
+    fireEvent.blur(field);
+
+    expect(onChoose).not.toHaveBeenCalled();
+    expect(field).toHaveValue('');
+  });
+
   it('names an unusable selection in the picker and raises no alert of its own', () => {
     renderPicker({
       providers: [selfHosted],

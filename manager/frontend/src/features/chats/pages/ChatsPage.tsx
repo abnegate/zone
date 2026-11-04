@@ -67,12 +67,13 @@ import {
   buildMessageWithAttachments,
   CHAT_GROUP_OPTIONS,
   CHAT_SORT_OPTIONS,
+  chatModelName,
+  chatProviderName,
   chatShowsAgent,
   chatShowsCharacter,
   chatShowsReasoning,
   contextTokenOptions,
   DEFAULT_PROVIDER,
-  DEFAULT_PROVIDER_LABEL,
   defaultContextTokens,
   effectiveOffer,
   effortsFor,
@@ -100,7 +101,6 @@ import {
   readChatSort,
   reasoningOptions,
   selectedContextTokens,
-  selectionModel,
   shortModelName,
   sourceAttachment,
   splitAtHandovers,
@@ -332,19 +332,17 @@ export default function ChatsPage() {
     displayedChat && displayedChat.model_name !== AUTO_MODEL && offersLocalContext(installedLocal)
   );
   const chatNative = installedLocal?.details?.context_length;
-  const chatProviderName = chatProviders?.selected?.label ?? DEFAULT_PROVIDER_LABEL;
-  const chatModelName = chatProviders?.selected
-    ? selectionModel(chatProviders.selected)
-    : modelLabel(displayedChat?.model_name ?? AUTO_MODEL);
+  const providerName = chatProviderName(chatProviders, displayedChat);
+  const modelName = chatModelName(chatProviders, displayedChat);
   const chatEffortName = showReasoning
     ? REASONING_EFFORT_LABELS[displayedChat?.reasoning_effort ?? AUTO_EFFORT]
     : null;
-  const chatSettingsSummary = [chatProviderName, chatModelName, chatEffortName]
-    .filter(Boolean)
-    .join(' · ');
-  const showSandbox = Boolean(displayedChat?.agent_enabled && chatProviders?.agent);
+  const chatSettingsSummary = [providerName, modelName, chatEffortName].filter(Boolean).join(' · ');
   const autoApproved = Boolean(displayedChat?.auto_approve);
   const sandboxed = displayedChat?.agent_sandboxed !== false;
+  const showSandbox = Boolean(
+    displayedChat?.agent_enabled && (chatProviders ? chatProviders.agent : !sandboxed)
+  );
   const permissionSummary = [
     `auto-approve ${autoApproved ? 'on' : 'off'}`,
     ...(showSandbox ? [`Zone tools only ${sandboxed ? 'on' : 'off'}`] : []),
@@ -1243,12 +1241,16 @@ export default function ChatsPage() {
                   disabled={!chatProviders && !showChatContext && !showReasoning}
                   trigger={
                     <>
-                      <span className="chat-settings-provider">{chatProviderName}</span>
-                      <span className="chat-settings-separator" aria-hidden="true">
-                        ·
-                      </span>
-                      <span className="chat-model" title={chatModelName}>
-                        {shortModelName(chatModelName)}
+                      {providerName && (
+                        <>
+                          <span className="chat-settings-provider">{providerName}</span>
+                          <span className="chat-settings-separator" aria-hidden="true">
+                            ·
+                          </span>
+                        </>
+                      )}
+                      <span className="chat-model" title={modelName}>
+                        {shortModelName(modelName)}
                       </span>
                       {chatEffortName && (
                         <>

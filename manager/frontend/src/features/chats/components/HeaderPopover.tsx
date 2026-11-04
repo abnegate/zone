@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 
 const SELECT_MENU = '[data-radix-popper-content-wrapper]';
+const OPEN_SELECT = '[role="combobox"][aria-expanded="true"]';
 
 export interface HeaderPopoverProps {
   className: string;
@@ -36,22 +37,32 @@ export function HeaderPopover({
   useEffect(() => {
     if (!open) return;
     panel.current?.focus();
-    const close = (event: MouseEvent) => {
-      if (document.querySelector(SELECT_MENU)) return;
-      if (root.current?.contains(event.target as Node)) return;
+    const selecting = () => Boolean(root.current?.querySelector(OPEN_SELECT));
+    // Captured because a select trigger elsewhere cancels the press it opens on.
+    const close = (event: PointerEvent) => {
+      if (selecting() || root.current?.contains(event.target as Node)) return;
       setOpen(false);
     };
-    // Captured so it runs before an open select closes itself on the same Escape.
+    // Bubbling so a control inside the panel sees the Escape before focus leaves it.
     const dismiss = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || document.querySelector(SELECT_MENU)) return;
+      if (event.key !== 'Escape' || selecting()) return;
+      if ((event.target as Element).closest?.(SELECT_MENU)) return;
       setOpen(false);
       button.current?.focus();
     };
-    document.addEventListener('mousedown', close);
-    document.addEventListener('keydown', dismiss, true);
+    const leave = (event: FocusEvent) => {
+      const next = event.relatedTarget as Element | null;
+      if (!next || root.current?.contains(next) || next.closest(SELECT_MENU)) return;
+      setOpen(false);
+    };
+    const element = root.current;
+    document.addEventListener('pointerdown', close, true);
+    document.addEventListener('keydown', dismiss);
+    element?.addEventListener('focusout', leave);
     return () => {
-      document.removeEventListener('mousedown', close);
-      document.removeEventListener('keydown', dismiss, true);
+      document.removeEventListener('pointerdown', close, true);
+      document.removeEventListener('keydown', dismiss);
+      element?.removeEventListener('focusout', leave);
     };
   }, [open]);
 

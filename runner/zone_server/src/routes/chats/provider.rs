@@ -24,7 +24,7 @@ use crate::db::chats::{self, provider::Choice};
 use crate::error::ServerError;
 use crate::routes::common::ErrorResponse;
 use crate::services::provider::{self, Offer, Provider, Refusal};
-use crate::services::route;
+use crate::services::route::{self, Route};
 use crate::state::AppState;
 use choose_request::ChooseRequest;
 use providers_response::ProvidersResponse;
@@ -62,7 +62,15 @@ pub async fn list(
     let (organization, settings) = saved(&state, workspace).await?;
     let choice = chats::provider::get(state.db(), id).await?;
     let offers = provider::offers(&state, organization, &settings).await?;
-    let agent = route::agent(state.config(), &settings, choice.as_ref()).map(Provider::of);
+    let agent = Route::of(
+        state.config(),
+        workspace,
+        organization,
+        settings.clone(),
+        choice.clone(),
+    )
+    .agent(state.config())
+    .map(Provider::of);
     let selected = choice.map(|choice| Selection {
         offer: offered(&offers, choice.provider),
         model: choice.model,

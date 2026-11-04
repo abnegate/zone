@@ -2,6 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import type { ChatProviderOffer, ChatProviderSelection, ReasoningEffort } from '../provider';
 import {
   asksModelName,
+  chatModelName,
+  chatProviderName,
   DEFAULT_PROVIDER,
   effectiveOffer,
   effortsFor,
@@ -130,6 +132,32 @@ describe('shortModelName', () => {
 
   it('leaves a bare name alone', () => {
     expect(shortModelName('llama3.2:3b')).toBe('llama3.2:3b');
+  });
+
+  it('keeps a name with nothing after its last slash', () => {
+    expect(shortModelName('foo/')).toBe('foo/');
+  });
+});
+
+describe('the summary before the providers load', () => {
+  const stored = { model_name: 'llama2', provider: null, provider_model: null };
+  const chosen = { model_name: 'llama2', provider: 'codex' as const, provider_model: 'gpt-5.5' };
+
+  it('never calls a chat that chose its provider Default', () => {
+    expect(chatProviderName(null, chosen)).toBeNull();
+    expect(chatProviderName(null, stored)).toBe('Default');
+  });
+
+  it('names the model the chat asks its own provider for', () => {
+    expect(chatModelName(null, chosen)).toBe('gpt-5.5');
+    expect(chatModelName(null, { ...chosen, provider_model: null })).toBe('Automatic');
+    expect(chatModelName(null, stored)).toBe('llama2');
+  });
+
+  it('trusts the loaded providers over the chat they correct', () => {
+    const providers = { default: codex, selected: null, providers: [] };
+    expect(chatProviderName(providers, chosen)).toBe('Default');
+    expect(chatModelName(providers, chosen)).toBe('llama2');
   });
 });
 

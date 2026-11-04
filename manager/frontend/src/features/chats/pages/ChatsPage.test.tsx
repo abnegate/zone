@@ -2722,6 +2722,29 @@ describe('ChatsPage', () => {
       expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
     });
 
+    it('keeps the way back and the warning for an unsandboxed chat when providers fail to load', async () => {
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-providers-error');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByTestId('agent-permissions')).toHaveTextContent('Host tools');
+    });
+
+    it('stays hidden for a sandboxed chat when providers fail to load', async () => {
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+      mockClient.getChat.mockResolvedValue({ ...mockChatWithMessages, agent_enabled: true });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-providers-error');
+      expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
+    });
+
     it('stays hidden when the server names no agent', async () => {
       await openAgentChat(chatProviders());
       expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();

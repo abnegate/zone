@@ -51,7 +51,25 @@ export function selectionModel(selection: ChatProviderSelection): string {
 }
 
 export function shortModelName(name: string): string {
-  return name.slice(name.lastIndexOf('/') + 1);
+  return name.slice(name.lastIndexOf('/') + 1) || name;
+}
+
+/** The provider's name for the summary. Null while a chat's own choice has no loaded label. */
+export function chatProviderName(
+  providers: ChatProviders | null,
+  chat: Pick<Chat, 'provider'> | null
+): string | null {
+  if (providers) return providers.selected?.label ?? DEFAULT_PROVIDER_LABEL;
+  return chat?.provider ? null : DEFAULT_PROVIDER_LABEL;
+}
+
+export function chatModelName(
+  providers: ChatProviders | null,
+  chat: Pick<Chat, 'model_name' | 'provider' | 'provider_model'> | null
+): string {
+  if (providers?.selected) return selectionModel(providers.selected);
+  if (!chat) return modelLabel(AUTO_MODEL);
+  return modelLabel(providers ? chat.model_name : requestedModel(chat));
 }
 
 export function effortsFor(

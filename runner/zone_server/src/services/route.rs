@@ -260,6 +260,20 @@ impl Route {
         }
     }
 
+    /// The route of a chat in `workspace` with `choice` among `settings`, already read.
+    pub fn of(
+        config: &Config,
+        workspace: Uuid,
+        organization: Uuid,
+        settings: EffectiveAiSettings,
+        choice: Option<Choice>,
+    ) -> Self {
+        match choice {
+            Some(choice) => Self::choosing(config, workspace, organization, &settings, choice),
+            None => Self::new(config, workspace, organization, settings),
+        }
+    }
+
     /// The route `settings`, one of `organization`'s for `workspace`, choose.
     pub fn new(
         config: &Config,
@@ -356,6 +370,16 @@ impl Route {
 
     pub fn settings(&self) -> Option<&EffectiveAiSettings> {
         self.saved.as_ref().map(|saved| &saved.settings)
+    }
+
+    /// The coding agent CLI this route's turns start on, before the router picks a login: none
+    /// when they go over HTTP or this route is unusable.
+    pub fn agent(&self, config: &Config) -> Option<AgentKind> {
+        let origin = self.endpoint().ok()?.origin();
+        match self.settings() {
+            Some(settings) => backend::agent(config, settings, origin),
+            None => config.model_backend().agent(),
+        }
     }
 
     /// The organization whose settings run its workspace, or the chat, on `agent`.
@@ -475,21 +499,6 @@ impl Route {
             _ => Preferences::from_optional_settings(None, classifier),
         }
     }
-}
-
-/// The coding agent CLI the turns of a chat with `choice` among `settings` run on, as its
-/// [`Route`] runs them: none when they go over HTTP, or to an endpoint that cannot be used.
-pub fn agent(
-    config: &Config,
-    settings: &EffectiveAiSettings,
-    choice: Option<&Choice>,
-) -> Option<AgentKind> {
-    let settings = match choice {
-        Some(choice) => settings.choosing(choice),
-        None => settings.clone(),
-    };
-    let origin = Endpoint::try_resolve(config, &settings).ok()?.origin();
-    backend::agent(config, &settings, origin)
 }
 
 /// The organization `workspace` belongs to and its effective AI settings,
@@ -1326,6 +1335,21 @@ mod tests {
         assert_eq!(settings.sign_in, SignIn::Host);
     }
 
+    fn agent(
+        config: &Config,
+        settings: &EffectiveAiSettings,
+        choice: Option<&Choice>,
+    ) -> Option<AgentKind> {
+        Route::of(
+            config,
+            Uuid::nil(),
+            Uuid::nil(),
+            settings.clone(),
+            choice.cloned(),
+        )
+        .agent(config)
+    }
+
     fn instance_on(agent: Option<AgentKind>) -> Config {
         let mut config = crate::state::test_config();
         config.model_backend = match agent {
@@ -1407,6 +1431,36 @@ mod tests {
                 })
             ),
             None
+        );
+    }
+
+    #[test]
+    fn a_choice_that_cannot_run_names_no_agent_even_on_an_agent_instance() {
+        let config = instance_on(Some(AgentKind::Claude));
+        let unconfigured = Choice {
+            provider: Provider::OpenAI,
+            model: None,
+        };
+        assert_eq!(
+            agent(
+                &config,
+                &settings(PROVIDER_SELF_HOSTED),
+                Some(&unconfigured)
+            ),
+            None,
+            "nothing is saved for the chosen provider, so its turns fail"
+        );
+
+        let mut saved = openai_at("https://api.openai.com/v1");
+        saved.model_fast = Some("gpt-4o".to_string());
+        let unsaved = Choice {
+            provider: Provider::OpenAI,
+            model: Some("gpt-3.5".to_string()),
+        };
+        assert_eq!(
+            agent(&config, &saved, Some(&unsaved)),
+            None,
+            "the chosen model is no longer saved, so its turns fail"
         );
     }
 

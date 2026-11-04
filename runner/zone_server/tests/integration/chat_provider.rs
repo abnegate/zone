@@ -702,7 +702,7 @@ async fn the_listing_names_the_agent_cli_the_chats_turns_run_on() {
     assert_eq!(
         tenant.offers(&tenant.owner.token, &chat).await["agent"],
         json!("claude_code"),
-        "a chat following an agent default runs on that agent"
+        "a chat following an agent default starts on that agent"
     );
 
     let chosen = tenant

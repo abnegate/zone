@@ -45,7 +45,10 @@ export interface ChatProviders {
   default: ChatProviderOffer;
   selected: ChatProviderSelection | null;
   providers: ChatProviderOffer[];
-  /** The agent CLI this chat's turns run on. Null when they go over HTTP. */
+  /**
+   * The agent CLI this chat's turns run on first; the router may move a turn to
+   * another agent's login. Null when they go over HTTP or cannot run.
+   */
   agent?: AiProvider | null;
 }
 
