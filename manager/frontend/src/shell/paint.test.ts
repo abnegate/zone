@@ -72,6 +72,12 @@ describe('paintShell', () => {
     expect(shell()?.textContent).toBe('Sign in');
   });
 
+  it('matches the path regardless of case, as the router does', () => {
+    visit('/Login');
+    paintShell(config);
+    expect(shell()?.textContent).toBe('Sign in');
+  });
+
   it('paints nothing for a stored session', () => {
     for (const key of config.sessionKeys) {
       localStorage.clear();

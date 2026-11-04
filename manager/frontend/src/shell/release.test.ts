@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { SHELL_ATTRIBUTE, SHELL_ID } from './paint';
-import { releaseShell, releaseShellOnRender } from './release';
+import {
+  releaseShell,
+  releaseShellOnRender,
+  STARTUP_FAILURE_MESSAGE,
+  showStartupFailure,
+} from './release';
 
 function root(): HTMLElement {
   return document.getElementById('root') as HTMLElement;
@@ -48,6 +53,14 @@ describe('releaseShell', () => {
     root().replaceChildren(document.createElement('div'));
     await mutationsDelivered();
     expect(shell()).toBeNull();
+  });
+
+  it('says the app could not load when it never started', () => {
+    root().innerHTML = '<div class="initial-loader"><p class="loader-text">Loading...</p></div>';
+    showStartupFailure();
+    expect(shell()).toBeNull();
+    expect(document.documentElement.hasAttribute(SHELL_ATTRIBUTE)).toBe(false);
+    expect(root().textContent).toBe(STARTUP_FAILURE_MESSAGE);
   });
 
   it('does nothing without a shell', async () => {

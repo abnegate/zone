@@ -139,6 +139,17 @@ describe('AuthContext', () => {
       await flushEffects();
     });
 
+    it('treats a stored user that is not JSON as signed out', async () => {
+      storage.setItem('manager_user', '{not json');
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      expect(result.current.user).toBeNull();
+      expect(result.current.isAuthenticated).toBe(false);
+
+      await flushEffects();
+    });
+
     it('handles malformed JWT payload gracefully', async () => {
       const malformedToken = 'header.not_valid_base64!!!.signature';
       storage.setItem('manager_access_token', malformedToken);

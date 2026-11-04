@@ -86,150 +86,152 @@ function App({
   router?: ComponentType<{ children: ReactNode }>;
 }) {
   return (
-    <ThemeProvider>
-      <AuthProvider>
-        <WorkspaceProvider>
-          <WorkspaceTheme />
-          <Router>
-            <LocationSync />
-            <RouteErrorBoundary>
-              <Suspense fallback={<RouteLoading />}>
-                <Routes>
-                  <Route path="/login" element={<LoginPage />} />
-                  <Route path="/register" element={<RegisterPage />} />
-                  <Route path="/verify-email" element={<EmailVerificationPage />} />
-                  <Route path="/verify" element={<EmailVerificationPage />} />
-                  <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-                  <Route path="/reset-password" element={<ResetPasswordPage />} />
-                  <Route path="/invitations" element={<InvitationAcceptPage />} />
-                  <Route path="/unauthorized" element={<UnauthorizedPage />} />
-                  <Route
-                    element={
-                      <ProtectedRoute>
-                        <AuthenticatedProviders />
-                      </ProtectedRoute>
-                    }
-                  >
+    <RouteErrorBoundary>
+      <ThemeProvider>
+        <AuthProvider>
+          <WorkspaceProvider>
+            <WorkspaceTheme />
+            <Router>
+              <LocationSync />
+              <RouteErrorBoundary>
+                <Suspense fallback={<RouteLoading />}>
+                  <Routes>
+                    <Route path="/login" element={<LoginPage />} />
+                    <Route path="/register" element={<RegisterPage />} />
+                    <Route path="/verify-email" element={<EmailVerificationPage />} />
+                    <Route path="/verify" element={<EmailVerificationPage />} />
+                    <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+                    <Route path="/reset-password" element={<ResetPasswordPage />} />
+                    <Route path="/invitations" element={<InvitationAcceptPage />} />
+                    <Route path="/unauthorized" element={<UnauthorizedPage />} />
                     <Route
-                      path="/agent-sign-in"
                       element={
                         <ProtectedRoute>
-                          <AgentSignInPage />
-                        </ProtectedRoute>
-                      }
-                    />
-                    <Route
-                      path="/setup"
-                      element={
-                        <ProtectedRoute requiredPermission={PERMISSIONS.MODELS.READ}>
-                          <SetupPage />
-                        </ProtectedRoute>
-                      }
-                    />
-                    <Route
-                      path="/"
-                      element={
-                        <ProtectedRoute>
-                          <SetupGate>
-                            <Layout />
-                          </SetupGate>
+                          <AuthenticatedProviders />
                         </ProtectedRoute>
                       }
                     >
                       <Route
-                        index
-                        element={
-                          <ProtectedRoute requiredPermission={PERMISSIONS.CHATS.READ}>
-                            <ChatsPage />
-                          </ProtectedRoute>
-                        }
-                      />
-                      <Route
-                        path="chats"
-                        element={
-                          <ProtectedRoute requiredPermission={PERMISSIONS.CHATS.READ}>
-                            <ChatsPage />
-                          </ProtectedRoute>
-                        }
-                      />
-                      <Route
-                        path="models"
-                        element={
-                          <ProtectedRoute requiredPermission={PERMISSIONS.MODELS.READ}>
-                            <ModelsPage />
-                          </ProtectedRoute>
-                        }
-                      />
-                      <Route
-                        path="projects"
-                        element={
-                          <ProtectedRoute requiredPermission={PERMISSIONS.PROJECTS.READ}>
-                            <ProjectsPage />
-                          </ProtectedRoute>
-                        }
-                      />
-                      <Route
-                        path="tasks"
-                        element={
-                          <ProtectedRoute requiredPermission={PERMISSIONS.TASKS.READ}>
-                            <TasksPage />
-                          </ProtectedRoute>
-                        }
-                      />
-                      <Route
-                        path="sources"
-                        element={
-                          <ProtectedRoute requiredPermission={PERMISSIONS.SOURCES.READ}>
-                            <SourcesPage />
-                          </ProtectedRoute>
-                        }
-                      />
-                      <Route path="search" element={<Navigate to="/wiki" replace />} />
-                      <Route
-                        path="wiki"
-                        element={
-                          <ProtectedRoute requiredPermission={PERMISSIONS.WIKI.READ}>
-                            <WikiPage />
-                          </ProtectedRoute>
-                        }
-                      />
-                      <Route
-                        path="org-settings"
-                        element={
-                          <ProtectedRoute
-                            requiredPermission={PERMISSIONS.ORGANIZATIONS.UPDATE}
-                            requiredOrganizationRole="admin"
-                          >
-                            <OrgSettingsPage />
-                          </ProtectedRoute>
-                        }
-                      />
-                      <Route
-                        path="settings"
-                        element={
-                          <ProtectedRoute requiredPermission={PERMISSIONS.WORKSPACES.UPDATE}>
-                            <WorkspaceSettingsPage />
-                          </ProtectedRoute>
-                        }
-                      />
-                      <Route
-                        path="sessions"
+                        path="/agent-sign-in"
                         element={
                           <ProtectedRoute>
-                            <SessionsPage />
+                            <AgentSignInPage />
                           </ProtectedRoute>
                         }
                       />
+                      <Route
+                        path="/setup"
+                        element={
+                          <ProtectedRoute requiredPermission={PERMISSIONS.MODELS.READ}>
+                            <SetupPage />
+                          </ProtectedRoute>
+                        }
+                      />
+                      <Route
+                        path="/"
+                        element={
+                          <ProtectedRoute>
+                            <SetupGate>
+                              <Layout />
+                            </SetupGate>
+                          </ProtectedRoute>
+                        }
+                      >
+                        <Route
+                          index
+                          element={
+                            <ProtectedRoute requiredPermission={PERMISSIONS.CHATS.READ}>
+                              <ChatsPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route
+                          path="chats"
+                          element={
+                            <ProtectedRoute requiredPermission={PERMISSIONS.CHATS.READ}>
+                              <ChatsPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route
+                          path="models"
+                          element={
+                            <ProtectedRoute requiredPermission={PERMISSIONS.MODELS.READ}>
+                              <ModelsPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route
+                          path="projects"
+                          element={
+                            <ProtectedRoute requiredPermission={PERMISSIONS.PROJECTS.READ}>
+                              <ProjectsPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route
+                          path="tasks"
+                          element={
+                            <ProtectedRoute requiredPermission={PERMISSIONS.TASKS.READ}>
+                              <TasksPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route
+                          path="sources"
+                          element={
+                            <ProtectedRoute requiredPermission={PERMISSIONS.SOURCES.READ}>
+                              <SourcesPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route path="search" element={<Navigate to="/wiki" replace />} />
+                        <Route
+                          path="wiki"
+                          element={
+                            <ProtectedRoute requiredPermission={PERMISSIONS.WIKI.READ}>
+                              <WikiPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route
+                          path="org-settings"
+                          element={
+                            <ProtectedRoute
+                              requiredPermission={PERMISSIONS.ORGANIZATIONS.UPDATE}
+                              requiredOrganizationRole="admin"
+                            >
+                              <OrgSettingsPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route
+                          path="settings"
+                          element={
+                            <ProtectedRoute requiredPermission={PERMISSIONS.WORKSPACES.UPDATE}>
+                              <WorkspaceSettingsPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route
+                          path="sessions"
+                          element={
+                            <ProtectedRoute>
+                              <SessionsPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                      </Route>
                     </Route>
-                  </Route>
-                  <Route path="*" element={<Unmatched />} />
-                </Routes>
-              </Suspense>
-            </RouteErrorBoundary>
-          </Router>
-        </WorkspaceProvider>
-      </AuthProvider>
-    </ThemeProvider>
+                    <Route path="*" element={<Unmatched />} />
+                  </Routes>
+                </Suspense>
+              </RouteErrorBoundary>
+            </Router>
+          </WorkspaceProvider>
+        </AuthProvider>
+      </ThemeProvider>
+    </RouteErrorBoundary>
   );
 }
 

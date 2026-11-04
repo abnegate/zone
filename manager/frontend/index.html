@@ -87,7 +87,18 @@
         color: #534b42;
       }
       [data-shell] #root > .initial-loader {
-        display: none;
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        min-height: 0;
+        margin: -1px;
+        padding: 0;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
+      [data-shell] #root > .initial-loader .loader-spinner {
+        animation: none;
       }
     </style>
   </head>
@@ -95,7 +106,7 @@
     <!--signed-out-shell-->
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root">
-      <div class="initial-loader" aria-label="Loading">
+      <div class="initial-loader" role="status" aria-label="Loading">
         <h1 class="loader-title">Zone</h1>
         <span class="loader-spinner"></span>
         <p class="loader-text">Loading...</p>

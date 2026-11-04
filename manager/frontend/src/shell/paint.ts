@@ -26,7 +26,7 @@ export function paintShell(config: ShellConfig): void {
     if (config.sessionKeys.some((key) => storage.getItem(key))) {
       return;
     }
-    const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
+    const pathname = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
     const route = config.routes[pathname];
     if (!route) {
       return;
