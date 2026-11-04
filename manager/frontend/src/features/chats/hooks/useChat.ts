@@ -723,7 +723,7 @@ export function useChat(
           }
           break;
         case 'message_saved':
-          if (payload.role === 'user') {
+          if (payload.role === 'user' && !payload.metadata?.source) {
             applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
           } else {
             upsertMessage(payload.message_id, payload.role, payload.content, payload.metadata);

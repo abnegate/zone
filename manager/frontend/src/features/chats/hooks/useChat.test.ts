@@ -1309,6 +1309,42 @@ describe('useChat', () => {
     });
   });
 
+  it('leaves a pending send in place when a reminder turn is saved first', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(lastSocket).not.toBeNull());
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Typed while it fired' });
+    });
+
+    lastSocket?.emit({
+      type: 'message_saved',
+      message_id: 'reminder-turn',
+      role: 'user',
+      content: 'Check the deploy queue',
+      metadata: { source: 'reminder', reminder_id: 'reminder-1' },
+    });
+    await waitFor(() => {
+      const messages = result.current.chat?.messages ?? [];
+      expect(messages.find((m) => m.id === 'reminder-turn')?.metadata?.source).toBe('reminder');
+      expect(messages.some((m) => m.content === 'Typed while it fired')).toBe(true);
+    });
+
+    lastSocket?.emit({
+      type: 'message_saved',
+      message_id: 'typed-turn',
+      role: 'user',
+      content: 'Typed while it fired',
+    });
+    await waitFor(() => {
+      const messages = result.current.chat?.messages ?? [];
+      expect(messages.filter((m) => m.content === 'Typed while it fired')).toHaveLength(1);
+      expect(messages.find((m) => m.content === 'Typed while it fired')?.id).toBe('typed-turn');
+      expect(messages.filter((m) => m.id === 'reminder-turn')).toHaveLength(1);
+    });
+  });
+
   it('keeps a single user message when message_saved arrives under Strict Mode', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     const QueryWrapper = createWrapper();

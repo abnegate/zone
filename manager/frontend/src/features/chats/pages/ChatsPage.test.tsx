@@ -2260,7 +2260,7 @@ describe('ChatsPage', () => {
       expect(screen.getByText('Hello').closest('.message')).toHaveClass('message-user');
     });
 
-    it('marks the turn a reminder sent, and no turn the person typed', async () => {
+    it('marks the turns automations sent, and no turn a person typed', async () => {
       mockClient.getChat.mockResolvedValueOnce({
         ...mockChatWithMessages,
         messages: [
@@ -2273,6 +2273,14 @@ describe('ChatsPage', () => {
             metadata: { source: 'reminder', reminder_id: 'reminder-1' },
           },
           ...mockChatWithMessages.messages,
+          {
+            id: 'msg-notice',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'Project build finished',
+            created_at: '2024-01-01T00:01:30Z',
+            metadata: { source: 'auto_project' },
+          },
           {
             id: 'msg-unknown',
             chat_id: 'chat-1',
@@ -2295,19 +2303,22 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Check the deploy queue')).toBeInTheDocument();
       });
-      const badges = screen.getAllByTestId('automation-badge');
-      expect(badges).toHaveLength(1);
-      expect(badges[0]).toHaveTextContent('Reminder');
-      expect(badges[0].closest('.message-header')).not.toBeNull();
-      expect(badges[0].closest('.message')).toBe(
-        screen.getByText('Check the deploy queue').closest('.message')
-      );
-      expect(
-        screen.getByText('Hello').closest('.message')?.querySelector('.automation-badge')
-      ).toBeNull();
-      expect(
-        screen.getByText('Posted elsewhere').closest('.message')?.querySelector('.automation-badge')
-      ).toBeNull();
+      const badgeIn = (text: string) =>
+        screen
+          .getByText(text)
+          .closest('.message')
+          ?.querySelector('[data-testid="automation-badge"]');
+      expect(screen.getAllByTestId('automation-badge')).toHaveLength(2);
+      const reminder = badgeIn('Check the deploy queue');
+      expect(reminder).toHaveTextContent('Reminder');
+      expect(reminder?.closest('.message-header')).not.toBeNull();
+      expect(reminder?.closest('.message')).toHaveClass('message-user');
+      const notice = badgeIn('Project build finished');
+      expect(notice).toHaveTextContent('Auto project');
+      expect(notice?.closest('.message')).toHaveClass('message-assistant');
+      expect(badgeIn('Hello')).toBeNull();
+      expect(badgeIn('Hi there!')).toBeNull();
+      expect(badgeIn('Posted elsewhere')).toBeNull();
     });
 
     it('selects chat via keyboard Enter', async () => {

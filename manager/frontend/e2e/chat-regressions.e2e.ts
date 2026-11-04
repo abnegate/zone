@@ -416,13 +416,22 @@ test.describe('Chat regressions', () => {
 
   test('a turn a reminder sent is marked as the reminder, live and after a reload', async ({
     page,
-  }) => {
+  }, testInfo) => {
+    const sentAt = '2026-11-04T09:30:00.000Z';
+    const capture = async (name: string) => {
+      if (testInfo.project.name !== 'chromium') return;
+      await page.screenshot({
+        path: `screenshots/${name}.png`,
+        fullPage: true,
+        animations: 'disabled',
+      });
+    };
     const reminder = {
       id: 'msg-reminder',
       chat_id: 'chat-1',
       role: 'user',
       content: 'Check the deploy queue and tell me what is stuck.',
-      created_at: new Date().toISOString(),
+      created_at: sentAt,
       metadata: {
         source: 'reminder',
         reminder_id: '5b0c7a52-6d1e-4d8f-9a0e-1f6f3c2b7d10',
@@ -434,22 +443,28 @@ test.describe('Chat regressions', () => {
       chat_id: 'chat-1',
       role: 'assistant',
       content: 'Two jobs are stuck behind the registry push; the rest are moving.',
-      created_at: new Date().toISOString(),
+      created_at: sentAt,
     };
     const messages: unknown[] = [
-      userMessage,
+      { ...userMessage, created_at: sentAt },
       {
         id: 'a-typed',
         chat_id: 'chat-1',
         role: 'assistant',
         content: 'The workspace has three projects and one open task.',
-        created_at: new Date().toISOString(),
+        created_at: sentAt,
       },
     ];
     await mockChatRoutes(page, messages);
     await page.reload();
     await page.click('a[href="/chats"]');
     await openChat(page);
+    await expect(page.getByText(userMessage.content)).toBeVisible();
+    await page.waitForFunction(() => {
+      const sockets =
+        (window as Window & { __chatSockets?: Array<{ readyState: number }> }).__chatSockets ?? [];
+      return sockets.some((candidate) => candidate.readyState === 1);
+    });
 
     await socket.emit({
       type: 'message_saved',
@@ -476,29 +491,27 @@ test.describe('Chat regressions', () => {
     ).toHaveCount(0);
 
     await page.mouse.move(0, 0);
-    await page.screenshot({
-      path: 'screenshots/chats-reminder.png',
-      fullPage: true,
-      animations: 'disabled',
-    });
+    await capture('chats-reminder');
     await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
-    await page.screenshot({
-      path: 'screenshots/chats-reminder-dark.png',
-      fullPage: true,
-      animations: 'disabled',
-    });
+    await capture('chats-reminder-dark');
     await page.evaluate(() => document.documentElement.removeAttribute('data-theme'));
     await page.setViewportSize({ width: 375, height: 812 });
     await expect(badge).toBeVisible();
-    const overflow = await page.evaluate(
-      () => document.documentElement.scrollWidth - document.documentElement.clientWidth
-    );
-    expect(overflow).toBeLessThanOrEqual(0);
-    await page.screenshot({
-      path: 'screenshots/chats-reminder-phone.png',
-      fullPage: true,
-      animations: 'disabled',
-    });
+    const header = marked.locator('.message-header');
+    expect(
+      await header.evaluate((element) => element.scrollWidth - element.clientWidth)
+    ).toBeLessThanOrEqual(0);
+    const badgeBox = await badge.boundingBox();
+    const messageBox = await marked.boundingBox();
+    expect(badgeBox && messageBox).toBeTruthy();
+    if (badgeBox && messageBox) {
+      expect(badgeBox.x).toBeGreaterThanOrEqual(messageBox.x);
+      expect(badgeBox.x + badgeBox.width).toBeLessThanOrEqual(
+        messageBox.x + messageBox.width + 0.5
+      );
+      expect(badgeBox.x + badgeBox.width).toBeLessThanOrEqual(375);
+    }
+    await capture('chats-reminder-phone');
 
     messages.push(reminder, answer);
     await page.setViewportSize({ width: 1280, height: 720 });
