@@ -15,7 +15,7 @@ mock.module('../../../api/models', () => ({
   },
 }));
 
-mock.module('../../../features/auth', () => ({
+mock.module('../../auth/context', () => ({
   useAuth: () => ({
     isAuthenticated: authState.isAuthenticated,
     accessToken: authState.accessToken,

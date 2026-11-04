@@ -1,5 +1,5 @@
 import { useLayoutEffect } from 'react';
-import { useAuth } from '../../features/auth';
+import { useAuth } from '../../features/auth/context';
 import { useTheme } from './ThemeContext';
 import { useWorkspace } from './WorkspaceContext';
 

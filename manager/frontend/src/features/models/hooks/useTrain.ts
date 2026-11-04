@@ -10,7 +10,7 @@ import {
   useState,
 } from 'react';
 import { modelsApi, type TrainJob } from '../../../api/models';
-import { useAuth } from '../../../features/auth';
+import { useAuth } from '../../auth/context';
 
 const POLL_MS = 2000;
 const SUCCESS_DISMISS_MS = 12_000;

@@ -10,7 +10,7 @@ import {
   useState,
 } from 'react';
 import { modelsApi } from '../../../api/models';
-import { useAuth } from '../../../features/auth';
+import { useAuth } from '../../auth/context';
 import {
   MAX_PARALLEL_PULLS,
   PULL_SUCCESS_DISMISS_MS,
