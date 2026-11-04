@@ -5,6 +5,7 @@ import io
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,8 +13,10 @@ import threading
 import unittest
 import uuid
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from typing import NamedTuple
 from unittest import mock
 
 COMFYUI = Path(__file__).parents[1]
@@ -57,6 +60,20 @@ def legacy_job(method: str = 'lora') -> dict:
     job = queued_job(method=method)
     del job['base']
     return job
+
+
+class DiskUsage(NamedTuple):
+    total: int
+    used: int
+    free: int
+
+
+def disk(free: int) -> DiskUsage:
+    return DiskUsage(free * 4, free * 3, free)
+
+
+def roomy_disk(test: unittest.TestCase) -> None:
+    test.enterContext(mock.patch.object(shutil, 'disk_usage', return_value=disk(1024**5)))
 
 
 def write_dataset(job_dir: Path, count: int = 1) -> None:
@@ -1179,6 +1196,9 @@ class ClaimTests(unittest.TestCase):
             self.assertTrue((unclaimed / CLAIM).is_file())
 
 class CrashResumeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        roomy_disk(self)
+
     def test_latent_sidecar_sits_next_to_the_png(self) -> None:
         self.assertEqual(
             train_sdxl.latent_sidecar(Path('/data/0001.png')),
@@ -1565,7 +1585,7 @@ class CrashResumeTests(unittest.TestCase):
             source = path / 'latest.pt'
             destination = path / 'step-000001.pt'
             source.write_bytes(b'snapshot')
-            train_sdxl.copy_snapshot(source, destination)
+            train_sdxl.copy_snapshot(source, destination, {})
             self.assertEqual(destination.read_bytes(), b'snapshot')
             self.assertFalse((path / 'step-000001.pt.tmp').exists())
 
@@ -1576,7 +1596,7 @@ class CrashResumeTests(unittest.TestCase):
             destination = path / 'step-000250.pt'
             source.write_bytes(b'snapshot')
             (path / 'step-000250.pt.tmp').write_bytes(b'stale')
-            train_sdxl.copy_snapshot(source, destination)
+            train_sdxl.copy_snapshot(source, destination, {})
             self.assertEqual(destination.stat().st_ino, source.stat().st_ino)
             self.assertEqual(destination.read_bytes(), b'snapshot')
             self.assertFalse((path / 'step-000250.pt.tmp').exists())
@@ -1606,7 +1626,7 @@ class CrashResumeTests(unittest.TestCase):
             modules = {'torch': torch, 'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
             with mock.patch.dict(sys.modules, modules):
                 train_sdxl.save_snapshot(source, step=250, **snapshot)
-                train_sdxl.copy_snapshot(source, destination)
+                train_sdxl.copy_snapshot(source, destination, {})
                 train_sdxl.save_snapshot(source, step=251, **snapshot)
             self.assertEqual(destination.read_bytes(), b'250')
             self.assertEqual(source.read_bytes(), b'251')
@@ -1621,7 +1641,7 @@ class CrashResumeTests(unittest.TestCase):
             with mock.patch.object(
                 train_sdxl.os, 'link', side_effect=OSError('cross-device link')
             ) as link:
-                train_sdxl.copy_snapshot(source, destination)
+                train_sdxl.copy_snapshot(source, destination, {})
             link.assert_called_once()
             self.assertEqual(destination.read_bytes(), b'snapshot')
             self.assertNotEqual(destination.stat().st_ino, source.stat().st_ino)
@@ -1710,6 +1730,9 @@ def read_job(job_dir: Path) -> dict[str, Any]:
 
 
 class TransientCrashTests(unittest.TestCase):
+    def setUp(self) -> None:
+        roomy_disk(self)
+
     def test_a_transient_crash_requeues_the_job_for_the_running_worker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             models = Path(directory)
@@ -1852,6 +1875,9 @@ class TransientCrashTests(unittest.TestCase):
 
 
 class LatestCadenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        roomy_disk(self)
+
     def device(self, kind: str) -> mock.Mock:
         device = mock.Mock()
         device.type = kind
@@ -1977,6 +2003,546 @@ class LatestCadenceTests(unittest.TestCase):
                     train_sdxl.latest_interval({'latest_interval_seconds': value})
 
 
+GIBIBYTE = 1024**3
+
+
+class FakeTensor:
+    def __init__(self, nbytes: int) -> None:
+        self.nbytes = nbytes
+
+
+class FakeStateModel:
+    def __init__(self, nbytes: int) -> None:
+        self.weight = FakeTensor(nbytes)
+
+    def state_dict(self) -> dict[str, FakeTensor]:
+        return {'weight': self.weight}
+
+
+class FreeSpaceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(mock.patch.object(train_sdxl, '_latest_save_thread', None))
+
+    def device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def persist(
+        self,
+        job_dir: Path,
+        job: dict,
+        free: int,
+        *,
+        step: int = 50,
+        kind: str = 'mps',
+        method: str = 'finetune',
+        estimate: int = 30 * GIBIBYTE,
+    ) -> dict[str, mock.Mock]:
+        checkpoint_dir = job_dir / 'checkpoints'
+        checkpoint_dir.mkdir(exist_ok=True)
+        with (
+            mock.patch.object(shutil, 'disk_usage', return_value=disk(free)) as usage,
+            mock.patch.object(train_sdxl, 'save_snapshot') as save,
+            mock.patch.object(train_sdxl, 'start_latest_save') as start,
+            mock.patch.object(train_sdxl, 'copy_snapshot') as copy,
+            mock.patch.object(train_sdxl, 'write_snapshot_previews') as previews,
+        ):
+            train_sdxl.persist_training_step(
+                checkpoint_dir,
+                job_dir,
+                job,
+                method=method,
+                step=step,
+                total=100,
+                loss=0.5,
+                best_loss=0.5,
+                best_step=1,
+                optimizer=object(),
+                unet=object(),
+                text_encoder=object(),
+                token_id=None,
+                sample_rng=random.Random(0),
+                dropout_rng=random.Random(1),
+                every=50,
+                keep=2,
+                pipeline=object(),
+                device=self.device(kind),
+                config={'preview_count': 0, 'free_space_margin_gib': 20},
+                progress=train_sdxl.Progress(job_dir, method, 100),
+                estimate=estimate,
+            )
+        return {'usage': usage, 'save': save, 'start': start, 'copy': copy, 'previews': previews}
+
+    def test_a_snapshot_that_would_leave_less_than_the_margin_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            job = queued_job(method='finetune', extra={'transient_attempts': 2})
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                calls = self.persist(job_dir, job, 50 * GIBIBYTE - 1)
+            calls['usage'].assert_called_with(job_dir / 'checkpoints')
+            calls['save'].assert_not_called()
+            calls['copy'].assert_not_called()
+            calls['previews'].assert_called_once()
+            written = read_job(job_dir)
+            self.assertEqual(written['step'], 50)
+            self.assertEqual(written['transient_attempts'], 2)
+            self.assertIn('skipped the step 50 snapshot', stderr.getvalue())
+            self.assertIn('needs 50.0 GiB free', stderr.getvalue())
+            self.assertIn('only 50.0 GiB is free', stderr.getvalue())
+
+    def test_a_snapshot_that_leaves_the_margin_is_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            calls = self.persist(job_dir, queued_job(method='finetune'), 50 * GIBIBYTE)
+            calls['save'].assert_called_once()
+            calls['copy'].assert_called_once()
+
+    def test_training_continues_on_the_next_snapshot_once_space_frees(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            job = queued_job(method='finetune')
+            with contextlib.redirect_stderr(io.StringIO()):
+                skipped = self.persist(job_dir, job, GIBIBYTE, step=50)
+            saved = self.persist(job_dir, job, 60 * GIBIBYTE, step=100)
+            skipped['save'].assert_not_called()
+            saved['save'].assert_called_once()
+            self.assertEqual(saved['save'].call_args.kwargs['step'], 100)
+
+    def test_the_previous_snapshot_counts_when_it_is_larger_than_the_estimate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            checkpoint_dir = job_dir / 'checkpoints'
+            checkpoint_dir.mkdir()
+            latest = train_sdxl.latest_snapshot_file(checkpoint_dir)
+            latest.write_bytes(b'x' * 4096)
+            self.assertEqual(train_sdxl.snapshot_size(checkpoint_dir, 1024), 4096)
+            self.assertEqual(train_sdxl.snapshot_size(checkpoint_dir, 8192), 8192)
+            with contextlib.redirect_stderr(io.StringIO()):
+                calls = self.persist(
+                    job_dir,
+                    queued_job(method='finetune'),
+                    20 * GIBIBYTE + 4095,
+                    estimate=1024,
+                )
+            calls['save'].assert_not_called()
+
+    def test_cuda_skips_the_background_save_when_it_cannot_fit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with contextlib.redirect_stderr(io.StringIO()):
+                calls = self.persist(
+                    Path(directory),
+                    queued_job(method='finetune'),
+                    GIBIBYTE,
+                    step=7,
+                    kind='cuda',
+                )
+            calls['start'].assert_not_called()
+            calls['save'].assert_not_called()
+
+    def test_cuda_skips_the_synchronous_save_when_it_cannot_fit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with contextlib.redirect_stderr(io.StringIO()):
+                calls = self.persist(
+                    Path(directory),
+                    queued_job(method='lora'),
+                    GIBIBYTE,
+                    step=7,
+                    kind='cuda',
+                    method='lora',
+                    estimate=3 * GIBIBYTE,
+                )
+            calls['save'].assert_not_called()
+
+    def fake_disk(self, directory: Path, capacity: int) -> Callable[[Path], DiskUsage]:
+        def usage(path: Path) -> DiskUsage:
+            used = sum(
+                entry.stat().st_size
+                for entry in {item.stat().st_ino: item for item in directory.iterdir()}.values()
+            )
+            return DiskUsage(capacity, used, capacity - used)
+
+        return usage
+
+    def persist_on_fake_disk(
+        self, checkpoint_dir: Path, capacity: int, best_step: int | None
+    ) -> mock.Mock:
+        job_dir = checkpoint_dir.parent
+        with (
+            mock.patch.object(
+                shutil, 'disk_usage', side_effect=self.fake_disk(checkpoint_dir, capacity)
+            ),
+            mock.patch.object(train_sdxl, 'save_snapshot') as save,
+            mock.patch.object(train_sdxl, 'write_snapshot_previews'),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            train_sdxl.persist_training_step(
+                checkpoint_dir,
+                job_dir,
+                queued_job(method='finetune'),
+                method='finetune',
+                step=150,
+                total=1000,
+                loss=0.5,
+                best_loss=0.5,
+                best_step=best_step,
+                optimizer=object(),
+                unet=object(),
+                text_encoder=object(),
+                token_id=None,
+                sample_rng=random.Random(0),
+                dropout_rng=random.Random(1),
+                every=50,
+                keep=2,
+                pipeline=object(),
+                device=self.device('mps'),
+                config={'preview_count': 0, 'free_space_margin_gib': 0},
+                progress=train_sdxl.Progress(job_dir, 'finetune', 1000),
+                estimate=100,
+            )
+        return save
+
+    def snapshots_on_disk(self, checkpoint_dir: Path) -> None:
+        checkpoint_dir.mkdir()
+        train_sdxl.snapshot_path(checkpoint_dir, 50).write_bytes(b'5' * 100)
+        latest = train_sdxl.latest_snapshot_file(checkpoint_dir)
+        latest.write_bytes(b'1' * 100)
+        os.link(latest, train_sdxl.snapshot_path(checkpoint_dir, 100))
+
+    def test_a_short_disk_drops_the_snapshot_pruning_would_drop_before_skipping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory) / 'checkpoints'
+            self.snapshots_on_disk(checkpoint_dir)
+            save = self.persist_on_fake_disk(checkpoint_dir, 299, best_step=None)
+            save.assert_called_once()
+            self.assertEqual(train_sdxl.snapshot_steps(checkpoint_dir), [100, 150])
+
+    def test_reclaiming_keeps_the_best_and_linked_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory) / 'checkpoints'
+            self.snapshots_on_disk(checkpoint_dir)
+            save = self.persist_on_fake_disk(checkpoint_dir, 299, best_step=50)
+            save.assert_not_called()
+            self.assertEqual(train_sdxl.snapshot_steps(checkpoint_dir), [50, 100])
+
+    def test_reclaiming_keeps_the_snapshot_a_resume_would_use(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            for step in (50, 100):
+                train_sdxl.snapshot_path(checkpoint_dir, step).write_bytes(b'x' * 100)
+            train_sdxl.reclaim_snapshots(checkpoint_dir, 1, None)
+            self.assertEqual(train_sdxl.snapshot_steps(checkpoint_dir), [100])
+
+    def test_a_transient_crash_while_saving_is_not_taken_for_a_full_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory)
+            with (
+                mock.patch.object(shutil, 'disk_usage', return_value=disk(GIBIBYTE)),
+                mock.patch.object(
+                    train_sdxl, 'save_snapshot', side_effect=MemoryError('host allocation')
+                ),
+            ):
+                with self.assertRaises(MemoryError):
+                    train_sdxl.save_latest(checkpoint_dir, 50, 30 * GIBIBYTE, {}, {})
+
+    def test_a_write_that_fails_partway_leaves_no_partial_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            latest = Path(directory) / 'latest.pt'
+            latest.write_bytes(b'previous')
+
+            def fill_the_disk(payload: dict[str, Any], target: Path) -> None:
+                Path(target).write_bytes(b'partial')
+                raise RuntimeError('[enforce fail at inline_container.cc:664] unexpected pos')
+
+            torch = mock.MagicMock()
+            torch.save.side_effect = fill_the_disk
+            optimizer = mock.Mock()
+            optimizer.state_dict.return_value = {}
+            with mock.patch.dict(sys.modules, {'torch': torch}):
+                with self.assertRaisesRegex(RuntimeError, 'unexpected pos'):
+                    train_sdxl.save_snapshot(
+                        latest,
+                        method='finetune',
+                        step=2,
+                        loss=0.5,
+                        best_loss=0.5,
+                        best_step=1,
+                        optimizer=optimizer,
+                        unet=FakeStateModel(1),
+                        text_encoder=FakeStateModel(1),
+                    )
+            self.assertEqual(latest.read_bytes(), b'previous')
+            self.assertEqual(
+                sorted(entry.name for entry in Path(directory).iterdir()), ['latest.pt']
+            )
+
+    def test_a_failed_publish_leaves_no_partial_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            weights = Path(directory) / 'jerry.safetensors'
+
+            def fill_the_disk(tensors: dict[str, Any], target: str) -> None:
+                Path(target).write_bytes(b'partial')
+                raise OSError(28, 'No space left on device')
+
+            safetensors = mock.MagicMock()
+            safetensors.torch.save_file.side_effect = fill_the_disk
+            modules = {'safetensors': safetensors, 'safetensors.torch': safetensors.torch}
+            with mock.patch.dict(sys.modules, modules):
+                with self.assertRaises(OSError):
+                    train_sdxl.save_safetensors(weights, {})
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def persist_with_failing_save(self, job_dir: Path, job: dict, frees: list[int]) -> None:
+        checkpoint_dir = job_dir / 'checkpoints'
+        checkpoint_dir.mkdir(exist_ok=True)
+        with (
+            mock.patch.object(shutil, 'disk_usage', side_effect=[disk(free) for free in frees]),
+            mock.patch.object(
+                train_sdxl, 'save_snapshot', side_effect=RuntimeError('unexpected pos 576 vs 534')
+            ),
+            mock.patch.object(train_sdxl, 'copy_snapshot') as copy,
+            mock.patch.object(train_sdxl, 'write_snapshot_previews'),
+        ):
+            train_sdxl.persist_training_step(
+                checkpoint_dir,
+                job_dir,
+                job,
+                method='finetune',
+                step=50,
+                total=100,
+                loss=0.5,
+                best_loss=0.5,
+                best_step=1,
+                optimizer=object(),
+                unet=object(),
+                text_encoder=object(),
+                token_id=None,
+                sample_rng=random.Random(0),
+                dropout_rng=random.Random(1),
+                every=50,
+                keep=2,
+                pipeline=object(),
+                device=self.device('mps'),
+                config={'preview_count': 0, 'free_space_margin_gib': 20},
+                progress=train_sdxl.Progress(job_dir, 'finetune', 100),
+                estimate=30 * GIBIBYTE,
+            )
+        copy.assert_not_called()
+
+    def test_a_write_that_runs_out_of_space_is_skipped_and_training_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            job = queued_job(method='finetune', extra={'transient_attempts': 1})
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                self.persist_with_failing_save(job_dir, job, [60 * GIBIBYTE, 10 * GIBIBYTE])
+            written = read_job(job_dir)
+            self.assertEqual(written['step'], 50)
+            self.assertEqual(written['transient_attempts'], 1)
+            self.assertIn(
+                "after its write failed with RuntimeError('unexpected pos 576 vs 534')",
+                stderr.getvalue(),
+            )
+
+    def test_a_write_that_fails_with_room_to_spare_still_fails_the_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, 'unexpected pos'):
+                self.persist_with_failing_save(
+                    Path(directory),
+                    queued_job(method='finetune'),
+                    [60 * GIBIBYTE, 60 * GIBIBYTE],
+                )
+
+    def test_the_copy_fallback_skips_a_copy_that_cannot_fit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            source = path / 'latest.pt'
+            destination = path / 'step-000250.pt'
+            source.write_bytes(b'snapshot')
+            with (
+                mock.patch.object(train_sdxl.os, 'link', side_effect=OSError('no hard links')),
+                mock.patch.object(shutil, 'disk_usage', return_value=disk(GIBIBYTE)),
+                mock.patch.object(shutil, 'copy2') as copy,
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                train_sdxl.copy_snapshot(source, destination, {'free_space_margin_gib': 20})
+            copy.assert_not_called()
+            self.assertFalse(destination.exists())
+            self.assertIn('skipped copying step-000250.pt', stderr.getvalue())
+
+    def test_a_running_cuda_save_is_left_alone_without_checking_space(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(train_sdxl, 'latest_save_running', return_value=True):
+                calls = self.persist(
+                    Path(directory), queued_job(method='finetune'), GIBIBYTE, step=7, kind='cuda'
+                )
+            calls['start'].assert_not_called()
+            calls['usage'].assert_not_called()
+
+    def test_the_margin_reads_the_configured_gibibytes(self) -> None:
+        self.assertEqual(train_sdxl.free_space_margin({}), 20 * GIBIBYTE)
+        self.assertEqual(
+            train_sdxl.free_space_margin({'free_space_margin_gib': None}), 20 * GIBIBYTE
+        )
+        self.assertEqual(train_sdxl.free_space_margin({'free_space_margin_gib': 5}), 5 * GIBIBYTE)
+        self.assertEqual(train_sdxl.free_space_margin({'free_space_margin_gib': 0}), 0)
+        self.assertEqual(train_sdxl.free_space_margin({'free_space_margin_gib': -3}), 0)
+        self.assertEqual(train_sdxl.free_space_margin(train_sdxl.load_config()), 20 * GIBIBYTE)
+        for value in (float('inf'), float('nan')):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'free_space_margin_gib'):
+                    train_sdxl.free_space_margin({'free_space_margin_gib': value})
+
+    def test_the_estimate_counts_the_model_state_and_every_optimizer_copy(self) -> None:
+        groups = [{'params': [FakeParameter(100, 4, True), FakeParameter(25, 4, True)]}]
+        unet = FakeStateModel(1000)
+        text_encoder = FakeStateModel(200)
+        trainable = 125 * 4
+        self.assertEqual(
+            train_sdxl.snapshot_estimate('finetune', 'adamw', groups, unet, text_encoder, None),
+            1200 + 2 * trainable,
+        )
+        self.assertEqual(
+            train_sdxl.snapshot_estimate('finetune', 'prodigy', groups, unet, text_encoder, None),
+            1200 + 4 * trainable,
+        )
+
+    def test_the_estimate_counts_adapter_weights_only(self) -> None:
+        groups = [{'params': [FakeParameter(10, 4, True)]}]
+        peft = mock.MagicMock()
+        peft.utils.get_peft_model_state_dict.side_effect = lambda model: {
+            'lora': FakeTensor(40)
+        }
+        with mock.patch.dict(sys.modules, {'peft': peft, 'peft.utils': peft.utils}):
+            estimate = train_sdxl.snapshot_estimate(
+                'lora', 'prodigy', groups, FakeStateModel(10**9), FakeStateModel(10**9), None
+            )
+        self.assertEqual(estimate, 80 + 4 * 40)
+
+    def train_until_loop(
+        self,
+        free: int,
+        estimate: int,
+        prior_preservation: bool = False,
+        prepare: Callable[[Path], None] | None = None,
+        inspect: Callable[[Path], None] | None = None,
+    ) -> mock.Mock:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            job = queued_job(method='finetune')
+            train_sdxl.write_job(job_dir, job)
+            checkpoint = models / 'checkpoints' / job['checkpoint']
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b'checkpoint')
+            frame = {'image': job_dir / 'dataset' / '0000.png', 'mask': None, 'caption': 'ohwx'}
+            config = train_sdxl.load_config()
+            config['prior_preservation'] = prior_preservation
+            if prepare is not None:
+                prepare(job_dir)
+            stepper = mock.MagicMock()
+            stepper.return_value.__enter__.side_effect = LoopReached()
+            modules = {'torch': mock.MagicMock(), 'diffusers': mock.MagicMock()}
+            class_pairs = [(models / '.zone-class' / '0000.png', 'a photo of a person')]
+            with (
+                mock.patch.dict(sys.modules, modules),
+                mock.patch.object(shutil, 'disk_usage', return_value=disk(free)),
+                mock.patch.object(train_sdxl, 'ensure_class_images', return_value=class_pairs),
+                mock.patch.multiple(
+                    train_sdxl,
+                    list_frames=mock.Mock(return_value=[frame]),
+                    steps_for=mock.Mock(return_value=12),
+                    select_device=mock.Mock(return_value=self.device('mps')),
+                    assert_device_capacity=mock.DEFAULT,
+                    assert_metal_working_set=mock.DEFAULT,
+                    load_base_pipeline=mock.MagicMock(),
+                    make_optimizer=mock.MagicMock(),
+                    snapshot_estimate=mock.Mock(return_value=estimate),
+                    load_or_encode_latents=mock.Mock(return_value=(mock.Mock(), 64, 64)),
+                    cache_secondary_embeddings=mock.MagicMock(),
+                    StepInBackward=stepper,
+                ),
+            ):
+                with self.assertRaises(LoopReached):
+                    train_sdxl.train(models, job_dir, job, config)
+            if inspect is not None:
+                inspect(job_dir)
+        return stepper
+
+    def test_a_stale_publish_left_by_a_failed_run_is_cleared_with_prior_preservation(
+        self,
+    ) -> None:
+        stale = 'jerry.safetensors.tmp'
+
+        def leave_stale(job_dir: Path) -> None:
+            (job_dir / stale).write_bytes(b'partial weights')
+
+        def assert_cleared(job_dir: Path) -> None:
+            self.assertFalse((job_dir / stale).exists())
+
+        self.train_until_loop(
+            30 * GIBIBYTE,
+            10 * GIBIBYTE,
+            prior_preservation=True,
+            prepare=leave_stale,
+            inspect=assert_cleared,
+        ).assert_called_once()
+
+    def test_a_job_that_cannot_fit_its_first_snapshot_fails_before_training(self) -> None:
+        with self.assertRaises(RuntimeError) as raised:
+            self.train_until_loop(29 * GIBIBYTE, 10 * GIBIBYTE)
+        message = str(raised.exception)
+        self.assertIn('a finetune snapshot needs 30.0 GiB free', message)
+        self.assertIn('only 29.0 GiB is free', message)
+        self.assertIn('free_space_margin_gib', message)
+        self.assertFalse(train_sdxl.is_transient_crash(raised.exception))
+
+    def test_a_job_that_fits_its_first_snapshot_starts_training(self) -> None:
+        self.train_until_loop(30 * GIBIBYTE, 10 * GIBIBYTE).assert_called_once()
+
+    def publish(self, free: int) -> mock.Mock:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            job = queued_job(method='lora', extra={'filename': 'jerry.safetensors'})
+            with (
+                mock.patch.object(shutil, 'disk_usage', return_value=disk(free)),
+                mock.patch.object(
+                    train_sdxl,
+                    'kohya_state_dict',
+                    return_value={'lora': FakeTensor(2 * GIBIBYTE)},
+                ),
+                mock.patch.object(train_sdxl, 'save_safetensors') as save,
+            ):
+                train_sdxl.save_trained(
+                    models,
+                    job_dir,
+                    job,
+                    method='lora',
+                    unet=object(),
+                    vae=object(),
+                    text_encoder=object(),
+                    text_encoder_2=object(),
+                    alpha=64,
+                    config={'free_space_margin_gib': 20},
+                )
+        return save
+
+    def test_publishing_refuses_weights_that_would_leave_less_than_the_margin(self) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            'publishing the trained weights needs 22.0 GiB free .* only 21.0 GiB is free; '
+            'refusing to fill the disk, so free some space and retry the job',
+        ):
+            self.publish(21 * GIBIBYTE)
+
+    def test_publishing_writes_weights_that_leave_the_margin(self) -> None:
+        self.publish(22 * GIBIBYTE).assert_called_once()
+
+
 def real_torch(test: unittest.TestCase) -> Any:
     try:
         import torch
@@ -2055,6 +2621,9 @@ def save_and_restore(
 
 
 class SnapshotRestoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        roomy_disk(self)
+
     def restore_with(self, module: mock.MagicMock) -> tuple[int, float, int | None]:
         modules = {'torch': module, 'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
         with mock.patch.dict(sys.modules, modules):
@@ -2877,6 +3446,9 @@ class StepInBackwardTests(unittest.TestCase):
                 self.assertIs(train_sdxl.offloads_moments(device, method, optimizer), expected)
 
 class MetalOffloadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        roomy_disk(self)
+
     def device(self, kind: str) -> mock.Mock:
         device = mock.Mock()
         device.type = kind
@@ -2901,6 +3473,7 @@ class MetalOffloadTests(unittest.TestCase):
                 'torch': mock.MagicMock(),
                 'diffusers': mock.MagicMock(),
                 'peft': mock.MagicMock(),
+                'peft.utils': mock.MagicMock(),
             }
             with (
                 mock.patch.dict(sys.modules, modules),

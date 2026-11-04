@@ -6,13 +6,10 @@ scripts/convert_diffusers_to_original_sdxl.py
 
 from __future__ import annotations
 
-import os
 import re
-from pathlib import Path
 from typing import Any
 
 import torch
-from safetensors.torch import save_file
 
 unet_conversion_map = [
     ('time_embed.0.weight', 'time_embedding.linear_1.weight'),
@@ -255,10 +252,3 @@ def as_checkpoint_tensors(state: dict[str, Any]) -> dict[str, Any]:
             tensor = tensor.half()
         converted[key] = tensor
     return converted
-
-
-def save_original_checkpoint(path: Path, state: dict[str, Any]) -> None:
-    path = Path(path)
-    temporary = path.with_name(path.name + '.tmp')
-    save_file(as_checkpoint_tensors(state), str(temporary))
-    os.replace(temporary, path)

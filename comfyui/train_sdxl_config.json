@@ -13,6 +13,7 @@
   "checkpoint_every": 250,
   "keep_snapshots": 2,
   "latest_interval_seconds": 600,
+  "free_space_margin_gib": 20,
   "prior_preservation": true,
   "prior_loss_weight": 1.0,
   "class_prompt": "a photo of a person",
