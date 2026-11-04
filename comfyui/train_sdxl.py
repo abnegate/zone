@@ -88,6 +88,10 @@ HOST_DEVICE = 'cpu'
 FINETUNE_MIN_MEMORY = 40 * 1024**3
 ADAPTER_MIN_MEMORY = 20 * 1024**3
 TRAINABLE_COPIES = 4
+UPDATE_GRADIENT_COPIES = 3
+MOMENT_KEYS = ('exp_avg', 'exp_avg_sq')
+PRODIGY_OPTIMIZER = 'prodigy'
+ADAMW_OPTIMIZER = 'adamw'
 MASK_THRESHOLD = 0.2
 KIND_BOOST = 1.25
 REBALANCE_SHARE = 0.40
@@ -398,8 +402,8 @@ def class_pairs(paths: list[Path], fallback: str) -> list[tuple[Path, str]]:
 
 def optimizer_kind(method: str, config: dict[str, Any]) -> str:
     if method == FINETUNE_METHOD:
-        return str(config.get('finetune_optimizer') or 'adamw').strip().lower()
-    return str(config.get('optimizer') or 'prodigy').strip().lower()
+        return str(config.get('finetune_optimizer') or ADAMW_OPTIMIZER).strip().lower()
+    return str(config.get('optimizer') or PRODIGY_OPTIMIZER).strip().lower()
 
 
 def load_prodigy() -> Any:
@@ -449,13 +453,134 @@ def prodigy_rate_notice(
 
 def make_optimizer(method: str, groups: list[dict[str, Any]], config: dict[str, Any]) -> Any:
     kind = optimizer_kind(method, config)
-    if kind == 'prodigy':
+    if kind == PRODIGY_OPTIMIZER:
         if any(group.get('lr') != PRODIGY_LR for group in groups):
             print(prodigy_rate_notice(method, groups, config), flush=True)
         return load_prodigy()(prodigy_param_groups(groups))
     import torch
 
     return torch.optim.AdamW(groups)
+
+
+def offloads_moments(device: Any, kind: str) -> bool:
+    return kind == ADAMW_OPTIMIZER and device_kind(device) == MPS_DEVICE
+
+
+def move_moments(state: dict[str, Any], device: Any) -> None:
+    for key in MOMENT_KEYS:
+        if key in state:
+            state[key] = state[key].to(device)
+
+
+def offload_optimizer_moments(optimizer: Any) -> None:
+    for state in optimizer.state.values():
+        move_moments(state, HOST_DEVICE)
+
+
+@dataclass(frozen=True)
+class Losses:
+    parts: list[Any]
+    total: Any
+
+
+def combine_losses(parts: list[Any]) -> Losses:
+    total = parts[0]
+    for part in parts[1:]:
+        total = total + part
+    return Losses(parts=parts, total=total)
+
+
+class StepInBackward:
+    """Step AdamW one parameter at a time as backward finishes its gradient, then drop it.
+
+    The full gradient set is never resident. With offload, the moments live on the host and
+    visit the parameter's device only for its update, and every loss part after the first is
+    backpropagated first with its finished gradients stashed on the host, so autograd never
+    buffers them on the device while it waits for the first part.
+    """
+
+    def __init__(self, optimizer: Any, enabled: bool, offload: bool = False) -> None:
+        self.optimizer = optimizer
+        self.enabled = enabled
+        self.offload = enabled and offload
+        self.handles: list[Any] = []
+        self.stashed: dict[Any, Any] = {}
+        self.stashing = False
+
+    def __enter__(self) -> StepInBackward:
+        if self.offload:
+            offload_optimizer_moments(self.optimizer)
+            release_device_cache(MPS_DEVICE)
+        if self.enabled:
+            self.handles = [
+                parameter.register_post_accumulate_grad_hook(self.update)
+                for group in self.optimizer.param_groups
+                for parameter in group['params']
+            ]
+        return self
+
+    def __exit__(self, *details: object) -> None:
+        for handle in self.handles:
+            handle.remove()
+        self.handles = []
+        self.stashed.clear()
+
+    def backward(self, losses: Losses) -> None:
+        if not self.offload:
+            losses.total.backward()
+            return
+        # Bit-identical to one backward through the total only while each parameter is used at
+        # most once per part: float addition commutes but does not associate.
+        self.stashed.clear()
+        self.stashing = True
+        try:
+            for part in reversed(losses.parts[1:]):
+                part.backward()
+        finally:
+            self.stashing = False
+        losses.parts[0].backward()
+        self.step_stashed()
+
+    def update(self, parameter: Any) -> None:
+        # Every other gradient is None here (zero_grad(set_to_none=True) runs before backward and
+        # each hook clears its own), so step() skips them and updates only this parameter.
+        if self.stashing:
+            self.stash(parameter)
+        elif self.offload:
+            self.merge_stashed(parameter)
+            self.step_on_device(parameter)
+        else:
+            self.optimizer.step()
+        parameter.grad = None
+
+    def stash(self, parameter: Any) -> None:
+        gradient = parameter.grad
+        previous = self.stashed.get(parameter)
+        if previous is not None:
+            gradient = previous.to(gradient.device) + gradient
+        self.stashed[parameter] = gradient.to(HOST_DEVICE)
+
+    def merge_stashed(self, parameter: Any) -> None:
+        stashed = self.stashed.pop(parameter, None)
+        if stashed is not None:
+            parameter.grad = stashed.to(parameter.device) + parameter.grad
+
+    def step_stashed(self) -> None:
+        while self.stashed:
+            parameter, stashed = self.stashed.popitem()
+            parameter.grad = stashed.to(parameter.device)
+            self.step_on_device(parameter)
+            parameter.grad = None
+
+    def step_on_device(self, parameter: Any) -> None:
+        state = self.optimizer.state[parameter]
+        move_moments(state, parameter.device)
+        self.optimizer.step()
+        move_moments(state, HOST_DEVICE)
+
+    def step(self) -> None:
+        if not self.enabled:
+            self.optimizer.step()
 
 
 def embedding_filename(job: dict[str, Any]) -> str:
@@ -1231,23 +1356,26 @@ def parameter_bytes(parameters: list[Any]) -> int:
     return sum(int(parameter.numel()) * int(parameter.element_size()) for parameter in parameters)
 
 
-def trainable_working_set(trainable: list[Any]) -> int:
-    return TRAINABLE_COPIES * parameter_bytes(trainable)
+def trainable_working_set(trainable: list[Any], offload: bool) -> int:
+    if not offload:
+        return TRAINABLE_COPIES * parameter_bytes(trainable)
+    largest = max((parameter_bytes([parameter]) for parameter in trainable), default=0)
+    return parameter_bytes(trainable) + (UPDATE_GRADIENT_COPIES + len(MOMENT_KEYS)) * largest
 
 
-def metal_working_set(models: list[Any]) -> int:
+def metal_working_set(models: list[Any], offload: bool = False) -> int:
     parameters = unique_parameters(models)
     trainable = [parameter for parameter in parameters if parameter.requires_grad]
     frozen = [parameter for parameter in parameters if not parameter.requires_grad]
-    return trainable_working_set(trainable) + parameter_bytes(frozen)
+    return trainable_working_set(trainable, offload) + parameter_bytes(frozen)
 
 
-def assert_metal_working_set(device: Any, models: list[Any]) -> None:
+def assert_metal_working_set(device: Any, models: list[Any], offload: bool = False) -> None:
     if device_kind(device) != MPS_DEVICE:
         return
     import torch
 
-    required = metal_working_set(models)
+    required = metal_working_set(models, offload)
     available = int(torch.mps.recommended_max_memory())
     if required > available:
         raise RuntimeError(metal_refusal('this job', required, available))
@@ -2239,7 +2367,10 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         ]
     groups = unique_param_groups([group for group in groups if group['params']])
     optimizer = make_optimizer(method, groups, config)
-    assert_metal_working_set(device, [unet, text_encoder, text_encoder_2])
+    kind = optimizer_kind(method, config)
+    offload = offloads_moments(device, kind)
+    print(f'optimizer={kind} offload_moments={offload}', flush=True)
+    assert_metal_working_set(device, [unet, text_encoder, text_encoder_2], offload)
     pipeline.unet = unet
     pipeline.text_encoder = text_encoder
     unet.to(device)
@@ -2337,94 +2468,101 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
 
     weights = pose_sample_weights(frames, config)
     te_trainable = train_text_encoder or method == 'pivotal'
-    for step in range(start_step, total + 1):
-        optimizer.zero_grad(set_to_none=True)
-        index = weighted_index(weights, sample_rng)
-        latents, height, width, caption, mask = encoded_instance[index]
-        caption = drop_caption(caption, class_prompt, dropout, dropout_rng)
-        prompt_embeds, pooled = encode_prompt(
-            caption,
-            tokenizer,
-            text_encoder,
-            secondary,
-            device,
-            te_trainable,
-        )
-        loss = prediction_loss(
-            unet,
-            scheduler,
-            latents,
-            prompt_embeds,
-            pooled,
-            height,
-            width,
-            device,
-            mask=mask,
-            noise_offset=noise_offset,
-            min_snr_gamma=min_snr_gamma,
-            mask_threshold=mask_threshold,
-        )
-        if encoded_class:
-            class_index = (step - 1) % len(encoded_class)
-            class_latents, class_height, class_width, class_caption, _class_mask = encoded_class[
-                class_index
-            ]
-            class_embeds, class_pooled = encode_prompt(
-                class_caption,
+    with StepInBackward(optimizer, offload, offload) as stepper:
+        for step in range(start_step, total + 1):
+            optimizer.zero_grad(set_to_none=True)
+            index = weighted_index(weights, sample_rng)
+            latents, height, width, caption, mask = encoded_instance[index]
+            caption = drop_caption(caption, class_prompt, dropout, dropout_rng)
+            prompt_embeds, pooled = encode_prompt(
+                caption,
                 tokenizer,
                 text_encoder,
                 secondary,
                 device,
                 te_trainable,
             )
-            loss = loss + prior_weight * prediction_loss(
-                unet,
-                scheduler,
-                class_latents,
-                class_embeds,
-                class_pooled,
-                class_height,
-                class_width,
-                device,
-                noise_offset=noise_offset,
-                min_snr_gamma=min_snr_gamma,
-                mask_threshold=mask_threshold,
+            parts = [
+                prediction_loss(
+                    unet,
+                    scheduler,
+                    latents,
+                    prompt_embeds,
+                    pooled,
+                    height,
+                    width,
+                    device,
+                    mask=mask,
+                    noise_offset=noise_offset,
+                    min_snr_gamma=min_snr_gamma,
+                    mask_threshold=mask_threshold,
+                )
+            ]
+            if encoded_class:
+                class_index = (step - 1) % len(encoded_class)
+                class_latents, class_height, class_width, class_caption, _class_mask = (
+                    encoded_class[class_index]
+                )
+                class_embeds, class_pooled = encode_prompt(
+                    class_caption,
+                    tokenizer,
+                    text_encoder,
+                    secondary,
+                    device,
+                    te_trainable,
+                )
+                parts.append(
+                    prior_weight
+                    * prediction_loss(
+                        unet,
+                        scheduler,
+                        class_latents,
+                        class_embeds,
+                        class_pooled,
+                        class_height,
+                        class_width,
+                        device,
+                        noise_offset=noise_offset,
+                        min_snr_gamma=min_snr_gamma,
+                        mask_threshold=mask_threshold,
+                    )
+                )
+            losses = combine_losses(parts)
+            stepper.backward(losses)
+            stepper.step()
+            if original_embeddings is not None and token_id is not None:
+                restore_frozen_embeddings(text_encoder, original_embeddings, token_id)
+            value = float(losses.total.detach().cpu())
+            if value < best_loss:
+                best_loss = value
+                best_step = step
+            persist_training_step(
+                checkpoint_dir,
+                job_dir,
+                job,
+                method=method,
+                step=step,
+                total=total,
+                loss=value,
+                best_loss=best_loss,
+                best_step=best_step,
+                optimizer=optimizer,
+                unet=unet,
+                text_encoder=text_encoder,
+                token_id=token_id,
+                sample_rng=sample_rng,
+                dropout_rng=dropout_rng,
+                every=every,
+                keep=keep,
+                pipeline=pipeline,
+                device=device,
+                config=config,
+                progress=progress,
+                cadence=cadence,
             )
-        loss.backward()
-        optimizer.step()
-        if original_embeddings is not None and token_id is not None:
-            restore_frozen_embeddings(text_encoder, original_embeddings, token_id)
-        value = float(loss.detach().cpu())
-        if value < best_loss:
-            best_loss = value
-            best_step = step
-        persist_training_step(
-            checkpoint_dir,
-            job_dir,
-            job,
-            method=method,
-            step=step,
-            total=total,
-            loss=value,
-            best_loss=best_loss,
-            best_step=best_step,
-            optimizer=optimizer,
-            unet=unet,
-            text_encoder=text_encoder,
-            token_id=token_id,
-            sample_rng=sample_rng,
-            dropout_rng=dropout_rng,
-            every=every,
-            keep=keep,
-            pipeline=pipeline,
-            device=device,
-            config=config,
-            progress=progress,
-            cadence=cadence,
-        )
-        progress.emit('training', step=step, phase_step=step, phase_total=total, loss=value)
-        if step == start_step or step % 10 == 0 or step == total:
-            print(f'step {step}/{total} loss={value:.4f}', flush=True)
+            progress.emit('training', step=step, phase_step=step, phase_total=total, loss=value)
+            if step == start_step or step % 10 == 0 or step == total:
+                print(f'step {step}/{total} loss={value:.4f}', flush=True)
 
     wait_for_latest_save()
     progress.emit('publishing', step=total, phase_step=0, phase_total=1)

@@ -11,6 +11,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -532,6 +533,26 @@ class MetalWorkingSetTests(unittest.TestCase):
         trainable = (1024 + 256 + 512) * 4
         frozen = (64 + 2048) * 4
         self.assertEqual(train_sdxl.metal_working_set(self.models()), 4 * trainable + frozen)
+
+    def test_offload_keeps_weights_and_one_parameter_update_on_metal(self) -> None:
+        trainable = (1024 + 256 + 512) * 4
+        largest = 1024 * 4
+        frozen = (64 + 2048) * 4
+        self.assertEqual(
+            train_sdxl.metal_working_set(self.models(), True), trainable + 5 * largest + frozen
+        )
+
+    def test_offload_without_trainable_parameters_counts_frozen_only(self) -> None:
+        frozen = FakeModel(FakeParameter(2048, 4, False))
+        self.assertEqual(train_sdxl.metal_working_set([frozen], True), 2048 * 4)
+
+    def test_offload_is_checked_against_its_own_smaller_working_set(self) -> None:
+        required = train_sdxl.metal_working_set(self.models(), True)
+        module = self.fake_torch(required)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.assert_metal_working_set(self.make_device('mps'), self.models(), True)
+            with self.assertRaisesRegex(RuntimeError, 'Metal working memory'):
+                train_sdxl.assert_metal_working_set(self.make_device('mps'), self.models())
 
     def test_metal_refuses_a_model_that_exceeds_the_working_set(self) -> None:
         required = train_sdxl.metal_working_set(self.models())
@@ -2347,6 +2368,499 @@ class PromptCacheTests(unittest.TestCase):
         self.assertEqual(
             pipeline.text_encoder_2.to.call_args_list, [mock.call('mps'), mock.call('cpu')]
         )
+
+
+class LoopReached(Exception):
+    pass
+
+
+class FakeMoment:
+    def __init__(self, device: str, value: float = 0.0) -> None:
+        self.device = device
+        self.value = value
+
+    def to(self, device: str) -> FakeMoment:
+        return FakeMoment(device, self.value)
+
+    def __add__(self, other: FakeMoment) -> FakeMoment:
+        if self.device != other.device:
+            raise AssertionError(f'cannot add {self.device} to {other.device}')
+        return FakeMoment(self.device, self.value + other.value)
+
+
+class FakeMomentParameter:
+    def __init__(self, device: str) -> None:
+        self.device = device
+        self.grad: object | None = None
+
+    def register_post_accumulate_grad_hook(self, hook: Any) -> mock.Mock:
+        return mock.Mock()
+
+
+class FakeMomentOptimizer:
+    def __init__(
+        self,
+        parameters: list[FakeMomentParameter],
+        state: dict[Any, dict[str, Any]] | None = None,
+    ) -> None:
+        self.param_groups = [{'params': parameters}]
+        self.state: defaultdict[Any, dict[str, Any]] = defaultdict(dict, state or {})
+        self.devices: list[tuple[str, str]] = []
+        self.gradients: list[tuple[str, float]] = []
+
+    def step(self) -> None:
+        for parameter in self.param_groups[0]['params']:
+            if parameter.grad is None:
+                continue
+            self.gradients.append((parameter.grad.device, parameter.grad.value))
+            state = self.state[parameter]
+            if not state:
+                state.update(
+                    step=0,
+                    exp_avg=FakeMoment(parameter.device),
+                    exp_avg_sq=FakeMoment(parameter.device),
+                )
+            self.devices.append((state['exp_avg'].device, state['exp_avg_sq'].device))
+            state['step'] += 1
+
+
+PARITY_WIDTH = 8
+PARITY_STEPS = 3
+PARITY_SEED = 11
+PRIOR_WEIGHT = 0.5
+
+
+def parity_model(torch: Any, seed: int) -> Any:
+    from torch.utils.checkpoint import checkpoint
+
+    class Denoiser(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = torch.nn.Linear(PARITY_WIDTH, PARITY_WIDTH)
+            self.first = torch.nn.Sequential(
+                torch.nn.Linear(PARITY_WIDTH, PARITY_WIDTH), torch.nn.GELU()
+            )
+            self.second = torch.nn.Sequential(
+                torch.nn.Linear(PARITY_WIDTH, PARITY_WIDTH), torch.nn.GELU()
+            )
+            self.offset = torch.nn.Parameter(torch.zeros(PARITY_WIDTH))
+
+        def forward(self, prompt: Any, latents: Any, noise: Any) -> Any:
+            condition = self.encoder(prompt)
+            hidden = checkpoint(self.first, latents + noise + condition, use_reentrant=False)
+            hidden = checkpoint(
+                self.second, hidden * condition + self.offset, use_reentrant=False
+            )
+            return torch.nn.functional.mse_loss(hidden, noise)
+
+    torch.manual_seed(seed)
+    return Denoiser()
+
+
+def parity_inputs(torch: Any) -> list[tuple[Any, ...]]:
+    generator = torch.Generator().manual_seed(PARITY_SEED)
+    return [
+        tuple(torch.randn(2, PARITY_WIDTH, generator=generator) for _ in range(6))
+        for _ in range(PARITY_STEPS)
+    ]
+
+
+def parity_optimizer(model: Any) -> Any:
+    config = train_sdxl.load_config()
+    groups = [{'params': list(model.parameters()), 'lr': float(config['finetune_lr'])}]
+    return train_sdxl.make_optimizer(train_sdxl.FINETUNE_METHOD, groups, config)
+
+
+def train_parity_steps(
+    model: Any,
+    optimizer: Any,
+    inputs: list[tuple[Any, ...]],
+    in_backward: bool,
+    offload: bool = False,
+) -> None:
+    with train_sdxl.StepInBackward(optimizer, in_backward, offload) as stepper:
+        for prompt, latents, noise, class_prompt, class_latents, class_noise in inputs:
+            optimizer.zero_grad(set_to_none=True)
+            losses = train_sdxl.combine_losses(
+                [
+                    model(prompt, latents, noise),
+                    PRIOR_WEIGHT * model(class_prompt, class_latents, class_noise),
+                ]
+            )
+            stepper.backward(losses)
+            stepper.step()
+
+
+class StepInBackwardTests(unittest.TestCase):
+    def make_device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def trained(
+        self, torch: Any, in_backward: bool, offload: bool = False
+    ) -> tuple[Any, Any, mock.Mock]:
+        model = parity_model(torch, PARITY_SEED)
+        optimizer = parity_optimizer(model)
+        step = mock.Mock(wraps=optimizer.step)
+        with (
+            mock.patch.object(optimizer, 'step', step),
+            mock.patch.object(train_sdxl, 'release_device_cache'),
+        ):
+            train_parity_steps(model, optimizer, parity_inputs(torch), in_backward, offload)
+        return model, optimizer, step
+
+    def test_adamw_in_backward_matches_backward_then_step_bitwise(self) -> None:
+        torch = real_torch(self)
+        standard, standard_optimizer, standard_step = self.trained(torch, False)
+        initial = parity_model(torch, PARITY_SEED)
+        for offload in (False, True):
+            with self.subTest(offload=offload):
+                fused, fused_optimizer, fused_step = self.trained(torch, True, offload)
+                parameters = list(fused.parameters())
+                self.assertIsInstance(fused_optimizer, torch.optim.AdamW)
+                self.assertEqual(standard_step.call_count, PARITY_STEPS)
+                self.assertEqual(fused_step.call_count, PARITY_STEPS * len(parameters))
+                for name, parameter in fused.named_parameters():
+                    reference = dict(standard.named_parameters())[name]
+                    self.assertIsNone(parameter.grad)
+                    self.assertFalse(
+                        torch.equal(parameter, dict(initial.named_parameters())[name])
+                    )
+                    self.assertTrue(torch.equal(parameter, reference), name)
+                    expected = standard_optimizer.state[reference]
+                    actual = fused_optimizer.state[parameter]
+                    for key in ('step', *train_sdxl.MOMENT_KEYS):
+                        self.assertTrue(torch.equal(actual[key], expected[key]), (name, key))
+
+    def test_state_dict_round_trips_into_a_standard_optimizer(self) -> None:
+        torch = real_torch(self)
+        standard, standard_optimizer, _ = self.trained(torch, False)
+        for offload in (False, True):
+            with self.subTest(offload=offload):
+                fused, fused_optimizer, _ = self.trained(torch, True, offload)
+                restored = parity_optimizer(fused)
+                restored.load_state_dict(fused_optimizer.state_dict())
+                expected = standard_optimizer.state_dict()
+                actual = restored.state_dict()
+                self.assertEqual(actual['param_groups'], expected['param_groups'])
+                self.assertEqual(sorted(actual['state']), sorted(expected['state']))
+                for index, state in expected['state'].items():
+                    for key, value in state.items():
+                        self.assertTrue(torch.equal(actual['state'][index][key], value), key)
+
+    def test_offload_moves_moments_to_the_parameter_device_only_around_the_step(self) -> None:
+        torch = real_torch(self)
+        model = parity_model(torch, PARITY_SEED)
+        optimizer = parity_optimizer(model)
+        events: list[tuple[str, int, str]] = []
+        move = train_sdxl.move_moments
+        step = optimizer.step
+
+        def record_move(state: dict[str, Any], device: Any) -> None:
+            events.append(('move', id(state), str(device)))
+            move(state, device)
+
+        def record_step() -> None:
+            events.append(('step', 0, ''))
+            step()
+
+        with (
+            mock.patch.object(train_sdxl, 'move_moments', record_move),
+            mock.patch.object(optimizer, 'step', record_step),
+            mock.patch.object(train_sdxl, 'release_device_cache'),
+        ):
+            train_parity_steps(model, optimizer, parity_inputs(torch)[:1], True, True)
+        expected = {
+            id(optimizer.state[parameter]): [
+                ('move', id(optimizer.state[parameter]), str(parameter.device)),
+                ('step', 0, ''),
+                ('move', id(optimizer.state[parameter]), train_sdxl.HOST_DEVICE),
+            ]
+            for parameter in model.parameters()
+        }
+        updates = [events[index : index + 3] for index in range(0, len(events), 3)]
+        self.assertEqual(len(updates), len(expected))
+        for update in updates:
+            self.assertEqual(update, expected[update[0][1]])
+
+    def test_hooks_are_removed_when_the_context_exits(self) -> None:
+        torch = real_torch(self)
+        model = parity_model(torch, PARITY_SEED)
+        optimizer = parity_optimizer(model)
+        inputs = parity_inputs(torch)
+        train_parity_steps(model, optimizer, inputs[:1], True)
+        before = [parameter.detach().clone() for parameter in model.parameters()]
+        prompt, latents, noise = inputs[1][:3]
+        model(prompt, latents, noise).backward()
+        for parameter, previous in zip(model.parameters(), before, strict=True):
+            self.assertIsNotNone(parameter.grad)
+            self.assertTrue(torch.equal(parameter, previous))
+
+    def test_hooks_are_removed_when_the_loop_raises(self) -> None:
+        handle = mock.Mock()
+        parameter = mock.Mock()
+        parameter.register_post_accumulate_grad_hook.return_value = handle
+        optimizer = mock.Mock(param_groups=[{'params': [parameter]}])
+        with self.assertRaises(LoopReached):
+            with train_sdxl.StepInBackward(optimizer, True):
+                raise LoopReached()
+        handle.remove.assert_called_once_with()
+
+    def test_enabled_registers_one_hook_per_parameter_and_skips_the_step(self) -> None:
+        parameters = [mock.Mock(), mock.Mock(), mock.Mock()]
+        groups = [{'params': parameters[:2]}, {'params': parameters[2:]}]
+        optimizer = mock.Mock(param_groups=groups)
+        with train_sdxl.StepInBackward(optimizer, True) as stepper:
+            stepper.step()
+        for parameter in parameters:
+            parameter.register_post_accumulate_grad_hook.assert_called_once_with(stepper.update)
+        optimizer.step.assert_not_called()
+
+    def test_disabled_registers_no_hooks_and_steps_after_backward(self) -> None:
+        parameter = mock.Mock()
+        optimizer = mock.Mock(param_groups=[{'params': [parameter]}])
+        with train_sdxl.StepInBackward(optimizer, False) as stepper:
+            stepper.step()
+        parameter.register_post_accumulate_grad_hook.assert_not_called()
+        optimizer.step.assert_called_once_with()
+
+    def test_entering_offloads_existing_moments_and_releases_the_metal_cache(self) -> None:
+        state = {'step': 'counter', 'exp_avg': FakeMoment('mps'), 'exp_avg_sq': FakeMoment('mps')}
+        optimizer = FakeMomentOptimizer([], {FakeMomentParameter('mps'): state})
+        with mock.patch.object(train_sdxl, 'release_device_cache') as release:
+            with train_sdxl.StepInBackward(optimizer, True, True):
+                release.assert_called_once_with(train_sdxl.MPS_DEVICE)
+                self.assertEqual(state['exp_avg'].device, train_sdxl.HOST_DEVICE)
+                self.assertEqual(state['exp_avg_sq'].device, train_sdxl.HOST_DEVICE)
+                self.assertEqual(state['step'], 'counter')
+        self.assertEqual(state['exp_avg'].device, train_sdxl.HOST_DEVICE)
+        self.assertEqual(state['exp_avg_sq'].device, train_sdxl.HOST_DEVICE)
+
+    def test_update_steps_with_moments_on_the_parameter_device_then_offloads(self) -> None:
+        parameter = FakeMomentParameter('mps')
+        optimizer = FakeMomentOptimizer([parameter])
+        stepper = train_sdxl.StepInBackward(optimizer, True, True)
+        for _ in range(2):
+            parameter.grad = FakeMoment('mps', 1.0)
+            stepper.update(parameter)
+            state = optimizer.state[parameter]
+            self.assertIsNone(parameter.grad)
+            self.assertEqual(state['exp_avg'].device, train_sdxl.HOST_DEVICE)
+            self.assertEqual(state['exp_avg_sq'].device, train_sdxl.HOST_DEVICE)
+        self.assertEqual(optimizer.devices, [('mps', 'mps'), ('mps', 'mps')])
+        self.assertEqual(optimizer.state[parameter]['step'], 2)
+
+    def test_update_without_offload_leaves_moments_where_the_optimizer_put_them(self) -> None:
+        parameter = FakeMomentParameter('mps')
+        optimizer = FakeMomentOptimizer([parameter])
+        with mock.patch.object(train_sdxl, 'release_device_cache') as release:
+            with train_sdxl.StepInBackward(optimizer, True, False) as stepper:
+                parameter.grad = FakeMoment('mps', 1.0)
+                stepper.update(parameter)
+        release.assert_not_called()
+        self.assertEqual(optimizer.state[parameter]['exp_avg'].device, 'mps')
+        self.assertEqual(optimizer.state[parameter]['exp_avg_sq'].device, 'mps')
+
+    def test_earlier_loss_parts_stash_gradients_on_the_host_until_the_final_part(self) -> None:
+        parameter = FakeMomentParameter('mps')
+        optimizer = FakeMomentOptimizer([parameter])
+        stepper = train_sdxl.StepInBackward(optimizer, True, True)
+        stepper.stashing = True
+        for value in (1.0, 2.0):
+            parameter.grad = FakeMoment('mps', value)
+            stepper.update(parameter)
+            self.assertIsNone(parameter.grad)
+        self.assertEqual(stepper.stashed[parameter].device, train_sdxl.HOST_DEVICE)
+        self.assertEqual(optimizer.gradients, [])
+        stepper.stashing = False
+        parameter.grad = FakeMoment('mps', 4.0)
+        stepper.update(parameter)
+        self.assertEqual(optimizer.gradients, [('mps', 7.0)])
+        self.assertEqual(stepper.stashed, {})
+        self.assertIsNone(parameter.grad)
+
+    def two_parameter_step(self, torch: Any, offload: bool) -> tuple[list[Any], Any]:
+        first = torch.nn.Parameter(torch.tensor([1.0, -2.0]))
+        second = torch.nn.Parameter(torch.tensor([0.5, 3.0]))
+        optimizer = torch.optim.AdamW([first, second], lr=0.1)
+        with (
+            mock.patch.object(train_sdxl, 'release_device_cache'),
+            train_sdxl.StepInBackward(optimizer, offload, offload) as stepper,
+        ):
+            optimizer.zero_grad(set_to_none=True)
+            parts = [(first * first).sum(), PRIOR_WEIGHT * (first * second).sum()]
+            stepper.backward(train_sdxl.combine_losses(parts))
+            stepper.step()
+            self.assertEqual(stepper.stashed, {})
+        return [first, second], optimizer
+
+    def test_parameters_missing_from_the_final_part_step_after_backward(self) -> None:
+        torch = real_torch(self)
+        parameters, optimizer = self.two_parameter_step(torch, True)
+        expected_parameters, expected_optimizer = self.two_parameter_step(torch, False)
+        for parameter, expected in zip(parameters, expected_parameters, strict=True):
+            self.assertIsNone(parameter.grad)
+            self.assertTrue(torch.equal(parameter, expected))
+            for key in ('step', *train_sdxl.MOMENT_KEYS):
+                actual_value = optimizer.state[parameter][key]
+                expected_value = expected_optimizer.state[expected][key]
+                self.assertTrue(torch.equal(actual_value, expected_value), key)
+
+    def test_backward_without_offload_runs_once_through_the_total(self) -> None:
+        losses = train_sdxl.Losses(parts=[mock.Mock(), mock.Mock()], total=mock.Mock())
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                train_sdxl.StepInBackward(mock.Mock(), enabled, False).backward(losses)
+        self.assertEqual(losses.total.backward.call_count, 2)
+        for part in losses.parts:
+            part.backward.assert_not_called()
+
+    def test_offloaded_backward_runs_later_parts_first(self) -> None:
+        order: list[str] = []
+        parts = [mock.Mock(), mock.Mock(), mock.Mock()]
+        for name, part in zip(('instance', 'second', 'third'), parts, strict=True):
+            part.backward.side_effect = lambda name=name: order.append(name)
+        losses = train_sdxl.Losses(parts=parts, total=mock.Mock())
+        stepper = train_sdxl.StepInBackward(FakeMomentOptimizer([]), True, True)
+        stepper.stashed[object()] = 'stale'
+        with mock.patch.object(stepper, 'step_stashed') as step_stashed:
+            stepper.backward(losses)
+        self.assertEqual(order, ['third', 'second', 'instance'])
+        self.assertEqual(stepper.stashed, {})
+        self.assertFalse(stepper.stashing)
+        step_stashed.assert_called_once_with()
+        losses.total.backward.assert_not_called()
+
+    def test_exit_drops_stashed_gradients(self) -> None:
+        stepper = train_sdxl.StepInBackward(FakeMomentOptimizer([]), True, True)
+        with mock.patch.object(train_sdxl, 'release_device_cache'):
+            with stepper:
+                stepper.stashed[object()] = 'gradient'
+        self.assertEqual(stepper.stashed, {})
+
+    def test_offload_requires_stepping_in_backward(self) -> None:
+        state = {'exp_avg': FakeMoment('mps'), 'exp_avg_sq': FakeMoment('mps')}
+        optimizer = FakeMomentOptimizer([], {FakeMomentParameter('mps'): state})
+        with mock.patch.object(train_sdxl, 'release_device_cache') as release:
+            with train_sdxl.StepInBackward(optimizer, False, True) as stepper:
+                self.assertFalse(stepper.offload)
+        release.assert_not_called()
+        self.assertEqual(state['exp_avg'].device, 'mps')
+
+    def test_only_adamw_on_metal_steps_in_backward_with_its_moments_on_the_host(self) -> None:
+        cases = (
+            ('mps', train_sdxl.ADAMW_OPTIMIZER, True),
+            ('cpu', train_sdxl.ADAMW_OPTIMIZER, False),
+            ('cuda', train_sdxl.ADAMW_OPTIMIZER, False),
+            ('mps', train_sdxl.PRODIGY_OPTIMIZER, False),
+            ('cpu', train_sdxl.PRODIGY_OPTIMIZER, False),
+            ('cuda', train_sdxl.PRODIGY_OPTIMIZER, False),
+        )
+        for kind, optimizer, expected in cases:
+            with self.subTest(kind=kind, optimizer=optimizer):
+                self.assertIs(
+                    train_sdxl.offloads_moments(self.make_device(kind), optimizer), expected
+                )
+
+    def test_configured_methods_pick_the_expected_path(self) -> None:
+        config = train_sdxl.load_config()
+        cases = (
+            ('mps', 'finetune', True),
+            ('mps', 'lora', False),
+            ('mps', 'pivotal', False),
+            ('cuda', 'finetune', False),
+        )
+        for kind, method, expected in cases:
+            with self.subTest(kind=kind, method=method):
+                optimizer = train_sdxl.optimizer_kind(method, config)
+                self.assertIs(
+                    train_sdxl.offloads_moments(self.make_device(kind), optimizer), expected
+                )
+
+class MetalOffloadTests(unittest.TestCase):
+    def device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def stepper_for(self, kind: str, method: str) -> mock.Mock:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            job = queued_job(method=method)
+            train_sdxl.write_job(job_dir, job)
+            checkpoint = models / 'checkpoints' / job['checkpoint']
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b'checkpoint')
+            frame = {'image': job_dir / 'dataset' / '0000.png', 'mask': None, 'caption': 'ohwx'}
+            config = train_sdxl.load_config()
+            config['prior_preservation'] = False
+            stepper = mock.MagicMock()
+            stepper.return_value.__enter__.side_effect = LoopReached()
+            modules = {
+                'torch': mock.MagicMock(),
+                'diffusers': mock.MagicMock(),
+                'peft': mock.MagicMock(),
+            }
+            with (
+                mock.patch.dict(sys.modules, modules),
+                mock.patch.multiple(
+                    train_sdxl,
+                    list_frames=mock.Mock(return_value=[frame]),
+                    steps_for=mock.Mock(return_value=12),
+                    select_device=mock.Mock(return_value=self.device(kind)),
+                    assert_device_capacity=mock.DEFAULT,
+                    assert_metal_working_set=mock.DEFAULT,
+                    load_base_pipeline=mock.MagicMock(),
+                    apply_lora=mock.MagicMock(),
+                    make_optimizer=mock.MagicMock(),
+                    load_or_encode_latents=mock.Mock(return_value=(mock.Mock(), 64, 64)),
+                    cache_secondary_embeddings=mock.MagicMock(),
+                    StepInBackward=stepper,
+                ),
+            ):
+                with self.assertRaises(LoopReached):
+                    train_sdxl.train(models, job_dir, job, config)
+        return stepper
+
+    def test_a_metal_fine_tune_steps_in_backward_with_its_moments_on_the_host(self) -> None:
+        stepper = self.stepper_for('mps', 'finetune')
+        stepper.assert_called_once_with(mock.ANY, True, True)
+
+    def test_cuda_and_prodigy_keep_backward_then_step(self) -> None:
+        for kind, method in (('cuda', 'finetune'), ('mps', 'lora'), ('cuda', 'lora')):
+            with self.subTest(kind=kind, method=method):
+                self.stepper_for(kind, method).assert_called_once_with(mock.ANY, False, False)
+
+    def test_offloaded_adamw_on_metal_keeps_its_moments_on_the_host_and_matches_bitwise(
+        self,
+    ) -> None:
+        torch = real_torch(self)
+        if not torch.backends.mps.is_available():
+            self.skipTest('Metal is not available')
+        device = torch.device('mps')
+        inputs = [tuple(value.to(device) for value in step) for step in parity_inputs(torch)]
+        trained = []
+        for in_backward in (False, True):
+            model = parity_model(torch, PARITY_SEED).to(device)
+            optimizer = parity_optimizer(model)
+            train_parity_steps(model, optimizer, inputs, in_backward, in_backward)
+            trained.append((model, optimizer))
+        (standard, standard_optimizer), (offloaded, offloaded_optimizer) = trained
+        for parameter, reference in zip(
+            offloaded.parameters(), standard.parameters(), strict=True
+        ):
+            self.assertEqual(parameter.device.type, 'mps')
+            self.assertIsNone(parameter.grad)
+            self.assertTrue(torch.equal(parameter, reference))
+            state = offloaded_optimizer.state[parameter]
+            expected = standard_optimizer.state[reference]
+            for key in train_sdxl.MOMENT_KEYS:
+                self.assertEqual(state[key].device.type, 'cpu', key)
+                self.assertEqual(expected[key].device.type, 'mps', key)
+                self.assertTrue(torch.equal(state[key], expected[key].cpu()), key)
 
 
 def import_in_clean_process(
