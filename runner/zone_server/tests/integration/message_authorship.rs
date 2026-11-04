@@ -67,6 +67,12 @@ async fn a_message_posted_over_http_cannot_claim_a_reminder_sent_it() {
     assert_eq!(messages[0].1, TYPED);
     assert!(
         !claims_automation(&messages[0].2),
+        "a message with no automation key claims none: {:?}",
+        messages[0].2
+    );
+    assert_eq!(
+        messages[0].2.get("web_search"),
+        Some(&json!(true)),
         "ordinary client metadata is still stored: {:?}",
         messages[0].2
     );
