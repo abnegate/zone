@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import errno
+import gc
 import json
+import math
 import os
 import random
 import shutil
@@ -16,15 +18,59 @@ import time
 import traceback
 import uuid
 import zlib
+from collections.abc import Callable
+from collections.abc import MutableMapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+METAL_HIGH_WATERMARK_VARIABLE = 'PYTORCH_MPS_HIGH_WATERMARK_RATIO'
+METAL_LOW_WATERMARK_VARIABLE = 'PYTORCH_MPS_LOW_WATERMARK_RATIO'
+METAL_WATERMARK_VARIABLES = (METAL_HIGH_WATERMARK_VARIABLE, METAL_LOW_WATERMARK_VARIABLE)
+METAL_HIGH_WATERMARK = '1.0'
+METAL_LOW_WATERMARK = '0.8'
+METAL_WATERMARK_TOO_LATE = (
+    'warning: torch was imported before train_sdxl, so the Metal memory watermarks '
+    'it sets may be ignored and an overcommit can hang macOS'
+)
+
+
+def metal_watermark_unreadable(variable: str, value: str) -> str:
+    return (
+        f'warning: {variable}={value!r} is not a number, '
+        'so train_sdxl leaves the Metal cap alone'
+    )
+
+
+def apply_metal_watermarks(environment: MutableMapping[str, str] = os.environ) -> None:
+    changed = METAL_HIGH_WATERMARK_VARIABLE not in environment
+    environment.setdefault(METAL_HIGH_WATERMARK_VARIABLE, METAL_HIGH_WATERMARK)
+    try:
+        high = float(environment[METAL_HIGH_WATERMARK_VARIABLE])
+        low = environment.get(METAL_LOW_WATERMARK_VARIABLE)
+        if high > 0 and (low is None or float(low) > high):
+            environment[METAL_LOW_WATERMARK_VARIABLE] = str(min(high, float(METAL_LOW_WATERMARK)))
+            changed = True
+    except ValueError:
+        for variable in METAL_WATERMARK_VARIABLES:
+            if variable in environment:
+                print(metal_watermark_unreadable(variable, environment[variable]), file=sys.stderr)
+        return
+    if changed and 'torch' in sys.modules:
+        print(METAL_WATERMARK_TOO_LATE, file=sys.stderr)
+
+
+apply_metal_watermarks()
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 WATCH_INTERVAL = 2
+TRANSIENT_ATTEMPT_LIMIT = 3
+TRANSIENT_ATTEMPTS_KEY = 'transient_attempts'
+METAL_OUT_OF_MEMORY = 'MPS backend out of memory'
 DEFAULT_HF_BASE = 'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl'
 DEFAULT_CHECKPOINT = 'lustifySDXLNSFW_ggwpV7.safetensors'
 CONFIG_PATH = Path(__file__).with_name('train_sdxl_config.json')
@@ -38,8 +84,17 @@ LANGUAGE_SUBJECT = 'language'
 LATEST_SNAPSHOT = 'latest.pt'
 STILL_METHODS = {'lora', 'finetune', 'pivotal'}
 ADAPTER_METHODS = {'lora', 'pivotal'}
+FINETUNE_METHOD = 'finetune'
+CUDA_DEVICE = 'cuda'
+MPS_DEVICE = 'mps'
+HOST_DEVICE = 'cpu'
 FINETUNE_MIN_MEMORY = 40 * 1024**3
 ADAPTER_MIN_MEMORY = 20 * 1024**3
+TRAINABLE_COPIES = 4
+UPDATE_GRADIENT_COPIES = 3
+MOMENT_KEYS = ('exp_avg', 'exp_avg_sq')
+PRODIGY_OPTIMIZER = 'prodigy'
+ADAMW_OPTIMIZER = 'adamw'
 MASK_THRESHOLD = 0.2
 KIND_BOOST = 1.25
 REBALANCE_SHARE = 0.40
@@ -104,7 +159,7 @@ def steps_for(image_count: int, config: dict[str, Any]) -> int:
 
 
 def recipe_for(method: str) -> str:
-    if method == 'finetune':
+    if method == FINETUNE_METHOD:
         return 'sdxl'
     return 'sdxl-adapter'
 
@@ -349,9 +404,9 @@ def class_pairs(paths: list[Path], fallback: str) -> list[tuple[Path, str]]:
 
 
 def optimizer_kind(method: str, config: dict[str, Any]) -> str:
-    if method == 'finetune':
-        return str(config.get('finetune_optimizer') or 'adamw').strip().lower()
-    return str(config.get('optimizer') or 'prodigy').strip().lower()
+    if method == FINETUNE_METHOD:
+        return str(config.get('finetune_optimizer') or ADAMW_OPTIMIZER).strip().lower()
+    return str(config.get('optimizer') or PRODIGY_OPTIMIZER).strip().lower()
 
 
 def load_prodigy() -> Any:
@@ -381,7 +436,7 @@ def prodigy_param_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def prodigy_rate_keys(method: str) -> tuple[str, ...]:
-    if method == 'finetune':
+    if method == FINETUNE_METHOD:
         return ('finetune_lr',)
     return ('unet_lr', 'text_encoder_lr')
 
@@ -401,13 +456,130 @@ def prodigy_rate_notice(
 
 def make_optimizer(method: str, groups: list[dict[str, Any]], config: dict[str, Any]) -> Any:
     kind = optimizer_kind(method, config)
-    if kind == 'prodigy':
+    if kind == PRODIGY_OPTIMIZER:
         if any(group.get('lr') != PRODIGY_LR for group in groups):
             print(prodigy_rate_notice(method, groups, config), flush=True)
         return load_prodigy()(prodigy_param_groups(groups))
     import torch
 
     return torch.optim.AdamW(groups)
+
+
+def offloads_moments(device: Any, method: str, kind: str) -> bool:
+    return (
+        method == FINETUNE_METHOD
+        and kind == ADAMW_OPTIMIZER
+        and device_kind(device) == MPS_DEVICE
+    )
+
+
+def move_moments(state: dict[str, Any], device: Any) -> None:
+    for key in MOMENT_KEYS:
+        if key in state:
+            state[key] = state[key].to(device)
+
+
+def offload_optimizer_moments(optimizer: Any) -> None:
+    for state in optimizer.state.values():
+        move_moments(state, HOST_DEVICE)
+
+
+@dataclass(frozen=True)
+class Losses:
+    parts: list[Any]
+    total: Any
+
+
+def combine_losses(parts: list[Any]) -> Losses:
+    total = parts[0]
+    for part in parts[1:]:
+        total = total + part
+    return Losses(parts=parts, total=total)
+
+
+class StepInBackward:
+    def __init__(self, optimizer: Any, enabled: bool, offload: bool = False) -> None:
+        self.optimizer = optimizer
+        self.enabled = enabled
+        self.offload = enabled and offload
+        self.handles: list[Any] = []
+        self.stashed: dict[Any, Any] = {}
+        self.stashing = False
+
+    def __enter__(self) -> StepInBackward:
+        if self.offload:
+            offload_optimizer_moments(self.optimizer)
+            release_device_cache(MPS_DEVICE)
+        if self.enabled:
+            self.handles = [
+                parameter.register_post_accumulate_grad_hook(self.update)
+                for group in self.optimizer.param_groups
+                for parameter in group['params']
+            ]
+        return self
+
+    def __exit__(self, *details: object) -> None:
+        for handle in self.handles:
+            handle.remove()
+        self.handles = []
+        self.stashed.clear()
+
+    def backward(self, losses: Losses) -> None:
+        if not self.offload:
+            losses.total.backward()
+            return
+        # Bit-identical to one backward through the total only while each parameter is used at
+        # most once per part: float addition commutes but does not associate.
+        self.stashed.clear()
+        self.stashing = True
+        try:
+            for part in reversed(losses.parts[1:]):
+                part.backward()
+        finally:
+            self.stashing = False
+        losses.parts[0].backward()
+        self.step_stashed()
+
+    def update(self, parameter: Any) -> None:
+        # Every other gradient is None here (zero_grad(set_to_none=True) runs before backward and
+        # each hook clears its own), so step() skips them and updates only this parameter.
+        if self.stashing:
+            self.stash(parameter)
+        elif self.offload:
+            self.merge_stashed(parameter)
+            self.step_on_device(parameter)
+        else:
+            self.optimizer.step()
+        parameter.grad = None
+
+    def stash(self, parameter: Any) -> None:
+        gradient = parameter.grad
+        previous = self.stashed.get(parameter)
+        if previous is not None:
+            gradient = previous.to(gradient.device) + gradient
+        self.stashed[parameter] = gradient.to(HOST_DEVICE)
+
+    def merge_stashed(self, parameter: Any) -> None:
+        stashed = self.stashed.pop(parameter, None)
+        if stashed is not None:
+            parameter.grad = stashed.to(parameter.device) + parameter.grad
+
+    def step_stashed(self) -> None:
+        while self.stashed:
+            parameter, stashed = self.stashed.popitem()
+            parameter.grad = stashed.to(parameter.device)
+            self.step_on_device(parameter)
+            parameter.grad = None
+
+    def step_on_device(self, parameter: Any) -> None:
+        state = self.optimizer.state[parameter]
+        move_moments(state, parameter.device)
+        self.optimizer.step()
+        move_moments(state, HOST_DEVICE)
+
+    def step(self) -> None:
+        if not self.enabled:
+            self.optimizer.step()
 
 
 def embedding_filename(job: dict[str, Any]) -> str:
@@ -684,7 +856,7 @@ def legacy(job: dict[str, Any]) -> bool:
 
 
 def legacy_destination(models_dir: Path, job: dict[str, Any]) -> Path:
-    folder = CHECKPOINTS if job.get('method') == 'finetune' else LORAS
+    folder = CHECKPOINTS if job.get('method') == FINETUNE_METHOD else LORAS
     return Path(models_dir) / folder / weight_name(str(job['filename']), 'filename')
 
 
@@ -822,6 +994,33 @@ def mark_failed(job_dir: Path, job: dict[str, Any], error: BaseException | str) 
     return job
 
 
+def transient_failure(attempts: int, error: BaseException) -> str:
+    if METAL_OUT_OF_MEMORY in str(error):
+        return (
+            f'Metal ran out of memory on {attempts} attempts in a row without saving a new '
+            'snapshot. The trainer caps Metal at its recommended working set so an overcommit '
+            'fails instead of hanging macOS; do not raise or disable '
+            f'{METAL_HIGH_WATERMARK_VARIABLE}. Quit other GPU apps such as ComfyUI or Ollama, '
+            f'or train on Runpod. Last error: {error}'
+        )
+    return (
+        f'ran out of memory on {attempts} attempts in a row without saving a new snapshot; '
+        f'last error: {error}'
+    )
+
+
+def record_transient_crash(
+    job_dir: Path, job: dict[str, Any], error: BaseException
+) -> dict[str, Any]:
+    attempts = int(job.get(TRANSIENT_ATTEMPTS_KEY) or 0) + 1
+    job[TRANSIENT_ATTEMPTS_KEY] = attempts
+    if attempts >= TRANSIENT_ATTEMPT_LIMIT:
+        return mark_failed(job_dir, job, transient_failure(attempts, error))
+    job['pid'] = None
+    write_job(job_dir, job)
+    return job
+
+
 def mark_succeeded(job_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
     job['status'] = 'succeeded'
     job['error'] = None
@@ -931,7 +1130,11 @@ def copy_snapshot(source: Path, destination: Path) -> None:
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + '.tmp')
-    shutil.copy2(source, temporary)
+    temporary.unlink(missing_ok=True)
+    try:
+        os.link(source, temporary)
+    except OSError:
+        shutil.copy2(source, temporary)
     os.replace(temporary, destination)
 
 
@@ -1021,11 +1224,30 @@ def process_job(
             train(models_dir, job_dir, job, config)
         succeed(models_dir, job_dir, job, sidecar_payload(job))
     except Exception as error:
-        if not is_transient_crash(error):
+        if is_transient_crash(error):
+            record_transient_crash(job_dir, job, error)
+        else:
             mark_failed(job_dir, job, error)
         raise
     finally:
         wait_for_latest_save()
+
+
+def run_job(models_dir: Path, job_dir: Path, config: dict[str, Any], stub: bool) -> bool:
+    try:
+        print(f'processing {job_dir}', flush=True)
+        process_job(models_dir, job_dir, config, stub)
+        print(f'finished {job_dir}', flush=True)
+        return True
+    except Exception:
+        traceback.print_exc()
+        return False
+
+
+def release_memory() -> None:
+    gc.collect()
+    if 'torch' in sys.modules:
+        release_device_cache(select_device())
 
 
 def watch(models_dir: Path, config: dict[str, Any], once: bool, stub: bool) -> int:
@@ -1036,16 +1258,14 @@ def watch(models_dir: Path, config: dict[str, Any], once: bool, stub: bool) -> i
                 return 0
             time.sleep(WATCH_INTERVAL)
             continue
-        try:
-            print(f'processing {job_dir}', flush=True)
-            process_job(models_dir, job_dir, config, stub)
-            print(f'finished {job_dir}', flush=True)
-        except Exception:
-            traceback.print_exc()
+        if run_job(models_dir, job_dir, config, stub):
             if once:
-                return 1
+                return 0
+            continue
+        release_memory()
         if once:
-            return 0
+            return 1
+        time.sleep(WATCH_INTERVAL)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1071,27 +1291,93 @@ def select_device() -> Any:
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
-        return torch.device('cuda')
+        return torch.device(CUDA_DEVICE)
     if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        return torch.device('mps')
-    return torch.device('cpu')
+        return torch.device(MPS_DEVICE)
+    return torch.device(HOST_DEVICE)
 
 
 def assert_device_capacity(device: Any, method: str) -> None:
-    if device_kind(device) != 'cuda':
-        return
+    kind = device_kind(device)
+    if kind == CUDA_DEVICE:
+        assert_cuda_capacity(device, method)
+    elif kind == MPS_DEVICE and method == FINETUNE_METHOD:
+        assert_metal_capacity()
+
+
+def assert_cuda_capacity(device: Any, method: str) -> None:
     import torch
 
-    required = FINETUNE_MIN_MEMORY if method == 'finetune' else ADAPTER_MIN_MEMORY
+    required = FINETUNE_MIN_MEMORY if method == FINETUNE_METHOD else ADAPTER_MIN_MEMORY
     index = getattr(device, 'index', None)
     total = int(torch.cuda.get_device_properties(0 if index is None else index).total_memory)
     if total >= required:
         return
-    if method == 'finetune':
+    if method == FINETUNE_METHOD:
         raise RuntimeError(
             'this recipe needs a 48 GB card for fine-tune; refusing to drop precision'
         )
     raise RuntimeError('this recipe needs a 24 GB card for LoRA; refusing to drop precision')
+
+
+def gibibytes(size: int) -> str:
+    return f'{size / 1024**3:.1f} GiB'
+
+
+def metal_refusal(job: str, required: int, available: int) -> str:
+    return (
+        f'{job} needs {gibibytes(required)} of Metal working memory but this Mac reports '
+        f'{gibibytes(available)} (torch.mps.recommended_max_memory); refusing to start '
+        'rather than overcommit Metal or drop precision, so train it on Runpod instead'
+    )
+
+
+def assert_metal_capacity() -> None:
+    import torch
+
+    available = int(torch.mps.recommended_max_memory())
+    if available < FINETUNE_MIN_MEMORY:
+        raise RuntimeError(metal_refusal('an SDXL fine-tune', FINETUNE_MIN_MEMORY, available))
+
+
+def unique_parameters(models: list[Any]) -> list[Any]:
+    seen: set[int] = set()
+    parameters = []
+    for model in models:
+        for parameter in model.parameters():
+            if id(parameter) not in seen:
+                seen.add(id(parameter))
+                parameters.append(parameter)
+    return parameters
+
+
+def parameter_bytes(parameters: list[Any]) -> int:
+    return sum(int(parameter.numel()) * int(parameter.element_size()) for parameter in parameters)
+
+
+def trainable_working_set(trainable: list[Any], offload: bool) -> int:
+    if not offload:
+        return TRAINABLE_COPIES * parameter_bytes(trainable)
+    largest = max((parameter_bytes([parameter]) for parameter in trainable), default=0)
+    return parameter_bytes(trainable) + (UPDATE_GRADIENT_COPIES + len(MOMENT_KEYS)) * largest
+
+
+def metal_working_set(models: list[Any], offload: bool = False) -> int:
+    parameters = unique_parameters(models)
+    trainable = [parameter for parameter in parameters if parameter.requires_grad]
+    frozen = [parameter for parameter in parameters if not parameter.requires_grad]
+    return trainable_working_set(trainable, offload) + parameter_bytes(frozen)
+
+
+def assert_metal_working_set(device: Any, models: list[Any], offload: bool = False) -> None:
+    if device_kind(device) != MPS_DEVICE:
+        return
+    import torch
+
+    required = metal_working_set(models, offload)
+    available = int(torch.mps.recommended_max_memory())
+    if required > available:
+        raise RuntimeError(metal_refusal('this job', required, available))
 
 
 def matching_targets(model: Any, candidates: list[str]) -> list[str]:
@@ -1226,19 +1512,99 @@ def load_or_encode_latents(vae: Any, path: Path, device: Any):
 def release_device_cache(device: Any) -> None:
     import torch
 
-    if getattr(device, 'type', None) == 'mps' and hasattr(torch, 'mps'):
+    if device_kind(device) == MPS_DEVICE and hasattr(torch, 'mps'):
         torch.mps.empty_cache()
+
+
+class UncachedPromptError(KeyError):
+    def __init__(self, prompt: str) -> None:
+        super().__init__(f'no cached text_encoder_2 output for prompt {prompt!r}')
+        self.prompt = prompt
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
+@dataclass(frozen=True)
+class SecondaryEmbedding:
+    hidden: Any
+    pooled: Any
+
+
+@dataclass(frozen=True)
+class PromptCache:
+    embeddings: dict[str, SecondaryEmbedding]
+
+    def __len__(self) -> int:
+        return len(self.embeddings)
+
+    def lookup(self, prompt: str, device: Any) -> tuple[Any, Any]:
+        embedding = self.embeddings.get(prompt)
+        if embedding is None:
+            raise UncachedPromptError(prompt)
+        return embedding.hidden.to(device, copy=True), embedding.pooled.to(device, copy=True)
+
+
+def training_prompts(
+    instance_captions: list[str],
+    class_prompt: str,
+    class_captions: list[str],
+) -> list[str]:
+    return list(dict.fromkeys([*instance_captions, class_prompt, *class_captions]))
+
+
+def encode_secondary(
+    prompt: str,
+    tokenizer_2: Any,
+    text_encoder_2: Any,
+    device: Any,
+) -> tuple[Any, Any]:
+    import torch
+
+    tokens_2 = tokenizer_2(
+        prompt,
+        padding='max_length',
+        max_length=tokenizer_2.model_max_length,
+        truncation=True,
+        return_tensors='pt',
+    )
+    ids_2 = tokens_2.input_ids.to(device)
+    with torch.no_grad():
+        output_2 = text_encoder_2(ids_2, output_hidden_states=True)
+    pooled = getattr(output_2, 'text_embeds', None)
+    if pooled is None:
+        pooled = output_2[0]
+    return output_2.hidden_states[-2], pooled
+
+
+def cache_secondary_embeddings(
+    prompts: list[str],
+    tokenizer_2: Any,
+    text_encoder_2: Any,
+    device: Any,
+) -> PromptCache:
+    """Encode every prompt the loop can request once on the device, then park CLIP-G on the host.
+
+    CLIP-G is frozen and in eval mode, so its output depends only on the prompt and draws no
+    random numbers; an uncached prompt raises because a host forward differs bitwise from Metal.
+    """
+    embeddings: dict[str, SecondaryEmbedding] = {}
+    for prompt in dict.fromkeys(prompts):
+        hidden, pooled = encode_secondary(prompt, tokenizer_2, text_encoder_2, device)
+        embeddings[prompt] = SecondaryEmbedding(hidden.detach().cpu(), pooled.detach().cpu())
+    text_encoder_2.to(HOST_DEVICE)
+    release_device_cache(device)
+    return PromptCache(embeddings)
 
 
 def encode_prompt(
     prompt: str,
     tokenizer: Any,
-    tokenizer_2: Any,
     text_encoder: Any,
-    text_encoder_2: Any,
+    secondary: PromptCache,
     device: Any,
     train_text_encoder: bool,
-):
+) -> tuple[Any, Any]:
     import torch
 
     tokens = tokenizer(
@@ -1248,27 +1614,14 @@ def encode_prompt(
         truncation=True,
         return_tensors='pt',
     )
-    tokens_2 = tokenizer_2(
-        prompt,
-        padding='max_length',
-        max_length=tokenizer_2.model_max_length,
-        truncation=True,
-        return_tensors='pt',
-    )
     ids = tokens.input_ids.to(device)
-    ids_2 = tokens_2.input_ids.to(device)
     if train_text_encoder:
         output_1 = text_encoder(ids, output_hidden_states=True)
     else:
         with torch.no_grad():
             output_1 = text_encoder(ids, output_hidden_states=True)
-    with torch.no_grad():
-        output_2 = text_encoder_2(ids_2, output_hidden_states=True)
     hidden_1 = output_1.hidden_states[-2]
-    hidden_2 = output_2.hidden_states[-2]
-    pooled = getattr(output_2, 'text_embeds', None)
-    if pooled is None:
-        pooled = output_2[0]
+    hidden_2, pooled = secondary.lookup(prompt, device)
     return torch.cat([hidden_1, hidden_2], dim=-1), pooled
 
 
@@ -1548,10 +1901,10 @@ def apply_rng_state(
     import torch
 
     if payload.get('torch_rng') is not None:
-        torch.set_rng_state(payload['torch_rng'])
+        torch.set_rng_state(payload['torch_rng'].cpu())
     if payload.get('torch_mps_rng') is not None and hasattr(torch, 'mps'):
         try:
-            torch.mps.set_rng_state(payload['torch_mps_rng'])
+            torch.mps.set_rng_state(payload['torch_mps_rng'].cpu())
         except (RuntimeError, AttributeError):
             pass
 
@@ -1601,6 +1954,26 @@ def save_snapshot(
     os.replace(temporary, path)
 
 
+def clone_host_tensors(values: dict[str, Any]) -> None:
+    import torch
+
+    for key, value in list(values.items()):
+        if isinstance(value, torch.Tensor) and value.device.type == HOST_DEVICE:
+            values[key] = value.clone()
+
+
+def release_snapshot_storage(optimizer: Any) -> None:
+    """Copy the optimizer's host tensors out of the memory-mapped snapshot.
+
+    load_state_dict leaves tensors that stay on the host, such as AdamW's step counters, as
+    views of the mapping, which would keep a replaced latest.pt alive for the whole run.
+    """
+    for state in optimizer.state.values():
+        clone_host_tensors(state)
+    for group in optimizer.param_groups:
+        clone_host_tensors(group)
+
+
 def restore_snapshot(
     path: Path,
     *,
@@ -1612,6 +1985,46 @@ def restore_snapshot(
     token_id: int | None = None,
     sample_rng: random.Random | None = None,
     dropout_rng: random.Random | None = None,
+    host_moments: bool = False,
+) -> tuple[int, float, int | None]:
+    """Restore a snapshot; with host_moments the optimizer state never lands on the device.
+
+    load_state_dict casts every moment onto its parameter's device, so the trained modules wait
+    on the host while it runs and go back to the device afterwards as the same parameters.
+    """
+    if host_moments:
+        unet.to(HOST_DEVICE)
+        text_encoder.to(HOST_DEVICE)
+    try:
+        return load_snapshot(
+            path,
+            method=method,
+            device=HOST_DEVICE if host_moments else device,
+            optimizer=optimizer,
+            unet=unet,
+            text_encoder=text_encoder,
+            token_id=token_id,
+            sample_rng=sample_rng,
+            dropout_rng=dropout_rng,
+        )
+    finally:
+        if host_moments:
+            unet.to(device)
+            text_encoder.to(device)
+            release_device_cache(device)
+
+
+def load_snapshot(
+    path: Path,
+    *,
+    method: str,
+    device: Any,
+    optimizer: Any,
+    unet: Any,
+    text_encoder: Any,
+    token_id: int | None,
+    sample_rng: random.Random | None,
+    dropout_rng: random.Random | None,
 ) -> tuple[int, float, int | None]:
     import torch
 
@@ -1621,9 +2034,9 @@ def restore_snapshot(
         from peft import set_peft_model_state_dict
 
     try:
-        payload = torch.load(path, map_location=device, weights_only=False)
+        payload = torch.load(path, map_location=HOST_DEVICE, mmap=True, weights_only=False)
     except TypeError:
-        payload = torch.load(path, map_location=device)
+        payload = torch.load(path, map_location=HOST_DEVICE)
     if method in ADAPTER_METHODS:
         set_peft_model_state_dict(unet, payload['unet_lora'])
         if 'text_encoder_lora' in payload:
@@ -1638,6 +2051,7 @@ def restore_snapshot(
         unet.load_state_dict(payload['unet'])
         text_encoder.load_state_dict(payload['text_encoder'])
     optimizer.load_state_dict(payload['optimizer'])
+    release_snapshot_storage(optimizer)
     apply_rng_state(payload, sample_rng=sample_rng, dropout_rng=dropout_rng)
     return (
         int(payload['step']),
@@ -1678,6 +2092,26 @@ def start_latest_save(path: Path, **kwargs: Any) -> None:
         thread.start()
 
 
+@dataclass
+class Cadence:
+    interval: float
+    clock: Callable[[], float] = time.monotonic
+    marked: float | None = None
+
+    def due(self) -> bool:
+        return self.marked is None or self.clock() - self.marked >= self.interval
+
+    def mark(self) -> None:
+        self.marked = self.clock()
+
+
+def latest_interval(config: dict[str, Any]) -> float:
+    interval = float(config.get('latest_interval_seconds') or 0)
+    if not math.isfinite(interval):
+        raise ValueError(f'latest_interval_seconds must be finite, got {interval!r}')
+    return max(0.0, interval)
+
+
 def persist_training_step(
     checkpoint_dir: Path,
     job_dir: Path,
@@ -1701,6 +2135,7 @@ def persist_training_step(
     device: Any,
     config: dict[str, Any],
     progress: Progress,
+    cadence: Cadence | None = None,
 ) -> None:
     latest = latest_snapshot_file(checkpoint_dir)
     numbered = bool(every) and (step % every == 0 or step == total)
@@ -1717,11 +2152,19 @@ def persist_training_step(
         'sample_rng': sample_rng,
         'dropout_rng': dropout_rng,
     }
-    if method == 'finetune' and device_kind(device) == 'cuda' and not numbered:
-        start_latest_save(latest, **snapshot)
-    else:
-        wait_for_latest_save()
+    if cadence is None:
+        cadence = Cadence(0)
+    if device_kind(device) == CUDA_DEVICE:
+        if method == FINETUNE_METHOD and not numbered:
+            start_latest_save(latest, **snapshot)
+        else:
+            wait_for_latest_save()
+            save_snapshot(latest, **snapshot)
+        job[TRANSIENT_ATTEMPTS_KEY] = 0
+    elif numbered or step == total or cadence.due():
+        cadence.mark()
         save_snapshot(latest, **snapshot)
+        job[TRANSIENT_ATTEMPTS_KEY] = 0
     job['step'] = step
     job['total'] = total
     write_job(job_dir, job)
@@ -1761,11 +2204,12 @@ def render_previews(
     size = int(config.get('resolution') or 1024)
     paths: list[str] = []
     was_training = pipeline.unet.training
-    pipeline.unet.eval()
-    if hasattr(pipeline, 'text_encoder') and pipeline.text_encoder is not None:
-        pipeline.text_encoder.eval()
-    pipeline.vae.to(device)
     try:
+        pipeline.unet.eval()
+        if hasattr(pipeline, 'text_encoder') and pipeline.text_encoder is not None:
+            pipeline.text_encoder.eval()
+        pipeline.vae.to(device)
+        pipeline.text_encoder_2.to(device)
         with torch.inference_mode():
             for index, (seed, prompt) in enumerate(specs):
                 generator = torch.Generator(device='cpu').manual_seed(int(seed))
@@ -1781,7 +2225,8 @@ def render_previews(
                 image.save(Path(job_dir) / relative)
                 paths.append(relative)
     finally:
-        pipeline.vae.to('cpu')
+        pipeline.vae.to(HOST_DEVICE)
+        pipeline.text_encoder_2.to(HOST_DEVICE)
         if was_training:
             pipeline.unet.train()
             if hasattr(pipeline, 'text_encoder') and pipeline.text_encoder is not None:
@@ -1961,6 +2406,10 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         ]
     groups = unique_param_groups([group for group in groups if group['params']])
     optimizer = make_optimizer(method, groups, config)
+    kind = optimizer_kind(method, config)
+    offload = offloads_moments(device, method, kind)
+    print(f'optimizer={kind} offload_moments={offload}', flush=True)
+    assert_metal_working_set(device, [unet, text_encoder, text_encoder_2], offload)
     pipeline.unet = unet
     pipeline.text_encoder = text_encoder
     unet.to(device)
@@ -1997,11 +2446,23 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         encoded_class.append(load_or_encode_latents(vae, path, device) + (caption, None))
         encoded += 1
         progress.emit('encoding', phase_step=encoded, phase_total=encode_total)
-    vae.to('cpu')
+    vae.to(HOST_DEVICE)
     release_device_cache(device)
+    secondary = cache_secondary_embeddings(
+        training_prompts(
+            [frame['caption'] for frame in frames],
+            class_prompt,
+            [caption for _, caption in class_pairs_list],
+        ),
+        tokenizer_2,
+        text_encoder_2,
+        device,
+    )
+    print(f'cached text_encoder_2 outputs for {len(secondary)} prompts', flush=True)
 
     every = int(config.get('checkpoint_every') or 0)
     keep = int(config.get('keep_snapshots') or 2)
+    cadence = Cadence(latest_interval(config))
     dropout = float(config.get('caption_dropout') or 0.0)
     mask_threshold = float(
         config.get('mask_threshold')
@@ -2029,9 +2490,13 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
             token_id=token_id,
             sample_rng=sample_rng,
             dropout_rng=dropout_rng,
+            host_moments=offload,
         )
         resume_step = start_step
         start_step += 1
+        job['step'] = resume_step
+        write_job(job_dir, job)
+        cadence.mark()
         print(f'resume from step {resume_step}', flush=True)
         progress.emit(
             'training',
@@ -2043,95 +2508,101 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
 
     weights = pose_sample_weights(frames, config)
     te_trainable = train_text_encoder or method == 'pivotal'
-    for step in range(start_step, total + 1):
-        optimizer.zero_grad(set_to_none=True)
-        index = weighted_index(weights, sample_rng)
-        latents, height, width, caption, mask = encoded_instance[index]
-        caption = drop_caption(caption, class_prompt, dropout, dropout_rng)
-        prompt_embeds, pooled = encode_prompt(
-            caption,
-            tokenizer,
-            tokenizer_2,
-            text_encoder,
-            text_encoder_2,
-            device,
-            te_trainable,
-        )
-        loss = prediction_loss(
-            unet,
-            scheduler,
-            latents,
-            prompt_embeds,
-            pooled,
-            height,
-            width,
-            device,
-            mask=mask,
-            noise_offset=noise_offset,
-            min_snr_gamma=min_snr_gamma,
-            mask_threshold=mask_threshold,
-        )
-        if encoded_class:
-            class_index = (step - 1) % len(encoded_class)
-            class_latents, class_height, class_width, class_caption, _class_mask = encoded_class[
-                class_index
-            ]
-            class_embeds, class_pooled = encode_prompt(
-                class_caption,
+    with StepInBackward(optimizer, offload, offload) as stepper:
+        for step in range(start_step, total + 1):
+            optimizer.zero_grad(set_to_none=True)
+            index = weighted_index(weights, sample_rng)
+            latents, height, width, caption, mask = encoded_instance[index]
+            caption = drop_caption(caption, class_prompt, dropout, dropout_rng)
+            prompt_embeds, pooled = encode_prompt(
+                caption,
                 tokenizer,
-                tokenizer_2,
                 text_encoder,
-                text_encoder_2,
+                secondary,
                 device,
                 te_trainable,
             )
-            loss = loss + prior_weight * prediction_loss(
-                unet,
-                scheduler,
-                class_latents,
-                class_embeds,
-                class_pooled,
-                class_height,
-                class_width,
-                device,
-                noise_offset=noise_offset,
-                min_snr_gamma=min_snr_gamma,
-                mask_threshold=mask_threshold,
+            parts = [
+                prediction_loss(
+                    unet,
+                    scheduler,
+                    latents,
+                    prompt_embeds,
+                    pooled,
+                    height,
+                    width,
+                    device,
+                    mask=mask,
+                    noise_offset=noise_offset,
+                    min_snr_gamma=min_snr_gamma,
+                    mask_threshold=mask_threshold,
+                )
+            ]
+            if encoded_class:
+                class_index = (step - 1) % len(encoded_class)
+                class_latents, class_height, class_width, class_caption, _class_mask = (
+                    encoded_class[class_index]
+                )
+                class_embeds, class_pooled = encode_prompt(
+                    class_caption,
+                    tokenizer,
+                    text_encoder,
+                    secondary,
+                    device,
+                    te_trainable,
+                )
+                parts.append(
+                    prior_weight
+                    * prediction_loss(
+                        unet,
+                        scheduler,
+                        class_latents,
+                        class_embeds,
+                        class_pooled,
+                        class_height,
+                        class_width,
+                        device,
+                        noise_offset=noise_offset,
+                        min_snr_gamma=min_snr_gamma,
+                        mask_threshold=mask_threshold,
+                    )
+                )
+            losses = combine_losses(parts)
+            stepper.backward(losses)
+            stepper.step()
+            if original_embeddings is not None and token_id is not None:
+                restore_frozen_embeddings(text_encoder, original_embeddings, token_id)
+            value = float(losses.total.detach().cpu())
+            if value < best_loss:
+                best_loss = value
+                best_step = step
+            persist_training_step(
+                checkpoint_dir,
+                job_dir,
+                job,
+                method=method,
+                step=step,
+                total=total,
+                loss=value,
+                best_loss=best_loss,
+                best_step=best_step,
+                optimizer=optimizer,
+                unet=unet,
+                text_encoder=text_encoder,
+                token_id=token_id,
+                sample_rng=sample_rng,
+                dropout_rng=dropout_rng,
+                every=every,
+                keep=keep,
+                pipeline=pipeline,
+                device=device,
+                config=config,
+                progress=progress,
+                cadence=cadence,
             )
-        loss.backward()
-        optimizer.step()
-        if original_embeddings is not None and token_id is not None:
-            restore_frozen_embeddings(text_encoder, original_embeddings, token_id)
-        value = float(loss.detach().cpu())
-        if value < best_loss:
-            best_loss = value
-            best_step = step
-        persist_training_step(
-            checkpoint_dir,
-            job_dir,
-            job,
-            method=method,
-            step=step,
-            total=total,
-            loss=value,
-            best_loss=best_loss,
-            best_step=best_step,
-            optimizer=optimizer,
-            unet=unet,
-            text_encoder=text_encoder,
-            token_id=token_id,
-            sample_rng=sample_rng,
-            dropout_rng=dropout_rng,
-            every=every,
-            keep=keep,
-            pipeline=pipeline,
-            device=device,
-            config=config,
-            progress=progress,
-        )
-        progress.emit('training', step=step, phase_step=step, phase_total=total, loss=value)
-        if step == start_step or step % 10 == 0 or step == total:
-            print(f'step {step}/{total} loss={value:.4f}', flush=True)
+            progress.emit('training', step=step, phase_step=step, phase_total=total, loss=value)
+            if step == start_step or step % 10 == 0 or step == total:
+                print(f'step {step}/{total} loss={value:.4f}', flush=True)
 
     wait_for_latest_save()
     progress.emit('publishing', step=total, phase_step=0, phase_total=1)

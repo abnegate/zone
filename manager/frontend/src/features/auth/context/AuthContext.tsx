@@ -69,6 +69,15 @@ function decodeJwt(token: string): JwtPayload | null {
   }
 }
 
+function storedUser(json: string | null): User | null {
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as User;
+  } catch {
+    return null;
+  }
+}
+
 // Check if token is expired (with 30 second buffer)
 function isTokenExpired(token: string): boolean {
   const payload = decodeJwt(token);
@@ -93,8 +102,7 @@ export function AuthProvider({
   const [state, setState] = useState<AuthState>(() => {
     const accessToken = storage.getItem(ACCESS_TOKEN_KEY);
     const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
-    const userJson = storage.getItem(USER_KEY);
-    const user = userJson ? JSON.parse(userJson) : null;
+    const user = storedUser(storage.getItem(USER_KEY));
     const payload = accessToken ? decodeJwt(accessToken) : null;
 
     // Set client token synchronously to avoid race condition where

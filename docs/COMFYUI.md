@@ -533,6 +533,23 @@ Save a Runpod API key under Workspace or organization AI settings; GET returns
 deletes the pod when the job ends. A card below the VRAM floor fails closed
 instead of dropping precision.
 
+On Apple silicon the worker caps Metal at its recommended working set before
+torch loads (`PYTORCH_MPS_HIGH_WATERMARK_RATIO=1.0`, low watermark 0.8, unless
+already set), so an overcommit raises "MPS backend out of memory" instead of
+hanging macOS; do not raise or disable it. A Metal fine-tune refuses to start
+when `torch.mps.recommended_max_memory` is below the same 40 GiB floor CUDA
+uses, so it needs a 64 GB Mac. Once the model loads, every Metal job also
+checks a lower bound of its working set (each trainable weight with its
+gradient and two optimizer moments, plus the frozen weights, without
+activations) and fails closed with both figures.
+An out-of-memory crash is retried from the last snapshot; three in a row without
+a new snapshot fail the job, and a Metal one says to quit other GPU apps or
+use Runpod. On Metal an AdamW fine-tune steps each parameter as backward
+finishes its gradient and keeps the AdamW moments in host memory, even while
+resuming, which costs seconds a step but keeps it under the cap. The moments
+still use the same unified RAM, so the Mac must have about 20 GiB to spare. CLIP-G outputs are encoded once and
+the encoder waits on the host until previews.
+
 Before the worker marks a queued job `running` it creates the empty file
 `claimed` in the job directory with exclusive create. Zone creates the same
 file before it gives up on a job no worker picked up, so only whichever side
@@ -570,7 +587,12 @@ describes. A trainer left on the scripts from before `abnegate-comfy`
 publishes into `loras/` itself, and every run it trains fails to publish.
 
 `COMFYUI_TRAIN_TIMEOUT_SECONDS` does not apply to the host worker. Person LoRA
-is hours; fine-tune is unbounded and resumes from snapshots.
+is hours; fine-tune is unbounded and resumes from snapshots. On Metal and CPU
+the rolling `latest.pt` is written at most once per `latest_interval_seconds`
+(600 in `comfyui/train_sdxl_config.json`), plus the first step of a fresh run,
+every `checkpoint_every` snapshot and the final step, so a crash resumes up to
+one interval back; CUDA still writes it every step. Numbered snapshots are hard
+links of `latest.pt`.
 
 Each job directory under `models/.zone-train/` is readable only by its owner
 (`0700`), and `runpod.key` inside it only by its owner too (`0600`). Docker

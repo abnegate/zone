@@ -1,41 +1,87 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defineConfig, type Plugin } from 'vite';
+import { createServer, defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwind from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
-import {
-  DEFERRED_STYLESHEET_ATTRIBUTE,
-  FEATURE_STYLESHEET_ATTRIBUTE,
-} from './src/shared/stylesheet';
+import { SERVICE_WORKER_FILE } from './src/shared/serviceWorker';
+import { FEATURE_STYLESHEET_ATTRIBUTE } from './src/shared/stylesheet';
 
 const frontendRoot = fileURLToPath(new URL('.', import.meta.url));
 const uiSrc = path.resolve(frontendRoot, '../../packages/ui/src');
 
-const STYLESHEET_COUNT = 3;
+const sourceAliases = {
+  '@zone/ui/styles/globals.css': path.join(uiSrc, 'styles/globals.css'),
+  '@zone/ui/styles/variables': path.join(uiSrc, 'styles/variables.css'),
+  '@zone/ui/styles': path.join(uiSrc, 'styles/index.css'),
+  '@zone/ui': path.join(uiSrc, 'index.ts'),
+};
 
-function deferStylesheets(): Plugin {
+const SHARED_STYLESHEET = 'styles-shared';
+const SIGNED_OUT_STYLESHEET = 'styles-signed-out';
+const FEATURE_STYLESHEET = 'styles-features';
+const STYLESHEETS = [SIGNED_OUT_STYLESHEET, FEATURE_STYLESHEET, SHARED_STYLESHEET];
+const SHELL_MARKER = '<!--signed-out-shell-->';
+const APP_CHUNK = 'app';
+const RENDERER_CHUNK = 'renderer';
+
+function deferFeatureStylesheet(): Plugin {
   return {
-    name: 'zone:defer-stylesheets',
+    name: 'zone:defer-feature-stylesheet',
     apply: 'build',
     transformIndexHtml: {
       order: 'post',
       handler: (html) => {
-        let rewritten = 0;
+        const found: string[] = [];
+        const names = STYLESHEETS.join('|');
         const output = html.replace(
-          /<link rel="stylesheet" crossorigin href="(\/assets\/styles-[^"]+\.css)">/g,
-          (_link, href: string) => {
-            rewritten += 1;
-            return href.includes('styles-features-')
+          new RegExp(`<link rel="stylesheet" crossorigin href="(/assets/(${names})-[^"/]+\\.css)">`, 'g'),
+          (link, href: string, stylesheet: string) => {
+            found.push(stylesheet);
+            return stylesheet === FEATURE_STYLESHEET
               ? `<link rel="stylesheet" crossorigin ${FEATURE_STYLESHEET_ATTRIBUTE}="${href}">`
-              : `<link rel="stylesheet" crossorigin href="${href}" media="print" onload="this.media='all'" onerror="this.media='all'" ${DEFERRED_STYLESHEET_ATTRIBUTE}>`;
+              : link;
           }
         );
-        if (rewritten !== STYLESHEET_COUNT) {
-          throw new Error(`Deferred ${rewritten} of ${STYLESHEET_COUNT} stylesheets`);
+        const links = html.match(/<link rel="stylesheet"/g)?.length ?? 0;
+        if (found.join() !== STYLESHEETS.join() || links !== STYLESHEETS.length) {
+          throw new Error(
+            `Found ${links} stylesheets (${found.join(', ')}), expected ${STYLESHEETS.join(', ')}`
+          );
         }
         return output;
+      },
+    },
+  };
+}
+
+function signedOutShell(): Plugin {
+  return {
+    name: 'zone:signed-out-shell',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'post',
+      handler: async (html) => {
+        if (!html.includes(SHELL_MARKER)) {
+          throw new Error('index.html has no signed-out shell marker');
+        }
+        const server = await createServer({
+          configFile: false,
+          root: frontendRoot,
+          logLevel: 'error',
+          appType: 'custom',
+          resolve: { alias: sourceAliases },
+          server: { middlewareMode: true, hmr: false, ws: false },
+        });
+        try {
+          const { prerender } = (await server.ssrLoadModule('/src/shell/prerender.tsx')) as {
+            prerender: () => string;
+          };
+          return html.replace(SHELL_MARKER, prerender());
+        } finally {
+          await server.close();
+        }
       },
     },
   };
@@ -53,11 +99,13 @@ export default defineConfig(({ command }) => {
     plugins: [
       react(),
       tailwind(),
-      deferStylesheets(),
+      deferFeatureStylesheet(),
+      signedOutShell(),
       VitePWA({
         disable: process.env.VITE_DISABLE_PWA === '1',
         registerType: 'autoUpdate',
-        injectRegister: 'script-defer',
+        injectRegister: false,
+        filename: SERVICE_WORKER_FILE,
         includeAssets: ['favicon.ico', 'logo192.png', 'logo512.png'],
         manifest: {
           name: 'Zone Dashboard',
@@ -82,14 +130,7 @@ export default defineConfig(({ command }) => {
     ],
     resolve:
       command === 'serve'
-        ? {
-            alias: {
-              '@zone/ui/styles/globals.css': path.join(uiSrc, 'styles/globals.css'),
-              '@zone/ui/styles/variables': path.join(uiSrc, 'styles/variables.css'),
-              '@zone/ui/styles': path.join(uiSrc, 'styles/index.css'),
-              '@zone/ui': path.join(uiSrc, 'index.ts'),
-            },
-          }
+        ? { alias: sourceAliases }
         : {
             alias: [{ find: /^@zone\/ui$/, replacement: path.join(uiSrc, 'index.ts') }],
           },
@@ -137,19 +178,29 @@ export default defineConfig(({ command }) => {
         output: {
           codeSplitting: {
             groups: [
-              { name: 'runtime', test: /preload-helper|rolldown:runtime|staleChunk|\/src\/routes\.ts|\/api\/session\.ts|\/shared\/stylesheet\.ts|\/shared\/lastPath\.ts/, priority: 4 },
+              { name: 'runtime', test: /preload-helper|rolldown:runtime|staleChunk|\/src\/routes\.ts|\/api\/session\.ts|\/shared\/stylesheet\.ts|\/shared\/lastPath\.ts|\/shell\/(paint|release)\.ts/, priority: 4 },
               {
-                name: 'styles-shared',
+                name: SHARED_STYLESHEET,
                 test: /(\/src\/App\.css|\/styles\/globals\.css)($|\?)/,
                 priority: 3,
               },
               {
-                name: 'styles-signed-out',
+                name: SIGNED_OUT_STYLESHEET,
                 test: /(\/ZoneLogo\.css|\/pages\/AuthPage\.css|\/ResendVerificationButton\.css|\/VerificationPendingBanner\.css|\/InvitationAcceptPage\.css)($|\?)/,
                 priority: 3,
               },
-              { name: 'styles-features', test: /\.css($|\?)/, priority: 2 },
-              { name: 'boot', test: /\/src\/main\.tsx$/, priority: 1 },
+              { name: FEATURE_STYLESHEET, test: /\.css($|\?)/, priority: 2 },
+              {
+                name: RENDERER_CHUNK,
+                test: /\/src\/renderer\.ts$|\/node_modules\/(\.bun\/[^/]+\/node_modules\/)?(react-dom\/(client\.js|cjs\/react-dom-client\.)|scheduler\/)/,
+                priority: 2,
+              },
+              {
+                name: 'react',
+                test: /\/node_modules\/(\.bun\/[^/]+\/node_modules\/)?(react\/|react-dom\/(index\.js|cjs\/react-dom\.))/,
+                priority: 3,
+              },
+              { name: APP_CHUNK, test: /\/src\/main\.tsx$/, priority: 1 },
             ],
           },
         },

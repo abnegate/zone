@@ -23,9 +23,13 @@ function verifyOnce(token: string): Promise<{ message: string }> {
 export default function EmailVerificationPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
-  const [message, setMessage] = useState('');
   const token = searchParams.get('token');
+  const [status, setStatus] = useState<'loading' | 'success' | 'error'>(() =>
+    isValidTokenFormat(token) ? 'loading' : 'error'
+  );
+  const [message, setMessage] = useState(() =>
+    !token ? 'No token provided' : isValidTokenFormat(token) ? '' : 'Invalid token format'
+  );
 
   useEffect(() => {
     if (!token) {
