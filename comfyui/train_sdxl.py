@@ -2205,12 +2205,12 @@ def render_previews(
     size = int(config.get('resolution') or 1024)
     paths: list[str] = []
     was_training = pipeline.unet.training
-    pipeline.unet.eval()
-    if hasattr(pipeline, 'text_encoder') and pipeline.text_encoder is not None:
-        pipeline.text_encoder.eval()
-    pipeline.vae.to(device)
-    pipeline.text_encoder_2.to(device)
     try:
+        pipeline.unet.eval()
+        if hasattr(pipeline, 'text_encoder') and pipeline.text_encoder is not None:
+            pipeline.text_encoder.eval()
+        pipeline.vae.to(device)
+        pipeline.text_encoder_2.to(device)
         with torch.inference_mode():
             for index, (seed, prompt) in enumerate(specs):
                 generator = torch.Generator(device='cpu').manual_seed(int(seed))

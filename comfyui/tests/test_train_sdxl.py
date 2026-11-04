@@ -2415,7 +2415,7 @@ class PromptCacheTests(unittest.TestCase):
 
         text_encoder_2.side_effect = forward
         text_encoder_2.to.side_effect = lambda device: events.append(f'to:{device}')
-        device = torch.device('cpu')
+        device = torch.device('meta')
         with mock.patch.object(
             train_sdxl,
             'release_device_cache',
@@ -2446,6 +2446,19 @@ class PromptCacheTests(unittest.TestCase):
         self.assertEqual(
             pipeline.text_encoder_2.to.call_args_list, [mock.call('mps'), mock.call('cpu')]
         )
+
+    def test_previews_that_cannot_reach_the_device_restore_every_model(self) -> None:
+        pipeline = mock.MagicMock()
+        pipeline.unet.training = True
+        pipeline.text_encoder_2.to.side_effect = [RuntimeError('MPS backend out of memory'), None]
+        with self.assertRaisesRegex(RuntimeError, 'MPS backend out of memory'):
+            self.render_previews(pipeline)
+        self.assertEqual(pipeline.vae.to.call_args_list, [mock.call('mps'), mock.call('cpu')])
+        self.assertEqual(
+            pipeline.text_encoder_2.to.call_args_list, [mock.call('mps'), mock.call('cpu')]
+        )
+        pipeline.unet.train.assert_called_once_with()
+        pipeline.text_encoder.train.assert_called_once_with()
 
     def test_failed_previews_still_return_text_encoder_2_to_the_host(self) -> None:
         pipeline = mock.MagicMock(side_effect=RuntimeError('out of memory'))
