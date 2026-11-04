@@ -73,8 +73,32 @@ impl Candidate {
         })
     }
 
+    /// Where this candidate starts a chat. All of it that touches a disk runs off the runtime,
+    /// where a stalled mount holds up one thread and not every workspace's turns, and the caller's
+    /// Stop still works.
     pub(super) async fn start(self, state: &AppState, workspace: Uuid, search: Search) -> Start {
-        let config = state.config();
+        let directories = match &self {
+            Self::Folder(_) => Vec::new(),
+            Self::Repository { .. } => folders(state, workspace).await,
+        };
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            self.resolve(state.config(), workspace, &directories, search)
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%workspace, %error, "Could not look for the project's directory");
+            Start::Elsewhere
+        })
+    }
+
+    fn resolve(
+        self,
+        config: &Config,
+        workspace: Uuid,
+        directories: &[String],
+        search: Search,
+    ) -> Start {
         match self {
             Self::Folder(path) => match folder(&config.host_mounts, &path) {
                 Some(directory) if within(&directory, &config.clones) => {
@@ -89,15 +113,13 @@ impl Candidate {
                 )),
             },
             Self::Repository { origin, clone } => {
-                let mounted = mounted(state, workspace).await;
-                let found = {
-                    let (origin, clones) = (origin.clone(), config.clones.clone());
-                    tokio::task::spawn_blocking(move || {
-                        scan::find(workspace, &mounted, &clones, &origin, search)
-                    })
-                    .await
-                };
-                if let Ok(Some(directory)) = found {
+                let mounted: Vec<PathBuf> = directories
+                    .iter()
+                    .filter_map(|host| config.host_mounts.mapped_directory(host).ok())
+                    .collect();
+                if let Some(directory) =
+                    scan::find(workspace, &mounted, &config.clones, &origin, search)
+                {
                     return usable(config, directory);
                 }
                 let Some((url, token)) = clone else {
@@ -146,20 +168,14 @@ fn folder(mounts: &HostMounts, path: &str) -> Option<PathBuf> {
     })
 }
 
-/// The workspace's folders as this process opens them, those that exist.
-async fn mounted(state: &AppState, workspace: Uuid) -> Vec<PathBuf> {
-    let directories = match workspace_host_directories::list(state.db(), workspace).await {
-        Ok(directories) => directories,
-        Err(error) => {
+/// The host paths of the workspace's folders.
+async fn folders(state: &AppState, workspace: Uuid) -> Vec<String> {
+    workspace_host_directories::list(state.db(), workspace)
+        .await
+        .unwrap_or_else(|error| {
             tracing::warn!(%workspace, %error, "Could not read the workspace's folders");
-            return Vec::new();
-        }
-    };
-    let mounts = &state.config().host_mounts;
-    directories
-        .iter()
-        .filter_map(|host| mounts.mapped_directory(host).ok())
-        .collect()
+            Vec::new()
+        })
 }
 
 /// `directory`, unless it lies in the agents' state, which every chat's tools are denied, or

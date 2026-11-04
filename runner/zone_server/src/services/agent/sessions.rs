@@ -99,7 +99,8 @@ pub fn carry(
 ///
 /// A handover copies a session and leaves the copy it left behind, so a home can hold an old one,
 /// even in the folder `work` names. The newest is the session, and the rest are removed: resuming
-/// an old one would lose every turn since without anything failing.
+/// an old one would lose every turn since without anything failing. The folder claude keeps beside
+/// a transcript stays where it is, since the transcript cites what is in it by absolute path.
 pub fn relocate(home: &Path, agent: AgentKind, work: &Path, id: &str) -> Result<(), Error> {
     if agent == AgentKind::Codex {
         return Ok(());
@@ -118,7 +119,6 @@ pub fn relocate(home: &Path, agent: AgentKind, work: &Path, id: &str) -> Result<
                 path: path.clone(),
                 source,
             })?;
-        carry_beside(&source, &path);
     }
     for (copy, _) in copies(home, id) {
         let copy = home.join(copy);
@@ -127,15 +127,6 @@ pub fn relocate(home: &Path, agent: AgentKind, work: &Path, id: &str) -> Result<
         }
     }
     Ok(())
-}
-
-/// Moves the folder claude keeps beside a transcript, of what the session's tools wrote, along
-/// with it. A session resumes without one, so one that can't be moved is left where it is.
-fn carry_beside(from: &Path, to: &Path) {
-    let (beside, destination) = (from.with_extension(""), to.with_extension(""));
-    if real(&beside) && !destination.exists() {
-        let _ = fs::rename(beside, destination);
-    }
 }
 
 /// Whether two paths are one file, which two spellings of a path are on a filesystem that ignores
@@ -707,41 +698,6 @@ mod tests {
             TRANSCRIPT,
             "the only copy of the session is gone"
         );
-    }
-
-    /// Claude keeps what a session's tools wrote in a folder beside its transcript.
-    #[test]
-    fn a_moved_session_takes_the_folder_beside_it() {
-        let homes = Homes::new();
-        let left = homes.claude();
-        homes.write(&left);
-        let beside = homes
-            .from
-            .path()
-            .join(left.parent().unwrap())
-            .join(CLAUDE_ID)
-            .join("tool-results");
-        fs::create_dir_all(&beside).unwrap();
-        fs::write(beside.join("output"), b"output").unwrap();
-        let project = TempDir::new().unwrap();
-
-        relocate(
-            homes.from.path(),
-            AgentKind::Claude,
-            project.path(),
-            CLAUDE_ID,
-        )
-        .unwrap();
-
-        let moved = homes
-            .from
-            .path()
-            .join(PROJECTS)
-            .join(sanitized(&fs::canonicalize(project.path()).unwrap()))
-            .join(CLAUDE_ID)
-            .join("tool-results/output");
-        assert_eq!(fs::read(moved).unwrap(), b"output");
-        assert!(!beside.exists());
     }
 
     #[test]

@@ -650,8 +650,8 @@ their absolute paths as before.
   in the checkout. Each turn walks until it finds one, and then keeps using it while
   it stays in a mounted folder with that `origin`, even if another checkout is added
   later. A preview only uses a checkout a turn already found, so it may name another
-  directory until then. A GitLab source named by a numeric project id has no path to
-  compare, so it starts where any chat does.
+  directory until then. A GitLab source whose numeric project id or host can't be
+  compared starts where any chat does, with no notice.
 - **Cloning**: the clone uses the source's credentials, or the token linked with
   the repository, sent as a header that never reaches the URL, `.git/config`, the
   process list or a log. While it runs the chat shows *Cloning …* and **Stop** ends
@@ -669,8 +669,8 @@ their absolute paths as before.
   be moved, the turn replays the chat in a fresh session.
 - **A project's own configuration**: a Claude turn still runs with
   `--setting-sources ""`, so it loads no `CLAUDE.md`, settings or hooks from the
-  project's directory, though its agent can read those files like any others. Codex
-  has no such switch and may read the directory's `AGENTS.md`.
+  project's directory, though its agent can read those files like any others. Zone
+  gives Codex no equivalent setting, so it may read the directory's `AGENTS.md`.
 - **Codex's sandbox**: under `ZONE_CODEX_SANDBOX=workspace-write`, Codex can write
   only inside the directory it starts in, so other mounted folders are read-only to
   it. The compose default, `danger-full-access`, has no such limit.
@@ -685,8 +685,9 @@ their absolute paths as before.
   the claim is in use.
 - **Description**: Where Zone clones a project's GitHub repository when no folder
   of its workspace holds a checkout, at `<dir>/<workspace id>/<digest of the URL>`.
-  A clone belongs to its workspace, so another workspace's chat never starts in it
-  or finds it, and a source can't name it. That is not a boundary between
+  A clone belongs to its workspace: a walk leaves clones out and a source can't name
+  one, so another workspace's chat is only led to one if that workspace adds it to
+  its **Folders**. That is not a boundary between
   workspaces: chat tools run as the server's user and reach what that user can, so
   an absolute path still reaches another workspace's clone. Two projects of one
   workspace on one repository share a clone. Each workspace's directory is set to
