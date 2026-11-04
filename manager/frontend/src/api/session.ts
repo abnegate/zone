@@ -1,3 +1,6 @@
+export const ACCESS_TOKEN_KEY = 'manager_access_token';
+export const REFRESH_TOKEN_KEY = 'manager_refresh_token';
+
 type EnsureAccessToken = () => Promise<string | null>;
 
 let accessToken: string | null = null;
@@ -17,3 +20,7 @@ export const session = {
     return ensure ? ensure() : Promise.resolve(accessToken);
   },
 };
+
+export function hasStoredSession(storage: Pick<Storage, 'getItem'> = localStorage): boolean {
+  return Boolean(storage.getItem(ACCESS_TOKEN_KEY) || storage.getItem(REFRESH_TOKEN_KEY));
+}

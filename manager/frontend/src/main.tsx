@@ -1,10 +1,11 @@
 import React, { lazy, Suspense, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
-import { persistCurrentPath, restoreLastPath } from './shared/lastPath';
+import { hasStoredSession } from './api/session';
+import { firstRouteLoaded, preloadSignedInRoutes } from './routes';
+import { persistCurrentPath } from './shared/lastPath';
 import { loadFeatureStylesheet, loadFonts, stylesheetsLoaded } from './shared/stylesheet';
 
-restoreLastPath();
 const persist = () => persistCurrentPath();
 (window as Window & { __zonePersistCurrentPath?: () => void }).__zonePersistCurrentPath = persist;
 window.addEventListener('pagehide', persist);
@@ -33,8 +34,11 @@ function AfterFirstPaint() {
   const [painted, setPainted] = useState(false);
   useEffect(() => {
     const timer = setTimeout(() => {
-      loadFonts();
+      if (!signedIn) {
+        loadFonts();
+      }
       void loadFeatureStylesheet();
+      void preloadSignedInRoutes();
       setPainted(true);
     }, AFTER_FIRST_PAINT_DELAY_MILLISECONDS);
     return () => clearTimeout(timer);
@@ -46,8 +50,13 @@ function AfterFirstPaint() {
   ) : null;
 }
 
+const signedIn = hasStoredSession();
+if (signedIn) {
+  loadFonts();
+}
+
 const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
-void stylesheetsLoaded().then(() => {
+void Promise.all([stylesheetsLoaded(), firstRouteLoaded()]).then(() => {
   root.render(
     <React.StrictMode>
       <App />

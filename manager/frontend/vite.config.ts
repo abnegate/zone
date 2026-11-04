@@ -127,7 +127,7 @@ export default defineConfig(({ command }) => {
         output: {
           codeSplitting: {
             groups: [
-              { name: 'runtime', test: /preload-helper|rolldown:runtime|staleChunk/, priority: 4 },
+              { name: 'runtime', test: /preload-helper|rolldown:runtime|staleChunk|\/src\/routes\.ts|\/api\/session\.ts|\/shared\/stylesheet\.ts|\/shared\/lastPath\.ts/, priority: 4 },
               {
                 name: 'styles-shared',
                 test: /(\/src\/App\.css|\/styles\/globals\.css)($|\?)/,

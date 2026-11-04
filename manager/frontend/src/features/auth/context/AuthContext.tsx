@@ -11,7 +11,7 @@ import {
 } from 'react';
 import * as authApi from '../../../api/auth';
 import { RefreshError } from '../../../api/auth';
-import { session } from '../../../api/session';
+import { ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY, session } from '../../../api/session';
 import type { AuthResponse, JwtPayload, LoginRequest, RegisterRequest, User } from '../types';
 
 interface AuthState {
@@ -47,8 +47,6 @@ const RETRY_REFRESH_SECONDS = 75;
 // setTimeout fires a delay above a signed 32-bit millisecond count at once.
 const LONGEST_TIMER_MILLISECONDS = 2_147_483_647;
 
-const ACCESS_TOKEN_KEY = 'manager_access_token';
-const REFRESH_TOKEN_KEY = 'manager_refresh_token';
 const USER_KEY = 'manager_user';
 
 // Decode JWT payload (without verification - that's done server-side)
