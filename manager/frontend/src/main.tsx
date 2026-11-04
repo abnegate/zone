@@ -1,6 +1,5 @@
-import React, { useEffect } from 'react';
+import React, { lazy, Suspense, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import { Toaster } from 'sonner';
 import App from './App';
 import { persistCurrentPath, restoreLastPath } from './shared/lastPath';
 import { loadFeatureStylesheet, loadFonts, stylesheetsLoaded } from './shared/stylesheet';
@@ -26,16 +25,25 @@ if (
   });
 }
 
+const AFTER_FIRST_PAINT_DELAY_MILLISECONDS = 200;
+
+const Toaster = lazy(() => import('sonner').then(({ Toaster }) => ({ default: Toaster })));
+
 function AfterFirstPaint() {
+  const [painted, setPainted] = useState(false);
   useEffect(() => {
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
-        loadFonts();
-        void loadFeatureStylesheet();
-      })
-    );
+    const timer = setTimeout(() => {
+      loadFonts();
+      void loadFeatureStylesheet();
+      setPainted(true);
+    }, AFTER_FIRST_PAINT_DELAY_MILLISECONDS);
+    return () => clearTimeout(timer);
   }, []);
-  return null;
+  return painted ? (
+    <Suspense fallback={null}>
+      <Toaster />
+    </Suspense>
+  ) : null;
 }
 
 const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
@@ -43,7 +51,6 @@ void stylesheetsLoaded().then(() => {
   root.render(
     <React.StrictMode>
       <App />
-      <Toaster />
       <AfterFirstPaint />
     </React.StrictMode>
   );
