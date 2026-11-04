@@ -24,7 +24,7 @@ interface ThemeContextType {
 }
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
-const THEME_STORAGE_KEY = 'manager_theme';
+export const THEME_STORAGE_KEY = 'manager_theme';
 const WORKSPACE_THEME_STORAGE_KEY = 'manager_workspace_theme';
 
 const FONT_MAP: Record<FontFamily, string> = {
