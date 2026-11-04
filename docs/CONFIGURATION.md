@@ -641,30 +641,36 @@ their absolute paths as before.
   source has no directory to give. An inactive source is skipped.
 - **Finding a checkout**: Zone walks each of the workspace's **Folders** in
   order, shallowest first and at most three levels down, skipping hidden folders,
-  `node_modules`, `target`, `vendor` and links. A folder is a checkout of the
-  repository only when its `.git/config` names the repository as `origin`, in any
-  spelling (`https`, `ssh`, `git@host:`, with or without `.git`, in any case). A
-  folder's name, another remote and a linked worktree do not count. The file is
-  read as data, and git is not run in the checkout.
+  `node_modules`, `target`, `vendor`, links and `ZONE_PROJECT_CLONE_DIR`. It doesn't
+  walk inside a checkout, except a mounted folder that is itself another repository.
+  A folder is a checkout of the repository only when its `.git/config` names the
+  repository as `origin`, in any spelling (`https`, `ssh`, `git@host:`, with or
+  without `.git`, in any case). A folder's name, another remote, a linked worktree
+  and an SSH host alias do not count. The file is read as data, and git is not run
+  in the checkout. Each turn walks until it finds one. A preview only uses a
+  checkout a turn already found, so it may name another directory until then.
 - **Cloning**: the clone uses the source's credentials, or the token linked with
   the repository, sent as a header that never reaches the URL, `.git/config`, the
   process list or a log. While it runs the chat shows *Cloning …* and **Stop** ends
   it. Chats starting together wait for one clone. Zone does not fetch a clone
   again after that: an agent that wants the latest commits pulls them itself, and
   a private repository's token is not left in the clone for that.
-- **When it can't**: a folder that is gone, a clone that fails or a GitLab
-  repository with no checkout never fails the turn. The chat starts where any chat
-  does, and the answer opens by saying why. Each turn tries again.
+- **When it can't**: a folder that is gone or can't be opened, a clone that fails
+  or a GitLab repository with no checkout never fails the turn. The chat starts where
+  any chat does, and the answer opens by saying why, once for each reason. Each turn
+  tries again. A chat with its agent off has no tools to use a directory with, so
+  it doesn't clone and isn't told.
 - **A session keeps going**: Claude finds a session by the directory it runs in,
   so when a chat's directory changes, Zone moves the session's file to the new
   directory's folder in that sign-in's home before resuming it. If the file can't
   be moved, the turn replays the chat in a fresh session.
-- **A project's own configuration applies**: a CLI that runs in a project's
-  directory reads that project's `CLAUDE.md`, `AGENTS.md` and settings, including
-  any hooks they name. Point a project only at repositories you would run an
-  agent in. Under `ZONE_CODEX_SANDBOX=workspace-write`, Codex can write only inside
-  the directory it starts in, so other mounted folders are read-only to it. The
-  compose default, `danger-full-access`, has no such limit.
+- **A project's own configuration**: a Claude turn still runs with
+  `--setting-sources ""`, so it loads no `CLAUDE.md`, settings or hooks from the
+  project's directory, though its agent can read those files like any others. Codex
+  has no such switch and may read the directory's `AGENTS.md`.
+- **Codex's sandbox**: under `ZONE_CODEX_SANDBOX=workspace-write`, Codex can write
+  only inside the directory it starts in, so other mounted folders are read-only to
+  it. The compose default, `danger-full-access`, has no such limit.
 
 ### `ZONE_PROJECT_CLONE_DIR`
 - **Default**: `clones` beside `ZONE_AGENT_STATE_DIR`, so
@@ -672,12 +678,16 @@ their absolute paths as before.
   `$HOME/.local/state/zone/clones`
 - **Compose**: `/tmp/repos`, on the `zone_manager_repos` volume, which
   `make backup` archives. **Helm**: `/app/clones`, a `clones` directory on the
-  agent-state claim.
+  agent-state volume, which is an emptyDir, lost whenever the pod is replaced, unless
+  the claim is in use.
 - **Description**: Where Zone clones a project's GitHub repository when no folder
   of its workspace holds a checkout, at `<dir>/<workspace id>/<digest of the URL>`.
-  A clone belongs to its workspace, so a private repository is never handed to
-  another workspace's chat. Two projects of one workspace on one repository share
-  a clone. Each workspace's directory has mode 0700.
+  A clone belongs to its workspace, so another workspace's chat never starts in it
+  or finds it, and a source can't name it. That is not a boundary between
+  workspaces: chat tools run as the server's user and reach what that user can, so
+  an absolute path still reaches another workspace's clone. Two projects of one
+  workspace on one repository share a clone. Each workspace's directory has mode
+  0700.
 - **Refused at boot**: a relative path, or one inside `ZONE_AGENT_STATE_DIR`, which
   every chat's tools are denied.
 - **Note**: This has to survive a restart. A clone holds whatever a chat left in

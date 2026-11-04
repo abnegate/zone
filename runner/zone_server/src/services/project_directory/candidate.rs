@@ -1,0 +1,287 @@
+use std::path::{Path, PathBuf};
+
+use abnegate_secret::SecretValue;
+use abnegate_vcs::{GitService, RepositoryUrl};
+use serde_json::Value;
+use uuid::Uuid;
+
+use super::search::Search;
+use super::{Missing, Origin, Start, scan};
+use crate::config::Config;
+use crate::db::sources::SourceRow;
+use crate::db::workspace_host_directories;
+use crate::host_mounts::{CONTAINER_ROOT, HostMounts, normalize};
+use crate::state::AppState;
+
+const FILESYSTEM: &str = "filesystem";
+const GITHUB: &str = "github";
+const GITLAB: &str = "gitlab";
+const GITLAB_HOST: &str = "https://gitlab.com";
+
+/// A place a project names that a chat could start in.
+pub(super) enum Candidate {
+    Folder(String),
+    Repository {
+        origin: Origin,
+        /// How to clone it, which only a GitHub repository offers: nothing else has a way to
+        /// present a token that keeps it out of the URL.
+        clone: Option<(RepositoryUrl, Option<SecretValue>)>,
+    },
+}
+
+impl Candidate {
+    pub(super) fn of_source(key: &[u8], source: &SourceRow) -> Option<Self> {
+        match source.source_type.as_str() {
+            FILESYSTEM => text(&source.config, &["base_path", "path"])
+                .map(|path| Self::Folder(path.to_string())),
+            GITHUB => {
+                let owner = text(&source.config, &["owner"])?;
+                let repository = text(&source.config, &["repo"])?;
+                let url =
+                    GitService::repository_url(&format!("https://github.com/{owner}/{repository}"))
+                        .ok()?;
+                Some(Self::Repository {
+                    origin: Origin::parse(url.as_str())?,
+                    clone: Some((url, credential(key, source))),
+                })
+            }
+            GITLAB => {
+                let project = text(&source.config, &["project", "project_id"])?;
+                let host = text(&source.config, &["base_url", "host"]).unwrap_or(GITLAB_HOST);
+                let host = host.trim_end_matches('/');
+                let remote = match host.contains("://") {
+                    true => format!("{host}/{project}"),
+                    false => format!("https://{host}/{project}"),
+                };
+                Some(Self::Repository {
+                    origin: Origin::parse(&remote)?,
+                    clone: None,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn of_project(key: &[u8], url: &str, token: Option<&str>) -> Option<Self> {
+        let url = GitService::repository_url(url).ok()?;
+        Some(Self::Repository {
+            origin: Origin::parse(url.as_str())?,
+            clone: Some((
+                url,
+                token.map(|stored| SecretValue::new(crate::crypto::open(key, stored))),
+            )),
+        })
+    }
+
+    pub(super) async fn start(self, state: &AppState, workspace: Uuid, search: Search) -> Start {
+        let config = state.config();
+        match self {
+            Self::Folder(path) => match folder(&config.host_mounts, &path) {
+                Some(directory) if within(&directory, &config.clones) => {
+                    Start::Unavailable(format!(
+                        "The project's folder {path} is inside Zone's clones, which belong to \
+                         the workspaces they were made for."
+                    ))
+                }
+                Some(directory) => usable(config, directory),
+                None => Start::Unavailable(format!(
+                    "The project's folder {path} isn't available on this machine."
+                )),
+            },
+            Self::Repository { origin, clone } => {
+                let mounted = mounted(state, workspace).await;
+                let found = {
+                    let (origin, clones) = (origin.clone(), config.clones.clone());
+                    tokio::task::spawn_blocking(move || {
+                        scan::find(workspace, &mounted, &clones, &origin, search)
+                    })
+                    .await
+                };
+                if let Ok(Some(directory)) = found {
+                    return usable(config, directory);
+                }
+                let Some((url, token)) = clone else {
+                    return Start::Unavailable(format!(
+                        "No folder of this workspace holds a checkout of {origin}, and Zone \
+                         clones only GitHub repositories. Add a folder that holds one."
+                    ));
+                };
+                let missing =
+                    Missing::new(&config.clones, workspace, url, token, config.chat.timeout);
+                match missing.present() {
+                    true => usable(config, missing.destination().to_path_buf()),
+                    false => Start::Missing(missing),
+                }
+            }
+        }
+    }
+}
+
+fn text<'a>(config: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| config.get(key)?.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// The token a source's repository is cloned with. A credential that cannot be opened is not
+/// presented, and the clone then fails or succeeds on what the repository allows anyone.
+fn credential(key: &[u8], source: &SourceRow) -> Option<SecretValue> {
+    let encrypted = source.credentials_encrypted.as_deref()?;
+    match crate::crypto::decrypt(key, encrypted) {
+        Ok(token) => Some(SecretValue::new(token)),
+        Err(error) => {
+            tracing::warn!(source = %source.id, %error, "Could not open the source's credentials");
+            None
+        }
+    }
+}
+
+/// The folder a source names: a host path through the mounts, or a path already under the
+/// container's mount of them, which is how a source indexed from inside the container names it.
+fn folder(mounts: &HostMounts, path: &str) -> Option<PathBuf> {
+    mounts.mapped_directory(path).ok().or_else(|| {
+        let path = normalize(path).ok()?;
+        (mounts.in_container && path.starts_with(CONTAINER_ROOT) && path.is_dir()).then_some(path)
+    })
+}
+
+/// The workspace's folders as this process opens them, those that exist.
+async fn mounted(state: &AppState, workspace: Uuid) -> Vec<PathBuf> {
+    let directories = match workspace_host_directories::list(state.db(), workspace).await {
+        Ok(directories) => directories,
+        Err(error) => {
+            tracing::warn!(%workspace, %error, "Could not read the workspace's folders");
+            return Vec::new();
+        }
+    };
+    let mounts = &state.config().host_mounts;
+    directories
+        .iter()
+        .filter_map(|host| mounts.mapped_directory(host).ok())
+        .collect()
+}
+
+/// `directory`, unless it lies in the agents' state, which every chat's tools are denied, or
+/// this process can't enter it, where a CLI could not even be started and would fail the turn.
+fn usable(config: &Config, directory: PathBuf) -> Start {
+    if within(&directory, &config.agents.state) {
+        return Start::Unavailable(format!(
+            "{} is inside Zone's agent state, which a chat can't work in.",
+            directory.display()
+        ));
+    }
+    if std::fs::read_dir(&directory).is_err() {
+        return Start::Unavailable(format!(
+            "Zone doesn't have permission to open {}.",
+            directory.display()
+        ));
+    }
+    Start::Directory(directory)
+}
+
+fn within(directory: &Path, root: &Path) -> bool {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    real(directory).starts_with(real(root))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn key() -> [u8; 16] {
+        Uuid::new_v4().into_bytes()
+    }
+
+    fn source(kind: &str, config: Value) -> SourceRow {
+        SourceRow {
+            id: Uuid::nil(),
+            name: "source".into(),
+            source_type: kind.into(),
+            config,
+            credentials_encrypted: None,
+            description: None,
+            url: None,
+            is_active: Some(true),
+            last_verified_at: None,
+            last_error: None,
+            created_at: None,
+            updated_at: None,
+            workspace_id: None,
+        }
+    }
+
+    #[test]
+    fn a_folder_is_read_through_the_mounts_and_nothing_else_inside_a_container() {
+        let root = TempDir::new().unwrap();
+        let inside = root.path().join("project");
+        std::fs::create_dir_all(&inside).unwrap();
+        let native = HostMounts::default();
+        assert_eq!(
+            folder(&native, inside.to_str().unwrap()),
+            Some(inside.clone())
+        );
+        assert_eq!(
+            folder(&native, root.path().join("gone").to_str().unwrap()),
+            None
+        );
+
+        let container = HostMounts {
+            host_root: Some(PathBuf::from("/Users/nobody")),
+            in_container: true,
+        };
+        assert_eq!(
+            folder(&container, inside.to_str().unwrap()),
+            None,
+            "a path that happens to exist in the container is not a mounted folder"
+        );
+        assert_eq!(folder(&container, "relative/path"), None);
+        assert_eq!(folder(&container, "/a/../b"), None);
+    }
+
+    #[test]
+    fn a_source_is_a_folder_or_a_repository_and_anything_else_has_no_directory() {
+        for config in [json!({"base_path": "/srv"}), json!({"path": "/srv"})] {
+            assert!(matches!(
+                Candidate::of_source(&key(), &source(FILESYSTEM, config)),
+                Some(Candidate::Folder(path)) if path == "/srv"
+            ));
+        }
+        assert!(matches!(
+            Candidate::of_source(&key(), &source(GITHUB, json!({"owner": "o", "repo": "r"}))),
+            Some(Candidate::Repository { clone: Some(_), .. })
+        ));
+        assert!(matches!(
+            Candidate::of_source(
+                &key(),
+                &source(GITLAB, json!({"project_id": "g/p", "host": "https://git.example"}))
+            ),
+            Some(Candidate::Repository { clone: None, origin })
+                if Some(origin.clone()) == Origin::parse("git@git.example:g/p.git")
+        ));
+        assert!(
+            Candidate::of_source(
+                &key(),
+                &source(GITHUB, json!({"owner": "--upload-pack=evil", "repo": "r"}))
+            )
+            .is_none(),
+            "an owner GitHub would not allow is never given to git"
+        );
+        for kind in ["web", "text", "notion"] {
+            assert!(Candidate::of_source(&key(), &source(kind, json!({}))).is_none());
+        }
+    }
+
+    #[test]
+    fn the_agents_state_is_not_a_place_to_start() {
+        let state = TempDir::new().unwrap();
+        let inside = state.path().join("organization");
+        std::fs::create_dir_all(&inside).unwrap();
+        assert!(within(&inside, state.path()));
+        assert!(within(state.path(), state.path()));
+        assert!(!within(TempDir::new().unwrap().path(), state.path()));
+    }
+}

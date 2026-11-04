@@ -36,6 +36,13 @@ impl Origin {
             .rsplit_once('@')
             .map_or(authority, |(_, host)| host);
         let host = host.split_once(':').map_or(host, |(host, _)| host);
+        if !host
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+            || authority.contains(['?', '#'])
+        {
+            return None;
+        }
         let path = path.trim_matches('/');
         let path = path.strip_suffix(GIT_SUFFIX).unwrap_or(path);
         let named = !host.is_empty()
@@ -114,6 +121,8 @@ mod tests {
             "https://github.com",
             "C:\\work\\repository",
             "https://github.com/owner/repository?token=secret",
+            "https://evil.example#@github.com/owner/repository",
+            "https://evil.example?@github.com/owner/repository",
         ] {
             assert_eq!(Origin::parse(remote), None, "{remote:?}");
         }

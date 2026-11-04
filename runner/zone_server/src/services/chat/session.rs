@@ -345,7 +345,7 @@ pub async fn build(
     };
     let directory = match &mode {
         Mode::Generation(generation) => generation.directory.clone(),
-        Mode::Preview => match project_directory::locate(state, chat.id, workspace).await {
+        Mode::Preview => match project_directory::peek(state, chat.id, workspace).await {
             Start::Directory(directory) => Some(directory),
             Start::Elsewhere | Start::Missing(_) | Start::Unavailable(_) => None,
         },

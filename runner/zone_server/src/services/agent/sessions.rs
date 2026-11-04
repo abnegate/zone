@@ -17,6 +17,7 @@ use std::fs::{self, DirBuilder, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use nix::fcntl::OFlag;
 use uuid::Uuid;
@@ -58,12 +59,10 @@ pub fn carry(
     work: &Path,
     id: &str,
 ) -> Result<Carried, Error> {
-    let found = relative(from, agent, work, id)
-        .or_else(|| elsewhere(from, agent, id))
-        .ok_or_else(|| Error::Missing {
-            agent,
-            id: id.to_string(),
-        })?;
+    let found = newest(from, agent, id).ok_or_else(|| Error::Missing {
+        agent,
+        id: id.to_string(),
+    })?;
     let relative = match agent {
         AgentKind::Claude => claude(work, id),
         AgentKind::Codex => found.clone(),
@@ -96,23 +95,39 @@ pub fn carry(
 /// Moves session `id` within `home` to where `agent` looks for it when it runs in `work`. Claude
 /// looks in a folder named for the directory it runs in, and a session stays with its folder when
 /// a chat starts somewhere new, so a chat that changes directory would otherwise lose its
-/// session. Codex finds a session by its id alone. A session already in place is left as it is.
+/// session. Codex finds a session by its id alone.
+///
+/// A handover copies a session and leaves the copy it left behind, so a home can hold an old one,
+/// even in the folder `work` names. The newest is the session, and the rest are removed: resuming
+/// an old one would lose every turn since without anything failing.
 pub fn relocate(home: &Path, agent: AgentKind, work: &Path, id: &str) -> Result<(), Error> {
-    if agent == AgentKind::Codex || relative(home, agent, work, id).is_some() {
+    if agent == AgentKind::Codex {
         return Ok(());
     }
-    let found = elsewhere(home, agent, id).ok_or_else(|| Error::Missing {
+    let found = newest(home, agent, id).ok_or_else(|| Error::Missing {
         agent,
         id: id.to_string(),
     })?;
     let relative = claude(work, id);
     let path = home.join(&relative);
-    directories(home, relative.parent().unwrap_or(Path::new("")))
-        .and_then(|()| fs::rename(home.join(&found), &path))
-        .map_err(|source| Error::Filesystem {
-            path: path.clone(),
+    if found != relative {
+        directories(home, relative.parent().unwrap_or(Path::new("")))
+            .and_then(|()| fs::rename(home.join(&found), &path))
+            .map_err(|source| Error::Filesystem {
+                path: path.clone(),
+                source,
+            })?;
+    }
+    for stale in copies(home, id)
+        .into_iter()
+        .filter(|(copy, _)| *copy != relative)
+    {
+        fs::remove_file(home.join(&stale.0)).map_err(|source| Error::Filesystem {
+            path: home.join(&stale.0),
             source,
-        })
+        })?;
+    }
+    Ok(())
 }
 
 /// Claude's project folder name for a working directory: every UTF-16 unit that is not an ASCII
@@ -167,29 +182,48 @@ fn claude(work: &Path, id: &str) -> PathBuf {
         .join(format!("{id}{EXTENSION}"))
 }
 
-/// Session `id` wherever in `home` `agent` left it, whichever directory it last ran in.
-fn elsewhere(home: &Path, agent: AgentKind, id: &str) -> Option<PathBuf> {
+/// Session `id` wherever in `home` `agent` left it, whichever directory it last ran in: the most
+/// recently written copy, when an earlier handover left more than one.
+fn newest(home: &Path, agent: AgentKind, id: &str) -> Option<PathBuf> {
     if !named(id) {
         return None;
     }
-    let relative = match agent {
-        AgentKind::Claude => {
-            fs::read_dir(home.join(PROJECTS))
-                .ok()?
-                .flatten()
-                .find_map(|folder| {
-                    let relative = Path::new(PROJECTS)
-                        .join(folder.file_name())
-                        .join(format!("{id}{EXTENSION}"));
-                    regular(&home.join(&relative)).then_some(relative)
-                })?
-        }
-        AgentKind::Codex => rollout(home, Path::new(SESSIONS), &format!("-{id}{EXTENSION}"))?,
+    match agent {
+        AgentKind::Claude => copies(home, id)
+            .into_iter()
+            .max_by_key(|(_, modified)| *modified)
+            .map(|(relative, _)| relative),
+        AgentKind::Codex => rollout(home, Path::new(SESSIONS), &format!("-{id}{EXTENSION}"))
+            .filter(|relative| {
+                relative
+                    .parent()
+                    .is_none_or(|parent| unlinked(home, parent))
+            }),
+    }
+}
+
+/// Every copy of claude's session `id` under `home`, relative to it, and when each was written.
+fn copies(home: &Path, id: &str) -> Vec<(PathBuf, SystemTime)> {
+    if !named(id) {
+        return Vec::new();
+    }
+    let Ok(folders) = fs::read_dir(home.join(PROJECTS)) else {
+        return Vec::new();
     };
-    relative
-        .parent()
-        .is_none_or(|parent| unlinked(home, parent))
-        .then_some(relative)
+    folders
+        .flatten()
+        .filter_map(|folder| {
+            let relative = Path::new(PROJECTS)
+                .join(folder.file_name())
+                .join(format!("{id}{EXTENSION}"));
+            let metadata = fs::symlink_metadata(home.join(&relative)).ok()?;
+            (metadata.file_type().is_file()
+                && relative
+                    .parent()
+                    .is_none_or(|parent| unlinked(home, parent)))
+            .then_some((relative, metadata.modified().ok()?))
+        })
+        .collect()
 }
 
 /// Whether every directory on `relative`'s way down from `home` is a directory itself, not a
@@ -313,6 +347,16 @@ mod tests {
     const CODEX_ID: &str = "019b2c41-0000-7000-8000-000000000001";
     const CODEX_DAY: &str = "sessions/2026/09/23";
     const TRANSCRIPT: &[u8] = b"{\"type\":\"user\",\"message\":\"remember marigold\"}\n";
+
+    /// Makes `path` an hour older than anything written now.
+    fn age(path: &Path) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+    }
 
     struct Homes {
         from: TempDir,
@@ -529,6 +573,89 @@ mod tests {
             ),
             Err(Error::Missing { .. })
         ));
+    }
+
+    /// A handover copies a session and leaves the copy it left behind, so a home can hold an old
+    /// one in the very folder the chat comes back to. Resuming that would lose every turn since.
+    #[test]
+    fn the_newest_copy_of_a_session_is_the_one_a_move_keeps() {
+        let homes = Homes::new();
+        let stale = homes.claude();
+        homes.write(&stale);
+        let elsewhere = TempDir::new().unwrap();
+        let current = Path::new(PROJECTS)
+            .join(sanitized(&fs::canonicalize(elsewhere.path()).unwrap()))
+            .join(format!("{CLAUDE_ID}{EXTENSION}"));
+        let path = homes.from.path().join(&current);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"current").unwrap();
+        age(&homes.from.path().join(&stale));
+
+        relocate(
+            homes.from.path(),
+            AgentKind::Claude,
+            homes.work.path(),
+            CLAUDE_ID,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(homes.from.path().join(&stale)).unwrap(),
+            b"current"
+        );
+        assert!(!path.exists(), "one session stays in one place");
+    }
+
+    #[test]
+    fn a_stale_copy_elsewhere_does_not_outlive_the_move_or_take_its_place() {
+        let homes = Homes::new();
+        let current = homes.claude();
+        homes.write(&current);
+        let elsewhere = TempDir::new().unwrap();
+        let stale = homes
+            .from
+            .path()
+            .join(PROJECTS)
+            .join(sanitized(&fs::canonicalize(elsewhere.path()).unwrap()))
+            .join(format!("{CLAUDE_ID}{EXTENSION}"));
+        fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        fs::write(&stale, b"stale").unwrap();
+        age(&stale);
+
+        relocate(
+            homes.from.path(),
+            AgentKind::Claude,
+            homes.work.path(),
+            CLAUDE_ID,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(homes.from.path().join(&current)).unwrap(),
+            TRANSCRIPT
+        );
+        assert!(!stale.exists(), "a stale copy could be resumed later");
+    }
+
+    #[test]
+    fn the_newest_copy_of_a_session_is_the_one_carried() {
+        let homes = Homes::new();
+        let stale = homes.claude();
+        homes.write(&stale);
+        age(&homes.from.path().join(&stale));
+        let elsewhere = TempDir::new().unwrap();
+        let current = homes
+            .from
+            .path()
+            .join(PROJECTS)
+            .join(sanitized(&fs::canonicalize(elsewhere.path()).unwrap()))
+            .join(format!("{CLAUDE_ID}{EXTENSION}"));
+        fs::create_dir_all(current.parent().unwrap()).unwrap();
+        fs::write(&current, b"current").unwrap();
+
+        let carried = homes.carry(AgentKind::Claude, CLAUDE_ID).unwrap();
+
+        assert_eq!(fs::read(&carried.path).unwrap(), b"current");
     }
 
     #[test]

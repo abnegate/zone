@@ -2878,6 +2878,21 @@ fn stamp(chat_id: Uuid, hit: &mut SearchHit, observed: db::DbResult<chat_sources
     }
 }
 
+/// What a turn's answer opens with when its project could not give it a directory, once for each
+/// reason in a chat: repeated, it would open every answer and go into each one's replay and
+/// embedding. It names no directory because Zone's tools and a CLI may each be in another.
+async fn displacement(state: &AppState, chat_id: Uuid, reason: String) -> Option<String> {
+    let notice = format!("> {reason} This chat is starting in its usual folder instead.\n\n");
+    match chats::answered_with(state.db(), chat_id, &notice).await {
+        Ok(true) => None,
+        Ok(false) => Some(notice),
+        Err(error) => {
+            tracing::warn!(%chat_id, %error, "Could not read whether the chat was told its folder is unavailable");
+            Some(notice)
+        }
+    }
+}
+
 /// The directory this turn's project starts it in, cloning its repository first when that is what
 /// it takes, and why not when it should have had one. The caller's Stop drops this, which ends
 /// the clone. Neither a clone that fails nor a project that can't be read fails the turn. A chat
@@ -3005,7 +3020,10 @@ async fn prepare_chat(
         endpoint,
     )
     .await?;
-    preparation.displaced = displaced;
+    preparation.displaced = match displaced {
+        Some(reason) => displacement(state, chat_id, reason).await,
+        None => None,
+    };
     preparation.handover = match (organization, current, &preparation.session) {
         (Some(organization), Some(current), Some(_)) => {
             let handover = Handover::new(organization, current, model, previous.as_ref(), opening)
@@ -3334,19 +3352,17 @@ async fn handle_chat_generation(
     // refused resume replays with that part and the instruction to go on.
     let mut continuing = false;
 
-    if let Some(reason) = displaced {
+    if let Some(notice) = displaced {
         emit_chunk(
             stream,
             &mut full_content,
             &mut chunk_index,
-            format!(
-                "> {reason} This chat is working in {} instead.\n\n",
-                directory.display()
-            ),
+            notice,
             &mut response_truncated,
         )
         .await;
     }
+    let told = full_content.len();
 
     loop {
         wait::set_ceiling(ToolSession::Chat(chat_id), stream_deadline);
@@ -3981,7 +3997,7 @@ async fn handle_chat_generation(
     // tools or produced an image before it broke is worth keeping even with no
     // prose, because both show the reader what was attempted.
     if (cancelled || failure.is_some())
-        && full_content.is_empty()
+        && full_content.len() == told
         && tool_calls.is_empty()
         && generated_images.is_empty()
     {
@@ -5911,6 +5927,44 @@ cat 'DIR/reply.jsonl'
                 assert!(
                     answer.ends_with(ANSWER),
                     "the turn was not answered: {answer}"
+                );
+            }
+
+            /// The reason is said once. A source that stays unavailable must not open every answer
+            /// in the chat with it, or carry it into each answer's replay and embedding.
+            #[tokio::test]
+            async fn a_chat_is_told_once_why_it_is_not_in_its_folder() {
+                let chat = Chat::on_claude().await;
+                let removed = TempDir::new().expect("a parent");
+                chat.in_project(&removed.path().join("gone")).await;
+                chat.with_agent().await;
+
+                chat.ask(FIRST).await;
+                let first = chat.answer().await;
+                chat.ask(SECOND).await;
+                let second = chat.answer().await;
+                chat.remove().await;
+
+                assert!(first.starts_with("> "), "{first}");
+                assert_eq!(second, ANSWER, "the reason was repeated");
+            }
+
+            /// A CLI runs in the organization's directory and Zone's tools in another, so the notice
+            /// names neither.
+            #[tokio::test]
+            async fn the_notice_does_not_name_a_directory_the_agent_is_not_in() {
+                let chat = Chat::on_claude().await;
+                let removed = TempDir::new().expect("a parent");
+                chat.in_project(&removed.path().join("gone")).await;
+                chat.with_agent().await;
+
+                chat.ask(FIRST).await;
+                let answer = chat.answer().await;
+                chat.remove().await;
+
+                assert!(
+                    !answer.contains("working in"),
+                    "the notice names a directory: {answer}"
                 );
             }
 

@@ -1,7 +1,12 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex, PoisonError};
+
+use uuid::Uuid;
 
 use super::Origin;
+use super::search::Search;
 use crate::services::checkout;
 
 /// How far below a mounted folder a checkout is looked for. A mount is often a whole home, and
@@ -14,26 +19,64 @@ const SKIPPED: [&str; 3] = ["node_modules", "target", "vendor"];
 const GIT: &str = ".git";
 const CONFIG: &str = "config";
 
-/// The first checkout under `mounted`, folder by folder and shallowest first, whose `origin` is
-/// `origin`. Nothing is run inside a checkout and nothing in one is written: its configuration
-/// is read as data, because it is the person's own and may name programs for git to run.
-pub fn checkout(mounted: &[PathBuf], origin: &Origin) -> Option<PathBuf> {
-    mounted.iter().find_map(|root| within(root, origin))
+/// The checkout each workspace's turns last found of each repository.
+static KNOWN: LazyLock<Mutex<HashMap<(Uuid, String), PathBuf>>> = LazyLock::new(Mutex::default);
+
+/// A checkout of `origin` in `workspace`'s `mounted` folders: the one last found while it is
+/// still there, in a folder still mounted, and still of that repository, else, when `search`
+/// allows, the one a walk finds. A preview cannot afford the walk, and repeats what a turn found.
+pub fn find(
+    workspace: Uuid,
+    mounted: &[PathBuf],
+    clones: &Path,
+    origin: &Origin,
+    search: Search,
+) -> Option<PathBuf> {
+    let key = (workspace, origin.to_string());
+    let mut known = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(checkout) = known.get(&key) {
+        if mounted.iter().any(|root| checkout.starts_with(root)) && matches(checkout, origin) {
+            return Some(checkout.clone());
+        }
+        known.remove(&key);
+    }
+    drop(known);
+    if search == Search::Known {
+        return None;
+    }
+    let found = checkout(mounted, clones, origin)?;
+    KNOWN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, found.clone());
+    Some(found)
 }
 
-fn within(root: &Path, origin: &Origin) -> Option<PathBuf> {
+/// The first checkout under `mounted`, folder by folder and shallowest first, whose `origin` is
+/// `origin`, leaving out Zone's own `clones`: what is in there may be another workspace's, or a
+/// clone still being made. Nothing is run inside a checkout and nothing in one is written: its
+/// configuration is read as data, because it is the person's own and may name programs for git
+/// to run.
+fn checkout(mounted: &[PathBuf], clones: &Path, origin: &Origin) -> Option<PathBuf> {
+    mounted.iter().find_map(|root| within(root, clones, origin))
+}
+
+/// A checkout's own folders aren't walked, with one exception: a mounted folder that is itself
+/// another repository, as a home kept under git for its dotfiles is, holds the person's checkouts.
+fn within(root: &Path, clones: &Path, origin: &Origin) -> Option<PathBuf> {
     let mut level = vec![root.to_path_buf()];
     for _ in 0..=DEPTH {
         let mut below = Vec::new();
         for directory in &level {
-            match fs::symlink_metadata(directory.join(GIT)) {
-                Ok(metadata) if metadata.is_dir() => {
-                    if matches(directory, origin) {
-                        return Some(directory.clone());
-                    }
-                }
-                Ok(_) => {}
-                Err(_) => below.extend(children(directory)),
+            if directory.starts_with(clones) {
+                continue;
+            }
+            let git = fs::symlink_metadata(directory.join(GIT));
+            if git.as_ref().is_ok_and(|metadata| metadata.is_dir()) && matches(directory, origin) {
+                return Some(directory.clone());
+            }
+            if git.is_err() || directory == root {
+                below.extend(children(directory));
             }
         }
         level = below;
@@ -65,6 +108,9 @@ fn children(directory: &Path) -> Vec<PathBuf> {
 /// hundreds of checkouts.
 fn matches(checkout: &Path, origin: &Origin) -> bool {
     let file = checkout.join(GIT).join(CONFIG);
+    if !fs::symlink_metadata(&file).is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
     let Ok(configuration) = fs::read(&file) else {
         return false;
     };
@@ -116,8 +162,12 @@ mod tests {
         TempDir::new().unwrap()
     }
 
+    fn clones() -> &'static Path {
+        Path::new("/nonexistent/clones")
+    }
+
     fn found(mount: &TempDir) -> Option<PathBuf> {
-        checkout(&[mount.path().to_path_buf()], &origin())
+        checkout(&[mount.path().to_path_buf()], clones(), &origin())
     }
 
     #[test]
@@ -168,6 +218,7 @@ mod tests {
         assert_eq!(
             checkout(
                 &[first.path().to_path_buf(), second.path().to_path_buf()],
+                clones(),
                 &origin()
             ),
             Some(expected)
@@ -202,6 +253,54 @@ mod tests {
         let mount = mount();
         let expected = cloned(mount.path(), REMOTE);
         assert_eq!(found(&mount), Some(expected));
+    }
+
+    /// A home folder kept under git for its dotfiles still holds the checkouts below it.
+    #[test]
+    fn a_mount_that_is_some_other_repository_is_still_walked() {
+        let mount = mount();
+        cloned(mount.path(), "git@github.com:owner/dotfiles.git");
+        let expected = cloned(&mount.path().join("code/repository"), REMOTE);
+        assert_eq!(found(&mount), Some(expected));
+    }
+
+    #[test]
+    fn a_configuration_that_is_a_link_is_not_read() {
+        let mount = mount();
+        let elsewhere = TempDir::new().unwrap();
+        let real = cloned(&elsewhere.path().join("real"), REMOTE);
+        let planted = mount.path().join("planted");
+        fs::create_dir_all(planted.join(GIT)).unwrap();
+        std::os::unix::fs::symlink(real.join(GIT).join(CONFIG), planted.join(GIT).join(CONFIG))
+            .unwrap();
+        assert_eq!(found(&mount), None);
+    }
+
+    #[test]
+    fn a_known_checkout_is_used_only_while_it_is_still_mounted_and_of_that_repository() {
+        let (workspace, mounted, other) = (Uuid::new_v4(), mount(), mount());
+        let path = cloned(&mounted.path().join("repository"), REMOTE);
+        let folders = [mounted.path().to_path_buf()];
+        let find =
+            |folders: &[PathBuf], search| find(workspace, folders, clones(), &origin(), search);
+
+        assert_eq!(find(&folders, Search::Known), None, "nothing is known yet");
+        assert_eq!(find(&folders, Search::Walk), Some(path.clone()));
+        assert_eq!(find(&folders, Search::Known), Some(path.clone()));
+        assert_eq!(
+            find(&[other.path().to_path_buf()], Search::Known),
+            None,
+            "a folder no longer mounted is not reached through what was known of it"
+        );
+        assert_eq!(find(&folders, Search::Walk), Some(path.clone()));
+
+        let status = Command::new("git")
+            .args(["remote", "set-url", "origin", "git@github.com:o/other.git"])
+            .current_dir(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(find(&folders, Search::Known), None);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use abnegate_secret::SecretValue;
+use abnegate_secret::{REDACTED, SecretValue};
 use abnegate_vcs::RepositoryUrl;
 use nix::fcntl::{Flock, FlockArg};
 use serde_json::{Value, json};
@@ -840,6 +840,145 @@ async fn other_mounted_folders_stay_reachable_from_a_project_chat() {
         "{:?}",
         shell.output
     );
+}
+
+/// The process can see a folder it can't enter. A CLI spawned there would fail the turn.
+#[tokio::test]
+async fn a_folder_this_process_cannot_enter_is_not_started_in() {
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let fixture = Fixture::new().await;
+    let parent = TempDir::new().unwrap();
+    let closed = parent.path().join("closed");
+    fs::create_dir_all(&closed).unwrap();
+    fs::set_permissions(&closed, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let chat = fixture
+        .sourced("filesystem", json!({"base_path": closed}))
+        .await;
+
+    let start = fixture.start(&chat).await;
+    fs::set_permissions(&closed, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    fixture.remove().await;
+
+    assert!(matches!(start, Start::Unavailable(_)));
+}
+
+/// A preview runs on every paused keystroke and every chat opened, so it uses what a turn found.
+#[tokio::test]
+async fn a_preview_never_walks_the_mounts_but_uses_what_a_turn_found() {
+    let fixture = Fixture::new().await;
+    let mounted = TempDir::new().unwrap();
+    let path = checkout(&mounted.path().join("code/repository"), REMOTE);
+    fixture.mount(&[mounted.path()]).await;
+    let chat = fixture.on_github().await;
+
+    let before = fixture.preview(&chat).await;
+    let start = fixture.start(&chat).await;
+    let after = fixture.preview(&chat).await;
+    git(
+        &path,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:someone-else/other.git",
+        ],
+    );
+    let changed = fixture.preview(&chat).await;
+    fixture.remove().await;
+
+    assert_eq!(agreed(&before), mounted.path());
+    assert_eq!(started_in(start), path);
+    assert_eq!(agreed(&after), path);
+    assert_eq!(
+        agreed(&changed),
+        mounted.path(),
+        "a checkout is checked again each time it is used"
+    );
+}
+
+#[tokio::test]
+async fn a_source_inside_the_clone_root_is_refused() {
+    let fixture = Fixture::new().await;
+    let inside = fixture.clones.path().join("another-workspace/clone");
+    fs::create_dir_all(&inside).unwrap();
+    let chat = fixture
+        .sourced("filesystem", json!({"base_path": inside}))
+        .await;
+
+    let start = fixture.start(&chat).await;
+    fixture.remove().await;
+
+    assert!(matches!(start, Start::Unavailable(_)));
+}
+
+/// git writes `origin` before it fetches, so a clone in progress looks like a checkout, and another
+/// workspace's clone is not this workspace's to start in.
+#[tokio::test]
+async fn a_mount_over_the_clone_root_does_not_find_the_clones_in_it() {
+    let fixture = Fixture::new().await;
+    checkout(
+        &fixture.clones.path().join("another-workspace/clone"),
+        REMOTE,
+    );
+    fixture.mount(&[fixture.clones.path()]).await;
+    let chat = fixture.on_github().await;
+
+    let start = fixture.start(&chat).await;
+    fixture.remove().await;
+
+    assert!(matches!(start, Start::Missing(_)));
+}
+
+#[tokio::test]
+async fn one_repository_spelled_in_another_case_is_one_clone() {
+    let fixture = Fixture::new().await;
+    let parsed = |source: &str| RepositoryUrl::parse(source).expect("a repository");
+
+    let (one, two) = (
+        fixture.missing(parsed("https://github.com/Owner/Repository"), None),
+        fixture.missing(parsed("https://github.com/owner/repository"), None),
+    );
+    fixture.remove().await;
+
+    assert_eq!(one.destination(), two.destination());
+}
+
+/// A cluster's `fsGroup` opens a volume's directories to the group whenever it remounts them.
+#[tokio::test]
+async fn a_workspace_directory_something_else_opened_is_made_private_again() {
+    let fixture = Fixture::new().await;
+    let (_holder, url) = remote();
+    let missing = fixture.missing(url, None);
+    let workspace = missing.destination().parent().unwrap().to_path_buf();
+    fs::create_dir_all(&workspace).unwrap();
+    fs::set_permissions(
+        &workspace,
+        std::os::unix::fs::PermissionsExt::from_mode(0o770),
+    )
+    .unwrap();
+
+    let cloned = missing.clone_repository().await;
+    fixture.remove().await;
+
+    assert!(cloned.is_ok(), "{cloned:?}");
+    let mode =
+        std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&workspace).unwrap().permissions());
+    assert_eq!(mode & 0o777, 0o700);
+}
+
+#[tokio::test]
+async fn an_empty_token_does_not_garble_a_failure() {
+    let fixture = Fixture::new().await;
+    let (holder, _url) = remote();
+    let absent = RepositoryUrl::local(&holder.path().join("absent.git")).expect("a local path");
+
+    let failed = fixture.missing(absent, Some("")).clone_repository().await;
+    fixture.remove().await;
+
+    let reason = failed.expect_err("a repository that isn't there cannot be cloned");
+    assert!(!reason.contains(REDACTED), "{reason}");
 }
 
 fn output(result: &ToolResult) -> &str {

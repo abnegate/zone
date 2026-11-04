@@ -84,7 +84,8 @@ the one pod.
 NOTE: server.agentState.persistence.enabled is false, so /app/agent-state is an
 emptyDir and zone-server loses codex logins whenever its pod is replaced (a
 rollout, an eviction or a reschedule). Saved Claude tokens are sealed in the
-database.
+database. /app/clones is on the same emptyDir, so project chats lose their clones,
+and any work left in them, at the same moments.
 {{- end }}
 {{- if .Values.server.env.ZONE_AGENT_CALLBACK }}
 
