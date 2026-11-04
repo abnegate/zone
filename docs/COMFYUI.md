@@ -599,12 +599,18 @@ a fine-tune and 3.4 GiB for a LoRA. Before each write the trainer checks the
 free space on the job's disk, and it writes only if the snapshot (the previous
 one's size, or an estimate from the state dicts) plus `free_space_margin_gib`
 (20 in `comfyui/train_sdxl_config.json`) would fit. That keeps a run from
-filling `/System/Volumes/Data` and stopping Docker Desktop's engine. A job that
-cannot fit its first snapshot fails before training, saying how much space it
-needs and how much is free. Mid-run, a snapshot that cannot fit is skipped with
-a warning and training continues, so a crash resumes from the last snapshot
-that was saved. Publishing checks the same way, so a run fails only when the
-trained weights themselves cannot fit.
+filling `/System/Volumes/Data` and stopping Docker Desktop's engine. A Runpod
+pod has a disk of its own, so the trainer sends it a margin of 1 GiB instead.
+
+A job that cannot fit its first snapshot fails before training, saying how much
+space it needs and how much is free. Mid-run, a snapshot that does not fit
+first deletes the oldest numbered snapshot that pruning would delete anyway
+(never the best one, or one still linked to `latest.pt`). If it still does not
+fit, it is skipped with a warning and training continues, so a crash resumes
+from the last snapshot that was saved. A write that runs out of space partway
+removes its partial `.tmp` and counts as skipped. Publishing checks the same
+way: the job fails only when the trained weights plus the margin cannot fit,
+and a retry resumes from its last snapshot.
 
 Each job directory under `models/.zone-train/` is readable only by its owner
 (`0700`), and `runpod.key` inside it only by its owner too (`0600`). Docker
