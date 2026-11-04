@@ -11,7 +11,9 @@ import tempfile
 import threading
 import unittest
 import uuid
+from collections import defaultdict
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 COMFYUI = Path(__file__).parents[1]
@@ -401,6 +403,7 @@ class DeviceSelectionTests(unittest.TestCase):
         cuda: bool,
         mps: bool = False,
         memory: int | None = None,
+        recommended: int | None = None,
     ) -> mock.MagicMock:
         module = mock.MagicMock()
         module.cuda.is_available.return_value = cuda
@@ -408,6 +411,8 @@ class DeviceSelectionTests(unittest.TestCase):
         module.device.side_effect = lambda name: self.make_device(name)
         if memory is not None:
             module.cuda.get_device_properties.return_value = mock.Mock(total_memory=memory)
+        if recommended is not None:
+            module.mps.recommended_max_memory.return_value = recommended
         return module
 
     def make_device(self, kind: str, index: int | None = 0) -> mock.Mock:
@@ -450,9 +455,126 @@ class DeviceSelectionTests(unittest.TestCase):
         self.assertFalse(module.backends.cuda.matmul.allow_tf32)
         self.assertFalse(module.backends.cudnn.allow_tf32)
 
-    def test_cpu_and_mps_skip_vram_checks(self) -> None:
-        train_sdxl.assert_device_capacity(self.make_device('cpu'), 'finetune')
-        train_sdxl.assert_device_capacity(self.make_device('mps'), 'finetune')
+    def test_cpu_skips_memory_checks(self) -> None:
+        module = self.fake_torch(cuda=False)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.assert_device_capacity(self.make_device('cpu'), 'finetune')
+        module.mps.recommended_max_memory.assert_not_called()
+        module.cuda.get_device_properties.assert_not_called()
+
+    def test_finetune_on_a_32gb_mac_refuses_with_both_figures(self) -> None:
+        module = self.fake_torch(cuda=False, mps=True, recommended=21 * 1024**3)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            with self.assertRaises(RuntimeError) as raised:
+                train_sdxl.assert_device_capacity(self.make_device('mps'), 'finetune')
+        message = str(raised.exception)
+        self.assertIn('needs 40.0 GiB of Metal working memory', message)
+        self.assertIn('this Mac reports 21.0 GiB', message)
+        self.assertIn('Runpod', message)
+
+    def test_a_metal_refusal_fails_the_job_instead_of_retrying(self) -> None:
+        refusal = RuntimeError(train_sdxl.metal_refusal('this job', 2, 1))
+        self.assertFalse(train_sdxl.is_transient_crash(refusal))
+
+    def test_finetune_on_a_64gb_mac_passes(self) -> None:
+        module = self.fake_torch(cuda=False, mps=True, recommended=48 * 1024**3)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.assert_device_capacity(self.make_device('mps'), 'finetune')
+        module.mps.recommended_max_memory.assert_called_once_with()
+
+    def test_adapters_and_video_on_mps_skip_the_early_floor(self) -> None:
+        module = self.fake_torch(cuda=False, mps=True, recommended=8 * 1024**3)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            for method in ('lora', 'pivotal', 'video'):
+                train_sdxl.assert_device_capacity(self.make_device('mps'), method)
+        module.mps.recommended_max_memory.assert_not_called()
+
+
+class FakeParameter:
+    def __init__(self, count: int, size: int, trainable: bool) -> None:
+        self.count = count
+        self.size = size
+        self.requires_grad = trainable
+
+    def numel(self) -> int:
+        return self.count
+
+    def element_size(self) -> int:
+        return self.size
+
+
+class FakeModel:
+    def __init__(self, *parameters: FakeParameter) -> None:
+        self.weights = list(parameters)
+
+    def parameters(self) -> list[FakeParameter]:
+        return list(self.weights)
+
+
+class MetalWorkingSetTests(unittest.TestCase):
+    def make_device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def models(self) -> list[FakeModel]:
+        shared = FakeParameter(256, 4, True)
+        unet = FakeModel(FakeParameter(1024, 4, True), shared, FakeParameter(64, 4, False))
+        text_encoder = FakeModel(FakeParameter(512, 4, True), shared)
+        text_encoder_2 = FakeModel(FakeParameter(2048, 4, False))
+        return [unet, text_encoder, text_encoder_2]
+
+    def fake_torch(self, recommended: int) -> mock.MagicMock:
+        module = mock.MagicMock()
+        module.mps.recommended_max_memory.return_value = recommended
+        return module
+
+    def test_working_set_counts_four_copies_of_trainable_and_one_of_frozen(self) -> None:
+        trainable = (1024 + 256 + 512) * 4
+        frozen = (64 + 2048) * 4
+        self.assertEqual(train_sdxl.metal_working_set(self.models()), 4 * trainable + frozen)
+
+    def test_offload_keeps_weights_and_one_parameter_update_on_metal(self) -> None:
+        trainable = (1024 + 256 + 512) * 4
+        largest = 1024 * 4
+        frozen = (64 + 2048) * 4
+        self.assertEqual(
+            train_sdxl.metal_working_set(self.models(), True), trainable + 5 * largest + frozen
+        )
+
+    def test_offload_without_trainable_parameters_counts_frozen_only(self) -> None:
+        frozen = FakeModel(FakeParameter(2048, 4, False))
+        self.assertEqual(train_sdxl.metal_working_set([frozen], True), 2048 * 4)
+
+    def test_offload_is_checked_against_its_own_smaller_working_set(self) -> None:
+        required = train_sdxl.metal_working_set(self.models(), True)
+        module = self.fake_torch(required)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.assert_metal_working_set(self.make_device('mps'), self.models(), True)
+            with self.assertRaisesRegex(RuntimeError, 'Metal working memory'):
+                train_sdxl.assert_metal_working_set(self.make_device('mps'), self.models())
+
+    def test_metal_refuses_a_model_that_exceeds_the_working_set(self) -> None:
+        required = train_sdxl.metal_working_set(self.models())
+        module = self.fake_torch(required - 1)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            with self.assertRaisesRegex(RuntimeError, 'Metal working memory'):
+                train_sdxl.assert_metal_working_set(self.make_device('mps'), self.models())
+
+    def test_metal_passes_a_model_that_fits(self) -> None:
+        required = train_sdxl.metal_working_set(self.models())
+        module = self.fake_torch(required)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.assert_metal_working_set(self.make_device('mps'), self.models())
+        module.mps.recommended_max_memory.assert_called_once_with()
+
+    def test_other_devices_skip_the_check(self) -> None:
+        module = self.fake_torch(0)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            for kind in ('cuda', 'cpu'):
+                with self.subTest(kind=kind):
+                    train_sdxl.assert_metal_working_set(self.make_device(kind), self.models())
+        module.mps.recommended_max_memory.assert_not_called()
 
 
 class OptimizerTests(unittest.TestCase):
@@ -616,6 +738,7 @@ class PreviewTests(unittest.TestCase):
                 self.unet = FakeModule()
                 self.text_encoder = FakeModule()
                 self.vae = mock.Mock()
+                self.text_encoder_2 = mock.Mock()
 
             def __call__(self, prompt: str, **kwargs: object) -> FakeResult:
                 captured.append({'prompt': prompt, **kwargs})
@@ -672,6 +795,7 @@ class PreviewTests(unittest.TestCase):
                 self.unet = FakeModule()
                 self.text_encoder = FakeModule()
                 self.vae = mock.Mock()
+                self.text_encoder_2 = mock.Mock()
 
             def __call__(self, prompt: str, **kwargs: object) -> FakeResult:
                 captured.append(kwargs)
@@ -1445,6 +1569,64 @@ class CrashResumeTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), b'snapshot')
             self.assertFalse((path / 'step-000001.pt.tmp').exists())
 
+    def test_copy_snapshot_hard_links_the_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            source = path / 'latest.pt'
+            destination = path / 'step-000250.pt'
+            source.write_bytes(b'snapshot')
+            (path / 'step-000250.pt.tmp').write_bytes(b'stale')
+            train_sdxl.copy_snapshot(source, destination)
+            self.assertEqual(destination.stat().st_ino, source.stat().st_ino)
+            self.assertEqual(destination.read_bytes(), b'snapshot')
+            self.assertFalse((path / 'step-000250.pt.tmp').exists())
+
+    def test_a_linked_snapshot_keeps_its_step_when_latest_is_saved_again(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            source = path / 'latest.pt'
+            destination = path / 'step-000250.pt'
+            optimizer = mock.Mock()
+            optimizer.state_dict.return_value = {}
+            snapshot = {
+                'method': 'lora',
+                'loss': 0.5,
+                'best_loss': 0.5,
+                'best_step': 1,
+                'optimizer': optimizer,
+                'unet': object(),
+                'text_encoder': object(),
+            }
+
+            def write_step(payload: dict[str, Any], target: Path) -> None:
+                Path(target).write_bytes(str(payload['step']).encode())
+
+            torch = mock.MagicMock()
+            torch.save.side_effect = write_step
+            modules = {'torch': torch, 'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
+            with mock.patch.dict(sys.modules, modules):
+                train_sdxl.save_snapshot(source, step=250, **snapshot)
+                train_sdxl.copy_snapshot(source, destination)
+                train_sdxl.save_snapshot(source, step=251, **snapshot)
+            self.assertEqual(destination.read_bytes(), b'250')
+            self.assertEqual(source.read_bytes(), b'251')
+            self.assertNotEqual(destination.stat().st_ino, source.stat().st_ino)
+
+    def test_copy_snapshot_copies_when_hard_links_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            source = path / 'latest.pt'
+            destination = path / 'step-000250.pt'
+            source.write_bytes(b'snapshot')
+            with mock.patch.object(
+                train_sdxl.os, 'link', side_effect=OSError('cross-device link')
+            ) as link:
+                train_sdxl.copy_snapshot(source, destination)
+            link.assert_called_once()
+            self.assertEqual(destination.read_bytes(), b'snapshot')
+            self.assertNotEqual(destination.stat().st_ino, source.stat().st_ino)
+            self.assertFalse((path / 'step-000250.pt.tmp').exists())
+
 
 class RunpodDispatchTests(unittest.TestCase):
     def _dispatch(self, extra: dict, stub: bool = True):
@@ -1513,6 +1695,1377 @@ class RunpodDispatchTests(unittest.TestCase):
         train.assert_not_called()
         run_stub.assert_not_called()
         normalize.assert_not_called()
+
+
+def queued_finetune(models: Path) -> Path:
+    job_dir = models / '.zone-train' / str(uuid.uuid4())
+    job_dir.mkdir(parents=True)
+    write_dataset(job_dir)
+    train_sdxl.write_job(job_dir, queued_job(method='finetune'))
+    return job_dir
+
+
+def read_job(job_dir: Path) -> dict[str, Any]:
+    return json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+
+
+class TransientCrashTests(unittest.TestCase):
+    def test_a_transient_crash_requeues_the_job_for_the_running_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = queued_finetune(models)
+            with mock.patch.object(train_sdxl, 'train', side_effect=MemoryError('mps')):
+                with self.assertRaises(MemoryError):
+                    train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=False)
+            job = read_job(job_dir)
+            self.assertEqual(job['status'], 'running')
+            self.assertIsNone(job['pid'])
+            self.assertEqual(train_sdxl.find_job(models), job_dir)
+
+    def test_watch_releases_memory_and_backs_off_after_a_failed_job(self) -> None:
+        manager = mock.Mock()
+        manager.find_job.side_effect = [Path('job'), KeyboardInterrupt]
+        manager.process_job.side_effect = MemoryError('mps')
+        with (
+            mock.patch.object(train_sdxl, 'find_job', manager.find_job),
+            mock.patch.object(train_sdxl, 'process_job', manager.process_job),
+            mock.patch.object(train_sdxl, 'release_memory', manager.release_memory),
+            mock.patch.object(train_sdxl.time, 'sleep', manager.sleep),
+            mock.patch.object(train_sdxl.traceback, 'print_exc'),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                train_sdxl.watch(Path('models'), {}, once=False, stub=False)
+        self.assertEqual(
+            [name for name, _, _ in manager.mock_calls],
+            ['find_job', 'process_job', 'release_memory', 'sleep', 'find_job'],
+        )
+        manager.sleep.assert_called_once_with(train_sdxl.WATCH_INTERVAL)
+
+    def test_watch_keeps_memory_after_a_finished_job(self) -> None:
+        with (
+            mock.patch.object(train_sdxl, 'find_job', return_value=Path('job')),
+            mock.patch.object(train_sdxl, 'process_job'),
+            mock.patch.object(train_sdxl, 'release_memory') as release,
+        ):
+            self.assertEqual(train_sdxl.watch(Path('models'), {}, once=True, stub=False), 0)
+        release.assert_not_called()
+
+    def test_release_memory_collects_and_empties_the_training_device_cache(self) -> None:
+        device = mock.Mock()
+        with (
+            mock.patch.dict(sys.modules, {'torch': mock.MagicMock()}),
+            mock.patch.object(train_sdxl.gc, 'collect') as collect,
+            mock.patch.object(train_sdxl, 'select_device', return_value=device),
+            mock.patch.object(train_sdxl, 'release_device_cache') as release,
+        ):
+            train_sdxl.release_memory()
+        collect.assert_called_once_with()
+        release.assert_called_once_with(device)
+
+    def test_release_memory_skips_the_device_when_torch_never_loaded(self) -> None:
+        with (
+            mock.patch.dict(sys.modules),
+            mock.patch.object(train_sdxl.gc, 'collect') as collect,
+            mock.patch.object(train_sdxl, 'select_device') as select,
+        ):
+            sys.modules.pop('torch', None)
+            train_sdxl.release_memory()
+        collect.assert_called_once_with()
+        select.assert_not_called()
+
+    def fail_repeatedly(self, error: BaseException) -> tuple[dict[str, Any], int, int]:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = queued_finetune(models)
+            config = train_sdxl.load_config()
+            with (
+                mock.patch.object(train_sdxl, 'train', side_effect=error) as train,
+                mock.patch.object(train_sdxl, 'release_memory') as release,
+                mock.patch.object(train_sdxl.traceback, 'print_exc'),
+            ):
+                for attempt in range(1, train_sdxl.TRANSIENT_ATTEMPT_LIMIT):
+                    self.assertEqual(train_sdxl.watch(models, config, once=True, stub=False), 1)
+                    job = read_job(job_dir)
+                    self.assertEqual(job['status'], 'running')
+                    self.assertEqual(job[train_sdxl.TRANSIENT_ATTEMPTS_KEY], attempt)
+                self.assertEqual(train_sdxl.watch(models, config, once=True, stub=False), 1)
+                self.assertEqual(train_sdxl.watch(models, config, once=True, stub=False), 0)
+            self.assertIsNone(train_sdxl.find_job(models))
+            return read_job(job_dir), train.call_count, release.call_count
+
+    def test_recurring_out_of_memory_fails_the_job_at_the_attempt_limit(self) -> None:
+        job, trained, released = self.fail_repeatedly(MemoryError('host'))
+        self.assertEqual(job['status'], 'failed')
+        self.assertIsNone(job['pid'])
+        self.assertEqual(job[train_sdxl.TRANSIENT_ATTEMPTS_KEY], train_sdxl.TRANSIENT_ATTEMPT_LIMIT)
+        self.assertIn(
+            f'ran out of memory on {train_sdxl.TRANSIENT_ATTEMPT_LIMIT} attempts', job['error']
+        )
+        self.assertIn('host', job['error'])
+        self.assertEqual(trained, train_sdxl.TRANSIENT_ATTEMPT_LIMIT)
+        self.assertEqual(released, train_sdxl.TRANSIENT_ATTEMPT_LIMIT)
+
+    def test_a_job_the_metal_cap_keeps_stopping_fails_with_how_to_fix_it(self) -> None:
+        error = RuntimeError(
+            'MPS backend out of memory (MPS allocated: 51.80 GiB, max allowed: 51.84 GiB). '
+            'Use PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 to disable upper limit'
+        )
+        job, _, _ = self.fail_repeatedly(error)
+        self.assertEqual(job['status'], 'failed')
+        self.assertTrue(job['error'].startswith('Metal ran out of memory on 3 attempts'))
+        self.assertIn('do not raise or disable PYTORCH_MPS_HIGH_WATERMARK_RATIO', job['error'])
+        self.assertIn('Runpod', job['error'])
+        self.assertIn('max allowed: 51.84 GiB', job['error'])
+
+    def test_saving_latest_resets_the_transient_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            checkpoint_dir = job_dir / 'checkpoints'
+            checkpoint_dir.mkdir()
+            job = queued_job(method='finetune', extra={train_sdxl.TRANSIENT_ATTEMPTS_KEY: 2})
+            with mock.patch.object(train_sdxl, 'save_snapshot') as save:
+                train_sdxl.persist_training_step(
+                    checkpoint_dir,
+                    job_dir,
+                    job,
+                    method='finetune',
+                    step=1,
+                    total=10,
+                    loss=0.5,
+                    best_loss=0.5,
+                    best_step=1,
+                    optimizer=object(),
+                    unet=object(),
+                    text_encoder=object(),
+                    token_id=None,
+                    sample_rng=random.Random(0),
+                    dropout_rng=random.Random(1),
+                    every=250,
+                    keep=2,
+                    pipeline=object(),
+                    device='mps',
+                    config={'preview_count': 0},
+                    progress=train_sdxl.Progress(job_dir, 'finetune', 10),
+                )
+            save.assert_called_once()
+            self.assertEqual(read_job(job_dir)[train_sdxl.TRANSIENT_ATTEMPTS_KEY], 0)
+
+
+class LatestCadenceTests(unittest.TestCase):
+    def device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def persist(
+        self,
+        job_dir: Path,
+        kind: str,
+        step: int,
+        cadence: Any,
+        method: str = 'finetune',
+        total: int = 100,
+    ) -> None:
+        checkpoint_dir = job_dir / 'checkpoints'
+        checkpoint_dir.mkdir(exist_ok=True)
+        train_sdxl.persist_training_step(
+            checkpoint_dir,
+            job_dir,
+            queued_job(method=method),
+            method=method,
+            step=step,
+            total=total,
+            loss=0.5,
+            best_loss=0.5,
+            best_step=1,
+            optimizer=object(),
+            unet=object(),
+            text_encoder=object(),
+            token_id=None,
+            sample_rng=random.Random(0),
+            dropout_rng=random.Random(1),
+            every=50,
+            keep=2,
+            pipeline=object(),
+            device=self.device(kind),
+            config={'preview_count': 0},
+            progress=train_sdxl.Progress(job_dir, method, total),
+            cadence=cadence,
+        )
+
+    def saves(
+        self, kind: str, steps: list[tuple[int, float]], method: str = 'finetune'
+    ) -> list[int]:
+        now = [0.0]
+        cadence = train_sdxl.Cadence(600, clock=lambda: now[0])
+        saved: list[int] = []
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            with (
+                mock.patch.object(
+                    train_sdxl,
+                    'save_snapshot',
+                    side_effect=lambda path, **snapshot: saved.append(snapshot['step']),
+                ),
+                mock.patch.object(
+                    train_sdxl,
+                    'start_latest_save',
+                    side_effect=lambda path, **snapshot: saved.append(snapshot['step']),
+                ),
+                mock.patch.object(train_sdxl, 'copy_snapshot'),
+                mock.patch.object(train_sdxl, 'write_snapshot_previews'),
+            ):
+                for step, moment in steps:
+                    now[0] = moment
+                    self.persist(job_dir, kind, step, cadence, method)
+                    self.assertEqual(read_job(job_dir)['step'], step)
+        return saved
+
+    def test_metal_writes_latest_on_the_first_step_then_once_per_interval(self) -> None:
+        steps = [(1, 0.0), (2, 10.0), (3, 599.0), (4, 600.0), (5, 700.0), (6, 1200.0)]
+        for method in ('finetune', 'lora'):
+            with self.subTest(method=method):
+                self.assertEqual(self.saves('mps', steps, method), [1, 4, 6])
+
+    def test_cpu_follows_the_interval(self) -> None:
+        self.assertEqual(self.saves('cpu', [(1, 0.0), (2, 10.0), (3, 600.0)]), [1, 3])
+
+    def test_numbered_and_final_steps_write_latest_inside_the_interval(self) -> None:
+        steps = [(1, 0.0), (50, 5.0), (51, 6.0), (100, 7.0)]
+        self.assertEqual(self.saves('mps', steps), [1, 50, 100])
+
+    def test_cuda_keeps_writing_latest_every_step(self) -> None:
+        steps = [(1, 0.0), (2, 10.0), (3, 20.0)]
+        for method in ('finetune', 'lora'):
+            with self.subTest(method=method):
+                self.assertEqual(self.saves('cuda', steps, method), [1, 2, 3])
+
+    def test_a_missing_cadence_writes_latest_every_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(train_sdxl, 'save_snapshot') as save,
+                mock.patch.object(train_sdxl, 'copy_snapshot'),
+            ):
+                for step in (1, 2, 3):
+                    self.persist(Path(directory), 'mps', step, None)
+        self.assertEqual(save.call_count, 3)
+
+    def test_the_interval_counts_from_the_start_of_a_save(self) -> None:
+        now = [0.0]
+        cadence = train_sdxl.Cadence(600, clock=lambda: now[0])
+
+        def slow_save(path: Path, **snapshot: Any) -> None:
+            now[0] += 500.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(train_sdxl, 'save_snapshot', side_effect=slow_save) as save:
+                self.persist(Path(directory), 'mps', 1, cadence)
+                now[0] = 600.0
+                self.persist(Path(directory), 'mps', 2, cadence)
+        self.assertEqual(save.call_count, 2)
+
+    def test_latest_interval_reads_the_configured_seconds(self) -> None:
+        self.assertEqual(train_sdxl.latest_interval({'latest_interval_seconds': 30}), 30.0)
+        self.assertEqual(train_sdxl.latest_interval({}), 0.0)
+        self.assertEqual(train_sdxl.latest_interval({'latest_interval_seconds': -5}), 0.0)
+        self.assertEqual(train_sdxl.latest_interval(train_sdxl.load_config()), 600.0)
+
+    def test_latest_interval_rejects_non_finite_values(self) -> None:
+        for value in (float('inf'), float('nan')):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'must be finite'):
+                    train_sdxl.latest_interval({'latest_interval_seconds': value})
+
+
+def real_torch(test: unittest.TestCase) -> Any:
+    try:
+        import torch
+    except ImportError:
+        test.skipTest('torch is not installed')
+    return torch
+
+
+def snapshot_modules(torch: Any, seed: int) -> tuple[Any, Any, Any]:
+    torch.manual_seed(seed)
+    unet = torch.nn.Linear(4, 4)
+    text_encoder = torch.nn.Linear(4, 4)
+    optimizer = torch.optim.AdamW([*unet.parameters(), *text_encoder.parameters()], lr=0.01)
+    return unet, text_encoder, optimizer
+
+
+def snapshot_step(torch: Any, unet: Any, text_encoder: Any, optimizer: Any) -> float:
+    optimizer.zero_grad(set_to_none=True)
+    sample = torch.linspace(-1.0, 1.0, 4, device=unet.weight.device)
+    noise = torch.randn(sample.shape, device=sample.device)
+    loss = torch.nn.functional.mse_loss(unet(text_encoder(sample) + noise), noise)
+    loss.backward()
+    optimizer.step()
+    return float(loss.detach().cpu())
+
+
+def save_and_restore(
+    torch: Any, directory: Path, device: Any, host_moments: bool = False
+) -> tuple[tuple[Any, Any, Any], tuple[Any, Any, Any], list[dict[str, Any]]]:
+    saved = snapshot_modules(torch, 0)
+    for module in saved[:2]:
+        module.to(device)
+    snapshot_step(torch, *saved)
+    path = directory / train_sdxl.LATEST_SNAPSHOT
+    train_sdxl.save_snapshot(
+        path,
+        method=train_sdxl.FINETUNE_METHOD,
+        step=1,
+        loss=0.5,
+        best_loss=0.5,
+        best_step=1,
+        optimizer=saved[2],
+        unet=saved[0],
+        text_encoder=saved[1],
+        sample_rng=random.Random(0),
+        dropout_rng=random.Random(1),
+    )
+    restored = snapshot_modules(torch, 99)
+    for module in restored[:2]:
+        module.to(device)
+    loaded: list[dict[str, Any]] = []
+    load = torch.load
+
+    def recording_load(*args: Any, **kwargs: Any) -> Any:
+        payload = load(*args, **kwargs)
+        loaded.append(payload)
+        return payload
+
+    peft = {'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
+    with (
+        mock.patch.dict(sys.modules, peft),
+        mock.patch.object(torch, 'load', side_effect=recording_load),
+    ):
+        train_sdxl.restore_snapshot(
+            path,
+            method=train_sdxl.FINETUNE_METHOD,
+            device=device,
+            optimizer=restored[2],
+            unet=restored[0],
+            text_encoder=restored[1],
+            sample_rng=random.Random(5),
+            dropout_rng=random.Random(6),
+            host_moments=host_moments,
+        )
+    return saved, restored, loaded
+
+
+class SnapshotRestoreTests(unittest.TestCase):
+    def restore_with(self, module: mock.MagicMock) -> tuple[int, float, int | None]:
+        modules = {'torch': module, 'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
+        with mock.patch.dict(sys.modules, modules):
+            return train_sdxl.restore_snapshot(
+                Path('latest.pt'),
+                method='finetune',
+                device=self.device('mps'),
+                optimizer=mock.Mock(state={}, param_groups=[]),
+                unet=mock.Mock(),
+                text_encoder=mock.Mock(),
+            )
+
+    def device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            'step': 3,
+            'best_loss': 0.5,
+            'best_step': 2,
+            'unet': {},
+            'text_encoder': {},
+            'optimizer': {},
+        }
+
+    def test_restore_memory_maps_the_snapshot_onto_the_host_not_the_training_device(self) -> None:
+        module = mock.MagicMock()
+        module.load.return_value = self.payload()
+
+        self.assertEqual(self.restore_with(module), (3, 0.5, 2))
+
+        module.load.assert_called_once_with(
+            Path('latest.pt'), map_location='cpu', mmap=True, weights_only=False
+        )
+
+    def test_restore_falls_back_to_the_host_without_mmap_support(self) -> None:
+        module = mock.MagicMock()
+        module.load.side_effect = [TypeError('mmap'), self.payload()]
+
+        self.assertEqual(self.restore_with(module), (3, 0.5, 2))
+
+        self.assertEqual(
+            module.load.call_args_list[1], mock.call(Path('latest.pt'), map_location='cpu')
+        )
+
+    def test_rng_states_mapped_onto_a_device_are_restored_from_the_host(self) -> None:
+        module = mock.MagicMock()
+        payload = {'torch_rng': mock.Mock(), 'torch_mps_rng': mock.Mock()}
+
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.apply_rng_state(payload)
+
+        module.set_rng_state.assert_called_once_with(payload['torch_rng'].cpu.return_value)
+        module.mps.set_rng_state.assert_called_once_with(
+            payload['torch_mps_rng'].cpu.return_value
+        )
+
+    def test_restore_leaves_no_optimizer_tensor_on_the_snapshot_mapping(self) -> None:
+        torch = real_torch(self)
+        with tempfile.TemporaryDirectory() as directory:
+            _, restored, loaded = save_and_restore(torch, Path(directory), torch.device('cpu'))
+
+        def storages(states: Any) -> set[int]:
+            return {
+                value.untyped_storage().data_ptr()
+                for state in states
+                for value in state.values()
+                if isinstance(value, torch.Tensor)
+            }
+
+        mapped = storages(loaded[0]['optimizer']['state'].values())
+        kept = storages(restored[2].state.values())
+        self.assertTrue(mapped)
+        self.assertEqual(len(kept), len(mapped))
+        self.assertFalse(mapped & kept)
+
+    def test_a_metal_snapshot_resumes_on_metal(self) -> None:
+        torch = real_torch(self)
+        if not torch.backends.mps.is_available():
+            self.skipTest('Metal is not available')
+        device = torch.device('mps')
+        with tempfile.TemporaryDirectory() as directory:
+            saved, restored, _ = save_and_restore(torch, Path(directory), device)
+        for expected, actual in zip(
+            [*saved[0].parameters(), *saved[1].parameters()],
+            [*restored[0].parameters(), *restored[1].parameters()],
+            strict=True,
+        ):
+            self.assertEqual(actual.device.type, 'mps')
+            self.assertTrue(torch.equal(expected, actual))
+            state = restored[2].state[actual]
+            self.assertEqual(state['exp_avg'].device.type, 'mps')
+            self.assertEqual(state['step'].device.type, 'cpu')
+
+    def test_a_metal_fine_tune_restores_its_moments_on_the_host(self) -> None:
+        torch = real_torch(self)
+        if not torch.backends.mps.is_available():
+            self.skipTest('Metal is not available')
+        device = torch.device('mps')
+        with tempfile.TemporaryDirectory() as directory:
+            saved, restored, _ = save_and_restore(torch, Path(directory), device, True)
+        for expected, actual in zip(
+            [*saved[0].parameters(), *saved[1].parameters()],
+            [*restored[0].parameters(), *restored[1].parameters()],
+            strict=True,
+        ):
+            self.assertEqual(actual.device.type, 'mps')
+            self.assertTrue(torch.equal(expected, actual))
+            state = restored[2].state[actual]
+            expected_state = saved[2].state[expected]
+            for key in train_sdxl.MOMENT_KEYS:
+                self.assertEqual(state[key].device.type, 'cpu', key)
+                self.assertTrue(torch.equal(state[key], expected_state[key].cpu()), key)
+
+    def test_host_moments_load_the_optimizer_while_the_modules_wait_on_the_host(self) -> None:
+        events: list[str] = []
+        unet = mock.Mock()
+        unet.to.side_effect = lambda device: events.append(f'unet:{device}')
+        text_encoder = mock.Mock()
+        text_encoder.to.side_effect = lambda device: events.append(f'text_encoder:{device}')
+        optimizer = mock.Mock(state={}, param_groups=[])
+        optimizer.load_state_dict.side_effect = lambda state: events.append('load_state_dict')
+        module = mock.MagicMock()
+        module.load.return_value = self.payload()
+        device = self.device('mps')
+        modules = {'torch': module, 'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(train_sdxl, 'release_device_cache') as release,
+        ):
+            train_sdxl.restore_snapshot(
+                Path('latest.pt'),
+                method='finetune',
+                device=device,
+                optimizer=optimizer,
+                unet=unet,
+                text_encoder=text_encoder,
+                host_moments=True,
+            )
+        self.assertEqual(
+            events,
+            [
+                'unet:cpu',
+                'text_encoder:cpu',
+                'load_state_dict',
+                f'unet:{device}',
+                f'text_encoder:{device}',
+            ],
+        )
+        release.assert_called_once_with(device)
+
+    def test_host_moments_return_the_modules_to_the_device_when_loading_fails(self) -> None:
+        unet = mock.Mock()
+        text_encoder = mock.Mock()
+        module = mock.MagicMock()
+        module.load.side_effect = [TypeError('mmap'), RuntimeError('corrupt snapshot')]
+        device = self.device('mps')
+        modules = {'torch': module, 'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(train_sdxl, 'release_device_cache'),
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'corrupt snapshot'):
+                train_sdxl.restore_snapshot(
+                    Path('latest.pt'),
+                    method='finetune',
+                    device=device,
+                    optimizer=mock.Mock(state={}, param_groups=[]),
+                    unet=unet,
+                    text_encoder=text_encoder,
+                    host_moments=True,
+                )
+        self.assertEqual(unet.to.call_args_list, [mock.call('cpu'), mock.call(device)])
+        self.assertEqual(text_encoder.to.call_args_list, [mock.call('cpu'), mock.call(device)])
+
+    def test_resume_rewinds_the_job_step_to_the_restored_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            job = queued_job(method='finetune')
+            job['status'] = 'running'
+            job['step'] = 9
+            train_sdxl.write_job(job_dir, job)
+            checkpoint = models / 'checkpoints' / job['checkpoint']
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b'checkpoint')
+            frame = {'image': job_dir / 'dataset' / '0000.png', 'mask': None, 'caption': 'ohwx'}
+            config = train_sdxl.load_config()
+            config['prior_preservation'] = False
+            modules = {'torch': mock.MagicMock(), 'diffusers': mock.MagicMock()}
+            with (
+                mock.patch.dict(sys.modules, modules),
+                mock.patch.multiple(
+                    train_sdxl,
+                    list_frames=mock.Mock(return_value=[frame]),
+                    steps_for=mock.Mock(return_value=12),
+                    select_device=mock.Mock(return_value=self.device('cpu')),
+                    assert_device_capacity=mock.DEFAULT,
+                    load_base_pipeline=mock.MagicMock(),
+                    make_optimizer=mock.MagicMock(),
+                    load_or_encode_latents=mock.Mock(return_value=(mock.Mock(), 64, 64)),
+                    resume_snapshot_path=mock.Mock(return_value=job_dir / 'latest.pt'),
+                    restore_snapshot=mock.Mock(return_value=(7, 0.25, 7)),
+                    pose_sample_weights=mock.Mock(return_value=[1.0]),
+                    weighted_index=mock.Mock(side_effect=MemoryError('mps')),
+                ),
+            ):
+                with self.assertRaises(MemoryError):
+                    train_sdxl.train(models, job_dir, job, config)
+            saved = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+            self.assertEqual(saved['step'], 7)
+
+
+class FakeTokenizer:
+    model_max_length = 8
+    end_token = 99
+
+    def __init__(self, torch: Any) -> None:
+        self.torch = torch
+
+    def __call__(
+        self,
+        prompt: str,
+        padding: str,
+        max_length: int,
+        truncation: bool,
+        return_tensors: str,
+    ) -> Any:
+        body = [2 + ord(character) % 90 for character in prompt][: max_length - 2]
+        ids = [1, *body, self.end_token]
+        ids += [0] * (max_length - len(ids))
+        return mock.Mock(input_ids=self.torch.tensor([ids]))
+
+
+class PromptCacheTests(unittest.TestCase):
+    INSTANCE_CAPTIONS = ['ohwx person, studio', 'ohwx person, beach', 'ohwx person, studio']
+    CLASS_PROMPT = 'a photo of a person'
+    CLASS_CAPTIONS = ['a photo of a person, standing', 'a photo of a person, sitting']
+
+    def clip_models(self) -> tuple[Any, Any, Any]:
+        torch = real_torch(self)
+        from transformers import CLIPTextConfig
+        from transformers import CLIPTextModel
+        from transformers import CLIPTextModelWithProjection
+
+        torch.manual_seed(0)
+
+        def config(hidden: int) -> Any:
+            return CLIPTextConfig(
+                vocab_size=100,
+                hidden_size=hidden,
+                intermediate_size=hidden * 2,
+                num_hidden_layers=3,
+                num_attention_heads=2,
+                max_position_embeddings=FakeTokenizer.model_max_length,
+                projection_dim=6,
+                pad_token_id=0,
+                bos_token_id=1,
+                eos_token_id=FakeTokenizer.end_token,
+            )
+
+        text_encoder = CLIPTextModel(config(8))
+        text_encoder_2 = CLIPTextModelWithProjection(config(12)).eval()
+        text_encoder_2.requires_grad_(False)
+        return torch, text_encoder, text_encoder_2
+
+    def prompts(self) -> list[str]:
+        return train_sdxl.training_prompts(
+            self.INSTANCE_CAPTIONS, self.CLASS_PROMPT, self.CLASS_CAPTIONS
+        )
+
+    def live(
+        self, torch: Any, prompt: str, text_encoder: Any, text_encoder_2: Any
+    ) -> tuple[Any, Any]:
+        tokenizer = FakeTokenizer(torch)
+        ids = tokenizer(prompt, 'max_length', tokenizer.model_max_length, True, 'pt').input_ids
+        with torch.no_grad():
+            hidden_1 = text_encoder(ids, output_hidden_states=True).hidden_states[-2]
+            output_2 = text_encoder_2(ids, output_hidden_states=True)
+        return torch.cat([hidden_1, output_2.hidden_states[-2]], dim=-1), output_2.text_embeds
+
+    def test_cached_embeddings_equal_a_live_text_encoder_2_forward(self) -> None:
+        torch, text_encoder, text_encoder_2 = self.clip_models()
+        tokenizer = FakeTokenizer(torch)
+        secondary = train_sdxl.cache_secondary_embeddings(
+            self.prompts(), tokenizer, text_encoder_2, torch.device('cpu')
+        )
+        for train_text_encoder in (True, False):
+            for prompt in [*self.INSTANCE_CAPTIONS, self.CLASS_PROMPT, *self.CLASS_CAPTIONS]:
+                embeds, pooled = train_sdxl.encode_prompt(
+                    prompt,
+                    tokenizer,
+                    text_encoder,
+                    secondary,
+                    torch.device('cpu'),
+                    train_text_encoder,
+                )
+                expected_embeds, expected_pooled = self.live(
+                    torch, prompt, text_encoder, text_encoder_2
+                )
+                self.assertTrue(torch.equal(embeds, expected_embeds), prompt)
+                self.assertTrue(torch.equal(pooled, expected_pooled), prompt)
+                self.assertEqual(embeds.requires_grad, train_text_encoder)
+                self.assertFalse(pooled.requires_grad)
+
+    def test_lookup_hands_out_copies_so_the_cache_cannot_be_mutated(self) -> None:
+        torch, _, text_encoder_2 = self.clip_models()
+        secondary = train_sdxl.cache_secondary_embeddings(
+            [self.CLASS_PROMPT], FakeTokenizer(torch), text_encoder_2, torch.device('cpu')
+        )
+        hidden, pooled = secondary.lookup(self.CLASS_PROMPT, torch.device('cpu'))
+        expected_hidden, expected_pooled = hidden.clone(), pooled.clone()
+        hidden.add_(1.0)
+        pooled.add_(1.0)
+        again_hidden, again_pooled = secondary.lookup(self.CLASS_PROMPT, torch.device('cpu'))
+        self.assertTrue(torch.equal(again_hidden, expected_hidden))
+        self.assertTrue(torch.equal(again_pooled, expected_pooled))
+
+    def test_uncached_prompt_raises_instead_of_encoding_on_another_device(self) -> None:
+        cache = train_sdxl.PromptCache({})
+        with self.assertRaises(train_sdxl.UncachedPromptError) as raised:
+            cache.lookup('ohwx person, unseen', 'cpu')
+        self.assertIsInstance(raised.exception, KeyError)
+        self.assertEqual(raised.exception.prompt, 'ohwx person, unseen')
+        self.assertEqual(
+            str(raised.exception),
+            "no cached text_encoder_2 output for prompt 'ohwx person, unseen'",
+        )
+
+    def test_training_prompts_cover_every_caption_the_loop_can_request(self) -> None:
+        prompts = self.prompts()
+        self.assertEqual(
+            prompts,
+            ['ohwx person, studio', 'ohwx person, beach', self.CLASS_PROMPT, *self.CLASS_CAPTIONS],
+        )
+        sample_rng = random.Random(0)
+        dropout_rng = random.Random(1)
+        requested = set()
+        for step in range(1, 2001):
+            caption = self.INSTANCE_CAPTIONS[sample_rng.randrange(len(self.INSTANCE_CAPTIONS))]
+            requested.add(train_sdxl.drop_caption(caption, self.CLASS_PROMPT, 0.5, dropout_rng))
+            requested.add(self.CLASS_CAPTIONS[(step - 1) % len(self.CLASS_CAPTIONS)])
+        self.assertIn(self.CLASS_PROMPT, requested)
+        self.assertLessEqual(requested, set(prompts))
+
+    def test_text_encoder_2_leaves_the_device_after_caching(self) -> None:
+        torch = real_torch(self)
+        events: list[str] = []
+        text_encoder_2 = mock.Mock()
+
+        def forward(ids: Any, output_hidden_states: bool) -> Any:
+            events.append('forward')
+            hidden = torch.zeros(1, 8, 4)
+            return mock.Mock(hidden_states=(hidden, hidden, hidden), text_embeds=torch.ones(1, 4))
+
+        text_encoder_2.side_effect = forward
+        text_encoder_2.to.side_effect = lambda device: events.append(f'to:{device}')
+        device = torch.device('meta')
+        with mock.patch.object(
+            train_sdxl,
+            'release_device_cache',
+            side_effect=lambda released: events.append(f'release:{released}'),
+        ):
+            cache = train_sdxl.cache_secondary_embeddings(
+                [self.CLASS_PROMPT, *self.INSTANCE_CAPTIONS],
+                FakeTokenizer(torch),
+                text_encoder_2,
+                device,
+            )
+        self.assertEqual(len(cache), 3)
+        self.assertEqual(events, ['forward'] * 3 + ['to:cpu', f'release:{device}'])
+        embedding = cache.embeddings[self.CLASS_PROMPT]
+        self.assertEqual(embedding.hidden.device.type, 'cpu')
+        self.assertEqual(embedding.pooled.device.type, 'cpu')
+
+    def render_previews(self, pipeline: Any) -> None:
+        real_torch(self)
+        with tempfile.TemporaryDirectory() as directory:
+            train_sdxl.render_previews(
+                pipeline, Path(directory), 10, 'ohwx', 'mps', {'preview_count': 1}
+            )
+
+    def test_previews_bring_text_encoder_2_to_the_device_and_back(self) -> None:
+        pipeline = mock.MagicMock()
+        self.render_previews(pipeline)
+        self.assertEqual(
+            pipeline.text_encoder_2.to.call_args_list, [mock.call('mps'), mock.call('cpu')]
+        )
+
+    def test_previews_that_cannot_reach_the_device_restore_every_model(self) -> None:
+        pipeline = mock.MagicMock()
+        pipeline.unet.training = True
+        pipeline.text_encoder_2.to.side_effect = [RuntimeError('MPS backend out of memory'), None]
+        with self.assertRaisesRegex(RuntimeError, 'MPS backend out of memory'):
+            self.render_previews(pipeline)
+        self.assertEqual(pipeline.vae.to.call_args_list, [mock.call('mps'), mock.call('cpu')])
+        self.assertEqual(
+            pipeline.text_encoder_2.to.call_args_list, [mock.call('mps'), mock.call('cpu')]
+        )
+        pipeline.unet.train.assert_called_once_with()
+        pipeline.text_encoder.train.assert_called_once_with()
+
+    def test_failed_previews_still_return_text_encoder_2_to_the_host(self) -> None:
+        pipeline = mock.MagicMock(side_effect=RuntimeError('out of memory'))
+        with self.assertRaises(RuntimeError):
+            self.render_previews(pipeline)
+        self.assertEqual(
+            pipeline.text_encoder_2.to.call_args_list, [mock.call('mps'), mock.call('cpu')]
+        )
+
+
+class LoopReached(Exception):
+    pass
+
+
+class FakeMoment:
+    def __init__(self, device: str, value: float = 0.0) -> None:
+        self.device = device
+        self.value = value
+
+    def to(self, device: str) -> FakeMoment:
+        return FakeMoment(device, self.value)
+
+    def __add__(self, other: FakeMoment) -> FakeMoment:
+        if self.device != other.device:
+            raise AssertionError(f'cannot add {self.device} to {other.device}')
+        return FakeMoment(self.device, self.value + other.value)
+
+
+class FakeMomentParameter:
+    def __init__(self, device: str) -> None:
+        self.device = device
+        self.grad: object | None = None
+
+    def register_post_accumulate_grad_hook(self, hook: Any) -> mock.Mock:
+        return mock.Mock()
+
+
+class FakeMomentOptimizer:
+    def __init__(
+        self,
+        parameters: list[FakeMomentParameter],
+        state: dict[Any, dict[str, Any]] | None = None,
+    ) -> None:
+        self.param_groups = [{'params': parameters}]
+        self.state: defaultdict[Any, dict[str, Any]] = defaultdict(dict, state or {})
+        self.devices: list[tuple[str, str]] = []
+        self.gradients: list[tuple[str, float]] = []
+
+    def step(self) -> None:
+        for parameter in self.param_groups[0]['params']:
+            if parameter.grad is None:
+                continue
+            self.gradients.append((parameter.grad.device, parameter.grad.value))
+            state = self.state[parameter]
+            if not state:
+                state.update(
+                    step=0,
+                    exp_avg=FakeMoment(parameter.device),
+                    exp_avg_sq=FakeMoment(parameter.device),
+                )
+            self.devices.append((state['exp_avg'].device, state['exp_avg_sq'].device))
+            state['step'] += 1
+
+
+PARITY_WIDTH = 8
+PARITY_STEPS = 3
+PARITY_SEED = 11
+PRIOR_WEIGHT = 0.5
+
+
+def parity_model(torch: Any, seed: int) -> Any:
+    from torch.utils.checkpoint import checkpoint
+
+    class Denoiser(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = torch.nn.Linear(PARITY_WIDTH, PARITY_WIDTH)
+            self.first = torch.nn.Sequential(
+                torch.nn.Linear(PARITY_WIDTH, PARITY_WIDTH), torch.nn.GELU()
+            )
+            self.second = torch.nn.Sequential(
+                torch.nn.Linear(PARITY_WIDTH, PARITY_WIDTH), torch.nn.GELU()
+            )
+            self.offset = torch.nn.Parameter(torch.zeros(PARITY_WIDTH))
+
+        def forward(self, prompt: Any, latents: Any, noise: Any) -> Any:
+            condition = self.encoder(prompt)
+            hidden = checkpoint(self.first, latents + noise + condition, use_reentrant=False)
+            hidden = checkpoint(
+                self.second, hidden * condition + self.offset, use_reentrant=False
+            )
+            return torch.nn.functional.mse_loss(hidden, noise)
+
+    torch.manual_seed(seed)
+    return Denoiser()
+
+
+def parity_inputs(torch: Any) -> list[tuple[Any, ...]]:
+    generator = torch.Generator().manual_seed(PARITY_SEED)
+    return [
+        tuple(torch.randn(2, PARITY_WIDTH, generator=generator) for _ in range(6))
+        for _ in range(PARITY_STEPS)
+    ]
+
+
+def parity_optimizer(model: Any) -> Any:
+    config = train_sdxl.load_config()
+    groups = [{'params': list(model.parameters()), 'lr': float(config['finetune_lr'])}]
+    return train_sdxl.make_optimizer(train_sdxl.FINETUNE_METHOD, groups, config)
+
+
+def train_parity_steps(
+    model: Any,
+    optimizer: Any,
+    inputs: list[tuple[Any, ...]],
+    in_backward: bool,
+    offload: bool = False,
+) -> None:
+    with train_sdxl.StepInBackward(optimizer, in_backward, offload) as stepper:
+        for prompt, latents, noise, class_prompt, class_latents, class_noise in inputs:
+            optimizer.zero_grad(set_to_none=True)
+            losses = train_sdxl.combine_losses(
+                [
+                    model(prompt, latents, noise),
+                    PRIOR_WEIGHT * model(class_prompt, class_latents, class_noise),
+                ]
+            )
+            stepper.backward(losses)
+            stepper.step()
+
+
+class StepInBackwardTests(unittest.TestCase):
+    def make_device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def trained(
+        self, torch: Any, in_backward: bool, offload: bool = False
+    ) -> tuple[Any, Any, mock.Mock]:
+        model = parity_model(torch, PARITY_SEED)
+        optimizer = parity_optimizer(model)
+        step = mock.Mock(wraps=optimizer.step)
+        with (
+            mock.patch.object(optimizer, 'step', step),
+            mock.patch.object(train_sdxl, 'release_device_cache'),
+        ):
+            train_parity_steps(model, optimizer, parity_inputs(torch), in_backward, offload)
+        return model, optimizer, step
+
+    def test_adamw_in_backward_matches_backward_then_step_bitwise(self) -> None:
+        torch = real_torch(self)
+        standard, standard_optimizer, standard_step = self.trained(torch, False)
+        initial = parity_model(torch, PARITY_SEED)
+        for offload in (False, True):
+            with self.subTest(offload=offload):
+                fused, fused_optimizer, fused_step = self.trained(torch, True, offload)
+                parameters = list(fused.parameters())
+                self.assertIsInstance(fused_optimizer, torch.optim.AdamW)
+                self.assertEqual(standard_step.call_count, PARITY_STEPS)
+                self.assertEqual(fused_step.call_count, PARITY_STEPS * len(parameters))
+                for name, parameter in fused.named_parameters():
+                    reference = dict(standard.named_parameters())[name]
+                    self.assertIsNone(parameter.grad)
+                    self.assertFalse(
+                        torch.equal(parameter, dict(initial.named_parameters())[name])
+                    )
+                    self.assertTrue(torch.equal(parameter, reference), name)
+                    expected = standard_optimizer.state[reference]
+                    actual = fused_optimizer.state[parameter]
+                    for key in ('step', *train_sdxl.MOMENT_KEYS):
+                        self.assertTrue(torch.equal(actual[key], expected[key]), (name, key))
+
+    def test_state_dict_round_trips_into_a_standard_optimizer(self) -> None:
+        torch = real_torch(self)
+        standard, standard_optimizer, _ = self.trained(torch, False)
+        for offload in (False, True):
+            with self.subTest(offload=offload):
+                fused, fused_optimizer, _ = self.trained(torch, True, offload)
+                restored = parity_optimizer(fused)
+                restored.load_state_dict(fused_optimizer.state_dict())
+                expected = standard_optimizer.state_dict()
+                actual = restored.state_dict()
+                self.assertEqual(actual['param_groups'], expected['param_groups'])
+                self.assertEqual(sorted(actual['state']), sorted(expected['state']))
+                for index, state in expected['state'].items():
+                    for key, value in state.items():
+                        self.assertTrue(torch.equal(actual['state'][index][key], value), key)
+
+    def test_offload_moves_moments_to_the_parameter_device_only_around_the_step(self) -> None:
+        torch = real_torch(self)
+        model = parity_model(torch, PARITY_SEED)
+        optimizer = parity_optimizer(model)
+        events: list[tuple[str, int, str]] = []
+        move = train_sdxl.move_moments
+        step = optimizer.step
+
+        def record_move(state: dict[str, Any], device: Any) -> None:
+            events.append(('move', id(state), str(device)))
+            move(state, device)
+
+        def record_step() -> None:
+            events.append(('step', 0, ''))
+            step()
+
+        with (
+            mock.patch.object(train_sdxl, 'move_moments', record_move),
+            mock.patch.object(optimizer, 'step', record_step),
+            mock.patch.object(train_sdxl, 'release_device_cache'),
+        ):
+            train_parity_steps(model, optimizer, parity_inputs(torch)[:1], True, True)
+        expected = {
+            id(optimizer.state[parameter]): [
+                ('move', id(optimizer.state[parameter]), str(parameter.device)),
+                ('step', 0, ''),
+                ('move', id(optimizer.state[parameter]), train_sdxl.HOST_DEVICE),
+            ]
+            for parameter in model.parameters()
+        }
+        updates = [events[index : index + 3] for index in range(0, len(events), 3)]
+        self.assertEqual(len(updates), len(expected))
+        for update in updates:
+            self.assertEqual(update, expected[update[0][1]])
+
+    def test_hooks_are_removed_when_the_context_exits(self) -> None:
+        torch = real_torch(self)
+        model = parity_model(torch, PARITY_SEED)
+        optimizer = parity_optimizer(model)
+        inputs = parity_inputs(torch)
+        train_parity_steps(model, optimizer, inputs[:1], True)
+        before = [parameter.detach().clone() for parameter in model.parameters()]
+        prompt, latents, noise = inputs[1][:3]
+        model(prompt, latents, noise).backward()
+        for parameter, previous in zip(model.parameters(), before, strict=True):
+            self.assertIsNotNone(parameter.grad)
+            self.assertTrue(torch.equal(parameter, previous))
+
+    def test_hooks_are_removed_when_the_loop_raises(self) -> None:
+        handle = mock.Mock()
+        parameter = mock.Mock()
+        parameter.register_post_accumulate_grad_hook.return_value = handle
+        optimizer = mock.Mock(param_groups=[{'params': [parameter]}])
+        with self.assertRaises(LoopReached):
+            with train_sdxl.StepInBackward(optimizer, True):
+                raise LoopReached()
+        handle.remove.assert_called_once_with()
+
+    def test_enabled_registers_one_hook_per_parameter_and_skips_the_step(self) -> None:
+        parameters = [mock.Mock(), mock.Mock(), mock.Mock()]
+        groups = [{'params': parameters[:2]}, {'params': parameters[2:]}]
+        optimizer = mock.Mock(param_groups=groups)
+        with train_sdxl.StepInBackward(optimizer, True) as stepper:
+            stepper.step()
+        for parameter in parameters:
+            parameter.register_post_accumulate_grad_hook.assert_called_once_with(stepper.update)
+        optimizer.step.assert_not_called()
+
+    def test_disabled_registers_no_hooks_and_steps_after_backward(self) -> None:
+        parameter = mock.Mock()
+        optimizer = mock.Mock(param_groups=[{'params': [parameter]}])
+        with train_sdxl.StepInBackward(optimizer, False) as stepper:
+            stepper.step()
+        parameter.register_post_accumulate_grad_hook.assert_not_called()
+        optimizer.step.assert_called_once_with()
+
+    def test_entering_offloads_existing_moments_and_releases_the_metal_cache(self) -> None:
+        state = {'step': 'counter', 'exp_avg': FakeMoment('mps'), 'exp_avg_sq': FakeMoment('mps')}
+        optimizer = FakeMomentOptimizer([], {FakeMomentParameter('mps'): state})
+        with mock.patch.object(train_sdxl, 'release_device_cache') as release:
+            with train_sdxl.StepInBackward(optimizer, True, True):
+                release.assert_called_once_with(train_sdxl.MPS_DEVICE)
+                self.assertEqual(state['exp_avg'].device, train_sdxl.HOST_DEVICE)
+                self.assertEqual(state['exp_avg_sq'].device, train_sdxl.HOST_DEVICE)
+                self.assertEqual(state['step'], 'counter')
+        self.assertEqual(state['exp_avg'].device, train_sdxl.HOST_DEVICE)
+        self.assertEqual(state['exp_avg_sq'].device, train_sdxl.HOST_DEVICE)
+
+    def test_update_steps_with_moments_on_the_parameter_device_then_offloads(self) -> None:
+        parameter = FakeMomentParameter('mps')
+        optimizer = FakeMomentOptimizer([parameter])
+        stepper = train_sdxl.StepInBackward(optimizer, True, True)
+        for _ in range(2):
+            parameter.grad = FakeMoment('mps', 1.0)
+            stepper.update(parameter)
+            state = optimizer.state[parameter]
+            self.assertIsNone(parameter.grad)
+            self.assertEqual(state['exp_avg'].device, train_sdxl.HOST_DEVICE)
+            self.assertEqual(state['exp_avg_sq'].device, train_sdxl.HOST_DEVICE)
+        self.assertEqual(optimizer.devices, [('mps', 'mps'), ('mps', 'mps')])
+        self.assertEqual(optimizer.state[parameter]['step'], 2)
+
+    def test_update_without_offload_leaves_moments_where_the_optimizer_put_them(self) -> None:
+        parameter = FakeMomentParameter('mps')
+        optimizer = FakeMomentOptimizer([parameter])
+        with mock.patch.object(train_sdxl, 'release_device_cache') as release:
+            with train_sdxl.StepInBackward(optimizer, True, False) as stepper:
+                parameter.grad = FakeMoment('mps', 1.0)
+                stepper.update(parameter)
+        release.assert_not_called()
+        self.assertEqual(optimizer.state[parameter]['exp_avg'].device, 'mps')
+        self.assertEqual(optimizer.state[parameter]['exp_avg_sq'].device, 'mps')
+
+    def test_earlier_loss_parts_stash_gradients_on_the_host_until_the_final_part(self) -> None:
+        parameter = FakeMomentParameter('mps')
+        optimizer = FakeMomentOptimizer([parameter])
+        stepper = train_sdxl.StepInBackward(optimizer, True, True)
+        stepper.stashing = True
+        for value in (1.0, 2.0):
+            parameter.grad = FakeMoment('mps', value)
+            stepper.update(parameter)
+            self.assertIsNone(parameter.grad)
+        self.assertEqual(stepper.stashed[parameter].device, train_sdxl.HOST_DEVICE)
+        self.assertEqual(optimizer.gradients, [])
+        stepper.stashing = False
+        parameter.grad = FakeMoment('mps', 4.0)
+        stepper.update(parameter)
+        self.assertEqual(optimizer.gradients, [('mps', 7.0)])
+        self.assertEqual(stepper.stashed, {})
+        self.assertIsNone(parameter.grad)
+
+    def two_parameter_step(self, torch: Any, offload: bool) -> tuple[list[Any], Any]:
+        first = torch.nn.Parameter(torch.tensor([1.0, -2.0]))
+        second = torch.nn.Parameter(torch.tensor([0.5, 3.0]))
+        optimizer = torch.optim.AdamW([first, second], lr=0.1)
+        with (
+            mock.patch.object(train_sdxl, 'release_device_cache'),
+            train_sdxl.StepInBackward(optimizer, offload, offload) as stepper,
+        ):
+            optimizer.zero_grad(set_to_none=True)
+            parts = [(first * first).sum(), PRIOR_WEIGHT * (first * second).sum()]
+            stepper.backward(train_sdxl.combine_losses(parts))
+            stepper.step()
+            self.assertEqual(stepper.stashed, {})
+        return [first, second], optimizer
+
+    def test_parameters_missing_from_the_final_part_step_after_backward(self) -> None:
+        torch = real_torch(self)
+        parameters, optimizer = self.two_parameter_step(torch, True)
+        expected_parameters, expected_optimizer = self.two_parameter_step(torch, False)
+        for parameter, expected in zip(parameters, expected_parameters, strict=True):
+            self.assertIsNone(parameter.grad)
+            self.assertTrue(torch.equal(parameter, expected))
+            for key in ('step', *train_sdxl.MOMENT_KEYS):
+                actual_value = optimizer.state[parameter][key]
+                expected_value = expected_optimizer.state[expected][key]
+                self.assertTrue(torch.equal(actual_value, expected_value), key)
+
+    def test_backward_without_offload_runs_once_through_the_total(self) -> None:
+        losses = train_sdxl.Losses(parts=[mock.Mock(), mock.Mock()], total=mock.Mock())
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                train_sdxl.StepInBackward(mock.Mock(), enabled, False).backward(losses)
+        self.assertEqual(losses.total.backward.call_count, 2)
+        for part in losses.parts:
+            part.backward.assert_not_called()
+
+    def test_offloaded_backward_runs_later_parts_first(self) -> None:
+        order: list[str] = []
+        parts = [mock.Mock(), mock.Mock(), mock.Mock()]
+        for name, part in zip(('instance', 'second', 'third'), parts, strict=True):
+            part.backward.side_effect = lambda name=name: order.append(name)
+        losses = train_sdxl.Losses(parts=parts, total=mock.Mock())
+        stepper = train_sdxl.StepInBackward(FakeMomentOptimizer([]), True, True)
+        stepper.stashed[object()] = 'stale'
+        with mock.patch.object(stepper, 'step_stashed') as step_stashed:
+            stepper.backward(losses)
+        self.assertEqual(order, ['third', 'second', 'instance'])
+        self.assertEqual(stepper.stashed, {})
+        self.assertFalse(stepper.stashing)
+        step_stashed.assert_called_once_with()
+        losses.total.backward.assert_not_called()
+
+    def test_exit_drops_stashed_gradients(self) -> None:
+        stepper = train_sdxl.StepInBackward(FakeMomentOptimizer([]), True, True)
+        with mock.patch.object(train_sdxl, 'release_device_cache'):
+            with stepper:
+                stepper.stashed[object()] = 'gradient'
+        self.assertEqual(stepper.stashed, {})
+
+    def test_offload_requires_stepping_in_backward(self) -> None:
+        state = {'exp_avg': FakeMoment('mps'), 'exp_avg_sq': FakeMoment('mps')}
+        optimizer = FakeMomentOptimizer([], {FakeMomentParameter('mps'): state})
+        with mock.patch.object(train_sdxl, 'release_device_cache') as release:
+            with train_sdxl.StepInBackward(optimizer, False, True) as stepper:
+                self.assertFalse(stepper.offload)
+        release.assert_not_called()
+        self.assertEqual(state['exp_avg'].device, 'mps')
+
+    def test_only_an_adamw_fine_tune_on_metal_keeps_its_moments_on_the_host(self) -> None:
+        cases = (
+            ('mps', 'finetune', train_sdxl.ADAMW_OPTIMIZER, True),
+            ('mps', 'lora', train_sdxl.ADAMW_OPTIMIZER, False),
+            ('mps', 'pivotal', train_sdxl.ADAMW_OPTIMIZER, False),
+            ('cpu', 'finetune', train_sdxl.ADAMW_OPTIMIZER, False),
+            ('cuda', 'finetune', train_sdxl.ADAMW_OPTIMIZER, False),
+            ('mps', 'finetune', train_sdxl.PRODIGY_OPTIMIZER, False),
+            ('cuda', 'lora', train_sdxl.PRODIGY_OPTIMIZER, False),
+        )
+        for kind, method, optimizer, expected in cases:
+            with self.subTest(kind=kind, method=method, optimizer=optimizer):
+                device = self.make_device(kind)
+                self.assertIs(train_sdxl.offloads_moments(device, method, optimizer), expected)
+
+    def test_configured_methods_pick_the_expected_path(self) -> None:
+        config = train_sdxl.load_config()
+        cases = (
+            ('mps', 'finetune', True),
+            ('mps', 'lora', False),
+            ('mps', 'pivotal', False),
+            ('cuda', 'finetune', False),
+        )
+        for kind, method, expected in cases:
+            with self.subTest(kind=kind, method=method):
+                optimizer = train_sdxl.optimizer_kind(method, config)
+                device = self.make_device(kind)
+                self.assertIs(train_sdxl.offloads_moments(device, method, optimizer), expected)
+
+class MetalOffloadTests(unittest.TestCase):
+    def device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def stepper_for(self, kind: str, method: str) -> mock.Mock:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = models / '.zone-train' / str(uuid.uuid4())
+            job_dir.mkdir(parents=True)
+            job = queued_job(method=method)
+            train_sdxl.write_job(job_dir, job)
+            checkpoint = models / 'checkpoints' / job['checkpoint']
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b'checkpoint')
+            frame = {'image': job_dir / 'dataset' / '0000.png', 'mask': None, 'caption': 'ohwx'}
+            config = train_sdxl.load_config()
+            config['prior_preservation'] = False
+            stepper = mock.MagicMock()
+            stepper.return_value.__enter__.side_effect = LoopReached()
+            modules = {
+                'torch': mock.MagicMock(),
+                'diffusers': mock.MagicMock(),
+                'peft': mock.MagicMock(),
+            }
+            with (
+                mock.patch.dict(sys.modules, modules),
+                mock.patch.multiple(
+                    train_sdxl,
+                    list_frames=mock.Mock(return_value=[frame]),
+                    steps_for=mock.Mock(return_value=12),
+                    select_device=mock.Mock(return_value=self.device(kind)),
+                    assert_device_capacity=mock.DEFAULT,
+                    assert_metal_working_set=mock.DEFAULT,
+                    load_base_pipeline=mock.MagicMock(),
+                    apply_lora=mock.MagicMock(),
+                    make_optimizer=mock.MagicMock(),
+                    load_or_encode_latents=mock.Mock(return_value=(mock.Mock(), 64, 64)),
+                    cache_secondary_embeddings=mock.MagicMock(),
+                    StepInBackward=stepper,
+                ),
+            ):
+                with self.assertRaises(LoopReached):
+                    train_sdxl.train(models, job_dir, job, config)
+        return stepper
+
+    def test_a_metal_fine_tune_steps_in_backward_with_its_moments_on_the_host(self) -> None:
+        stepper = self.stepper_for('mps', 'finetune')
+        stepper.assert_called_once_with(mock.ANY, True, True)
+
+    def test_cuda_and_prodigy_keep_backward_then_step(self) -> None:
+        for kind, method in (('cuda', 'finetune'), ('mps', 'lora'), ('cuda', 'lora')):
+            with self.subTest(kind=kind, method=method):
+                self.stepper_for(kind, method).assert_called_once_with(mock.ANY, False, False)
+
+    def test_offloaded_adamw_on_metal_keeps_its_moments_on_the_host_and_matches_bitwise(
+        self,
+    ) -> None:
+        torch = real_torch(self)
+        if not torch.backends.mps.is_available():
+            self.skipTest('Metal is not available')
+        device = torch.device('mps')
+        inputs = [tuple(value.to(device) for value in step) for step in parity_inputs(torch)]
+        trained = []
+        for in_backward in (False, True):
+            model = parity_model(torch, PARITY_SEED).to(device)
+            optimizer = parity_optimizer(model)
+            train_parity_steps(model, optimizer, inputs, in_backward, in_backward)
+            trained.append((model, optimizer))
+        (standard, standard_optimizer), (offloaded, offloaded_optimizer) = trained
+        for parameter, reference in zip(
+            offloaded.parameters(), standard.parameters(), strict=True
+        ):
+            self.assertEqual(parameter.device.type, 'mps')
+            self.assertIsNone(parameter.grad)
+            self.assertTrue(torch.equal(parameter, reference))
+            state = offloaded_optimizer.state[parameter]
+            expected = standard_optimizer.state[reference]
+            for key in train_sdxl.MOMENT_KEYS:
+                self.assertEqual(state[key].device.type, 'cpu', key)
+                self.assertEqual(expected[key].device.type, 'mps', key)
+                self.assertTrue(torch.equal(state[key], expected[key].cpu()), key)
+
+
+def import_in_clean_process(
+    module: str,
+    preset: dict[str, str] | None = None,
+    preload_torch: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in train_sdxl.METAL_WATERMARK_VARIABLES
+    }
+    environment.update(preset or {})
+    preload = "import sys, types; sys.modules['torch'] = types.ModuleType('torch'); "
+    variables = train_sdxl.METAL_WATERMARK_VARIABLES
+    code = (
+        f"{preload if preload_torch else ''}import json, os, {module}; "
+        f'print(json.dumps({{key: os.environ.get(key) for key in {variables!r}}}))'
+    )
+    return subprocess.run(
+        [sys.executable, '-c', code],
+        cwd=COMFYUI,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+class MetalWatermarkTests(unittest.TestCase):
+    def test_import_caps_metal_at_the_recommended_working_set(self) -> None:
+        result = import_in_clean_process('train_sdxl')
+
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: train_sdxl.METAL_HIGH_WATERMARK,
+                train_sdxl.METAL_LOW_WATERMARK_VARIABLE: train_sdxl.METAL_LOW_WATERMARK,
+            },
+        )
+        self.assertNotIn(train_sdxl.METAL_WATERMARK_TOO_LATE, result.stderr)
+
+    def test_every_trainer_that_imports_train_sdxl_inherits_the_cap(self) -> None:
+        for module in ('train_flux', 'train_wan', 'train_runpod'):
+            with self.subTest(module=module):
+                result = import_in_clean_process(module)
+                self.assertEqual(
+                    json.loads(result.stdout)[train_sdxl.METAL_HIGH_WATERMARK_VARIABLE],
+                    train_sdxl.METAL_HIGH_WATERMARK,
+                )
+
+    def test_import_keeps_preset_values(self) -> None:
+        preset = {
+            train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: '0.9',
+            train_sdxl.METAL_LOW_WATERMARK_VARIABLE: '0.5',
+        }
+
+        result = import_in_clean_process('train_sdxl', preset, preload_torch=True)
+
+        self.assertEqual(json.loads(result.stdout), preset)
+        self.assertNotIn(train_sdxl.METAL_WATERMARK_TOO_LATE, result.stderr)
+
+    def test_import_after_torch_warns(self) -> None:
+        result = import_in_clean_process('train_sdxl', preload_torch=True)
+
+        self.assertIn(train_sdxl.METAL_WATERMARK_TOO_LATE, result.stderr)
+
+    def test_low_is_capped_to_high(self) -> None:
+        environment = {
+            train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: '0.5',
+            train_sdxl.METAL_LOW_WATERMARK_VARIABLE: '0.9',
+        }
+
+        train_sdxl.apply_metal_watermarks(environment)
+
+        self.assertEqual(environment[train_sdxl.METAL_LOW_WATERMARK_VARIABLE], '0.5')
+
+    def test_an_unreadable_watermark_warns_instead_of_breaking_the_import(self) -> None:
+        preset = {train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: 'abc'}
+
+        result = import_in_clean_process('train_runpod', preset)
+
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: 'abc',
+                train_sdxl.METAL_LOW_WATERMARK_VARIABLE: None,
+            },
+        )
+        self.assertIn("PYTORCH_MPS_HIGH_WATERMARK_RATIO='abc' is not a number", result.stderr)
+
+    def test_low_defaults_below_high(self) -> None:
+        environment = {train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: '1.2'}
+
+        train_sdxl.apply_metal_watermarks(environment)
+
+        self.assertEqual(
+            environment[train_sdxl.METAL_LOW_WATERMARK_VARIABLE],
+            train_sdxl.METAL_LOW_WATERMARK,
+        )
+
+    def test_disabled_high_leaves_low_alone(self) -> None:
+        environment = {train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: '0.0'}
+
+        train_sdxl.apply_metal_watermarks(environment)
+
+        self.assertNotIn(train_sdxl.METAL_LOW_WATERMARK_VARIABLE, environment)
 
 
 if __name__ == '__main__':
