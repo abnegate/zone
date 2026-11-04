@@ -11,6 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use super::beneath::{self, Access};
 use super::denied::Denied;
@@ -24,6 +25,13 @@ const LIST_FILES_CAP: usize = 200;
 /// How much of a patch's first hunk an approval preview quotes.
 const PATCH_HUNK_CHARS: usize = 80;
 const SEARCH_MAX_RESULTS: usize = 100;
+/// How long a walk reads before it answers with what it has found. Short of the
+/// limit a caller holds a tool to, because everything a walk found is lost when
+/// that limit ends it.
+const WALK_BUDGET: Duration = Duration::from_secs(25);
+/// What a walk that ran out of [`WALK_BUDGET`] says of what it left unread.
+const WALK_UNFINISHED: &str =
+    "The walk ran out of time with part of the tree unread. Try a narrower path for the rest.";
 
 /// What a file tool answers for a path in [`ToolContext::denied`], or in a
 /// directory that reaches a file by identity, however unrestricted its
@@ -163,21 +171,22 @@ fn steps(path: &Path) -> VecDeque<PathBuf> {
         .collect()
 }
 
-/// Whether a directory entry may be descended into.
-///
-/// `Path::is_dir` follows symlinks, so a link in the tree pointing outside it
-/// would otherwise be walked as if it were part of the tree.
-/// One walk of a directory tree: where it began, whose tree it is, and whether
-/// anybody still wants the answer.
+/// One walk of a directory tree: where it began, whose tree it is, and when to
+/// stop reading it.
 struct Walk<'a> {
     base: &'a Path,
     context: &'a ToolContext,
     abandoned: &'a AtomicBool,
+    deadline: Instant,
 }
 
 impl Walk<'_> {
-    fn abandoned(&self) -> bool {
-        self.abandoned.load(Ordering::Relaxed)
+    fn over(&self) -> bool {
+        self.abandoned.load(Ordering::Relaxed) || self.out_of_time()
+    }
+
+    fn out_of_time(&self) -> bool {
+        Instant::now() >= self.deadline
     }
 }
 
@@ -197,25 +206,36 @@ impl Drop for Abandon {
 /// turn's own, and it waits in that worker's unstealable slot, so the reader
 /// sees nothing and Stop goes unread until the walk ends. A blocking thread
 /// cannot be cancelled, so a caller that gives up flags the walk instead.
+///
+/// Off the worker, a caller's limit on the tool can fire mid-walk, which it
+/// never could while the walk held the only poll, so the walk stops itself at
+/// `budget` and answers with what it found.
 async fn walking<T: Send + 'static>(
     context: &ToolContext,
     base: PathBuf,
+    budget: Duration,
     walk: impl FnOnce(&Walk<'_>) -> T + Send + 'static,
 ) -> Result<T, ToolError> {
     let abandoned = Arc::new(AtomicBool::new(false));
     let _abandon = Abandon(Arc::clone(&abandoned));
     let context = context.clone();
+    let deadline = Instant::now() + budget;
     tokio::task::spawn_blocking(move || {
         walk(&Walk {
             base: &base,
             context: &context,
             abandoned: &abandoned,
+            deadline,
         })
     })
     .await
     .map_err(|error| ToolError::Execution(format!("The walk did not finish: {error}")))
 }
 
+/// Whether a directory entry may be descended into.
+///
+/// `Path::is_dir` follows symlinks, so a link in the tree pointing outside it
+/// would otherwise be walked as if it were part of the tree.
 fn descendable(path: &Path, context: &ToolContext) -> bool {
     path.is_dir() && confine(&resolve(path), context).is_ok()
 }
@@ -733,83 +753,95 @@ impl Tool for ListFilesTool {
             )));
         }
 
-        fn collect_files(
-            walk: &Walk<'_>,
-            dir: &Path,
-            recursive: bool,
-            pattern: &Option<String>,
-            files: &mut Vec<String>,
-            total: &mut usize,
-        ) -> Result<(), ToolError> {
-            let entries = fs::read_dir(dir)
-                .map_err(|e| ToolError::Execution(format!("Cannot read directory: {}", e)))?;
+        list_walking(params, full_path, WALK_BUDGET, context).await
+    }
+}
 
-            for entry in entries {
-                if walk.abandoned() {
-                    return Ok(());
-                }
-                let entry =
-                    entry.map_err(|e| ToolError::Execution(format!("Cannot read entry: {}", e)))?;
-                let path = entry.path();
-                let relative = path.strip_prefix(walk.base).unwrap_or(&path);
+async fn list_walking(
+    params: ListFilesParams,
+    full_path: PathBuf,
+    budget: Duration,
+    context: &ToolContext,
+) -> Result<ToolResult, ToolError> {
+    let (mut files, total, unfinished) = walking(context, full_path, budget, move |walk| {
+        let mut files = Vec::new();
+        let mut total = 0;
+        collect_files(
+            walk,
+            walk.base,
+            params.recursive,
+            &params.pattern,
+            &mut files,
+            &mut total,
+        )?;
+        Ok::<_, ToolError>((files, total, walk.out_of_time()))
+    })
+    .await??;
 
-                if path.is_dir() {
-                    if !recursive {
-                        push_listing(files, total, format!("{}/", relative.display()));
-                    } else if descendable(&path, walk.context) {
-                        collect_files(walk, &path, recursive, pattern, files, total)?;
-                    }
-                } else {
-                    let name = relative.display().to_string();
+    files.sort();
 
-                    let matches = if let Some(pat) = pattern {
-                        if let Some(suffix) = pat.strip_prefix('*') {
-                            name.ends_with(suffix)
-                        } else if let Some(prefix) = pat.strip_suffix('*') {
-                            name.starts_with(prefix)
-                        } else {
-                            name.contains(pat)
-                        }
-                    } else {
-                        true
-                    };
-
-                    if matches {
-                        push_listing(files, total, name);
-                    }
-                }
-            }
-
-            Ok(())
+    let mut output = if files.is_empty() {
+        "No files found".to_string()
+    } else {
+        let mut output = files.join("\n");
+        if total > files.len() {
+            output.push_str(&format!("\n[truncated; omitted={}]", total - files.len()));
         }
+        output
+    };
+    if unfinished {
+        output.push_str(&format!("\n\n{WALK_UNFINISHED}"));
+    }
+    Ok(ToolResult::success(output))
+}
 
-        let (mut files, total) = walking(context, full_path, move |walk| {
-            let mut files = Vec::new();
-            let mut total = 0;
-            collect_files(
-                walk,
-                walk.base,
-                params.recursive,
-                &params.pattern,
-                &mut files,
-                &mut total,
-            )?;
-            Ok::<_, ToolError>((files, total))
-        })
-        .await??;
+fn collect_files(
+    walk: &Walk<'_>,
+    dir: &Path,
+    recursive: bool,
+    pattern: &Option<String>,
+    files: &mut Vec<String>,
+    total: &mut usize,
+) -> Result<(), ToolError> {
+    let entries = fs::read_dir(dir)
+        .map_err(|e| ToolError::Execution(format!("Cannot read directory: {}", e)))?;
 
-        files.sort();
+    for entry in entries {
+        if walk.over() {
+            return Ok(());
+        }
+        let entry = entry.map_err(|e| ToolError::Execution(format!("Cannot read entry: {}", e)))?;
+        let path = entry.path();
+        let relative = path.strip_prefix(walk.base).unwrap_or(&path);
 
-        if files.is_empty() {
-            Ok(ToolResult::success("No files found"))
-        } else {
-            let mut output = files.join("\n");
-            if total > files.len() {
-                output.push_str(&format!("\n[truncated; omitted={}]", total - files.len()));
+        if path.is_dir() {
+            if !recursive {
+                push_listing(files, total, format!("{}/", relative.display()));
+            } else if descendable(&path, walk.context) {
+                collect_files(walk, &path, recursive, pattern, files, total)?;
             }
-            Ok(ToolResult::success(output))
+        } else {
+            let name = relative.display().to_string();
+
+            let matches = if let Some(pat) = pattern {
+                if let Some(suffix) = pat.strip_prefix('*') {
+                    name.ends_with(suffix)
+                } else if let Some(prefix) = pat.strip_suffix('*') {
+                    name.starts_with(prefix)
+                } else {
+                    name.contains(pat)
+                }
+            } else {
+                true
+            };
+
+            if matches {
+                push_listing(files, total, name);
+            }
         }
     }
+
+    Ok(())
 }
 
 /// Search for code patterns in files
@@ -889,6 +921,7 @@ impl Tool for SearchCodeTool {
             params.case_sensitive,
             search_path,
             max_results,
+            WALK_BUDGET,
             context,
         )
         .await
@@ -900,9 +933,10 @@ async fn search_walking(
     case_sensitive: bool,
     search_path: PathBuf,
     max_results: usize,
+    budget: Duration,
     context: &ToolContext,
 ) -> Result<ToolResult, ToolError> {
-    let results = walking(context, search_path, move |walk| {
+    let (results, unfinished) = walking(context, search_path, budget, move |walk| {
         let mut results = Vec::new();
         search_dir(
             walk,
@@ -912,10 +946,24 @@ async fn search_walking(
             &mut results,
             max_results,
         )?;
-        Ok::<_, ToolError>(results)
+        Ok::<_, ToolError>((results, walk.out_of_time()))
     })
     .await??;
-    Ok(format_search_results(results, max_results))
+    Ok(match unfinished {
+        true => unfinished_search_results(results),
+        false => format_search_results(results, max_results),
+    })
+}
+
+fn unfinished_search_results(results: Vec<String>) -> ToolResult {
+    if results.is_empty() {
+        return ToolResult::success(format!("No matches found so far. {WALK_UNFINISHED}"));
+    }
+    ToolResult::success(format!(
+        "Found {} matches so far:\n\n{}\n\n{WALK_UNFINISHED}",
+        results.len(),
+        results.join("\n"),
+    ))
 }
 
 fn format_search_results(results: Vec<String>, max_results: usize) -> ToolResult {
@@ -954,7 +1002,7 @@ fn search_dir(
     };
 
     for entry in entries {
-        if results.len() >= max_results || walk.abandoned() {
+        if results.len() >= max_results || walk.over() {
             break;
         }
 
@@ -1692,6 +1740,7 @@ mod tests {
             base: root,
             context,
             abandoned,
+            deadline: Instant::now() + WALK_BUDGET,
         };
         let mut results = Vec::new();
         search_dir(&walk, root, pattern, true, &mut results, SEARCH_MAX_RESULTS)
@@ -1732,6 +1781,7 @@ mod tests {
             true,
             root,
             SEARCH_MAX_RESULTS,
+            WALK_BUDGET,
             &context,
         );
 
@@ -1765,16 +1815,128 @@ mod tests {
         let context = create_test_context(dir.path());
         let (finished, told) = std::sync::mpsc::channel();
 
-        let walk = walking(&context, dir.path().to_path_buf(), move |walk| {
-            while !walk.abandoned() {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            finished.send(()).unwrap();
-        });
+        let walk = walking(
+            &context,
+            dir.path().to_path_buf(),
+            WALK_BUDGET,
+            move |walk| {
+                while !walk.over() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                finished.send(!walk.out_of_time()).unwrap();
+            },
+        );
         let _ = tokio::time::timeout(WALK_DEADLINE, walk).await;
 
-        told.recv_timeout(Duration::from_secs(30))
-            .expect("the walk must stop once nobody is waiting for it");
+        assert!(
+            told.recv_timeout(Duration::from_secs(20))
+                .expect("the walk must stop once nobody is waiting for it"),
+            "the walk ran out its budget instead of being told"
+        );
+    }
+
+    /// A caller's limit discards the walk, and whatever it found, when it
+    /// fires. The walk has to answer first.
+    #[test]
+    fn a_walk_answers_before_a_callers_limit_on_the_tool_would_end_it() {
+        let dir = tempdir().unwrap();
+        let context = create_test_context(dir.path());
+
+        for limit in [
+            SearchCodeTool.timeout(&context),
+            ListFilesTool.timeout(&context),
+        ] {
+            assert!(WALK_BUDGET < limit, "{WALK_BUDGET:?} against {limit:?}");
+        }
+    }
+
+    const SPENT_BUDGET: Duration = Duration::from_millis(250);
+
+    #[test]
+    fn a_search_out_of_time_answers_with_what_it_found() {
+        let found = unfinished_search_results(vec!["own.rs:1: open sesame please".to_string()])
+            .output
+            .unwrap();
+
+        assert!(found.contains("own.rs:1"), "{found}");
+        assert!(found.contains(WALK_UNFINISHED), "{found}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_search_out_of_time_does_not_claim_there_are_no_matches() {
+        let dir = tempdir().unwrap();
+        fanned_out(dir.path(), FANNED_OUT_DEPTH);
+        let context = create_test_context(dir.path());
+
+        let found = search_walking(
+            "open sesame please".to_string(),
+            true,
+            context.cwd.clone(),
+            SEARCH_MAX_RESULTS,
+            SPENT_BUDGET,
+            &context,
+        )
+        .await
+        .expect("an answer")
+        .output
+        .unwrap();
+
+        assert_eq!(found, format!("No matches found so far. {WALK_UNFINISHED}"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_listing_out_of_time_answers_with_what_it_found() {
+        let dir = tempdir().unwrap();
+        fanned_out(dir.path(), FANNED_OUT_DEPTH);
+        fs::write(
+            dir.path().join(FANNED_OUT_DEPTH.to_string()).join("own.rs"),
+            "",
+        )
+        .unwrap();
+        let context = create_test_context(dir.path());
+
+        let listed = list_walking(
+            ListFilesParams {
+                path: ".".to_string(),
+                recursive: true,
+                pattern: None,
+            },
+            context.cwd.clone(),
+            SPENT_BUDGET,
+            &context,
+        )
+        .await
+        .expect("an answer")
+        .output
+        .unwrap();
+
+        assert!(listed.contains("own.rs"), "{listed}");
+        assert!(listed.contains(WALK_UNFINISHED), "{listed}");
+    }
+
+    #[test]
+    fn an_abandoned_listing_reads_no_further() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("own.rs"), "").unwrap();
+        let context = create_test_context(dir.path());
+        let root = context.cwd.clone();
+        let listed = |abandoned: bool| {
+            let abandoned = AtomicBool::new(abandoned);
+            let walk = Walk {
+                base: &root,
+                context: &context,
+                abandoned: &abandoned,
+                deadline: Instant::now() + WALK_BUDGET,
+            };
+            let mut files = Vec::new();
+            collect_files(&walk, &root, true, &None, &mut files, &mut 0).expect("a walk of cwd");
+            files
+        };
+
+        assert_eq!(listed(false), ["own.rs"]);
+        assert!(listed(true).is_empty());
     }
 
     #[test]

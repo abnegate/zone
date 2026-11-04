@@ -1,6 +1,7 @@
 //! What one line of a coding agent's output means.
 
 use abnegate_llm::{Limit, ToolCall, Usage, Window};
+use abnegate_secret::sanitize;
 use serde_json::Value;
 
 use super::settings::Toolset;
@@ -105,7 +106,9 @@ pub fn activity(call: &ToolCall) -> Option<String> {
     })
 }
 
-/// The first line of what a call is about, cut short.
+/// The first line of what a call is about, cut short once it is clean: a token
+/// cut in half no longer looks like a token, and a carriage return left in
+/// would end the line a code span has to stay on.
 fn subject(arguments: &str) -> Option<String> {
     let arguments: Value = serde_json::from_str(arguments).ok()?;
     let text = SUBJECTS.iter().find_map(|key| {
@@ -115,6 +118,7 @@ fn subject(arguments: &str) -> Option<String> {
             .map(str::trim)
             .filter(|text| !text.is_empty())
     })?;
+    let text = sanitize(text);
     let line = text.lines().next()?.trim_end();
     let shown: String = line.chars().take(SUBJECT_CHARS).collect();
     if shown.len() == text.len() {
@@ -219,6 +223,33 @@ mod tests {
             .as_deref(),
             Some("- Bash `cd /w\u{2026}`\n")
         );
+    }
+
+    #[test]
+    fn a_secret_in_a_subject_is_redacted_before_it_is_cut() {
+        let token = format!("ghp_{}", "a".repeat(36));
+        let padded = format!(
+            "{}export GITHUB_TOKEN={token}",
+            "x".repeat(SUBJECT_CHARS - 40)
+        );
+        let shown = activity(&call(
+            "Bash",
+            &serde_json::json!({ "command": padded }).to_string(),
+        ))
+        .expect("a line");
+
+        assert!(!shown.contains("ghp_"), "{shown}");
+    }
+
+    #[test]
+    fn a_carriage_return_cannot_end_the_line_a_subject_stays_on() {
+        let shown = activity(&call(
+            "Bash",
+            &serde_json::json!({ "command": "ls\r# ![x](https://evil.example/)" }).to_string(),
+        ))
+        .expect("a line");
+
+        assert_eq!(shown, "- Bash `ls\u{2026}`\n");
     }
 
     #[test]

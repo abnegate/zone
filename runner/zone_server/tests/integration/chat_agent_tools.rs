@@ -155,10 +155,9 @@ impl Processes {
     async fn pids(&self) -> [String; 2] {
         let deadline = Instant::now() + SPAWN_TIMEOUT;
         while Instant::now() < deadline {
-            if let (Ok(forked), Ok(leader)) = (
-                std::fs::read_to_string(&self.forked),
-                std::fs::read_to_string(&self.leader),
-            ) {
+            let forked = std::fs::read_to_string(&self.forked).unwrap_or_default();
+            let leader = std::fs::read_to_string(&self.leader).unwrap_or_default();
+            if !forked.is_empty() && !leader.is_empty() {
                 return [leader, forked];
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
