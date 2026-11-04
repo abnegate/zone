@@ -5,21 +5,27 @@ import react from '@vitejs/plugin-react';
 import tailwind from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
-import { DEFERRED_STYLESHEET_ATTRIBUTE } from './src/shared/stylesheet';
+import {
+  DEFERRED_STYLESHEET_ATTRIBUTE,
+  FEATURE_STYLESHEET_ATTRIBUTE,
+} from './src/shared/stylesheet';
 
 const frontendRoot = fileURLToPath(new URL('.', import.meta.url));
 const uiSrc = path.resolve(frontendRoot, '../../packages/ui/src');
 
-function deferStylesheet(): Plugin {
+function deferStylesheets(): Plugin {
   return {
-    name: 'zone:defer-stylesheet',
+    name: 'zone:defer-stylesheets',
     apply: 'build',
     transformIndexHtml: {
       order: 'post',
       handler: (html) =>
         html.replace(
-          /<link rel="stylesheet" crossorigin href="(\/assets\/[^"]+\.css)">/,
-          `<link rel="stylesheet" crossorigin href="$1" media="print" onload="this.media='all'" ${DEFERRED_STYLESHEET_ATTRIBUTE}>`
+          /<link rel="stylesheet" crossorigin href="(\/assets\/styles-[^"]+\.css)">/g,
+          (_link, href: string) =>
+            href.includes('styles-features-')
+              ? `<link rel="stylesheet" crossorigin ${FEATURE_STYLESHEET_ATTRIBUTE}="${href}">`
+              : `<link rel="stylesheet" crossorigin href="${href}" media="print" onload="this.media='all'" ${DEFERRED_STYLESHEET_ATTRIBUTE}>`
         ),
     },
   };
@@ -37,7 +43,7 @@ export default defineConfig(({ command }) => {
     plugins: [
       react(),
       tailwind(),
-      deferStylesheet(),
+      deferStylesheets(),
       VitePWA({
         disable: process.env.VITE_DISABLE_PWA === '1',
         registerType: 'autoUpdate',
@@ -121,8 +127,18 @@ export default defineConfig(({ command }) => {
         output: {
           codeSplitting: {
             groups: [
-              { name: 'runtime', test: /preload-helper|rolldown:runtime|staleChunk/, priority: 3 },
-              { name: 'styles', test: /\.css($|\?)/, priority: 2 },
+              { name: 'runtime', test: /preload-helper|rolldown:runtime|staleChunk/, priority: 4 },
+              {
+                name: 'styles-shared',
+                test: /(\/src\/App\.css|\/styles\/globals\.css)($|\?)/,
+                priority: 3,
+              },
+              {
+                name: 'styles-signed-out',
+                test: /(\/ZoneLogo\.css|\/pages\/AuthPage\.css)($|\?)/,
+                priority: 3,
+              },
+              { name: 'styles-features', test: /\.css($|\?)/, priority: 2 },
               { name: 'boot', test: /\/src\/main\.tsx$/, priority: 1 },
             ],
           },

@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { Toaster } from 'sonner';
 import App from './App';
 import { persistCurrentPath, restoreLastPath } from './shared/lastPath';
-import { loadFonts, stylesheetLoaded } from './shared/stylesheet';
+import { loadFeatureStylesheet, loadFonts, stylesheetsLoaded } from './shared/stylesheet';
 
 restoreLastPath();
 const persist = () => persistCurrentPath();
@@ -26,20 +26,25 @@ if (
   });
 }
 
-function Fonts() {
+function AfterFirstPaint() {
   useEffect(() => {
-    requestAnimationFrame(() => requestAnimationFrame(() => loadFonts()));
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        loadFonts();
+        void loadFeatureStylesheet();
+      })
+    );
   }, []);
   return null;
 }
 
 const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
-void stylesheetLoaded().then(() => {
+void stylesheetsLoaded().then(() => {
   root.render(
     <React.StrictMode>
       <App />
       <Toaster />
-      <Fonts />
+      <AfterFirstPaint />
     </React.StrictMode>
   );
 });

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useState } from 'react';
+import { type ComponentType, lazy, Suspense, useEffect, useLayoutEffect, useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { AuthProvider } from './features/auth/context';
 import ForgotPasswordPage from './features/auth/pages/ForgotPasswordPage';
@@ -8,28 +8,40 @@ import ProtectedRoute from './shared/components/ProtectedRoute';
 import { ThemeProvider, WorkspaceProvider } from './shared/context';
 import { WorkspaceTheme } from './shared/context/WorkspaceTheme';
 import { lastPathToRestore, persistLastPath } from './shared/lastPath';
+import { loadFeatureStylesheet } from './shared/stylesheet';
 import { PERMISSIONS } from './shared/types/permissions';
 
-const AuthenticatedProviders = lazy(() => import('./shared/components/AuthenticatedProviders'));
-const AgentSignInPage = lazy(() => import('./features/settings/ai/AgentSignInPage'));
-const ChatsPage = lazy(() => import('./features/chats/pages/ChatsPage'));
-const EmailVerificationPage = lazy(() => import('./features/auth/pages/EmailVerificationPage'));
-const InvitationAcceptPage = lazy(() => import('./features/auth/pages/InvitationAcceptPage'));
-const Layout = lazy(() => import('./shared/components/Layout/Layout'));
-const ModelsPage = lazy(() => import('./features/models/pages/ModelsPage'));
-const OrgSettingsPage = lazy(
+function lazyRoute<Props>(load: () => Promise<{ default: ComponentType<Props> }>) {
+  return lazy(async () => {
+    const [module] = await Promise.all([load(), loadFeatureStylesheet()]);
+    return module;
+  });
+}
+
+const AuthenticatedProviders = lazyRoute(
+  () => import('./shared/components/AuthenticatedProviders')
+);
+const AgentSignInPage = lazyRoute(() => import('./features/settings/ai/AgentSignInPage'));
+const ChatsPage = lazyRoute(() => import('./features/chats/pages/ChatsPage'));
+const EmailVerificationPage = lazyRoute(
+  () => import('./features/auth/pages/EmailVerificationPage')
+);
+const InvitationAcceptPage = lazyRoute(() => import('./features/auth/pages/InvitationAcceptPage'));
+const Layout = lazyRoute(() => import('./shared/components/Layout/Layout'));
+const ModelsPage = lazyRoute(() => import('./features/models/pages/ModelsPage'));
+const OrgSettingsPage = lazyRoute(
   () => import('./features/settings/organization/pages/OrgSettingsPage')
 );
-const ProjectsPage = lazy(() => import('./features/projects/pages/ProjectsPage'));
-const ResetPasswordPage = lazy(() => import('./features/auth/pages/ResetPasswordPage'));
-const SessionsPage = lazy(() => import('./features/auth/pages/SessionsPage'));
-const SetupGate = lazy(() => import('./features/models/components/SetupGate'));
-const SetupPage = lazy(() => import('./features/models/pages/SetupPage'));
-const SourcesPage = lazy(() => import('./features/sources/pages/SourcesPage'));
-const TasksPage = lazy(() => import('./features/tasks/pages/TasksPage'));
-const UnauthorizedPage = lazy(() => import('./pages/UnauthorizedPage'));
-const WikiPage = lazy(() => import('./features/knowledge/pages/WikiPage'));
-const WorkspaceSettingsPage = lazy(
+const ProjectsPage = lazyRoute(() => import('./features/projects/pages/ProjectsPage'));
+const ResetPasswordPage = lazyRoute(() => import('./features/auth/pages/ResetPasswordPage'));
+const SessionsPage = lazyRoute(() => import('./features/auth/pages/SessionsPage'));
+const SetupGate = lazyRoute(() => import('./features/models/components/SetupGate'));
+const SetupPage = lazyRoute(() => import('./features/models/pages/SetupPage'));
+const SourcesPage = lazyRoute(() => import('./features/sources/pages/SourcesPage'));
+const TasksPage = lazyRoute(() => import('./features/tasks/pages/TasksPage'));
+const UnauthorizedPage = lazyRoute(() => import('./pages/UnauthorizedPage'));
+const WikiPage = lazyRoute(() => import('./features/knowledge/pages/WikiPage'));
+const WorkspaceSettingsPage = lazyRoute(
   () => import('./features/settings/workspace/pages/WorkspaceSettingsPage')
 );
 

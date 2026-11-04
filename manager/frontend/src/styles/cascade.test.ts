@@ -38,9 +38,17 @@ describe('stylesheet cascade', () => {
     expect(listed.filter((stylesheet) => !existsSync(stylesheet))).toEqual([]);
   });
 
+  const lines = readFileSync(cascade, 'utf8').trim().split('\n');
+
+  it('starts with the signed out sheets so splitting them off keeps their order', () => {
+    expect(lines.slice(0, 2)).toEqual([
+      "import '../shared/components/ZoneLogo/ZoneLogo.css';",
+      "import '../features/auth/pages/AuthPage.css';",
+    ]);
+  });
+
   it('ends with the shared sheets so they keep winning ties', () => {
-    const text = readFileSync(cascade, 'utf8').trim().split('\n');
-    expect(text.slice(-2)).toEqual([
+    expect(lines.slice(-2)).toEqual([
       "import '../App.css';",
       "import '@zone/ui/styles/globals.css';",
     ]);
