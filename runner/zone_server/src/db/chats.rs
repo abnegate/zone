@@ -683,6 +683,18 @@ pub struct ChatLink {
     pub project_id: Option<Uuid>,
 }
 
+/// Whether any answer in the chat opens with `opening`.
+pub async fn answered_with(pool: &PgPool, chat_id: Uuid, opening: &str) -> DbResult<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM messages WHERE chat_id = $1 AND role = 'assistant' \
+         AND starts_with(content, $2))",
+    )
+    .bind(chat_id)
+    .bind(opening)
+    .fetch_one(pool)
+    .await
+}
+
 /// What a chat is for and which project it belongs to.
 pub async fn link(pool: &PgPool, chat_id: Uuid) -> DbResult<Option<ChatLink>> {
     let row: Option<(String, Option<Uuid>)> =

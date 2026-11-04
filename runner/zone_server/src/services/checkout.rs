@@ -93,7 +93,7 @@ async fn restore(base: &Path, origin: &RepositoryUrl) -> Result<(), String> {
 
 /// The origin URL a configuration file names, read as data: no include is
 /// followed and no repository around it is consulted.
-fn configured_origin(file: &Path) -> std::io::Result<Option<String>> {
+pub(crate) fn configured_origin(file: &Path) -> std::io::Result<Option<String>> {
     let output = std::process::Command::new("git")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -337,7 +337,7 @@ impl Checkout {
     /// a file lock beside the clone, so it is shared by every process that
     /// shares the checkout root and released with the process if one dies
     /// holding it.
-    async fn lock_base(base: &Path) -> Result<Flock<std::fs::File>, String> {
+    pub(crate) async fn lock_base(base: &Path) -> Result<Flock<std::fs::File>, String> {
         let base = base.to_path_buf();
         Self::filesystem(move || {
             Flock::lock(Self::open_lock(&base)?, FlockArg::LockExclusive)
@@ -444,7 +444,7 @@ impl Checkout {
         std::env::temp_dir().join(format!("{ROOT}-{}", hex::encode(digest.finalize())))
     }
 
-    fn validate_root(root: &Path) -> std::io::Result<()> {
+    pub(crate) fn validate_root(root: &Path) -> std::io::Result<()> {
         let metadata = std::fs::symlink_metadata(root)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(std::io::Error::other("Checkout root is not a directory"));
@@ -461,7 +461,7 @@ impl Checkout {
         Ok(())
     }
 
-    fn directory(path: &Path) -> std::io::Result<()> {
+    pub(crate) fn directory(path: &Path) -> std::io::Result<()> {
         let mut directory = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -494,7 +494,7 @@ impl Checkout {
         Self::recover_root(pool, &Self::root(pool)).await
     }
 
-    async fn filesystem<T: Send + 'static>(
+    pub(crate) async fn filesystem<T: Send + 'static>(
         operation: impl FnOnce() -> std::io::Result<T> + Send + 'static,
     ) -> Result<T, String> {
         tokio::task::spawn_blocking(operation)

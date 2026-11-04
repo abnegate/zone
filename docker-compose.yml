@@ -319,6 +319,7 @@ services:
       - ZONE_IN_CONTAINER=1
       - ZONE_LLM_BACKEND=${ZONE_LLM_BACKEND:-litellm}
       - ZONE_AGENT_STATE_DIR=/app/agent-state
+      - ZONE_PROJECT_CLONE_DIR=/tmp/repos
       - ZONE_AGENT_HOST_LOGIN=${ZONE_AGENT_HOST_LOGIN:-false}
       - ZONE_AGENT_ENV_PASSTHROUGH=${ZONE_AGENT_ENV_PASSTHROUGH:-}
       - ZONE_CODEX_SANDBOX=${ZONE_CODEX_SANDBOX:-danger-full-access}

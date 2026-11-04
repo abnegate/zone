@@ -13,6 +13,7 @@ pub use notice::Notice;
 pub use reason::Reason;
 pub use switch::Switch;
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use abnegate_llm::Message;
@@ -53,6 +54,8 @@ pub struct Handover {
     opening: Option<Notice>,
     /// Whether the turn moves only onto logins of the agent it runs on.
     strict: bool,
+    /// The directory the chat's project starts it in, on whichever login it runs.
+    directory: Option<PathBuf>,
 }
 
 impl Handover {
@@ -82,7 +85,13 @@ impl Handover {
             model,
             opening,
             strict: false,
+            directory: None,
         }
+    }
+
+    /// This handover keeping the turn in `directory`, the one its project starts it in.
+    pub fn in_directory(self, directory: Option<PathBuf>) -> Self {
+        Self { directory, ..self }
     }
 
     /// This handover moving the turn only onto logins of the agent it runs on, for a chat that
@@ -162,6 +171,7 @@ impl Handover {
                     self.organization,
                     chosen.agent,
                     (from.id, chosen.login.id),
+                    self.directory.as_deref(),
                     id,
                 )
             });
@@ -177,13 +187,17 @@ impl Handover {
         let Some(to) = resolved.login else {
             return Err(None);
         };
+        let running = match &self.directory {
+            Some(directory) => backend::in_directory(resolved.backend, directory),
+            None => resolved.backend,
+        };
         if let Err(error) = agent_logins::touch(state.db(), to.id, Utc::now()).await {
             tracing::warn!(login = %to.id, %error, "Could not record that a turn moved onto the login");
         }
         let model = (to.agent != from.agent).then(|| self.model.on(to.agent));
         self.current = to.clone();
         Ok(Switch {
-            backend: backend::bounded(resolved.backend, timeout),
+            backend: backend::bounded(running, timeout),
             from,
             to,
             reason: cause.reason,
@@ -205,6 +219,7 @@ pub async fn opening(
     previous: Option<&ChatSession>,
     resolved: &mut Resolved,
     model: Option<&str>,
+    directory: Option<&Path>,
 ) -> Option<Notice> {
     let previous = previous?;
     let left = previous.login?;
@@ -234,6 +249,7 @@ pub async fn opening(
             organization,
             to.agent,
             (left, to.id),
+            directory,
             &previous.id,
         );
     if carried {
@@ -299,13 +315,36 @@ fn instruction() -> Entry {
     }
 }
 
+/// Moves the session `resolved` is about to resume to where its agent will look for it from the
+/// directory it runs in, since the chat may have started somewhere else before. One that cannot
+/// be moved is left for the agent to refuse, and the turn then replays the chat.
+pub fn settle(config: &Config, organization: Uuid, resolved: &Resolved) {
+    let (Some(login), LlmBackend::Cli { agent, settings }) = (&resolved.login, &resolved.backend)
+    else {
+        return;
+    };
+    let (Some(session), Some(work)) = (&settings.session, &settings.working_directory) else {
+        return;
+    };
+    if !session.resume {
+        return;
+    }
+    let home = config.agents.login_home(organization, *agent, login.id);
+    if let Err(error) = sessions::relocate(&home, *agent, work, &session.id) {
+        tracing::info!(%error, "The agent session cannot be moved to the chat's directory");
+    }
+}
+
 /// Copies session `id`'s file from login `from`'s home into login `to`'s, both `agent`'s logins
-/// of `organization`. False when it cannot, and the turn replays instead.
+/// of `organization`, to where `agent` looks for it from `directory`, or from the organization's
+/// working directory when the chat has none of its own. False when it cannot, and the turn
+/// replays instead.
 fn carry(
     config: &Config,
     organization: Uuid,
     agent: AgentKind,
     (from, to): (Uuid, Uuid),
+    directory: Option<&Path>,
     id: &str,
 ) -> bool {
     let home = match config.agents.create_login_home(organization, agent, to) {
@@ -319,7 +358,10 @@ fn carry(
         &config.agents.login_home(organization, agent, from),
         &home,
         agent,
-        &config.agents.work(organization, agent),
+        &directory.map_or_else(
+            || config.agents.work(organization, agent),
+            Path::to_path_buf,
+        ),
         id,
     ) {
         Ok(carried) => {
@@ -522,6 +564,7 @@ mod tests {
                 entry: 4,
                 prompt: Some("a".repeat(64)),
             }),
+            directory: None,
         };
         let mut pinned = Pinned::of(&generation).expect("a session on a login");
         pinned.sees("b".repeat(64), 6);
@@ -583,6 +626,7 @@ mod tests {
                 login: Some(from),
             },
             session: None,
+            directory: None,
         };
         let mut pinned = Pinned::of(&generation).expect("a session on a login");
         pinned.keep(whole());
@@ -720,6 +764,24 @@ mod tests {
         }
 
         /// Writes claude session `id`'s file into `login`'s home, as a turn on it leaves it.
+        /// A session of `login` in the folder claude keeps for turns run in `directory`.
+        fn session_in(&self, login: &LoginIdentity, id: &str, directory: &Path) -> PathBuf {
+            let home = self
+                .state
+                .config()
+                .agents
+                .create_login_home(self.organization, login.agent, login.id)
+                .expect("the login's home");
+            let directory = fs::canonicalize(directory).expect("the directory");
+            let path = home
+                .join("projects")
+                .join(sessions::sanitized(&directory))
+                .join(format!("{id}.jsonl"));
+            fs::create_dir_all(path.parent().expect("a project folder")).expect("the folder");
+            fs::write(&path, b"{}\n").expect("the session file");
+            path
+        }
+
         fn session(&self, login: &LoginIdentity, id: &str) {
             let home = self
                 .state
@@ -901,6 +963,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_switch_stays_in_the_chats_directory_and_carries_its_session_there() {
+        let fixture = Fixture::new().await;
+        let from = fixture.claude("a@example.com").await;
+        let to = fixture.claude("b@example.com").await;
+        let project = TempDir::new().expect("a project folder");
+        let path = fixture.session_in(&from, SESSION, project.path());
+        let mut handover = fixture
+            .handover(&from)
+            .in_directory(Some(project.path().to_path_buf()));
+
+        let switch = handover
+            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .await;
+        let landed = fixture
+            .home(&to)
+            .join(path.strip_prefix(fixture.home(&from)).expect("in its home"))
+            .is_file();
+        fixture.remove().await;
+
+        let switch = switch.expect("the other claude login takes the turn over");
+        let (_, settings) = cli(&switch.backend);
+        assert!(switch.carried);
+        assert_eq!(
+            settings.working_directory.as_deref(),
+            Some(project.path()),
+            "the next login runs where the chat's tools run"
+        );
+        assert!(
+            landed,
+            "the next login looks for the session in the chat's directory's folder"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_is_settled_where_its_agent_will_look_from_the_chats_directory() {
+        let fixture = Fixture::new().await;
+        let login = fixture.claude("a@example.com").await;
+        fixture.session(&login, SESSION);
+        let left = fixture
+            .home(&login)
+            .join("projects")
+            .join(sessions::sanitized(
+                &fs::canonicalize(fixture.work(AgentKind::Claude)).expect("the working directory"),
+            ));
+        let project = TempDir::new().expect("a project folder");
+        let chosen: Chosen = router::pick(
+            &fixture.state,
+            fixture.organization,
+            AgentKind::Claude,
+            &[],
+            Some(login.id),
+            None,
+            false,
+        )
+        .await
+        .expect("the login");
+        let mut resolved = backend::on_login(
+            fixture.state.config(),
+            fixture.organization,
+            &chosen,
+            Some(Session {
+                id: SESSION.into(),
+                resume: true,
+            }),
+        )
+        .expect("a backend");
+        resolved.backend = backend::in_directory(resolved.backend, project.path());
+
+        settle(fixture.state.config(), fixture.organization, &resolved);
+        let found = sessions::locate(
+            &fixture.home(&login),
+            AgentKind::Claude,
+            project.path(),
+            SESSION,
+        );
+        fixture.remove().await;
+
+        assert!(found.is_some(), "the agent would not find its session");
+        assert!(!left.join(format!("{SESSION}.jsonl")).exists());
+    }
+
+    #[tokio::test]
     async fn a_switch_without_a_session_file_starts_a_fresh_session() {
         let fixture = Fixture::new().await;
         let from = fixture.claude("a@example.com").await;
@@ -1059,6 +1203,7 @@ mod tests {
             Some(&previous),
             &mut resolved,
             None,
+            None,
         )
         .await;
         let unmoved = opening(
@@ -1070,6 +1215,7 @@ mod tests {
                 ..previous.clone()
             }),
             &mut resolved.clone(),
+            None,
             None,
         )
         .await;
@@ -1151,6 +1297,7 @@ mod tests {
             Some(&previous),
             &mut resolved,
             None,
+            None,
         )
         .await;
         fixture.remove().await;
@@ -1208,6 +1355,7 @@ mod tests {
             AgentKind::Claude,
             Some(&previous),
             &mut resolved,
+            None,
             None,
         )
         .await;
@@ -1284,6 +1432,7 @@ mod tests {
             Some(&previous),
             &mut resolved,
             Some(&model),
+            None,
         )
         .await;
         let exhausted = fixture.exhausted_until(&refused).await;

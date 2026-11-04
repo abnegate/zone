@@ -92,6 +92,8 @@ spec:
               value: /home/zone
             - name: ZONE_AGENT_STATE_DIR
               value: /app/agent-state
+            - name: ZONE_PROJECT_CLONE_DIR
+              value: /app/clones
             - name: ZONE_CHAT_AGENT_CWD
               value: /app/workspace
             {{- if .Values.server.hostRoot }}
@@ -174,6 +176,9 @@ spec:
               mountPath: /app/workspace
             - name: agent-state
               mountPath: /app/agent-state
+            - name: agent-state
+              mountPath: /app/clones
+              subPath: clones
             {{- if .Values.server.hostRoot }}
             - name: host
               mountPath: /host

@@ -205,6 +205,7 @@ mod tests {
                 login: Some(login.clone()),
             },
             session: Some(previous(login)),
+            directory: None,
         }
     }
 
