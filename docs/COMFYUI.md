@@ -594,6 +594,18 @@ every `checkpoint_every` snapshot and the final step, so a crash resumes up to
 one interval back; CUDA still writes it every step. Numbered snapshots are hard
 links of `latest.pt`.
 
+A snapshot holds the trained weights and the optimizer state: about 30 GiB for
+a fine-tune and 3.4 GiB for a LoRA. Before each write the trainer checks the
+free space on the job's disk, and it writes only if the snapshot (the previous
+one's size, or an estimate from the state dicts) plus `free_space_margin_gib`
+(20 in `comfyui/train_sdxl_config.json`) would fit. That keeps a run from
+filling `/System/Volumes/Data` and stopping Docker Desktop's engine. A job that
+cannot fit its first snapshot fails before training, saying how much space it
+needs and how much is free. Mid-run, a snapshot that cannot fit is skipped with
+a warning and training continues, so a crash resumes from the last snapshot
+that was saved. Publishing checks the same way, so a run fails only when the
+trained weights themselves cannot fit.
+
 Each job directory under `models/.zone-train/` is readable only by its owner
 (`0700`), and `runpod.key` inside it only by its owner too (`0600`). Docker
 Desktop on macOS shows bind-mounted files on the host as owned by the user
