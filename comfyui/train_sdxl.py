@@ -74,8 +74,13 @@ LANGUAGE_SUBJECT = 'language'
 LATEST_SNAPSHOT = 'latest.pt'
 STILL_METHODS = {'lora', 'finetune', 'pivotal'}
 ADAPTER_METHODS = {'lora', 'pivotal'}
+FINETUNE_METHOD = 'finetune'
+CUDA_DEVICE = 'cuda'
+MPS_DEVICE = 'mps'
+HOST_DEVICE = 'cpu'
 FINETUNE_MIN_MEMORY = 40 * 1024**3
 ADAPTER_MIN_MEMORY = 20 * 1024**3
+TRAINABLE_COPIES = 4
 MASK_THRESHOLD = 0.2
 KIND_BOOST = 1.25
 REBALANCE_SHARE = 0.40
@@ -140,7 +145,7 @@ def steps_for(image_count: int, config: dict[str, Any]) -> int:
 
 
 def recipe_for(method: str) -> str:
-    if method == 'finetune':
+    if method == FINETUNE_METHOD:
         return 'sdxl'
     return 'sdxl-adapter'
 
@@ -385,7 +390,7 @@ def class_pairs(paths: list[Path], fallback: str) -> list[tuple[Path, str]]:
 
 
 def optimizer_kind(method: str, config: dict[str, Any]) -> str:
-    if method == 'finetune':
+    if method == FINETUNE_METHOD:
         return str(config.get('finetune_optimizer') or 'adamw').strip().lower()
     return str(config.get('optimizer') or 'prodigy').strip().lower()
 
@@ -417,7 +422,7 @@ def prodigy_param_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def prodigy_rate_keys(method: str) -> tuple[str, ...]:
-    if method == 'finetune':
+    if method == FINETUNE_METHOD:
         return ('finetune_lr',)
     return ('unet_lr', 'text_encoder_lr')
 
@@ -720,7 +725,7 @@ def legacy(job: dict[str, Any]) -> bool:
 
 
 def legacy_destination(models_dir: Path, job: dict[str, Any]) -> Path:
-    folder = CHECKPOINTS if job.get('method') == 'finetune' else LORAS
+    folder = CHECKPOINTS if job.get('method') == FINETUNE_METHOD else LORAS
     return Path(models_dir) / folder / weight_name(str(job['filename']), 'filename')
 
 
@@ -1107,27 +1112,90 @@ def select_device() -> Any:
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
-        return torch.device('cuda')
+        return torch.device(CUDA_DEVICE)
     if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        return torch.device('mps')
-    return torch.device('cpu')
+        return torch.device(MPS_DEVICE)
+    return torch.device(HOST_DEVICE)
 
 
 def assert_device_capacity(device: Any, method: str) -> None:
-    if device_kind(device) != 'cuda':
-        return
+    kind = device_kind(device)
+    if kind == CUDA_DEVICE:
+        assert_cuda_capacity(device, method)
+    elif kind == MPS_DEVICE and method == FINETUNE_METHOD:
+        assert_metal_capacity()
+
+
+def assert_cuda_capacity(device: Any, method: str) -> None:
     import torch
 
-    required = FINETUNE_MIN_MEMORY if method == 'finetune' else ADAPTER_MIN_MEMORY
+    required = FINETUNE_MIN_MEMORY if method == FINETUNE_METHOD else ADAPTER_MIN_MEMORY
     index = getattr(device, 'index', None)
     total = int(torch.cuda.get_device_properties(0 if index is None else index).total_memory)
     if total >= required:
         return
-    if method == 'finetune':
+    if method == FINETUNE_METHOD:
         raise RuntimeError(
             'this recipe needs a 48 GB card for fine-tune; refusing to drop precision'
         )
     raise RuntimeError('this recipe needs a 24 GB card for LoRA; refusing to drop precision')
+
+
+def gibibytes(size: int) -> str:
+    return f'{size / 1024**3:.1f} GiB'
+
+
+def metal_refusal(job: str, required: int, available: int) -> str:
+    return (
+        f'{job} needs {gibibytes(required)} of Metal working memory but this Mac reports '
+        f'{gibibytes(available)} (torch.mps.recommended_max_memory); refusing to start '
+        'rather than overcommit Metal or drop precision, so train it on Runpod instead'
+    )
+
+
+def assert_metal_capacity() -> None:
+    import torch
+
+    available = int(torch.mps.recommended_max_memory())
+    if available < FINETUNE_MIN_MEMORY:
+        raise RuntimeError(metal_refusal('an SDXL fine-tune', FINETUNE_MIN_MEMORY, available))
+
+
+def unique_parameters(models: list[Any]) -> list[Any]:
+    seen: set[int] = set()
+    parameters = []
+    for model in models:
+        for parameter in model.parameters():
+            if id(parameter) not in seen:
+                seen.add(id(parameter))
+                parameters.append(parameter)
+    return parameters
+
+
+def parameter_bytes(parameters: list[Any]) -> int:
+    return sum(int(parameter.numel()) * int(parameter.element_size()) for parameter in parameters)
+
+
+def trainable_working_set(trainable: list[Any]) -> int:
+    return TRAINABLE_COPIES * parameter_bytes(trainable)
+
+
+def metal_working_set(models: list[Any]) -> int:
+    parameters = unique_parameters(models)
+    trainable = [parameter for parameter in parameters if parameter.requires_grad]
+    frozen = [parameter for parameter in parameters if not parameter.requires_grad]
+    return trainable_working_set(trainable) + parameter_bytes(frozen)
+
+
+def assert_metal_working_set(device: Any, models: list[Any]) -> None:
+    if device_kind(device) != MPS_DEVICE:
+        return
+    import torch
+
+    required = metal_working_set(models)
+    available = int(torch.mps.recommended_max_memory())
+    if required > available:
+        raise RuntimeError(metal_refusal('this job', required, available))
 
 
 def matching_targets(model: Any, candidates: list[str]) -> list[str]:
@@ -1753,7 +1821,7 @@ def persist_training_step(
         'sample_rng': sample_rng,
         'dropout_rng': dropout_rng,
     }
-    if method == 'finetune' and device_kind(device) == 'cuda' and not numbered:
+    if method == FINETUNE_METHOD and device_kind(device) == 'cuda' and not numbered:
         start_latest_save(latest, **snapshot)
     else:
         wait_for_latest_save()
@@ -1997,6 +2065,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         ]
     groups = unique_param_groups([group for group in groups if group['params']])
     optimizer = make_optimizer(method, groups, config)
+    assert_metal_working_set(device, [unet, text_encoder, text_encoder_2])
     pipeline.unet = unet
     pipeline.text_encoder = text_encoder
     unet.to(device)

@@ -401,6 +401,7 @@ class DeviceSelectionTests(unittest.TestCase):
         cuda: bool,
         mps: bool = False,
         memory: int | None = None,
+        recommended: int | None = None,
     ) -> mock.MagicMock:
         module = mock.MagicMock()
         module.cuda.is_available.return_value = cuda
@@ -408,6 +409,8 @@ class DeviceSelectionTests(unittest.TestCase):
         module.device.side_effect = lambda name: self.make_device(name)
         if memory is not None:
             module.cuda.get_device_properties.return_value = mock.Mock(total_memory=memory)
+        if recommended is not None:
+            module.mps.recommended_max_memory.return_value = recommended
         return module
 
     def make_device(self, kind: str, index: int | None = 0) -> mock.Mock:
@@ -450,9 +453,106 @@ class DeviceSelectionTests(unittest.TestCase):
         self.assertFalse(module.backends.cuda.matmul.allow_tf32)
         self.assertFalse(module.backends.cudnn.allow_tf32)
 
-    def test_cpu_and_mps_skip_vram_checks(self) -> None:
-        train_sdxl.assert_device_capacity(self.make_device('cpu'), 'finetune')
-        train_sdxl.assert_device_capacity(self.make_device('mps'), 'finetune')
+    def test_cpu_skips_memory_checks(self) -> None:
+        module = self.fake_torch(cuda=False)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.assert_device_capacity(self.make_device('cpu'), 'finetune')
+        module.mps.recommended_max_memory.assert_not_called()
+        module.cuda.get_device_properties.assert_not_called()
+
+    def test_finetune_on_a_32gb_mac_refuses_with_both_figures(self) -> None:
+        module = self.fake_torch(cuda=False, mps=True, recommended=21 * 1024**3)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            with self.assertRaises(RuntimeError) as raised:
+                train_sdxl.assert_device_capacity(self.make_device('mps'), 'finetune')
+        message = str(raised.exception)
+        self.assertIn('needs 40.0 GiB of Metal working memory', message)
+        self.assertIn('this Mac reports 21.0 GiB', message)
+        self.assertIn('Runpod', message)
+
+    def test_a_metal_refusal_fails_the_job_instead_of_retrying(self) -> None:
+        refusal = RuntimeError(train_sdxl.metal_refusal('this job', 2, 1))
+        self.assertFalse(train_sdxl.is_transient_crash(refusal))
+
+    def test_finetune_on_a_64gb_mac_passes(self) -> None:
+        module = self.fake_torch(cuda=False, mps=True, recommended=48 * 1024**3)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.assert_device_capacity(self.make_device('mps'), 'finetune')
+        module.mps.recommended_max_memory.assert_called_once_with()
+
+    def test_adapters_and_video_on_mps_skip_the_early_floor(self) -> None:
+        module = self.fake_torch(cuda=False, mps=True, recommended=8 * 1024**3)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            for method in ('lora', 'pivotal', 'video'):
+                train_sdxl.assert_device_capacity(self.make_device('mps'), method)
+        module.mps.recommended_max_memory.assert_not_called()
+
+
+class FakeParameter:
+    def __init__(self, count: int, size: int, trainable: bool) -> None:
+        self.count = count
+        self.size = size
+        self.requires_grad = trainable
+
+    def numel(self) -> int:
+        return self.count
+
+    def element_size(self) -> int:
+        return self.size
+
+
+class FakeModel:
+    def __init__(self, *parameters: FakeParameter) -> None:
+        self.weights = list(parameters)
+
+    def parameters(self) -> list[FakeParameter]:
+        return list(self.weights)
+
+
+class MetalWorkingSetTests(unittest.TestCase):
+    def make_device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def models(self) -> list[FakeModel]:
+        shared = FakeParameter(256, 4, True)
+        unet = FakeModel(FakeParameter(1024, 4, True), shared, FakeParameter(64, 4, False))
+        text_encoder = FakeModel(FakeParameter(512, 4, True), shared)
+        text_encoder_2 = FakeModel(FakeParameter(2048, 4, False))
+        return [unet, text_encoder, text_encoder_2]
+
+    def fake_torch(self, recommended: int) -> mock.MagicMock:
+        module = mock.MagicMock()
+        module.mps.recommended_max_memory.return_value = recommended
+        return module
+
+    def test_working_set_counts_four_copies_of_trainable_and_one_of_frozen(self) -> None:
+        trainable = (1024 + 256 + 512) * 4
+        frozen = (64 + 2048) * 4
+        self.assertEqual(train_sdxl.metal_working_set(self.models()), 4 * trainable + frozen)
+
+    def test_metal_refuses_a_model_that_exceeds_the_working_set(self) -> None:
+        required = train_sdxl.metal_working_set(self.models())
+        module = self.fake_torch(required - 1)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            with self.assertRaisesRegex(RuntimeError, 'Metal working memory'):
+                train_sdxl.assert_metal_working_set(self.make_device('mps'), self.models())
+
+    def test_metal_passes_a_model_that_fits(self) -> None:
+        required = train_sdxl.metal_working_set(self.models())
+        module = self.fake_torch(required)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            train_sdxl.assert_metal_working_set(self.make_device('mps'), self.models())
+        module.mps.recommended_max_memory.assert_called_once_with()
+
+    def test_other_devices_skip_the_check(self) -> None:
+        module = self.fake_torch(0)
+        with mock.patch.dict(sys.modules, {'torch': module}):
+            for kind in ('cuda', 'cpu'):
+                with self.subTest(kind=kind):
+                    train_sdxl.assert_metal_working_set(self.make_device(kind), self.models())
+        module.mps.recommended_max_memory.assert_not_called()
 
 
 class OptimizerTests(unittest.TestCase):
