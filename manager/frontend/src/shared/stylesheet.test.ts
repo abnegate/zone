@@ -1,25 +1,11 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import {
-  DEFERRED_STYLESHEET_ATTRIBUTE,
   FEATURE_STYLESHEET_ATTRIBUTE,
   FONT_STYLESHEET,
   loadFeatureStylesheet,
   loadFonts,
   resetFeatureStylesheet,
-  stylesheetsLoaded,
 } from './stylesheet';
-
-function page(...medias: string[]) {
-  const root = document.createElement('div');
-  const links = medias.map((media) => {
-    const link = document.createElement('link');
-    link.setAttribute(DEFERRED_STYLESHEET_ATTRIBUTE, '');
-    link.media = media;
-    root.append(link);
-    return link;
-  });
-  return { root, links };
-}
 
 async function settled(promise: Promise<void>): Promise<boolean> {
   let done = false;
@@ -29,37 +15,6 @@ async function settled(promise: Promise<void>): Promise<boolean> {
   await new Promise((resolve) => setTimeout(resolve));
   return done;
 }
-
-describe('stylesheetsLoaded', () => {
-  it('resolves at once without a deferred stylesheet', async () => {
-    expect(await settled(stylesheetsLoaded(page().root))).toBe(true);
-  });
-
-  it('resolves at once when the stylesheets have already applied', async () => {
-    expect(await settled(stylesheetsLoaded(page('all', 'all').root))).toBe(true);
-  });
-
-  it('waits for every stylesheet still loading', async () => {
-    const { root, links } = page('print', 'all', 'print');
-    const loading = stylesheetsLoaded(root);
-    links[0].dispatchEvent(new Event('load'));
-    expect(await settled(loading)).toBe(false);
-    links[2].dispatchEvent(new Event('load'));
-    expect(await settled(loading)).toBe(true);
-  });
-
-  it('does not wait on a stylesheet that failed before anyone was listening', async () => {
-    const { root } = page('all');
-    expect(await settled(stylesheetsLoaded(root))).toBe(true);
-  });
-
-  it('still renders when a stylesheet fails to load', async () => {
-    const { root, links } = page('print');
-    const loading = stylesheetsLoaded(root);
-    links[0].dispatchEvent(new Event('error'));
-    expect(await settled(loading)).toBe(true);
-  });
-});
 
 describe('loadFeatureStylesheet', () => {
   function featurePage() {

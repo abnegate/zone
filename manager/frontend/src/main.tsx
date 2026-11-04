@@ -4,7 +4,8 @@ import App from './App';
 import { hasStoredSession } from './api/session';
 import { firstRouteLoaded, preloadSignedInRoutes } from './routes';
 import { persistCurrentPath } from './shared/lastPath';
-import { loadFeatureStylesheet, loadFonts, stylesheetsLoaded } from './shared/stylesheet';
+import { loadFeatureStylesheet, loadFonts } from './shared/stylesheet';
+import { releaseShellOnRender } from './shell/release';
 
 const persist = () => persistCurrentPath();
 (window as Window & { __zonePersistCurrentPath?: () => void }).__zonePersistCurrentPath = persist;
@@ -55,8 +56,10 @@ if (signedIn) {
   loadFonts();
 }
 
-const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
-void Promise.all([stylesheetsLoaded(), firstRouteLoaded()]).then(() => {
+const container = document.getElementById('root') as HTMLElement;
+const root = ReactDOM.createRoot(container);
+void firstRouteLoaded().then(() => {
+  releaseShellOnRender(container);
   root.render(
     <React.StrictMode>
       <App />

@@ -1,4 +1,11 @@
-import { Suspense, useEffect, useLayoutEffect, useState } from 'react';
+import {
+  type ComponentType,
+  type ReactNode,
+  Suspense,
+  useEffect,
+  useLayoutEffect,
+  useState,
+} from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { AuthProvider } from './features/auth/context';
 import EmailVerificationPage from './features/auth/pages/EmailVerificationPage';
@@ -16,6 +23,7 @@ import { WorkspaceTheme } from './shared/context/WorkspaceTheme';
 import { lastPathToRestore, persistLastPath } from './shared/lastPath';
 import { lazyRoute } from './shared/lazyRoute';
 import { PERMISSIONS } from './shared/types/permissions';
+import { releaseShell } from './shell/release';
 
 const AuthenticatedProviders = lazyRoute(loaders.authenticatedProviders);
 const AgentSignInPage = lazyRoute(loaders.agentSignIn);
@@ -67,13 +75,22 @@ function RouteLoading() {
   );
 }
 
-function App() {
+function Unmatched() {
+  useLayoutEffect(() => releaseShell(), []);
+  return null;
+}
+
+function App({
+  router: Router = BrowserRouter,
+}: {
+  router?: ComponentType<{ children: ReactNode }>;
+}) {
   return (
     <ThemeProvider>
       <AuthProvider>
         <WorkspaceProvider>
           <WorkspaceTheme />
-          <BrowserRouter>
+          <Router>
             <LocationSync />
             <RouteErrorBoundary>
               <Suspense fallback={<RouteLoading />}>
@@ -205,10 +222,11 @@ function App() {
                       />
                     </Route>
                   </Route>
+                  <Route path="*" element={<Unmatched />} />
                 </Routes>
               </Suspense>
             </RouteErrorBoundary>
-          </BrowserRouter>
+          </Router>
         </WorkspaceProvider>
       </AuthProvider>
     </ThemeProvider>

@@ -86,9 +86,13 @@
         font-size: var(--ui-text-sm, 0.875rem);
         color: #534b42;
       }
+      [data-shell] #root > .initial-loader {
+        display: none;
+      }
     </style>
   </head>
   <body>
+    <!--signed-out-shell-->
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root">
       <div class="initial-loader" aria-label="Loading">
