@@ -62,6 +62,7 @@ pub async fn list(
     let (organization, settings) = saved(&state, workspace).await?;
     let choice = chats::provider::get(state.db(), id).await?;
     let offers = provider::offers(&state, organization, &settings).await?;
+    let agent = route::agent(state.config(), &settings, choice.as_ref()).map(Provider::of);
     let selected = choice.map(|choice| Selection {
         offer: offered(&offers, choice.provider),
         model: choice.model,
@@ -71,6 +72,7 @@ pub async fn list(
         default,
         selected,
         providers,
+        agent,
     }))
 }
 

@@ -142,6 +142,13 @@ pub enum ModelBackend {
 }
 
 impl ModelBackend {
+    pub fn agent(&self) -> Option<AgentKind> {
+        match self {
+            Self::LiteLlm => None,
+            Self::Cli { agent, .. } => Some(*agent),
+        }
+    }
+
     /// Read the selection from the environment, defaulting to LiteLLM.
     pub fn from_env() -> Result<Self, ConfigError> {
         let executable = env::var(MODEL_BACKEND_EXECUTABLE)

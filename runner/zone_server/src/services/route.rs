@@ -477,6 +477,21 @@ impl Route {
     }
 }
 
+/// The coding agent CLI the turns of a chat with `choice` among `settings` run on, as its
+/// [`Route`] runs them: none when they go over HTTP, or to an endpoint that cannot be used.
+pub fn agent(
+    config: &Config,
+    settings: &EffectiveAiSettings,
+    choice: Option<&Choice>,
+) -> Option<AgentKind> {
+    let settings = match choice {
+        Some(choice) => settings.choosing(choice),
+        None => settings.clone(),
+    };
+    let origin = Endpoint::try_resolve(config, &settings).ok()?.origin();
+    backend::agent(config, &settings, origin)
+}
+
 /// The organization `workspace` belongs to and its effective AI settings,
 /// nothing when there is no such workspace, or [`Reason::Unreadable`] when
 /// either cannot be read, with the reason logged.
@@ -553,9 +568,10 @@ mod tests {
     use zone_core::llm::provider::SignIn;
 
     use super::*;
-    use crate::config::AgentConfig;
+    use crate::config::{AgentConfig, ModelBackend};
     use crate::db::ai_settings::{PROVIDER_ANTHROPIC, PROVIDER_CLAUDE_CODE};
     use crate::db::{agent_logins, chats, organizations};
+    use crate::services::endpoint::testing::settings;
     use crate::services::login::usage::Snapshot;
     use crate::services::stages::AUTO;
 
@@ -1308,5 +1324,99 @@ mod tests {
         };
         assert_eq!(agent, AgentKind::Claude);
         assert_eq!(settings.sign_in, SignIn::Host);
+    }
+
+    fn instance_on(agent: Option<AgentKind>) -> Config {
+        let mut config = crate::state::test_config();
+        config.model_backend = match agent {
+            Some(agent) => ModelBackend::Cli {
+                agent,
+                executable: None,
+            },
+            None => ModelBackend::LiteLlm,
+        };
+        config
+    }
+
+    fn openai_at(url: &str) -> EffectiveAiSettings {
+        let mut settings = settings(PROVIDER_OPENAI);
+        settings.openai_base_url = Some(url.to_string());
+        settings
+    }
+
+    #[test]
+    fn a_coding_agent_provider_runs_its_turns_on_that_agent() {
+        let settings = settings(PROVIDER_CLAUDE_CODE);
+
+        assert_eq!(
+            agent(&instance_on(None), &settings, None),
+            Some(AgentKind::Claude)
+        );
+        assert_eq!(
+            agent(&instance_on(Some(AgentKind::Codex)), &settings, None),
+            Some(AgentKind::Claude),
+            "the instance's own agent never stands in for the one chosen"
+        );
+    }
+
+    #[test]
+    fn a_provider_on_the_instance_runs_its_turns_on_the_instance_backend() {
+        let settings = settings(PROVIDER_SELF_HOSTED);
+
+        assert_eq!(agent(&instance_on(None), &settings, None), None);
+        assert_eq!(
+            agent(&instance_on(Some(AgentKind::Codex)), &settings, None),
+            Some(AgentKind::Codex)
+        );
+    }
+
+    #[test]
+    fn a_saved_endpoint_runs_its_turns_over_http_whatever_the_instance_runs() {
+        let settings = openai_at("https://api.openai.com/v1");
+
+        assert_eq!(
+            agent(&instance_on(Some(AgentKind::Claude)), &settings, None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_chat_choice_decides_the_agent_over_its_workspace_default() {
+        let config = instance_on(None);
+        let http = openai_at("https://api.openai.com/v1");
+        let claude = settings(PROVIDER_CLAUDE_CODE);
+
+        assert_eq!(
+            agent(
+                &config,
+                &http,
+                Some(&Choice {
+                    provider: Provider::Codex,
+                    model: None,
+                })
+            ),
+            Some(AgentKind::Codex)
+        );
+        assert_eq!(
+            agent(
+                &config,
+                &claude,
+                Some(&Choice {
+                    provider: Provider::SelfHosted,
+                    model: None,
+                })
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_endpoint_that_cannot_be_used_runs_no_agent() {
+        let settings = openai_at("https://proxy.example/v1?key=leak");
+
+        assert_eq!(
+            agent(&instance_on(Some(AgentKind::Claude)), &settings, None),
+            None
+        );
     }
 }
