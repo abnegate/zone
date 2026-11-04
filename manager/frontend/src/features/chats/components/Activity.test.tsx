@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { ToolCallRecord } from '../types';
 import { Activity } from './Activity';
 
@@ -119,6 +119,23 @@ describe('Activity', () => {
 
     expect(screen.queryByText('Reasoning')).not.toBeInTheDocument();
     expect(screen.getByTestId('tool-call').closest('[hidden]')).toBeNull();
+  });
+
+  it('lists what a coding agent reached for one line at a time', () => {
+    render(
+      <Activity
+        calls={[call({ reasoning: '- Bash `git status`\n- ToolSearch `select:Read`\n' })]}
+        live
+        answered={false}
+      />
+    );
+
+    const lines = within(screen.getByTestId('reasoning')).getAllByRole('listitem');
+    expect(lines.map((line) => line.textContent)).toEqual([
+      'Bash git status',
+      'ToolSearch select:Read',
+    ]);
+    expect(screen.getByText('git status').tagName).toBe('CODE');
   });
 
   it('puts thinking that led to no call above the trace', () => {
