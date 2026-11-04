@@ -93,6 +93,9 @@ ADAPTER_MIN_MEMORY = 20 * 1024**3
 TRAINABLE_COPIES = 4
 UPDATE_GRADIENT_COPIES = 3
 MOMENT_KEYS = ('exp_avg', 'exp_avg_sq')
+PRODIGY_STATE_COPIES = 4
+FREE_SPACE_MARGIN_KEY = 'free_space_margin_gib'
+FREE_SPACE_MARGIN_GIB = 20
 PRODIGY_OPTIMIZER = 'prodigy'
 ADAMW_OPTIMIZER = 'adamw'
 MASK_THRESHOLD = 0.2
@@ -1156,6 +1159,91 @@ def clear_incomplete_saves(*directories: Path) -> None:
                 entry.unlink(missing_ok=True)
 
 
+def free_space_margin(config: dict[str, Any]) -> int:
+    configured = config.get(FREE_SPACE_MARGIN_KEY)
+    margin = float(FREE_SPACE_MARGIN_GIB if configured is None else configured)
+    if not math.isfinite(margin):
+        raise ValueError(f'{FREE_SPACE_MARGIN_KEY} must be finite, got {margin!r}')
+    return int(max(0.0, margin) * 1024**3)
+
+
+def tensor_bytes(value: Any) -> int:
+    if isinstance(value, dict):
+        return sum(tensor_bytes(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(tensor_bytes(item) for item in value)
+    size = getattr(value, 'nbytes', None)
+    return size if isinstance(size, int) else 0
+
+
+def optimizer_state_copies(kind: str) -> int:
+    return PRODIGY_STATE_COPIES if kind == PRODIGY_OPTIMIZER else len(MOMENT_KEYS)
+
+
+def snapshot_estimate(
+    method: str,
+    kind: str,
+    groups: list[dict[str, Any]],
+    unet: Any,
+    text_encoder: Any,
+    token_id: int | None,
+) -> int:
+    trainable = [parameter for group in groups for parameter in group['params']]
+    return tensor_bytes(
+        model_snapshot(method, unet, text_encoder, token_id)
+    ) + optimizer_state_copies(kind) * parameter_bytes(trainable)
+
+
+def snapshot_size(directory: Path, estimate: int) -> int:
+    previous = resume_snapshot_path(directory)
+    try:
+        size = previous.stat().st_size if previous is not None else 0
+    except OSError:
+        size = 0
+    return max(size, estimate)
+
+
+@dataclass(frozen=True)
+class FreeSpace:
+    needed: int
+    free: int
+
+    @property
+    def fits(self) -> bool:
+        return self.free >= self.needed
+
+    def describe(self, directory: Path) -> str:
+        return (
+            f'needs {gibibytes(self.needed)} free on {directory}, including the '
+            f'{FREE_SPACE_MARGIN_KEY} margin, but only {gibibytes(self.free)} is free'
+        )
+
+
+def free_space(directory: Path, size: int, config: dict[str, Any]) -> FreeSpace:
+    return FreeSpace(size + free_space_margin(config), int(shutil.disk_usage(directory).free))
+
+
+def assert_free_space(what: str, directory: Path, size: int, config: dict[str, Any]) -> None:
+    space = free_space(directory, size, config)
+    if not space.fits:
+        raise RuntimeError(
+            f'{what} {space.describe(directory)}; refusing to fill the disk, so free some '
+            'space or train it on Runpod instead'
+        )
+
+
+def room_for_snapshot(directory: Path, step: int, estimate: int, config: dict[str, Any]) -> bool:
+    space = free_space(directory, snapshot_size(directory, estimate), config)
+    if not space.fits:
+        print(
+            f'warning: skipped the step {step} snapshot, which {space.describe(directory)}; '
+            'training continues and a crash resumes from the last snapshot saved',
+            file=sys.stderr,
+            flush=True,
+        )
+    return space.fits
+
+
 def is_transient_crash(error: BaseException) -> bool:
     if isinstance(error, MemoryError):
         return True
@@ -1936,22 +2024,29 @@ def save_snapshot(
     }
     if sample_rng is not None and dropout_rng is not None:
         payload.update(capture_rng_state(sample_rng, dropout_rng))
-    if method in ADAPTER_METHODS:
-        from peft.utils import get_peft_model_state_dict
-
-        payload['unet_lora'] = get_peft_model_state_dict(unet)
-        payload['text_encoder_lora'] = get_peft_model_state_dict(text_encoder)
-        if method == 'pivotal' and token_id is not None:
-            payload['token_id'] = token_id
-            payload['trigger_embedding'] = (
-                text_encoder.get_input_embeddings().weight[token_id].detach().cpu()
-            )
-    else:
-        payload['unet'] = unet.state_dict()
-        payload['text_encoder'] = text_encoder.state_dict()
+    payload.update(model_snapshot(method, unet, text_encoder, token_id))
     temporary = path.with_name(path.name + '.tmp')
     torch.save(payload, temporary)
     os.replace(temporary, path)
+
+
+def model_snapshot(
+    method: str, unet: Any, text_encoder: Any, token_id: int | None
+) -> dict[str, Any]:
+    if method not in ADAPTER_METHODS:
+        return {'unet': unet.state_dict(), 'text_encoder': text_encoder.state_dict()}
+    from peft.utils import get_peft_model_state_dict
+
+    payload: dict[str, Any] = {
+        'unet_lora': get_peft_model_state_dict(unet),
+        'text_encoder_lora': get_peft_model_state_dict(text_encoder),
+    }
+    if method == 'pivotal' and token_id is not None:
+        payload['token_id'] = token_id
+        payload['trigger_embedding'] = (
+            text_encoder.get_input_embeddings().weight[token_id].detach().cpu()
+        )
+    return payload
 
 
 def clone_host_tensors(values: dict[str, Any]) -> None:
@@ -2074,6 +2169,11 @@ def wait_for_latest_save() -> None:
             _latest_save_thread = None
 
 
+def latest_save_running() -> bool:
+    thread = _latest_save_thread
+    return thread is not None and thread.is_alive()
+
+
 def start_latest_save(path: Path, **kwargs: Any) -> None:
     global _latest_save_thread
 
@@ -2136,6 +2236,7 @@ def persist_training_step(
     config: dict[str, Any],
     progress: Progress,
     cadence: Cadence | None = None,
+    estimate: int = 0,
 ) -> None:
     latest = latest_snapshot_file(checkpoint_dir)
     numbered = bool(every) and (step % every == 0 or step == total)
@@ -2154,22 +2255,30 @@ def persist_training_step(
     }
     if cadence is None:
         cadence = Cadence(0)
+    saved = False
     if device_kind(device) == CUDA_DEVICE:
         if method == FINETUNE_METHOD and not numbered:
-            start_latest_save(latest, **snapshot)
+            if latest_save_running() or room_for_snapshot(checkpoint_dir, step, estimate, config):
+                start_latest_save(latest, **snapshot)
+                saved = True
         else:
             wait_for_latest_save()
-            save_snapshot(latest, **snapshot)
-        job[TRANSIENT_ATTEMPTS_KEY] = 0
+            if room_for_snapshot(checkpoint_dir, step, estimate, config):
+                save_snapshot(latest, **snapshot)
+                saved = True
     elif numbered or step == total or cadence.due():
         cadence.mark()
-        save_snapshot(latest, **snapshot)
+        if room_for_snapshot(checkpoint_dir, step, estimate, config):
+            save_snapshot(latest, **snapshot)
+            saved = True
+    if saved:
         job[TRANSIENT_ATTEMPTS_KEY] = 0
     job['step'] = step
     job['total'] = total
     write_job(job_dir, job)
     if numbered:
-        copy_snapshot(latest, snapshot_path(checkpoint_dir, step))
+        if saved:
+            copy_snapshot(latest, snapshot_path(checkpoint_dir, step))
         write_json(
             checkpoint_dir / 'best.json',
             {'step': best_step, 'loss': best_loss},
@@ -2263,25 +2372,34 @@ def save_trained(
     text_encoder: Any,
     text_encoder_2: Any,
     alpha: int,
+    config: dict[str, Any],
     token_id: int | None = None,
 ) -> Path:
     destination = weight_path(job_dir, job)
     if method in ADAPTER_METHODS:
-        save_safetensors(destination, kohya_state_dict(unet, text_encoder, alpha))
+        outputs = {destination: kohya_state_dict(unet, text_encoder, alpha)}
         if method == 'pivotal':
             if token_id is None:
                 raise ValueError('pivotal publishing needs the trained trigger embedding')
-            save_safetensors(
-                embedding_path(models_dir, job),
-                trigger_embedding_tensors(text_encoder, token_id, str(job.get('trigger') or '')),
+            outputs[embedding_path(models_dir, job)] = trigger_embedding_tensors(
+                text_encoder, token_id, str(job.get('trigger') or '')
             )
     else:
-        from sdxl_checkpoint import pipeline_to_original, save_original_checkpoint
+        from sdxl_checkpoint import as_checkpoint_tensors, pipeline_to_original
 
-        save_original_checkpoint(
-            destination,
-            pipeline_to_original(unet, vae, text_encoder, text_encoder_2),
-        )
+        outputs = {
+            destination: as_checkpoint_tensors(
+                pipeline_to_original(unet, vae, text_encoder, text_encoder_2)
+            )
+        }
+    assert_free_space(
+        'publishing the trained weights',
+        destination.parent,
+        tensor_bytes(list(outputs.values())),
+        config,
+    )
+    for path, tensors in outputs.items():
+        save_safetensors(path, tensors)
     return destination
 
 
@@ -2410,6 +2528,20 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     offload = offloads_moments(device, method, kind)
     print(f'optimizer={kind} offload_moments={offload}', flush=True)
     assert_metal_working_set(device, [unet, text_encoder, text_encoder_2], offload)
+    checkpoint_dir = Path(job_dir) / 'checkpoints'
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    clear_incomplete_saves(
+        checkpoint_dir,
+        Path(job_dir) / 'dataset',
+        class_cache_path(models_dir, config) if class_pairs_list else Path(job_dir),
+    )
+    estimate = snapshot_estimate(method, kind, groups, unet, text_encoder, token_id)
+    assert_free_space(
+        f'a {method} snapshot',
+        checkpoint_dir,
+        snapshot_size(checkpoint_dir, estimate),
+        config,
+    )
     pipeline.unet = unet
     pipeline.text_encoder = text_encoder
     unet.to(device)
@@ -2426,13 +2558,6 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     encoded_instance: list[Any] = []
     encoded_class: list[Any] = []
     encoded = 0
-    checkpoint_dir = Path(job_dir) / 'checkpoints'
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    clear_incomplete_saves(
-        checkpoint_dir,
-        Path(job_dir) / 'dataset',
-        class_cache_path(models_dir, config) if class_pairs_list else Path(job_dir),
-    )
     progress.emit('encoding', phase_step=0, phase_total=encode_total)
     for frame in frames:
         latents, height, width = load_or_encode_latents(vae, frame['image'], device)
@@ -2599,6 +2724,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
                 config=config,
                 progress=progress,
                 cadence=cadence,
+                estimate=estimate,
             )
             progress.emit('training', step=step, phase_step=step, phase_total=total, loss=value)
             if step == start_step or step % 10 == 0 or step == total:
@@ -2616,6 +2742,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         text_encoder=text_encoder,
         text_encoder_2=text_encoder_2,
         alpha=int(config['alpha']),
+        config=config,
         token_id=token_id,
     )
     progress.emit('publishing', step=total, phase_step=1, phase_total=1)
