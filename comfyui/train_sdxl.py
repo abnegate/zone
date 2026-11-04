@@ -37,7 +37,10 @@ METAL_WATERMARK_TOO_LATE = (
 
 
 def metal_watermark_unreadable(variable: str, value: str) -> str:
-    return f'warning: {variable}={value!r} is not a number, so train_sdxl leaves the Metal cap alone'
+    return (
+        f'warning: {variable}={value!r} is not a number, '
+        'so train_sdxl leaves the Metal cap alone'
+    )
 
 
 def apply_metal_watermarks(environment: MutableMapping[str, str] = os.environ) -> None:
