@@ -1,4 +1,3 @@
-import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer, defineConfig, type Plugin } from 'vite';
@@ -26,31 +25,6 @@ const STYLESHEETS = [SIGNED_OUT_STYLESHEET, FEATURE_STYLESHEET, SHARED_STYLESHEE
 const SHELL_MARKER = '<!--signed-out-shell-->';
 const APP_CHUNK = 'app';
 const RENDERER_CHUNK = 'renderer';
-const EAGER_CHUNKS = [APP_CHUNK, RENDERER_CHUNK];
-const EAGER_COMPILE_HINT = '//# allFunctionsCalledOnLoad';
-
-function compileEagerly(): Plugin {
-  return {
-    name: 'zone:compile-eagerly',
-    apply: 'build',
-    enforce: 'post',
-    writeBundle: async (options, bundle) => {
-      const chunks = Object.values(bundle).filter(
-        (output) => output.type === 'chunk' && EAGER_CHUNKS.includes(output.name)
-      );
-      if (chunks.length !== EAGER_CHUNKS.length) {
-        throw new Error(`Found ${chunks.length} of the chunks ${EAGER_CHUNKS.join(', ')}`);
-      }
-      for (const chunk of chunks) {
-        const file = path.join(options.dir ?? '', chunk.fileName);
-        await writeFile(file, `${EAGER_COMPILE_HINT}\n${await readFile(file, 'utf8')}`);
-        const map = JSON.parse(await readFile(`${file}.map`, 'utf8')) as { mappings: string };
-        map.mappings = `;${map.mappings}`;
-        await writeFile(`${file}.map`, JSON.stringify(map));
-      }
-    },
-  };
-}
 
 function deferFeatureStylesheet(): Plugin {
   return {
@@ -127,7 +101,6 @@ export default defineConfig(({ command }) => {
       tailwind(),
       deferFeatureStylesheet(),
       signedOutShell(),
-      compileEagerly(),
       VitePWA({
         disable: process.env.VITE_DISABLE_PWA === '1',
         registerType: 'autoUpdate',
