@@ -105,6 +105,20 @@ async fn a_message_sent_over_the_socket_cannot_claim_a_reminder_sent_it() {
     );
     assert!(stored(&harness).await.is_empty());
 
+    common::context::send(
+        &mut socket,
+        json!({"type": "send", "content": TYPED, "metadata": {"reminder_id": Uuid::new_v4()}}),
+    )
+    .await;
+    let frames = finish(&mut socket).await;
+    let last = frames.last().expect("the socket answers the send");
+    assert_eq!(last["type"], "error", "the send is refused: {frames:?}");
+    assert_eq!(
+        last["message"],
+        "Message metadata may not set `reminder_id`"
+    );
+    assert!(stored(&harness).await.is_empty());
+
     common::context::send(&mut socket, json!({"type": "send", "content": TYPED})).await;
     successful(&finish(&mut socket).await);
     let _ = socket.close(None).await;
