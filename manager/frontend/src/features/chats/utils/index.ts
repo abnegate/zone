@@ -1,6 +1,7 @@
 export * from './answers';
 export * from './arrange';
 export * from './attachments';
+export * from './automation';
 export * from './characterCard';
 export * from './citations';
 export { formatDate } from './formatters';

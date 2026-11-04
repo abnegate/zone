@@ -1309,6 +1309,91 @@ describe('useChat', () => {
     });
   });
 
+  it('leaves a pending send in place when a reminder turn is saved first', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(lastSocket).not.toBeNull());
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Typed while it fired' });
+    });
+
+    lastSocket?.emit({
+      type: 'message_saved',
+      message_id: 'reminder-turn',
+      role: 'user',
+      content: 'Check the deploy queue',
+      metadata: { source: 'reminder', reminder_id: 'reminder-1' },
+    });
+    lastSocket?.emit({ type: 'message_start', message_id: 'reminder-answer', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'reminder-answer',
+      content: 'Two jobs are stuck',
+    });
+    await waitFor(() => {
+      const messages = result.current.chat?.messages ?? [];
+      expect(messages.find((m) => m.id === 'reminder-turn')?.metadata?.source).toBe('reminder');
+      expect(messages.find((m) => m.id === 'reminder-answer')?.content).toBe('Two jobs are stuck');
+      expect(messages.some((m) => m.content === 'Typed while it fired')).toBe(true);
+    });
+    expect(result.current.streaming).toBe(true);
+
+    lastSocket?.emit({
+      type: 'message_saved',
+      message_id: 'typed-turn',
+      role: 'user',
+      content: 'Typed while it fired',
+    });
+    await waitFor(() => {
+      const ids = (result.current.chat?.messages ?? []).map((m) => m.id);
+      expect(ids.slice(-3)).toEqual(['reminder-turn', 'reminder-answer', 'typed-turn']);
+    });
+    expect(result.current.streaming).toBe(true);
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'typed-answer', role: 'assistant' });
+    lastSocket?.emit({ type: 'message_end', message_id: 'typed-answer', content: 'Done' });
+    await waitFor(() => expect(result.current.streaming).toBe(false));
+  });
+
+  it('frees the composer after a reminder turn when the typed send had already failed', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(lastSocket).not.toBeNull());
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Rejected first time' });
+    });
+    lastSocket?.emit({ type: 'error', message: 'Rate limit exceeded' });
+    await waitFor(() => expect(result.current.streaming).toBe(false));
+
+    lastSocket?.emit({
+      type: 'message_saved',
+      message_id: 'reminder-turn',
+      role: 'user',
+      content: 'Check the deploy queue',
+      metadata: { source: 'reminder' },
+    });
+    lastSocket?.emit({ type: 'message_start', message_id: 'reminder-answer', role: 'assistant' });
+    lastSocket?.emit({ type: 'message_end', message_id: 'reminder-answer', content: 'All clear' });
+    await waitFor(() => {
+      expect(result.current.chat?.messages.some((m) => m.id === 'reminder-answer')).toBe(true);
+      expect(result.current.streaming).toBe(false);
+    });
+
+    const pendingId = result.current.chat?.messages.find(
+      (m) => m.content === 'Rejected first time'
+    )?.id;
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Rejected first time' });
+    });
+    const retried = result.current.chat?.messages.filter(
+      (m) => m.content === 'Rejected first time'
+    );
+    expect(retried).toHaveLength(1);
+    expect(retried?.[0].id).toBe(pendingId);
+  });
+
   it('keeps a single user message when message_saved arrives under Strict Mode', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     const QueryWrapper = createWrapper();

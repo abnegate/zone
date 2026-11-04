@@ -234,6 +234,8 @@ export const MessageMetadataSchema = z
     memory_used: z.boolean().optional().catch(undefined),
     reasoning: z.string().optional(),
     handovers: HandoversSchema.optional().catch(undefined),
+    source: z.string().optional().catch(undefined),
+    reminder_id: z.string().optional().catch(undefined),
   })
   .passthrough();
 

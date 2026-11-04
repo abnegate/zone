@@ -278,6 +278,8 @@ export interface MessageMetadata {
   /** Model thinking text, when the deployment advertised reasoning. */
   reasoning?: string;
   handovers?: Handover[];
+  source?: string;
+  reminder_id?: string;
 }
 
 export interface Message {

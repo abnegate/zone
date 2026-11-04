@@ -92,7 +92,7 @@ async fn until_finished(harness: &Harness, reminder: Uuid) -> Vec<(String, Strin
 ///
 /// `until_finished` cannot serve a second firing: its first condition — any
 /// assistant message at all — is already true the moment the first one lands.
-async fn until_stored(
+pub(crate) async fn until_stored(
     harness: &Harness,
     reminder: Uuid,
     count: usize,
@@ -114,7 +114,7 @@ async fn until_stored(
 /// Due now rather than when it was asked for. The create refuses a past
 /// `due_at`, which is the right refusal for a person asking for one and the
 /// wrong thing for a test that needs the sweep to find something.
-async fn make_due(harness: &Harness, reminder: Uuid) {
+pub(crate) async fn make_due(harness: &Harness, reminder: Uuid) {
     sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
         .bind(reminder)
         .execute(&harness.pool)

@@ -231,11 +231,15 @@ test.describe('Chat regressions', () => {
     const reasoningBlocks = page.locator('[data-testid="reasoning"]');
     await expect(reasoningBlocks).toHaveCount(3);
     await expect(page.locator('[data-testid="reasoning"]:not([hidden])')).toHaveCount(3);
-    await expect(
-      page.getByRole('button', { name: 'Reasoning' })
-    ).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByRole('button', { name: 'Reasoning' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    );
     await expect(page.locator('[data-testid="reasoning"] blockquote')).toHaveCount(0);
-    await page.screenshot({ path: testInfo.outputPath('thinking-between-tools.png'), fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath('thinking-between-tools.png'),
+      fullPage: true,
+    });
   });
 
   test('streams a fenced-code answer as it arrives instead of holding a blank reply', async ({
@@ -410,6 +414,114 @@ test.describe('Chat regressions', () => {
     });
   });
 
+  test('a turn a reminder sent is marked as the reminder, live and after a reload', async ({
+    page,
+  }, testInfo) => {
+    const sentAt = '2026-11-04T09:30:00.000Z';
+    const capture = async (name: string) => {
+      if (testInfo.project.name !== 'chromium') return;
+      await page.screenshot({
+        path: `screenshots/${name}.png`,
+        fullPage: true,
+        animations: 'disabled',
+      });
+    };
+    const reminder = {
+      id: 'msg-reminder',
+      chat_id: 'chat-1',
+      role: 'user',
+      content: 'Check the deploy queue and tell me what is stuck.',
+      created_at: sentAt,
+      metadata: {
+        source: 'reminder',
+        reminder_id: '5b0c7a52-6d1e-4d8f-9a0e-1f6f3c2b7d10',
+        actor_id: 'user-1',
+      },
+    };
+    const answer = {
+      id: 'a-reminder',
+      chat_id: 'chat-1',
+      role: 'assistant',
+      content: 'Two jobs are stuck behind the registry push; the rest are moving.',
+      created_at: sentAt,
+    };
+    const messages: unknown[] = [
+      { ...userMessage, created_at: sentAt },
+      {
+        id: 'a-typed',
+        chat_id: 'chat-1',
+        role: 'assistant',
+        content: 'The workspace has three projects and one open task.',
+        created_at: sentAt,
+      },
+    ];
+    await mockChatRoutes(page, messages);
+    await page.reload();
+    await page.click('a[href="/chats"]');
+    await openChat(page);
+    await expect(page.getByText(userMessage.content)).toBeVisible();
+    await page.waitForFunction(() => {
+      const sockets =
+        (window as Window & { __chatSockets?: Array<{ readyState: number }> }).__chatSockets ?? [];
+      return sockets.some((candidate) => candidate.readyState === 1);
+    });
+
+    await socket.emit({
+      type: 'message_saved',
+      message_id: reminder.id,
+      role: 'user',
+      content: reminder.content,
+      metadata: reminder.metadata,
+    });
+    await socket.emit({ type: 'message_start', message_id: answer.id, role: 'assistant' });
+    await socket.emit({ type: 'message_end', message_id: answer.id, content: answer.content });
+
+    const badge = page.getByTestId('automation-badge');
+    await expect(badge).toHaveCount(1);
+    await expect(badge).toHaveText(/^Reminder/);
+    await expect(badge).toHaveAttribute('title', new RegExp(reminder.metadata.reminder_id));
+    const marked = page.locator('.message').filter({ has: badge });
+    await expect(marked).toHaveClass(/message-user/);
+    await expect(marked).toContainText(reminder.content);
+    await expect(
+      page
+        .locator('.message-user')
+        .filter({ hasText: userMessage.content })
+        .getByTestId('automation-badge')
+    ).toHaveCount(0);
+
+    await page.mouse.move(0, 0);
+    await capture('chats-reminder');
+    await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
+    await capture('chats-reminder-dark');
+    await page.evaluate(() => document.documentElement.removeAttribute('data-theme'));
+    await page.setViewportSize({ width: 375, height: 812 });
+    await expect(badge).toBeVisible();
+    const header = marked.locator('.message-header');
+    expect(
+      await header.evaluate((element) => element.scrollWidth - element.clientWidth)
+    ).toBeLessThanOrEqual(0);
+    const badgeBox = await badge.boundingBox();
+    const messageBox = await marked.boundingBox();
+    expect(badgeBox).not.toBeNull();
+    expect(messageBox).not.toBeNull();
+    const badgeRight = badgeBox!.x + badgeBox!.width;
+    expect(badgeBox!.x).toBeGreaterThanOrEqual(messageBox!.x);
+    expect(badgeRight).toBeLessThanOrEqual(messageBox!.x + messageBox!.width + 0.5);
+    expect(badgeRight).toBeLessThanOrEqual(375);
+    await capture('chats-reminder-phone');
+
+    messages.push(reminder, answer);
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.reload();
+    await page.click('a[href="/chats"]');
+    await openChat(page);
+    await expect(page.getByTestId('automation-badge')).toHaveCount(1);
+    await expect(
+      page.locator('.message').filter({ has: page.getByTestId('automation-badge') })
+    ).toContainText(reminder.content);
+  });
+
   test('streams preamble that arrived after native tool deltas', async ({ page }, testInfo) => {
     await mockChatRoutes(page, []);
     await page.reload();
@@ -445,7 +557,10 @@ test.describe('Chat regressions', () => {
     await page.fill('.message-form textarea', 'Open the file');
     await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
     await expect(page.getByText('Looking at the file.')).toBeVisible();
-    await page.screenshot({ path: testInfo.outputPath('preamble-after-tools.png'), fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath('preamble-after-tools.png'),
+      fullPage: true,
+    });
   });
 
   test('Stop finishes in-flight tools instead of leaving Running…', async ({ page }, testInfo) => {
@@ -511,7 +626,10 @@ test.describe('Chat regressions', () => {
     await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
     await expect(page.getByText('Second try')).toHaveCount(1);
     await expect(page.getByText('First try')).toHaveCount(0);
-    await page.screenshot({ path: testInfo.outputPath('retry-reuses-pending.png'), fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath('retry-reuses-pending.png'),
+      fullPage: true,
+    });
   });
 
   test('a sidebar refresh failure is not reported as a failed send', async ({ page }) => {
@@ -746,7 +864,9 @@ test.describe('Chat regressions', () => {
     });
   });
 
-  test('a stored partial assistant reply is still visible after reload', async ({ page }, testInfo) => {
+  test('a stored partial assistant reply is still visible after reload', async ({
+    page,
+  }, testInfo) => {
     await mockChatRoutes(page, [
       userMessage,
       {
@@ -777,9 +897,9 @@ test.describe('Chat regressions', () => {
     await page.addInitScript(() => {
       const original = window.open;
       window.open = ((url?: string | URL, ...rest: unknown[]) => {
-        (
-          window as Window & { __recordOpened?: (url: string) => void }
-        ).__recordOpened?.(String(url ?? ''));
+        (window as Window & { __recordOpened?: (url: string) => void }).__recordOpened?.(
+          String(url ?? '')
+        );
         return original?.call(window, url, ...(rest as [])) ?? null;
       }) as typeof window.open;
     });

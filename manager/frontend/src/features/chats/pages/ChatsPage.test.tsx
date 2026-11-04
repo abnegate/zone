@@ -9,7 +9,7 @@ import {
   mock,
   spyOn,
 } from 'bun:test';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import { chooseMenuItem } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
@@ -822,6 +822,99 @@ describe('ChatsPage', () => {
 
       await screen.findByTestId('question-card');
       expect(screen.queryByText('[Waiting for your answer]')).not.toBeInTheDocument();
+    });
+
+    const askedQuestion = {
+      ...mockChatWithMessages.messages[1],
+      content: '[Waiting for your answer]',
+      metadata: {
+        tool_calls: [
+          {
+            id: 'call_q',
+            name: 'ask_user',
+            arguments: '{}',
+            success: true,
+            detail: 'Waiting for your answer…',
+            duration_ms: 0,
+            questions: [
+              {
+                header: 'Which city?',
+                question: 'Which city do you mean?',
+                required: false,
+                multi_select: false,
+                choices: [{ label: 'Auckland', description: 'North Island' }],
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    it('leaves a question open when only a reminder turn follows it', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          askedQuestion,
+          {
+            id: 'msg-reminder',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: 'Check the deploy queue',
+            created_at: '2024-01-01T00:02:00Z',
+            metadata: { source: 'reminder' },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const card = await screen.findByTestId('question-card');
+      expect(card).not.toHaveClass('question-card--answered');
+      const choice = within(card).getByRole('radio', { name: /Auckland/ });
+      expect(choice).toBeEnabled();
+      fireEvent.click(choice);
+      const submit = within(card).getByRole('button', { name: 'Send answer' });
+      await waitFor(() => expect(submit).toBeEnabled());
+      fireEvent.click(submit);
+
+      await waitFor(() => {
+        const sent = mockWsSend.mock.calls.map(([frame]) => JSON.parse(String(frame)));
+        expect(sent.some((frame) => frame.type === 'send' && /Auckland/.test(frame.content))).toBe(
+          true
+        );
+      });
+    });
+
+    it('settles a question once the reader types a reply after a reminder turn', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          askedQuestion,
+          {
+            id: 'msg-reminder',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: 'Check the deploy queue',
+            created_at: '2024-01-01T00:02:00Z',
+            metadata: { source: 'reminder' },
+          },
+          {
+            id: 'msg-typed',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: 'Auckland',
+            created_at: '2024-01-01T00:03:00Z',
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const card = await screen.findByTestId('question-card');
+      expect(card).toHaveClass('question-card--answered');
+      expect(within(card).getByRole('radio', { name: /Auckland/ })).toBeDisabled();
     });
 
     it('shows thinking interleaved with the tool trace', async () => {
@@ -2258,6 +2351,67 @@ describe('ChatsPage', () => {
       expect(badges[0]).toHaveTextContent('Memory read');
       expect(badges[0].closest('.message')).toHaveClass('message-assistant');
       expect(screen.getByText('Hello').closest('.message')).toHaveClass('message-user');
+    });
+
+    it('marks the turns automations sent, and no turn a person typed', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-reminder',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: 'Check the deploy queue',
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: { source: 'reminder', reminder_id: 'reminder-1' },
+          },
+          ...mockChatWithMessages.messages,
+          {
+            id: 'msg-notice',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'Project build finished',
+            created_at: '2024-01-01T00:01:30Z',
+            metadata: { source: 'auto_project' },
+          },
+          {
+            id: 'msg-unknown',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: 'Posted elsewhere',
+            created_at: '2024-01-01T00:02:00Z',
+            metadata: { source: 'somewhere_new' },
+          },
+        ],
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Check the deploy queue')).toBeInTheDocument();
+      });
+      const badgeIn = (text: string) =>
+        screen
+          .getByText(text)
+          .closest('.message')
+          ?.querySelector('[data-testid="automation-badge"]');
+      expect(screen.getAllByTestId('automation-badge')).toHaveLength(2);
+      const reminder = badgeIn('Check the deploy queue');
+      expect(reminder).toHaveTextContent('Reminder');
+      expect(reminder?.closest('.message-header')).not.toBeNull();
+      expect(reminder?.closest('.message')).toHaveClass('message-user');
+      const notice = badgeIn('Project build finished');
+      expect(notice).toHaveTextContent('Auto project');
+      expect(notice?.closest('.message')).toHaveClass('message-assistant');
+      expect(badgeIn('Hello')).toBeNull();
+      expect(badgeIn('Hi there!')).toBeNull();
+      expect(badgeIn('Posted elsewhere')).toBeNull();
     });
 
     it('selects chat via keyboard Enter', async () => {

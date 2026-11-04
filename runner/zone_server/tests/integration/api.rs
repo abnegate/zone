@@ -1966,7 +1966,7 @@ async fn test_chat_messages() {
             &json!({
                 "role": "user",
                 "content": "Hello, world!",
-                "metadata": {"source": "test"}
+                "metadata": {"web_search": true}
             }),
             &token,
         )
@@ -1979,6 +1979,10 @@ async fn test_chat_messages() {
         .to_string();
     assert_eq!(response.json_value()["message"]["role"], "user");
     assert_eq!(response.json_value()["message"]["content"], "Hello, world!");
+    assert_eq!(
+        response.json_value()["message"]["metadata"],
+        json!({"web_search": true})
+    );
 
     // List messages
     let response = client

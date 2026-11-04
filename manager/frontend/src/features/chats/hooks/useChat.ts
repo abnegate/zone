@@ -30,6 +30,7 @@ import {
   type Waiting,
   type WaitSettled,
 } from '../types';
+import { automated } from '../utils/automation';
 import { mergeCitations } from '../utils/citations';
 import { appendHandover } from '../utils/handover';
 import { requestedModel } from '../utils/providerOptions';
@@ -251,6 +252,7 @@ export function useChat(
   const pendingUserIdRef = useRef<string | null>(null);
   const supersededPendingIdsRef = useRef<Set<string>>(new Set());
   const activeGenerationRef = useRef(false);
+  const sendInFlightRef = useRef(false);
   const titleCallback = useRef(onTitleUpdated);
   titleCallback.current = onTitleUpdated;
   const titles = useRef(new Map<string, { title: string; revision: number }>());
@@ -550,19 +552,26 @@ export function useChat(
       // ref inside the updater left the pending row and appended the saved one.
       const pendingId = pendingUserIdRef.current;
       pendingUserIdRef.current = null;
+      sendInFlightRef.current = false;
       if (pendingId) {
         supersededPendingIdsRef.current.add(pendingId);
       }
 
       setChat((prev) => {
         if (!prev) return prev;
-        const replaceId =
-          pendingId && prev.messages.some((m) => m.id === pendingId) ? pendingId : id;
-        if (prev.messages.some((m) => m.id === replaceId)) {
+        const pending = pendingId ? prev.messages.find((m) => m.id === pendingId) : undefined;
+        if (pending) {
+          const saved = { ...pending, id, content, metadata: metadata ?? pending.metadata };
+          return {
+            ...prev,
+            messages: [...prev.messages.filter((m) => m.id !== pendingId), saved],
+          };
+        }
+        if (prev.messages.some((m) => m.id === id)) {
           return {
             ...prev,
             messages: prev.messages.map((m) =>
-              m.id === replaceId ? { ...m, id, content, metadata: metadata ?? m.metadata } : m
+              m.id === id ? { ...m, content, metadata: metadata ?? m.metadata } : m
             ),
           };
         }
@@ -582,6 +591,7 @@ export function useChat(
 
   useEffect(() => {
     activeGenerationRef.current = false;
+    sendInFlightRef.current = false;
     pendingUserIdRef.current = null;
     supersededPendingIdsRef.current.clear();
     setStreaming(false);
@@ -597,6 +607,7 @@ export function useChat(
     let assistantId: string | null = null;
     let generationSeen = false;
     const completed = new Set<string>();
+    let automatedTurn = false;
     let assistantContent = '';
     let assistantMetadata: MessageMetadata | undefined;
     let chunkFrame = 0;
@@ -723,9 +734,10 @@ export function useChat(
           }
           break;
         case 'message_saved':
-          if (payload.role === 'user') {
+          if (payload.role === 'user' && !automated(payload.metadata)) {
             applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
           } else {
+            if (payload.role === 'user') automatedTurn = true;
             upsertMessage(payload.message_id, payload.role, payload.content, payload.metadata);
           }
           break;
@@ -911,7 +923,13 @@ export function useChat(
           assistantId = null;
           assistantContent = '';
           assistantMetadata = undefined;
+          if (automatedTurn && sendInFlightRef.current) {
+            automatedTurn = false;
+            break;
+          }
+          automatedTurn = false;
           activeGenerationRef.current = false;
+          sendInFlightRef.current = false;
           setStreaming(false);
           break;
         case 'cancelled': {
@@ -925,6 +943,7 @@ export function useChat(
           if (payload.message_id !== null) completed.add(payload.message_id);
           settleStoppedAssistant(assistantId ?? payload.message_id);
           assistantId = null;
+          automatedTurn = false;
           contextEpoch.current += 1;
           const pendingId = pendingUserIdRef.current;
           pendingUserIdRef.current = null;
@@ -941,6 +960,7 @@ export function useChat(
           }
           setStatus(null);
           activeGenerationRef.current = false;
+          sendInFlightRef.current = false;
           setStreaming(false);
           break;
         }
@@ -948,10 +968,12 @@ export function useChat(
           settleStoppedAssistant(assistantId);
           if (assistantId !== null) completed.add(assistantId);
           assistantId = null;
+          automatedTurn = false;
           contextEpoch.current += 1;
           setStatus(null);
           setError(payload.message);
           activeGenerationRef.current = false;
+          sendInFlightRef.current = false;
           setStreaming(false);
           break;
         default:
@@ -1063,6 +1085,7 @@ export function useChat(
         setError('Chat connection failed');
         setStatus(null);
         activeGenerationRef.current = false;
+        sendInFlightRef.current = false;
         setStreaming(false);
       };
 
@@ -1073,6 +1096,7 @@ export function useChat(
         contextEpoch.current += 1;
         setStatus(null);
         activeGenerationRef.current = false;
+        sendInFlightRef.current = false;
         setStreaming(false);
         if (refused) return;
         const delay =
@@ -1177,6 +1201,7 @@ export function useChat(
     const pendingId = pendingUserIdRef.current ?? `pending-${crypto.randomUUID()}`;
     pendingUserIdRef.current = pendingId;
     activeGenerationRef.current = true;
+    sendInFlightRef.current = true;
     contextEpoch.current += 1;
     upsertMessage(pendingId, 'user', request.content, request.metadata);
     setStreaming(true);
@@ -1191,6 +1216,7 @@ export function useChat(
     } catch (err) {
       pendingUserIdRef.current = null;
       activeGenerationRef.current = false;
+      sendInFlightRef.current = false;
       setChat((prev) =>
         prev ? { ...prev, messages: prev.messages.filter((m) => m.id !== pendingId) } : prev
       );
