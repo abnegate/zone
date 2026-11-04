@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'bun:test';
-import { DEFERRED_STYLESHEET_ATTRIBUTE, stylesheetLoaded } from './stylesheet';
+import {
+  DEFERRED_STYLESHEET_ATTRIBUTE,
+  FONT_STYLESHEET,
+  loadFonts,
+  stylesheetLoaded,
+} from './stylesheet';
 
 function page(media?: string) {
   const root = document.createElement('div');
@@ -44,5 +49,15 @@ describe('stylesheetLoaded', () => {
     const loaded = stylesheetLoaded(root);
     link?.dispatchEvent(new Event('error'));
     expect(await settled(loaded)).toBe(true);
+  });
+});
+
+describe('loadFonts', () => {
+  it('appends the font stylesheet to the head', () => {
+    const target = document.implementation.createHTMLDocument();
+    loadFonts(target);
+    const link = target.head.querySelector('link');
+    expect(link?.rel).toBe('stylesheet');
+    expect(link?.getAttribute('href')).toBe(FONT_STYLESHEET);
   });
 });

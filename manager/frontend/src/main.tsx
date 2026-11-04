@@ -1,9 +1,9 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { Toaster } from 'sonner';
 import App from './App';
 import { persistCurrentPath, restoreLastPath } from './shared/lastPath';
-import { stylesheetLoaded } from './shared/stylesheet';
+import { loadFonts, stylesheetLoaded } from './shared/stylesheet';
 
 restoreLastPath();
 const persist = () => persistCurrentPath();
@@ -26,12 +26,20 @@ if (
   });
 }
 
+function Fonts() {
+  useEffect(() => {
+    requestAnimationFrame(() => requestAnimationFrame(() => loadFonts()));
+  }, []);
+  return null;
+}
+
 const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
 void stylesheetLoaded().then(() => {
   root.render(
     <React.StrictMode>
       <App />
       <Toaster />
+      <Fonts />
     </React.StrictMode>
   );
 });

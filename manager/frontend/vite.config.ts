@@ -119,7 +119,13 @@ export default defineConfig(({ command }) => {
       sourcemap: true,
       rolldownOptions: {
         output: {
-          manualChunks: (id: string) => (id.includes('.css') ? 'styles' : undefined),
+          codeSplitting: {
+            groups: [
+              { name: 'runtime', test: /preload-helper|rolldown:runtime|staleChunk/, priority: 3 },
+              { name: 'styles', test: /\.css($|\?)/, priority: 2 },
+              { name: 'boot', test: /\/src\/main\.tsx$/, priority: 1 },
+            ],
+          },
         },
       },
     },
