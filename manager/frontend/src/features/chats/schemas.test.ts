@@ -261,6 +261,15 @@ describe('a chat provider choice', () => {
 });
 
 describe('the providers a chat can run on', () => {
+  it('reads whether the turns run on a CLI, and anything else as not knowing', () => {
+    const listing = { default: openaiOffer, selected: null, providers: [] };
+
+    expect(ChatProvidersSchema.parse({ ...listing, cli: true }).cli).toBe(true);
+    expect(ChatProvidersSchema.parse({ ...listing, cli: false }).cli).toBe(false);
+    expect(ChatProvidersSchema.parse(listing).cli).toBeUndefined();
+    expect(ChatProvidersSchema.parse({ ...listing, cli: 'codex' }).cli).toBeUndefined();
+  });
+
   it('parses the default, the selection and the offers with their labels and efforts', () => {
     const parsed = ChatProvidersSchema.parse({
       default: { ...openaiOffer, requires_model: false },

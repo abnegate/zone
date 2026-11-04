@@ -45,6 +45,8 @@ export interface ChatProviders {
   default: ChatProviderOffer;
   selected: ChatProviderSelection | null;
   providers: ChatProviderOffer[];
+  /** Whether this chat's turns run on a coding agent CLI. Omitted when the server cannot say. */
+  cli?: boolean;
 }
 
 export interface WorkspaceChatProviders {

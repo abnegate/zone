@@ -130,6 +130,15 @@ pub fn instance(config: &Config) -> LlmBackend {
     }
 }
 
+/// The coding agent CLI [`for_settings`] runs `settings` on, given the `origin` of the endpoint
+/// they resolved to: none when their completions go over HTTP.
+pub fn agent(config: &Config, settings: &EffectiveAiSettings, origin: Origin) -> Option<AgentKind> {
+    settings.agent().or(match origin {
+        Origin::Settings => None,
+        Origin::Instance => config.model_backend().agent(),
+    })
+}
+
 /// The backend `settings` choose for one of `organization`'s workspaces.
 ///
 /// A coding agent provider runs on the login [`router::pick`] picks among the organization's,

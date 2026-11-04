@@ -15,16 +15,26 @@ export function ModelNameInput({
   onSubmit,
 }: ModelNameInputProps) {
   const [name, setName] = useState(value);
+  const draft = useRef(value);
   const submitted = useRef(value);
 
+  const edit = (next: string) => {
+    draft.current = next;
+    setName(next);
+  };
+
   const submit = () => {
-    const trimmed = name.trim();
+    const trimmed = draft.current.trim();
     if (!trimmed || trimmed === submitted.current) return;
     submitted.current = trimmed;
     onSubmit(trimmed);
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape') {
+      edit(submitted.current);
+      return;
+    }
     if (event.key !== 'Enter') return;
     event.preventDefault();
     submit();
@@ -42,7 +52,7 @@ export function ModelNameInput({
         disabled={disabled}
         spellCheck={false}
         autoComplete="off"
-        onChange={(event) => setName(event.target.value)}
+        onChange={(event) => edit(event.target.value)}
         onBlur={submit}
         onKeyDown={handleKeyDown}
       />
