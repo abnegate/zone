@@ -5,6 +5,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::DbResult;
+use crate::services::time_zone::TimeZone;
 
 /// User row from database
 #[derive(Debug, Clone)]
@@ -295,5 +296,28 @@ pub async fn delete_user(pool: &PgPool, user_id: Uuid) -> DbResult<()> {
         .execute(pool)
         .await?;
 
+    Ok(())
+}
+
+/// The zone the person's console last reported, or `None` when it never has
+/// or what it reported is no longer a zone this build knows.
+pub async fn time_zone(
+    executor: impl sqlx::PgExecutor<'_>,
+    user_id: Uuid,
+) -> DbResult<Option<TimeZone>> {
+    let stored: Option<String> = sqlx::query_scalar("SELECT time_zone FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(executor)
+        .await?
+        .flatten();
+    Ok(stored.and_then(|name| TimeZone::parse(&name).ok()))
+}
+
+pub async fn set_time_zone(pool: &PgPool, user_id: Uuid, zone: TimeZone) -> DbResult<()> {
+    sqlx::query("UPDATE users SET time_zone = $2 WHERE id = $1 AND time_zone IS DISTINCT FROM $2")
+        .bind(user_id)
+        .bind(zone.name())
+        .execute(pool)
+        .await?;
     Ok(())
 }

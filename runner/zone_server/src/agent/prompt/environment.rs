@@ -1,11 +1,12 @@
 //! Where and when this turn runs.
 
 use abnegate_llm::Effort;
-use chrono::{DateTime, FixedOffset, Local};
+use chrono::{DateTime, FixedOffset, Local, Utc};
 use std::path::PathBuf;
 
 use super::Vcs;
 use crate::agent::tools::host_root;
+use crate::services::time_zone::TimeZone;
 
 /// Fallback zone name when the host exposes no IANA identifier.
 const UNKNOWN_TIMEZONE: &str = "UTC";
@@ -83,6 +84,14 @@ impl Environment {
         self.effort = Some(effort);
         self
     }
+
+    /// The same instant on another zone's clock.
+    pub fn with_time_zone(mut self, zone: TimeZone) -> Self {
+        let instant = self.now.with_timezone(&Utc);
+        self.now = instant.with_timezone(&zone.offset(instant));
+        self.timezone = zone.name().to_string();
+        self
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +129,17 @@ mod tests {
         assert_eq!(filled.user.as_deref(), Some("Ari"));
         assert_eq!(filled.workspace.as_deref(), Some("Zone"));
         assert_eq!(filled.effort, Some(Effort::High));
+    }
+
+    #[test]
+    fn a_person_s_zone_restates_the_same_instant_on_their_clock() {
+        let environment = fixed().with_time_zone(TimeZone::parse("Europe/London").expect("a zone"));
+        assert_eq!(environment.timezone, "Europe/London");
+        assert_eq!(
+            environment.now.to_rfc3339(),
+            "2026-09-08T22:30:00+01:00",
+            "09:30 in Auckland is 22:30 the evening before in London"
+        );
     }
 
     #[test]

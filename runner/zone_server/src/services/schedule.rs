@@ -11,7 +11,8 @@
 //! rather than ignored, because a rule that silently drops a clause fires at a
 //! time nobody asked for and the owner finds out by being interrupted.
 
-use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc, Weekday};
+use crate::services::time_zone::TimeZone;
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Utc, Weekday};
 use uuid::Uuid;
 
 /// The shortest period an automation may repeat on.
@@ -355,30 +356,46 @@ impl Recurrence {
     /// weekday and time rather than on an arbitrary one. `fired` is how many
     /// firings have already happened, which is what `COUNT` is measured
     /// against.
+    ///
+    /// Every clause is read on `zone`'s wall clock, and so is the anchor, so
+    /// nine o'clock stays nine o'clock there across a daylight-saving change
+    /// and only the firing that answers is turned into UTC. An hourly rule is
+    /// the exception: it counts elapsed hours, which no clock change moves, so
+    /// it is read in UTC whatever the zone.
     pub fn next_after(
         &self,
         anchor: DateTime<Utc>,
         after: DateTime<Utc>,
         fired: u32,
+        zone: TimeZone,
     ) -> Option<DateTime<Utc>> {
         if self.count.is_some_and(|count| fired >= count) {
             return None;
         }
+        let zone = if self.frequency == Frequency::Hourly {
+            TimeZone::UTC
+        } else {
+            zone
+        };
+        let anchor_local = zone.local(anchor);
 
         let hours = if self.by_hour.is_empty() {
-            vec![anchor.hour()]
+            vec![anchor_local.hour()]
         } else {
             self.by_hour.clone()
         };
         let minutes = if self.by_minute.is_empty() {
-            vec![anchor.minute()]
+            vec![anchor_local.minute()]
         } else {
             self.by_minute.clone()
         };
 
-        let mut period = self.period_start(anchor, after);
+        let mut period = self.period_start(anchor_local, zone.local(after));
         for _ in 0..MAX_PERIODS {
-            for candidate in self.candidates(period, anchor, &hours, &minutes) {
+            for local in self.candidates(period, anchor_local, &hours, &minutes) {
+                let Some(candidate) = zone.instant(local) else {
+                    continue;
+                };
                 if candidate <= after {
                     continue;
                 }
@@ -395,7 +412,7 @@ impl Recurrence {
     /// The start of the period `after` falls in, walked back to the anchor's
     /// own phase so an `INTERVAL` counts from the automation's first firing
     /// rather than from an arbitrary epoch.
-    fn period_start(&self, anchor: DateTime<Utc>, after: DateTime<Utc>) -> DateTime<Utc> {
+    fn period_start(&self, anchor: NaiveDateTime, after: NaiveDateTime) -> NaiveDateTime {
         let mut period = anchor;
         while period > after {
             let Some(back) = self.retreat(period) else {
@@ -412,15 +429,15 @@ impl Recurrence {
         period
     }
 
-    fn advance(&self, from: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn advance(&self, from: NaiveDateTime) -> Option<NaiveDateTime> {
         self.step(from, 1)
     }
 
-    fn retreat(&self, from: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn retreat(&self, from: NaiveDateTime) -> Option<NaiveDateTime> {
         self.step(from, -1)
     }
 
-    fn step(&self, from: DateTime<Utc>, direction: i32) -> Option<DateTime<Utc>> {
+    fn step(&self, from: NaiveDateTime, direction: i32) -> Option<NaiveDateTime> {
         let interval = i32::try_from(self.interval).unwrap_or(i32::MAX) * direction;
         match self.frequency {
             Frequency::Hourly => from.checked_add_signed(Duration::hours(i64::from(interval))),
@@ -430,37 +447,38 @@ impl Recurrence {
         }
     }
 
-    /// The instants one period offers, in order.
+    /// The wall-clock times one period offers, in order.
     ///
     /// An hourly period *is* its firing — the hour is what the period stepped —
     /// so it is returned whole. Every other frequency picks dates and then
     /// crosses them with the hours and minutes the rule or the anchor gives.
     fn candidates(
         &self,
-        period: DateTime<Utc>,
-        anchor: DateTime<Utc>,
+        period: NaiveDateTime,
+        anchor: NaiveDateTime,
         hours: &[u32],
         minutes: &[u32],
-    ) -> Vec<DateTime<Utc>> {
+    ) -> Vec<NaiveDateTime> {
         if self.frequency == Frequency::Hourly {
             return period.with_second(0).into_iter().collect();
         }
-        let mut instants: Vec<DateTime<Utc>> = Vec::new();
+        let mut times: Vec<NaiveDateTime> = Vec::new();
         for day in self.days_of(period, anchor) {
             for hour in hours {
                 for minute in minutes {
-                    instants.extend(at(day, *hour, *minute));
+                    times.extend(day.and_hms_opt(*hour, *minute, 0));
                 }
             }
         }
-        instants.sort_unstable();
-        instants
+        times.sort_unstable();
+        times
     }
 
     /// Which dates inside one period the rule selects, in order.
-    fn days_of(&self, period: DateTime<Utc>, anchor: DateTime<Utc>) -> Vec<DateTime<Utc>> {
+    fn days_of(&self, period: NaiveDateTime, anchor: NaiveDateTime) -> Vec<NaiveDate> {
+        let date = period.date();
         match self.frequency {
-            Frequency::Hourly | Frequency::Daily => vec![period],
+            Frequency::Hourly | Frequency::Daily => vec![date],
             Frequency::Weekly => {
                 let days = if self.by_day.is_empty() {
                     vec![anchor.weekday()]
@@ -468,8 +486,8 @@ impl Recurrence {
                     self.by_day.clone()
                 };
                 let monday =
-                    period - Duration::days(i64::from(period.weekday().num_days_from_monday()));
-                let mut dates: Vec<DateTime<Utc>> = days
+                    date - Duration::days(i64::from(date.weekday().num_days_from_monday()));
+                let mut dates: Vec<NaiveDate> = days
                     .iter()
                     .map(|day| monday + Duration::days(i64::from(day.num_days_from_monday())))
                     .collect();
@@ -484,18 +502,15 @@ impl Recurrence {
             // automation lands on 28 February rather than vanishing from the
             // shortest month of the year.
             Frequency::Monthly => {
-                let last = last_day(period.year(), period.month());
+                let last = last_day(date.year(), date.month());
                 let days = if self.by_month_day.is_empty() {
                     vec![anchor.day().min(last)]
                 } else {
                     self.by_month_day.clone()
                 };
-                let mut dates: Vec<DateTime<Utc>> = days
+                let mut dates: Vec<NaiveDate> = days
                     .iter()
-                    .filter_map(|day| {
-                        Utc.with_ymd_and_hms(period.year(), period.month(), *day, 0, 0, 0)
-                            .single()
-                    })
+                    .filter_map(|day| NaiveDate::from_ymd_opt(date.year(), date.month(), *day))
                     .collect();
                 dates.sort_unstable();
                 dates
@@ -504,29 +519,18 @@ impl Recurrence {
     }
 }
 
-/// An hourly rule fires at the period's own hour; every other frequency takes
-/// the hour and minute from the rule or the anchor.
-fn at(day: DateTime<Utc>, hour: u32, minute: u32) -> Option<DateTime<Utc>> {
-    Utc.with_ymd_and_hms(day.year(), day.month(), day.day(), hour, minute, 0)
-        .single()
-}
-
 /// Adds whole months, clamping a day the target month does not have — 31
 /// January plus one month is the last day of February, never 3 March.
-fn months(from: DateTime<Utc>, count: i32) -> Option<DateTime<Utc>> {
+fn months(from: NaiveDateTime, count: i32) -> Option<NaiveDateTime> {
     let zero = from.year() * 12 + i32::try_from(from.month()).ok()? - 1 + count;
     let year = zero.div_euclid(12);
     let month = u32::try_from(zero.rem_euclid(12) + 1).ok()?;
     let last = last_day(year, month);
-    Utc.with_ymd_and_hms(
-        year,
-        month,
-        from.day().min(last),
+    NaiveDate::from_ymd_opt(year, month, from.day().min(last))?.and_hms_opt(
         from.hour(),
         from.minute(),
         0,
     )
-    .single()
 }
 
 fn last_day(year: i32, month: u32) -> u32 {
@@ -535,9 +539,8 @@ fn last_day(year: i32, month: u32) -> u32 {
     } else {
         (year, month + 1)
     };
-    Utc.with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0)
-        .single()
-        .and_then(|first| first.checked_sub_signed(Duration::days(1)))
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|first| first.pred_opt())
         .map_or(28, |last| last.day())
 }
 
@@ -916,7 +919,7 @@ mod tests {
         let rule = Recurrence::parse("FREQ=DAILY").expect("accepted");
 
         assert_eq!(
-            rule.next_after(anchor, anchor, 1),
+            rule.next_after(anchor, anchor, 1, TimeZone::UTC),
             Some(at_utc("2026-09-15T06:47:00Z"))
         );
     }
@@ -927,15 +930,15 @@ mod tests {
         let rule = Recurrence::parse("FREQ=DAILY;BYHOUR=9,17;BYMINUTE=3").expect("accepted");
 
         let first = rule
-            .next_after(anchor, at_utc("2026-09-14T00:00:00Z"), 0)
+            .next_after(anchor, at_utc("2026-09-14T00:00:00Z"), 0, TimeZone::UTC)
             .expect("a firing");
         assert_eq!(first, at_utc("2026-09-14T09:03:00Z"));
         assert_eq!(
-            rule.next_after(anchor, first, 1),
+            rule.next_after(anchor, first, 1, TimeZone::UTC),
             Some(at_utc("2026-09-14T17:03:00Z"))
         );
         assert_eq!(
-            rule.next_after(anchor, at_utc("2026-09-14T17:03:00Z"), 2),
+            rule.next_after(anchor, at_utc("2026-09-14T17:03:00Z"), 2, TimeZone::UTC),
             Some(at_utc("2026-09-15T09:03:00Z"))
         );
     }
@@ -947,13 +950,15 @@ mod tests {
         let rule =
             Recurrence::parse("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,TH;BYHOUR=9").expect("accepted");
 
-        let thursday = rule.next_after(anchor, anchor, 1).expect("a firing");
+        let thursday = rule
+            .next_after(anchor, anchor, 1, TimeZone::UTC)
+            .expect("a firing");
         assert_eq!(thursday, at_utc("2026-09-17T09:00:00Z"));
         assert_eq!(thursday.weekday(), Weekday::Thu);
 
         // Two weeks on from the anchor's week, not one.
         assert_eq!(
-            rule.next_after(anchor, thursday, 2),
+            rule.next_after(anchor, thursday, 2, TimeZone::UTC),
             Some(at_utc("2026-09-28T09:00:00Z"))
         );
     }
@@ -966,10 +971,12 @@ mod tests {
         let anchor = at_utc("2026-01-31T08:00:00Z");
         let rule = Recurrence::parse("FREQ=MONTHLY").expect("accepted");
 
-        let february = rule.next_after(anchor, anchor, 1).expect("a firing");
+        let february = rule
+            .next_after(anchor, anchor, 1, TimeZone::UTC)
+            .expect("a firing");
         assert_eq!(february, at_utc("2026-02-28T08:00:00Z"));
         assert_eq!(
-            rule.next_after(anchor, february, 2),
+            rule.next_after(anchor, february, 2, TimeZone::UTC),
             Some(at_utc("2026-03-31T08:00:00Z")),
             "a clamped month must not drag the following ones back with it"
         );
@@ -981,7 +988,7 @@ mod tests {
         let rule = Recurrence::parse("FREQ=MONTHLY;BYMONTHDAY=31;BYHOUR=8").expect("accepted");
 
         // Only the long months, in order, and never a 31st that does not exist.
-        let march = rule.next_after(anchor, at_utc("2026-02-01T00:00:00Z"), 1);
+        let march = rule.next_after(anchor, at_utc("2026-02-01T00:00:00Z"), 1, TimeZone::UTC);
         assert_eq!(march, Some(at_utc("2026-03-31T08:00:00Z")));
     }
 
@@ -990,10 +997,12 @@ mod tests {
         let anchor = at_utc("2026-09-14T06:47:00Z");
         let rule = Recurrence::parse("FREQ=HOURLY;INTERVAL=6").expect("accepted");
 
-        let next = rule.next_after(anchor, anchor, 1).expect("a firing");
+        let next = rule
+            .next_after(anchor, anchor, 1, TimeZone::UTC)
+            .expect("a firing");
         assert_eq!(next, at_utc("2026-09-14T12:47:00Z"));
         assert_eq!(
-            rule.next_after(anchor, next, 2),
+            rule.next_after(anchor, next, 2, TimeZone::UTC),
             Some(at_utc("2026-09-14T18:47:00Z"))
         );
     }
@@ -1003,10 +1012,10 @@ mod tests {
         let anchor = at_utc("2026-09-14T09:00:00Z");
         let rule = Recurrence::parse("FREQ=DAILY;COUNT=3").expect("accepted");
 
-        assert!(rule.next_after(anchor, anchor, 1).is_some());
-        assert!(rule.next_after(anchor, anchor, 2).is_some());
+        assert!(rule.next_after(anchor, anchor, 1, TimeZone::UTC).is_some());
+        assert!(rule.next_after(anchor, anchor, 2, TimeZone::UTC).is_some());
         assert_eq!(
-            rule.next_after(anchor, anchor, 3),
+            rule.next_after(anchor, anchor, 3, TimeZone::UTC),
             None,
             "the third firing is the last, so a fourth is never scheduled"
         );
@@ -1018,16 +1027,16 @@ mod tests {
         let rule = Recurrence::parse("FREQ=DAILY;UNTIL=20260916T090000Z").expect("accepted");
 
         assert_eq!(
-            rule.next_after(anchor, anchor, 1),
+            rule.next_after(anchor, anchor, 1, TimeZone::UTC),
             Some(at_utc("2026-09-15T09:00:00Z"))
         );
         assert_eq!(
-            rule.next_after(anchor, at_utc("2026-09-15T09:00:00Z"), 2),
+            rule.next_after(anchor, at_utc("2026-09-15T09:00:00Z"), 2, TimeZone::UTC),
             Some(at_utc("2026-09-16T09:00:00Z")),
             "UNTIL includes the instant it names"
         );
         assert_eq!(
-            rule.next_after(anchor, at_utc("2026-09-16T09:00:00Z"), 3),
+            rule.next_after(anchor, at_utc("2026-09-16T09:00:00Z"), 3, TimeZone::UTC),
             None
         );
     }
@@ -1040,7 +1049,7 @@ mod tests {
         let rule = Recurrence::parse("FREQ=DAILY;BYHOUR=9").expect("accepted");
 
         assert_eq!(
-            rule.next_after(anchor, at_utc("2026-09-14T06:47:00Z"), 13),
+            rule.next_after(anchor, at_utc("2026-09-14T06:47:00Z"), 13, TimeZone::UTC),
             Some(at_utc("2026-09-14T09:00:00Z"))
         );
     }
@@ -1054,6 +1063,6 @@ mod tests {
         let rule =
             Recurrence::parse("FREQ=MONTHLY;INTERVAL=12;BYMONTHDAY=31;BYHOUR=9").expect("accepted");
 
-        assert_eq!(rule.next_after(february, february, 1), None);
+        assert_eq!(rule.next_after(february, february, 1, TimeZone::UTC), None);
     }
 }

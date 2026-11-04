@@ -988,6 +988,7 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             "007_devices.sql",
             "009_chat_provider.sql",
             "010_chat_provider_validation.sql",
+            "011_time_zones.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );
