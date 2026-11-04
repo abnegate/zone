@@ -24,6 +24,7 @@ import { useSources } from '../../sources/hooks/useSources';
 import {
   ActionReceipts,
   AgentPermission,
+  AgentPermissionSummary,
   AuthenticatedAudio,
   AuthenticatedImage,
   AuthenticatedVideo,
@@ -1369,10 +1370,10 @@ export default function ChatsPage() {
                         triggerLabel={`Agent permissions: ${permissionSummary}`}
                         title={`Agent permissions: ${permissionSummary}`}
                         trigger={
-                          <>
-                            {autoApproved && <span>Auto-approve</span>}
-                            {showSandbox && !sandboxed && <span>Host tools</span>}
-                          </>
+                          <AgentPermissionSummary
+                            autoApproved={autoApproved}
+                            hostTools={showSandbox && !sandboxed}
+                          />
                         }
                       >
                         <AgentPermission
@@ -1405,6 +1406,7 @@ export default function ChatsPage() {
                                 : 'Zone tools only off: the agent can also read, write and run commands on this host with its own tools, which Zone never sees and cannot gate'
                             }
                             enabled={sandboxed}
+                            warning={!sandboxed}
                             testId="agent-sandbox-toggle"
                             onToggle={handleToggleAgentSandboxed}
                           />
