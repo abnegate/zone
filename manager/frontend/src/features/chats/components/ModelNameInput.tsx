@@ -1,21 +1,20 @@
-import { type KeyboardEvent, useState } from 'react';
+import { type KeyboardEvent, useEffect, useState } from 'react';
 import { MODEL_NAME_PLACEHOLDER } from '../utils';
 
 export interface ModelNameInputProps {
   provider: string;
   value: string;
-  disabled?: boolean;
+  busy?: boolean;
   onSubmit: (name: string) => void;
 }
 
-export function ModelNameInput({
-  provider,
-  value,
-  disabled = false,
-  onSubmit,
-}: ModelNameInputProps) {
+export function ModelNameInput({ provider, value, busy = false, onSubmit }: ModelNameInputProps) {
   const [name, setName] = useState(value);
   const trimmed = name.trim();
+
+  useEffect(() => {
+    setName(value);
+  }, [value]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Escape') {
@@ -24,7 +23,7 @@ export function ModelNameInput({
     }
     if (event.key !== 'Enter') return;
     event.preventDefault();
-    if (trimmed && trimmed !== value) onSubmit(trimmed);
+    if (!busy && trimmed && trimmed !== value) onSubmit(trimmed);
   };
 
   return (
@@ -36,7 +35,8 @@ export function ModelNameInput({
         title={`Which model ${provider} runs. AI Settings save none for it, so name one it serves and press Enter.`}
         placeholder={MODEL_NAME_PLACEHOLDER}
         value={name}
-        disabled={disabled}
+        readOnly={busy}
+        aria-busy={busy}
         spellCheck={false}
         autoComplete="off"
         onChange={(event) => setName(event.target.value)}

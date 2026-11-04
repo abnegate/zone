@@ -1,5 +1,5 @@
 import { describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { chooseSelect, openSelect } from '../../../test/select';
 import type {
   ChatProviderOffer,
@@ -73,7 +73,7 @@ function optionNames(label: string): string[] {
 }
 
 function renderPicker(providers: Partial<ChatProviders> = {}, modelName = 'auto') {
-  const onChoose = mock((_provider: string | null, _model: string | null) => {});
+  const onChoose = mock(async (_provider: string | null, _model: string | null) => true);
   const onModel = mock((_name: string) => {});
   render(
     <ProviderPicker
@@ -159,6 +159,87 @@ describe('ProviderPicker', () => {
 
     expect(onChoose).toHaveBeenCalledTimes(1);
     expect(onChoose).toHaveBeenCalledWith('openai', 'gpt-4o');
+  });
+
+  it('sends nothing on Enter while a change is in flight', () => {
+    const onChoose = mock(async (_provider: string | null, _model: string | null) => true);
+    render(
+      <ProviderPicker
+        providers={{
+          default: selfHosted,
+          selected: selection(openai, { model: 'gpt-4o' }),
+          providers: [selfHosted, openai],
+        }}
+        modelName="auto"
+        disabled
+        onChoose={onChoose}
+        onModel={() => {}}
+      />
+    );
+    const field = screen.getByRole('textbox', { name: 'Provider model name' });
+
+    fireEvent.change(field, { target: { value: 'other' } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+
+    expect(onChoose).not.toHaveBeenCalled();
+  });
+
+  it('keeps a first name the server refused, ready to send again', async () => {
+    const onChoose = mock(
+      async (_provider: string | null, _model: string | null): Promise<boolean> => false
+    );
+    render(
+      <ProviderPicker
+        providers={{ default: selfHosted, selected: null, providers: [selfHosted, openai] }}
+        modelName="auto"
+        onChoose={onChoose}
+        onModel={() => {}}
+      />
+    );
+    chooseSelect('AI provider', 'OpenAI');
+    const field = screen.getByRole('textbox', { name: 'Provider model name' });
+
+    fireEvent.change(field, { target: { value: 'refused' } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+    await act(async () => {
+      await onChoose.mock.results[0].value;
+    });
+
+    expect(screen.getByRole('textbox', { name: 'Provider model name' })).toBe(field);
+    expect(field).toHaveValue('refused');
+    expect(screen.getByTestId('chat-provider')).toHaveTextContent('OpenAI');
+
+    fireEvent.keyDown(field, { key: 'Enter' });
+    expect(onChoose).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the same field, and its focus, when a name is saved', async () => {
+    const onChoose = mock(
+      async (_provider: string | null, _model: string | null): Promise<boolean> => true
+    );
+    const props = { modelName: 'auto', onChoose, onModel: () => {} };
+    const listing = { default: selfHosted, providers: [selfHosted, openai] };
+    const { rerender } = render(
+      <ProviderPicker providers={{ ...listing, selected: null }} {...props} />
+    );
+    chooseSelect('AI provider', 'OpenAI');
+    const field = screen.getByRole('textbox', { name: 'Provider model name' });
+    fireEvent.change(field, { target: { value: 'gpt-4o' } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+
+    rerender(
+      <ProviderPicker
+        providers={{ ...listing, selected: selection(openai, { model: 'gpt-4o' }) }}
+        {...props}
+      />
+    );
+    await act(async () => {
+      await onChoose.mock.results[0].value;
+    });
+
+    expect(screen.getByRole('textbox', { name: 'Provider model name' })).toBe(field);
+    expect(field).toHaveValue('gpt-4o');
+    expect(screen.queryByText('Enter to save')).toBeNull();
   });
 
   it('after a refused name, reverts to the saved model and can send the name again', () => {
@@ -321,6 +402,9 @@ describe('ProviderPicker', () => {
       />
     );
 
-    expect(screen.getByRole('textbox', { name: 'Provider model name' })).toBeDisabled();
+    const field = screen.getByRole('textbox', { name: 'Provider model name' });
+    expect(field).not.toBeDisabled();
+    expect(field).toHaveAttribute('readonly');
+    expect(field).toHaveAttribute('aria-busy', 'true');
   });
 });

@@ -48,7 +48,7 @@ export function useChatProviders(chatId: string | null) {
     void load(chatId);
   }, [chatId, load]);
 
-  const refresh = useCallback((): Promise<void> => load(chatId), [chatId, load]);
+  const refresh = useCallback((): Promise<void> => load(latestChatId.current), [load]);
 
   const choose = useCallback(
     async (provider: AiProvider | null, model: string | null = null): Promise<ChatWithMessages> => {

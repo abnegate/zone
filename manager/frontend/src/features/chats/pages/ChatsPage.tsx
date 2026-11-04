@@ -347,7 +347,8 @@ export default function ChatsPage() {
   const chatSettingsSummary = [providerName, modelName, chatEffortName].filter(Boolean).join(' · ');
   const autoApproved = Boolean(displayedChat?.auto_approve);
   const sandboxed = displayedChat?.agent_sandboxed !== false;
-  const cli = providersError ? undefined : chatProviders?.cli;
+  const cliStale = Boolean(providersError) || changingProvider;
+  const cli = cliStale && chatProviders?.cli === false ? undefined : chatProviders?.cli;
   const showSandbox = Boolean(
     displayedChat?.agent_enabled && (cli === undefined ? !sandboxed : cli)
   );
@@ -590,8 +591,11 @@ export default function ChatsPage() {
     );
   };
 
-  const handleChooseProvider = async (provider: AiProvider | null, model: string | null) => {
-    if (!isAuthenticated || !displayedChat) return;
+  const handleChooseProvider = async (
+    provider: AiProvider | null,
+    model: string | null
+  ): Promise<boolean> => {
+    if (!isAuthenticated || !displayedChat) return false;
     const modelName = displayedChat.model_name;
     setOperationError(null);
     setChangingProvider(true);
@@ -600,7 +604,7 @@ export default function ChatsPage() {
     } catch (error) {
       setOperationError(error instanceof Error ? error.message : 'Failed to change AI provider');
       setChangingProvider(false);
-      return;
+      return false;
     }
     try {
       const offer = offerFor(provider);
@@ -611,6 +615,7 @@ export default function ChatsPage() {
       await refreshChat();
       setChangingProvider(false);
     }
+    return true;
   };
 
   const handleProviderModel = async (name: string) => {
@@ -1079,7 +1084,7 @@ export default function ChatsPage() {
           </div>
         )}
 
-        {operationError && !showNewChatModal && (
+        {operationError && !showNewChatModal && !displayedChat && (
           <div className="chats-error" role="alert">
             {operationError}
           </div>
@@ -1239,6 +1244,15 @@ export default function ChatsPage() {
                   </p>
                 )}
                 <ProviderError providers={chatProviders} />
+                {operationError && !showNewChatModal && (
+                  <p
+                    className="chat-provider-error"
+                    role="alert"
+                    data-testid="chat-operation-error"
+                  >
+                    {operationError}
+                  </p>
+                )}
                 <HeaderPopover
                   key={`settings-${displayedChat.id}`}
                   className="chat-settings-trigger"
@@ -1277,9 +1291,7 @@ export default function ChatsPage() {
                       providers={chatProviders}
                       modelName={displayedChat.model_name}
                       disabled={changingProvider}
-                      onChoose={(provider, model) => {
-                        void handleChooseProvider(provider, model);
-                      }}
+                      onChoose={handleChooseProvider}
                       onModel={(name) => {
                         void handleProviderModel(name);
                       }}

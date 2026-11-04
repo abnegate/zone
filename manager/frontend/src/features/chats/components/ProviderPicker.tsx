@@ -32,7 +32,7 @@ export interface ProviderPickerProps {
   providers: ChatProviders;
   modelName: string;
   disabled?: boolean;
-  onChoose: (provider: AiProvider | null, model: string | null) => void;
+  onChoose: (provider: AiProvider | null, model: string | null) => Promise<boolean>;
   onModel: (name: string) => void;
 }
 
@@ -45,6 +45,10 @@ export function ProviderPicker({
 }: ProviderPickerProps) {
   const { selected } = providers;
   const [pending, setPending] = useState<ChatProviderOffer | null>(null);
+
+  const choosePending = async (offer: ChatProviderOffer, model: string) => {
+    if (await onChoose(offer.provider, model)) setPending(null);
+  };
 
   const handleProvider = (value: string) => {
     if (value === DEFAULT_PROVIDER) {
@@ -69,14 +73,13 @@ export function ProviderPicker({
         provider: pending.label,
         value: '',
         onSubmit: (name) => {
-          setPending(null);
-          onChoose(pending.provider, name);
+          void choosePending(pending, name);
         },
       };
     }
     if (!pending && selected && asksModelName(selected)) {
       return {
-        key: `${selected.provider}:${selected.model ?? ''}`,
+        key: selected.provider,
         provider: selected.label,
         value: selected.model ?? '',
         onSubmit: (name) => onChoose(selected.provider, name),
@@ -91,8 +94,7 @@ export function ProviderPicker({
         value: '',
         options: modelSelectOptions(pending, null),
         onValueChange: (value) => {
-          setPending(null);
-          onChoose(pending.provider, value);
+          void choosePending(pending, value);
         },
       };
     }
@@ -134,7 +136,7 @@ export function ProviderPicker({
           provider={named.provider}
           value={named.value}
           onSubmit={named.onSubmit}
-          disabled={disabled}
+          busy={disabled}
         />
       )}
       {model && (

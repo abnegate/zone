@@ -2849,6 +2849,57 @@ describe('ChatsPage', () => {
 
       await waitFor(() => expect(mockWsSend).toHaveBeenCalled());
       expect(await screen.findByRole('status')).toHaveTextContent('Generating response…');
+      await waitFor(() => expect(mockGetChatProviders).toHaveBeenCalledTimes(2));
+    });
+
+    it('hides the toggle again once a later read says the chat runs over HTTP', async () => {
+      await openUnsandboxedChat();
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+      sendTurn();
+      await screen.findByTestId('agent-sandbox-toggle');
+
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: false }));
+      act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
+      act(() => socket.emit({ type: 'message_end', message_id: 'reply', content: 'Done' }));
+
+      await waitFor(() =>
+        expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument()
+      );
+      expect(screen.queryByTestId('chat-providers-error')).not.toBeInTheDocument();
+    });
+
+    it('keeps the toggle on a sandboxed CLI chat through a failed read', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: true,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('agent-sandbox-toggle');
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+
+      sendTurn();
+
+      await screen.findByTestId('chat-providers-error');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('warns while a provider change is still being read back', async () => {
+      await openUnsandboxedChat();
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+        provider: 'claude_code',
+      });
+      mockGetChatProviders.mockReturnValue(new Promise(() => {}));
+
+      chooseSelectOption('chat-provider', 'Claude Code');
+
+      await screen.findByTestId('agent-sandbox-toggle');
+      expect(screen.getByTestId('agent-permissions')).toHaveTextContent('Host tools');
     });
 
     it('keeps the turn running when reading the providers fails', async () => {
@@ -3138,7 +3189,8 @@ describe('ChatsPage', () => {
 
       chooseSelectOption('chat-provider', 'Codex');
 
-      expect(await screen.findByText('Codex is not signed in.')).toBeInTheDocument();
+      const refusal = await screen.findByText('Codex is not signed in.');
+      expect(refusal.closest('.chat-header')).not.toBeNull();
       expect(screen.getByTestId('chat-provider')).toHaveTextContent('Default');
       expect(screen.getByTestId('chat-provider')).not.toHaveTextContent('Codex');
     });

@@ -175,6 +175,30 @@ describe('useChatProviders', () => {
     });
   });
 
+  it('never reads the previous chat through a refresh held across a chat change', async () => {
+    mockGetChatProviders.mockImplementation((id: string) =>
+      Promise.resolve(following(id === 'chat-1' ? codex : claude))
+    );
+    const { result, rerender } = renderHook(({ id }) => useChatProviders(id), {
+      initialProps: { id: 'chat-1' },
+    });
+    await waitFor(() => {
+      expect(result.current.providers).toEqual(following(codex));
+    });
+    const held = result.current.refresh;
+
+    rerender({ id: 'chat-2' });
+    await waitFor(() => {
+      expect(result.current.providers).toEqual(following(claude));
+    });
+    await act(async () => {
+      await held();
+    });
+
+    expect(mockGetChatProviders).toHaveBeenLastCalledWith('chat-2');
+    expect(result.current.providers).toEqual(following(claude));
+  });
+
   it('forgets a failed read when the chat changes', async () => {
     const next = deferred<ChatProviders>();
     mockGetChatProviders.mockRejectedValueOnce(new Error('Failed to load AI providers: 502'));

@@ -675,8 +675,8 @@
   font-weight: 500;
 }
 
-.chat-provider-model-name input:disabled {
-  cursor: not-allowed;
+.chat-provider-model-name input:read-only {
+  cursor: progress;
   opacity: 0.6;
 }
 
