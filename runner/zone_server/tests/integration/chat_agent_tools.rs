@@ -10,7 +10,7 @@
 
 use crate::common;
 
-use crate::common::context::{finish, send};
+use crate::common::context::{Socket, finish, next, send};
 use crate::common::{
     TestClient, context_database_url, create_test_router, create_test_state, test_config,
     test_email, test_password,
@@ -40,6 +40,10 @@ const CHAT_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// How long the test waits for the spawned agent to report how it was invoked.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long Stop has to end a turn, far past what a turn at rest takes and far
+/// short of the walk [`fanned_out`] sends a tool on.
+const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
 const ANSWER: &str = "Written.";
 
@@ -111,6 +115,92 @@ impl Agent {
     fn finish(&self) {
         std::fs::write(&self.release, "go").expect("releasing the agent");
     }
+
+    /// Turns the stand-in into one that forks a child of its own before it
+    /// holds the turn open, and says which processes those are.
+    fn forking(&self) -> Processes {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = self.executable.parent().expect("the stand-in's directory");
+        let processes = Processes {
+            leader: directory.join("leader"),
+            forked: directory.join("forked"),
+        };
+        std::fs::write(
+            &self.executable,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\nprintf '%s' \"$ZONE_MCP_TOKEN\" > {token}\nprintf \
+                 '%s' \"$*\" > {arguments}\nsleep 600 > /dev/null 2>&1 &\nprintf '%s' \"$!\" > \
+                 {forked}\nprintf '%s' \"$$\" > {leader}\nwhile :; do sleep 0.05; done\n",
+                token = self.token.display(),
+                arguments = self.arguments.display(),
+                forked = processes.forked.display(),
+                leader = processes.leader.display(),
+            ),
+        )
+        .expect("the forking stand-in");
+        std::fs::set_permissions(&self.executable, std::fs::Permissions::from_mode(0o755))
+            .expect("the forking stand-in to be executable");
+        processes
+    }
+}
+
+/// Where a forking stand-in wrote its own pid and its child's.
+struct Processes {
+    leader: PathBuf,
+    forked: PathBuf,
+}
+
+impl Processes {
+    async fn pids(&self) -> [String; 2] {
+        let deadline = Instant::now() + SPAWN_TIMEOUT;
+        while Instant::now() < deadline {
+            let forked = std::fs::read_to_string(&self.forked).unwrap_or_default();
+            let leader = std::fs::read_to_string(&self.leader).unwrap_or_default();
+            if !forked.is_empty() && !leader.is_empty() {
+                return [leader, forked];
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("the forking stand-in never reported its processes");
+    }
+}
+
+/// Whether `pid` still runs. A killed process its parent has not reaped yet is
+/// a zombie, which is gone for this purpose.
+fn running(pid: &str) -> bool {
+    let state = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .expect("ps");
+    let state = String::from_utf8_lossy(&state.stdout);
+    !state.trim().is_empty() && !state.trim_start().starts_with('Z')
+}
+
+async fn gone(pid: &str) -> bool {
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    while Instant::now() < deadline {
+        if !running(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+/// A tree of `depth` levels with two links from each to the next, which a walk
+/// that follows links reads `2^depth` times over: one a real walk of a host's
+/// projects takes minutes over, from next to nothing on disk.
+fn fanned_out(root: &Path, depth: usize) {
+    for level in 0..depth {
+        let directory = root.join(level.to_string());
+        std::fs::create_dir_all(&directory).expect("a level of the tree");
+        for link in ["a", "b"] {
+            std::os::unix::fs::symlink(root.join((level + 1).to_string()), directory.join(link))
+                .expect("a link to the next level");
+        }
+    }
+    std::fs::create_dir_all(root.join(depth.to_string())).expect("the last level of the tree");
 }
 
 /// The MCP server definition zone passed on the command line, as the agent
@@ -170,6 +260,10 @@ impl Harness {
     /// The port is bound before the config is built, because the address the
     /// agent is pointed at is the one this server was configured to listen on.
     async fn start(agent_enabled: bool, sandboxed: bool) -> Self {
+        Self::start_on(AgentKind::Claude, agent_enabled, sandboxed).await
+    }
+
+    async fn start_on(kind: AgentKind, agent_enabled: bool, sandboxed: bool) -> Self {
         let provider = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v2/model/info"))
@@ -198,7 +292,7 @@ impl Harness {
         config.comfyui.enabled = false;
         config.web_search.enabled = false;
         config.model_backend = ModelBackend::Cli {
-            agent: AgentKind::Claude,
+            agent: kind,
             executable: Some(agent.executable.clone()),
         };
 
@@ -274,12 +368,17 @@ impl Harness {
         }
     }
 
-    async fn turn(&self, content: &str) -> tokio::task::JoinHandle<Vec<Value>> {
+    async fn socket(&self) -> Socket {
         let (mut socket, _) =
             connect_async(format!("ws://{}/ws/chats/{}", self.address, self.chat))
                 .await
                 .expect("the chat socket");
         send(&mut socket, json!({"type": "auth", "token": self.token})).await;
+        socket
+    }
+
+    async fn turn(&self, content: &str) -> tokio::task::JoinHandle<Vec<Value>> {
+        let mut socket = self.socket().await;
         let content = content.to_string();
         tokio::spawn(async move {
             send(&mut socket, json!({"type": "send", "content": content})).await;
@@ -384,6 +483,116 @@ async fn a_cli_turn_serves_its_tools_for_the_life_of_the_turn_and_no_longer() {
         StatusCode::UNAUTHORIZED,
         "a token that outlives its turn is a standing grant on this workspace: {refused}"
     );
+}
+
+/// Stop ends the turn from the reader's side and the agent's: the console is
+/// told, and neither the agent nor anything it forked keeps running.
+async fn stop_ends_the_turn_and_its_processes(kind: AgentKind) {
+    let harness = Harness::start_on(kind, true, true).await;
+    let processes = harness.agent.forking();
+    let mut socket = harness.socket().await;
+    send(
+        &mut socket,
+        json!({"type": "send", "content": "Run for ever."}),
+    )
+    .await;
+    let [leader, forked] = processes.pids().await;
+    assert!(
+        running(&leader),
+        "the stand-in must be running to be stopped"
+    );
+    assert!(running(&forked), "its child must be running to be stopped");
+
+    send(&mut socket, json!({"type": "cancel"})).await;
+    let frames = tokio::time::timeout(STOP_TIMEOUT, finish(&mut socket))
+        .await
+        .expect("Stop must end the turn promptly");
+
+    assert_eq!(
+        frames.last().map(|frame| frame["type"].clone()),
+        Some(json!("cancelled")),
+        "the console must be told the turn stopped: {frames:?}"
+    );
+    assert!(gone(&leader).await, "the agent outlived Stop");
+    assert!(gone(&forked).await, "the agent's child outlived Stop");
+}
+
+#[tokio::test]
+async fn stopping_a_claude_turn_kills_its_agent_and_everything_it_forked() {
+    stop_ends_the_turn_and_its_processes(AgentKind::Claude).await;
+}
+
+#[tokio::test]
+async fn stopping_a_codex_turn_kills_its_agent_and_everything_it_forked() {
+    stop_ends_the_turn_and_its_processes(AgentKind::Codex).await;
+}
+
+/// A zone tool the agent called is exactly when a reader reaches for Stop, and
+/// the slowest are the ones that walk a directory tree. A walk that keeps its
+/// worker also keeps the turn, whose task the call has just woken on that
+/// worker, however many others are idle: the reader is shown nothing and Stop
+/// goes unread until the walk ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_reaches_a_cli_turn_while_a_tool_it_called_walks_a_huge_tree() {
+    let harness = Harness::start(true, true).await;
+    let processes = harness.agent.forking();
+    let tree = harness._directory.path().join("tree");
+    fanned_out(&tree, 18);
+    let mut socket = harness.socket().await;
+    send(
+        &mut socket,
+        json!({"type": "send", "content": "List everything."}),
+    )
+    .await;
+    let [leader, forked] = processes.pids().await;
+    let (arguments, token) = harness.agent.spawned().await;
+    let (endpoint, _) = served(&arguments);
+
+    let call = tokio::spawn(async move {
+        rpc(
+            &endpoint,
+            &token,
+            "tools/call",
+            json!({
+                "name": "list_files",
+                "arguments": {"path": tree.to_string_lossy(), "recursive": true},
+            }),
+        )
+        .await
+    });
+    let started = tokio::time::timeout(SPAWN_TIMEOUT, async {
+        loop {
+            let frame = next(&mut socket).await;
+            if frame["type"] == "tool_call" && frame["name"] == "list_files" {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("the reader must be shown the call while it runs");
+    assert!(
+        !call.is_finished(),
+        "the call finished before the reader was shown it, so its walk held the runtime: \
+         {started}"
+    );
+
+    send(&mut socket, json!({"type": "cancel"})).await;
+    let frames = tokio::time::timeout(STOP_TIMEOUT, finish(&mut socket))
+        .await
+        .expect("Stop must end the turn promptly");
+
+    assert_eq!(
+        frames.last().map(|frame| frame["type"].clone()),
+        Some(json!("cancelled")),
+        "the console must be told the turn stopped: {frames:?}"
+    );
+    assert!(
+        !call.is_finished(),
+        "Stop was only read once the call had finished"
+    );
+    assert!(gone(&leader).await, "the agent outlived Stop");
+    assert!(gone(&forked).await, "the agent's child outlived Stop");
+    call.abort();
 }
 
 /// A chat whose agent the reader turned off gets no tools, and neither does

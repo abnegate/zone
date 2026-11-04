@@ -2143,7 +2143,9 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Hello')).toBeInTheDocument();
       });
-      const badge = document.querySelector('.chat-header-info .chat-model');
+      expect(document.querySelector('.chat-header-info .chat-model')).toBeNull();
+      const badge = document.querySelector('.chat-settings-trigger .chat-model');
+      expect(badge).toHaveTextContent(/^MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest$/);
       expect(badge).toHaveAttribute(
         'title',
         'hf.co/Ttimofeyka/MistralRP-Noromaid-NSFW-Mistral-7B-GGUF:latest'
@@ -2471,7 +2473,7 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(document.querySelector('.chat-header-info .chat-model')).toHaveTextContent('llama2');
+        expect(document.querySelector('.chat-model')).toHaveTextContent('llama2');
       });
     });
   });
@@ -2600,6 +2602,7 @@ describe('ChatsPage', () => {
   });
 
   it('shows the agent confined to Zone tools until the reader says otherwise', async () => {
+    mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
     mockClient.getChat.mockResolvedValueOnce({
       ...mockChatWithMessages,
       agent_enabled: true,
@@ -2625,6 +2628,7 @@ describe('ChatsPage', () => {
   });
 
   it('puts an agent that kept its own tools back inside Zone', async () => {
+    mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
     mockClient.getChat.mockResolvedValueOnce({
       ...mockChatWithMessages,
       agent_enabled: true,
@@ -2650,6 +2654,7 @@ describe('ChatsPage', () => {
   });
 
   it('leaves auto-approve alone when the reader changes tool access', async () => {
+    mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
     mockClient.getChat.mockResolvedValueOnce({
       ...mockChatWithMessages,
       agent_enabled: true,
@@ -2671,6 +2676,233 @@ describe('ChatsPage', () => {
       expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { agent_sandboxed: false });
     });
     expect(screen.getByTestId('auto-approve-toggle')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  describe('Zone tools only toggle', () => {
+    const openAgentChat = async (providers: ChatProviders) => {
+      mockGetChatProviders.mockResolvedValue(providers);
+      mockClient.getChat.mockResolvedValue({ ...mockChatWithMessages, agent_enabled: true });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+    };
+
+    it('shows on a chat that chose an agent provider', async () => {
+      await openAgentChat(chatProviders({ selected: selection(claudeOffer, null), cli: true }));
+      fireEvent.click(screen.getByTestId('agent-permissions'));
+      expect(screen.getByRole('button', { name: 'Zone tools only' })).toBe(
+        screen.getByTestId('agent-sandbox-toggle')
+      );
+    });
+
+    it('stays hidden on a chat that chose a self-hosted provider', async () => {
+      await openAgentChat(
+        chatProviders({ selected: selection(selfHostedOffer, null), cli: false })
+      );
+      expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
+      expect(screen.getByTestId('auto-approve-toggle')).toBeInTheDocument();
+    });
+
+    it('shows on a Default chat that resolves to an agent', async () => {
+      await openAgentChat(chatProviders({ default: codexOffer, cli: true }));
+      expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument();
+    });
+
+    it('shows on a Default chat the instance runs on an agent behind a self-hosted default', async () => {
+      await openAgentChat(chatProviders({ default: selfHostedOffer, cli: true }));
+      expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument();
+    });
+
+    it('stays hidden on a Default chat that resolves to self-hosted', async () => {
+      await openAgentChat(chatProviders({ default: selfHostedOffer, cli: false }));
+      expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
+    });
+
+    it('stays hidden on a Default chat that resolves to another HTTP provider', async () => {
+      await openAgentChat(chatProviders({ default: openAiOffer, cli: false }));
+      expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
+    });
+
+    it('keeps the way back and the warning for an unsandboxed chat when providers fail to load', async () => {
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-providers-error');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByTestId('agent-permissions')).toHaveTextContent('Host tools');
+    });
+
+    it('stays hidden for a sandboxed chat when providers fail to load', async () => {
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+      mockClient.getChat.mockResolvedValue({ ...mockChatWithMessages, agent_enabled: true });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-providers-error');
+      expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
+    });
+
+    it('stays hidden for a sandboxed chat when the server does not say', async () => {
+      await openAgentChat(chatProviders());
+      expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
+    });
+
+    it('keeps the way back for an unsandboxed chat when the server does not say', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders());
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('hides for an unsandboxed chat once the server says it runs over HTTP', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: false }));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      await waitFor(() =>
+        expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument()
+      );
+    });
+
+    it('follows the provider as it changes in the picker', async () => {
+      await openAgentChat(chatProviders({ cli: false }));
+      expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
+
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        provider: 'claude_code',
+      });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(claudeOffer, null), cli: true })
+      );
+      fireEvent.click(screen.getByTestId('chat-settings'));
+      chooseSelectOption('chat-provider', 'Claude Code');
+      await screen.findByTestId('agent-sandbox-toggle');
+
+      mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, agent_enabled: true });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: false }));
+      chooseSelectOption('chat-provider', 'Default (Self-Hosted)');
+      await waitFor(() =>
+        expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument()
+      );
+    });
+  });
+
+  describe('chat header layout', () => {
+    const openHeader = async (chat: Partial<ChatWithMessages> = {}) => {
+      mockClient.getChat.mockResolvedValue({ ...mockChatWithMessages, ...chat });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+    };
+
+    it('shows the model once, shortened, with the full name in its tooltip', async () => {
+      const name = 'orcarouter/Qwen3.8-27B-Uncensored:Q4_K_M';
+      await openHeader({ model_name: name });
+      const trigger = screen.getByTestId('chat-settings');
+      const model = trigger.querySelector('.chat-model');
+      expect(model).toHaveTextContent(/^Qwen3.8-27B-Uncensored:Q4_K_M$/);
+      expect(model).toHaveAttribute('title', name);
+      expect(trigger).toHaveAttribute('aria-label', `Model settings: Default · ${name}`);
+      expect(document.querySelectorAll('.chat-model')).toHaveLength(1);
+    });
+
+    it('sums up the provider, the model and the effort on the one control', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(codexOffer, 'gpt-5.5'), cli: true })
+      );
+      await openHeader({ provider: 'codex', provider_model: 'gpt-5.5', reasoning_effort: 'high' });
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-settings')).toHaveAttribute(
+          'aria-label',
+          'Model settings: Codex · gpt-5.5 · High'
+        )
+      );
+    });
+
+    it('holds the pickers in a panel the summary opens and Escape closes', async () => {
+      await openHeader();
+      const trigger = screen.getByTestId('chat-settings');
+      expect(trigger).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('dialog', { name: 'Model settings' })).not.toBeInTheDocument();
+
+      fireEvent.click(trigger);
+      expect(trigger).toHaveAttribute('aria-expanded', 'true');
+      const panel = screen.getByRole('dialog', { name: 'Model settings' });
+      expect(panel.contains(screen.getByTestId('chat-provider'))).toBe(true);
+
+      fireEvent.keyDown(document.body, { key: 'Escape' });
+      expect(trigger).toHaveAttribute('aria-expanded', 'false');
+      expect(document.activeElement).toBe(trigger);
+    });
+
+    it('keeps a provider error in view while the panel is closed', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({
+          selected: selection(codexOffer, null, { usable: false, reason: 'Codex is signed out.' }),
+        })
+      );
+      await openHeader({ provider: 'codex' });
+      expect(screen.getByRole('alert')).toHaveTextContent('Codex is signed out.');
+      expect(screen.getByTestId('chat-settings')).toHaveAttribute('aria-expanded', 'false');
+    });
+
+    it('still names the model when nothing can be chosen', async () => {
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+      mockClient.getChat.mockResolvedValue(mockChatWithMessages);
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-providers-error');
+      const trigger = screen.getByTestId('chat-settings');
+      expect(trigger.querySelector('.chat-model')).toHaveTextContent('llama2');
+    });
+
+    it('keeps the agent toggle visible and tucks its permissions behind a labelled trigger', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+      await openHeader({ agent_enabled: true, auto_approve: true, agent_sandboxed: false });
+      const trigger = screen.getByTestId('agent-permissions');
+      expect(trigger).toHaveAttribute(
+        'aria-label',
+        'Agent permissions: auto-approve on, Zone tools only off'
+      );
+      expect(trigger).toHaveTextContent('Auto-approve');
+      expect(trigger).toHaveTextContent('Host tools');
+      expect(screen.getByRole('button', { name: /^Agent$/ })).toBe(
+        screen.getByTestId('agent-toggle')
+      );
+
+      fireEvent.click(trigger);
+      expect(screen.getByRole('button', { name: 'Auto-approve', pressed: true })).toBe(
+        screen.getByTestId('auto-approve-toggle')
+      );
+      expect(screen.getByRole('button', { name: 'Zone tools only', pressed: false })).toBe(
+        screen.getByTestId('agent-sandbox-toggle')
+      );
+      expect(screen.getByTestId('auto-approve-toggle')).toHaveTextContent('On');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveTextContent('Off');
+    });
+
+    it('offers no permissions while agent mode is off', async () => {
+      await openHeader({ tools: true, agent_enabled: false });
+      expect(screen.getByTestId('agent-toggle')).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.queryByTestId('agent-permissions')).not.toBeInTheDocument();
+    });
   });
 
   it('hides the tool-access toggle when the chat is not agentic', async () => {
@@ -2764,6 +2996,7 @@ describe('ChatsPage', () => {
       renderChatsPage();
       fireEvent.click(await screen.findByText('Chat 1'));
       await screen.findByText('Hi there!');
+      fireEvent.click(screen.getByTestId('chat-settings'));
     };
 
     const optionNames = (testId: string): string[] => {
@@ -2774,7 +3007,7 @@ describe('ChatsPage', () => {
       return names;
     };
 
-    const badge = () => document.querySelector('.chat-header-info .chat-model');
+    const badge = () => document.querySelector('.chat-settings-trigger');
 
     it('renders the picker on the workspace default', async () => {
       await openChat();
@@ -2810,7 +3043,7 @@ describe('ChatsPage', () => {
         expect(mockGetChatProviders.mock.calls.length).toBeGreaterThan(providerLoads);
         expect(mockClient.getChat.mock.calls.length).toBeGreaterThan(chatLoads);
       });
-      await waitFor(() => expect(badge()).toHaveTextContent('Claude Code · Automatic'));
+      await waitFor(() => expect(badge()).toHaveTextContent('Claude Code·Automatic'));
       expect(mockClient.updateChat).not.toHaveBeenCalled();
     });
 
@@ -2833,7 +3066,7 @@ describe('ChatsPage', () => {
       await openChat({ context_tokens: 32768, provider: 'openai', provider_model: 'gpt-4o' });
       await waitFor(() => expect(screen.getByTestId('chat-provider')).toHaveTextContent('OpenAI'));
       expect(screen.queryByTestId('context-tokens')).not.toBeInTheDocument();
-      expect(badge()).toHaveTextContent('OpenAI · gpt-4o');
+      expect(badge()).toHaveTextContent('OpenAI·gpt-4o');
       expect(optionNames('reasoning-effort')).toEqual(['Auto', 'Off', 'Low', 'Medium', 'High']);
     });
 
@@ -2903,7 +3136,7 @@ describe('ChatsPage', () => {
       await openChat({ provider: 'codex', provider_model: 'gpt-6-sol', reasoning_effort: 'max' });
       await screen.findByTestId('chat-provider-model');
       expect(optionNames('reasoning-effort')).toContain('Ultra');
-      expect(badge()).toHaveTextContent('Codex · gpt-6-sol');
+      expect(badge()).toHaveTextContent('Codex·gpt-6-sol');
       mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, provider: 'codex' });
       mockGetChatProviders.mockResolvedValue(
         chatProviders({ selected: selection(codexOffer, 'gpt-5.5') })
@@ -2924,7 +3157,7 @@ describe('ChatsPage', () => {
       await waitFor(() =>
         expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { reasoning_effort: 'auto' })
       );
-      await waitFor(() => expect(badge()).toHaveTextContent('Codex · gpt-5.5'));
+      await waitFor(() => expect(badge()).toHaveTextContent('Codex·gpt-5.5'));
       expect(optionNames('reasoning-effort')).not.toContain('Ultra');
     });
 
@@ -2941,7 +3174,7 @@ describe('ChatsPage', () => {
 
       chooseSelectOption('chat-provider-model', 'gpt-5.5');
 
-      await waitFor(() => expect(badge()).toHaveTextContent('Codex · gpt-5.5'));
+      await waitFor(() => expect(badge()).toHaveTextContent('Codex·gpt-5.5'));
       expect(mockClient.updateChat).not.toHaveBeenCalled();
     });
 
@@ -3051,7 +3284,7 @@ describe('ChatsPage', () => {
       ).toBeInTheDocument();
       expect(screen.queryByText(/Failed to change AI provider/)).not.toBeInTheDocument();
       await waitFor(() => expect(mockClient.getChat.mock.calls.length).toBeGreaterThan(chatLoads));
-      await waitFor(() => expect(badge()).toHaveTextContent('Codex · gpt-5.5'));
+      await waitFor(() => expect(badge()).toHaveTextContent('Codex·gpt-5.5'));
     });
 
     it('refreshes after a saved model change and reports only the effort when its reset fails', async () => {

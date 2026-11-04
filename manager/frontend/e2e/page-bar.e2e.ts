@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures';
 import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 
 const screens = [
   {
@@ -134,6 +134,21 @@ test.describe('Page bar on a 375px phone', () => {
 
   test('conversation header wraps its controls instead of overflowing', async ({ page }) => {
     const model = 'orcarouter/Qwen3.8-27B-Instruct';
+    const offer = {
+      provider: 'self_hosted',
+      label: 'Self-Hosted',
+      usable: true,
+      reason: null,
+      models: [],
+      efforts: ['off', 'low', 'medium', 'high'],
+      requires_model: false,
+    };
+    const expectPanelInView = async (page: Page) => {
+      const panel = await page.locator('.chat-header-popover-panel:visible').boundingBox();
+      expect(panel).not.toBeNull();
+      expect(panel!.x).toBeGreaterThanOrEqual(0);
+      expect(panel!.x + panel!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    };
     const chat = {
       id: 'chat-1',
       title: 'Test 1',
@@ -172,6 +187,11 @@ test.describe('Page bar on a 375px phone', () => {
     await routeApi(page, /\/api\/chats\/chat-1(?:\?|$)/, (route) =>
       route.fulfill({ json: { chat } })
     );
+    await routeApi(page, CHAT_PROVIDERS, (route) =>
+      route.fulfill({
+        json: { default: offer, selected: null, providers: [offer], cli: true },
+      })
+    );
     await page.routeWebSocket('**/ws/chats/**', (socket) => {
       socket.onMessage(() => socket.send(JSON.stringify({ type: 'authenticated' })));
     });
@@ -180,11 +200,23 @@ test.describe('Page bar on a 375px phone', () => {
     await expect(page.locator('.chat-item').first()).toBeVisible();
     await page.locator('.chat-item').first().click();
     await expect(page.locator('.chat-header h3')).toHaveText('Test 1');
+    await expect(page.getByTestId('chat-offline')).toBeVisible();
+    await expect(page.getByTestId('agent-toggle')).toBeVisible();
+    await expect(page.getByTestId('chat-settings')).toBeVisible();
+    await expect(page.getByTestId('agent-permissions')).toBeVisible();
+
+    await page.getByTestId('agent-permissions').click();
     await expect(page.getByTestId('auto-approve-toggle')).toBeVisible();
     await expect(page.getByTestId('agent-sandbox-toggle')).toBeVisible();
+    await expectPanelInView(page);
+    await page.keyboard.press('Escape');
+
+    await page.getByTestId('chat-settings').click();
+    await expect(page.getByTestId('chat-provider')).toBeVisible();
     await expect(page.getByTestId('context-tokens')).toBeVisible();
     await expect(page.getByTestId('reasoning-effort')).toBeVisible();
-    await expect(page.getByTestId('chat-offline')).toBeVisible();
+    await expectPanelInView(page);
+    await page.keyboard.press('Escape');
 
     const header = page.locator('.chat-header');
     const box = await width(page, '.chat-header');

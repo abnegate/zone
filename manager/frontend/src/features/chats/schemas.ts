@@ -372,6 +372,7 @@ export const ChatProvidersSchema = z.object({
   default: ChatProviderOfferSchema,
   selected: ChatProviderSelectionSchema.nullable(),
   providers: tolerantArray(ChatProviderOfferSchema),
+  cli: z.boolean().optional().catch(undefined),
 });
 
 export const WorkspaceChatProvidersSchema = z.object({

@@ -6,6 +6,7 @@ import {
   AUTO_MODEL,
   asksModelName,
   DEFAULT_PROVIDER,
+  DEFAULT_PROVIDER_LABEL,
   isAgentOffer,
   MODEL_PLACEHOLDER,
   modelSelectOptions,
@@ -13,8 +14,6 @@ import {
 } from '../utils';
 import { HeaderSelect } from './HeaderSelect';
 import { ModelNameInput } from './ModelNameInput';
-
-const DEFAULT_LABEL = 'Default';
 
 interface ModelSelect {
   value: string;
@@ -124,7 +123,7 @@ export function ProviderPicker({
         testId="chat-provider"
         title={`Which AI provider answers in this chat. Default follows the workspace settings (${providers.default.label}).`}
         value={provider}
-        display={provider === DEFAULT_PROVIDER ? DEFAULT_LABEL : undefined}
+        display={provider === DEFAULT_PROVIDER ? DEFAULT_PROVIDER_LABEL : undefined}
         options={providerChoices(providers.default, providers.providers, selected)}
         onValueChange={handleProvider}
         disabled={disabled}
@@ -151,11 +150,6 @@ export function ProviderPicker({
           onValueChange={model.onValueChange}
           disabled={disabled}
         />
-      )}
-      {!pending && selected && !selected.usable && (
-        <p className="chat-provider-error" role="alert" data-testid="chat-provider-error">
-          {selected.reason ?? `${selected.label} can't be used for this chat.`}
-        </p>
       )}
     </>
   );

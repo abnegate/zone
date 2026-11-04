@@ -1,5 +1,4 @@
 import {
-  Badge,
   Button,
   Checkbox,
   EmptyState,
@@ -24,6 +23,7 @@ import type { AiProvider } from '../../settings/workspace/types';
 import { useSources } from '../../sources/hooks/useSources';
 import {
   ActionReceipts,
+  AgentPermission,
   AuthenticatedAudio,
   AuthenticatedImage,
   AuthenticatedVideo,
@@ -31,9 +31,11 @@ import {
   Citations,
   Generation,
   HandoverNotice,
+  HeaderPopover,
   HeaderSelect,
   MemoryBadge,
   MessageContent,
+  ProviderError,
   ProviderPicker,
 } from '../components';
 import { Activity } from '../components/Activity';
@@ -50,6 +52,7 @@ import {
   type Chat,
   type ChatProviderOffer,
   type ChatSearchResult,
+  REASONING_EFFORT_LABELS,
   REASONING_EFFORT_OPTIONS,
   type ReasoningEffort,
 } from '../types';
@@ -64,6 +67,8 @@ import {
   buildMessageWithAttachments,
   CHAT_GROUP_OPTIONS,
   CHAT_SORT_OPTIONS,
+  chatModelName,
+  chatProviderName,
   chatShowsAgent,
   chatShowsCharacter,
   chatShowsReasoning,
@@ -96,7 +101,7 @@ import {
   readChatSort,
   reasoningOptions,
   selectedContextTokens,
-  selectionLabel,
+  shortModelName,
   sourceAttachment,
   splitAtHandovers,
   toPlainText,
@@ -327,9 +332,22 @@ export default function ChatsPage() {
     displayedChat && displayedChat.model_name !== AUTO_MODEL && offersLocalContext(installedLocal)
   );
   const chatNative = installedLocal?.details?.context_length;
-  const chatBadge = chatProviders?.selected
-    ? selectionLabel(chatProviders.selected)
-    : modelLabel(displayedChat?.model_name ?? AUTO_MODEL);
+  const providerName = chatProviderName(chatProviders, displayedChat);
+  const modelName = chatModelName(chatProviders, displayedChat);
+  const chatEffortName = showReasoning
+    ? REASONING_EFFORT_LABELS[displayedChat?.reasoning_effort ?? AUTO_EFFORT]
+    : null;
+  const chatSettingsSummary = [providerName, modelName, chatEffortName].filter(Boolean).join(' · ');
+  const autoApproved = Boolean(displayedChat?.auto_approve);
+  const sandboxed = displayedChat?.agent_sandboxed !== false;
+  const showSandbox = Boolean(
+    displayedChat?.agent_enabled &&
+      (chatProviders?.cli === undefined ? !sandboxed : chatProviders.cli)
+  );
+  const permissionSummary = [
+    `auto-approve ${autoApproved ? 'on' : 'off'}`,
+    ...(showSandbox ? [`Zone tools only ${sandboxed ? 'on' : 'off'}`] : []),
+  ].join(', ');
   const meterCapacity = showChatContext
     ? selectedContextTokens(displayedChat?.context_tokens, chatNative)
     : chatNative && chatNative > 0
@@ -1166,9 +1184,6 @@ export default function ChatsPage() {
               </Button>
               <div className="chat-header-info">
                 <h3>{displayedChat.title}</h3>
-                <Badge variant="neutral" className="chat-model" title={chatBadge}>
-                  {chatBadge}
-                </Badge>
                 {displayedChat.purpose === 'project_planner' && (
                   <span className="chat-purpose" data-testid="chat-purpose">
                     Project planner
@@ -1207,20 +1222,6 @@ export default function ChatsPage() {
                 )}
               </div>
               <div className="chat-header-actions">
-                {chatProviders && (
-                  <ProviderPicker
-                    key={displayedChat.id}
-                    providers={chatProviders}
-                    modelName={displayedChat.model_name}
-                    disabled={changingProvider}
-                    onChoose={(provider, model) => {
-                      void handleChooseProvider(provider, model);
-                    }}
-                    onModel={(name) => {
-                      void handleProviderModel(name);
-                    }}
-                  />
-                )}
                 {providersError && (
                   <p
                     className="chat-provider-error"
@@ -1230,66 +1231,84 @@ export default function ChatsPage() {
                     {providersError}
                   </p>
                 )}
-                {showChatContext && (
-                  <HeaderSelect
-                    className="context-tokens"
-                    label="Context"
-                    ariaLabel="Context size"
-                    testId="context-tokens"
-                    title="How much context this local model loads. Larger windows use more RAM."
-                    value={String(selectedContextTokens(displayedChat.context_tokens, chatNative))}
-                    options={contextTokenOptions(chatNative)}
-                    onValueChange={(value) => {
-                      void handleContextTokens(Number(value));
-                    }}
-                  />
-                )}
-                {showReasoning && (
-                  <HeaderSelect
-                    className="reasoning-effort"
-                    label="Reasoning"
-                    ariaLabel="Reasoning effort"
-                    testId="reasoning-effort"
-                    title="How much the model thinks before answering. Auto matches the request."
-                    value={displayedChat.reasoning_effort ?? AUTO_EFFORT}
-                    options={chatReasoningOptions}
-                    onValueChange={(value) => {
-                      void handleReasoningEffort(value as ReasoningEffort);
-                    }}
-                  />
-                )}
-                {displayedChat.agent_enabled && (
-                  <button
-                    type="button"
-                    className="agent-toggle"
-                    onClick={handleToggleAutoApprove}
-                    aria-pressed={Boolean(displayedChat.auto_approve)}
-                    title={
-                      displayedChat.auto_approve
-                        ? 'Auto-approve on: file writes and shell commands run without asking'
-                        : 'Auto-approve off: file writes and shell commands wait for confirmation'
-                    }
-                    data-testid="auto-approve-toggle"
-                  >
-                    Auto-approve
-                  </button>
-                )}
-                {displayedChat.agent_enabled && (
-                  <button
-                    type="button"
-                    className="agent-toggle"
-                    onClick={handleToggleAgentSandboxed}
-                    aria-pressed={displayedChat.agent_sandboxed !== false}
-                    title={
-                      displayedChat.agent_sandboxed !== false
-                        ? 'Zone tools only on: the agent can call nothing but the tools Zone gives it, so Zone sees and gates every call'
-                        : 'Zone tools only off: the agent can also read, write and run commands on this host with its own tools, which Zone never sees and cannot gate'
-                    }
-                    data-testid="agent-sandbox-toggle"
-                  >
-                    Zone tools only
-                  </button>
-                )}
+                <ProviderError providers={chatProviders} />
+                <HeaderPopover
+                  key={`settings-${displayedChat.id}`}
+                  className="chat-settings-trigger"
+                  testId="chat-settings"
+                  label="Model settings"
+                  triggerLabel={`Model settings: ${chatSettingsSummary}`}
+                  title={chatSettingsSummary}
+                  disabled={!chatProviders && !showChatContext && !showReasoning}
+                  trigger={
+                    <>
+                      {providerName && (
+                        <>
+                          <span className="chat-settings-provider">{providerName}</span>
+                          <span className="chat-settings-separator" aria-hidden="true">
+                            ·
+                          </span>
+                        </>
+                      )}
+                      <span className="chat-model" title={modelName}>
+                        {shortModelName(modelName)}
+                      </span>
+                      {chatEffortName && (
+                        <>
+                          <span className="chat-settings-separator" aria-hidden="true">
+                            ·
+                          </span>
+                          <span className="chat-settings-effort">{chatEffortName}</span>
+                        </>
+                      )}
+                    </>
+                  }
+                >
+                  {chatProviders && (
+                    <ProviderPicker
+                      key={displayedChat.id}
+                      providers={chatProviders}
+                      modelName={displayedChat.model_name}
+                      disabled={changingProvider}
+                      onChoose={(provider, model) => {
+                        void handleChooseProvider(provider, model);
+                      }}
+                      onModel={(name) => {
+                        void handleProviderModel(name);
+                      }}
+                    />
+                  )}
+                  {showChatContext && (
+                    <HeaderSelect
+                      className="context-tokens"
+                      label="Context"
+                      ariaLabel="Context size"
+                      testId="context-tokens"
+                      title="How much context this local model loads. Larger windows use more RAM."
+                      value={String(
+                        selectedContextTokens(displayedChat.context_tokens, chatNative)
+                      )}
+                      options={contextTokenOptions(chatNative)}
+                      onValueChange={(value) => {
+                        void handleContextTokens(Number(value));
+                      }}
+                    />
+                  )}
+                  {showReasoning && (
+                    <HeaderSelect
+                      className="reasoning-effort"
+                      label="Reasoning"
+                      ariaLabel="Reasoning effort"
+                      testId="reasoning-effort"
+                      title="How much the model thinks before answering. Auto matches the request."
+                      value={displayedChat.reasoning_effort ?? AUTO_EFFORT}
+                      options={chatReasoningOptions}
+                      onValueChange={(value) => {
+                        void handleReasoningEffort(value as ReasoningEffort);
+                      }}
+                    />
+                  )}
+                </HeaderPopover>
                 {showCharacter && (
                   <button
                     type="button"
@@ -1310,33 +1329,88 @@ export default function ChatsPage() {
                     {displayedChat.character?.name ?? 'Character'}
                   </button>
                 )}
-                {showAgent && (
-                  <button
-                    type="button"
-                    className="agent-toggle"
-                    onClick={handleToggleAgent}
-                    aria-pressed={displayedChat.agent_enabled}
-                    title={
-                      displayedChat.agent_enabled
-                        ? 'Agent mode on: replies can search this workspace, run server commands, and read or write server files'
-                        : 'Agent mode off: replies come straight from the model'
-                    }
-                    data-testid="agent-toggle"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.75"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <path d="M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4L7 17M17 7l1.4-1.4" />
-                      <circle cx="12" cy="12" r="3.5" />
-                    </svg>
-                    Agent
-                  </button>
+                {(showAgent || displayedChat.agent_enabled) && (
+                  <div className="agent-controls" role="group" aria-label="Agent">
+                    {showAgent && (
+                      <button
+                        type="button"
+                        className="agent-toggle"
+                        onClick={handleToggleAgent}
+                        aria-pressed={displayedChat.agent_enabled}
+                        title={
+                          displayedChat.agent_enabled
+                            ? 'Agent mode on: replies can search this workspace, run server commands, and read or write server files'
+                            : 'Agent mode off: replies come straight from the model'
+                        }
+                        data-testid="agent-toggle"
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.75"
+                          width="14"
+                          height="14"
+                          aria-hidden="true"
+                        >
+                          <path d="M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4L7 17M17 7l1.4-1.4" />
+                          <circle cx="12" cy="12" r="3.5" />
+                        </svg>
+                        Agent
+                      </button>
+                    )}
+                    {displayedChat.agent_enabled && (
+                      <HeaderPopover
+                        key={`permissions-${displayedChat.id}`}
+                        className="agent-toggle agent-permissions-trigger"
+                        testId="agent-permissions"
+                        label="Agent permissions"
+                        triggerLabel={`Agent permissions: ${permissionSummary}`}
+                        title={`Agent permissions: ${permissionSummary}`}
+                        trigger={
+                          <>
+                            {autoApproved && <span>Auto-approve</span>}
+                            {showSandbox && !sandboxed && <span>Host tools</span>}
+                          </>
+                        }
+                      >
+                        <AgentPermission
+                          name="Auto-approve"
+                          hint={
+                            autoApproved
+                              ? 'File writes and shell commands run without asking'
+                              : 'File writes and shell commands wait for confirmation'
+                          }
+                          title={
+                            autoApproved
+                              ? 'Auto-approve on: file writes and shell commands run without asking'
+                              : 'Auto-approve off: file writes and shell commands wait for confirmation'
+                          }
+                          enabled={autoApproved}
+                          testId="auto-approve-toggle"
+                          onToggle={handleToggleAutoApprove}
+                        />
+                        {showSandbox && (
+                          <AgentPermission
+                            name="Zone tools only"
+                            hint={
+                              sandboxed
+                                ? 'The agent can call only the tools Zone gives it'
+                                : 'The agent can also use its own tools on this host, which Zone never sees'
+                            }
+                            title={
+                              sandboxed
+                                ? 'Zone tools only on: the agent can call nothing but the tools Zone gives it, so Zone sees and gates every call'
+                                : 'Zone tools only off: the agent can also read, write and run commands on this host with its own tools, which Zone never sees and cannot gate'
+                            }
+                            enabled={sandboxed}
+                            testId="agent-sandbox-toggle"
+                            onToggle={handleToggleAgentSandboxed}
+                          />
+                        )}
+                      </HeaderPopover>
+                    )}
+                  </div>
                 )}
               </div>
             </div>

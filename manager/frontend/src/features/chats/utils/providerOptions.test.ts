@@ -2,6 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import type { ChatProviderOffer, ChatProviderSelection, ReasoningEffort } from '../provider';
 import {
   asksModelName,
+  chatModelName,
+  chatProviderName,
   DEFAULT_PROVIDER,
   effectiveOffer,
   effortsFor,
@@ -11,7 +13,8 @@ import {
   modelSelectOptions,
   providerChoices,
   reasoningOptions,
-  selectionLabel,
+  selectionModel,
+  shortModelName,
 } from './providerOptions';
 
 const HTTP: ReasoningEffort[] = ['off', 'low', 'medium', 'high'];
@@ -105,17 +108,56 @@ describe('asksModelName', () => {
   });
 });
 
-describe('selectionLabel', () => {
-  it('names the provider and the model by its server label', () => {
-    expect(selectionLabel(select(claude, { model: 'sonnet' }))).toBe('Claude Code · Sonnet');
+describe('selectionModel', () => {
+  it('names the model by its server label', () => {
+    expect(selectionModel(select(claude, { model: 'sonnet' }))).toBe('Sonnet');
   });
 
   it('calls a missing model Automatic', () => {
-    expect(selectionLabel(select(codex))).toBe('Codex · Automatic');
+    expect(selectionModel(select(codex))).toBe('Automatic');
   });
 
   it('keeps a model the provider no longer lists', () => {
-    expect(selectionLabel(select(codex, { model: 'gpt-4.1' }))).toBe('Codex · gpt-4.1');
+    expect(selectionModel(select(codex, { model: 'gpt-4.1' }))).toBe('gpt-4.1');
+  });
+});
+
+describe('shortModelName', () => {
+  it('drops the routing prefix and keeps the tag', () => {
+    expect(shortModelName('orcarouter/Qwen3.8-27B-Uncensored:Q4_K_M')).toBe(
+      'Qwen3.8-27B-Uncensored:Q4_K_M'
+    );
+    expect(shortModelName('hf.co/org/model:latest')).toBe('model:latest');
+  });
+
+  it('leaves a bare name alone', () => {
+    expect(shortModelName('llama3.2:3b')).toBe('llama3.2:3b');
+  });
+
+  it('keeps a name with nothing after its last slash', () => {
+    expect(shortModelName('foo/')).toBe('foo/');
+  });
+});
+
+describe('the summary before the providers load', () => {
+  const stored = { model_name: 'llama2', provider: null, provider_model: null };
+  const chosen = { model_name: 'llama2', provider: 'codex' as const, provider_model: 'gpt-5.5' };
+
+  it('never calls a chat that chose its provider Default', () => {
+    expect(chatProviderName(null, chosen)).toBeNull();
+    expect(chatProviderName(null, stored)).toBe('Default');
+  });
+
+  it('names the model the chat asks its own provider for', () => {
+    expect(chatModelName(null, chosen)).toBe('gpt-5.5');
+    expect(chatModelName(null, { ...chosen, provider_model: null })).toBe('Automatic');
+    expect(chatModelName(null, stored)).toBe('llama2');
+  });
+
+  it('trusts the loaded providers over the chat they correct', () => {
+    const providers = { default: codex, selected: null, providers: [] };
+    expect(chatProviderName(providers, chosen)).toBe('Default');
+    expect(chatModelName(providers, chosen)).toBe('llama2');
   });
 });
 

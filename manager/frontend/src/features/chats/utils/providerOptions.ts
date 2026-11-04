@@ -13,6 +13,8 @@ import { AUTO_MODEL, modelLabel } from './modelOptions';
 
 export const DEFAULT_PROVIDER = 'default';
 
+export const DEFAULT_PROVIDER_LABEL = 'Default';
+
 export const MODEL_PLACEHOLDER = 'Choose a model';
 
 export const MODEL_NAME_PLACEHOLDER = 'Type a model name';
@@ -41,12 +43,33 @@ export function asksModelName(offer: ChatProviderOffer): boolean {
   return offer.requires_model && offer.models.length === 0;
 }
 
-export function selectionLabel(selection: ChatProviderSelection): string {
-  const model = selection.model
+export function selectionModel(selection: ChatProviderSelection): string {
+  return selection.model
     ? (modelChoices(selection).find((choice) => choice.name === selection.model)?.label ??
-      selection.model)
+        selection.model)
     : modelLabel(AUTO_MODEL);
-  return `${selection.label} · ${model}`;
+}
+
+export function shortModelName(name: string): string {
+  return name.slice(name.lastIndexOf('/') + 1) || name;
+}
+
+/** The provider's name for the summary. Null while a chat's own choice has no loaded label. */
+export function chatProviderName(
+  providers: ChatProviders | null,
+  chat: Pick<Chat, 'provider'> | null
+): string | null {
+  if (providers) return providers.selected?.label ?? DEFAULT_PROVIDER_LABEL;
+  return chat?.provider ? null : DEFAULT_PROVIDER_LABEL;
+}
+
+export function chatModelName(
+  providers: ChatProviders | null,
+  chat: Pick<Chat, 'model_name' | 'provider' | 'provider_model'> | null
+): string {
+  if (providers?.selected) return selectionModel(providers.selected);
+  if (!chat) return modelLabel(AUTO_MODEL);
+  return modelLabel(providers ? chat.model_name : requestedModel(chat));
 }
 
 export function effortsFor(
