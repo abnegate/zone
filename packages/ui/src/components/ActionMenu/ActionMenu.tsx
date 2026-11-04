@@ -1,6 +1,7 @@
 import * as MenuPrimitive from '@radix-ui/react-dropdown-menu';
 import { type KeyboardEvent, type ReactNode, type SyntheticEvent, useRef } from 'react';
 import { cn } from '../../lib/utils';
+import './ActionMenu.css';
 
 export interface ActionMenuItem {
   label: string;
