@@ -10,13 +10,29 @@ describe('chats layout', () => {
   it('keeps the hover actions out of the chat title width', () => {
     const actions = rule(chats, '.chat-item-actions');
     expect(actions).toContain('position: absolute');
-    expect(actions).toContain('display: none');
+    expect(actions).toContain('opacity: 0');
     expect(
       rule(
         chats,
-        '.chat-item:hover .chat-item-actions,\n.chat-item:focus-within .chat-item-actions'
+        ".chat-item:hover .chat-item-actions,\n.chat-item:focus-within .chat-item-actions,\n.chat-item-actions:has(.ui-action-menu-trigger[data-state='open'])"
       )
-    ).toContain('display: flex');
+    ).toContain('opacity: 1');
+  });
+
+  it('hides the row menu trigger without removing it, so focus can return to it', () => {
+    expect(rule(chats, '.chat-item-actions')).not.toContain('display: none');
+    expect(rule(chats, '.chat-item-actions')).not.toContain('visibility');
+  });
+
+  it('keeps the row menu trigger shown and its row highlighted while the menu is open', () => {
+    expect(
+      rule(
+        chats,
+        ".chat-item:hover,\n.chat-item:focus-within,\n.chat-item:has(.ui-action-menu-trigger[data-state='open'])"
+      )
+    ).toContain('--chat-item-bg: var(--ui-bg-hover)');
+    expect(rule(chats, '.chat-item')).toContain('--chat-item-actions: var(--ui-control-height-sm)');
+    expect(media(chats, '(hover: none)')).toContain('opacity: 1');
   });
 
   it('ellipsises the title before the hover actions on a matching background', () => {
@@ -25,9 +41,6 @@ describe('chats layout', () => {
     expect(fade).toContain('width: var(--ui-space-2)');
     expect(fade).toContain('linear-gradient(to right, transparent, var(--chat-item-bg))');
     expect(rule(chats, '.chat-item-actions')).toContain('background: var(--chat-item-bg)');
-    expect(rule(chats, '.chat-item:hover,\n.chat-item:focus-within')).toContain(
-      '--chat-item-bg: var(--ui-bg-hover)'
-    );
     expect(rule(chats, '.chat-item.active')).toContain('--chat-item-bg: var(--ui-bg-selected)');
     expect(chats).not.toMatch(/\.chat-item:(hover|focus-within) \.chat-item-content/);
     expect(rule(chats, '.chat-title')).toContain('text-overflow: ellipsis');

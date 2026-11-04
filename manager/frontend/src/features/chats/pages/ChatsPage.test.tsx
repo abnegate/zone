@@ -11,6 +11,7 @@ import {
 } from 'bun:test';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
+import { chooseMenuItem } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
 import type {
   Chat,
@@ -438,6 +439,9 @@ function chooseSelectOption(testId: string, optionName: string) {
   fireEvent.click(screen.getByRole('option', { name: optionName }));
 }
 
+const selectedChatParam = (): string | null =>
+  new URLSearchParams(window.location.search).get('id');
+
 const renderChatsPage = () => {
   return render(
     <BrowserRouter>
@@ -497,7 +501,7 @@ describe('ChatsPage', () => {
         socket.emit({ type: 'message_start', message_id: 'stream', role: 'assistant' });
         socket.emit({ type: 'chunk', content: 'Still writing', index: 0 });
       });
-      fireEvent.click(screen.getByRole('button', { name: 'Rename Chat 1' }));
+      await chooseMenuItem('Actions for Chat 1', 'Rename');
       expect(screen.getByLabelText('Chat name')).toHaveValue('Chat 1');
       fireEvent.change(screen.getByLabelText('Chat name'), { target: { value: '  New name  ' } });
       fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
@@ -510,7 +514,8 @@ describe('ChatsPage', () => {
     it('keeps failed input, rejects blank names, and cancels without an update', async () => {
       mockUpdateChat.mockRejectedValue(new Error('Rename unavailable'));
       renderChatsPage();
-      fireEvent.click(await screen.findByRole('button', { name: 'Rename Chat 1' }));
+      await screen.findByRole('button', { name: 'Actions for Chat 1' });
+      await chooseMenuItem('Actions for Chat 1', 'Rename');
       fireEvent.change(screen.getByLabelText('Chat name'), { target: { value: '   ' } });
       expect(screen.getByRole('button', { name: 'Save name' })).toBeDisabled();
       fireEvent.change(screen.getByLabelText('Chat name'), { target: { value: 'Try again' } });
@@ -527,11 +532,31 @@ describe('ChatsPage', () => {
       renderChatsPage();
       fireEvent.click(await screen.findByText('Chat 1'));
       await screen.findByText('Hi there!');
-      fireEvent.click(screen.getByRole('button', { name: 'Rename Chat 2' }));
+      await chooseMenuItem('Actions for Chat 2', 'Rename');
       fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
       expect(mockUpdateChat).toHaveBeenCalledWith('chat-2', { title: 'Chat 2' });
       expect(screen.getByRole('heading', { name: mockChatWithMessages.title })).toBeInTheDocument();
+    });
+
+    it('opens rename from the row menu with the name field focused, leaving the chat unselected', async () => {
+      renderChatsPage();
+      await screen.findByRole('button', { name: 'Actions for Chat 1' });
+      await chooseMenuItem('Actions for Chat 1', 'Rename');
+      const input = await screen.findByLabelText('Chat name');
+      await waitFor(() => expect(document.activeElement).toBe(input));
+      expect(input).toHaveValue('Chat 1');
+      expect(mockGetChat).not.toHaveBeenCalled();
+    });
+
+    it('archives from the row menu without opening the chat', async () => {
+      mockClient.archiveChat.mockResolvedValueOnce({ ...mockChats[1]!, archived: true });
+      renderChatsPage();
+      await screen.findByRole('button', { name: 'Actions for Chat 2' });
+      await chooseMenuItem('Actions for Chat 2', 'Archive');
+      await waitFor(() => expect(mockClient.archiveChat).toHaveBeenCalledWith('chat-2'));
+      expect(mockGetChat).not.toHaveBeenCalled();
+      expect(document.querySelector('.chat-item.active')).toBeNull();
     });
 
     it('updates both titles from a socket event while preserving the response', async () => {
@@ -564,7 +589,7 @@ describe('ChatsPage', () => {
     renderChatsPage();
     fireEvent.click(await screen.findByText('Chat 1'));
     await screen.findByText('Hi there!');
-    fireEvent.click(screen.getByRole('button', { name: 'Rename Chat 1' }));
+    await chooseMenuItem('Actions for Chat 1', 'Rename');
     const input = screen.getByLabelText('Chat name');
     fireEvent.change(input, { target: { value: 'Renamed first' } });
     const form = input.closest('form')!;
@@ -589,7 +614,7 @@ describe('ChatsPage', () => {
     renderChatsPage();
     fireEvent.click(await screen.findByText('Chat 1'));
     await screen.findByText('Hi there!');
-    fireEvent.click(screen.getByRole('button', { name: 'Rename Chat 1' }));
+    await chooseMenuItem('Actions for Chat 1', 'Rename');
     fireEvent.change(screen.getByLabelText('Chat name'), { target: { value: 'My first name' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
     await screen.findByRole('heading', { name: 'My first name' });
@@ -597,7 +622,7 @@ describe('ChatsPage', () => {
     expect(screen.getAllByText('My first name')).toHaveLength(2);
     expect(screen.queryByText('Late summary')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Rename Chat 2' }));
+    await chooseMenuItem('Actions for Chat 2', 'Rename');
     fireEvent.change(screen.getByLabelText('Chat name'), { target: { value: 'My second name' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
@@ -1783,9 +1808,7 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      // Find the archive button for the first chat
-      const archiveButtons = screen.getAllByTitle('Archive');
-      fireEvent.click(archiveButtons[0]);
+      await chooseMenuItem('Actions for Chat 1', 'Archive');
 
       await waitFor(() => {
         expect(mockClient.archiveChat).toHaveBeenCalledWith('chat-1');
@@ -1801,8 +1824,7 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      const archiveButtons = screen.getAllByTitle('Archive');
-      fireEvent.click(archiveButtons[0]);
+      await chooseMenuItem('Actions for Chat 1', 'Archive');
 
       await waitFor(() => {
         expect(screen.getByText('Archive failed')).toBeInTheDocument();
@@ -1848,8 +1870,7 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Archived Chat')).toBeInTheDocument();
       });
 
-      const unarchiveButton = screen.getByTitle('Unarchive');
-      fireEvent.click(unarchiveButton);
+      await chooseMenuItem('Actions for Archived Chat', 'Unarchive');
 
       await waitFor(() => {
         expect(mockClient.unarchiveChat).toHaveBeenCalledWith('chat-archived');
@@ -1886,7 +1907,7 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Archived Chat')).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByTitle('Unarchive'));
+      await chooseMenuItem('Actions for Archived Chat', 'Unarchive');
 
       await waitFor(() => {
         expect(screen.getByText('Unarchive failed')).toBeInTheDocument();
@@ -1930,20 +1951,19 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      // Select the chat first
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
         expect(screen.getByText('Hello')).toBeInTheDocument();
       });
+      await waitFor(() => expect(selectedChatParam()).toBe('chat-1'));
 
-      // Archive it
-      const archiveButtons = screen.getAllByTitle('Archive');
-      fireEvent.click(archiveButtons[0]);
+      await chooseMenuItem('Actions for Chat 1', 'Archive');
 
       await waitFor(() => {
         expect(mockClient.archiveChat).toHaveBeenCalledWith('chat-1');
       });
+      await waitFor(() => expect(selectedChatParam()).toBeNull());
     });
   });
 
@@ -1955,8 +1975,7 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      const deleteButtons = screen.getAllByTitle('Delete');
-      fireEvent.click(deleteButtons[0]);
+      await chooseMenuItem('Actions for Chat 1', 'Delete');
 
       expect(screen.getByRole('heading', { name: 'Delete Chat' })).toBeInTheDocument();
       expect(
@@ -1973,10 +1992,9 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      const deleteButtons = screen.getAllByTitle('Delete');
-      fireEvent.click(deleteButtons[0]);
+      await chooseMenuItem('Actions for Chat 1', 'Delete');
 
-      // Click the Cancel button in the modal (not the icon buttons)
+      // Click the Cancel button in the modal
       const modalButtons = screen.getAllByRole('button', { name: 'Cancel' });
       fireEvent.click(modalButtons[modalButtons.length - 1]);
 
@@ -1993,8 +2011,7 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      const deleteButtons = screen.getAllByTitle('Delete');
-      fireEvent.click(deleteButtons[0]);
+      await chooseMenuItem('Actions for Chat 1', 'Delete');
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'Delete Chat' })).toBeInTheDocument();
@@ -2020,8 +2037,7 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      const deleteButtons = screen.getAllByTitle('Delete');
-      fireEvent.click(deleteButtons[0]);
+      await chooseMenuItem('Actions for Chat 1', 'Delete');
 
       // Press Escape
       fireEvent.keyDown(document, { key: 'Escape' });
@@ -2040,8 +2056,7 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      const deleteButtons = screen.getAllByTitle('Delete');
-      fireEvent.click(deleteButtons[0]);
+      await chooseMenuItem('Actions for Chat 1', 'Delete');
 
       // Click the Delete button in the modal using accessible query
       const deleteModalButtons = screen.getAllByRole('button', { name: 'Delete' });
@@ -2062,8 +2077,7 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      const deleteButtons = screen.getAllByTitle('Delete');
-      fireEvent.click(deleteButtons[0]);
+      await chooseMenuItem('Actions for Chat 1', 'Delete');
 
       // Click the Delete button in the modal using accessible query
       const deleteModalButtons = screen.getAllByRole('button', { name: 'Delete' });
@@ -2083,24 +2097,22 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      // Select the chat
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
         expect(screen.getByText('Hello')).toBeInTheDocument();
       });
+      await waitFor(() => expect(selectedChatParam()).toBe('chat-1'));
 
-      // Delete it
-      const deleteButtons = screen.getAllByTitle('Delete');
-      fireEvent.click(deleteButtons[0]);
+      await chooseMenuItem('Actions for Chat 1', 'Delete');
 
-      // Click the Delete button in the modal using accessible query
       const deleteModalButtons = screen.getAllByRole('button', { name: 'Delete' });
       fireEvent.click(deleteModalButtons[deleteModalButtons.length - 1]);
 
       await waitFor(() => {
         expect(mockClient.deleteChat).toHaveBeenCalledWith('chat-1');
       });
+      await waitFor(() => expect(selectedChatParam()).toBeNull());
     });
   });
 
@@ -3365,7 +3377,7 @@ describe('ChatsPage', () => {
       await openChatById();
       mockClient.archiveChat.mockRejectedValue(new Error('Archive failed'));
 
-      fireEvent.click(document.querySelectorAll('.chat-item button[title="Archive"]')[1]);
+      await chooseMenuItem('Actions for Chat 2', 'Archive');
 
       const error = await screen.findByText('Archive failed');
       expect(error.closest('.chat-header')).toBeNull();

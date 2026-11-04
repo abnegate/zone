@@ -3,6 +3,7 @@ export { AgentPermission } from './AgentPermission';
 export { AuthenticatedAudio } from './AuthenticatedAudio';
 export { AuthenticatedImage } from './AuthenticatedImage';
 export { AuthenticatedVideo } from './AuthenticatedVideo';
+export { ChatMenu } from './ChatMenu';
 export { ChatSources } from './ChatSources';
 export { Citations } from './Citations';
 export { Generation } from './Generation';

@@ -1029,7 +1029,8 @@ test.describe('agent tools from chat', () => {
     const s = stamp();
     const target = await newChat(page, { model: 'llama3.2:3b' });
     await page.locator('.chat-item.active').hover();
-    await page.locator('.chat-item.active button[title="Rename"]').click();
+    await page.locator('.chat-item.active .ui-action-menu-trigger').click();
+    await page.getByRole('menuitem', { name: 'Rename' }).click();
     await page.locator('#chat-name').fill(`Inbox ${s}`);
     await page.getByRole('button', { name: 'Save name' }).click();
     await expect(

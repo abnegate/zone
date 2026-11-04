@@ -53,7 +53,8 @@ test.describe('Dialog footers', () => {
     await expectFooterGap(page, 'New Chat');
     const chat = page.locator('.chat-item').first();
     await chat.hover();
-    await chat.getByRole('button', { name: /^Rename / }).click();
+    await chat.getByRole('button', { name: /^Actions for / }).click();
+    await page.getByRole('menuitem', { name: 'Rename' }).click();
     await expectFooterGap(page, 'Rename chat');
 
     await page.goto('/projects', { waitUntil: 'domcontentloaded' });
