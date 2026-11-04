@@ -1770,6 +1770,132 @@ class TransientCrashTests(unittest.TestCase):
             self.assertEqual(read_job(job_dir)[train_sdxl.TRANSIENT_ATTEMPTS_KEY], 0)
 
 
+class LatestCadenceTests(unittest.TestCase):
+    def device(self, kind: str) -> mock.Mock:
+        device = mock.Mock()
+        device.type = kind
+        return device
+
+    def persist(
+        self,
+        job_dir: Path,
+        kind: str,
+        step: int,
+        cadence: Any,
+        method: str = 'finetune',
+        total: int = 100,
+    ) -> None:
+        checkpoint_dir = job_dir / 'checkpoints'
+        checkpoint_dir.mkdir(exist_ok=True)
+        train_sdxl.persist_training_step(
+            checkpoint_dir,
+            job_dir,
+            queued_job(method=method),
+            method=method,
+            step=step,
+            total=total,
+            loss=0.5,
+            best_loss=0.5,
+            best_step=1,
+            optimizer=object(),
+            unet=object(),
+            text_encoder=object(),
+            token_id=None,
+            sample_rng=random.Random(0),
+            dropout_rng=random.Random(1),
+            every=50,
+            keep=2,
+            pipeline=object(),
+            device=self.device(kind),
+            config={'preview_count': 0},
+            progress=train_sdxl.Progress(job_dir, method, total),
+            cadence=cadence,
+        )
+
+    def saves(
+        self, kind: str, steps: list[tuple[int, float]], method: str = 'finetune'
+    ) -> list[int]:
+        now = [0.0]
+        cadence = train_sdxl.Cadence(600, clock=lambda: now[0])
+        saved: list[int] = []
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            with (
+                mock.patch.object(
+                    train_sdxl,
+                    'save_snapshot',
+                    side_effect=lambda path, **snapshot: saved.append(snapshot['step']),
+                ),
+                mock.patch.object(
+                    train_sdxl,
+                    'start_latest_save',
+                    side_effect=lambda path, **snapshot: saved.append(snapshot['step']),
+                ),
+                mock.patch.object(train_sdxl, 'copy_snapshot'),
+                mock.patch.object(train_sdxl, 'write_snapshot_previews'),
+            ):
+                for step, moment in steps:
+                    now[0] = moment
+                    self.persist(job_dir, kind, step, cadence, method)
+                    self.assertEqual(read_job(job_dir)['step'], step)
+        return saved
+
+    def test_metal_writes_latest_on_the_first_step_then_once_per_interval(self) -> None:
+        steps = [(1, 0.0), (2, 10.0), (3, 599.0), (4, 600.0), (5, 700.0), (6, 1200.0)]
+        for method in ('finetune', 'lora'):
+            with self.subTest(method=method):
+                self.assertEqual(self.saves('mps', steps, method), [1, 4, 6])
+
+    def test_cpu_follows_the_interval(self) -> None:
+        self.assertEqual(self.saves('cpu', [(1, 0.0), (2, 10.0), (3, 600.0)]), [1, 3])
+
+    def test_numbered_and_final_steps_write_latest_inside_the_interval(self) -> None:
+        steps = [(1, 0.0), (50, 5.0), (51, 6.0), (100, 7.0)]
+        self.assertEqual(self.saves('mps', steps), [1, 50, 100])
+
+    def test_cuda_keeps_writing_latest_every_step(self) -> None:
+        steps = [(1, 0.0), (2, 10.0), (3, 20.0)]
+        for method in ('finetune', 'lora'):
+            with self.subTest(method=method):
+                self.assertEqual(self.saves('cuda', steps, method), [1, 2, 3])
+
+    def test_a_missing_cadence_writes_latest_every_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(train_sdxl, 'save_snapshot') as save,
+                mock.patch.object(train_sdxl, 'copy_snapshot'),
+            ):
+                for step in (1, 2, 3):
+                    self.persist(Path(directory), 'mps', step, None)
+        self.assertEqual(save.call_count, 3)
+
+    def test_the_interval_counts_from_the_start_of_a_save(self) -> None:
+        now = [0.0]
+        cadence = train_sdxl.Cadence(600, clock=lambda: now[0])
+
+        def slow_save(path: Path, **snapshot: Any) -> None:
+            now[0] += 500.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(train_sdxl, 'save_snapshot', side_effect=slow_save) as save:
+                self.persist(Path(directory), 'mps', 1, cadence)
+                now[0] = 600.0
+                self.persist(Path(directory), 'mps', 2, cadence)
+        self.assertEqual(save.call_count, 2)
+
+    def test_latest_interval_reads_the_configured_seconds(self) -> None:
+        self.assertEqual(train_sdxl.latest_interval({'latest_interval_seconds': 30}), 30.0)
+        self.assertEqual(train_sdxl.latest_interval({}), 0.0)
+        self.assertEqual(train_sdxl.latest_interval({'latest_interval_seconds': -5}), 0.0)
+        self.assertEqual(train_sdxl.latest_interval(train_sdxl.load_config()), 600.0)
+
+    def test_latest_interval_rejects_non_finite_values(self) -> None:
+        for value in (float('inf'), float('nan')):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'must be finite'):
+                    train_sdxl.latest_interval({'latest_interval_seconds': value})
+
+
 def real_torch(test: unittest.TestCase) -> Any:
     try:
         import torch

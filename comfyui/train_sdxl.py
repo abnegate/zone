@@ -7,6 +7,7 @@ import argparse
 import errno
 import gc
 import json
+import math
 import os
 import random
 import shutil
@@ -17,7 +18,9 @@ import time
 import traceback
 import uuid
 import zlib
+from collections.abc import Callable
 from collections.abc import MutableMapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1851,6 +1854,26 @@ def start_latest_save(path: Path, **kwargs: Any) -> None:
         thread.start()
 
 
+@dataclass
+class Cadence:
+    interval: float
+    clock: Callable[[], float] = time.monotonic
+    marked: float | None = None
+
+    def due(self) -> bool:
+        return self.marked is None or self.clock() - self.marked >= self.interval
+
+    def mark(self) -> None:
+        self.marked = self.clock()
+
+
+def latest_interval(config: dict[str, Any]) -> float:
+    interval = float(config.get('latest_interval_seconds') or 0)
+    if not math.isfinite(interval):
+        raise ValueError(f'latest_interval_seconds must be finite, got {interval!r}')
+    return max(0.0, interval)
+
+
 def persist_training_step(
     checkpoint_dir: Path,
     job_dir: Path,
@@ -1874,6 +1897,7 @@ def persist_training_step(
     device: Any,
     config: dict[str, Any],
     progress: Progress,
+    cadence: Cadence | None = None,
 ) -> None:
     latest = latest_snapshot_file(checkpoint_dir)
     numbered = bool(every) and (step % every == 0 or step == total)
@@ -1890,12 +1914,19 @@ def persist_training_step(
         'sample_rng': sample_rng,
         'dropout_rng': dropout_rng,
     }
-    if method == FINETUNE_METHOD and device_kind(device) == CUDA_DEVICE and not numbered:
-        start_latest_save(latest, **snapshot)
-    else:
-        wait_for_latest_save()
+    if cadence is None:
+        cadence = Cadence(0)
+    if device_kind(device) == CUDA_DEVICE:
+        if method == FINETUNE_METHOD and not numbered:
+            start_latest_save(latest, **snapshot)
+        else:
+            wait_for_latest_save()
+            save_snapshot(latest, **snapshot)
+        job[TRANSIENT_ATTEMPTS_KEY] = 0
+    elif numbered or step == total or cadence.due():
+        cadence.mark()
         save_snapshot(latest, **snapshot)
-    job[TRANSIENT_ATTEMPTS_KEY] = 0
+        job[TRANSIENT_ATTEMPTS_KEY] = 0
     job['step'] = step
     job['total'] = total
     write_job(job_dir, job)
@@ -2177,6 +2208,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
 
     every = int(config.get('checkpoint_every') or 0)
     keep = int(config.get('keep_snapshots') or 2)
+    cadence = Cadence(latest_interval(config))
     dropout = float(config.get('caption_dropout') or 0.0)
     mask_threshold = float(
         config.get('mask_threshold')
@@ -2209,6 +2241,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         start_step += 1
         job['step'] = resume_step
         write_job(job_dir, job)
+        cadence.mark()
         print(f'resume from step {resume_step}', flush=True)
         progress.emit(
             'training',
@@ -2305,6 +2338,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
             device=device,
             config=config,
             progress=progress,
+            cadence=cadence,
         )
         progress.emit('training', step=step, phase_step=step, phase_total=total, loss=value)
         if step == start_step or step % 10 == 0 or step == total:
