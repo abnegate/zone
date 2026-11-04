@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useRef, useState } from 'react';
+import { type KeyboardEvent, useState } from 'react';
 import { MODEL_NAME_PLACEHOLDER } from '../utils';
 
 export interface ModelNameInputProps {
@@ -15,29 +15,16 @@ export function ModelNameInput({
   onSubmit,
 }: ModelNameInputProps) {
   const [name, setName] = useState(value);
-  const draft = useRef(value);
-  const submitted = useRef(value);
-
-  const edit = (next: string) => {
-    draft.current = next;
-    setName(next);
-  };
-
-  const submit = () => {
-    const trimmed = draft.current.trim();
-    if (!trimmed || trimmed === submitted.current) return;
-    submitted.current = trimmed;
-    onSubmit(trimmed);
-  };
+  const trimmed = name.trim();
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Escape') {
-      edit(submitted.current);
+      setName(value);
       return;
     }
     if (event.key !== 'Enter') return;
     event.preventDefault();
-    submit();
+    if (trimmed && trimmed !== value) onSubmit(trimmed);
   };
 
   return (
@@ -52,10 +39,12 @@ export function ModelNameInput({
         disabled={disabled}
         spellCheck={false}
         autoComplete="off"
-        onChange={(event) => edit(event.target.value)}
-        onBlur={submit}
+        onChange={(event) => setName(event.target.value)}
         onKeyDown={handleKeyDown}
       />
+      {trimmed && trimmed !== value && (
+        <span className="chat-provider-model-hint">Enter to save</span>
+      )}
     </label>
   );
 }

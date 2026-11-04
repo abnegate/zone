@@ -611,6 +611,14 @@
   width: auto;
 }
 
+.chat-provider-model-hint {
+  flex-shrink: 0;
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-2xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .chat-header-select-label {
   overflow: visible;
   color: var(--ui-text-muted);
@@ -656,6 +664,10 @@
   background: transparent;
   color: var(--ui-text-primary);
   font: inherit;
+}
+
+.chat-provider-model-name input:focus {
+  box-shadow: none;
 }
 
 .chat-provider-model-name input::placeholder {

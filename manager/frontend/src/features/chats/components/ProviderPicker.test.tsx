@@ -140,16 +140,45 @@ describe('ProviderPicker', () => {
     expect(onChoose).toHaveBeenCalledWith('openai', 'my-deployment');
   });
 
-  it('chooses the typed model name when the field loses focus', () => {
+  it('saves a typed model name only on Enter, and says so while it is unsaved', () => {
     const { onChoose } = renderPicker({ providers: [selfHosted, openai] });
 
     chooseSelect('AI provider', 'OpenAI');
     const field = screen.getByRole('textbox', { name: 'Provider model name' });
-    fireEvent.change(field, { target: { value: 'my-deployment' } });
+    expect(screen.queryByText('Enter to save')).toBeNull();
+
+    fireEvent.change(field, { target: { value: 'gp' } });
     fireEvent.blur(field);
 
+    expect(onChoose).not.toHaveBeenCalled();
+    expect(field).toHaveValue('gp');
+    expect(screen.getByText('Enter to save')).toBeInTheDocument();
+
+    fireEvent.change(field, { target: { value: 'gpt-4o' } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+
     expect(onChoose).toHaveBeenCalledTimes(1);
-    expect(onChoose).toHaveBeenCalledWith('openai', 'my-deployment');
+    expect(onChoose).toHaveBeenCalledWith('openai', 'gpt-4o');
+  });
+
+  it('after a refused name, reverts to the saved model and can send the name again', () => {
+    const { onChoose } = renderPicker({
+      providers: [selfHosted, openai],
+      selected: selection(openai, { model: 'gpt-4o' }),
+    });
+    const field = screen.getByRole('textbox', { name: 'Provider model name' });
+
+    fireEvent.change(field, { target: { value: 'refused' } });
+    fireEvent.keyDown(field, { key: 'Enter' });
+    expect(onChoose).toHaveBeenCalledTimes(1);
+
+    fireEvent.keyDown(field, { key: 'Enter' });
+    expect(onChoose).toHaveBeenCalledTimes(2);
+    expect(onChoose).toHaveBeenLastCalledWith('openai', 'refused');
+
+    fireEvent.keyDown(field, { key: 'Escape' });
+    expect(field).toHaveValue('gpt-4o');
+    expect(screen.queryByText('Enter to save')).toBeNull();
   });
 
   it('drops a pending provider that needs a model when another is chosen', () => {
@@ -200,6 +229,9 @@ describe('ProviderPicker', () => {
     fireEvent.blur(field);
     fireEvent.change(field, { target: { value: '' } });
     fireEvent.blur(field);
+    expect(onChoose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(field, { key: 'Enter' });
     expect(onChoose).not.toHaveBeenCalled();
 
     fireEvent.change(field, { target: { value: 'my-deployment' } });

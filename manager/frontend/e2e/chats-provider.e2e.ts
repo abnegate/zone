@@ -385,6 +385,11 @@ for (const width of [1280, 1024, 900, 390]) {
       await expect(modelSelect).toHaveCount(0);
       expect(captured.provider.some((body) => body.provider === 'openai')).toBe(false);
       await shoot('openai-name-model');
+      await modelName.fill('my-dep');
+      await expect(page.getByText('Enter to save')).toBeVisible();
+      await shoot('openai-unsaved-name');
+      await reasoningSelect.focus();
+      expect(captured.provider.some((body) => body.provider === 'openai')).toBe(false);
       await modelName.fill('my-deployment');
       await modelName.press('Enter');
       await expect
