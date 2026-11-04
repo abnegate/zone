@@ -372,8 +372,8 @@ impl Route {
         self.saved.as_ref().map(|saved| &saved.settings)
     }
 
-    /// The coding agent CLI this route's turns start on, before the router picks a login: none
-    /// when they go over HTTP or this route is unusable.
+    /// The coding agent CLI this route prefers for its turns; the router may pick another agent's
+    /// login as a turn starts. None when they go over HTTP or this route is unusable.
     pub fn agent(&self, config: &Config) -> Option<AgentKind> {
         let origin = self.endpoint().ok()?.origin();
         match self.settings() {
@@ -1369,7 +1369,7 @@ mod tests {
     }
 
     #[test]
-    fn a_coding_agent_provider_runs_its_turns_on_that_agent() {
+    fn a_coding_agent_provider_prefers_that_agent() {
         let settings = settings(PROVIDER_CLAUDE_CODE);
 
         assert_eq!(

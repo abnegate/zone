@@ -73,13 +73,6 @@ impl Provider {
         }
     }
 
-    pub fn of(agent: AgentKind) -> Self {
-        match agent {
-            AgentKind::Claude => Self::ClaudeCode,
-            AgentKind::Codex => Self::Codex,
-        }
-    }
-
     pub fn agent(self) -> Option<AgentKind> {
         match self {
             Self::ClaudeCode => Some(AgentKind::Claude),
@@ -169,9 +162,6 @@ mod tests {
 
     #[test]
     fn only_the_coding_agents_name_an_agent() {
-        for agent in AgentKind::ALL {
-            assert_eq!(Provider::of(agent).agent(), Some(agent));
-        }
         assert_eq!(Provider::ClaudeCode.agent(), Some(AgentKind::Claude));
         assert_eq!(Provider::Codex.agent(), Some(AgentKind::Codex));
         for provider in [

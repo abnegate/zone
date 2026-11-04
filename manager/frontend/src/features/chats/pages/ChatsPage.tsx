@@ -341,7 +341,8 @@ export default function ChatsPage() {
   const autoApproved = Boolean(displayedChat?.auto_approve);
   const sandboxed = displayedChat?.agent_sandboxed !== false;
   const showSandbox = Boolean(
-    displayedChat?.agent_enabled && (chatProviders ? chatProviders.agent : !sandboxed)
+    displayedChat?.agent_enabled &&
+      (chatProviders?.cli === undefined ? !sandboxed : chatProviders.cli)
   );
   const permissionSummary = [
     `auto-approve ${autoApproved ? 'on' : 'off'}`,

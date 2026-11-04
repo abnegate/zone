@@ -189,7 +189,7 @@ test.describe('Page bar on a 375px phone', () => {
     );
     await routeApi(page, CHAT_PROVIDERS, (route) =>
       route.fulfill({
-        json: { default: offer, selected: null, providers: [offer], agent: 'claude_code' },
+        json: { default: offer, selected: null, providers: [offer], cli: true },
       })
     );
     await page.routeWebSocket('**/ws/chats/**', (socket) => {

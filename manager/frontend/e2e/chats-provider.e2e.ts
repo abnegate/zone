@@ -141,7 +141,7 @@ async function mockChats(page: Page): Promise<Captured> {
       ? { ...offerOf(entry.provider), model: entry.provider_model ?? null }
       : null,
     providers: choosable,
-    agent: entry.provider === 'claude_code' || entry.provider === 'codex' ? entry.provider : null,
+    cli: entry.provider === 'claude_code' || entry.provider === 'codex',
   });
   const withMessages = (entry: Chat) => ({
     ...entry,

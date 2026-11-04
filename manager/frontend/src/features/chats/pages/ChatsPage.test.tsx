@@ -2602,7 +2602,7 @@ describe('ChatsPage', () => {
   });
 
   it('shows the agent confined to Zone tools until the reader says otherwise', async () => {
-    mockGetChatProviders.mockResolvedValue(chatProviders({ agent: 'claude_code' }));
+    mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
     mockClient.getChat.mockResolvedValueOnce({
       ...mockChatWithMessages,
       agent_enabled: true,
@@ -2628,7 +2628,7 @@ describe('ChatsPage', () => {
   });
 
   it('puts an agent that kept its own tools back inside Zone', async () => {
-    mockGetChatProviders.mockResolvedValue(chatProviders({ agent: 'claude_code' }));
+    mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
     mockClient.getChat.mockResolvedValueOnce({
       ...mockChatWithMessages,
       agent_enabled: true,
@@ -2654,7 +2654,7 @@ describe('ChatsPage', () => {
   });
 
   it('leaves auto-approve alone when the reader changes tool access', async () => {
-    mockGetChatProviders.mockResolvedValue(chatProviders({ agent: 'claude_code' }));
+    mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
     mockClient.getChat.mockResolvedValueOnce({
       ...mockChatWithMessages,
       agent_enabled: true,
@@ -2688,37 +2688,38 @@ describe('ChatsPage', () => {
     };
 
     it('shows on a chat that chose an agent provider', async () => {
-      await openAgentChat(
-        chatProviders({ selected: selection(claudeOffer, null), agent: 'claude_code' })
+      await openAgentChat(chatProviders({ selected: selection(claudeOffer, null), cli: true }));
+      fireEvent.click(screen.getByTestId('agent-permissions'));
+      expect(screen.getByRole('button', { name: 'Zone tools only' })).toBe(
+        screen.getByTestId('agent-sandbox-toggle')
       );
-      expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument();
     });
 
     it('stays hidden on a chat that chose a self-hosted provider', async () => {
       await openAgentChat(
-        chatProviders({ selected: selection(selfHostedOffer, null), agent: null })
+        chatProviders({ selected: selection(selfHostedOffer, null), cli: false })
       );
       expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
       expect(screen.getByTestId('auto-approve-toggle')).toBeInTheDocument();
     });
 
     it('shows on a Default chat that resolves to an agent', async () => {
-      await openAgentChat(chatProviders({ default: codexOffer, agent: 'codex' }));
+      await openAgentChat(chatProviders({ default: codexOffer, cli: true }));
       expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument();
     });
 
     it('shows on a Default chat the instance runs on an agent behind a self-hosted default', async () => {
-      await openAgentChat(chatProviders({ default: selfHostedOffer, agent: 'claude_code' }));
+      await openAgentChat(chatProviders({ default: selfHostedOffer, cli: true }));
       expect(screen.getByTestId('agent-sandbox-toggle')).toBeInTheDocument();
     });
 
     it('stays hidden on a Default chat that resolves to self-hosted', async () => {
-      await openAgentChat(chatProviders({ default: selfHostedOffer, agent: null }));
+      await openAgentChat(chatProviders({ default: selfHostedOffer, cli: false }));
       expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
     });
 
     it('stays hidden on a Default chat that resolves to another HTTP provider', async () => {
-      await openAgentChat(chatProviders({ default: openAiOffer, agent: null }));
+      await openAgentChat(chatProviders({ default: openAiOffer, cli: false }));
       expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
     });
 
@@ -2745,13 +2746,41 @@ describe('ChatsPage', () => {
       expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
     });
 
-    it('stays hidden when the server names no agent', async () => {
+    it('stays hidden for a sandboxed chat when the server does not say', async () => {
       await openAgentChat(chatProviders());
       expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
     });
 
+    it('keeps the way back for an unsandboxed chat when the server does not say', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders());
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('hides for an unsandboxed chat once the server says it runs over HTTP', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: false }));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      await waitFor(() =>
+        expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument()
+      );
+    });
+
     it('follows the provider as it changes in the picker', async () => {
-      await openAgentChat(chatProviders({ agent: null }));
+      await openAgentChat(chatProviders({ cli: false }));
       expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
 
       mockSetChatProvider.mockResolvedValue({
@@ -2760,14 +2789,14 @@ describe('ChatsPage', () => {
         provider: 'claude_code',
       });
       mockGetChatProviders.mockResolvedValue(
-        chatProviders({ selected: selection(claudeOffer, null), agent: 'claude_code' })
+        chatProviders({ selected: selection(claudeOffer, null), cli: true })
       );
       fireEvent.click(screen.getByTestId('chat-settings'));
       chooseSelectOption('chat-provider', 'Claude Code');
       await screen.findByTestId('agent-sandbox-toggle');
 
       mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, agent_enabled: true });
-      mockGetChatProviders.mockResolvedValue(chatProviders({ agent: null }));
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: false }));
       chooseSelectOption('chat-provider', 'Default (Self-Hosted)');
       await waitFor(() =>
         expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument()
@@ -2796,7 +2825,7 @@ describe('ChatsPage', () => {
 
     it('sums up the provider, the model and the effort on the one control', async () => {
       mockGetChatProviders.mockResolvedValue(
-        chatProviders({ selected: selection(codexOffer, 'gpt-5.5'), agent: 'codex' })
+        chatProviders({ selected: selection(codexOffer, 'gpt-5.5'), cli: true })
       );
       await openHeader({ provider: 'codex', provider_model: 'gpt-5.5', reasoning_effort: 'high' });
       await waitFor(() =>
@@ -2845,7 +2874,7 @@ describe('ChatsPage', () => {
     });
 
     it('keeps the agent toggle visible and tucks its permissions behind a labelled trigger', async () => {
-      mockGetChatProviders.mockResolvedValue(chatProviders({ agent: 'claude_code' }));
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
       await openHeader({ agent_enabled: true, auto_approve: true, agent_sandboxed: false });
       const trigger = screen.getByTestId('agent-permissions');
       expect(trigger).toHaveAttribute(

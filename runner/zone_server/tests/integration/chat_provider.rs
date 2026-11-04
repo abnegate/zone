@@ -685,14 +685,14 @@ async fn a_member_chooses_and_clears_a_provider_but_cannot_change_ai_settings() 
 }
 
 #[tokio::test]
-async fn the_listing_names_the_agent_cli_the_chats_turns_run_on() {
+async fn the_listing_says_whether_the_chats_turns_run_on_a_cli() {
     let tenant = Tenant::new().await;
     tenant.sign_in_codex().await;
     let chat = tenant.chat(&tenant.owner.token).await;
 
     assert_eq!(
-        tenant.offers(&tenant.owner.token, &chat).await["agent"],
-        Value::Null,
+        tenant.offers(&tenant.owner.token, &chat).await["cli"],
+        json!(false),
         "a chat on the self-hosted default runs over HTTP"
     );
 
@@ -700,8 +700,8 @@ async fn the_listing_names_the_agent_cli_the_chats_turns_run_on() {
         .save_organization_settings(json!({ "provider": "claude_code" }))
         .await;
     assert_eq!(
-        tenant.offers(&tenant.owner.token, &chat).await["agent"],
-        json!("claude_code"),
+        tenant.offers(&tenant.owner.token, &chat).await["cli"],
+        json!(true),
         "a chat following an agent default starts on that agent"
     );
 
@@ -714,8 +714,8 @@ async fn the_listing_names_the_agent_cli_the_chats_turns_run_on() {
         .await;
     expect(&chosen, StatusCode::OK, "the chat chooses Codex");
     assert_eq!(
-        tenant.offers(&tenant.owner.token, &chat).await["agent"],
-        json!("codex"),
+        tenant.offers(&tenant.owner.token, &chat).await["cli"],
+        json!(true),
         "a chat's choice comes before its default"
     );
 
@@ -728,8 +728,8 @@ async fn the_listing_names_the_agent_cli_the_chats_turns_run_on() {
         .await;
     expect(&chosen, StatusCode::OK, "the chat chooses Self-Hosted");
     assert_eq!(
-        tenant.offers(&tenant.owner.token, &chat).await["agent"],
-        Value::Null,
+        tenant.offers(&tenant.owner.token, &chat).await["cli"],
+        json!(false),
         "a chat that chose an HTTP provider runs over HTTP under an agent default"
     );
 }

@@ -45,11 +45,8 @@ export interface ChatProviders {
   default: ChatProviderOffer;
   selected: ChatProviderSelection | null;
   providers: ChatProviderOffer[];
-  /**
-   * The agent CLI this chat's turns run on first; the router may move a turn to
-   * another agent's login. Null when they go over HTTP or cannot run.
-   */
-  agent?: AiProvider | null;
+  /** Whether this chat's turns run on a coding agent CLI. Omitted when the server cannot say. */
+  cli?: boolean;
 }
 
 export interface WorkspaceChatProviders {
