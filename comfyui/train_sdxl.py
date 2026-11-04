@@ -30,30 +30,30 @@ METAL_LOW_WATERMARK_VARIABLE = 'PYTORCH_MPS_LOW_WATERMARK_RATIO'
 METAL_WATERMARK_VARIABLES = (METAL_HIGH_WATERMARK_VARIABLE, METAL_LOW_WATERMARK_VARIABLE)
 METAL_HIGH_WATERMARK = '1.0'
 METAL_LOW_WATERMARK = '0.8'
-METAL_LOW_WATERMARK_FLOOR = '0.0'
 METAL_WATERMARK_TOO_LATE = (
     'warning: torch was imported before train_sdxl, so the Metal memory watermarks '
     'it sets may be ignored and an overcommit can hang macOS'
 )
 
 
-def apply_metal_watermarks(environment: MutableMapping[str, str] = os.environ) -> None:
-    """Cap Metal at its recommended working set so an overcommit raises instead of hanging macOS.
+def metal_watermark_unreadable(variable: str, value: str) -> str:
+    return f'warning: {variable}={value!r} is not a number, so train_sdxl leaves the Metal cap alone'
 
-    torch defaults the high watermark to 1.7x the recommended working set, and the low one to
-    1.4x on unified memory; it rejects a high watermark below the low one, so both are set.
-    """
+
+def apply_metal_watermarks(environment: MutableMapping[str, str] = os.environ) -> None:
     changed = METAL_HIGH_WATERMARK_VARIABLE not in environment
     environment.setdefault(METAL_HIGH_WATERMARK_VARIABLE, METAL_HIGH_WATERMARK)
-    high = float(environment[METAL_HIGH_WATERMARK_VARIABLE])
-    if high > 0:
+    try:
+        high = float(environment[METAL_HIGH_WATERMARK_VARIABLE])
         low = environment.get(METAL_LOW_WATERMARK_VARIABLE)
-        if low is None or float(low) > high:
-            reachable = high >= float(METAL_LOW_WATERMARK)
-            environment[METAL_LOW_WATERMARK_VARIABLE] = (
-                METAL_LOW_WATERMARK if reachable else METAL_LOW_WATERMARK_FLOOR
-            )
+        if high > 0 and (low is None or float(low) > high):
+            environment[METAL_LOW_WATERMARK_VARIABLE] = str(min(high, float(METAL_LOW_WATERMARK)))
             changed = True
+    except ValueError:
+        for variable in METAL_WATERMARK_VARIABLES:
+            if variable in environment:
+                print(metal_watermark_unreadable(variable, environment[variable]), file=sys.stderr)
+        return
     if changed and 'torch' in sys.modules:
         print(METAL_WATERMARK_TOO_LATE, file=sys.stderr)
 

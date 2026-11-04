@@ -3035,10 +3035,21 @@ class MetalWatermarkTests(unittest.TestCase):
 
         train_sdxl.apply_metal_watermarks(environment)
 
+        self.assertEqual(environment[train_sdxl.METAL_LOW_WATERMARK_VARIABLE], '0.5')
+
+    def test_an_unreadable_watermark_warns_instead_of_breaking_the_import(self) -> None:
+        preset = {train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: 'abc'}
+
+        result = import_in_clean_process('train_runpod', preset)
+
         self.assertEqual(
-            environment[train_sdxl.METAL_LOW_WATERMARK_VARIABLE],
-            train_sdxl.METAL_LOW_WATERMARK_FLOOR,
+            json.loads(result.stdout),
+            {
+                train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: 'abc',
+                train_sdxl.METAL_LOW_WATERMARK_VARIABLE: None,
+            },
         )
+        self.assertIn("PYTORCH_MPS_HIGH_WATERMARK_RATIO='abc' is not a number", result.stderr)
 
     def test_low_defaults_below_high(self) -> None:
         environment = {train_sdxl.METAL_HIGH_WATERMARK_VARIABLE: '1.2'}
