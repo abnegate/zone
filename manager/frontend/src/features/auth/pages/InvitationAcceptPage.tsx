@@ -1,9 +1,9 @@
 import { Button } from '@zone/ui';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { client } from '../../../api/client';
-import { AuthCard, AuthStatus } from '../components';
-import { useAuth } from '../hooks';
+import AuthCard from '../components/AuthCard';
+import AuthStatus from '../components/AuthStatus';
+import { useAuth } from '../context';
 import type { InvitationDetails } from '../types';
 import './InvitationAcceptPage.css';
 
@@ -30,6 +30,7 @@ export default function InvitationAcceptPage() {
     setLoading(true);
     setError(null);
     try {
+      const { client } = await import('../../../api/client');
       const invitationDetails = await client.getInvitationByToken(token);
       setDetails(invitationDetails);
 
@@ -55,6 +56,7 @@ export default function InvitationAcceptPage() {
     setError(null);
 
     try {
+      const { client } = await import('../../../api/client');
       await client.acceptInvitation(token);
       // Redirect to org-settings or home after successful acceptance
       navigate('/org-settings');

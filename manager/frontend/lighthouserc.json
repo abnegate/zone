@@ -7,7 +7,11 @@
         "http://localhost/",
         "http://localhost/login",
         "http://localhost/register",
-        "http://localhost/forgot-password"
+        "http://localhost/forgot-password",
+        "http://localhost/reset-password?token=lighthouse-reset-token-000000",
+        "http://localhost/verify-email",
+        "http://localhost/invitations",
+        "http://localhost/unauthorized"
       ],
       "numberOfRuns": 3,
       "settings": {
@@ -15,7 +19,7 @@
       }
     },
     "assert": {
-      "aggregationMethod": "median",
+      "aggregationMethod": "pessimistic",
       "assertions": {
         "categories:performance": ["error", {"minScore": 1}],
         "categories:accessibility": ["error", {"minScore": 1}],

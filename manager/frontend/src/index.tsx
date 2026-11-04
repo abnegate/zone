@@ -5,7 +5,12 @@ import { reloadOnStaleChunk } from './shared/staleChunk';
 
 function boot() {
   startFirstRoute(window.location.pathname);
-  void import('./main');
+  import('./main').catch(() => {
+    const text = document.querySelector('.loader-text');
+    if (text) {
+      text.textContent = 'Zone could not load. Reload the page to try again.';
+    }
+  });
 }
 
 reloadOnStaleChunk();

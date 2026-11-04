@@ -10,13 +10,12 @@ export function reloadOnStaleChunk(
   storage: Pick<Storage, 'getItem' | 'setItem'> = sessionStorage,
   now: () => number = Date.now
 ): void {
-  target.addEventListener('vite:preloadError', (event) => {
+  target.addEventListener('vite:preloadError', () => {
     const reloadedAt = Number(storage.getItem(RELOADED_AT_KEY) ?? 0);
     if (now() - reloadedAt < RELOAD_COOLDOWN_MILLISECONDS) {
       return;
     }
     storage.setItem(RELOADED_AT_KEY, String(now()));
-    event.preventDefault();
     target.location.reload();
   });
 }

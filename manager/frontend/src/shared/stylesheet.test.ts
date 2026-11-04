@@ -48,6 +48,11 @@ describe('stylesheetsLoaded', () => {
     expect(await settled(loading)).toBe(true);
   });
 
+  it('does not wait on a stylesheet that failed before anyone was listening', async () => {
+    const { root } = page('all');
+    expect(await settled(stylesheetsLoaded(root))).toBe(true);
+  });
+
   it('still renders when a stylesheet fails to load', async () => {
     const { root, links } = page('print');
     const loading = stylesheetsLoaded(root);

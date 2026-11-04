@@ -33,20 +33,19 @@ function harness(start = 100_000) {
 }
 
 describe('reloadOnStaleChunk', () => {
-  it('reloads and swallows the error when a chunk fails to load', () => {
+  it('reloads and lets the import reject when a chunk fails to load', () => {
     const { state, fire } = harness();
     const event = fire();
     expect(state.reloads).toBe(1);
-    expect(event.defaultPrevented).toBe(true);
+    expect(event.defaultPrevented).toBe(false);
   });
 
   it('lets a repeat failure surface instead of looping', () => {
     const { state, fire } = harness();
     fire();
     state.now += 1_000;
-    const event = fire();
+    fire();
     expect(state.reloads).toBe(1);
-    expect(event.defaultPrevented).toBe(false);
   });
 
   it('reloads again once the cooldown has passed', () => {

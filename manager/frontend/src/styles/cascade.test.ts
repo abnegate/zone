@@ -41,9 +41,12 @@ describe('stylesheet cascade', () => {
   const lines = readFileSync(cascade, 'utf8').trim().split('\n');
 
   it('starts with the signed out sheets so splitting them off keeps their order', () => {
-    expect(lines.slice(0, 2)).toEqual([
+    expect(lines.slice(0, 5)).toEqual([
       "import '../shared/components/ZoneLogo/ZoneLogo.css';",
       "import '../features/auth/pages/AuthPage.css';",
+      "import '../features/auth/components/ResendVerificationButton.css';",
+      "import '../features/auth/components/VerificationPendingBanner.css';",
+      "import '../features/auth/pages/InvitationAcceptPage.css';",
     ]);
   });
 

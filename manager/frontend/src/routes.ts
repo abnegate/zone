@@ -7,29 +7,17 @@ export const loaders = {
   agentSignIn: () => import('./features/settings/ai/AgentSignInPage'),
   authenticatedProviders: () => import('./shared/components/AuthenticatedProviders'),
   chats: () => import('./features/chats/pages/ChatsPage'),
-  emailVerification: () => import('./features/auth/pages/EmailVerificationPage'),
-  invitationAccept: () => import('./features/auth/pages/InvitationAcceptPage'),
   layout: () => import('./shared/components/Layout/Layout'),
   models: () => import('./features/models/pages/ModelsPage'),
   orgSettings: () => import('./features/settings/organization/pages/OrgSettingsPage'),
   projects: () => import('./features/projects/pages/ProjectsPage'),
-  resetPassword: () => import('./features/auth/pages/ResetPasswordPage'),
   sessions: () => import('./features/auth/pages/SessionsPage'),
   setup: () => import('./features/models/pages/SetupPage'),
   setupGate: () => import('./features/models/components/SetupGate'),
   sources: () => import('./features/sources/pages/SourcesPage'),
   tasks: () => import('./features/tasks/pages/TasksPage'),
-  unauthorized: () => import('./pages/UnauthorizedPage'),
   wiki: () => import('./features/knowledge/pages/WikiPage'),
   workspaceSettings: () => import('./features/settings/workspace/pages/WorkspaceSettingsPage'),
-};
-
-const SIGNED_OUT_ROUTES: Record<string, Loader[]> = {
-  '/invitations': [loaders.invitationAccept],
-  '/reset-password': [loaders.resetPassword],
-  '/unauthorized': [loaders.unauthorized],
-  '/verify': [loaders.emailVerification],
-  '/verify-email': [loaders.emailVerification],
 };
 
 const SHELL = [loaders.authenticatedProviders, loaders.setupGate, loaders.layout];
@@ -56,7 +44,8 @@ export function preloaded<Module>(load: () => Promise<Module>): Module | undefin
 }
 
 export async function preload<Module>(load: () => Promise<Module>): Promise<Module> {
-  const [module] = await Promise.all([load(), loadFeatureStylesheet()]);
+  const stylesheet = loadFeatureStylesheet();
+  const [module] = await Promise.all([load(), stylesheet]);
   modules.set(load, module);
   return module;
 }
@@ -70,9 +59,7 @@ export function preloadRoute(
   storage: Pick<Storage, 'getItem'> = localStorage
 ): Promise<unknown> {
   const path = pathname.replace(/\/+$/, '') || '/';
-  const routes =
-    SIGNED_OUT_ROUTES[path] ?? (hasStoredSession(storage) ? SIGNED_IN_ROUTES[path] : undefined);
-  return run(routes ?? []);
+  return run((hasStoredSession(storage) && SIGNED_IN_ROUTES[path]) || []);
 }
 
 export function preloadSignedInRoutes(

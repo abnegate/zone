@@ -15,23 +15,23 @@ export default function ForgotPasswordPage() {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     const formData = { email: email.trim() };
-    const [{ getErrors }, { ForgotPasswordSchema }] = await Promise.all([
-      import('../../../validation'),
-      import('../schemas'),
-    ]);
-    const errors = getErrors(ForgotPasswordSchema, formData);
-
-    if (Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
-      return;
-    }
-
-    setFieldErrors({});
     setLoading(true);
     setError('');
 
     try {
-      const { client } = await import('../../../api/client');
+      const [{ getErrors }, { ForgotPasswordSchema }, { client }] = await Promise.all([
+        import('../../../validation'),
+        import('../schemas'),
+        import('../../../api/client'),
+      ]);
+      const errors = getErrors(ForgotPasswordSchema, formData);
+
+      if (Object.keys(errors).length > 0) {
+        setFieldErrors(errors);
+        return;
+      }
+
+      setFieldErrors({});
       await client.forgotPassword(email.trim());
       setSubmitted(true);
     } catch (err) {

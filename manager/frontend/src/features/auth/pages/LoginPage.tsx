@@ -64,19 +64,19 @@ export default function LoginPage() {
     setRootError('');
     setIsSubmitting(true);
 
-    const invalid = await validate(values);
-    const firstInvalid = FIELDS.find((field) => invalid[field]);
-    if (firstInvalid) {
-      flushSync(() => {
-        setErrors(invalid);
-        setIsSubmitting(false);
-      });
-      form.querySelector<HTMLInputElement>(`[name="${firstInvalid}"]`)?.focus();
-      return;
-    }
-    setErrors({});
-
     try {
+      const invalid = await validate(values);
+      const firstInvalid = FIELDS.find((field) => invalid[field]);
+      if (firstInvalid) {
+        flushSync(() => {
+          setErrors(invalid);
+          setIsSubmitting(false);
+        });
+        form.querySelector<HTMLInputElement>(`[name="${firstInvalid}"]`)?.focus();
+        return;
+      }
+      setErrors({});
+
       await login(values);
       navigate(next, { replace: true });
       void notify('success', 'Successfully logged in');
@@ -91,7 +91,8 @@ export default function LoginPage() {
 
   const revalidate = async (event: FormEvent<HTMLFormElement>) => {
     if (attempted.current) {
-      setErrors(await validate(valuesOf(event.currentTarget)));
+      const values = valuesOf(event.currentTarget);
+      setErrors(await validate(values).catch(() => ({})));
     }
   };
 

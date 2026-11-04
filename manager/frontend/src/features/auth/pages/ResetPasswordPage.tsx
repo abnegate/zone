@@ -2,11 +2,9 @@ import { Button, Input } from '@zone/ui';
 import type React from 'react';
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { client } from '../../../api/client';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
-import { getErrors } from '../../../validation';
-import { AuthCard, AuthStatus } from '../components';
-import { ResetPasswordSchema } from '../schemas';
+import AuthCard from '../components/AuthCard';
+import AuthStatus from '../components/AuthStatus';
 import { isValidTokenFormat } from '../utils';
 import './AuthPage.css';
 
@@ -40,18 +38,23 @@ export default function ResetPasswordPage() {
     }
 
     const formData = { password, confirmPassword };
-    const errors = getErrors(ResetPasswordSchema, formData);
-
-    if (Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
-      return;
-    }
-
-    setFieldErrors({});
     setLoading(true);
     setError('');
 
     try {
+      const [{ getErrors }, { ResetPasswordSchema }, { client }] = await Promise.all([
+        import('../../../validation'),
+        import('../schemas'),
+        import('../../../api/client'),
+      ]);
+      const errors = getErrors(ResetPasswordSchema, formData);
+
+      if (Object.keys(errors).length > 0) {
+        setFieldErrors(errors);
+        return;
+      }
+
+      setFieldErrors({});
       await client.resetPassword(token, password);
       setSuccess(true);
       // Clear password fields from state after success

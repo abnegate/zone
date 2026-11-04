@@ -13,13 +13,9 @@ describe('route preloading', () => {
   });
 
   it('loads nothing for the eager signed out forms', async () => {
-    for (const path of ['/login', '/register', '/forgot-password']) {
+    for (const path of ['/login', '/register', '/forgot-password', '/unauthorized']) {
       expect(await preloadRoute(path, storageWith(ACCESS_TOKEN_KEY))).toEqual([]);
     }
-  });
-
-  it('loads a lazy signed out page without a session', async () => {
-    expect(await preloadRoute('/unauthorized', storageWith())).toHaveLength(1);
   });
 
   it('loads the shell, and the page when a session is stored', async () => {

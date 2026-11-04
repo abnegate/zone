@@ -11,7 +11,13 @@ import {
 } from 'react';
 import * as authApi from '../../../api/auth';
 import { RefreshError } from '../../../api/auth';
-import { ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY, session } from '../../../api/session';
+import {
+  ACCESS_TOKEN_KEY,
+  ACTIVE_PULLS_KEY,
+  LEGACY_ACTIVE_PULL_KEY,
+  REFRESH_TOKEN_KEY,
+  session,
+} from '../../../api/session';
 import type { AuthResponse, JwtPayload, LoginRequest, RegisterRequest, User } from '../types';
 
 interface AuthState {
@@ -125,6 +131,8 @@ export function AuthProvider({
     storage.removeItem(ACCESS_TOKEN_KEY);
     storage.removeItem(REFRESH_TOKEN_KEY);
     storage.removeItem(USER_KEY);
+    sessionStorage.removeItem(ACTIVE_PULLS_KEY);
+    sessionStorage.removeItem(LEGACY_ACTIVE_PULL_KEY);
 
     setState({
       user: null,

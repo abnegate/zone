@@ -13,20 +13,30 @@ import {
 const frontendRoot = fileURLToPath(new URL('.', import.meta.url));
 const uiSrc = path.resolve(frontendRoot, '../../packages/ui/src');
 
+const STYLESHEET_COUNT = 3;
+
 function deferStylesheets(): Plugin {
   return {
     name: 'zone:defer-stylesheets',
     apply: 'build',
     transformIndexHtml: {
       order: 'post',
-      handler: (html) =>
-        html.replace(
+      handler: (html) => {
+        let rewritten = 0;
+        const output = html.replace(
           /<link rel="stylesheet" crossorigin href="(\/assets\/styles-[^"]+\.css)">/g,
-          (_link, href: string) =>
-            href.includes('styles-features-')
+          (_link, href: string) => {
+            rewritten += 1;
+            return href.includes('styles-features-')
               ? `<link rel="stylesheet" crossorigin ${FEATURE_STYLESHEET_ATTRIBUTE}="${href}">`
-              : `<link rel="stylesheet" crossorigin href="${href}" media="print" onload="this.media='all'" ${DEFERRED_STYLESHEET_ATTRIBUTE}>`
-        ),
+              : `<link rel="stylesheet" crossorigin href="${href}" media="print" onload="this.media='all'" onerror="this.media='all'" ${DEFERRED_STYLESHEET_ATTRIBUTE}>`;
+          }
+        );
+        if (rewritten !== STYLESHEET_COUNT) {
+          throw new Error(`Deferred ${rewritten} of ${STYLESHEET_COUNT} stylesheets`);
+        }
+        return output;
+      },
     },
   };
 }
@@ -135,7 +145,7 @@ export default defineConfig(({ command }) => {
               },
               {
                 name: 'styles-signed-out',
-                test: /(\/ZoneLogo\.css|\/pages\/AuthPage\.css)($|\?)/,
+                test: /(\/ZoneLogo\.css|\/pages\/AuthPage\.css|\/ResendVerificationButton\.css|\/VerificationPendingBanner\.css|\/InvitationAcceptPage\.css)($|\?)/,
                 priority: 3,
               },
               { name: 'styles-features', test: /\.css($|\?)/, priority: 2 },

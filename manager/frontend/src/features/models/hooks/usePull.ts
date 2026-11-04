@@ -10,6 +10,7 @@ import {
   useState,
 } from 'react';
 import { modelsApi } from '../../../api/models';
+import { ACTIVE_PULLS_KEY, LEGACY_ACTIVE_PULL_KEY } from '../../../api/session';
 import { useAuth } from '../../auth/context';
 import {
   MAX_PARALLEL_PULLS,
@@ -20,8 +21,8 @@ import {
   type Step,
 } from '../types';
 
-const STORAGE_KEY = 'zone.activePulls';
-const LEGACY_STORAGE_KEY = 'zone.activePull';
+const STORAGE_KEY = ACTIVE_PULLS_KEY;
+const LEGACY_STORAGE_KEY = LEGACY_ACTIVE_PULL_KEY;
 const MAX_RECONNECTS = 8;
 
 export interface PullApi {

@@ -32,26 +32,26 @@ export default function RegisterPage() {
       password,
       display_name: displayName.trim() || undefined,
     };
-    const [{ getErrors }, { RegisterRequestSchema }] = await Promise.all([
-      import('../../../validation'),
-      import('../schemas'),
-    ]);
-    const errors = getErrors(RegisterRequestSchema, formData);
-
-    if (password !== confirmPassword) {
-      errors.confirmPassword = 'Passwords do not match';
-    }
-
-    if (Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
-      return;
-    }
-
-    setFieldErrors({});
     setLoading(true);
     setError('');
 
     try {
+      const [{ getErrors }, { RegisterRequestSchema }] = await Promise.all([
+        import('../../../validation'),
+        import('../schemas'),
+      ]);
+      const errors = getErrors(RegisterRequestSchema, formData);
+
+      if (password !== confirmPassword) {
+        errors.confirmPassword = 'Passwords do not match';
+      }
+
+      if (Object.keys(errors).length > 0) {
+        setFieldErrors(errors);
+        return;
+      }
+
+      setFieldErrors({});
       await register({
         email: email.trim(),
         password,

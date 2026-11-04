@@ -1,5 +1,7 @@
 export const ACCESS_TOKEN_KEY = 'manager_access_token';
 export const REFRESH_TOKEN_KEY = 'manager_refresh_token';
+export const ACTIVE_PULLS_KEY = 'zone.activePulls';
+export const LEGACY_ACTIVE_PULL_KEY = 'zone.activePull';
 
 type EnsureAccessToken = () => Promise<string | null>;
 
