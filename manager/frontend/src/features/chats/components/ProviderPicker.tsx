@@ -64,7 +64,6 @@ export function ProviderPicker({
       setPending(offer);
       return;
     }
-    setPending(null);
     onChoose(offer.provider, null);
   };
 

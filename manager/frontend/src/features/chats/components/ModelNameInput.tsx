@@ -25,6 +25,7 @@ export function ModelNameInput({
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Escape') {
+      if (busy) return;
       setName(value);
       onCancel?.();
       return;

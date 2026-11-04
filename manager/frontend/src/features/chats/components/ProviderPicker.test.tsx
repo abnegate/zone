@@ -7,6 +7,7 @@ import type {
   ChatProviders,
   ReasoningEffort,
 } from '../provider';
+import { ModelNameInput } from './ModelNameInput';
 import { ProviderPicker } from './ProviderPicker';
 
 const HTTP: ReasoningEffort[] = ['off', 'low', 'medium', 'high'];
@@ -217,6 +218,19 @@ describe('ProviderPicker', () => {
 
     rerender(<ProviderPicker providers={listing('gpt-5')} {...props} />);
     expect(field).toHaveValue('gpt-5');
+  });
+
+  it('does not back out of a provider while its change is in flight', () => {
+    const onCancel = mock();
+    render(
+      <ModelNameInput provider="OpenAI" value="" busy onSubmit={() => {}} onCancel={onCancel} />
+    );
+
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Provider model name' }), {
+      key: 'Escape',
+    });
+
+    expect(onCancel).not.toHaveBeenCalled();
   });
 
   it('sends nothing on Enter while a change is in flight', () => {

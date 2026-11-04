@@ -174,6 +174,7 @@ export default function ChatsPage() {
   };
   const [sending, setSending] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
+  const [chatOperationError, setChatOperationError] = useState<string | null>(null);
 
   const {
     chats,
@@ -244,7 +245,8 @@ export default function ChatsPage() {
     choose: chooseProvider,
     refresh: refreshProviders,
   } = useChatProviders(selectedChatId);
-  const [changingProvider, setChangingProvider] = useState(false);
+  const [changingChat, setChangingChat] = useState<string | null>(null);
+  const changingProvider = changingChat !== null && changingChat === selectedChatId;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -265,7 +267,7 @@ export default function ChatsPage() {
 
   useEffect(() => {
     latestSelectedChatId.current = selectedChatId;
-    setOperationError(null);
+    setChatOperationError(null);
   }, [selectedChatId]);
 
   const chatOffer = chatProviders ? effectiveOffer(chatProviders) : null;
@@ -542,44 +544,58 @@ export default function ChatsPage() {
     }
   };
 
+  const reportForChat = (chatId: string, message: string) => {
+    if (latestSelectedChatId.current === chatId) setChatOperationError(message);
+  };
+
   const handleToggleAgent = async () => {
     if (!isAuthenticated || !displayedChat) return;
-    setOperationError(null);
+    const chatId = displayedChat.id;
+    setChatOperationError(null);
     try {
       await setAgentEnabledFn(!displayedChat.agent_enabled);
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Failed to change agent mode');
+      reportForChat(chatId, error instanceof Error ? error.message : 'Failed to change agent mode');
     }
   };
 
   const handleToggleAutoApprove = async () => {
     if (!isAuthenticated || !displayedChat) return;
-    setOperationError(null);
+    const chatId = displayedChat.id;
+    setChatOperationError(null);
     try {
       await setAutoApproveFn(!displayedChat.auto_approve);
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Failed to change auto-approve');
+      reportForChat(
+        chatId,
+        error instanceof Error ? error.message : 'Failed to change auto-approve'
+      );
     }
   };
 
   const handleToggleAgentSandboxed = async () => {
     if (!isAuthenticated || !displayedChat) return;
-    setOperationError(null);
+    const chatId = displayedChat.id;
+    setChatOperationError(null);
     try {
       const sandboxed = displayedChat.agent_sandboxed !== false;
       await setAgentSandboxedFn(!sandboxed);
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Failed to change tool access');
+      reportForChat(
+        chatId,
+        error instanceof Error ? error.message : 'Failed to change tool access'
+      );
     }
   };
 
   const handleReasoningEffort = async (effort: ReasoningEffort) => {
     if (!isAuthenticated || !displayedChat) return;
-    setOperationError(null);
+    const chatId = displayedChat.id;
+    setChatOperationError(null);
     try {
       await setReasoningEffortFn(effort);
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Failed to change reasoning');
+      reportForChat(chatId, error instanceof Error ? error.message : 'Failed to change reasoning');
     }
   };
 
@@ -606,29 +622,26 @@ export default function ChatsPage() {
     if (!isAuthenticated || !displayedChat) return false;
     const chatId = displayedChat.id;
     const modelName = displayedChat.model_name;
-    setOperationError(null);
-    setChangingProvider(true);
+    setChatOperationError(null);
+    setChangingChat(chatId);
     try {
       await chooseProvider(provider, model);
     } catch (error) {
-      if (latestSelectedChatId.current === chatId) {
-        setOperationError(error instanceof Error ? error.message : 'Failed to change AI provider');
-      }
-      setChangingProvider(false);
+      reportForChat(
+        chatId,
+        error instanceof Error ? error.message : 'Failed to change AI provider'
+      );
+      setChangingChat(null);
       return false;
-    }
-    if (latestSelectedChatId.current !== chatId) {
-      setChangingProvider(false);
-      return true;
     }
     try {
       const offer = offerFor(provider);
       if (offer) await settleEffort(effortsFor(offer, provider === null ? modelName : model));
     } catch (error) {
-      setOperationError(failure(PROVIDER_EFFORT_RESET_FAILED, error));
+      reportForChat(chatId, failure(PROVIDER_EFFORT_RESET_FAILED, error));
     } finally {
-      await refreshChat();
-      setChangingProvider(false);
+      if (latestSelectedChatId.current === chatId) await refreshChat();
+      setChangingChat(null);
     }
     return true;
   };
@@ -636,41 +649,41 @@ export default function ChatsPage() {
   const handleProviderModel = async (name: string) => {
     if (!isAuthenticated || !displayedChat || !chatProviders) return;
     const chatId = displayedChat.id;
-    setOperationError(null);
-    setChangingProvider(true);
+    setChatOperationError(null);
+    setChangingChat(chatId);
     try {
       await setModelNameFn(name);
     } catch (error) {
-      if (latestSelectedChatId.current === chatId) {
-        setOperationError(error instanceof Error ? error.message : 'Failed to change model');
-      }
-      setChangingProvider(false);
-      return;
-    }
-    if (latestSelectedChatId.current !== chatId) {
-      setChangingProvider(false);
+      reportForChat(chatId, error instanceof Error ? error.message : 'Failed to change model');
+      setChangingChat(null);
       return;
     }
     try {
       await settleEffort(effortsFor(chatProviders.default, name));
     } catch (error) {
-      setOperationError(failure(MODEL_EFFORT_RESET_FAILED, error));
+      reportForChat(chatId, failure(MODEL_EFFORT_RESET_FAILED, error));
     } finally {
       try {
-        await Promise.all([refreshProviders(), refreshChat()]);
+        if (latestSelectedChatId.current === chatId) {
+          await Promise.all([refreshProviders(), refreshChat()]);
+        }
       } finally {
-        setChangingProvider(false);
+        setChangingChat(null);
       }
     }
   };
 
   const handleContextTokens = async (tokens: number) => {
     if (!isAuthenticated || !displayedChat) return;
-    setOperationError(null);
+    const chatId = displayedChat.id;
+    setChatOperationError(null);
     try {
       await setContextTokensFn(tokens);
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Failed to change context size');
+      reportForChat(
+        chatId,
+        error instanceof Error ? error.message : 'Failed to change context size'
+      );
     }
   };
 
@@ -679,15 +692,19 @@ export default function ChatsPage() {
     const leftover: File[] = [];
     for (const file of Array.from(files)) {
       if (displayedChat && showCharacter) {
+        const chatId = displayedChat.id;
         try {
           const card = await parseCharacterFile(file);
           if (card) {
-            setOperationError(null);
+            setChatOperationError(null);
             await setCharacterFn(card);
             continue;
           }
         } catch (error) {
-          setOperationError(error instanceof Error ? error.message : 'Failed to attach character');
+          reportForChat(
+            chatId,
+            error instanceof Error ? error.message : 'Failed to attach character'
+          );
           continue;
         }
       }
@@ -786,8 +803,9 @@ export default function ChatsPage() {
     if (!isAuthenticated || !displayedChat || sending || streaming) return;
     if (!messageInput.trim() && sendable.length === 0) return;
 
+    const chatId = displayedChat.id;
     setSending(true);
-    setOperationError(null);
+    setChatOperationError(null);
     stickToBottom.current = true;
     try {
       await sendMessageFn({
@@ -797,7 +815,7 @@ export default function ChatsPage() {
       setMessageInput('');
       setAttachments([]);
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Failed to send message');
+      reportForChat(chatId, error instanceof Error ? error.message : 'Failed to send message');
     } finally {
       setSending(false);
     }
@@ -811,13 +829,14 @@ export default function ChatsPage() {
   const handleAnswerQuestions = async (content: string) => {
     if (!isAuthenticated || !displayedChat || sending || streaming || !content.trim()) return;
 
+    const chatId = displayedChat.id;
     setSending(true);
-    setOperationError(null);
+    setChatOperationError(null);
     stickToBottom.current = true;
     try {
       await sendMessageFn({ content });
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Failed to send message');
+      reportForChat(chatId, error instanceof Error ? error.message : 'Failed to send message');
     } finally {
       setSending(false);
     }
@@ -1106,7 +1125,7 @@ export default function ChatsPage() {
           </div>
         )}
 
-        {operationError && !showNewChatModal && !displayedChat && (
+        {operationError && !showNewChatModal && (
           <div className="chats-error" role="alert">
             {operationError}
           </div>
@@ -1266,13 +1285,13 @@ export default function ChatsPage() {
                   </p>
                 )}
                 <ProviderError providers={chatProviders} />
-                {operationError && !showNewChatModal && (
+                {chatOperationError && (
                   <p
                     className="chat-provider-error"
                     role="alert"
                     data-testid="chat-operation-error"
                   >
-                    {operationError}
+                    {chatOperationError}
                   </p>
                 )}
                 <HeaderPopover
