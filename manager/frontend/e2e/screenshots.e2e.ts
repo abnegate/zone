@@ -8,6 +8,19 @@ const describeScreenshots = runScreenshots ? test.describe : test.describe.skip;
 const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
+async function fontsLoaded(page: Page): Promise<void> {
+  await page.waitForFunction(() =>
+    Boolean(
+      document.querySelector<HTMLLinkElement>('link[href*="fonts.googleapis.com"]')?.sheet
+    )
+  );
+  await page.evaluate(async () => {
+    await document.fonts.load('16px Nunito');
+    await new Promise(requestAnimationFrame);
+    await document.fonts.ready;
+  });
+}
+
 async function capturePage(
   page: Page,
   options: Parameters<Page['screenshot']>[0]
@@ -27,6 +40,7 @@ async function capturePage(
   }
   if (options?.path?.includes('modal-'))
     await expect(page.getByRole('dialog')).toBeVisible();
+  await fontsLoaded(page);
   await page.screenshot({ ...options, animations: 'disabled' });
 }
 
@@ -113,7 +127,7 @@ describeScreenshots('Screenshots - Public Pages', () => {
   test('Unauthorized page', async ({ page }) => {
     await page.goto('/unauthorized');
     await page.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(500);
+    await expect(page.getByText('Access Denied')).toBeVisible();
     await capturePage(page, {
       path: 'screenshots/unauthorized.png',
       fullPage: true,
@@ -625,6 +639,8 @@ describeScreenshots('Screenshots - Dark Mode', () => {
   });
 
   async function enableDarkMode(page: Page) {
+    await expect(page.locator('#root')).not.toBeEmpty();
+    await expect(page.locator('.initial-loader')).toHaveCount(0);
     await page.evaluate(() => {
       document.documentElement.setAttribute('data-theme', 'dark');
     });
