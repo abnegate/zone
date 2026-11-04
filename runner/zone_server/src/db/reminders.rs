@@ -152,45 +152,47 @@ impl Zoned {
 /// Refuses a repeat whose `due_at` would not keep its time on the zone's clock.
 ///
 /// The rule is read on the zone's wall clock, so a due_at written in another
-/// offset, or at a time the rule's own clauses do not select, means the first
-/// firing and the repeats land at different times — 09:00+01:00 read in a zone
-/// at +00:00 repeats at 08:00 — and the person finds out by being interrupted.
-fn agrees(
-    due: DateTime<FixedOffset>,
-    rule: &Recurrence,
-    rrule: &str,
-    zoned: Zoned,
-) -> Result<(), String> {
+/// offset, or at a time the rule itself would not fire, means the first firing
+/// and the repeats land at different times — 09:00+01:00 read in a zone at
+/// +00:00 repeats at 08:00 — and the person finds out by being interrupted.
+fn agrees(due: DateTime<FixedOffset>, rule: &Recurrence, zoned: Zoned) -> Result<(), String> {
     let zone = zoned.zone();
     let instant = due.with_timezone(&Utc);
     let offset = zone.offset(instant);
     let written = due.format("%Y-%m-%dT%H:%M:%S%:z");
-    let read = match zoned {
-        Zoned::Given(_) => zone.name().to_string(),
-        Zoned::Reported(_) => format!("the person's own zone, {}", zone.name()),
-        Zoned::Unknown => "UTC, as no time zone is known for this person".to_string(),
-    };
-    let remedy = match zoned {
-        Zoned::Given(_) | Zoned::Reported(_) => format!(
-            "Pass time_zone with the IANA zone the person meant, or write due_at in {}'s offset.",
-            zone.name()
+    let ask = "Pass time_zone with the IANA zone the person meant";
+    let (read, unknown) = match zoned {
+        Zoned::Given(_) => (zone.name().to_string(), ""),
+        Zoned::Reported(_) => (format!("the person's own zone, {}", zone.name()), ""),
+        Zoned::Unknown => (
+            "UTC".to_string(),
+            " No time zone is known for this person, so UTC is what it is read in.",
         ),
-        Zoned::Unknown => "Pass time_zone with the IANA zone the person meant.".to_string(),
     };
     if offset != *due.offset() {
+        let remedy = match zoned {
+            Zoned::Unknown => format!("{ask}."),
+            Zoned::Given(_) | Zoned::Reported(_) => {
+                format!("{ask}, or write due_at in {}'s offset.", zone.name())
+            }
+        };
         return Err(format!(
-            "due_at {written} is at {}, but a repeat is read in {read} ({offset} then). A repeat \
-             keeps due_at's wall-clock time in its time_zone, so the two must agree. {remedy}",
+            "due_at {written} is at {}, but a repeat is read in {read}, at {offset} then.{unknown} \
+             A repeat keeps due_at's wall-clock time in its time_zone, so the two must agree. \
+             {remedy}",
             due.offset()
         ));
     }
-    let local = zone.local(instant);
-    if !rule.admits(local) {
+    if !rule.fires_at(instant, zone) {
+        let remedy = match zoned {
+            Zoned::Unknown => format!(" {ask}."),
+            Zoned::Given(_) | Zoned::Reported(_) => String::new(),
+        };
         return Err(format!(
-            "due_at {written} is {} in {read}, which {rrule} does not select, so the first firing \
-             and the repeats would land at different times. Make due_at the first time the rule \
-             selects there. {remedy}",
-            local.format("%A %H:%M")
+            "due_at {written} is {} in {read}, a time the rule does not fire at, so the first \
+             firing and the repeats would land at different times.{unknown} Make due_at the first \
+             time the rule fires there.{remedy}",
+            zone.local(instant).format("%A %Y-%m-%d %H:%M")
         ));
     }
     Ok(())
@@ -256,8 +258,8 @@ pub async fn create(
             .await?
             .map_or(Zoned::Unknown, Zoned::Reported),
     };
-    if let (Some(rule), Some(rrule)) = (&rule, input.rrule.as_deref()) {
-        agrees(input.due_at, rule, rrule.trim(), zoned).map_err(|why| actions::invalid(&why))?;
+    if let Some(rule) = &rule {
+        agrees(input.due_at, rule, zoned).map_err(|why| actions::invalid(&why))?;
     }
     let result = sqlx::query_scalar(
         "INSERT INTO reminders (workspace_id, created_by, chat_id, content, due_at, rrule, \

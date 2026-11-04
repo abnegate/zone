@@ -348,13 +348,18 @@ impl Recurrence {
         Ok(())
     }
 
-    /// Whether the rule's own clauses select this wall-clock time.
-    pub fn admits(&self, local: NaiveDateTime) -> bool {
-        let named = |values: &[u32], value: u32| values.is_empty() || values.contains(&value);
-        named(&self.by_hour, local.hour())
-            && named(&self.by_minute, local.minute())
-            && named(&self.by_month_day, local.day())
-            && (self.by_day.is_empty() || self.by_day.contains(&local.weekday()))
+    /// Whether a schedule anchored at `instant` would fire there itself, which
+    /// is what makes it a first firing the repeats agree with. Asked of the
+    /// search rather than of the clauses, so a time the clocks skip is judged
+    /// where the schedule actually lands it.
+    pub fn fires_at(&self, instant: DateTime<Utc>, zone: TimeZone) -> bool {
+        let minute = |at: DateTime<Utc>| at.with_second(0).and_then(|at| at.with_nanosecond(0));
+        let Some(start) = minute(instant) else {
+            return false;
+        };
+        self.next_after(instant, start - Duration::minutes(1), 0, zone)
+            .and_then(minute)
+            == Some(start)
     }
 
     /// The first firing strictly after `after`, or `None` once the rule is
@@ -1073,5 +1078,61 @@ mod tests {
             Recurrence::parse("FREQ=MONTHLY;INTERVAL=12;BYMONTHDAY=31;BYHOUR=9").expect("accepted");
 
         assert_eq!(rule.next_after(february, february, 1, TimeZone::UTC), None);
+    }
+
+    /// A first firing is one the schedule would land on itself: its clauses
+    /// select it on the zone's clock, a skipped time is accepted where the
+    /// clocks change, and the second pass of a repeated hour is not.
+    #[test]
+    fn a_first_firing_is_a_time_the_schedule_itself_would_fire_at() {
+        let london = TimeZone::parse("Europe/London").expect("a zone");
+        for (rule, due, fires) in [
+            (
+                "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9",
+                "2027-07-05T09:00:00+01:00",
+                true,
+            ),
+            (
+                "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9",
+                "2027-07-06T09:00:00+01:00",
+                false,
+            ),
+            ("FREQ=WEEKLY", "2027-07-06T09:00:00+01:00", true),
+            (
+                "FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=8",
+                "2027-07-01T08:00:00+01:00",
+                true,
+            ),
+            (
+                "FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=8",
+                "2027-07-02T08:00:00+01:00",
+                false,
+            ),
+            ("FREQ=DAILY;BYHOUR=9", "2027-07-05T09:00:00Z", false),
+            ("FREQ=DAILY;BYHOUR=9", "2027-07-05T09:00:30+01:00", true),
+            ("FREQ=HOURLY", "2027-07-05T09:17:42.123456+01:00", true),
+            (
+                "FREQ=DAILY;BYHOUR=1;BYMINUTE=30",
+                "2027-03-28T02:00:00+01:00",
+                true,
+            ),
+            (
+                "FREQ=DAILY;BYHOUR=1;BYMINUTE=30",
+                "2027-10-31T01:30:00+01:00",
+                true,
+            ),
+            (
+                "FREQ=DAILY;BYHOUR=1;BYMINUTE=30",
+                "2027-10-31T01:30:00+00:00",
+                false,
+            ),
+        ] {
+            let parsed = Recurrence::parse(rule).expect(rule);
+            assert_eq!(
+                parsed.fires_at(at_utc(due), london),
+                fires,
+                "{rule} at {due}"
+            );
+        }
     }
 }

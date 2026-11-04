@@ -19,7 +19,7 @@ const TIMESTAMP: &str = "%A %Y-%m-%d %H:%M:%S %:z";
 const CLOCK: &str = "Work out every date, time and duration the user asks about from this clock \
      and this zone. Do not assume UTC, and do not reuse a date from training.";
 
-const UNREPORTED: &str = ", this server's zone; the user's own time zone is not known";
+const UNREPORTED: &str = ", this server's zone, which may not be the user's";
 
 const RUNTIME: &str = "You are on Zone's own runtime rather than the user's computer, so the \
      files, tools and software here are Zone's and none of them are on their machine.";
@@ -143,9 +143,8 @@ mod tests {
         let rendered = chat(&environment);
 
         assert!(
-            rendered.contains(
-                "(Pacific/Auckland, this server's zone; the user's own time zone is not known)."
-            ),
+            rendered
+                .contains("(Pacific/Auckland, this server's zone, which may not be the user's)."),
             "{rendered}"
         );
     }

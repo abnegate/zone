@@ -392,7 +392,11 @@ async fn a_repeat_with_no_zone_known_is_read_in_utc_and_says_so() {
         .await
         .expect_err("a +01:00 repeat with no zone known is refused rather than read in UTC"),
     );
-    assert!(refused.contains("no time zone is known"), "{refused}");
+    assert!(refused.contains("No time zone is known"), "{refused}");
+    assert!(
+        !refused.contains("write due_at in"),
+        "a UTC rewrite would drift at every clock change, so it is not offered: {refused}"
+    );
     assert!(refused.contains("UTC"), "{refused}");
 
     let eight_utc = nine_in_two_days(TimeZone::UTC) - Duration::hours(1);
@@ -407,7 +411,7 @@ async fn a_repeat_with_no_zone_known_is_read_in_utc_and_says_so() {
         .await
         .expect_err("a first firing the rule does not select is refused"),
     );
-    assert!(refused.contains("does not select"), "{refused}");
+    assert!(refused.contains("does not fire at"), "{refused}");
     assert!(refused.contains("time_zone"), "{refused}");
 
     let created = reminders::create(
