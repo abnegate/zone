@@ -413,8 +413,10 @@ for (const width of [1280, 1024, 900, 390]) {
       await page.keyboard.press('Escape');
       await expect(page.getByTestId('chat-settings')).toHaveAttribute('aria-expanded', 'false');
       await page.getByTestId('chat-settings').click();
-      await expect(modelName).toHaveValue('');
+      await expect(providerSelect).toContainText('Anthropic');
+      await expect(modelName).toHaveCount(0);
 
+      await choose(page, providerSelect, 'OpenAI');
       await modelName.fill('my-deployment');
       await modelName.press('Enter');
       await expect

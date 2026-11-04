@@ -15,6 +15,7 @@ import {
   reasoningOptions,
   selectionModel,
   shortModelName,
+  withChoice,
 } from './providerOptions';
 
 const HTTP: ReasoningEffort[] = ['off', 'low', 'medium', 'high'];
@@ -136,6 +137,32 @@ describe('shortModelName', () => {
 
   it('keeps a name with nothing after its last slash', () => {
     expect(shortModelName('foo/')).toBe('foo/');
+  });
+});
+
+describe('withChoice', () => {
+  const listing = { default: codex, selected: null, providers: [codex, claude] };
+
+  it('selects the saved provider and model', () => {
+    const chosen = withChoice(listing, { provider: 'claude_code', provider_model: 'sonnet' });
+    expect(chosen.selected).toEqual({ ...claude, model: 'sonnet' });
+    expect(chosen.providers).toEqual(listing.providers);
+  });
+
+  it('returns to the default when nothing is saved', () => {
+    const selected = select(claude, { model: 'sonnet' });
+    expect(
+      withChoice({ ...listing, selected }, { provider: null, provider_model: null }).selected
+    ).toBeNull();
+  });
+
+  it('keeps the selection it can still describe when no offer lists the provider', () => {
+    const selected = select(claude, { model: 'sonnet' });
+    const unlisted = { ...listing, selected, providers: [codex] };
+    expect(
+      withChoice(unlisted, { provider: 'claude_code', provider_model: 'opus' }).selected
+    ).toEqual({ ...selected, model: 'opus' });
+    expect(withChoice(listing, { provider: 'openai', provider_model: 'gpt-4o' })).toEqual(listing);
   });
 });
 

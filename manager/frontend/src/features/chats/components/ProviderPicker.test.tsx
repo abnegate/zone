@@ -161,6 +161,64 @@ describe('ProviderPicker', () => {
     expect(onChoose).toHaveBeenCalledWith('openai', 'gpt-4o');
   });
 
+  it('backs out of a provider waiting on a name on Escape', () => {
+    const { onChoose } = renderPicker({
+      providers: [selfHosted, openai, claude],
+      selected: selection(claude, { model: 'sonnet' }),
+    });
+    chooseSelect('AI provider', 'OpenAI');
+    const field = screen.getByRole('textbox', { name: 'Provider model name' });
+    fireEvent.change(field, { target: { value: 'gp' } });
+
+    fireEvent.keyDown(field, { key: 'Escape' });
+
+    expect(onChoose).not.toHaveBeenCalled();
+    expect(screen.queryByRole('textbox', { name: 'Provider model name' })).toBeNull();
+    expect(screen.getByTestId('chat-provider')).toHaveTextContent('Claude Code');
+    expect(screen.getByTestId('chat-provider-model')).toHaveTextContent('Sonnet');
+  });
+
+  it('sends nothing when the provider the chat is on is picked back', () => {
+    const { onChoose } = renderPicker({
+      providers: [selfHosted, openai, claude],
+      selected: selection(claude, { model: 'sonnet' }),
+    });
+    chooseSelect('AI provider', 'OpenAI');
+
+    chooseSelect('AI provider', 'Claude Code');
+
+    expect(onChoose).not.toHaveBeenCalled();
+    expect(screen.getByTestId('chat-provider-model')).toHaveTextContent('Sonnet');
+  });
+
+  it('sends nothing when Default is picked back on a chat that follows it', () => {
+    const { onChoose } = renderPicker({ providers: [selfHosted, openai] });
+    chooseSelect('AI provider', 'OpenAI');
+
+    chooseSelect('AI provider', 'Default (Self-Hosted)');
+
+    expect(onChoose).not.toHaveBeenCalled();
+    expect(screen.queryByRole('textbox', { name: 'Provider model name' })).toBeNull();
+  });
+
+  it('takes a saved model that changed, and keeps a draft through a read that did not', () => {
+    const listing = (model: string) => ({
+      default: selfHosted,
+      selected: selection(openai, { model }),
+      providers: [selfHosted, openai],
+    });
+    const props = { modelName: 'auto', onChoose: async () => true, onModel: () => {} };
+    const { rerender } = render(<ProviderPicker providers={listing('gpt-4o')} {...props} />);
+    const field = screen.getByRole('textbox', { name: 'Provider model name' });
+    fireEvent.change(field, { target: { value: 'draft' } });
+
+    rerender(<ProviderPicker providers={listing('gpt-4o')} {...props} />);
+    expect(field).toHaveValue('draft');
+
+    rerender(<ProviderPicker providers={listing('gpt-5')} {...props} />);
+    expect(field).toHaveValue('gpt-5');
+  });
+
   it('sends nothing on Enter while a change is in flight', () => {
     const onChoose = mock(async (_provider: string | null, _model: string | null) => true);
     render(
@@ -213,7 +271,7 @@ describe('ProviderPicker', () => {
     expect(onChoose).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps the same field, and its focus, when a name is saved', async () => {
+  it('keeps the same field when a name is saved', async () => {
     const onChoose = mock(
       async (_provider: string | null, _model: string | null): Promise<boolean> => true
     );
@@ -387,7 +445,7 @@ describe('ProviderPicker', () => {
     expect(screen.getByTestId('chat-provider-model')).toBeDisabled();
   });
 
-  it('disables the model name field', () => {
+  it('makes the model name field read-only during a change, without the hint', () => {
     render(
       <ProviderPicker
         providers={{
@@ -406,5 +464,7 @@ describe('ProviderPicker', () => {
     expect(field).not.toBeDisabled();
     expect(field).toHaveAttribute('readonly');
     expect(field).toHaveAttribute('aria-busy', 'true');
+    fireEvent.change(field, { target: { value: 'other' } });
+    expect(screen.queryByText('Enter to save')).toBeNull();
   });
 });

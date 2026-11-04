@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import type { AiProvider } from '../../settings/workspace/types';
 import type { ChatProviders, ChatWithMessages } from '../types';
+import { withChoice } from '../utils/providerOptions';
 
 const LOAD_FAILED = 'Failed to load AI providers';
 
@@ -19,12 +20,12 @@ export function useChatProviders(chatId: string | null) {
   const request = useRef(0);
   const latestChatId = useRef(chatId);
 
-  const load = useCallback(async (id: string | null): Promise<void> => {
+  const load = useCallback(async (id: string | null): Promise<boolean> => {
     const current = ++request.current;
     if (!id) {
       setProviders(null);
       setLoading(false);
-      return;
+      return true;
     }
     setLoading(true);
     try {
@@ -33,9 +34,11 @@ export function useChatProviders(chatId: string | null) {
         setProviders(loaded);
         setError(null);
       }
+      return true;
     } catch (error) {
-      if (current !== request.current) return;
+      if (current !== request.current) return true;
       setError(error instanceof Error ? error.message : LOAD_FAILED);
+      return false;
     } finally {
       if (current === request.current) setLoading(false);
     }
@@ -48,13 +51,17 @@ export function useChatProviders(chatId: string | null) {
     void load(chatId);
   }, [chatId, load]);
 
-  const refresh = useCallback((): Promise<void> => load(latestChatId.current), [load]);
+  const refresh = useCallback(async (): Promise<void> => {
+    await load(latestChatId.current);
+  }, [load]);
 
   const choose = useCallback(
     async (provider: AiProvider | null, model: string | null = null): Promise<ChatWithMessages> => {
       if (!chatId) throw new Error('No chat selected');
       const chat = await chatsApi.setChatProvider(chatId, { provider, model });
-      if (latestChatId.current === chatId) await load(chatId);
+      if (latestChatId.current === chatId && !(await load(chatId))) {
+        setProviders((current) => current && withChoice(current, chat));
+      }
       return chat;
     },
     [chatId, load]

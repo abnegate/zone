@@ -199,6 +199,27 @@ describe('useChatProviders', () => {
     expect(result.current.providers).toEqual(following(claude));
   });
 
+  it('shows a saved choice when reading it back fails', async () => {
+    mockGetChatProviders.mockResolvedValueOnce(following(codex));
+    mockSetChatProvider.mockResolvedValueOnce({
+      id: 'chat-1',
+      provider: 'claude_code',
+      provider_model: 'sonnet',
+    });
+    const { result } = renderHook(() => useChatProviders('chat-1'));
+    await waitFor(() => {
+      expect(result.current.providers).not.toBeNull();
+    });
+    mockGetChatProviders.mockRejectedValueOnce(new Error('Failed to load AI providers: 502'));
+
+    await act(async () => {
+      await result.current.choose('claude_code', 'sonnet');
+    });
+
+    expect(result.current.error).toBe('Failed to load AI providers: 502');
+    expect(result.current.providers?.selected).toEqual({ ...claude, model: 'sonnet' });
+  });
+
   it('forgets a failed read when the chat changes', async () => {
     const next = deferred<ChatProviders>();
     mockGetChatProviders.mockRejectedValueOnce(new Error('Failed to load AI providers: 502'));

@@ -50,6 +50,19 @@ export function selectionModel(selection: ChatProviderSelection): string {
     : modelLabel(AUTO_MODEL);
 }
 
+/** `providers` with the provider a chat saved selected, for when it can't be read back. */
+export function withChoice(
+  providers: ChatProviders,
+  chat: Pick<Chat, 'provider' | 'provider_model'>
+): ChatProviders {
+  if (!chat.provider) return { ...providers, selected: null };
+  const offer =
+    providers.providers.find((candidate) => candidate.provider === chat.provider) ??
+    (providers.selected?.provider === chat.provider ? providers.selected : null);
+  if (!offer) return providers;
+  return { ...providers, selected: { ...offer, model: chat.provider_model ?? null } };
+}
+
 export function shortModelName(name: string): string {
   return name.slice(name.lastIndexOf('/') + 1) || name;
 }

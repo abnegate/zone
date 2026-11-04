@@ -26,6 +26,7 @@ interface ModelName {
   provider: string;
   value: string;
   onSubmit: (name: string) => void;
+  onCancel?: () => void;
 }
 
 export interface ProviderPickerProps {
@@ -51,8 +52,9 @@ export function ProviderPicker({
   };
 
   const handleProvider = (value: string) => {
+    setPending(null);
+    if (value === (selected?.provider ?? DEFAULT_PROVIDER)) return;
     if (value === DEFAULT_PROVIDER) {
-      setPending(null);
       onChoose(null, null);
       return;
     }
@@ -75,6 +77,7 @@ export function ProviderPicker({
         onSubmit: (name) => {
           void choosePending(pending, name);
         },
+        onCancel: () => setPending(null),
       };
     }
     if (!pending && selected && asksModelName(selected)) {
@@ -136,6 +139,7 @@ export function ProviderPicker({
           provider={named.provider}
           value={named.value}
           onSubmit={named.onSubmit}
+          onCancel={named.onCancel}
           busy={disabled}
         />
       )}

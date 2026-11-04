@@ -6,9 +6,16 @@ export interface ModelNameInputProps {
   value: string;
   busy?: boolean;
   onSubmit: (name: string) => void;
+  onCancel?: () => void;
 }
 
-export function ModelNameInput({ provider, value, busy = false, onSubmit }: ModelNameInputProps) {
+export function ModelNameInput({
+  provider,
+  value,
+  busy = false,
+  onSubmit,
+  onCancel,
+}: ModelNameInputProps) {
   const [name, setName] = useState(value);
   const trimmed = name.trim();
 
@@ -19,6 +26,7 @@ export function ModelNameInput({ provider, value, busy = false, onSubmit }: Mode
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Escape') {
       setName(value);
+      onCancel?.();
       return;
     }
     if (event.key !== 'Enter') return;
@@ -42,7 +50,7 @@ export function ModelNameInput({ provider, value, busy = false, onSubmit }: Mode
         onChange={(event) => setName(event.target.value)}
         onKeyDown={handleKeyDown}
       />
-      {trimmed && trimmed !== value && (
+      {!busy && trimmed && trimmed !== value && (
         <span className="chat-provider-model-hint">Enter to save</span>
       )}
     </label>

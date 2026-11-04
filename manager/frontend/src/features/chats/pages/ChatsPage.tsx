@@ -245,14 +245,6 @@ export default function ChatsPage() {
     refresh: refreshProviders,
   } = useChatProviders(selectedChatId);
   const [changingProvider, setChangingProvider] = useState(false);
-  const wasStreaming = useRef(streaming);
-
-  useEffect(() => {
-    if (wasStreaming.current === streaming) return;
-    wasStreaming.current = streaming;
-    void refreshProviders();
-  }, [streaming, refreshProviders]);
-
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -260,6 +252,22 @@ export default function ChatsPage() {
   // Only render a conversation that matches the current selection so a
   // previous chat never flashes in the main pane while the next one loads.
   const displayedChat = activeChat?.id === selectedChatId ? activeChat : null;
+  const chatOpen = displayedChat !== null;
+  const wasStreaming = useRef(streaming);
+  const latestSelectedChatId = useRef(selectedChatId);
+
+  // A chat change resets streaming before the new chat is shown, and loads its providers itself.
+  useEffect(() => {
+    if (wasStreaming.current === streaming) return;
+    wasStreaming.current = streaming;
+    if (chatOpen) void refreshProviders();
+  }, [streaming, chatOpen, refreshProviders]);
+
+  useEffect(() => {
+    latestSelectedChatId.current = selectedChatId;
+    setOperationError(null);
+  }, [selectedChatId]);
+
   const chatOffer = chatProviders ? effectiveOffer(chatProviders) : null;
   const agentChat = chatOffer !== null && isAgentOffer(chatOffer);
   const providerChosen = chatProviders
@@ -596,15 +604,22 @@ export default function ChatsPage() {
     model: string | null
   ): Promise<boolean> => {
     if (!isAuthenticated || !displayedChat) return false;
+    const chatId = displayedChat.id;
     const modelName = displayedChat.model_name;
     setOperationError(null);
     setChangingProvider(true);
     try {
       await chooseProvider(provider, model);
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Failed to change AI provider');
+      if (latestSelectedChatId.current === chatId) {
+        setOperationError(error instanceof Error ? error.message : 'Failed to change AI provider');
+      }
       setChangingProvider(false);
       return false;
+    }
+    if (latestSelectedChatId.current !== chatId) {
+      setChangingProvider(false);
+      return true;
     }
     try {
       const offer = offerFor(provider);
@@ -620,12 +635,19 @@ export default function ChatsPage() {
 
   const handleProviderModel = async (name: string) => {
     if (!isAuthenticated || !displayedChat || !chatProviders) return;
+    const chatId = displayedChat.id;
     setOperationError(null);
     setChangingProvider(true);
     try {
       await setModelNameFn(name);
     } catch (error) {
-      setOperationError(error instanceof Error ? error.message : 'Failed to change model');
+      if (latestSelectedChatId.current === chatId) {
+        setOperationError(error instanceof Error ? error.message : 'Failed to change model');
+      }
+      setChangingProvider(false);
+      return;
+    }
+    if (latestSelectedChatId.current !== chatId) {
       setChangingProvider(false);
       return;
     }
