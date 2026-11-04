@@ -9,6 +9,8 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::beneath::{self, Access};
 use super::denied::Denied;
@@ -165,6 +167,55 @@ fn steps(path: &Path) -> VecDeque<PathBuf> {
 ///
 /// `Path::is_dir` follows symlinks, so a link in the tree pointing outside it
 /// would otherwise be walked as if it were part of the tree.
+/// One walk of a directory tree: where it began, whose tree it is, and whether
+/// anybody still wants the answer.
+struct Walk<'a> {
+    base: &'a Path,
+    context: &'a ToolContext,
+    abandoned: &'a AtomicBool,
+}
+
+impl Walk<'_> {
+    fn abandoned(&self) -> bool {
+        self.abandoned.load(Ordering::Relaxed)
+    }
+}
+
+/// Tells a walk nobody is waiting for it any more.
+struct Abandon(Arc<AtomicBool>);
+
+impl Drop for Abandon {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Run `walk` over the tree at `base` on the blocking pool.
+///
+/// A host's projects take minutes to read. On a runtime worker that holds more
+/// than the worker: the task a call wakes just before it starts walking is the
+/// turn's own, and it waits in that worker's unstealable slot, so the reader
+/// sees nothing and Stop goes unread until the walk ends. A blocking thread
+/// cannot be cancelled, so a caller that gives up flags the walk instead.
+async fn walking<T: Send + 'static>(
+    context: &ToolContext,
+    base: PathBuf,
+    walk: impl FnOnce(&Walk<'_>) -> T + Send + 'static,
+) -> Result<T, ToolError> {
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let _abandon = Abandon(Arc::clone(&abandoned));
+    let context = context.clone();
+    tokio::task::spawn_blocking(move || {
+        walk(&Walk {
+            base: &base,
+            context: &context,
+            abandoned: &abandoned,
+        })
+    })
+    .await
+    .map_err(|error| ToolError::Execution(format!("The walk did not finish: {error}")))
+}
+
 fn descendable(path: &Path, context: &ToolContext) -> bool {
     path.is_dir() && confine(&resolve(path), context).is_ok()
 }
@@ -682,32 +733,31 @@ impl Tool for ListFilesTool {
             )));
         }
 
-        let mut files = Vec::new();
-        let mut total = 0;
-
         fn collect_files(
+            walk: &Walk<'_>,
             dir: &Path,
-            base: &Path,
             recursive: bool,
             pattern: &Option<String>,
             files: &mut Vec<String>,
             total: &mut usize,
-            context: &ToolContext,
         ) -> Result<(), ToolError> {
             let entries = fs::read_dir(dir)
                 .map_err(|e| ToolError::Execution(format!("Cannot read directory: {}", e)))?;
 
             for entry in entries {
+                if walk.abandoned() {
+                    return Ok(());
+                }
                 let entry =
                     entry.map_err(|e| ToolError::Execution(format!("Cannot read entry: {}", e)))?;
                 let path = entry.path();
-                let relative = path.strip_prefix(base).unwrap_or(&path);
+                let relative = path.strip_prefix(walk.base).unwrap_or(&path);
 
                 if path.is_dir() {
                     if !recursive {
                         push_listing(files, total, format!("{}/", relative.display()));
-                    } else if descendable(&path, context) {
-                        collect_files(&path, base, recursive, pattern, files, total, context)?;
+                    } else if descendable(&path, walk.context) {
+                        collect_files(walk, &path, recursive, pattern, files, total)?;
                     }
                 } else {
                     let name = relative.display().to_string();
@@ -733,15 +783,20 @@ impl Tool for ListFilesTool {
             Ok(())
         }
 
-        collect_files(
-            &full_path,
-            &full_path,
-            params.recursive,
-            &params.pattern,
-            &mut files,
-            &mut total,
-            context,
-        )?;
+        let (mut files, total) = walking(context, full_path, move |walk| {
+            let mut files = Vec::new();
+            let mut total = 0;
+            collect_files(
+                walk,
+                walk.base,
+                params.recursive,
+                &params.pattern,
+                &mut files,
+                &mut total,
+            )?;
+            Ok::<_, ToolError>((files, total))
+        })
+        .await??;
 
         files.sort();
 
@@ -829,18 +884,38 @@ impl Tool for SearchCodeTool {
             params.pattern.to_lowercase()
         };
 
-        let mut results = Vec::new();
-        search_dir(
-            &search_path,
-            &search_path,
-            &pattern,
+        search_walking(
+            pattern,
             params.case_sensitive,
-            &mut results,
+            search_path,
             max_results,
             context,
-        )?;
-        Ok(format_search_results(results, max_results))
+        )
+        .await
     }
+}
+
+async fn search_walking(
+    pattern: String,
+    case_sensitive: bool,
+    search_path: PathBuf,
+    max_results: usize,
+    context: &ToolContext,
+) -> Result<ToolResult, ToolError> {
+    let results = walking(context, search_path, move |walk| {
+        let mut results = Vec::new();
+        search_dir(
+            walk,
+            walk.base,
+            &pattern,
+            case_sensitive,
+            &mut results,
+            max_results,
+        )?;
+        Ok::<_, ToolError>(results)
+    })
+    .await??;
+    Ok(format_search_results(results, max_results))
 }
 
 fn format_search_results(results: Vec<String>, max_results: usize) -> ToolResult {
@@ -862,13 +937,12 @@ fn format_search_results(results: Vec<String>, max_results: usize) -> ToolResult
 }
 
 fn search_dir(
+    walk: &Walk<'_>,
     dir: &Path,
-    base: &Path,
     pattern: &str,
     case_sensitive: bool,
     results: &mut Vec<String>,
     max_results: usize,
-    context: &ToolContext,
 ) -> Result<(), ToolError> {
     if results.len() >= max_results {
         return Ok(());
@@ -880,7 +954,7 @@ fn search_dir(
     };
 
     for entry in entries {
-        if results.len() >= max_results {
+        if results.len() >= max_results || walk.abandoned() {
             break;
         }
 
@@ -901,7 +975,7 @@ fn search_dir(
         }
 
         if path.is_dir() {
-            if !descendable(&path, context) {
+            if !descendable(&path, walk.context) {
                 continue;
             }
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -918,15 +992,7 @@ fn search_dir(
                 continue;
             }
 
-            search_dir(
-                &path,
-                base,
-                pattern,
-                case_sensitive,
-                results,
-                max_results,
-                context,
-            )?;
+            search_dir(walk, &path, pattern, case_sensitive, results, max_results)?;
         } else if path.is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let code_exts = [
@@ -940,7 +1006,7 @@ fn search_dir(
                 continue;
             }
 
-            let Ok(mut file) = beneath::open(context, &path, Access::Read) else {
+            let Ok(mut file) = beneath::open(walk.context, &path, Access::Read) else {
                 continue;
             };
             let mut content = String::new();
@@ -948,7 +1014,7 @@ fn search_dir(
                 continue;
             }
 
-            let relative = path.strip_prefix(base).unwrap_or(&path);
+            let relative = path.strip_prefix(walk.base).unwrap_or(&path);
 
             for (line_num, line) in content.lines().enumerate() {
                 if results.len() >= max_results {
@@ -1019,6 +1085,7 @@ async fn search_ripgrep(
     command.arg("--").arg(&params.pattern).arg(search_path);
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::null());
+    command.kill_on_drop(true);
 
     let output = command.output().await.ok()?;
     // 0 = matches, 1 = no matches; anything else is a real failure.
@@ -1615,6 +1682,130 @@ mod tests {
         }
     }
 
+    fn walked(
+        root: &Path,
+        pattern: &str,
+        context: &ToolContext,
+        abandoned: &AtomicBool,
+    ) -> Vec<String> {
+        let walk = Walk {
+            base: root,
+            context,
+            abandoned,
+        };
+        let mut results = Vec::new();
+        search_dir(&walk, root, pattern, true, &mut results, SEARCH_MAX_RESULTS)
+            .expect("a walk of cwd");
+        results
+    }
+
+    /// Two links from each of `depth` levels to the next, which a walk that
+    /// follows links reads `2^depth` times over.
+    #[cfg(unix)]
+    fn fanned_out(root: &Path, depth: usize) {
+        for level in 0..depth {
+            let directory = root.join(level.to_string());
+            fs::create_dir(&directory).unwrap();
+            for link in ["a", "b"] {
+                symlinked(&directory, link, &root.join((level + 1).to_string()));
+            }
+        }
+        fs::create_dir(root.join(depth.to_string())).unwrap();
+    }
+
+    const FANNED_OUT_DEPTH: usize = 14;
+
+    /// A deadline shorter than any walk of the tree above. A walk that holds
+    /// its worker answers on its first poll, before this can ever fire.
+    const WALK_DEADLINE: Duration = Duration::from_millis(1);
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_search_walk_holds_no_worker_while_it_reads_the_tree() {
+        let dir = tempdir().unwrap();
+        fanned_out(dir.path(), FANNED_OUT_DEPTH);
+        let context = create_test_context(dir.path());
+        let root = context.cwd.clone();
+
+        let walk = search_walking(
+            "open sesame please".to_string(),
+            true,
+            root,
+            SEARCH_MAX_RESULTS,
+            &context,
+        );
+
+        assert!(
+            tokio::time::timeout(WALK_DEADLINE, walk).await.is_err(),
+            "the walk ran on the worker that polled it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_recursive_listing_holds_no_worker_while_it_reads_the_tree() {
+        let dir = tempdir().unwrap();
+        fanned_out(dir.path(), FANNED_OUT_DEPTH);
+        let context = create_test_context(dir.path());
+
+        let listing = ListFilesTool.execute(
+            serde_json::json!({"path": ".", "recursive": true}),
+            &context,
+        );
+
+        assert!(
+            tokio::time::timeout(WALK_DEADLINE, listing).await.is_err(),
+            "the listing ran on the worker that polled it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_walk_is_told_when_its_caller_gives_up() {
+        let dir = tempdir().unwrap();
+        let context = create_test_context(dir.path());
+        let (finished, told) = std::sync::mpsc::channel();
+
+        let walk = walking(&context, dir.path().to_path_buf(), move |walk| {
+            while !walk.abandoned() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            finished.send(()).unwrap();
+        });
+        let _ = tokio::time::timeout(WALK_DEADLINE, walk).await;
+
+        told.recv_timeout(Duration::from_secs(30))
+            .expect("the walk must stop once nobody is waiting for it");
+    }
+
+    #[test]
+    fn an_abandoned_walk_reads_no_further() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("own.rs"), "open sesame please\n").unwrap();
+        let context = create_test_context(dir.path());
+        let root = context.cwd.clone();
+
+        assert_eq!(
+            walked(
+                &root,
+                "open sesame please",
+                &context,
+                &AtomicBool::new(false)
+            )
+            .len(),
+            1,
+            "a walk nobody gave up on finds the match"
+        );
+        assert!(
+            walked(
+                &root,
+                "open sesame please",
+                &context,
+                &AtomicBool::new(true)
+            )
+            .is_empty()
+        );
+    }
+
     /// Driven against the walker rather than the tool: ripgrep does not follow
     /// symlinks without `-L`, so a tool-level assertion would hold with the
     /// guard gone on any host where `rg` is installed.
@@ -1629,17 +1820,12 @@ mod tests {
         let context = create_test_context(inside.path());
         let root = context.cwd.clone();
 
-        let mut results = Vec::new();
-        search_dir(
-            &root,
+        let results = walked(
             &root,
             "open sesame please",
-            true,
-            &mut results,
-            SEARCH_MAX_RESULTS,
             &context,
-        )
-        .expect("a walk of cwd");
+            &AtomicBool::new(false),
+        );
 
         let output = results.join("\n");
         assert!(output.contains("own.sh"), "{output}");
@@ -1663,17 +1849,12 @@ mod tests {
         let context = create_test_context(inside.path());
         let root = context.cwd.clone();
 
-        let mut results = Vec::new();
-        search_dir(
-            &root,
+        let results = walked(
             &root,
             "open sesame please",
-            true,
-            &mut results,
-            SEARCH_MAX_RESULTS,
             &context,
-        )
-        .expect("a walk of cwd");
+            &AtomicBool::new(false),
+        );
 
         let output = results.join("\n");
         assert!(output.contains("own.rs"), "{output}");
@@ -2426,16 +2607,7 @@ mod tests {
 
         let mut disclosed = Vec::new();
         for _ in 0..ATTEMPTS {
-            let mut results = Vec::new();
-            let _ = search_dir(
-                &context.cwd,
-                &context.cwd,
-                SECRET,
-                true,
-                &mut results,
-                SEARCH_MAX_RESULTS,
-                &context,
-            );
+            let results = walked(&context.cwd, SECRET, &context, &AtomicBool::new(false));
             if !results.is_empty() {
                 disclosed = results;
                 break;
@@ -2633,18 +2805,7 @@ mod tests {
         assert!(!searched.contains("auth.json"), "{searched}");
 
         let root = resolve(&shared.root);
-        let mut walked = Vec::new();
-        search_dir(
-            &root,
-            &root,
-            OTHER_LOGIN,
-            true,
-            &mut walked,
-            SEARCH_MAX_RESULTS,
-            &context,
-        )
-        .expect("a walk around the state");
-        let walked = walked.join("\n");
+        let walked = walked(&root, OTHER_LOGIN, &context, &AtomicBool::new(false)).join("\n");
         assert!(walked.contains("own.rs"), "{walked}");
         assert!(!walked.contains("auth.json"), "{walked}");
     }
