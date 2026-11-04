@@ -2847,20 +2847,20 @@ class StepInBackwardTests(unittest.TestCase):
         release.assert_not_called()
         self.assertEqual(state['exp_avg'].device, 'mps')
 
-    def test_only_adamw_on_metal_steps_in_backward_with_its_moments_on_the_host(self) -> None:
+    def test_only_an_adamw_fine_tune_on_metal_keeps_its_moments_on_the_host(self) -> None:
         cases = (
-            ('mps', train_sdxl.ADAMW_OPTIMIZER, True),
-            ('cpu', train_sdxl.ADAMW_OPTIMIZER, False),
-            ('cuda', train_sdxl.ADAMW_OPTIMIZER, False),
-            ('mps', train_sdxl.PRODIGY_OPTIMIZER, False),
-            ('cpu', train_sdxl.PRODIGY_OPTIMIZER, False),
-            ('cuda', train_sdxl.PRODIGY_OPTIMIZER, False),
+            ('mps', 'finetune', train_sdxl.ADAMW_OPTIMIZER, True),
+            ('mps', 'lora', train_sdxl.ADAMW_OPTIMIZER, False),
+            ('mps', 'pivotal', train_sdxl.ADAMW_OPTIMIZER, False),
+            ('cpu', 'finetune', train_sdxl.ADAMW_OPTIMIZER, False),
+            ('cuda', 'finetune', train_sdxl.ADAMW_OPTIMIZER, False),
+            ('mps', 'finetune', train_sdxl.PRODIGY_OPTIMIZER, False),
+            ('cuda', 'lora', train_sdxl.PRODIGY_OPTIMIZER, False),
         )
-        for kind, optimizer, expected in cases:
-            with self.subTest(kind=kind, optimizer=optimizer):
-                self.assertIs(
-                    train_sdxl.offloads_moments(self.make_device(kind), optimizer), expected
-                )
+        for kind, method, optimizer, expected in cases:
+            with self.subTest(kind=kind, method=method, optimizer=optimizer):
+                device = self.make_device(kind)
+                self.assertIs(train_sdxl.offloads_moments(device, method, optimizer), expected)
 
     def test_configured_methods_pick_the_expected_path(self) -> None:
         config = train_sdxl.load_config()
@@ -2873,9 +2873,8 @@ class StepInBackwardTests(unittest.TestCase):
         for kind, method, expected in cases:
             with self.subTest(kind=kind, method=method):
                 optimizer = train_sdxl.optimizer_kind(method, config)
-                self.assertIs(
-                    train_sdxl.offloads_moments(self.make_device(kind), optimizer), expected
-                )
+                device = self.make_device(kind)
+                self.assertIs(train_sdxl.offloads_moments(device, method, optimizer), expected)
 
 class MetalOffloadTests(unittest.TestCase):
     def device(self, kind: str) -> mock.Mock:

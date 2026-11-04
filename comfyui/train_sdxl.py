@@ -462,8 +462,12 @@ def make_optimizer(method: str, groups: list[dict[str, Any]], config: dict[str, 
     return torch.optim.AdamW(groups)
 
 
-def offloads_moments(device: Any, kind: str) -> bool:
-    return kind == ADAMW_OPTIMIZER and device_kind(device) == MPS_DEVICE
+def offloads_moments(device: Any, method: str, kind: str) -> bool:
+    return (
+        method == FINETUNE_METHOD
+        and kind == ADAMW_OPTIMIZER
+        and device_kind(device) == MPS_DEVICE
+    )
 
 
 def move_moments(state: dict[str, Any], device: Any) -> None:
@@ -491,14 +495,6 @@ def combine_losses(parts: list[Any]) -> Losses:
 
 
 class StepInBackward:
-    """Step AdamW one parameter at a time as backward finishes its gradient, then drop it.
-
-    The full gradient set is never resident. With offload, the moments live on the host and
-    visit the parameter's device only for its update, and every loss part after the first is
-    backpropagated first with its finished gradients stashed on the host, so autograd never
-    buffers them on the device while it waits for the first part.
-    """
-
     def __init__(self, optimizer: Any, enabled: bool, offload: bool = False) -> None:
         self.optimizer = optimizer
         self.enabled = enabled
@@ -2408,7 +2404,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     groups = unique_param_groups([group for group in groups if group['params']])
     optimizer = make_optimizer(method, groups, config)
     kind = optimizer_kind(method, config)
-    offload = offloads_moments(device, kind)
+    offload = offloads_moments(device, method, kind)
     print(f'optimizer={kind} offload_moments={offload}', flush=True)
     assert_metal_working_set(device, [unet, text_encoder, text_encoder_2], offload)
     pipeline.unet = unet

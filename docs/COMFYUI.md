@@ -539,13 +539,15 @@ already set), so an overcommit raises "MPS backend out of memory" instead of
 hanging macOS; do not raise or disable it. A Metal fine-tune refuses to start
 when `torch.mps.recommended_max_memory` is below the same 40 GiB floor CUDA
 uses, so it needs a 64 GB Mac. Once the model loads, every Metal job also
-checks its real working set (each trainable weight with its gradient and two
-optimizer moments, plus the frozen weights) and fails closed with both figures.
+checks a lower bound of its working set (each trainable weight with its
+gradient and two optimizer moments, plus the frozen weights, without
+activations) and fails closed with both figures.
 An out-of-memory crash is retried from the last snapshot; three in a row without
 a new snapshot fail the job, and a Metal one says to quit other GPU apps or
 use Runpod. On Metal an AdamW fine-tune steps each parameter as backward
-finishes its gradient and keeps the AdamW moments in host memory, which costs
-seconds a step but keeps it under the cap. CLIP-G outputs are encoded once and
+finishes its gradient and keeps the AdamW moments in host memory, even while
+resuming, which costs seconds a step but keeps it under the cap. The moments
+still use the same unified RAM, so the Mac must have about 20 GiB to spare. CLIP-G outputs are encoded once and
 the encoder waits on the host until previews.
 
 Before the worker marks a queued job `running` it creates the empty file
@@ -587,7 +589,7 @@ publishes into `loras/` itself, and every run it trains fails to publish.
 `COMFYUI_TRAIN_TIMEOUT_SECONDS` does not apply to the host worker. Person LoRA
 is hours; fine-tune is unbounded and resumes from snapshots. On Metal and CPU
 the rolling `latest.pt` is written at most once per `latest_interval_seconds`
-(600 in `comfyui/train_sdxl_config.json`), plus the first step of each run,
+(600 in `comfyui/train_sdxl_config.json`), plus the first step of a fresh run,
 every `checkpoint_every` snapshot and the final step, so a crash resumes up to
 one interval back; CUDA still writes it every step. Numbered snapshots are hard
 links of `latest.pt`.
