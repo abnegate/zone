@@ -411,6 +411,15 @@ pub async fn build(
         .flatten();
     let mut environment =
         Environment::here().with_directory(tools.working_directory().to_path_buf());
+    match crate::db::users::time_zone(state.db(), user).await {
+        Ok(Some(zone)) => environment = environment.with_time_zone(zone),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(
+            chat_id = %chat.id,
+            %error,
+            "Failed to read the person's time zone; stating the server's"
+        ),
+    }
     if let Some(effort) = effort {
         environment = environment.with_effort(effort);
     }

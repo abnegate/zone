@@ -775,6 +775,7 @@ mod tests {
                 rrule: rrule.map(str::to_string),
                 prompt: prompt.map(str::to_string),
                 timing_mode: mode.map(str::to_string),
+                time_zone: None,
             };
 
         for (rrule, prompt, mode, expected) in [
@@ -900,6 +901,7 @@ mod tests {
             rrule: Some("FREQ=DAILY".into()),
             prompt: Some("Check whether the release branch is green".into()),
             timing_mode: Some("condition_watch".into()),
+            time_zone: None,
         };
         let mut owed = Vec::new();
         for name in ["Release branch", "Dependency PRs"] {
@@ -985,6 +987,7 @@ mod tests {
                 rrule: Some("FREQ=DAILY".into()),
                 prompt: Some("Check whether the release branch is green".into()),
                 timing_mode: Some("condition_watch".into()),
+                time_zone: None,
             },
         )
         .await
@@ -1066,6 +1069,7 @@ mod tests {
                 rrule: Some("FREQ=DAILY".into()),
                 prompt: Some("Check whether the release branch is green".into()),
                 timing_mode: Some("condition_watch".into()),
+                time_zone: None,
             },
         )
         .await
@@ -1088,6 +1092,7 @@ mod tests {
                 rrule: Some("FREQ=DAILY".into()),
                 prompt: Some("Say what is on today".into()),
                 timing_mode: None,
+                time_zone: None,
             },
         )
         .await
@@ -1168,6 +1173,7 @@ mod tests {
             rrule: None,
             prompt: None,
             timing_mode: None,
+            time_zone: None,
         };
         let daily = reminders::Reminder {
             content: "Every morning".into(),
@@ -1178,6 +1184,7 @@ mod tests {
             // turn. The prompt path has its own test.
             prompt: None,
             timing_mode: Some("exact_schedule".into()),
+            time_zone: None,
         };
 
         let one_shot = reminders::create(&pool, workspace, user, chat_id, one_shot)
@@ -1277,6 +1284,7 @@ mod tests {
                 rrule: Some("FREQ=DAILY;COUNT=1".into()),
                 prompt: None,
                 timing_mode: None,
+                time_zone: None,
             },
         )
         .await
@@ -1338,6 +1346,7 @@ mod tests {
                     "Say what changed since yesterday. If nothing did, say nothing.".into(),
                 ),
                 timing_mode: None,
+                time_zone: None,
             },
         )
         .await
@@ -1419,6 +1428,7 @@ mod tests {
                 rrule: None,
                 prompt: Some("Say what changed overnight.".into()),
                 timing_mode: None,
+                time_zone: None,
             },
         )
         .await
@@ -1478,6 +1488,7 @@ mod tests {
                 rrule: Some("FREQ=HOURLY".into()),
                 prompt: Some("Say what changed in the last hour.".into()),
                 timing_mode: None,
+                time_zone: None,
             },
         )
         .await
@@ -1519,6 +1530,7 @@ mod tests {
                 rrule: Some("FREQ=DAILY".into()),
                 prompt: None,
                 timing_mode: None,
+                time_zone: None,
             },
         )
         .await
@@ -1575,6 +1587,7 @@ mod tests {
             rrule: None,
             prompt: None,
             timing_mode: None,
+            time_zone: None,
         };
         assert!(
             reminders::create(&pool, workspace, user, Uuid::new_v4(), reminder())

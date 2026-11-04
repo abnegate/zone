@@ -47,6 +47,7 @@ describe('auth API', () => {
             'Content-Type': 'application/json',
             'X-Zone-Device': expect.any(String),
             'X-Zone-Device-Platform': 'browser',
+            'X-Zone-Time-Zone': Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
           body: JSON.stringify({ email: 'test@test.com', password: 'password' }),
         })
@@ -206,6 +207,7 @@ describe('auth API', () => {
           headers: expect.objectContaining({
             'Content-Type': 'application/json',
             'X-Zone-Device': expect.any(String),
+            'X-Zone-Time-Zone': Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
           body: JSON.stringify({ refresh_token: 'old-refresh-token' }),
         })

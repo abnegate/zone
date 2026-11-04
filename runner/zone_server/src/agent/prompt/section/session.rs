@@ -19,6 +19,8 @@ const TIMESTAMP: &str = "%A %Y-%m-%d %H:%M:%S %:z";
 const CLOCK: &str = "Work out every date, time and duration the user asks about from this clock \
      and this zone. Do not assume UTC, and do not reuse a date from training.";
 
+const UNREPORTED: &str = ", this server's zone, which may not be the user's";
+
 const RUNTIME: &str = "You are on Zone's own runtime rather than the user's computer, so the \
      files, tools and software here are Zone's and none of them are on their machine.";
 
@@ -44,12 +46,16 @@ const NOISE: &str = "This block arrives with every turn and has no bearing on mo
 
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
     let environment = context.environment;
+    let zone = if environment.reported {
+        environment.timezone.clone()
+    } else {
+        format!("{}{UNREPORTED}", environment.timezone)
+    };
     let mut lines = vec![
         HEADING.to_string(),
         format!(
-            "{NOW}{} ({}). {CLOCK}",
-            environment.now.format(TIMESTAMP),
-            environment.timezone
+            "{NOW}{} ({zone}). {CLOCK}",
+            environment.now.format(TIMESTAMP)
         ),
         format!(
             "- Working directory {} on {}. {RUNTIME}",
@@ -126,6 +132,19 @@ mod tests {
         assert!(rendered.contains("Do not assume UTC"), "{rendered}");
         assert!(
             rendered.contains("from this clock and this zone"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_zone_the_user_never_reported_is_named_as_the_server_s() {
+        let mut environment = environment();
+        environment.reported = false;
+        let rendered = chat(&environment);
+
+        assert!(
+            rendered
+                .contains("(Pacific/Auckland, this server's zone, which may not be the user's)."),
             "{rendered}"
         );
     }
