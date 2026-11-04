@@ -824,6 +824,54 @@ describe('ChatsPage', () => {
       expect(screen.queryByText('[Waiting for your answer]')).not.toBeInTheDocument();
     });
 
+    it('leaves a question open when only a reminder turn follows it', async () => {
+      const asked = {
+        ...mockChatWithMessages.messages[1],
+        content: '[Waiting for your answer]',
+        metadata: {
+          tool_calls: [
+            {
+              id: 'call_q',
+              name: 'ask_user',
+              arguments: '{}',
+              success: true,
+              detail: 'Waiting for your answer…',
+              duration_ms: 0,
+              questions: [
+                {
+                  header: 'Which city?',
+                  question: 'Which city do you mean?',
+                  required: false,
+                  multi_select: false,
+                  choices: [{ label: 'Auckland', description: 'North Island' }],
+                },
+              ],
+            },
+          ],
+        },
+      };
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          asked,
+          {
+            id: 'msg-reminder',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: 'Check the deploy queue',
+            created_at: '2024-01-01T00:02:00Z',
+            metadata: { source: 'reminder' },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const card = await screen.findByTestId('question-card');
+      expect(card).not.toHaveClass('question-card--answered');
+    });
+
     it('shows thinking interleaved with the tool trace', async () => {
       mockClient.getChat.mockResolvedValueOnce({
         ...mockChatWithMessages,

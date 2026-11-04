@@ -66,6 +66,7 @@ import {
   asksModelName,
   attachmentMetadata,
   audioAttachments,
+  automated,
   buildMessageWithAttachments,
   CHAT_GROUP_OPTIONS,
   CHAT_SORT_OPTIONS,
@@ -307,7 +308,8 @@ export default function ChatsPage() {
   // user message after the assistant message carrying a question card is that
   // answer and settles the card. Nothing on the server records it.
   const lastUserIndex = (displayedChat?.messages ?? []).reduce(
-    (last, message, index) => (message.role === 'user' ? index : last),
+    (last, message, index) =>
+      message.role === 'user' && !automated(message.metadata) ? index : last,
     -1
   );
   const showAgent = displayedChat
