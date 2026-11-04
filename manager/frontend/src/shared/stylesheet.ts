@@ -1,4 +1,3 @@
-export const DEFERRED_STYLESHEET_ATTRIBUTE = 'data-deferred-stylesheet';
 export const FEATURE_STYLESHEET_ATTRIBUTE = 'data-feature-stylesheet';
 
 export const FONT_STYLESHEET =
@@ -9,11 +8,6 @@ function loaded(link: HTMLLinkElement): Promise<void> {
     link.addEventListener('load', () => resolve(), { once: true });
     link.addEventListener('error', () => resolve(), { once: true });
   });
-}
-
-export async function stylesheetsLoaded(root: ParentNode = document): Promise<void> {
-  const links = root.querySelectorAll<HTMLLinkElement>(`link[${DEFERRED_STYLESHEET_ATTRIBUTE}]`);
-  await Promise.all([...links].filter((link) => link.media === 'print').map(loaded));
 }
 
 let featureStylesheet: Promise<void> | null = null;

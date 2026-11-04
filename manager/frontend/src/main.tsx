@@ -1,10 +1,12 @@
 import React, { lazy, Suspense, useEffect, useState } from 'react';
-import ReactDOM from 'react-dom/client';
+import type { createRoot } from 'react-dom/client';
 import App from './App';
 import { hasStoredSession } from './api/session';
 import { firstRouteLoaded, preloadSignedInRoutes } from './routes';
 import { persistCurrentPath } from './shared/lastPath';
-import { loadFeatureStylesheet, loadFonts, stylesheetsLoaded } from './shared/stylesheet';
+import { setUpServiceWorker } from './shared/serviceWorker';
+import { loadFeatureStylesheet, loadFonts } from './shared/stylesheet';
+import { releaseShellOnRender, showStartupFailure } from './shell/release';
 
 const persist = () => persistCurrentPath();
 (window as Window & { __zonePersistCurrentPath?: () => void }).__zonePersistCurrentPath = persist;
@@ -15,17 +17,6 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-if (
-  'serviceWorker' in navigator &&
-  (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')
-) {
-  void navigator.serviceWorker.getRegistrations().then((registrations) => {
-    for (const registration of registrations) {
-      void registration.unregister();
-    }
-  });
-}
-
 const AFTER_FIRST_PAINT_DELAY_MILLISECONDS = 200;
 
 const Toaster = lazy(() => import('sonner').then(({ Toaster }) => ({ default: Toaster })));
@@ -34,11 +25,12 @@ function AfterFirstPaint() {
   const [painted, setPainted] = useState(false);
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (!signedIn) {
+      if (signedIn) {
+        void loadFeatureStylesheet();
+        void preloadSignedInRoutes();
+      } else {
         loadFonts();
       }
-      void loadFeatureStylesheet();
-      void preloadSignedInRoutes();
       setPainted(true);
     }, AFTER_FIRST_PAINT_DELAY_MILLISECONDS);
     return () => clearTimeout(timer);
@@ -55,12 +47,24 @@ if (signedIn) {
   loadFonts();
 }
 
-const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
-void Promise.all([stylesheetsLoaded(), firstRouteLoaded()]).then(() => {
-  root.render(
-    <React.StrictMode>
-      <App />
-      <AfterFirstPaint />
-    </React.StrictMode>
-  );
-});
+export function start(create: typeof createRoot): void {
+  const container = document.getElementById('root') as HTMLElement;
+  const root = create(container, {
+    onUncaughtError: (error) => {
+      showStartupFailure();
+      reportError(error);
+    },
+  });
+  void firstRouteLoaded().then(() => {
+    releaseShellOnRender(container);
+    root.render(
+      <React.StrictMode>
+        <App />
+        <AfterFirstPaint />
+      </React.StrictMode>
+    );
+    if (import.meta.env.VITE_DISABLE_PWA !== '1') {
+      setUpServiceWorker();
+    }
+  });
+}
