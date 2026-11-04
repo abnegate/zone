@@ -16,6 +16,7 @@ use crate::db::{chat_attached_sources, chats, message_embeddings, projects};
 use crate::error::ServerError;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
+use crate::services::chat::authorship;
 use crate::services::chat::session;
 use crate::services::model::Model;
 use crate::services::provider::Provider;
@@ -946,6 +947,10 @@ pub async fn create_message(
         && let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await
     {
         return e.into_response();
+    }
+
+    if let Some(key) = authorship::claimed(req.metadata.as_ref()) {
+        return ServerError::BadRequest(authorship::refusal(key)).into_response();
     }
 
     let mut session = match session::Session::acquire(

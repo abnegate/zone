@@ -68,6 +68,7 @@ mod mcp_task_tools;
 mod memory;
 mod memory_isolation;
 mod memory_store;
+mod message_authorship;
 mod message_embedding;
 mod migration_atomicity;
 mod model_namespaces;

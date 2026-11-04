@@ -46,6 +46,7 @@ use crate::db::{
 };
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
+use crate::services::chat::authorship;
 use crate::services::chat::handover::{self, Cause, Handover, Notice};
 use crate::services::chat::session::{self, Session};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
@@ -1325,6 +1326,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                         message: "Message too long".to_string(),
                                     };
                                     let _ = send_server(&sender, error_msg).await;
+                                    continue;
+                                }
+
+                                if let Some(key) = authorship::claimed(metadata.as_ref()) {
+                                    let refusal = ServerMessage::Error {
+                                        message: authorship::refusal(key),
+                                    };
+                                    let _ = send_server(&sender, refusal).await;
                                     continue;
                                 }
 
