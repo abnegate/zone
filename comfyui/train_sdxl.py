@@ -1986,6 +1986,46 @@ def restore_snapshot(
     token_id: int | None = None,
     sample_rng: random.Random | None = None,
     dropout_rng: random.Random | None = None,
+    host_moments: bool = False,
+) -> tuple[int, float, int | None]:
+    """Restore a snapshot; with host_moments the optimizer state never lands on the device.
+
+    load_state_dict casts every moment onto its parameter's device, so the trained modules wait
+    on the host while it runs and go back to the device afterwards as the same parameters.
+    """
+    if host_moments:
+        unet.to(HOST_DEVICE)
+        text_encoder.to(HOST_DEVICE)
+    try:
+        return load_snapshot(
+            path,
+            method=method,
+            device=HOST_DEVICE if host_moments else device,
+            optimizer=optimizer,
+            unet=unet,
+            text_encoder=text_encoder,
+            token_id=token_id,
+            sample_rng=sample_rng,
+            dropout_rng=dropout_rng,
+        )
+    finally:
+        if host_moments:
+            unet.to(device)
+            text_encoder.to(device)
+            release_device_cache(device)
+
+
+def load_snapshot(
+    path: Path,
+    *,
+    method: str,
+    device: Any,
+    optimizer: Any,
+    unet: Any,
+    text_encoder: Any,
+    token_id: int | None,
+    sample_rng: random.Random | None,
+    dropout_rng: random.Random | None,
 ) -> tuple[int, float, int | None]:
     import torch
 
@@ -2451,6 +2491,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
             token_id=token_id,
             sample_rng=sample_rng,
             dropout_rng=dropout_rng,
+            host_moments=offload,
         )
         resume_step = start_step
         start_step += 1

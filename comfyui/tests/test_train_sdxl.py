@@ -2004,7 +2004,7 @@ def snapshot_step(torch: Any, unet: Any, text_encoder: Any, optimizer: Any) -> f
 
 
 def save_and_restore(
-    torch: Any, directory: Path, device: Any
+    torch: Any, directory: Path, device: Any, host_moments: bool = False
 ) -> tuple[tuple[Any, Any, Any], tuple[Any, Any, Any], list[dict[str, Any]]]:
     saved = snapshot_modules(torch, 0)
     for module in saved[:2]:
@@ -2035,7 +2035,11 @@ def save_and_restore(
         loaded.append(payload)
         return payload
 
-    with mock.patch.object(torch, 'load', side_effect=recording_load):
+    peft = {'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
+    with (
+        mock.patch.dict(sys.modules, peft),
+        mock.patch.object(torch, 'load', side_effect=recording_load),
+    ):
         train_sdxl.restore_snapshot(
             path,
             method=train_sdxl.FINETUNE_METHOD,
@@ -2045,6 +2049,7 @@ def save_and_restore(
             text_encoder=restored[1],
             sample_rng=random.Random(5),
             dropout_rng=random.Random(6),
+            host_moments=host_moments,
         )
     return saved, restored, loaded
 
@@ -2145,6 +2150,87 @@ class SnapshotRestoreTests(unittest.TestCase):
             state = restored[2].state[actual]
             self.assertEqual(state['exp_avg'].device.type, 'mps')
             self.assertEqual(state['step'].device.type, 'cpu')
+
+    def test_a_metal_fine_tune_restores_its_moments_on_the_host(self) -> None:
+        torch = real_torch(self)
+        if not torch.backends.mps.is_available():
+            self.skipTest('Metal is not available')
+        device = torch.device('mps')
+        with tempfile.TemporaryDirectory() as directory:
+            saved, restored, _ = save_and_restore(torch, Path(directory), device, True)
+        for expected, actual in zip(
+            [*saved[0].parameters(), *saved[1].parameters()],
+            [*restored[0].parameters(), *restored[1].parameters()],
+            strict=True,
+        ):
+            self.assertEqual(actual.device.type, 'mps')
+            self.assertTrue(torch.equal(expected, actual))
+            state = restored[2].state[actual]
+            expected_state = saved[2].state[expected]
+            for key in train_sdxl.MOMENT_KEYS:
+                self.assertEqual(state[key].device.type, 'cpu', key)
+                self.assertTrue(torch.equal(state[key], expected_state[key].cpu()), key)
+
+    def test_host_moments_load_the_optimizer_while_the_modules_wait_on_the_host(self) -> None:
+        events: list[str] = []
+        unet = mock.Mock()
+        unet.to.side_effect = lambda device: events.append(f'unet:{device}')
+        text_encoder = mock.Mock()
+        text_encoder.to.side_effect = lambda device: events.append(f'text_encoder:{device}')
+        optimizer = mock.Mock(state={}, param_groups=[])
+        optimizer.load_state_dict.side_effect = lambda state: events.append('load_state_dict')
+        module = mock.MagicMock()
+        module.load.return_value = self.payload()
+        device = self.device('mps')
+        modules = {'torch': module, 'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(train_sdxl, 'release_device_cache') as release,
+        ):
+            train_sdxl.restore_snapshot(
+                Path('latest.pt'),
+                method='finetune',
+                device=device,
+                optimizer=optimizer,
+                unet=unet,
+                text_encoder=text_encoder,
+                host_moments=True,
+            )
+        self.assertEqual(
+            events,
+            [
+                'unet:cpu',
+                'text_encoder:cpu',
+                'load_state_dict',
+                f'unet:{device}',
+                f'text_encoder:{device}',
+            ],
+        )
+        release.assert_called_once_with(device)
+
+    def test_host_moments_return_the_modules_to_the_device_when_loading_fails(self) -> None:
+        unet = mock.Mock()
+        text_encoder = mock.Mock()
+        module = mock.MagicMock()
+        module.load.side_effect = [TypeError('mmap'), RuntimeError('corrupt snapshot')]
+        device = self.device('mps')
+        modules = {'torch': module, 'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(train_sdxl, 'release_device_cache'),
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'corrupt snapshot'):
+                train_sdxl.restore_snapshot(
+                    Path('latest.pt'),
+                    method='finetune',
+                    device=device,
+                    optimizer=mock.Mock(state={}, param_groups=[]),
+                    unet=unet,
+                    text_encoder=text_encoder,
+                    host_moments=True,
+                )
+        self.assertEqual(unet.to.call_args_list, [mock.call('cpu'), mock.call(device)])
+        self.assertEqual(text_encoder.to.call_args_list, [mock.call('cpu'), mock.call(device)])
 
     def test_resume_rewinds_the_job_step_to_the_restored_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
