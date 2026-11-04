@@ -824,37 +824,38 @@ describe('ChatsPage', () => {
       expect(screen.queryByText('[Waiting for your answer]')).not.toBeInTheDocument();
     });
 
+    const askedQuestion = {
+      ...mockChatWithMessages.messages[1],
+      content: '[Waiting for your answer]',
+      metadata: {
+        tool_calls: [
+          {
+            id: 'call_q',
+            name: 'ask_user',
+            arguments: '{}',
+            success: true,
+            detail: 'Waiting for your answer…',
+            duration_ms: 0,
+            questions: [
+              {
+                header: 'Which city?',
+                question: 'Which city do you mean?',
+                required: false,
+                multi_select: false,
+                choices: [{ label: 'Auckland', description: 'North Island' }],
+              },
+            ],
+          },
+        ],
+      },
+    };
+
     it('leaves a question open when only a reminder turn follows it', async () => {
-      const asked = {
-        ...mockChatWithMessages.messages[1],
-        content: '[Waiting for your answer]',
-        metadata: {
-          tool_calls: [
-            {
-              id: 'call_q',
-              name: 'ask_user',
-              arguments: '{}',
-              success: true,
-              detail: 'Waiting for your answer…',
-              duration_ms: 0,
-              questions: [
-                {
-                  header: 'Which city?',
-                  question: 'Which city do you mean?',
-                  required: false,
-                  multi_select: false,
-                  choices: [{ label: 'Auckland', description: 'North Island' }],
-                },
-              ],
-            },
-          ],
-        },
-      };
       mockClient.getChat.mockResolvedValueOnce({
         ...mockChatWithMessages,
         messages: [
           mockChatWithMessages.messages[0],
-          asked,
+          askedQuestion,
           {
             id: 'msg-reminder',
             chat_id: 'chat-1',
@@ -883,6 +884,37 @@ describe('ChatsPage', () => {
           true
         );
       });
+    });
+
+    it('settles a question once the reader types a reply after a reminder turn', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          askedQuestion,
+          {
+            id: 'msg-reminder',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: 'Check the deploy queue',
+            created_at: '2024-01-01T00:02:00Z',
+            metadata: { source: 'reminder' },
+          },
+          {
+            id: 'msg-typed',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: 'Auckland',
+            created_at: '2024-01-01T00:03:00Z',
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const card = await screen.findByTestId('question-card');
+      expect(card).toHaveClass('question-card--answered');
+      expect(within(card).getByRole('radio', { name: /Auckland/ })).toBeDisabled();
     });
 
     it('shows thinking interleaved with the tool trace', async () => {
