@@ -9,7 +9,7 @@ import {
   mock,
   spyOn,
 } from 'bun:test';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import { chooseMenuItem } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
@@ -870,6 +870,19 @@ describe('ChatsPage', () => {
 
       const card = await screen.findByTestId('question-card');
       expect(card).not.toHaveClass('question-card--answered');
+      const choice = within(card).getByRole('radio', { name: /Auckland/ });
+      expect(choice).toBeEnabled();
+      fireEvent.click(choice);
+      const submit = within(card).getByRole('button', { name: 'Send answer' });
+      await waitFor(() => expect(submit).toBeEnabled());
+      fireEvent.click(submit);
+
+      await waitFor(() => {
+        const sent = mockWsSend.mock.calls.map(([frame]) => JSON.parse(String(frame)));
+        expect(sent.some((frame) => frame.type === 'send' && /Auckland/.test(frame.content))).toBe(
+          true
+        );
+      });
     });
 
     it('shows thinking interleaved with the tool trace', async () => {
