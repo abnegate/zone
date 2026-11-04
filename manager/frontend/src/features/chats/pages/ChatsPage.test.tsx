@@ -3383,6 +3383,104 @@ describe('ChatsPage', () => {
       expect(screen.getByTestId('chat-provider')).toBeEnabled();
     });
 
+    const heldSave = () => {
+      let save = (_chat: ChatWithMessages) => {};
+      mockSetChatProvider.mockReturnValueOnce(
+        new Promise<ChatWithMessages>((resolve) => {
+          save = resolve;
+        })
+      );
+      return (chat: ChatWithMessages) => save(chat);
+    };
+
+    it('keeps a chat busy when an earlier change on another chat lands', async () => {
+      await openChatById();
+      const landOnChat1 = heldSave();
+      chooseSelectOption('chat-provider', 'Codex');
+      await switchToChat2();
+      heldSave();
+      chooseSelectOption('chat-provider', 'Codex');
+      await waitFor(() => expect(screen.getByTestId('chat-provider')).toBeDisabled());
+
+      await act(async () => {
+        landOnChat1({ ...mockChatWithMessages, provider: 'codex' });
+      });
+
+      expect(screen.getByTestId('chat-provider')).toBeDisabled();
+    });
+
+    it('still shows a chat as busy after another chat started a change', async () => {
+      await openChatById();
+      heldSave();
+      chooseSelectOption('chat-provider', 'Codex');
+      await switchToChat2();
+      heldSave();
+      chooseSelectOption('chat-provider', 'Codex');
+      await waitFor(() => expect(screen.getByTestId('chat-provider')).toBeDisabled());
+
+      fireEvent.click(screen.getAllByText('Chat 1')[0]);
+      await waitFor(() => expect(mockClient.getChat.mock.calls.at(-1)?.[0]).toBe('chat-1'));
+      await screen.findByTestId('chat-provider');
+
+      expect(screen.getByTestId('chat-provider')).toBeDisabled();
+    });
+
+    it('does not clear the error of a chat opened while a dropped card was read', async () => {
+      mockClient.getChat.mockImplementation(async (id: string) => ({
+        ...mockChatWithMessages,
+        id,
+        tools: true,
+        needs_character: true,
+      }));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      let read = (_text: string) => {};
+      const card = new File(['{}'], 'card.json', { type: 'application/json' });
+      card.text = () =>
+        new Promise<string>((resolve) => {
+          read = resolve;
+        });
+      fireEvent.drop(document.querySelector('.message-form') as Element, {
+        dataTransfer: { files: [card], types: ['Files'] },
+      });
+      await switchToChat2();
+      mockClient.updateChat.mockResolvedValue(mockChatWithMessages);
+      mockClient.updateChat.mockRejectedValueOnce(new Error('Failed on chat 2'));
+      fireEvent.click(await screen.findByTestId('agent-toggle'));
+      await screen.findByText('Failed on chat 2');
+
+      await act(async () => {
+        read(JSON.stringify({ name: 'Ada', description: 'A card' }));
+      });
+
+      expect(screen.getByText('Failed on chat 2')).toBeInTheDocument();
+    });
+
+    it('warns during a turn while reading the providers is still pending', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: false }));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      await waitFor(() =>
+        expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument()
+      );
+      mockGetChatProviders.mockReturnValue(new Promise(() => {}));
+
+      fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {
+        target: { value: 'Next turn' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+      await screen.findByTestId('agent-sandbox-toggle');
+      expect(screen.getByTestId('agent-permissions')).toHaveTextContent('Host tools');
+    });
+
     it('reads a chat opened during a turn only once', async () => {
       await openChatById();
       fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {

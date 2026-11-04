@@ -1,6 +1,8 @@
 import { type KeyboardEvent, useEffect, useState } from 'react';
 import { MODEL_NAME_PLACEHOLDER } from '../utils';
 
+const IME_KEY_CODE = 229;
+
 export interface ModelNameInputProps {
   provider: string;
   value: string;
@@ -24,6 +26,7 @@ export function ModelNameInput({
   }, [value]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === IME_KEY_CODE) return;
     if (event.key === 'Escape') {
       if (busy) return;
       setName(value);

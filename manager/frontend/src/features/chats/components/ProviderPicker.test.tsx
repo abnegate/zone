@@ -233,6 +233,22 @@ describe('ProviderPicker', () => {
     expect(onCancel).not.toHaveBeenCalled();
   });
 
+  it('ignores the keys that finish an IME composition', () => {
+    const onSubmit = mock();
+    const onCancel = mock();
+    render(<ModelNameInput provider="OpenAI" value="" onSubmit={onSubmit} onCancel={onCancel} />);
+    const field = screen.getByRole('textbox', { name: 'Provider model name' });
+    fireEvent.change(field, { target: { value: 'gpt' } });
+
+    fireEvent.keyDown(field, { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(field, { key: 'Enter', keyCode: 229 });
+    fireEvent.keyDown(field, { key: 'Escape', isComposing: true });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(field).toHaveValue('gpt');
+  });
+
   it('sends nothing on Enter while a change is in flight', () => {
     const onChoose = mock(async (_provider: string | null, _model: string | null) => true);
     render(

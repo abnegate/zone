@@ -241,12 +241,21 @@ export default function ChatsPage() {
   } = useChatSources(selectedChatId);
   const {
     providers: chatProviders,
+    loading: providersLoading,
     error: providersError,
     choose: chooseProvider,
     refresh: refreshProviders,
   } = useChatProviders(selectedChatId);
-  const [changingChat, setChangingChat] = useState<string | null>(null);
-  const changingProvider = changingChat !== null && changingChat === selectedChatId;
+  const [changingChats, setChangingChats] = useState<ReadonlySet<string>>(new Set());
+  const changingProvider = selectedChatId !== null && changingChats.has(selectedChatId);
+  const markChanging = (chatId: string, changing: boolean) => {
+    setChangingChats((current) => {
+      const next = new Set(current);
+      if (changing) next.add(chatId);
+      else next.delete(chatId);
+      return next;
+    });
+  };
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -268,6 +277,7 @@ export default function ChatsPage() {
   useEffect(() => {
     latestSelectedChatId.current = selectedChatId;
     setChatOperationError(null);
+    setOperationError(null);
   }, [selectedChatId]);
 
   const chatOffer = chatProviders ? effectiveOffer(chatProviders) : null;
@@ -357,7 +367,7 @@ export default function ChatsPage() {
   const chatSettingsSummary = [providerName, modelName, chatEffortName].filter(Boolean).join(' · ');
   const autoApproved = Boolean(displayedChat?.auto_approve);
   const sandboxed = displayedChat?.agent_sandboxed !== false;
-  const cliStale = Boolean(providersError) || changingProvider;
+  const cliStale = Boolean(providersError) || changingProvider || (streaming && providersLoading);
   const cli = cliStale && chatProviders?.cli === false ? undefined : chatProviders?.cli;
   const showSandbox = Boolean(
     displayedChat?.agent_enabled && (cli === undefined ? !sandboxed : cli)
@@ -623,7 +633,7 @@ export default function ChatsPage() {
     const chatId = displayedChat.id;
     const modelName = displayedChat.model_name;
     setChatOperationError(null);
-    setChangingChat(chatId);
+    markChanging(chatId, true);
     try {
       await chooseProvider(provider, model);
     } catch (error) {
@@ -631,7 +641,7 @@ export default function ChatsPage() {
         chatId,
         error instanceof Error ? error.message : 'Failed to change AI provider'
       );
-      setChangingChat(null);
+      markChanging(chatId, false);
       return false;
     }
     try {
@@ -641,7 +651,7 @@ export default function ChatsPage() {
       reportForChat(chatId, failure(PROVIDER_EFFORT_RESET_FAILED, error));
     } finally {
       if (latestSelectedChatId.current === chatId) await refreshChat();
-      setChangingChat(null);
+      markChanging(chatId, false);
     }
     return true;
   };
@@ -650,12 +660,12 @@ export default function ChatsPage() {
     if (!isAuthenticated || !displayedChat || !chatProviders) return;
     const chatId = displayedChat.id;
     setChatOperationError(null);
-    setChangingChat(chatId);
+    markChanging(chatId, true);
     try {
       await setModelNameFn(name);
     } catch (error) {
       reportForChat(chatId, error instanceof Error ? error.message : 'Failed to change model');
-      setChangingChat(null);
+      markChanging(chatId, false);
       return;
     }
     try {
@@ -668,7 +678,7 @@ export default function ChatsPage() {
           await Promise.all([refreshProviders(), refreshChat()]);
         }
       } finally {
-        setChangingChat(null);
+        markChanging(chatId, false);
       }
     }
   };
@@ -696,7 +706,7 @@ export default function ChatsPage() {
         try {
           const card = await parseCharacterFile(file);
           if (card) {
-            setChatOperationError(null);
+            if (latestSelectedChatId.current === chatId) setChatOperationError(null);
             await setCharacterFn(card);
             continue;
           }
