@@ -109,6 +109,8 @@ test.describe('chat row menu', () => {
     await expect.poll(() => calls.archived).toEqual(['chat-1']);
     expect(calls.opened).toEqual([]);
     await expect(page.locator('.chat-item.active')).toHaveCount(0);
+    await expect(row(page, 'Garden plans')).toHaveCount(0);
+    await expect(row(page, 'Changed')).toHaveCount(0);
 
     await row(page, 'Trip notes').locator('.chat-title').click();
     await expect(page.locator('.chat-item.active')).toHaveCount(1);

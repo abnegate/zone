@@ -439,6 +439,9 @@ function chooseSelectOption(testId: string, optionName: string) {
   fireEvent.click(screen.getByRole('option', { name: optionName }));
 }
 
+const selectedChatParam = (): string | null =>
+  new URLSearchParams(window.location.search).get('id');
+
 const renderChatsPage = () => {
   return render(
     <BrowserRouter>
@@ -1948,18 +1951,19 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      // Select the chat first
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
         expect(screen.getByText('Hello')).toBeInTheDocument();
       });
+      await waitFor(() => expect(selectedChatParam()).toBe('chat-1'));
 
       await chooseMenuItem('Actions for Chat 1', 'Archive');
 
       await waitFor(() => {
         expect(mockClient.archiveChat).toHaveBeenCalledWith('chat-1');
       });
+      await waitFor(() => expect(selectedChatParam()).toBeNull());
     });
   });
 
@@ -2093,22 +2097,22 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Chat 1')).toBeInTheDocument();
       });
 
-      // Select the chat
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
         expect(screen.getByText('Hello')).toBeInTheDocument();
       });
+      await waitFor(() => expect(selectedChatParam()).toBe('chat-1'));
 
       await chooseMenuItem('Actions for Chat 1', 'Delete');
 
-      // Click the Delete button in the modal using accessible query
       const deleteModalButtons = screen.getAllByRole('button', { name: 'Delete' });
       fireEvent.click(deleteModalButtons[deleteModalButtons.length - 1]);
 
       await waitFor(() => {
         expect(mockClient.deleteChat).toHaveBeenCalledWith('chat-1');
       });
+      await waitFor(() => expect(selectedChatParam()).toBeNull());
     });
   });
 
