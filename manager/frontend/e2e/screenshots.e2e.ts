@@ -11,7 +11,7 @@ const PNG_BASE64 =
 async function fontsLoaded(page: Page): Promise<void> {
   await page.waitForFunction(() =>
     Boolean(
-      document.querySelector<HTMLLinkElement>('link[href*="fonts.googleapis.com"]')?.sheet
+      document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][href*="fonts.googleapis.com"]')?.sheet
     )
   );
   await page.evaluate(async () => {
