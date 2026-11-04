@@ -252,6 +252,7 @@ export function useChat(
   const pendingUserIdRef = useRef<string | null>(null);
   const supersededPendingIdsRef = useRef<Set<string>>(new Set());
   const activeGenerationRef = useRef(false);
+  const sendInFlightRef = useRef(false);
   const titleCallback = useRef(onTitleUpdated);
   titleCallback.current = onTitleUpdated;
   const titles = useRef(new Map<string, { title: string; revision: number }>());
@@ -551,6 +552,7 @@ export function useChat(
       // ref inside the updater left the pending row and appended the saved one.
       const pendingId = pendingUserIdRef.current;
       pendingUserIdRef.current = null;
+      sendInFlightRef.current = false;
       if (pendingId) {
         supersededPendingIdsRef.current.add(pendingId);
       }
@@ -589,6 +591,7 @@ export function useChat(
 
   useEffect(() => {
     activeGenerationRef.current = false;
+    sendInFlightRef.current = false;
     pendingUserIdRef.current = null;
     supersededPendingIdsRef.current.clear();
     setStreaming(false);
@@ -920,12 +923,13 @@ export function useChat(
           assistantId = null;
           assistantContent = '';
           assistantMetadata = undefined;
-          if (automatedTurn && pendingUserIdRef.current !== null) {
+          if (automatedTurn && sendInFlightRef.current) {
             automatedTurn = false;
             break;
           }
           automatedTurn = false;
           activeGenerationRef.current = false;
+          sendInFlightRef.current = false;
           setStreaming(false);
           break;
         case 'cancelled': {
@@ -956,6 +960,7 @@ export function useChat(
           }
           setStatus(null);
           activeGenerationRef.current = false;
+          sendInFlightRef.current = false;
           setStreaming(false);
           break;
         }
@@ -968,6 +973,7 @@ export function useChat(
           setStatus(null);
           setError(payload.message);
           activeGenerationRef.current = false;
+          sendInFlightRef.current = false;
           setStreaming(false);
           break;
         default:
@@ -1079,6 +1085,7 @@ export function useChat(
         setError('Chat connection failed');
         setStatus(null);
         activeGenerationRef.current = false;
+        sendInFlightRef.current = false;
         setStreaming(false);
       };
 
@@ -1089,6 +1096,7 @@ export function useChat(
         contextEpoch.current += 1;
         setStatus(null);
         activeGenerationRef.current = false;
+        sendInFlightRef.current = false;
         setStreaming(false);
         if (refused) return;
         const delay =
@@ -1193,6 +1201,7 @@ export function useChat(
     const pendingId = pendingUserIdRef.current ?? `pending-${crypto.randomUUID()}`;
     pendingUserIdRef.current = pendingId;
     activeGenerationRef.current = true;
+    sendInFlightRef.current = true;
     contextEpoch.current += 1;
     upsertMessage(pendingId, 'user', request.content, request.metadata);
     setStreaming(true);
@@ -1207,6 +1216,7 @@ export function useChat(
     } catch (err) {
       pendingUserIdRef.current = null;
       activeGenerationRef.current = false;
+      sendInFlightRef.current = false;
       setChat((prev) =>
         prev ? { ...prev, messages: prev.messages.filter((m) => m.id !== pendingId) } : prev
       );
