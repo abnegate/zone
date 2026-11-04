@@ -717,6 +717,7 @@ class PreviewTests(unittest.TestCase):
                 self.unet = FakeModule()
                 self.text_encoder = FakeModule()
                 self.vae = mock.Mock()
+                self.text_encoder_2 = mock.Mock()
 
             def __call__(self, prompt: str, **kwargs: object) -> FakeResult:
                 captured.append({'prompt': prompt, **kwargs})
@@ -773,6 +774,7 @@ class PreviewTests(unittest.TestCase):
                 self.unet = FakeModule()
                 self.text_encoder = FakeModule()
                 self.vae = mock.Mock()
+                self.text_encoder_2 = mock.Mock()
 
             def __call__(self, prompt: str, **kwargs: object) -> FakeResult:
                 captured.append(kwargs)
@@ -2160,6 +2162,191 @@ class SnapshotRestoreTests(unittest.TestCase):
                     train_sdxl.train(models, job_dir, job, config)
             saved = json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
             self.assertEqual(saved['step'], 7)
+
+
+class FakeTokenizer:
+    model_max_length = 8
+    end_token = 99
+
+    def __init__(self, torch: Any) -> None:
+        self.torch = torch
+
+    def __call__(
+        self,
+        prompt: str,
+        padding: str,
+        max_length: int,
+        truncation: bool,
+        return_tensors: str,
+    ) -> Any:
+        body = [2 + ord(character) % 90 for character in prompt][: max_length - 2]
+        ids = [1, *body, self.end_token]
+        ids += [0] * (max_length - len(ids))
+        return mock.Mock(input_ids=self.torch.tensor([ids]))
+
+
+class PromptCacheTests(unittest.TestCase):
+    INSTANCE_CAPTIONS = ['ohwx person, studio', 'ohwx person, beach', 'ohwx person, studio']
+    CLASS_PROMPT = 'a photo of a person'
+    CLASS_CAPTIONS = ['a photo of a person, standing', 'a photo of a person, sitting']
+
+    def clip_models(self) -> tuple[Any, Any, Any]:
+        torch = real_torch(self)
+        from transformers import CLIPTextConfig
+        from transformers import CLIPTextModel
+        from transformers import CLIPTextModelWithProjection
+
+        torch.manual_seed(0)
+
+        def config(hidden: int) -> Any:
+            return CLIPTextConfig(
+                vocab_size=100,
+                hidden_size=hidden,
+                intermediate_size=hidden * 2,
+                num_hidden_layers=3,
+                num_attention_heads=2,
+                max_position_embeddings=FakeTokenizer.model_max_length,
+                projection_dim=6,
+                pad_token_id=0,
+                bos_token_id=1,
+                eos_token_id=FakeTokenizer.end_token,
+            )
+
+        text_encoder = CLIPTextModel(config(8))
+        text_encoder_2 = CLIPTextModelWithProjection(config(12)).eval()
+        text_encoder_2.requires_grad_(False)
+        return torch, text_encoder, text_encoder_2
+
+    def prompts(self) -> list[str]:
+        return train_sdxl.training_prompts(
+            self.INSTANCE_CAPTIONS, self.CLASS_PROMPT, self.CLASS_CAPTIONS
+        )
+
+    def live(
+        self, torch: Any, prompt: str, text_encoder: Any, text_encoder_2: Any
+    ) -> tuple[Any, Any]:
+        tokenizer = FakeTokenizer(torch)
+        ids = tokenizer(prompt, 'max_length', tokenizer.model_max_length, True, 'pt').input_ids
+        with torch.no_grad():
+            hidden_1 = text_encoder(ids, output_hidden_states=True).hidden_states[-2]
+            output_2 = text_encoder_2(ids, output_hidden_states=True)
+        return torch.cat([hidden_1, output_2.hidden_states[-2]], dim=-1), output_2.text_embeds
+
+    def test_cached_embeddings_equal_a_live_text_encoder_2_forward(self) -> None:
+        torch, text_encoder, text_encoder_2 = self.clip_models()
+        tokenizer = FakeTokenizer(torch)
+        secondary = train_sdxl.cache_secondary_embeddings(
+            self.prompts(), tokenizer, text_encoder_2, torch.device('cpu')
+        )
+        for train_text_encoder in (True, False):
+            for prompt in [*self.INSTANCE_CAPTIONS, self.CLASS_PROMPT, *self.CLASS_CAPTIONS]:
+                embeds, pooled = train_sdxl.encode_prompt(
+                    prompt,
+                    tokenizer,
+                    text_encoder,
+                    secondary,
+                    torch.device('cpu'),
+                    train_text_encoder,
+                )
+                expected_embeds, expected_pooled = self.live(
+                    torch, prompt, text_encoder, text_encoder_2
+                )
+                self.assertTrue(torch.equal(embeds, expected_embeds), prompt)
+                self.assertTrue(torch.equal(pooled, expected_pooled), prompt)
+                self.assertEqual(embeds.requires_grad, train_text_encoder)
+                self.assertFalse(pooled.requires_grad)
+
+    def test_lookup_hands_out_copies_so_the_cache_cannot_be_mutated(self) -> None:
+        torch, _, text_encoder_2 = self.clip_models()
+        secondary = train_sdxl.cache_secondary_embeddings(
+            [self.CLASS_PROMPT], FakeTokenizer(torch), text_encoder_2, torch.device('cpu')
+        )
+        hidden, pooled = secondary.lookup(self.CLASS_PROMPT, torch.device('cpu'))
+        expected_hidden, expected_pooled = hidden.clone(), pooled.clone()
+        hidden.add_(1.0)
+        pooled.add_(1.0)
+        again_hidden, again_pooled = secondary.lookup(self.CLASS_PROMPT, torch.device('cpu'))
+        self.assertTrue(torch.equal(again_hidden, expected_hidden))
+        self.assertTrue(torch.equal(again_pooled, expected_pooled))
+
+    def test_uncached_prompt_raises_instead_of_encoding_on_another_device(self) -> None:
+        cache = train_sdxl.PromptCache({})
+        with self.assertRaises(train_sdxl.UncachedPromptError) as raised:
+            cache.lookup('ohwx person, unseen', 'cpu')
+        self.assertIsInstance(raised.exception, KeyError)
+        self.assertEqual(raised.exception.prompt, 'ohwx person, unseen')
+        self.assertEqual(
+            str(raised.exception),
+            "no cached text_encoder_2 output for prompt 'ohwx person, unseen'",
+        )
+
+    def test_training_prompts_cover_every_caption_the_loop_can_request(self) -> None:
+        prompts = self.prompts()
+        self.assertEqual(
+            prompts,
+            ['ohwx person, studio', 'ohwx person, beach', self.CLASS_PROMPT, *self.CLASS_CAPTIONS],
+        )
+        sample_rng = random.Random(0)
+        dropout_rng = random.Random(1)
+        requested = set()
+        for step in range(1, 2001):
+            caption = self.INSTANCE_CAPTIONS[sample_rng.randrange(len(self.INSTANCE_CAPTIONS))]
+            requested.add(train_sdxl.drop_caption(caption, self.CLASS_PROMPT, 0.5, dropout_rng))
+            requested.add(self.CLASS_CAPTIONS[(step - 1) % len(self.CLASS_CAPTIONS)])
+        self.assertIn(self.CLASS_PROMPT, requested)
+        self.assertLessEqual(requested, set(prompts))
+
+    def test_text_encoder_2_leaves_the_device_after_caching(self) -> None:
+        torch = real_torch(self)
+        events: list[str] = []
+        text_encoder_2 = mock.Mock()
+
+        def forward(ids: Any, output_hidden_states: bool) -> Any:
+            events.append('forward')
+            hidden = torch.zeros(1, 8, 4)
+            return mock.Mock(hidden_states=(hidden, hidden, hidden), text_embeds=torch.ones(1, 4))
+
+        text_encoder_2.side_effect = forward
+        text_encoder_2.to.side_effect = lambda device: events.append(f'to:{device}')
+        device = torch.device('cpu')
+        with mock.patch.object(
+            train_sdxl,
+            'release_device_cache',
+            side_effect=lambda released: events.append(f'release:{released}'),
+        ):
+            cache = train_sdxl.cache_secondary_embeddings(
+                [self.CLASS_PROMPT, *self.INSTANCE_CAPTIONS],
+                FakeTokenizer(torch),
+                text_encoder_2,
+                device,
+            )
+        self.assertEqual(len(cache), 3)
+        self.assertEqual(events, ['forward'] * 3 + ['to:cpu', f'release:{device}'])
+        embedding = cache.embeddings[self.CLASS_PROMPT]
+        self.assertEqual(embedding.hidden.device.type, 'cpu')
+        self.assertEqual(embedding.pooled.device.type, 'cpu')
+
+    def render_previews(self, pipeline: Any) -> None:
+        real_torch(self)
+        with tempfile.TemporaryDirectory() as directory:
+            train_sdxl.render_previews(
+                pipeline, Path(directory), 10, 'ohwx', 'mps', {'preview_count': 1}
+            )
+
+    def test_previews_bring_text_encoder_2_to_the_device_and_back(self) -> None:
+        pipeline = mock.MagicMock()
+        self.render_previews(pipeline)
+        self.assertEqual(
+            pipeline.text_encoder_2.to.call_args_list, [mock.call('mps'), mock.call('cpu')]
+        )
+
+    def test_failed_previews_still_return_text_encoder_2_to_the_host(self) -> None:
+        pipeline = mock.MagicMock(side_effect=RuntimeError('out of memory'))
+        with self.assertRaises(RuntimeError):
+            self.render_previews(pipeline)
+        self.assertEqual(
+            pipeline.text_encoder_2.to.call_args_list, [mock.call('mps'), mock.call('cpu')]
+        )
 
 
 def import_in_clean_process(

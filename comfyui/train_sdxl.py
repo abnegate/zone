@@ -1389,15 +1389,95 @@ def release_device_cache(device: Any) -> None:
         torch.mps.empty_cache()
 
 
+class UncachedPromptError(KeyError):
+    def __init__(self, prompt: str) -> None:
+        super().__init__(f'no cached text_encoder_2 output for prompt {prompt!r}')
+        self.prompt = prompt
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
+@dataclass(frozen=True)
+class SecondaryEmbedding:
+    hidden: Any
+    pooled: Any
+
+
+@dataclass(frozen=True)
+class PromptCache:
+    embeddings: dict[str, SecondaryEmbedding]
+
+    def __len__(self) -> int:
+        return len(self.embeddings)
+
+    def lookup(self, prompt: str, device: Any) -> tuple[Any, Any]:
+        embedding = self.embeddings.get(prompt)
+        if embedding is None:
+            raise UncachedPromptError(prompt)
+        return embedding.hidden.to(device, copy=True), embedding.pooled.to(device, copy=True)
+
+
+def training_prompts(
+    instance_captions: list[str],
+    class_prompt: str,
+    class_captions: list[str],
+) -> list[str]:
+    return list(dict.fromkeys([*instance_captions, class_prompt, *class_captions]))
+
+
+def encode_secondary(
+    prompt: str,
+    tokenizer_2: Any,
+    text_encoder_2: Any,
+    device: Any,
+) -> tuple[Any, Any]:
+    import torch
+
+    tokens_2 = tokenizer_2(
+        prompt,
+        padding='max_length',
+        max_length=tokenizer_2.model_max_length,
+        truncation=True,
+        return_tensors='pt',
+    )
+    ids_2 = tokens_2.input_ids.to(device)
+    with torch.no_grad():
+        output_2 = text_encoder_2(ids_2, output_hidden_states=True)
+    pooled = getattr(output_2, 'text_embeds', None)
+    if pooled is None:
+        pooled = output_2[0]
+    return output_2.hidden_states[-2], pooled
+
+
+def cache_secondary_embeddings(
+    prompts: list[str],
+    tokenizer_2: Any,
+    text_encoder_2: Any,
+    device: Any,
+) -> PromptCache:
+    """Encode every prompt the loop can request once on the device, then park CLIP-G on the host.
+
+    CLIP-G is frozen and in eval mode, so its output depends only on the prompt and draws no
+    random numbers; an uncached prompt raises because a host forward differs bitwise from Metal.
+    """
+    embeddings: dict[str, SecondaryEmbedding] = {}
+    for prompt in dict.fromkeys(prompts):
+        hidden, pooled = encode_secondary(prompt, tokenizer_2, text_encoder_2, device)
+        embeddings[prompt] = SecondaryEmbedding(hidden.detach().cpu(), pooled.detach().cpu())
+    text_encoder_2.to(HOST_DEVICE)
+    release_device_cache(device)
+    return PromptCache(embeddings)
+
+
 def encode_prompt(
     prompt: str,
     tokenizer: Any,
-    tokenizer_2: Any,
     text_encoder: Any,
-    text_encoder_2: Any,
+    secondary: PromptCache,
     device: Any,
     train_text_encoder: bool,
-):
+) -> tuple[Any, Any]:
     import torch
 
     tokens = tokenizer(
@@ -1407,27 +1487,14 @@ def encode_prompt(
         truncation=True,
         return_tensors='pt',
     )
-    tokens_2 = tokenizer_2(
-        prompt,
-        padding='max_length',
-        max_length=tokenizer_2.model_max_length,
-        truncation=True,
-        return_tensors='pt',
-    )
     ids = tokens.input_ids.to(device)
-    ids_2 = tokens_2.input_ids.to(device)
     if train_text_encoder:
         output_1 = text_encoder(ids, output_hidden_states=True)
     else:
         with torch.no_grad():
             output_1 = text_encoder(ids, output_hidden_states=True)
-    with torch.no_grad():
-        output_2 = text_encoder_2(ids_2, output_hidden_states=True)
     hidden_1 = output_1.hidden_states[-2]
-    hidden_2 = output_2.hidden_states[-2]
-    pooled = getattr(output_2, 'text_embeds', None)
-    if pooled is None:
-        pooled = output_2[0]
+    hidden_2, pooled = secondary.lookup(prompt, device)
     return torch.cat([hidden_1, hidden_2], dim=-1), pooled
 
 
@@ -1974,6 +2041,7 @@ def render_previews(
     if hasattr(pipeline, 'text_encoder') and pipeline.text_encoder is not None:
         pipeline.text_encoder.eval()
     pipeline.vae.to(device)
+    pipeline.text_encoder_2.to(device)
     try:
         with torch.inference_mode():
             for index, (seed, prompt) in enumerate(specs):
@@ -1990,7 +2058,8 @@ def render_previews(
                 image.save(Path(job_dir) / relative)
                 paths.append(relative)
     finally:
-        pipeline.vae.to('cpu')
+        pipeline.vae.to(HOST_DEVICE)
+        pipeline.text_encoder_2.to(HOST_DEVICE)
         if was_training:
             pipeline.unet.train()
             if hasattr(pipeline, 'text_encoder') and pipeline.text_encoder is not None:
@@ -2207,8 +2276,19 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         encoded_class.append(load_or_encode_latents(vae, path, device) + (caption, None))
         encoded += 1
         progress.emit('encoding', phase_step=encoded, phase_total=encode_total)
-    vae.to('cpu')
+    vae.to(HOST_DEVICE)
     release_device_cache(device)
+    secondary = cache_secondary_embeddings(
+        training_prompts(
+            [frame['caption'] for frame in frames],
+            class_prompt,
+            [caption for _, caption in class_pairs_list],
+        ),
+        tokenizer_2,
+        text_encoder_2,
+        device,
+    )
+    print(f'cached text_encoder_2 outputs for {len(secondary)} prompts', flush=True)
 
     every = int(config.get('checkpoint_every') or 0)
     keep = int(config.get('keep_snapshots') or 2)
@@ -2265,9 +2345,8 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         prompt_embeds, pooled = encode_prompt(
             caption,
             tokenizer,
-            tokenizer_2,
             text_encoder,
-            text_encoder_2,
+            secondary,
             device,
             te_trainable,
         )
@@ -2293,9 +2372,8 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
             class_embeds, class_pooled = encode_prompt(
                 class_caption,
                 tokenizer,
-                tokenizer_2,
                 text_encoder,
-                text_encoder_2,
+                secondary,
                 device,
                 te_trainable,
             )
