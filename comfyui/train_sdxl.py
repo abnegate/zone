@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import gc
 import json
 import os
 import random
@@ -61,6 +62,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 WATCH_INTERVAL = 2
+TRANSIENT_ATTEMPT_LIMIT = 3
+TRANSIENT_ATTEMPTS_KEY = 'transient_attempts'
+METAL_OUT_OF_MEMORY = 'MPS backend out of memory'
 DEFAULT_HF_BASE = 'John6666/lustify-sdxl-nsfw-checkpoint-ggwp-v7-sdxl'
 DEFAULT_CHECKPOINT = 'lustifySDXLNSFW_ggwpV7.safetensors'
 CONFIG_PATH = Path(__file__).with_name('train_sdxl_config.json')
@@ -863,6 +867,33 @@ def mark_failed(job_dir: Path, job: dict[str, Any], error: BaseException | str) 
     return job
 
 
+def transient_failure(attempts: int, error: BaseException) -> str:
+    if METAL_OUT_OF_MEMORY in str(error):
+        return (
+            f'Metal ran out of memory on {attempts} attempts in a row without saving a new '
+            'snapshot. The trainer caps Metal at its recommended working set so an overcommit '
+            'fails instead of hanging macOS; do not raise or disable '
+            f'{METAL_HIGH_WATERMARK_VARIABLE}. Quit other GPU apps such as ComfyUI or Ollama, '
+            f'or train on Runpod. Last error: {error}'
+        )
+    return (
+        f'ran out of memory on {attempts} attempts in a row without saving a new snapshot; '
+        f'last error: {error}'
+    )
+
+
+def record_transient_crash(
+    job_dir: Path, job: dict[str, Any], error: BaseException
+) -> dict[str, Any]:
+    attempts = int(job.get(TRANSIENT_ATTEMPTS_KEY) or 0) + 1
+    job[TRANSIENT_ATTEMPTS_KEY] = attempts
+    if attempts >= TRANSIENT_ATTEMPT_LIMIT:
+        return mark_failed(job_dir, job, transient_failure(attempts, error))
+    job['pid'] = None
+    write_job(job_dir, job)
+    return job
+
+
 def mark_succeeded(job_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
     job['status'] = 'succeeded'
     job['error'] = None
@@ -1062,11 +1093,30 @@ def process_job(
             train(models_dir, job_dir, job, config)
         succeed(models_dir, job_dir, job, sidecar_payload(job))
     except Exception as error:
-        if not is_transient_crash(error):
+        if is_transient_crash(error):
+            record_transient_crash(job_dir, job, error)
+        else:
             mark_failed(job_dir, job, error)
         raise
     finally:
         wait_for_latest_save()
+
+
+def run_job(models_dir: Path, job_dir: Path, config: dict[str, Any], stub: bool) -> bool:
+    try:
+        print(f'processing {job_dir}', flush=True)
+        process_job(models_dir, job_dir, config, stub)
+        print(f'finished {job_dir}', flush=True)
+        return True
+    except Exception:
+        traceback.print_exc()
+        return False
+
+
+def release_memory() -> None:
+    gc.collect()
+    if 'torch' in sys.modules:
+        release_device_cache(select_device())
 
 
 def watch(models_dir: Path, config: dict[str, Any], once: bool, stub: bool) -> int:
@@ -1077,16 +1127,14 @@ def watch(models_dir: Path, config: dict[str, Any], once: bool, stub: bool) -> i
                 return 0
             time.sleep(WATCH_INTERVAL)
             continue
-        try:
-            print(f'processing {job_dir}', flush=True)
-            process_job(models_dir, job_dir, config, stub)
-            print(f'finished {job_dir}', flush=True)
-        except Exception:
-            traceback.print_exc()
+        if run_job(models_dir, job_dir, config, stub):
             if once:
-                return 1
+                return 0
+            continue
+        release_memory()
         if once:
-            return 0
+            return 1
+        time.sleep(WATCH_INTERVAL)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1330,7 +1378,7 @@ def load_or_encode_latents(vae: Any, path: Path, device: Any):
 def release_device_cache(device: Any) -> None:
     import torch
 
-    if getattr(device, 'type', None) == 'mps' and hasattr(torch, 'mps'):
+    if device_kind(device) == MPS_DEVICE and hasattr(torch, 'mps'):
         torch.mps.empty_cache()
 
 
@@ -1842,11 +1890,12 @@ def persist_training_step(
         'sample_rng': sample_rng,
         'dropout_rng': dropout_rng,
     }
-    if method == FINETUNE_METHOD and device_kind(device) == 'cuda' and not numbered:
+    if method == FINETUNE_METHOD and device_kind(device) == CUDA_DEVICE and not numbered:
         start_latest_save(latest, **snapshot)
     else:
         wait_for_latest_save()
         save_snapshot(latest, **snapshot)
+    job[TRANSIENT_ATTEMPTS_KEY] = 0
     job['step'] = step
     job['total'] = total
     write_job(job_dir, job)

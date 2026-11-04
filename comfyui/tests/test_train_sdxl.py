@@ -1616,6 +1616,160 @@ class RunpodDispatchTests(unittest.TestCase):
         normalize.assert_not_called()
 
 
+def queued_finetune(models: Path) -> Path:
+    job_dir = models / '.zone-train' / str(uuid.uuid4())
+    job_dir.mkdir(parents=True)
+    write_dataset(job_dir)
+    train_sdxl.write_job(job_dir, queued_job(method='finetune'))
+    return job_dir
+
+
+def read_job(job_dir: Path) -> dict[str, Any]:
+    return json.loads((job_dir / 'job.json').read_text(encoding='utf-8'))
+
+
+class TransientCrashTests(unittest.TestCase):
+    def test_a_transient_crash_requeues_the_job_for_the_running_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = queued_finetune(models)
+            with mock.patch.object(train_sdxl, 'train', side_effect=MemoryError('mps')):
+                with self.assertRaises(MemoryError):
+                    train_sdxl.process_job(models, job_dir, train_sdxl.load_config(), stub=False)
+            job = read_job(job_dir)
+            self.assertEqual(job['status'], 'running')
+            self.assertIsNone(job['pid'])
+            self.assertEqual(train_sdxl.find_job(models), job_dir)
+
+    def test_watch_releases_memory_and_backs_off_after_a_failed_job(self) -> None:
+        manager = mock.Mock()
+        manager.find_job.side_effect = [Path('job'), KeyboardInterrupt]
+        manager.process_job.side_effect = MemoryError('mps')
+        with (
+            mock.patch.object(train_sdxl, 'find_job', manager.find_job),
+            mock.patch.object(train_sdxl, 'process_job', manager.process_job),
+            mock.patch.object(train_sdxl, 'release_memory', manager.release_memory),
+            mock.patch.object(train_sdxl.time, 'sleep', manager.sleep),
+            mock.patch.object(train_sdxl.traceback, 'print_exc'),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                train_sdxl.watch(Path('models'), {}, once=False, stub=False)
+        self.assertEqual(
+            [name for name, _, _ in manager.mock_calls],
+            ['find_job', 'process_job', 'release_memory', 'sleep', 'find_job'],
+        )
+        manager.sleep.assert_called_once_with(train_sdxl.WATCH_INTERVAL)
+
+    def test_watch_keeps_memory_after_a_finished_job(self) -> None:
+        with (
+            mock.patch.object(train_sdxl, 'find_job', return_value=Path('job')),
+            mock.patch.object(train_sdxl, 'process_job'),
+            mock.patch.object(train_sdxl, 'release_memory') as release,
+        ):
+            self.assertEqual(train_sdxl.watch(Path('models'), {}, once=True, stub=False), 0)
+        release.assert_not_called()
+
+    def test_release_memory_collects_and_empties_the_training_device_cache(self) -> None:
+        device = mock.Mock()
+        with (
+            mock.patch.dict(sys.modules, {'torch': mock.MagicMock()}),
+            mock.patch.object(train_sdxl.gc, 'collect') as collect,
+            mock.patch.object(train_sdxl, 'select_device', return_value=device),
+            mock.patch.object(train_sdxl, 'release_device_cache') as release,
+        ):
+            train_sdxl.release_memory()
+        collect.assert_called_once_with()
+        release.assert_called_once_with(device)
+
+    def test_release_memory_skips_the_device_when_torch_never_loaded(self) -> None:
+        with (
+            mock.patch.dict(sys.modules),
+            mock.patch.object(train_sdxl.gc, 'collect') as collect,
+            mock.patch.object(train_sdxl, 'select_device') as select,
+        ):
+            sys.modules.pop('torch', None)
+            train_sdxl.release_memory()
+        collect.assert_called_once_with()
+        select.assert_not_called()
+
+    def fail_repeatedly(self, error: BaseException) -> tuple[dict[str, Any], int, int]:
+        with tempfile.TemporaryDirectory() as directory:
+            models = Path(directory)
+            job_dir = queued_finetune(models)
+            config = train_sdxl.load_config()
+            with (
+                mock.patch.object(train_sdxl, 'train', side_effect=error) as train,
+                mock.patch.object(train_sdxl, 'release_memory') as release,
+                mock.patch.object(train_sdxl.traceback, 'print_exc'),
+            ):
+                for attempt in range(1, train_sdxl.TRANSIENT_ATTEMPT_LIMIT):
+                    self.assertEqual(train_sdxl.watch(models, config, once=True, stub=False), 1)
+                    job = read_job(job_dir)
+                    self.assertEqual(job['status'], 'running')
+                    self.assertEqual(job[train_sdxl.TRANSIENT_ATTEMPTS_KEY], attempt)
+                self.assertEqual(train_sdxl.watch(models, config, once=True, stub=False), 1)
+                self.assertEqual(train_sdxl.watch(models, config, once=True, stub=False), 0)
+            self.assertIsNone(train_sdxl.find_job(models))
+            return read_job(job_dir), train.call_count, release.call_count
+
+    def test_recurring_out_of_memory_fails_the_job_at_the_attempt_limit(self) -> None:
+        job, trained, released = self.fail_repeatedly(MemoryError('host'))
+        self.assertEqual(job['status'], 'failed')
+        self.assertIsNone(job['pid'])
+        self.assertEqual(job[train_sdxl.TRANSIENT_ATTEMPTS_KEY], train_sdxl.TRANSIENT_ATTEMPT_LIMIT)
+        self.assertIn(
+            f'ran out of memory on {train_sdxl.TRANSIENT_ATTEMPT_LIMIT} attempts', job['error']
+        )
+        self.assertIn('host', job['error'])
+        self.assertEqual(trained, train_sdxl.TRANSIENT_ATTEMPT_LIMIT)
+        self.assertEqual(released, train_sdxl.TRANSIENT_ATTEMPT_LIMIT)
+
+    def test_a_job_the_metal_cap_keeps_stopping_fails_with_how_to_fix_it(self) -> None:
+        error = RuntimeError(
+            'MPS backend out of memory (MPS allocated: 51.80 GiB, max allowed: 51.84 GiB). '
+            'Use PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0 to disable upper limit'
+        )
+        job, _, _ = self.fail_repeatedly(error)
+        self.assertEqual(job['status'], 'failed')
+        self.assertTrue(job['error'].startswith('Metal ran out of memory on 3 attempts'))
+        self.assertIn('do not raise or disable PYTORCH_MPS_HIGH_WATERMARK_RATIO', job['error'])
+        self.assertIn('Runpod', job['error'])
+        self.assertIn('max allowed: 51.84 GiB', job['error'])
+
+    def test_saving_latest_resets_the_transient_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            job_dir = Path(directory)
+            checkpoint_dir = job_dir / 'checkpoints'
+            checkpoint_dir.mkdir()
+            job = queued_job(method='finetune', extra={train_sdxl.TRANSIENT_ATTEMPTS_KEY: 2})
+            with mock.patch.object(train_sdxl, 'save_snapshot') as save:
+                train_sdxl.persist_training_step(
+                    checkpoint_dir,
+                    job_dir,
+                    job,
+                    method='finetune',
+                    step=1,
+                    total=10,
+                    loss=0.5,
+                    best_loss=0.5,
+                    best_step=1,
+                    optimizer=object(),
+                    unet=object(),
+                    text_encoder=object(),
+                    token_id=None,
+                    sample_rng=random.Random(0),
+                    dropout_rng=random.Random(1),
+                    every=250,
+                    keep=2,
+                    pipeline=object(),
+                    device='mps',
+                    config={'preview_count': 0},
+                    progress=train_sdxl.Progress(job_dir, 'finetune', 10),
+                )
+            save.assert_called_once()
+            self.assertEqual(read_job(job_dir)[train_sdxl.TRANSIENT_ATTEMPTS_KEY], 0)
+
+
 def real_torch(test: unittest.TestCase) -> Any:
     try:
         import torch
