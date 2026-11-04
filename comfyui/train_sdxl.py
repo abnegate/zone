@@ -1006,7 +1006,11 @@ def copy_snapshot(source: Path, destination: Path) -> None:
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + '.tmp')
-    shutil.copy2(source, temporary)
+    temporary.unlink(missing_ok=True)
+    try:
+        os.link(source, temporary)
+    except OSError:
+        shutil.copy2(source, temporary)
     os.replace(temporary, destination)
 
 

@@ -1546,6 +1546,64 @@ class CrashResumeTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), b'snapshot')
             self.assertFalse((path / 'step-000001.pt.tmp').exists())
 
+    def test_copy_snapshot_hard_links_the_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            source = path / 'latest.pt'
+            destination = path / 'step-000250.pt'
+            source.write_bytes(b'snapshot')
+            (path / 'step-000250.pt.tmp').write_bytes(b'stale')
+            train_sdxl.copy_snapshot(source, destination)
+            self.assertEqual(destination.stat().st_ino, source.stat().st_ino)
+            self.assertEqual(destination.read_bytes(), b'snapshot')
+            self.assertFalse((path / 'step-000250.pt.tmp').exists())
+
+    def test_a_linked_snapshot_keeps_its_step_when_latest_is_saved_again(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            source = path / 'latest.pt'
+            destination = path / 'step-000250.pt'
+            optimizer = mock.Mock()
+            optimizer.state_dict.return_value = {}
+            snapshot = {
+                'method': 'lora',
+                'loss': 0.5,
+                'best_loss': 0.5,
+                'best_step': 1,
+                'optimizer': optimizer,
+                'unet': object(),
+                'text_encoder': object(),
+            }
+
+            def write_step(payload: dict[str, Any], target: Path) -> None:
+                Path(target).write_bytes(str(payload['step']).encode())
+
+            torch = mock.MagicMock()
+            torch.save.side_effect = write_step
+            modules = {'torch': torch, 'peft': mock.MagicMock(), 'peft.utils': mock.MagicMock()}
+            with mock.patch.dict(sys.modules, modules):
+                train_sdxl.save_snapshot(source, step=250, **snapshot)
+                train_sdxl.copy_snapshot(source, destination)
+                train_sdxl.save_snapshot(source, step=251, **snapshot)
+            self.assertEqual(destination.read_bytes(), b'250')
+            self.assertEqual(source.read_bytes(), b'251')
+            self.assertNotEqual(destination.stat().st_ino, source.stat().st_ino)
+
+    def test_copy_snapshot_copies_when_hard_links_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            source = path / 'latest.pt'
+            destination = path / 'step-000250.pt'
+            source.write_bytes(b'snapshot')
+            with mock.patch.object(
+                train_sdxl.os, 'link', side_effect=OSError('cross-device link')
+            ) as link:
+                train_sdxl.copy_snapshot(source, destination)
+            link.assert_called_once()
+            self.assertEqual(destination.read_bytes(), b'snapshot')
+            self.assertNotEqual(destination.stat().st_ino, source.stat().st_ino)
+            self.assertFalse((path / 'step-000250.pt.tmp').exists())
+
 
 class RunpodDispatchTests(unittest.TestCase):
     def _dispatch(self, extra: dict, stub: bool = True):
