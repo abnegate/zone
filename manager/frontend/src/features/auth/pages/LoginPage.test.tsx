@@ -6,7 +6,7 @@ import { LAST_PATH_KEY, persistLastPath } from '../../../shared/lastPath';
 
 const mockUseAuth = mock();
 
-mock.module('../hooks', () => ({
+mock.module('../context', () => ({
   useAuth: mockUseAuth,
 }));
 

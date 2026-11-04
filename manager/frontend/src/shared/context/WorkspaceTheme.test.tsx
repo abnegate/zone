@@ -34,6 +34,12 @@ describe('WorkspaceTheme synchronization', () => {
       </ThemeProvider>
     );
   }
+  async function answer(identifier: string, value: Configuration | null) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve));
+      requests.get(identifier)?.(value);
+    });
+  }
   beforeEach(() => {
     localStorage.clear();
     localStorage.setItem('manager_theme', 'light');
@@ -57,9 +63,9 @@ describe('WorkspaceTheme synchronization', () => {
     expect(context.workspaceThemeLoading).toBe(true);
     workspace = 'b';
     application.rerender(<Application />);
-    await act(async () => requests.get('b')?.(saved('b', '#0f0')));
+    await answer('b', saved('b', '#0f0'));
     expect(document.documentElement.style.getPropertyValue('--ui-accent')).toBe('#00ff00');
-    await act(async () => requests.get('a')?.(saved('a', '#f00')));
+    await answer('a', saved('a', '#f00'));
     expect(context.workspaceTheme?.workspace_id).toBe('b');
     authenticated = false;
     application.rerender(<Application />);
@@ -70,19 +76,19 @@ describe('WorkspaceTheme synchronization', () => {
   it('does not overwrite a saved theme with an earlier load', async () => {
     render(<Application />);
     act(() => context.setWorkspaceTheme(saved('a', '#00f')));
-    await act(async () => requests.get('a')?.(saved('a', '#f00')));
+    await answer('a', saved('a', '#f00'));
     expect(document.documentElement.style.getPropertyValue('--ui-accent')).toBe('#0000ff');
     expect(context.workspaceThemeLoading).toBe(false);
   });
 
   it('clears previews and saved overrides when switching workspaces', async () => {
     const application = render(<Application />);
-    await act(async () => requests.get('a')?.(saved('a', '#f00')));
+    await answer('a', saved('a', '#f00'));
     act(() => context.previewWorkspaceTheme(saved('a', '#00f')));
     workspace = 'b';
     application.rerender(<Application />);
     expect(document.documentElement.style.getPropertyValue('--ui-accent')).toBe('');
-    await act(async () => requests.get('b')?.(null));
+    await answer('b', null);
     expect(context.workspaceTheme).toBeNull();
     expect(context.workspaceThemeLoading).toBe(false);
   });
@@ -90,7 +96,7 @@ describe('WorkspaceTheme synchronization', () => {
     const application = render(<Application />);
     authenticated = false;
     application.rerender(<Application />);
-    await act(async () => requests.get('a')?.(saved('a', '#f00')));
+    await answer('a', saved('a', '#f00'));
     expect(context.workspaceTheme).toBeNull();
     expect(context.workspaceThemeLoading).toBe(false);
     expect(document.documentElement.style.getPropertyValue('--ui-accent')).toBe('');

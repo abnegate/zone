@@ -1,6 +1,4 @@
 import type { AuthResponse, LoginRequest, RegisterRequest } from '../types';
-import { parse } from '../validation';
-import { AuthResponseSchema } from '../validation/schemas';
 import { deviceHeaders } from './device';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -19,6 +17,14 @@ async function refused(response: Response, fallback: string): Promise<never> {
     throw new AuthRequestError(message, error.code);
   }
   throw new Error(message);
+}
+
+async function authResponse(data: unknown): Promise<AuthResponse> {
+  const [{ parse }, { AuthResponseSchema }] = await Promise.all([
+    import('../validation'),
+    import('../features/auth/schemas'),
+  ]);
+  return parse(AuthResponseSchema, data);
 }
 
 export class AuthRequestError extends Error {
@@ -43,7 +49,7 @@ export async function login(request: LoginRequest): Promise<AuthResponse> {
   }
 
   const data = await response.json();
-  return parse(AuthResponseSchema, data);
+  return authResponse(data);
 }
 
 export async function register(request: RegisterRequest): Promise<AuthResponse> {
@@ -58,7 +64,7 @@ export async function register(request: RegisterRequest): Promise<AuthResponse> 
   }
 
   const data = await response.json();
-  return parse(AuthResponseSchema, data);
+  return authResponse(data);
 }
 
 /// A refresh that failed. `status` distinguishes a rejected credential from a
@@ -97,7 +103,7 @@ export async function refreshToken(token: string): Promise<AuthResponse> {
   }
 
   const data = await response.json();
-  return parse(AuthResponseSchema, data);
+  return authResponse(data);
 }
 
 export async function logout(token: string): Promise<void> {

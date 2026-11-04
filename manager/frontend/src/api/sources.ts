@@ -18,11 +18,12 @@ import type {
 } from '../features/sources/types';
 import { parse } from '../validation';
 import { deviceHeaders } from './device';
+import { session } from './session';
 
 export const API_BASE = import.meta.env.VITE_API_URL || '';
 
 class SourcesApi {
-  private getAccessToken: (() => string | null) | null = null;
+  private getAccessToken: () => string | null = () => session.getAccessToken();
 
   setGetAccessToken(fn: () => string | null) {
     this.getAccessToken = fn;

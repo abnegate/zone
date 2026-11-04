@@ -111,6 +111,7 @@ import { deviceHeaders } from './device';
 import { knowledgeApi } from './knowledge';
 import { modelsApi } from './models';
 import { projectsApi } from './projects';
+import { session } from './session';
 import { sourcesApi } from './sources';
 import { tasksApi } from './tasks';
 
@@ -119,24 +120,12 @@ import { tasksApi } from './tasks';
 export const API_BASE = import.meta.env.VITE_API_URL || '';
 
 class Client {
-  private accessToken: string | null = null;
-
   setAccessToken(token: string | null) {
-    this.accessToken = token;
-    // Update chatsApi with token getter
-    chatsApi.setGetAccessToken(() => this.accessToken);
-    // Update projectsApi with token getter
-    projectsApi.setGetAccessToken(() => this.accessToken);
-    // Update tasksApi with token getter
-    tasksApi.setGetAccessToken(() => this.accessToken);
-    // Update sourcesApi with token getter
-    sourcesApi.setGetAccessToken(() => this.accessToken);
-    // Update knowledgeApi with token getter
-    knowledgeApi.setGetAccessToken(() => this.accessToken);
+    session.setAccessToken(token);
   }
 
   getAccessToken(): string | null {
-    return this.accessToken;
+    return session.getAccessToken();
   }
 
   getHeaders(): HeadersInit {
@@ -144,8 +133,9 @@ class Client {
       'Content-Type': 'application/json',
       ...deviceHeaders(),
     };
-    if (this.accessToken) {
-      headers.Authorization = `Bearer ${this.accessToken}`;
+    const token = session.getAccessToken();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
     }
     return headers;
   }

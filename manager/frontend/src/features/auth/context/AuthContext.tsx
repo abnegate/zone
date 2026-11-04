@@ -11,8 +11,7 @@ import {
 } from 'react';
 import * as authApi from '../../../api/auth';
 import { RefreshError } from '../../../api/auth';
-import { chatsApi } from '../../../api/chats';
-import { client } from '../../../api/client';
+import { session } from '../../../api/session';
 import type { AuthResponse, JwtPayload, LoginRequest, RegisterRequest, User } from '../types';
 
 interface AuthState {
@@ -38,7 +37,7 @@ interface AuthContextType extends AuthState {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 type AuthApi = Pick<typeof authApi, 'login' | 'register' | 'refreshToken' | 'logout'>;
-type ClientApi = Pick<typeof client, 'setAccessToken'>;
+type ClientApi = Pick<typeof session, 'setAccessToken'>;
 type StorageApi = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 // Retry window after a refresh that failed for a reason other than the server
@@ -85,7 +84,7 @@ export function AuthProvider({
   storageOverride?: StorageApi;
 }) {
   const auth = authApiOverride ?? authApi;
-  const apiClient = clientOverride ?? client;
+  const apiClient = clientOverride ?? session;
   const storage = storageOverride ?? localStorage;
   const [state, setState] = useState<AuthState>(() => {
     const accessToken = storage.getItem(ACCESS_TOKEN_KEY);
@@ -249,9 +248,9 @@ export function AuthProvider({
   }, [apiClient, auth, handleAuthResponse, handleLogout, scheduleRefresh, storage]);
 
   useLayoutEffect(() => {
-    chatsApi.setEnsureAccessToken(() => ensureFresh());
+    session.setEnsureAccessToken(() => ensureFresh());
     return () => {
-      chatsApi.setEnsureAccessToken(null);
+      session.setEnsureAccessToken(null);
     };
   }, [ensureFresh]);
 

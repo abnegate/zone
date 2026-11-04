@@ -2,10 +2,7 @@ import { Button, Input } from '@zone/ui';
 import type React from 'react';
 import { type FormEvent, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { client } from '../../../api/client';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
-import { getErrors } from '../../../validation';
-import { ForgotPasswordSchema } from '../schemas';
 import './AuthPage.css';
 
 export default function ForgotPasswordPage() {
@@ -18,6 +15,10 @@ export default function ForgotPasswordPage() {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     const formData = { email: email.trim() };
+    const [{ getErrors }, { ForgotPasswordSchema }] = await Promise.all([
+      import('../../../validation'),
+      import('../schemas'),
+    ]);
     const errors = getErrors(ForgotPasswordSchema, formData);
 
     if (Object.keys(errors).length > 0) {
@@ -30,6 +31,7 @@ export default function ForgotPasswordPage() {
     setError('');
 
     try {
+      const { client } = await import('../../../api/client');
       await client.forgotPassword(email.trim());
       setSubmitted(true);
     } catch (err) {

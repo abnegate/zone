@@ -28,24 +28,17 @@ import { parse } from '../validation';
 import { ApiError } from './ApiError';
 import { API_BASE } from './client';
 import { deviceHeaders } from './device';
+import { session } from './session';
 
 class ChatsApi {
-  private getAccessToken: () => string | null = () => null;
-  private ensureAccessTokenFn: (() => Promise<string | null>) | null = null;
+  private getAccessToken: () => string | null = () => session.getAccessToken();
 
   setGetAccessToken(fn: () => string | null) {
     this.getAccessToken = fn;
   }
 
-  setEnsureAccessToken(fn: (() => Promise<string | null>) | null) {
-    this.ensureAccessTokenFn = fn;
-  }
-
-  async ensureAccessToken(): Promise<string | null> {
-    if (this.ensureAccessTokenFn) {
-      return this.ensureAccessTokenFn();
-    }
-    return this.getAccessToken();
+  ensureAccessToken(): Promise<string | null> {
+    return session.ensureAccessToken();
   }
 
   private getHeaders(): HeadersInit {

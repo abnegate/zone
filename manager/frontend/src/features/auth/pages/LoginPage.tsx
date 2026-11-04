@@ -1,17 +1,24 @@
 import './AuthPage.css';
-import { zodResolver } from '@hookform/resolvers/zod';
 import { Button, Input } from '@zone/ui';
 import { useEffect } from 'react';
-import { useForm } from 'react-hook-form';
+import { type Resolver, useForm } from 'react-hook-form';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import type { z } from 'zod';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
 import { type PathLike, pathAfterAuth } from '../../../shared/lastPath';
-import { useAuth } from '../hooks';
-import { LoginRequestSchema } from '../schemas';
+import { useAuth } from '../context';
+import type { LoginRequestSchema } from '../schemas';
 
 type LoginForm = z.infer<typeof LoginRequestSchema>;
+
+const resolver: Resolver<LoginForm> = async (...args) => {
+  const [{ zodResolver }, { LoginRequestSchema }] = await Promise.all([
+    import('@hookform/resolvers/zod'),
+    import('../schemas'),
+  ]);
+  return zodResolver(LoginRequestSchema)(...args);
+};
 
 function fromLocation(state: unknown): PathLike | null {
   if (!state || typeof state !== 'object' || !('from' in state)) {
@@ -36,7 +43,7 @@ export default function LoginPage() {
     formState: { errors, isSubmitting },
     setError,
   } = useForm<LoginForm>({
-    resolver: zodResolver(LoginRequestSchema),
+    resolver,
     defaultValues: {
       email: '',
       password: '',

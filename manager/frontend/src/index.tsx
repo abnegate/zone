@@ -10,5 +10,5 @@ reloadOnStaleChunk();
 if (document.hidden) {
   boot();
 } else {
-  requestAnimationFrame(() => setTimeout(boot));
+  requestAnimationFrame(() => requestAnimationFrame(boot));
 }

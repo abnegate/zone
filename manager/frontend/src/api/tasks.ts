@@ -18,6 +18,7 @@ import type {
 import { parse } from '../validation';
 import { API_BASE } from './client';
 import { deviceHeaders } from './device';
+import { session } from './session';
 
 // Helper to parse error responses
 async function parseErrorResponse(response: Response): Promise<{ message?: string }> {
@@ -30,7 +31,7 @@ async function parseErrorResponse(response: Response): Promise<{ message?: strin
 }
 
 class TasksApi {
-  private getAccessToken: (() => string | null) | null = null;
+  private getAccessToken: () => string | null = () => session.getAccessToken();
 
   setGetAccessToken(fn: () => string | null): void {
     this.getAccessToken = fn;
