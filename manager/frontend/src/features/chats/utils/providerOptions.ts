@@ -13,6 +13,8 @@ import { AUTO_MODEL, modelLabel } from './modelOptions';
 
 export const DEFAULT_PROVIDER = 'default';
 
+export const DEFAULT_PROVIDER_LABEL = 'Default';
+
 export const MODEL_PLACEHOLDER = 'Choose a model';
 
 export const MODEL_NAME_PLACEHOLDER = 'Type a model name';
@@ -41,12 +43,15 @@ export function asksModelName(offer: ChatProviderOffer): boolean {
   return offer.requires_model && offer.models.length === 0;
 }
 
-export function selectionLabel(selection: ChatProviderSelection): string {
-  const model = selection.model
+export function selectionModel(selection: ChatProviderSelection): string {
+  return selection.model
     ? (modelChoices(selection).find((choice) => choice.name === selection.model)?.label ??
-      selection.model)
+        selection.model)
     : modelLabel(AUTO_MODEL);
-  return `${selection.label} · ${model}`;
+}
+
+export function shortModelName(name: string): string {
+  return name.slice(name.lastIndexOf('/') + 1);
 }
 
 export function effortsFor(

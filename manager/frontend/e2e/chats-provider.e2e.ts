@@ -141,6 +141,7 @@ async function mockChats(page: Page): Promise<Captured> {
       ? { ...offerOf(entry.provider), model: entry.provider_model ?? null }
       : null,
     providers: choosable,
+    agent: entry.provider === 'claude_code' || entry.provider === 'codex' ? entry.provider : null,
   });
   const withMessages = (entry: Chat) => ({
     ...entry,
@@ -271,13 +272,22 @@ for (const width of [1280, 1024, 900, 390]) {
       const openChat = async (id: string, title: string) => {
         await page.goto(`/chats?id=${id}`);
         await expect(page.getByRole('heading', { name: title })).toBeVisible();
+        await page.getByTestId('chat-settings').click();
         await expect(page.getByTestId('chat-provider')).toBeVisible();
       };
       const providerSelect = page.getByTestId('chat-provider');
       const modelSelect = page.getByTestId('chat-provider-model');
       const reasoningSelect = page.getByTestId('reasoning-effort');
+      const permissions = page.getByTestId('agent-permissions');
+      const sandbox = page.getByTestId('agent-sandbox-toggle');
 
       await openChat('chat-default', 'Release notes draft');
+      await permissions.click();
+      await expect(page.getByTestId('auto-approve-toggle')).toBeVisible();
+      await expect(sandbox).toHaveCount(0);
+      await shoot('default-permissions');
+      await page.keyboard.press('Escape');
+      await page.getByTestId('chat-settings').click();
       await expect(providerSelect).toHaveText('ProviderDefault');
       await expect(providerSelect).toHaveAttribute('title', /\(Self-Hosted\)/);
       await expect(modelSelect).toHaveCount(0);
@@ -299,7 +309,14 @@ for (const width of [1280, 1024, 900, 390]) {
         .toEqual([{ provider: 'claude_code', model: null }]);
       await expect(providerSelect).toContainText('Claude Code');
       await expect(modelSelect).toContainText('Automatic');
-      await expect(page.locator('.chat-model')).toHaveText('Claude Code · Automatic');
+      await expect(page.locator('.chat-settings-provider')).toHaveText('Claude Code');
+      await expect(page.locator('.chat-model')).toHaveText('Automatic');
+      await permissions.click();
+      await expect(sandbox).toBeVisible();
+      await expect(sandbox).toHaveAttribute('aria-pressed', 'true');
+      await shoot('claude-code-permissions');
+      await page.keyboard.press('Escape');
+      await page.getByTestId('chat-settings').click();
       await modelSelect.click();
       expect(await optionLabels(page)).toEqual(['Automatic', 'Sonnet', 'Opus', 'Haiku', 'Fable']);
       await shoot('claude-code-models');
@@ -373,7 +390,8 @@ for (const width of [1280, 1024, 900, 390]) {
       await expect
         .poll(() => captured.provider.at(-1))
         .toEqual({ provider: 'openai', model: 'my-deployment' });
-      await expect(page.locator('.chat-model')).toHaveText('OpenAI · my-deployment');
+      await expect(page.locator('.chat-settings-provider')).toHaveText('OpenAI');
+      await expect(page.locator('.chat-model')).toHaveText('my-deployment');
       await expect(modelName).toHaveValue('my-deployment');
       await shoot('openai-named-model');
 

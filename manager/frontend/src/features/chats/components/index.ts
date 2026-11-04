@@ -1,4 +1,5 @@
 export { ActionReceipts } from './ActionReceipts';
+export { AgentPermission } from './AgentPermission';
 export { AuthenticatedAudio } from './AuthenticatedAudio';
 export { AuthenticatedImage } from './AuthenticatedImage';
 export { AuthenticatedVideo } from './AuthenticatedVideo';
@@ -6,10 +7,12 @@ export { ChatSources } from './ChatSources';
 export { Citations } from './Citations';
 export { Generation } from './Generation';
 export { HandoverNotice } from './HandoverNotice';
+export { HeaderPopover } from './HeaderPopover';
 export { HeaderSelect } from './HeaderSelect';
 export { JobCard } from './JobCard';
 export { MemoryBadge } from './MemoryBadge';
 export { MessageContent } from './MessageContent';
+export { ProviderError } from './ProviderError';
 export { ProviderPicker } from './ProviderPicker';
 export { QuestionCard } from './QuestionCard';
 export { Reasoning } from './Reasoning';

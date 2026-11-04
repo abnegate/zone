@@ -11,7 +11,8 @@ import {
   modelSelectOptions,
   providerChoices,
   reasoningOptions,
-  selectionLabel,
+  selectionModel,
+  shortModelName,
 } from './providerOptions';
 
 const HTTP: ReasoningEffort[] = ['off', 'low', 'medium', 'high'];
@@ -105,17 +106,30 @@ describe('asksModelName', () => {
   });
 });
 
-describe('selectionLabel', () => {
-  it('names the provider and the model by its server label', () => {
-    expect(selectionLabel(select(claude, { model: 'sonnet' }))).toBe('Claude Code · Sonnet');
+describe('selectionModel', () => {
+  it('names the model by its server label', () => {
+    expect(selectionModel(select(claude, { model: 'sonnet' }))).toBe('Sonnet');
   });
 
   it('calls a missing model Automatic', () => {
-    expect(selectionLabel(select(codex))).toBe('Codex · Automatic');
+    expect(selectionModel(select(codex))).toBe('Automatic');
   });
 
   it('keeps a model the provider no longer lists', () => {
-    expect(selectionLabel(select(codex, { model: 'gpt-4.1' }))).toBe('Codex · gpt-4.1');
+    expect(selectionModel(select(codex, { model: 'gpt-4.1' }))).toBe('gpt-4.1');
+  });
+});
+
+describe('shortModelName', () => {
+  it('drops the routing prefix and keeps the tag', () => {
+    expect(shortModelName('orcarouter/Qwen3.8-27B-Uncensored:Q4_K_M')).toBe(
+      'Qwen3.8-27B-Uncensored:Q4_K_M'
+    );
+    expect(shortModelName('hf.co/org/model:latest')).toBe('model:latest');
+  });
+
+  it('leaves a bare name alone', () => {
+    expect(shortModelName('llama3.2:3b')).toBe('llama3.2:3b');
   });
 });
 

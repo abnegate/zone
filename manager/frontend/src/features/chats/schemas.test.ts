@@ -261,6 +261,15 @@ describe('a chat provider choice', () => {
 });
 
 describe('the providers a chat can run on', () => {
+  it('reads the agent CLI the turns run on, and reads anything else as none', () => {
+    const listing = { default: openaiOffer, selected: null, providers: [] };
+
+    expect(ChatProvidersSchema.parse({ ...listing, agent: 'codex' }).agent).toBe('codex');
+    expect(ChatProvidersSchema.parse({ ...listing, agent: null }).agent).toBeNull();
+    expect(ChatProvidersSchema.parse(listing).agent).toBeUndefined();
+    expect(ChatProvidersSchema.parse({ ...listing, agent: 'gemini-cli' }).agent).toBeNull();
+  });
+
   it('parses the default, the selection and the offers with their labels and efforts', () => {
     const parsed = ChatProvidersSchema.parse({
       default: { ...openaiOffer, requires_model: false },

@@ -45,6 +45,8 @@ export interface ChatProviders {
   default: ChatProviderOffer;
   selected: ChatProviderSelection | null;
   providers: ChatProviderOffer[];
+  /** The agent CLI this chat's turns run on. Null when they go over HTTP. */
+  agent?: AiProvider | null;
 }
 
 export interface WorkspaceChatProviders {

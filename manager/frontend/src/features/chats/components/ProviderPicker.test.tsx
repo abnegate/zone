@@ -228,7 +228,7 @@ describe('ProviderPicker', () => {
     expect(screen.queryByTestId('chat-provider-model')).toBeNull();
   });
 
-  it('alerts with the server reason for an unusable selection', () => {
+  it('names an unusable selection in the picker and raises no alert of its own', () => {
     renderPicker({
       providers: [selfHosted],
       selected: selection(codex, {
@@ -237,10 +237,7 @@ describe('ProviderPicker', () => {
       }),
     });
 
-    expect(screen.getByRole('alert')).toHaveTextContent(
-      'Codex is not signed in for this organization.'
-    );
-    expect(screen.getByTestId('chat-provider-error')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.getByTestId('chat-provider')).toHaveTextContent('Codex (unavailable)');
   });
 
