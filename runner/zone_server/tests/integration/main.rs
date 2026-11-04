@@ -81,6 +81,7 @@ mod plans;
 mod pr_reception_status;
 mod prompt_assembly;
 mod pull_ws;
+mod reminder_time_zone;
 mod reminder_turn;
 mod role_demotion;
 mod role_demotion_race;

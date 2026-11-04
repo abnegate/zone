@@ -11,6 +11,7 @@ pub mod jwt;
 pub mod middleware;
 pub mod organization_guard;
 pub mod password;
+pub mod time_zone;
 pub mod workspace_guard;
 
 pub use jwt::{

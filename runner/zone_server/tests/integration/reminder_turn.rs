@@ -173,6 +173,7 @@ async fn a_watch_hands_its_next_firing_the_reading_the_last_one_took() {
             rrule: Some("FREQ=DAILY".into()),
             prompt: Some("Check whether the release branch is green.".into()),
             timing_mode: Some("condition_watch".into()),
+            time_zone: None,
         },
     )
     .await
@@ -275,6 +276,7 @@ async fn a_due_prompt_is_answered_in_its_chat_by_the_worker_that_claimed_it() {
             rrule: None,
             prompt: Some("Report any dependency PR that has been red for a week.".into()),
             timing_mode: None,
+            time_zone: None,
         },
     )
     .await

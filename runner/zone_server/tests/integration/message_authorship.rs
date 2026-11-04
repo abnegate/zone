@@ -142,6 +142,7 @@ async fn a_message_sent_over_the_socket_cannot_claim_a_reminder_sent_it() {
             rrule: None,
             prompt: Some("Check the deploy queue.".into()),
             timing_mode: None,
+            time_zone: None,
         },
     )
     .await

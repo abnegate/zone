@@ -1,5 +1,6 @@
 import type { AuthResponse, LoginRequest, RegisterRequest } from '../types';
 import { deviceHeaders } from './device';
+import { timeZoneHeaders } from './timeZone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
@@ -7,6 +8,7 @@ function jsonHeaders(): HeadersInit {
   return {
     'Content-Type': 'application/json',
     ...deviceHeaders(),
+    ...timeZoneHeaders(),
   };
 }
 

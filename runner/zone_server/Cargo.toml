@@ -39,6 +39,8 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 # IANA zone name for the session block; chrono resolves the offset, not the name.
 iana-time-zone = "=0.1.65"
+# IANA zone rules a recurring reminder's wall-clock times are read in.
+chrono-tz = "=0.10.4"
 uuid = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

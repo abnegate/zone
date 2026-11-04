@@ -30,3 +30,4 @@ pub mod schedule;
 pub mod search;
 pub mod stages;
 pub mod task_progress;
+pub mod time_zone;

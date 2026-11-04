@@ -31,4 +31,5 @@ pub const EMBEDDED: &[Source] = &[
     source!("008_workspace_host_directories.sql"),
     source!("009_chat_provider.sql"),
     source!("010_chat_provider_validation.sql"),
+    source!("011_time_zones.sql"),
 ];
