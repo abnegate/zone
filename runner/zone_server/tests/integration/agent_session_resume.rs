@@ -209,6 +209,49 @@ fn claude_session_resume_across_homes() {
     );
 }
 
+/// A chat whose directory changes moves its session's file with `sessions::relocate`. Run by hand
+/// as the test above is, with `claude_session_resume_across_directories` in place of its name.
+#[test]
+#[ignore = "spends two turns of a real Claude subscription"]
+fn claude_session_resume_across_directories() {
+    let token = required(
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "set it to a token printed by `claude setup-token`",
+    );
+    let home = TempDir::new().expect("a config directory");
+    let first = TempDir::new().expect("a first directory");
+    let second = TempDir::new().expect("a second directory");
+    let id = Uuid::new_v4().to_string();
+    let word = nonce();
+
+    claude(
+        home.path(),
+        first.path(),
+        &token,
+        ["--session-id", &id],
+        &format!("Remember the word {word}. Reply with only OK."),
+    );
+    sessions::relocate(home.path(), AgentKind::Claude, second.path(), &id).unwrap_or_else(|error| {
+        panic!(
+            "claude kept session {id} nowhere sessions::relocate looks ({error}); {} holds {:#?}",
+            home.path().display(),
+            listing(home.path())
+        )
+    });
+    let answer = claude(
+        home.path(),
+        second.path(),
+        &token,
+        ["--resume", &id],
+        "What was the word I asked you to remember? Reply with only that word.",
+    );
+
+    assert!(
+        answer.contains(&word),
+        "claude resumed in the second directory without the first turn: {answer:?}"
+    );
+}
+
 #[test]
 #[ignore = "spends two turns of a real ChatGPT subscription"]
 fn codex_session_resume_across_homes() {

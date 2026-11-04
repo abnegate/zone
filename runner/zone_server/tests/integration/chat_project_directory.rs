@@ -3,7 +3,6 @@
 //! where any chat does, and nothing here confines it to the directory it starts in.
 
 use std::fs;
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -863,7 +862,6 @@ fn locked(destination: &Path) -> Flock<fs::File> {
         .write(true)
         .open(destination.with_extension("lock"))
         .unwrap();
-    assert!(file.as_raw_fd() >= 0);
     Flock::lock(file, FlockArg::LockExclusive)
         .map_err(|(_, errno)| errno)
         .expect("the lock")
