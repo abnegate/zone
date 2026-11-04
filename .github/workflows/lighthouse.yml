@@ -4,11 +4,15 @@ on:
   pull_request:
     paths:
       - 'manager/frontend/**'
+      - 'packages/ui/**'
+      - 'bun.lock'
       - '.github/workflows/lighthouse.yml'
   push:
     branches: [main]
     paths:
       - 'manager/frontend/**'
+      - 'packages/ui/**'
+      - 'bun.lock'
       - '.github/workflows/lighthouse.yml'
 
 jobs:
@@ -37,6 +41,13 @@ jobs:
       - name: Run Lighthouse CI
         uses: treosh/lighthouse-ci-action@3e7e23fb74242897f95c0ba9cabad3d0227b9b18 # 12.6.2
         with:
-          uploadArtifacts: true
           temporaryPublicStorage: true
           configPath: ./manager/frontend/lighthouserc.json
+
+      - name: Upload Lighthouse reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lighthouse-results
+          path: .lighthouseci
+          include-hidden-files: true
