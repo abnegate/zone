@@ -37,6 +37,7 @@ ADAPTER_MEMORY = 24
 FINETUNE_DISK = 150
 ADAPTER_DISK = 40
 OTHER_DISK = 80
+REMOTE_FREE_SPACE_MARGIN_GIB = 1
 CATALOG_QUERY = urllib.parse.urlencode(
     {'include': 'AVAILABILITY', 'product': 'POD'}
 )
@@ -420,6 +421,10 @@ def add_bytes(archive: tarfile.TarFile, name: str, data: bytes) -> None:
     archive.addfile(info, io.BytesIO(data))
 
 
+def remote_config(config: dict[str, Any]) -> dict[str, Any]:
+    return {**config, train_sdxl.FREE_SPACE_MARGIN_KEY: REMOTE_FREE_SPACE_MARGIN_GIB}
+
+
 def pack_upload(
     models_dir: Path,
     job_dir: Path,
@@ -436,7 +441,7 @@ def pack_upload(
         add_bytes(
             archive,
             'train_sdxl_config.json',
-            (json.dumps(config, indent=2) + '\n').encode(),
+            (json.dumps(remote_config(config), indent=2) + '\n').encode(),
         )
         for name in SCRIPTS:
             path = ROOT / name

@@ -586,6 +586,9 @@ class PackTests(unittest.TestCase):
             with tarfile.open(fileobj=BytesIO(payload), mode='r:gz') as archive:
                 names = archive.getnames()
                 remote = json.loads(archive.extractfile('job.json').read().decode())
+                remote_config = json.loads(
+                    archive.extractfile('train_sdxl_config.json').read().decode()
+                )
             self.assertIn('job.json', names)
             self.assertIn('dataset/0000.png', names)
             self.assertIn('class/0000.png', names)
@@ -597,6 +600,10 @@ class PackTests(unittest.TestCase):
             self.assertIn('train_flux_config.json', names)
             self.assertNotIn('provider', remote)
             self.assertEqual(remote['status'], 'queued')
+            self.assertEqual(
+                remote_config,
+                {'class_cache_dir': '.zone-class/person', 'free_space_margin_gib': 1},
+            )
             self.assertTrue(all('lustify' not in name for name in names))
             self.assertTrue(all('ggwp' not in name.lower() for name in names))
 

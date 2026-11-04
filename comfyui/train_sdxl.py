@@ -1126,7 +1126,17 @@ def resume_snapshot_path(directory: Path) -> Path | None:
     return snapshot_path(directory, step)
 
 
-def copy_snapshot(source: Path, destination: Path) -> None:
+def write_then_replace(path: Path, write: Callable[[Path], None]) -> None:
+    temporary = path.with_name(path.name + '.tmp')
+    try:
+        write(temporary)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    os.replace(temporary, path)
+
+
+def copy_snapshot(source: Path, destination: Path, config: dict[str, Any]) -> None:
     source = Path(source)
     destination = Path(destination)
     if source.resolve() == destination.resolve():
@@ -1137,7 +1147,12 @@ def copy_snapshot(source: Path, destination: Path) -> None:
     try:
         os.link(source, temporary)
     except OSError:
-        shutil.copy2(source, temporary)
+        space = free_space(destination.parent, source.stat().st_size, config)
+        if not space.fits:
+            warn_skipped(f'copying {destination.name}', destination.parent, space)
+            return
+        write_then_replace(destination, lambda target: shutil.copy2(source, target))
+        return
     os.replace(temporary, destination)
 
 
@@ -1148,6 +1163,18 @@ def prune_snapshots(directory: Path, keep: int, best_step: int | None) -> None:
     for step in snapshot_steps(directory):
         if step not in retain:
             snapshot_path(directory, step).unlink(missing_ok=True)
+
+
+def reclaim_snapshots(directory: Path, keep: int, best_step: int | None) -> None:
+    steps = snapshot_steps(directory)
+    newer = max(int(keep) - 1, 0)
+    retain = set(steps[len(steps) - newer :]) if newer else set()
+    if best_step is not None:
+        retain.add(best_step)
+    for step in steps:
+        path = snapshot_path(directory, step)
+        if step not in retain and path.stat().st_nlink == 1:
+            path.unlink(missing_ok=True)
 
 
 def clear_incomplete_saves(*directories: Path) -> None:
@@ -1223,25 +1250,61 @@ def free_space(directory: Path, size: int, config: dict[str, Any]) -> FreeSpace:
     return FreeSpace(size + free_space_margin(config), int(shutil.disk_usage(directory).free))
 
 
-def assert_free_space(what: str, directory: Path, size: int, config: dict[str, Any]) -> None:
+def assert_free_space(
+    what: str, directory: Path, size: int, config: dict[str, Any], advice: str
+) -> None:
     space = free_space(directory, size, config)
     if not space.fits:
         raise RuntimeError(
-            f'{what} {space.describe(directory)}; refusing to fill the disk, so free some '
-            'space or train it on Runpod instead'
+            f'{what} {space.describe(directory)}; refusing to fill the disk, so {advice}'
         )
 
 
-def room_for_snapshot(directory: Path, step: int, estimate: int, config: dict[str, Any]) -> bool:
-    space = free_space(directory, snapshot_size(directory, estimate), config)
+def warn_skipped(what: str, directory: Path, space: FreeSpace) -> None:
+    print(
+        f'warning: skipped {what}, which {space.describe(directory)}; training continues '
+        'and a crash resumes from the last snapshot saved',
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def room_for_snapshot(
+    directory: Path,
+    step: int,
+    estimate: int,
+    config: dict[str, Any],
+    keep: int,
+    best_step: int | None,
+) -> bool:
+    size = snapshot_size(directory, estimate)
+    space = free_space(directory, size, config)
     if not space.fits:
-        print(
-            f'warning: skipped the step {step} snapshot, which {space.describe(directory)}; '
-            'training continues and a crash resumes from the last snapshot saved',
-            file=sys.stderr,
-            flush=True,
-        )
+        reclaim_snapshots(directory, keep, best_step)
+        space = free_space(directory, size, config)
+    if not space.fits:
+        warn_skipped(f'the step {step} snapshot', directory, space)
     return space.fits
+
+
+def save_latest(
+    directory: Path,
+    step: int,
+    estimate: int,
+    config: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> bool:
+    try:
+        save_snapshot(latest_snapshot_file(directory), **snapshot)
+    except Exception as error:
+        if is_transient_crash(error):
+            raise
+        space = free_space(directory, snapshot_size(directory, estimate), config)
+        if space.fits:
+            raise
+        warn_skipped(f'the step {step} snapshot after its write ran out of space', directory, space)
+        return False
+    return True
 
 
 def is_transient_crash(error: BaseException) -> bool:
@@ -1802,9 +1865,7 @@ def save_safetensors(path: Path, tensors: dict[str, Any]) -> None:
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + '.tmp')
-    save_file(tensors, str(temporary))
-    os.replace(temporary, path)
+    write_then_replace(path, lambda target: save_file(tensors, str(target)))
 
 
 def ensure_class_images(
@@ -2025,9 +2086,7 @@ def save_snapshot(
     if sample_rng is not None and dropout_rng is not None:
         payload.update(capture_rng_state(sample_rng, dropout_rng))
     payload.update(model_snapshot(method, unet, text_encoder, token_id))
-    temporary = path.with_name(path.name + '.tmp')
-    torch.save(payload, temporary)
-    os.replace(temporary, path)
+    write_then_replace(path, lambda target: torch.save(payload, target))
 
 
 def model_snapshot(
@@ -2258,19 +2317,21 @@ def persist_training_step(
     saved = False
     if device_kind(device) == CUDA_DEVICE:
         if method == FINETUNE_METHOD and not numbered:
-            if latest_save_running() or room_for_snapshot(checkpoint_dir, step, estimate, config):
+            if latest_save_running():
+                saved = True
+            elif room_for_snapshot(checkpoint_dir, step, estimate, config, keep, best_step):
                 start_latest_save(latest, **snapshot)
                 saved = True
         else:
             wait_for_latest_save()
-            if room_for_snapshot(checkpoint_dir, step, estimate, config):
-                save_snapshot(latest, **snapshot)
-                saved = True
+            saved = room_for_snapshot(
+                checkpoint_dir, step, estimate, config, keep, best_step
+            ) and save_latest(checkpoint_dir, step, estimate, config, snapshot)
     elif numbered or step == total or cadence.due():
         cadence.mark()
-        if room_for_snapshot(checkpoint_dir, step, estimate, config):
-            save_snapshot(latest, **snapshot)
-            saved = True
+        saved = room_for_snapshot(
+            checkpoint_dir, step, estimate, config, keep, best_step
+        ) and save_latest(checkpoint_dir, step, estimate, config, snapshot)
     if saved:
         job[TRANSIENT_ATTEMPTS_KEY] = 0
     job['step'] = step
@@ -2278,7 +2339,7 @@ def persist_training_step(
     write_job(job_dir, job)
     if numbered:
         if saved:
-            copy_snapshot(latest, snapshot_path(checkpoint_dir, step))
+            copy_snapshot(latest, snapshot_path(checkpoint_dir, step), config)
         write_json(
             checkpoint_dir / 'best.json',
             {'step': best_step, 'loss': best_loss},
@@ -2397,6 +2458,7 @@ def save_trained(
         destination.parent,
         tensor_bytes(list(outputs.values())),
         config,
+        'free some space and retry the job, which resumes from its last snapshot',
     )
     for path, tensors in outputs.items():
         save_safetensors(path, tensors)
@@ -2532,8 +2594,9 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     clear_incomplete_saves(
         checkpoint_dir,
+        Path(job_dir),
         Path(job_dir) / 'dataset',
-        class_cache_path(models_dir, config) if class_pairs_list else Path(job_dir),
+        *([class_cache_path(models_dir, config)] if class_pairs_list else []),
     )
     estimate = snapshot_estimate(method, kind, groups, unet, text_encoder, token_id)
     assert_free_space(
@@ -2541,6 +2604,7 @@ def train(models_dir: Path, job_dir: Path, job: dict[str, Any], config: dict[str
         checkpoint_dir,
         snapshot_size(checkpoint_dir, estimate),
         config,
+        'free some space or train it on Runpod instead',
     )
     pipeline.unet = unet
     pipeline.text_encoder = text_encoder
