@@ -864,6 +864,28 @@ async fn a_folder_this_process_cannot_enter_is_not_started_in() {
     assert!(matches!(start, Start::Unavailable(_)));
 }
 
+/// A folder can be listed and still not be entered, and a CLI is started by entering it.
+#[tokio::test]
+async fn a_folder_this_process_can_list_but_not_enter_is_not_started_in() {
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let fixture = Fixture::new().await;
+    let parent = TempDir::new().unwrap();
+    let listed = parent.path().join("listed");
+    fs::create_dir_all(&listed).unwrap();
+    fs::set_permissions(&listed, std::os::unix::fs::PermissionsExt::from_mode(0o400)).unwrap();
+    let chat = fixture
+        .sourced("filesystem", json!({"base_path": listed}))
+        .await;
+
+    let start = fixture.start(&chat).await;
+    fs::set_permissions(&listed, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    fixture.remove().await;
+
+    assert!(matches!(start, Start::Unavailable(_)));
+}
+
 /// A preview runs on every paused keystroke and every chat opened, so it uses what a turn found.
 #[tokio::test]
 async fn a_preview_never_walks_the_mounts_but_uses_what_a_turn_found() {

@@ -33,14 +33,12 @@ pub fn find(
     search: Search,
 ) -> Option<PathBuf> {
     let key = (workspace, origin.to_string());
-    let mut known = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(checkout) = known.get(&key) {
-        if mounted.iter().any(|root| checkout.starts_with(root)) && matches(checkout, origin) {
-            return Some(checkout.clone());
-        }
-        known.remove(&key);
+    let valid = |checkout: &Path| {
+        mounted.iter().any(|root| checkout.starts_with(root)) && matches(checkout, origin)
+    };
+    if let Some(checkout) = recalled(&key, valid) {
+        return Some(checkout);
     }
-    drop(known);
     if search == Search::Known {
         return None;
     }
@@ -52,13 +50,35 @@ pub fn find(
     Some(found)
 }
 
+/// The checkout known for `key` while it is `valid`, forgetting one that no longer is. `valid`
+/// runs with nothing locked, since it reads a mount that may be stalled and every workspace
+/// shares what is known.
+fn recalled(key: &(Uuid, String), valid: impl FnOnce(&Path) -> bool) -> Option<PathBuf> {
+    let checkout = KNOWN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(key)?
+        .clone();
+    if valid(&checkout) {
+        return Some(checkout);
+    }
+    let mut known = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
+    if known.get(key) == Some(&checkout) {
+        known.remove(key);
+    }
+    None
+}
+
 /// The first checkout under `mounted`, folder by folder and shallowest first, whose `origin` is
 /// `origin`, leaving out Zone's own `clones`: what is in there may be another workspace's, or a
 /// clone still being made. Nothing is run inside a checkout and nothing in one is written: its
 /// configuration is read as data, because it is the person's own and may name programs for git
 /// to run.
 fn checkout(mounted: &[PathBuf], clones: &Path, origin: &Origin) -> Option<PathBuf> {
-    mounted.iter().find_map(|root| within(root, clones, origin))
+    let clones = fs::canonicalize(clones).unwrap_or_else(|_| clones.to_path_buf());
+    mounted
+        .iter()
+        .find_map(|root| within(root, &clones, origin))
 }
 
 /// A checkout's own folders aren't walked, with one exception: a mounted folder that is itself
@@ -68,7 +88,7 @@ fn within(root: &Path, clones: &Path, origin: &Origin) -> Option<PathBuf> {
     for _ in 0..=DEPTH {
         let mut below = Vec::new();
         for directory in &level {
-            if directory.starts_with(clones) {
+            if fs::canonicalize(directory).is_ok_and(|real| real.starts_with(clones)) {
                 continue;
             }
             let git = fs::symlink_metadata(directory.join(GIT));
@@ -301,6 +321,41 @@ mod tests {
             .unwrap();
         assert!(status.success());
         assert_eq!(find(&folders, Search::Known), None);
+    }
+
+    /// Checking a checkout reads a mount that may be stalled and starts git. One workspace's dead
+    /// mount must not hold up every other workspace's turns.
+    #[test]
+    fn a_known_checkout_is_checked_without_holding_up_anyone_else() {
+        let key = (Uuid::new_v4(), "github.com/owner/repository".to_string());
+        KNOWN
+            .lock()
+            .unwrap()
+            .insert(key.clone(), PathBuf::from("/known"));
+
+        let free = recalled(&key, |_| {
+            (0..100).any(|_| {
+                let free = KNOWN.try_lock().is_ok();
+                if !free {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                free
+            })
+        });
+
+        assert_eq!(free, Some(PathBuf::from("/known")));
+    }
+
+    #[test]
+    fn a_mount_reaching_the_clones_through_a_link_does_not_find_them() {
+        let parent = mount();
+        let clones = parent.path().join("clones");
+        cloned(&clones.join("workspace/clone"), REMOTE);
+        let link = mount();
+        let through = link.path().join("through");
+        std::os::unix::fs::symlink(parent.path(), &through).unwrap();
+
+        assert_eq!(checkout(&[through], &clones, &origin()), None);
     }
 
     #[test]

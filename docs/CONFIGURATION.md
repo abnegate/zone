@@ -647,8 +647,11 @@ their absolute paths as before.
   repository as `origin`, in any spelling (`https`, `ssh`, `git@host:`, with or
   without `.git`, in any case). A folder's name, another remote, a linked worktree
   and an SSH host alias do not count. The file is read as data, and git is not run
-  in the checkout. Each turn walks until it finds one. A preview only uses a
-  checkout a turn already found, so it may name another directory until then.
+  in the checkout. Each turn walks until it finds one, and then keeps using it while
+  it stays in a mounted folder with that `origin`, even if another checkout is added
+  later. A preview only uses a checkout a turn already found, so it may name another
+  directory until then. A GitLab source named by a numeric project id has no path to
+  compare, so it starts where any chat does.
 - **Cloning**: the clone uses the source's credentials, or the token linked with
   the repository, sent as a header that never reaches the URL, `.git/config`, the
   process list or a log. While it runs the chat shows *Cloning …* and **Stop** ends
@@ -686,8 +689,8 @@ their absolute paths as before.
   or finds it, and a source can't name it. That is not a boundary between
   workspaces: chat tools run as the server's user and reach what that user can, so
   an absolute path still reaches another workspace's clone. Two projects of one
-  workspace on one repository share a clone. Each workspace's directory has mode
-  0700.
+  workspace on one repository share a clone. Each workspace's directory is set to
+  mode 0700 whenever a clone is made in it.
 - **Refused at boot**: a relative path, or one inside `ZONE_AGENT_STATE_DIR`, which
   every chat's tools are denied.
 - **Note**: This has to survive a restart. A clone holds whatever a chat left in

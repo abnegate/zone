@@ -75,6 +75,8 @@ NOTE: zone-server can run more than one replica, so the coding agent providers
 will not work reliably. A sign-in in progress lives in one pod's memory and
 fails when its next request reaches another pod. A codex login exists only on
 the pod that made it, in an emptyDir that is lost when that pod is replaced.
+Each pod also keeps its own /app/clones there, so project chats may clone again
+on another pod and work left in a clone stays on the pod that made it.
 Saved Claude tokens are sealed in the database. To use either provider, set
 server.replicaCount=1 and server.autoscaling.enabled=false, and set
 server.podDisruptionBudget.enabled=false so that a node drain can still evict

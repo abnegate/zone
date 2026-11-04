@@ -862,6 +862,15 @@ const MEDIA_WORKING: &str = "Working...";
 
 const MEDIA_QUEUED: &str = "Waiting for another generation...";
 
+/// `placeholder` in place of whatever follows the `told` bytes Zone itself opened an answer with,
+/// when the model wrote nothing there.
+fn fill_silence(content: &mut String, told: usize, placeholder: &str) {
+    if content[told..].trim().is_empty() {
+        content.truncate(told);
+        content.push_str(placeholder);
+    }
+}
+
 /// What a turn that produced neither prose nor an image is stored as.
 const STOPPED_BEFORE_ANSWERING: &str = "[Stopped before answering]";
 
@@ -4042,8 +4051,8 @@ async fn handle_chat_generation(
     // An image is its own answer, so it does not need the placeholder.
     // A turn that ended on a question or a wait is not silent but waiting, and
     // saying so keeps the card's own bubble from reading as a failure.
-    if full_content.trim().is_empty() && generated_images.is_empty() {
-        full_content = silent_turn(asked, waited).to_string();
+    if generated_images.is_empty() {
+        fill_silence(&mut full_content, told, silent_turn(asked, waited));
     }
 
     merge_cited_sources(state, chat_id, &full_content, &mut citations).await;
@@ -6145,6 +6154,27 @@ cat 'DIR/reply.jsonl'
         assert!(
             message.contains("Incorrect API key provided") && message.contains(REDACTED),
             "the reader lost why the turn failed: {message}"
+        );
+    }
+
+    #[test]
+    fn a_silent_turn_keeps_its_placeholder_after_a_notice() {
+        let notice = "> The folder is gone.\n\n";
+        for (written, expected) in [
+            ("", format!("{notice}[silent]")),
+            ("  \n", format!("{notice}[silent]")),
+            ("Written.", format!("{notice}Written.")),
+        ] {
+            let mut content = format!("{notice}{written}");
+            fill_silence(&mut content, notice.len(), "[silent]");
+            assert_eq!(content, expected);
+        }
+
+        let mut silent = "  ".to_string();
+        fill_silence(&mut silent, 0, "[silent]");
+        assert_eq!(
+            silent, "[silent]",
+            "with no notice it replaces the whole answer"
         );
     }
 

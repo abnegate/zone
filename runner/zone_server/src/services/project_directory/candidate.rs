@@ -163,7 +163,8 @@ async fn mounted(state: &AppState, workspace: Uuid) -> Vec<PathBuf> {
 }
 
 /// `directory`, unless it lies in the agents' state, which every chat's tools are denied, or
-/// this process can't enter it, where a CLI could not even be started and would fail the turn.
+/// this process can't list and enter it: a CLI can't even be started in a folder it can't enter,
+/// which would fail the turn. Reading a folder's `.` is what takes entering it.
 fn usable(config: &Config, directory: PathBuf) -> Start {
     if within(&directory, &config.agents.state) {
         return Start::Unavailable(format!(
@@ -171,7 +172,7 @@ fn usable(config: &Config, directory: PathBuf) -> Start {
             directory.display()
         ));
     }
-    if std::fs::read_dir(&directory).is_err() {
+    if std::fs::read_dir(&directory).is_err() || std::fs::metadata(directory.join(".")).is_err() {
         return Start::Unavailable(format!(
             "Zone doesn't have permission to open {}.",
             directory.display()

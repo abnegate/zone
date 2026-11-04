@@ -36,22 +36,21 @@ impl Origin {
             .rsplit_once('@')
             .map_or(authority, |(_, host)| host);
         let host = host.split_once(':').map_or(host, |(host, _)| host);
-        if !host
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
-            || authority.contains(['?', '#'])
+        if !host.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        }) || authority.contains(['?', '#'])
         {
             return None;
         }
-        let path = path.trim_matches('/');
-        let path = path.strip_suffix(GIT_SUFFIX).unwrap_or(path);
+        let path = path.trim_matches('/').to_ascii_lowercase();
+        let path = path.strip_suffix(GIT_SUFFIX).unwrap_or(&path);
         let named = !host.is_empty()
             && path.contains('/')
             && !path.contains(['?', '#', '\\'])
             && path.split('/').all(|segment| !segment.is_empty());
         named.then(|| Self {
             host: host.to_ascii_lowercase(),
-            path: path.to_ascii_lowercase(),
+            path: path.to_string(),
         })
     }
 
@@ -92,6 +91,7 @@ mod tests {
             "git://github.com/owner/repository.git",
             "git+ssh://git@github.com/owner/repository",
             "  https://github.com/owner/repository.git\n",
+            "https://github.com/owner/repository.GIT",
         ] {
             assert_eq!(Origin::parse(remote), Some(expected()), "{remote}");
         }
@@ -126,6 +126,16 @@ mod tests {
         ] {
             assert_eq!(Origin::parse(remote), None, "{remote:?}");
         }
+    }
+
+    #[test]
+    fn a_host_on_a_container_network_is_a_host() {
+        assert_eq!(
+            Origin::parse("http://git_lab/group/project.git")
+                .map(|origin| origin.to_string())
+                .as_deref(),
+            Some("git_lab/group/project")
+        );
     }
 
     #[test]

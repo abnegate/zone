@@ -15,7 +15,7 @@ pub use error::Error;
 
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -110,24 +110,41 @@ pub fn relocate(home: &Path, agent: AgentKind, work: &Path, id: &str) -> Result<
     })?;
     let relative = claude(work, id);
     let path = home.join(&relative);
-    if found != relative {
+    let source = home.join(&found);
+    if !same_file(&source, &path) {
         directories(home, relative.parent().unwrap_or(Path::new("")))
-            .and_then(|()| fs::rename(home.join(&found), &path))
+            .and_then(|()| fs::rename(&source, &path))
             .map_err(|source| Error::Filesystem {
                 path: path.clone(),
                 source,
             })?;
+        carry_beside(&source, &path);
     }
-    for stale in copies(home, id)
-        .into_iter()
-        .filter(|(copy, _)| *copy != relative)
-    {
-        fs::remove_file(home.join(&stale.0)).map_err(|source| Error::Filesystem {
-            path: home.join(&stale.0),
-            source,
-        })?;
+    for (copy, _) in copies(home, id) {
+        let copy = home.join(copy);
+        if !same_file(&copy, &path) {
+            fs::remove_file(&copy).map_err(|source| Error::Filesystem { path: copy, source })?;
+        }
     }
     Ok(())
+}
+
+/// Moves the folder claude keeps beside a transcript, of what the session's tools wrote, along
+/// with it. A session resumes without one, so one that can't be moved is left where it is.
+fn carry_beside(from: &Path, to: &Path) {
+    let (beside, destination) = (from.with_extension(""), to.with_extension(""));
+    if real(&beside) && !destination.exists() {
+        let _ = fs::rename(beside, destination);
+    }
+}
+
+/// Whether two paths are one file, which two spellings of a path are on a filesystem that ignores
+/// case.
+fn same_file(one: &Path, other: &Path) -> bool {
+    match (fs::symlink_metadata(one), fs::symlink_metadata(other)) {
+        (Ok(one), Ok(other)) => one.dev() == other.dev() && one.ino() == other.ino(),
+        _ => false,
+    }
 }
 
 /// Claude's project folder name for a working directory: every UTF-16 unit that is not an ASCII
@@ -656,6 +673,75 @@ mod tests {
         let carried = homes.carry(AgentKind::Claude, CLAUDE_ID).unwrap();
 
         assert_eq!(fs::read(&carried.path).unwrap(), b"current");
+    }
+
+    /// On a filesystem that ignores case, a folder renamed by case alone leaves the session in a
+    /// folder that spells it another way. It is the same file, and must not be removed as a stale
+    /// copy of itself.
+    #[test]
+    fn a_session_in_a_folder_spelled_another_way_is_not_removed_as_a_copy_of_itself() {
+        let homes = Homes::new();
+        let parent = TempDir::new().unwrap();
+        let work = parent.path().join("code");
+        fs::create_dir_all(&work).unwrap();
+        let folder = sanitized(&fs::canonicalize(&work).unwrap());
+        let respelled = folder.replacen("-code", "-Code", 1);
+        assert_ne!(folder, respelled);
+        let left = Path::new(PROJECTS)
+            .join(&respelled)
+            .join(format!("{CLAUDE_ID}{EXTENSION}"));
+        homes.write(&left);
+
+        relocate(homes.from.path(), AgentKind::Claude, &work, CLAUDE_ID).unwrap();
+
+        assert_eq!(
+            fs::read(
+                homes
+                    .from
+                    .path()
+                    .join(PROJECTS)
+                    .join(&folder)
+                    .join(format!("{CLAUDE_ID}{EXTENSION}"))
+            )
+            .unwrap(),
+            TRANSCRIPT,
+            "the only copy of the session is gone"
+        );
+    }
+
+    /// Claude keeps what a session's tools wrote in a folder beside its transcript.
+    #[test]
+    fn a_moved_session_takes_the_folder_beside_it() {
+        let homes = Homes::new();
+        let left = homes.claude();
+        homes.write(&left);
+        let beside = homes
+            .from
+            .path()
+            .join(left.parent().unwrap())
+            .join(CLAUDE_ID)
+            .join("tool-results");
+        fs::create_dir_all(&beside).unwrap();
+        fs::write(beside.join("output"), b"output").unwrap();
+        let project = TempDir::new().unwrap();
+
+        relocate(
+            homes.from.path(),
+            AgentKind::Claude,
+            project.path(),
+            CLAUDE_ID,
+        )
+        .unwrap();
+
+        let moved = homes
+            .from
+            .path()
+            .join(PROJECTS)
+            .join(sanitized(&fs::canonicalize(project.path()).unwrap()))
+            .join(CLAUDE_ID)
+            .join("tool-results/output");
+        assert_eq!(fs::read(moved).unwrap(), b"output");
+        assert!(!beside.exists());
     }
 
     #[test]
