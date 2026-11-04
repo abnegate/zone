@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
 use super::agent::{AgentKind, Reader};
-use super::event::AgentEvent;
+use super::event::{AgentEvent, Paragraphs, activity};
 use super::lines::{Frame, Lines};
 use super::settings::{CliSettings, Toolset};
 use super::transcript;
@@ -189,6 +189,7 @@ impl CliProvider {
             let mut lines = Lines::new(line_limit);
             let mut buffer = [0_u8; READ_BUFFER];
             let mut events = Vec::new();
+            let mut paragraphs = Paragraphs::default();
             let mut kept = 0_usize;
             let mut ended = false;
             let mut terminal = false;
@@ -218,6 +219,7 @@ impl CliProvider {
                 }
 
                 for event in events.drain(..) {
+                    let event = paragraphs.separated(event);
                     // The agent's own report of what went wrong beats an exit
                     // code, which says only that something did.
                     match &event {
@@ -464,14 +466,14 @@ fn interpret(
 }
 
 /// The bytes of `event` that whoever reads the stream keeps. A tool call is
-/// kept as its name on a line of its own; what it was made with reaches no
-/// reader.
+/// kept as its line of [`activity`]; the rest of what it was made with reaches
+/// no reader.
 fn retained(event: &AgentEvent) -> usize {
     match event {
         AgentEvent::Text(text)
         | AgentEvent::Failed(text)
         | AgentEvent::Limited(Limit { message: text, .. }) => text.len(),
-        AgentEvent::Tool(call) => call.function.name.len() + '\n'.len_utf8(),
+        AgentEvent::Tool(call) => activity(call).map_or(0, |line| line.len()),
         AgentEvent::Usage(_)
         | AgentEvent::Window(_)
         | AgentEvent::Session(_)
@@ -624,7 +626,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         assert_eq!(completion.provider, "claude");
         assert_eq!(
             completion.message.content.as_deref(),
-            Some("Looking now. It is empty.")
+            Some("Looking now. \n\nIt is empty.")
         );
         assert_eq!(completion.finish_reason.as_deref(), Some("success"));
 

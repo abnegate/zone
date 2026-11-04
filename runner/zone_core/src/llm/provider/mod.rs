@@ -34,7 +34,7 @@ mod transcript;
 
 pub use agent::{AgentKind, Delivery};
 pub use cli::{AgentStream, CliProvider, OUTGROWN, STDERR_HEADING};
-pub use event::AgentEvent;
+pub use event::{AgentEvent, activity};
 pub use lines::{Frame, Lines};
 pub use parser::claude::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
 pub use session::Session;

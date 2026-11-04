@@ -12,7 +12,7 @@ use abnegate_llm::{
 use futures::{Stream, StreamExt};
 
 use super::provider::{
-    AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Toolset,
+    AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Toolset, activity,
 };
 
 /// The longest a buffered completion may take, from sending the request to
@@ -89,7 +89,8 @@ fn refuse_tools(tools: Option<&[ToolDefinition]>, agent: AgentKind) -> Result<()
 /// has already run those tools, so replaying them through zone's registry
 /// would run each a second time -- but a turn that spends ten minutes reading
 /// and editing files should not look to the reader like a turn doing nothing,
-/// so what the agent reached for is shown as the thinking it was.
+/// so what the agent reached for is listed as the thinking it was. Zone's own
+/// tools reach the reader as cards when the agent calls them over MCP.
 fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, Error> {
     let mut delta = StreamDelta::default();
     let mut finished = false;
@@ -100,7 +101,7 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, Error> {
     match event {
         AgentEvent::Text(text) => delta.content = Some(text),
         AgentEvent::Tool(call) => {
-            delta.reasoning_content = Some(format!("{}\n", call.function.name));
+            delta.reasoning_content = activity(&call);
         }
         AgentEvent::Usage(counts) => usage = Some(counts),
         AgentEvent::Window(reported) => window = Some(reported),

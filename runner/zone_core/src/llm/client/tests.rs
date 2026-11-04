@@ -1358,6 +1358,58 @@ async fn an_agents_tool_use_is_shown_as_reasoning_rather_than_replayed() {
 }
 
 #[tokio::test]
+async fn an_agents_own_tools_are_listed_and_zones_are_left_to_their_cards() {
+    let events = agent_events(vec![
+        Ok(AgentEvent::Tool(ToolCall::function(
+            "toolu_01",
+            "Bash",
+            r#"{"command":"git status"}"#,
+        ))),
+        Ok(AgentEvent::Tool(ToolCall::function(
+            "toolu_02",
+            "mcp__zone__list_sources",
+            "{}",
+        ))),
+        Ok(AgentEvent::Tool(ToolCall::function(
+            "toolu_03",
+            "ToolSearch",
+            r#"{"query":"select:Read"}"#,
+        ))),
+        Ok(AgentEvent::Finished {
+            finish_reason: Some("success".to_string()),
+        }),
+    ]);
+
+    let (delivered, failure) = collected(chunks(events, "claude".to_string())).await;
+
+    assert!(failure.is_none(), "a finished turn failed: {failure:?}");
+    assert_eq!(
+        reasoned(&delivered),
+        "- Bash `git status`\n- ToolSearch `select:Read`\n"
+    );
+}
+
+#[tokio::test]
+async fn a_host_agents_answer_keeps_its_blocks_apart() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let script = [
+        r#"echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I will look first."}]}}'"#,
+        r#"echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01","name":"mcp__zone__list_files","input":{"path":"."}}]}}'"#,
+        r#"echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Found it."}]}}'"#,
+        r#"echo '{"type":"result","subtype":"success","is_error":false}'"#,
+    ]
+    .join("\n");
+    let client = agent_client(fake(&directory, &script));
+
+    let stream = stream_turn(&client, None).await.expect("a stream");
+    let (delivered, failure) = collected(stream).await;
+
+    assert!(failure.is_none(), "a finished turn failed: {failure:?}");
+    assert_eq!(spoken(&delivered), "I will look first.\n\nFound it.");
+    assert_eq!(reasoned(&delivered), "");
+}
+
+#[tokio::test]
 async fn a_refusing_agent_ends_the_stream_in_its_own_words() {
     let events = agent_events(vec![Ok(AgentEvent::Failed(REFUSAL.to_string()))]);
 
@@ -1455,7 +1507,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
     let (delivered, failure) = collected(stream).await;
 
     assert!(failure.is_none(), "the turn failed: {failure:?}");
-    assert_eq!(spoken(&delivered), "Looking now. It is empty.");
+    assert_eq!(spoken(&delivered), "Looking now. \n\nIt is empty.");
     assert!(reasoned(&delivered).contains("Read"));
     assert_eq!(reasons(&delivered), [STOP]);
     assert_eq!(
