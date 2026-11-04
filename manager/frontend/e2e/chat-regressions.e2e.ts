@@ -503,14 +503,12 @@ test.describe('Chat regressions', () => {
     ).toBeLessThanOrEqual(0);
     const badgeBox = await badge.boundingBox();
     const messageBox = await marked.boundingBox();
-    expect(badgeBox && messageBox).toBeTruthy();
-    if (badgeBox && messageBox) {
-      expect(badgeBox.x).toBeGreaterThanOrEqual(messageBox.x);
-      expect(badgeBox.x + badgeBox.width).toBeLessThanOrEqual(
-        messageBox.x + messageBox.width + 0.5
-      );
-      expect(badgeBox.x + badgeBox.width).toBeLessThanOrEqual(375);
-    }
+    expect(badgeBox).not.toBeNull();
+    expect(messageBox).not.toBeNull();
+    const badgeRight = badgeBox!.x + badgeBox!.width;
+    expect(badgeBox!.x).toBeGreaterThanOrEqual(messageBox!.x);
+    expect(badgeRight).toBeLessThanOrEqual(messageBox!.x + messageBox!.width + 0.5);
+    expect(badgeRight).toBeLessThanOrEqual(375);
     await capture('chats-reminder-phone');
 
     messages.push(reminder, answer);

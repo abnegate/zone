@@ -278,9 +278,7 @@ export interface MessageMetadata {
   /** Model thinking text, when the deployment advertised reasoning. */
   reasoning?: string;
   handovers?: Handover[];
-  /** What wrote this message when a person did not, such as `reminder`. Server-set. */
   source?: string;
-  /** The reminder whose firing wrote this message. */
   reminder_id?: string;
 }
 

@@ -1,7 +1,7 @@
 import { Badge } from '@zone/ui';
 import type { ReactElement } from 'react';
 import type { MessageMetadata } from '../types';
-import { automation } from '../utils/automation';
+import { automation } from '../utils';
 
 export function AutomationBadge({
   metadata,
@@ -11,14 +11,14 @@ export function AutomationBadge({
   const found = automation(metadata);
   if (!found) return null;
 
-  const { source, detail } = found;
+  const { kind, detail } = found;
 
   return (
     <Badge
       variant="neutral"
       className="automation-badge"
       data-testid="automation-badge"
-      title={detail ? `${source.description} ${detail}` : source.description}
+      title={detail ? `${kind.description} ${detail}` : kind.description}
     >
       <svg
         className="automation-badge-icon"
@@ -30,10 +30,10 @@ export function AutomationBadge({
         strokeLinejoin="round"
         aria-hidden="true"
       >
-        <path d={source.icon} />
+        <path d={kind.icon} />
       </svg>
-      {source.label}
-      <span className="sr-only">. {source.description}</span>
+      {kind.label}
+      <span className="sr-only">. {kind.description}</span>
     </Badge>
   );
 }

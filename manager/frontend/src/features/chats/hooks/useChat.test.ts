@@ -1325,11 +1325,19 @@ describe('useChat', () => {
       content: 'Check the deploy queue',
       metadata: { source: 'reminder', reminder_id: 'reminder-1' },
     });
+    lastSocket?.emit({ type: 'message_start', message_id: 'reminder-answer', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'reminder-answer',
+      content: 'Two jobs are stuck',
+    });
     await waitFor(() => {
       const messages = result.current.chat?.messages ?? [];
       expect(messages.find((m) => m.id === 'reminder-turn')?.metadata?.source).toBe('reminder');
+      expect(messages.find((m) => m.id === 'reminder-answer')?.content).toBe('Two jobs are stuck');
       expect(messages.some((m) => m.content === 'Typed while it fired')).toBe(true);
     });
+    expect(result.current.streaming).toBe(true);
 
     lastSocket?.emit({
       type: 'message_saved',
@@ -1338,11 +1346,14 @@ describe('useChat', () => {
       content: 'Typed while it fired',
     });
     await waitFor(() => {
-      const messages = result.current.chat?.messages ?? [];
-      expect(messages.filter((m) => m.content === 'Typed while it fired')).toHaveLength(1);
-      expect(messages.find((m) => m.content === 'Typed while it fired')?.id).toBe('typed-turn');
-      expect(messages.filter((m) => m.id === 'reminder-turn')).toHaveLength(1);
+      const ids = (result.current.chat?.messages ?? []).map((m) => m.id);
+      expect(ids.slice(-3)).toEqual(['reminder-turn', 'reminder-answer', 'typed-turn']);
     });
+    expect(result.current.streaming).toBe(true);
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'typed-answer', role: 'assistant' });
+    lastSocket?.emit({ type: 'message_end', message_id: 'typed-answer', content: 'Done' });
+    await waitFor(() => expect(result.current.streaming).toBe(false));
   });
 
   it('keeps a single user message when message_saved arrives under Strict Mode', async () => {
