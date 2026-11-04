@@ -5,7 +5,7 @@ import { BrowserRouter } from 'react-router-dom';
 
 const mockUseAuth = mock();
 
-mock.module('../hooks', () => ({
+mock.module('../context', () => ({
   useAuth: mockUseAuth,
 }));
 

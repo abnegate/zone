@@ -6,7 +6,7 @@ import { LAST_PATH_KEY, persistLastPath } from '../../../shared/lastPath';
 
 const mockUseAuth = mock();
 
-mock.module('../hooks', () => ({
+mock.module('../context', () => ({
   useAuth: mockUseAuth,
 }));
 
@@ -152,8 +152,43 @@ describe('LoginPage', () => {
       expect(mockLogin).not.toHaveBeenCalled();
     });
 
-    // Note: Error clearing on typing is not currently implemented in the component
-    // The error persists until the next form submission attempt
+    it('focuses the first invalid field', async () => {
+      renderLoginPage();
+
+      const emailInput = screen.getByLabelText(/email/i);
+      await userEvent.type(emailInput, 'test@example.com');
+      await userEvent.type(emailInput, '{enter}');
+
+      await waitFor(() => {
+        expect(document.activeElement).toBe(screen.getByLabelText(/password/i));
+      });
+    });
+
+    it('clears a field error while typing once a submit has been attempted', async () => {
+      renderLoginPage();
+
+      const emailInput = screen.getByLabelText(/email/i);
+      await userEvent.type(emailInput, 'test@example.com');
+      await userEvent.type(emailInput, '{enter}');
+      await waitFor(() => {
+        expect(screen.getByText(/password is required/i)).toBeInTheDocument();
+      });
+
+      await userEvent.type(screen.getByLabelText(/password/i), 'secret');
+
+      await waitFor(() => {
+        expect(screen.queryByText(/password is required/i)).not.toBeInTheDocument();
+      });
+    });
+
+    it('does not validate while typing before the first submit', async () => {
+      renderLoginPage();
+
+      await userEvent.type(screen.getByLabelText(/email/i), 'not-an-email');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(screen.queryByText(/invalid email/i)).not.toBeInTheDocument();
+    });
   });
 
   describe('Form Submission', () => {

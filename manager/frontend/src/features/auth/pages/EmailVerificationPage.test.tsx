@@ -248,6 +248,7 @@ describe('EmailVerificationPage', () => {
         </StrictMode>
       );
 
+      await waitFor(() => expect(mockVerifyEmail).toHaveBeenCalled());
       resolveVerify({ success: true, message: 'Email verified successfully' });
 
       await waitFor(() => {

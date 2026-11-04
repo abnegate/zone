@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from 'react';
-import { client } from '../../api/client';
 import type { BorderRadius, FontFamily, WorkspaceTheme } from '../../types';
 
 export type Theme = 'light' | 'dark';
@@ -205,8 +204,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       setError(null);
       setLoading(Boolean(organization && workspace));
       if (organization && workspace) {
-        client
-          .getWorkspaceTheme(organization, workspace)
+        import('../../api/client')
+          .then(({ client }) => client.getWorkspaceTheme(organization, workspace))
           .then((value) => {
             if (revision.current !== request) return;
             setWorkspaceThemeState(value);

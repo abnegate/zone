@@ -14,11 +14,12 @@ import type {
 } from '../features/knowledge/types';
 import { parse } from '../validation';
 import { deviceHeaders } from './device';
+import { session } from './session';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
 class KnowledgeApi {
-  private getAccessToken: (() => string | null) | null = null;
+  private getAccessToken: () => string | null = () => session.getAccessToken();
 
   setGetAccessToken(fn: () => string | null) {
     this.getAccessToken = fn;

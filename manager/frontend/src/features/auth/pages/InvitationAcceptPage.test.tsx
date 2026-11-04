@@ -16,7 +16,7 @@ mock.module('../../../api/client', () =>
   })
 );
 
-mock.module('../hooks', () => ({
+mock.module('../context', () => ({
   useAuth: mockUseAuth,
 }));
 

@@ -1,12 +1,45 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwind from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+import {
+  DEFERRED_STYLESHEET_ATTRIBUTE,
+  FEATURE_STYLESHEET_ATTRIBUTE,
+} from './src/shared/stylesheet';
+
 const frontendRoot = fileURLToPath(new URL('.', import.meta.url));
 const uiSrc = path.resolve(frontendRoot, '../../packages/ui/src');
+
+const STYLESHEET_COUNT = 3;
+
+function deferStylesheets(): Plugin {
+  return {
+    name: 'zone:defer-stylesheets',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'post',
+      handler: (html) => {
+        let rewritten = 0;
+        const output = html.replace(
+          /<link rel="stylesheet" crossorigin href="(\/assets\/styles-[^"]+\.css)">/g,
+          (_link, href: string) => {
+            rewritten += 1;
+            return href.includes('styles-features-')
+              ? `<link rel="stylesheet" crossorigin ${FEATURE_STYLESHEET_ATTRIBUTE}="${href}">`
+              : `<link rel="stylesheet" crossorigin href="${href}" media="print" onload="this.media='all'" onerror="this.media='all'" ${DEFERRED_STYLESHEET_ATTRIBUTE}>`;
+          }
+        );
+        if (rewritten !== STYLESHEET_COUNT) {
+          throw new Error(`Deferred ${rewritten} of ${STYLESHEET_COUNT} stylesheets`);
+        }
+        return output;
+      },
+    },
+  };
+}
 
 export default defineConfig(({ command }) => {
   const inDocker = Boolean(process.env.VITE_PROXY_TARGET);
@@ -20,9 +53,11 @@ export default defineConfig(({ command }) => {
     plugins: [
       react(),
       tailwind(),
+      deferStylesheets(),
       VitePWA({
         disable: process.env.VITE_DISABLE_PWA === '1',
         registerType: 'autoUpdate',
+        injectRegister: 'script-defer',
         includeAssets: ['favicon.ico', 'logo192.png', 'logo512.png'],
         manifest: {
           name: 'Zone Dashboard',
@@ -55,7 +90,9 @@ export default defineConfig(({ command }) => {
               '@zone/ui': path.join(uiSrc, 'index.ts'),
             },
           }
-        : undefined,
+        : {
+            alias: [{ find: /^@zone\/ui$/, replacement: path.join(uiSrc, 'index.ts') }],
+          },
     optimizeDeps: {
       exclude: ['@zone/ui'],
     },
@@ -96,6 +133,27 @@ export default defineConfig(({ command }) => {
     build: {
       outDir: 'build',
       sourcemap: true,
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              { name: 'runtime', test: /preload-helper|rolldown:runtime|staleChunk|\/src\/routes\.ts|\/api\/session\.ts|\/shared\/stylesheet\.ts|\/shared\/lastPath\.ts/, priority: 4 },
+              {
+                name: 'styles-shared',
+                test: /(\/src\/App\.css|\/styles\/globals\.css)($|\?)/,
+                priority: 3,
+              },
+              {
+                name: 'styles-signed-out',
+                test: /(\/ZoneLogo\.css|\/pages\/AuthPage\.css|\/ResendVerificationButton\.css|\/VerificationPendingBanner\.css|\/InvitationAcceptPage\.css)($|\?)/,
+                priority: 3,
+              },
+              { name: 'styles-features', test: /\.css($|\?)/, priority: 2 },
+              { name: 'boot', test: /\/src\/main\.tsx$/, priority: 1 },
+            ],
+          },
+        },
+      },
     },
   };
 });

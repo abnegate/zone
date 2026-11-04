@@ -3,9 +3,7 @@ import type React from 'react';
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
-import { getErrors } from '../../../validation';
-import { useAuth } from '../hooks';
-import { RegisterRequestSchema } from '../schemas';
+import { useAuth } from '../context';
 import './AuthPage.css';
 
 export default function RegisterPage() {
@@ -34,22 +32,26 @@ export default function RegisterPage() {
       password,
       display_name: displayName.trim() || undefined,
     };
-    const errors = getErrors(RegisterRequestSchema, formData);
-
-    if (password !== confirmPassword) {
-      errors.confirmPassword = 'Passwords do not match';
-    }
-
-    if (Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
-      return;
-    }
-
-    setFieldErrors({});
     setLoading(true);
     setError('');
 
     try {
+      const [{ getErrors }, { RegisterRequestSchema }] = await Promise.all([
+        import('../../../validation'),
+        import('../schemas'),
+      ]);
+      const errors = getErrors(RegisterRequestSchema, formData);
+
+      if (password !== confirmPassword) {
+        errors.confirmPassword = 'Passwords do not match';
+      }
+
+      if (Object.keys(errors).length > 0) {
+        setFieldErrors(errors);
+        return;
+      }
+
+      setFieldErrors({});
       await register({
         email: email.trim(),
         password,

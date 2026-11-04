@@ -962,8 +962,8 @@ describe('AgentSignIn', () => {
       await waitFor(() => expect(onChange).toHaveBeenCalledWith(codexSignedOut));
       expect(agentsApi.cancel).toHaveBeenCalledWith(organization, 'codex');
       expect(agentsApi.signOut).not.toHaveBeenCalled();
+      await waitFor(() => expect(focused(screen.getByRole('status'))).toBe(true));
       expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
-      expect(focused(screen.getByRole('status'))).toBe(true);
     });
 
     it('keeps the accounts already held when another device sign-in is cancelled', async () => {

@@ -1,6 +1,4 @@
 import type { AuthResponse, LoginRequest, RegisterRequest } from '../types';
-import { parse } from '../validation';
-import { AuthResponseSchema } from '../validation/schemas';
 import { deviceHeaders } from './device';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -21,6 +19,14 @@ async function refused(response: Response, fallback: string): Promise<never> {
   throw new Error(message);
 }
 
+async function authResponseParser(): Promise<(data: unknown) => AuthResponse> {
+  const [{ parse }, { AuthResponseSchema }] = await Promise.all([
+    import('../validation'),
+    import('../features/auth/schemas'),
+  ]);
+  return (data) => parse(AuthResponseSchema, data);
+}
+
 export class AuthRequestError extends Error {
   readonly code: string;
 
@@ -32,6 +38,7 @@ export class AuthRequestError extends Error {
 }
 
 export async function login(request: LoginRequest): Promise<AuthResponse> {
+  const parseResponse = await authResponseParser();
   const response = await fetch(`${API_BASE}/api/auth/login`, {
     method: 'POST',
     headers: jsonHeaders(),
@@ -43,10 +50,11 @@ export async function login(request: LoginRequest): Promise<AuthResponse> {
   }
 
   const data = await response.json();
-  return parse(AuthResponseSchema, data);
+  return parseResponse(data);
 }
 
 export async function register(request: RegisterRequest): Promise<AuthResponse> {
+  const parseResponse = await authResponseParser();
   const response = await fetch(`${API_BASE}/api/auth/register`, {
     method: 'POST',
     headers: jsonHeaders(),
@@ -58,7 +66,7 @@ export async function register(request: RegisterRequest): Promise<AuthResponse> 
   }
 
   const data = await response.json();
-  return parse(AuthResponseSchema, data);
+  return parseResponse(data);
 }
 
 /// A refresh that failed. `status` distinguishes a rejected credential from a
@@ -81,6 +89,13 @@ export class RefreshError extends Error {
 }
 
 export async function refreshToken(token: string): Promise<AuthResponse> {
+  let parseResponse: (data: unknown) => AuthResponse;
+  try {
+    parseResponse = await authResponseParser();
+  } catch (cause) {
+    throw new RefreshError(`Token refresh could not load its validation: ${cause}`);
+  }
+
   let response: Response;
   try {
     response = await fetch(`${API_BASE}/api/auth/refresh`, {
@@ -97,7 +112,7 @@ export async function refreshToken(token: string): Promise<AuthResponse> {
   }
 
   const data = await response.json();
-  return parse(AuthResponseSchema, data);
+  return parseResponse(data);
 }
 
 export async function logout(token: string): Promise<void> {

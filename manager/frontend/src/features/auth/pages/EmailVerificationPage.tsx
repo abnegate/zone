@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { client } from '../../../api/client';
-import { AuthCard, AuthStatus, CheckIcon } from '../components';
+import AuthCard from '../components/AuthCard';
+import AuthStatus from '../components/AuthStatus';
+import CheckIcon from '../components/CheckIcon';
 import { isValidTokenFormat } from '../utils';
 import './AuthPage.css';
 
@@ -12,7 +13,9 @@ const inFlight = new Map<string, Promise<{ message: string }>>();
 function verifyOnce(token: string): Promise<{ message: string }> {
   const pending = inFlight.get(token);
   if (pending) return pending;
-  const request = client.verifyEmail(token).finally(() => inFlight.delete(token));
+  const request = import('../../../api/client')
+    .then(({ client }) => client.verifyEmail(token))
+    .finally(() => inFlight.delete(token));
   inFlight.set(token, request);
   return request;
 }

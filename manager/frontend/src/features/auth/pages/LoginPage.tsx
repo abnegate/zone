@@ -1,17 +1,32 @@
 import './AuthPage.css';
-import { zodResolver } from '@hookform/resolvers/zod';
 import { Button, Input } from '@zone/ui';
-import { useEffect } from 'react';
-import { useForm } from 'react-hook-form';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { toast } from 'sonner';
-import type { z } from 'zod';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
 import { type PathLike, pathAfterAuth } from '../../../shared/lastPath';
-import { useAuth } from '../hooks';
-import { LoginRequestSchema } from '../schemas';
+import { useAuth } from '../context';
+import type { LoginRequest } from '../types';
 
-type LoginForm = z.infer<typeof LoginRequestSchema>;
+const FIELDS = ['email', 'password'] as const;
+
+function valuesOf(form: HTMLFormElement): LoginRequest {
+  const data = new FormData(form);
+  return { email: String(data.get('email') ?? ''), password: String(data.get('password') ?? '') };
+}
+
+async function validate(values: LoginRequest): Promise<Record<string, string>> {
+  const [{ getErrors }, { LoginRequestSchema }] = await Promise.all([
+    import('../../../validation'),
+    import('../schemas'),
+  ]);
+  return getErrors(LoginRequestSchema, values);
+}
+
+async function notify(kind: 'success' | 'error', message: string) {
+  const { toast } = await import('sonner');
+  toast[kind](message);
+}
 
 function fromLocation(state: unknown): PathLike | null {
   if (!state || typeof state !== 'object' || !('from' in state)) {
@@ -30,18 +45,10 @@ export default function LoginPage() {
   const { login, isAuthenticated, isLoading: authLoading } = useAuth();
   const next = pathAfterAuth(fromLocation(location.state));
 
-  const {
-    register,
-    handleSubmit,
-    formState: { errors, isSubmitting },
-    setError,
-  } = useForm<LoginForm>({
-    resolver: zodResolver(LoginRequestSchema),
-    defaultValues: {
-      email: '',
-      password: '',
-    },
-  });
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [rootError, setRootError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const attempted = useRef(false);
 
   useEffect(() => {
     if (isAuthenticated && !authLoading) {
@@ -49,15 +56,43 @@ export default function LoginPage() {
     }
   }, [isAuthenticated, authLoading, navigate, next]);
 
-  const onSubmit = async (data: LoginForm) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const values = valuesOf(form);
+    attempted.current = true;
+    setRootError('');
+    setIsSubmitting(true);
+
     try {
-      await login(data);
+      const invalid = await validate(values);
+      const firstInvalid = FIELDS.find((field) => invalid[field]);
+      if (firstInvalid) {
+        flushSync(() => {
+          setErrors(invalid);
+          setIsSubmitting(false);
+        });
+        form.querySelector<HTMLInputElement>(`[name="${firstInvalid}"]`)?.focus();
+        return;
+      }
+      setErrors({});
+
+      await login(values);
       navigate(next, { replace: true });
-      toast.success('Successfully logged in');
+      void notify('success', 'Successfully logged in');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Login failed';
-      toast.error(message);
-      setError('root', { message });
+      void notify('error', message);
+      setRootError(message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const revalidate = async (event: FormEvent<HTMLFormElement>) => {
+    if (attempted.current) {
+      const values = valuesOf(event.currentTarget);
+      setErrors(await validate(values).catch(() => ({})));
     }
   };
 
@@ -80,16 +115,16 @@ export default function LoginPage() {
           <p>Sign in to your account</p>
         </div>
 
-        <form className="auth-form" onSubmit={handleSubmit(onSubmit)}>
+        <form className="auth-form" onSubmit={handleSubmit} onChange={revalidate}>
           <Input
             label="Email"
             type="email"
             placeholder="you@example.com"
             autoFocus
             autoComplete="email"
-            error={errors.email?.message}
+            error={errors.email}
             disabled={isSubmitting}
-            {...register('email')}
+            name="email"
           />
 
           <Input
@@ -97,18 +132,18 @@ export default function LoginPage() {
             type="password"
             placeholder="Enter your password"
             autoComplete="current-password"
-            error={errors.password?.message}
+            error={errors.password}
             disabled={isSubmitting}
-            {...register('password')}
+            name="password"
           />
 
           <div className="auth-form-links">
             <Link to="/forgot-password">Forgot password?</Link>
           </div>
 
-          {errors.root && (
+          {rootError && (
             <div className="auth-error" role="alert">
-              {errors.root.message}
+              {rootError}
             </div>
           )}
 

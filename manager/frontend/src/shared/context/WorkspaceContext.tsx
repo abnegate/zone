@@ -1,6 +1,5 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from 'react';
-import { client } from '../../api/client';
-import { useAuth } from '../../features/auth';
+import { useAuth } from '../../features/auth/context';
 import type { Organization, OrgRole, Workspace } from '../../types';
 
 interface WorkspaceContextType {
@@ -59,6 +58,7 @@ export function WorkspaceProvider({
   const refreshOrganizations = useCallback(async () => {
     try {
       setError(null);
+      const { client } = await import('../../api/client');
       const orgs = await client.getOrganizations(true);
       setOrganizations(orgs);
 
@@ -83,6 +83,7 @@ export function WorkspaceProvider({
 
     try {
       setError(null);
+      const { client } = await import('../../api/client');
       const wsList = await client.getWorkspaces(organizationId, true);
       setWorkspaces(wsList);
 
@@ -149,8 +150,8 @@ export function WorkspaceProvider({
       return;
     }
     let cancelled = false;
-    client
-      .getOrgMembers(organizationId)
+    import('../../api/client')
+      .then(({ client }) => client.getOrgMembers(organizationId))
       .then(({ members }) => members.find((member) => member.user_id === userId)?.role)
       .catch(() => undefined)
       .then((role) => {

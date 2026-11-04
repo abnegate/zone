@@ -11,8 +11,13 @@ import {
 } from 'react';
 import * as authApi from '../../../api/auth';
 import { RefreshError } from '../../../api/auth';
-import { chatsApi } from '../../../api/chats';
-import { client } from '../../../api/client';
+import {
+  ACCESS_TOKEN_KEY,
+  ACTIVE_PULLS_KEY,
+  LEGACY_ACTIVE_PULL_KEY,
+  REFRESH_TOKEN_KEY,
+  session,
+} from '../../../api/session';
 import type { AuthResponse, JwtPayload, LoginRequest, RegisterRequest, User } from '../types';
 
 interface AuthState {
@@ -38,7 +43,7 @@ interface AuthContextType extends AuthState {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 type AuthApi = Pick<typeof authApi, 'login' | 'register' | 'refreshToken' | 'logout'>;
-type ClientApi = Pick<typeof client, 'setAccessToken'>;
+type ClientApi = Pick<typeof session, 'setAccessToken'>;
 type StorageApi = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 // Retry window after a refresh that failed for a reason other than the server
@@ -48,8 +53,6 @@ const RETRY_REFRESH_SECONDS = 75;
 // setTimeout fires a delay above a signed 32-bit millisecond count at once.
 const LONGEST_TIMER_MILLISECONDS = 2_147_483_647;
 
-const ACCESS_TOKEN_KEY = 'manager_access_token';
-const REFRESH_TOKEN_KEY = 'manager_refresh_token';
 const USER_KEY = 'manager_user';
 
 // Decode JWT payload (without verification - that's done server-side)
@@ -85,7 +88,7 @@ export function AuthProvider({
   storageOverride?: StorageApi;
 }) {
   const auth = authApiOverride ?? authApi;
-  const apiClient = clientOverride ?? client;
+  const apiClient = clientOverride ?? session;
   const storage = storageOverride ?? localStorage;
   const [state, setState] = useState<AuthState>(() => {
     const accessToken = storage.getItem(ACCESS_TOKEN_KEY);
@@ -128,6 +131,8 @@ export function AuthProvider({
     storage.removeItem(ACCESS_TOKEN_KEY);
     storage.removeItem(REFRESH_TOKEN_KEY);
     storage.removeItem(USER_KEY);
+    sessionStorage.removeItem(ACTIVE_PULLS_KEY);
+    sessionStorage.removeItem(LEGACY_ACTIVE_PULL_KEY);
 
     setState({
       user: null,
@@ -249,9 +254,9 @@ export function AuthProvider({
   }, [apiClient, auth, handleAuthResponse, handleLogout, scheduleRefresh, storage]);
 
   useLayoutEffect(() => {
-    chatsApi.setEnsureAccessToken(() => ensureFresh());
+    session.setEnsureAccessToken(() => ensureFresh());
     return () => {
-      chatsApi.setEnsureAccessToken(null);
+      session.setEnsureAccessToken(null);
     };
   }, [ensureFresh]);
 

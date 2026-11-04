@@ -20,13 +20,14 @@ import {
 } from '../validation/schemas';
 import { API_BASE } from './client';
 import { deviceHeaders } from './device';
+import { session } from './session';
 
 /**
  * Projects API client
  * Handles all project-related API calls
  */
 class ProjectsApi {
-  private getAccessToken: (() => string | null) | null = null;
+  private getAccessToken: () => string | null = () => session.getAccessToken();
 
   setGetAccessToken(fn: () => string | null) {
     this.getAccessToken = fn;

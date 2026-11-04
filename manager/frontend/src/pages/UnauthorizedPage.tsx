@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
-import { AuthCard, AuthStatus } from '../features/auth/components';
+import AuthCard from '../features/auth/components/AuthCard';
+import AuthStatus from '../features/auth/components/AuthStatus';
 
 const LockIcon = () => (
   <svg
