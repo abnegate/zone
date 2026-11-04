@@ -80,7 +80,8 @@ test.describe('chats', () => {
     // Rename, archive, unarchive and delete the reasoning chat from the list.
     const active = page.locator('.chat-item.active');
     await active.hover();
-    await active.locator('button[title="Rename"]').click();
+    await active.locator('.ui-action-menu-trigger').click();
+    await page.getByRole('menuitem', { name: 'Rename' }).click();
     await page.locator('#chat-name').fill(`Renamed ${s}`);
     await page.getByRole('button', { name: 'Save name' }).click();
     await expect(
@@ -89,7 +90,8 @@ test.describe('chats', () => {
     await shot(page, '33-renamed');
     const renamedItem = page.locator('.chat-item', { hasText: `Renamed ${s}` });
     await renamedItem.hover();
-    await renamedItem.locator('button[title=\"Archive\"]').click();
+    await renamedItem.locator('.ui-action-menu-trigger').click();
+    await page.getByRole('menuitem', { name: 'Archive' }).click();
     await page.waitForTimeout(3_000);
     const archivedInDb = sql(
       `select archived from chats where id = '${reasonChat}'`,
@@ -110,7 +112,8 @@ test.describe('chats', () => {
     await expect(archived).toBeVisible({ timeout: 30_000 });
     await shot(page, '33-archived');
     await archived.hover();
-    await archived.locator('button[title="Unarchive"]').click();
+    await archived.locator('.ui-action-menu-trigger').click();
+    await page.getByRole('menuitem', { name: 'Unarchive' }).click();
     await page.waitForTimeout(3_000);
     const stillListedAfterUnarchive = await archived.count();
     const unarchivedInDb = sql(
@@ -150,7 +153,8 @@ test.describe('chats', () => {
 
     await toDelete.hover();
 
-    await toDelete.locator('button[title=\"Delete\"]').click();
+    await toDelete.locator('.ui-action-menu-trigger').click();
+    await page.getByRole('menuitem', { name: 'Delete' }).click();
     const confirm = page.getByRole('dialog');
     await expect(confirm).toContainText('Delete Chat');
     await confirm.getByRole('button', { name: 'Delete', exact: true }).click();

@@ -137,7 +137,7 @@
 
 .chat-item {
   --chat-item-bg: var(--ui-bg-base);
-  --chat-item-actions: calc(3 * var(--ui-control-height-sm) + 2 * var(--ui-space-0-5));
+  --chat-item-actions: var(--ui-control-height-sm);
   position: relative;
   display: flex;
   align-items: center;
@@ -148,7 +148,8 @@
 }
 
 .chat-item:hover,
-.chat-item:focus-within {
+.chat-item:focus-within,
+.chat-item:has(.ui-action-menu-trigger[data-state='open']) {
   --chat-item-bg: var(--ui-bg-hover);
   background: var(--chat-item-bg);
 }
@@ -201,10 +202,10 @@
   top: 0;
   right: var(--ui-space-2);
   bottom: 0;
-  display: none;
+  display: flex;
   align-items: center;
-  gap: var(--ui-space-0-5);
   background: var(--chat-item-bg);
+  opacity: 0;
 }
 
 .chat-item-actions::before {
@@ -218,13 +219,14 @@
 }
 
 .chat-item:hover .chat-item-actions,
-.chat-item:focus-within .chat-item-actions {
-  display: flex;
+.chat-item:focus-within .chat-item-actions,
+.chat-item-actions:has(.ui-action-menu-trigger[data-state='open']) {
+  opacity: 1;
 }
 
 @media (hover: none) {
   .chat-item-actions {
-    display: flex;
+    opacity: 1;
   }
 
   .chat-item-content {

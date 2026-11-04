@@ -47,8 +47,13 @@ for (const width of [390, 1280]) {
     const row = page.locator('.chat-item');
     if (width < 768) await page.getByRole('button', { name: 'Back to chats' }).click();
     await row.hover();
-    await expect(row.getByTitle('Archive', { exact: true })).toBeVisible();
-    await expect(row.getByTitle('Delete', { exact: true })).toBeVisible();
+    const actions = row.getByRole('button', { name: `Actions for ${chat.title}` });
+    await actions.click();
+    const menu = page.getByRole('menu');
+    await expect(menu.getByRole('menuitem', { name: 'Archive' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Delete' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
     if (width < 768) await row.click();
     await expect(page.getByTestId('agent-toggle')).toBeVisible();
     await expect(page.getByTestId('sandbox-toggle')).toHaveCount(0);
@@ -64,7 +69,8 @@ for (const width of [390, 1280]) {
     });
     if (width < 768) await page.getByRole('button', { name: 'Back to chats' }).click();
     await row.hover();
-    await row.getByRole('button', { name: `Rename ${chat.title}` }).click();
+    await row.getByRole('button', { name: `Actions for ${chat.title}` }).click();
+    await page.getByRole('menuitem', { name: 'Rename' }).click();
     const name = page.getByLabel('Chat name');
     await expect(name).toHaveValue(chat.title);
     await name.fill('  Planning a garden  ');

@@ -52,6 +52,11 @@ const openNewChatFromSidebar = (page: Page) =>
     .getByRole('button', { name: 'New chat', exact: true })
     .click();
 
+const openChatActions = async (page: Page) => {
+  await page.hover('.chat-item');
+  await page.locator('.chat-item .ui-action-menu-trigger').click();
+};
+
 const mockOpenChatSocket = async (page: Page, chatId = 'chat-1') => {
   await page.routeWebSocket(new RegExp(`/ws/chats/${chatId}`), (ws) => {
     ws.onMessage((message) => {
@@ -562,9 +567,9 @@ test.describe('Chats Page', () => {
       await page.click('a[href="/chats"]');
     });
 
-    test('shows archive button on hover', async ({ page }) => {
-      await page.hover('.chat-item');
-      await expect(page.locator('.chat-item-actions button[title="Archive"]')).toBeVisible();
+    test('offers archive from the row menu on hover', async ({ page }) => {
+      await openChatActions(page);
+      await expect(page.getByRole('menuitem', { name: 'Archive' })).toBeVisible();
     });
 
     test('archives chat', async ({ page }) => {
@@ -576,15 +581,15 @@ test.describe('Chats Page', () => {
         });
       });
 
-      await page.hover('.chat-item');
-      await page.click('button[title="Archive"]');
+      await openChatActions(page);
+      await page.getByRole('menuitem', { name: 'Archive' }).click();
 
       // Chat should be removed from active list (or API called)
     });
 
     test('shows delete confirmation modal', async ({ page }) => {
-      await page.hover('.chat-item');
-      await page.click('button[title="Delete"]');
+      await openChatActions(page);
+      await page.getByRole('menuitem', { name: 'Delete' }).click();
 
       const deleteDialog = page.getByRole('dialog', { name: 'Delete Chat' });
       await expect(deleteDialog).toBeVisible();
@@ -598,8 +603,8 @@ test.describe('Chats Page', () => {
         }
       });
 
-      await page.hover('.chat-item');
-      await page.click('button[title="Delete"]');
+      await openChatActions(page);
+      await page.getByRole('menuitem', { name: 'Delete' }).click();
       await page
         .getByRole('dialog', { name: 'Delete Chat' })
         .getByRole('button', { name: 'Delete' })
@@ -610,8 +615,8 @@ test.describe('Chats Page', () => {
     });
 
     test('cancels delete', async ({ page }) => {
-      await page.hover('.chat-item');
-      await page.click('button[title="Delete"]');
+      await openChatActions(page);
+      await page.getByRole('menuitem', { name: 'Delete' }).click();
       await page
         .getByRole('dialog', { name: 'Delete Chat' })
         .getByRole('button', { name: 'Cancel' })
