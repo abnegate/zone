@@ -1,5 +1,6 @@
 import './styles/cascade';
 import { startFirstRoute } from './routes';
+import { afterFirstContentfulPaint } from './shared/firstPaint';
 import { restoreLastPath } from './shared/lastPath';
 import { reloadOnStaleChunk } from './shared/staleChunk';
 import { releaseShell } from './shell/release';
@@ -17,9 +18,4 @@ function boot() {
 
 reloadOnStaleChunk();
 restoreLastPath();
-
-if (document.hidden) {
-  boot();
-} else {
-  requestAnimationFrame(() => requestAnimationFrame(boot));
-}
+afterFirstContentfulPaint(boot);
