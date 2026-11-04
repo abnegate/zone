@@ -16,7 +16,8 @@ export interface HeaderPopoverProps {
 
 /**
  * A pill in the chat header that opens a panel of further controls. The panel
- * stays mounted while closed so a half-made choice inside it survives closing.
+ * stays mounted while closed, so a half-made choice inside it survives closing
+ * unsaved: leaving the panel commits nothing.
  */
 export function HeaderPopover({
   className,

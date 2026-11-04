@@ -1,43 +1,41 @@
-import { type KeyboardEvent, useRef, useState } from 'react';
+import { type KeyboardEvent, useEffect, useState } from 'react';
 import { MODEL_NAME_PLACEHOLDER } from '../utils';
+
+const IME_KEY_CODE = 229;
 
 export interface ModelNameInputProps {
   provider: string;
   value: string;
-  disabled?: boolean;
+  busy?: boolean;
   onSubmit: (name: string) => void;
+  onCancel?: () => void;
 }
 
 export function ModelNameInput({
   provider,
   value,
-  disabled = false,
+  busy = false,
   onSubmit,
+  onCancel,
 }: ModelNameInputProps) {
   const [name, setName] = useState(value);
-  const draft = useRef(value);
-  const submitted = useRef(value);
+  const trimmed = name.trim();
 
-  const edit = (next: string) => {
-    draft.current = next;
-    setName(next);
-  };
-
-  const submit = () => {
-    const trimmed = draft.current.trim();
-    if (!trimmed || trimmed === submitted.current) return;
-    submitted.current = trimmed;
-    onSubmit(trimmed);
-  };
+  useEffect(() => {
+    setName(value);
+  }, [value]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === IME_KEY_CODE) return;
     if (event.key === 'Escape') {
-      edit(submitted.current);
+      if (busy) return;
+      setName(value);
+      onCancel?.();
       return;
     }
     if (event.key !== 'Enter') return;
     event.preventDefault();
-    submit();
+    if (!busy && trimmed && trimmed !== value) onSubmit(trimmed);
   };
 
   return (
@@ -49,13 +47,16 @@ export function ModelNameInput({
         title={`Which model ${provider} runs. AI Settings save none for it, so name one it serves and press Enter.`}
         placeholder={MODEL_NAME_PLACEHOLDER}
         value={name}
-        disabled={disabled}
+        readOnly={busy}
+        aria-busy={busy}
         spellCheck={false}
         autoComplete="off"
-        onChange={(event) => edit(event.target.value)}
-        onBlur={submit}
+        onChange={(event) => setName(event.target.value)}
         onKeyDown={handleKeyDown}
       />
+      {!busy && trimmed && trimmed !== value && (
+        <span className="chat-provider-model-hint">Enter to save</span>
+      )}
     </label>
   );
 }

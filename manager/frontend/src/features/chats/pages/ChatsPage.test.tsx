@@ -1388,6 +1388,23 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('keeps a failed create in the dialog, out of the open chat', async () => {
+      mockClient.createChat.mockRejectedValueOnce(new Error('Failed to create'));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+
+      fireEvent.click(newChatButtons()[0]);
+      await screen.findByRole('heading', { name: 'New Chat' });
+      const model = screen.getByLabelText('Select Model');
+      fireEvent.keyDown(model, { key: 'ArrowDown' });
+      fireEvent.click(await screen.findByRole('option', { name: 'llama2' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
+
+      await waitFor(() => expect(screen.getByText('Failed to create')).toBeInTheDocument());
+      expect(screen.queryByTestId('chat-operation-error')).not.toBeInTheDocument();
+    });
+
     it('shows error when create chat fails', async () => {
       mockClient.createChat.mockRejectedValueOnce(new Error('Failed to create'));
 
@@ -2779,6 +2796,141 @@ describe('ChatsPage', () => {
       );
     });
 
+    const openUnsandboxedChat = async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: false }));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      await waitFor(() =>
+        expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument()
+      );
+    };
+
+    const sendTurn = () => {
+      fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {
+        target: { value: 'Next turn' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    };
+
+    it('warns when a provider change lands but reading the providers back fails', async () => {
+      await openUnsandboxedChat();
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+        provider: 'claude_code',
+      });
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+
+      chooseSelectOption('chat-provider', 'Claude Code');
+
+      await screen.findByTestId('chat-providers-error');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByTestId('agent-permissions')).toHaveTextContent('Host tools');
+    });
+
+    it('picks up a default that changed between turns as the next turn starts', async () => {
+      await openUnsandboxedChat();
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+
+      sendTurn();
+
+      await screen.findByTestId('agent-sandbox-toggle');
+      expect(screen.getByTestId('agent-permissions')).toHaveTextContent('Host tools');
+    });
+
+    it('reads the providers again when a turn ends', async () => {
+      await openUnsandboxedChat();
+      sendTurn();
+      await waitFor(() => expect(mockWsSend).toHaveBeenCalled());
+      await waitFor(() => expect(mockGetChatProviders.mock.calls.length).toBe(2));
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+
+      act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
+      act(() => socket.emit({ type: 'message_end', message_id: 'reply', content: 'Done' }));
+
+      await screen.findByTestId('agent-sandbox-toggle');
+    });
+
+    it('sends the turn without waiting for a slow read of the providers', async () => {
+      await openUnsandboxedChat();
+      mockGetChatProviders.mockReturnValue(new Promise(() => {}));
+
+      sendTurn();
+
+      await waitFor(() => expect(mockWsSend).toHaveBeenCalled());
+      expect(await screen.findByRole('status')).toHaveTextContent('Generating response…');
+      await waitFor(() => expect(mockGetChatProviders).toHaveBeenCalledTimes(2));
+    });
+
+    it('hides the toggle again once a later read says the chat runs over HTTP', async () => {
+      await openUnsandboxedChat();
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+      sendTurn();
+      await screen.findByTestId('agent-sandbox-toggle');
+
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: false }));
+      act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
+      act(() => socket.emit({ type: 'message_end', message_id: 'reply', content: 'Done' }));
+
+      await waitFor(() =>
+        expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument()
+      );
+      expect(screen.queryByTestId('chat-providers-error')).not.toBeInTheDocument();
+    });
+
+    it('keeps the toggle on a sandboxed CLI chat through a failed read', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: true,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('agent-sandbox-toggle');
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+
+      sendTurn();
+
+      await screen.findByTestId('chat-providers-error');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('warns while a provider change is still being read back', async () => {
+      await openUnsandboxedChat();
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+        provider: 'claude_code',
+      });
+      mockGetChatProviders.mockReturnValue(new Promise(() => {}));
+
+      chooseSelectOption('chat-provider', 'Claude Code');
+
+      await screen.findByTestId('agent-sandbox-toggle');
+      expect(screen.getByTestId('agent-permissions')).toHaveTextContent('Host tools');
+    });
+
+    it('keeps the turn running when reading the providers fails', async () => {
+      await openUnsandboxedChat();
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+
+      sendTurn();
+
+      await screen.findByTestId('chat-providers-error');
+      expect(mockWsSend).toHaveBeenCalled();
+      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
+    });
+
     it('follows the provider as it changes in the picker', async () => {
       await openAgentChat(chatProviders({ cli: false }));
       expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument();
@@ -3047,6 +3199,320 @@ describe('ChatsPage', () => {
       expect(mockClient.updateChat).not.toHaveBeenCalled();
     });
 
+    const openChatById = async () => {
+      mockClient.getChat.mockImplementation(async (id: string) => ({
+        ...mockChatWithMessages,
+        id,
+      }));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+    };
+
+    const switchToChat2 = async () => {
+      fireEvent.click(screen.getByText('Chat 2'));
+      await waitFor(() => expect(mockClient.getChat.mock.calls.at(-1)?.[0]).toBe('chat-2'));
+      await screen.findByTestId('chat-provider');
+    };
+
+    it('does not carry a refusal over to the chat opened next', async () => {
+      await openChatById();
+      mockSetChatProvider.mockRejectedValue(new Error('Codex is not signed in.'));
+      chooseSelectOption('chat-provider', 'Codex');
+      await screen.findByText('Codex is not signed in.');
+
+      await switchToChat2();
+
+      expect(screen.queryByText('Codex is not signed in.')).not.toBeInTheDocument();
+    });
+
+    it('does not show a late refusal on the chat opened since', async () => {
+      await openChatById();
+      let refuse = (_error: Error) => {};
+      mockSetChatProvider.mockReturnValue(
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        })
+      );
+      chooseSelectOption('chat-provider', 'Codex');
+      await switchToChat2();
+
+      await act(async () => {
+        refuse(new Error('Codex is not signed in.'));
+      });
+
+      expect(screen.queryByText('Codex is not signed in.')).not.toBeInTheDocument();
+    });
+
+    it('leaves the chat opened since alone when an earlier change lands', async () => {
+      await openChatById();
+      let save = (_chat: ChatWithMessages) => {};
+      mockSetChatProvider.mockReturnValue(
+        new Promise<ChatWithMessages>((resolve) => {
+          save = resolve;
+        })
+      );
+      chooseSelectOption('chat-provider', 'Codex');
+      await switchToChat2();
+      const reads = mockClient.getChat.mock.calls.length;
+
+      await act(async () => {
+        save({ ...mockChatWithMessages, provider: 'codex' });
+      });
+
+      expect(mockClient.getChat.mock.calls.length).toBe(reads);
+      expect(mockClient.updateChat).not.toHaveBeenCalled();
+      expect(screen.getByTestId('chat-provider')).toBeInTheDocument();
+    });
+
+    it('resets the effort of the chat left behind without disturbing the one opened', async () => {
+      mockClient.getChat.mockImplementation(async (id: string) => ({
+        ...mockChatWithMessages,
+        id,
+        reasoning_effort: 'ultra',
+      }));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      let settle = (_chat: ChatWithMessages) => {};
+      mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, provider: 'openai' });
+      mockClient.updateChat.mockReturnValue(
+        new Promise<ChatWithMessages>((resolve) => {
+          settle = resolve;
+        })
+      );
+
+      chooseSelectOption('chat-provider', 'Self-Hosted');
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { reasoning_effort: 'auto' })
+      );
+      await switchToChat2();
+      const reads = mockClient.getChat.mock.calls.length;
+
+      await act(async () => {
+        settle({ ...mockChatWithMessages, reasoning_effort: 'auto' });
+      });
+
+      expect(mockClient.getChat.mock.calls.length).toBe(reads);
+      expect(screen.getByTestId('chat-provider')).toBeInTheDocument();
+    });
+
+    it('does not show a late effort reset failure on the chat opened since', async () => {
+      mockClient.getChat.mockImplementation(async (id: string) => ({
+        ...mockChatWithMessages,
+        id,
+        reasoning_effort: 'ultra',
+      }));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      let refuse = (_error: Error) => {};
+      mockSetChatProvider.mockResolvedValue({ ...mockChatWithMessages, provider: 'openai' });
+      mockClient.updateChat.mockReturnValue(
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        })
+      );
+
+      chooseSelectOption('chat-provider', 'Self-Hosted');
+      await waitFor(() => expect(mockClient.updateChat).toHaveBeenCalled());
+      await switchToChat2();
+
+      await act(async () => {
+        refuse(new Error('nope'));
+      });
+
+      expect(screen.queryByTestId('chat-operation-error')).not.toBeInTheDocument();
+    });
+
+    it('does not show a late toggle failure on the chat opened since', async () => {
+      mockClient.getChat.mockImplementation(async (id: string) => ({
+        ...mockChatWithMessages,
+        id,
+        tools: true,
+      }));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      const toggle = await screen.findByTestId('agent-toggle');
+      let refuse = (_error: Error) => {};
+      mockClient.updateChat.mockReturnValue(
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        })
+      );
+      fireEvent.click(toggle);
+      await switchToChat2();
+
+      await act(async () => {
+        refuse(new Error('Failed on the old chat'));
+      });
+
+      expect(screen.queryByText('Failed on the old chat')).not.toBeInTheDocument();
+    });
+
+    it('still shows a toggle failure on the chat it happened to', async () => {
+      mockClient.getChat.mockResolvedValue({ ...mockChatWithMessages, tools: true });
+      mockClient.updateChat.mockRejectedValue(new Error('Failed on this chat'));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      fireEvent.click(await screen.findByTestId('agent-toggle'));
+
+      const error = await screen.findByText('Failed on this chat');
+      expect(error.closest('.chat-header')).not.toBeNull();
+    });
+
+    it('shows a failure on another chat in the sidebar, not the open chat', async () => {
+      await openChatById();
+      mockClient.archiveChat.mockRejectedValue(new Error('Archive failed'));
+
+      fireEvent.click(document.querySelectorAll('.chat-item button[title="Archive"]')[1]);
+
+      const error = await screen.findByText('Archive failed');
+      expect(error.closest('.chat-header')).toBeNull();
+      expect(error.closest('.chats-error')).not.toBeNull();
+    });
+
+    it('keeps the picker of a chat opened during another chat change usable', async () => {
+      await openChatById();
+      mockSetChatProvider.mockReturnValue(new Promise(() => {}));
+      chooseSelectOption('chat-provider', 'Codex');
+      await waitFor(() => expect(screen.getByTestId('chat-provider')).toBeDisabled());
+
+      await switchToChat2();
+
+      expect(screen.getByTestId('chat-provider')).toBeEnabled();
+    });
+
+    const heldSave = () => {
+      let save = (_chat: ChatWithMessages) => {};
+      mockSetChatProvider.mockReturnValueOnce(
+        new Promise<ChatWithMessages>((resolve) => {
+          save = resolve;
+        })
+      );
+      return (chat: ChatWithMessages) => save(chat);
+    };
+
+    it('keeps a chat busy when an earlier change on another chat lands', async () => {
+      await openChatById();
+      const landOnChat1 = heldSave();
+      chooseSelectOption('chat-provider', 'Codex');
+      await switchToChat2();
+      heldSave();
+      chooseSelectOption('chat-provider', 'Codex');
+      await waitFor(() => expect(screen.getByTestId('chat-provider')).toBeDisabled());
+
+      await act(async () => {
+        landOnChat1({ ...mockChatWithMessages, provider: 'codex' });
+      });
+
+      expect(screen.getByTestId('chat-provider')).toBeDisabled();
+    });
+
+    it('still shows a chat as busy after another chat started a change', async () => {
+      await openChatById();
+      heldSave();
+      chooseSelectOption('chat-provider', 'Codex');
+      await switchToChat2();
+      heldSave();
+      chooseSelectOption('chat-provider', 'Codex');
+      await waitFor(() => expect(screen.getByTestId('chat-provider')).toBeDisabled());
+
+      fireEvent.click(screen.getAllByText('Chat 1')[0]);
+      await waitFor(() => expect(mockClient.getChat.mock.calls.at(-1)?.[0]).toBe('chat-1'));
+      await screen.findByTestId('chat-provider');
+
+      expect(screen.getByTestId('chat-provider')).toBeDisabled();
+    });
+
+    it('does not clear the error of a chat opened while a dropped card was read', async () => {
+      mockClient.getChat.mockImplementation(async (id: string) => ({
+        ...mockChatWithMessages,
+        id,
+        tools: true,
+        needs_character: true,
+      }));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      let read = (_text: string) => {};
+      const card = new File(['{}'], 'card.json', { type: 'application/json' });
+      card.text = () =>
+        new Promise<string>((resolve) => {
+          read = resolve;
+        });
+      fireEvent.drop(document.querySelector('.message-form') as Element, {
+        dataTransfer: { files: [card], types: ['Files'] },
+      });
+      await switchToChat2();
+      mockClient.updateChat.mockResolvedValue(mockChatWithMessages);
+      mockClient.updateChat.mockRejectedValueOnce(new Error('Failed on chat 2'));
+      fireEvent.click(await screen.findByTestId('agent-toggle'));
+      await screen.findByText('Failed on chat 2');
+
+      await act(async () => {
+        read(JSON.stringify({ name: 'Ada', description: 'A card' }));
+      });
+
+      expect(screen.getByText('Failed on chat 2')).toBeInTheDocument();
+    });
+
+    it('warns during a turn while reading the providers is still pending', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: false }));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-provider');
+      await waitFor(() =>
+        expect(screen.queryByTestId('agent-sandbox-toggle')).not.toBeInTheDocument()
+      );
+      mockGetChatProviders.mockReturnValue(new Promise(() => {}));
+
+      fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {
+        target: { value: 'Next turn' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+      await screen.findByTestId('agent-sandbox-toggle');
+      expect(screen.getByTestId('agent-permissions')).toHaveTextContent('Host tools');
+    });
+
+    it('reads a chat opened during a turn only once', async () => {
+      await openChatById();
+      fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {
+        target: { value: 'Next turn' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => expect(mockWsSend).toHaveBeenCalled());
+
+      await switchToChat2();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const reads = mockGetChatProviders.mock.calls.filter(([id]) => id === 'chat-2');
+      expect(reads).toHaveLength(1);
+    });
+
+    it('shows a saved choice in the picker when reading it back fails', async () => {
+      await openChatById();
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        provider: 'codex',
+        provider_model: 'gpt-5.5',
+      });
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+
+      chooseSelectOption('chat-provider', 'Codex');
+
+      await screen.findByTestId('chat-providers-error');
+      await waitFor(() => expect(screen.getByTestId('chat-provider')).toHaveTextContent('Codex'));
+      expect(document.querySelector('.chat-settings-provider')).toHaveTextContent('Codex');
+      expect(document.querySelector('.chat-model')).toHaveTextContent('gpt-5.5');
+    });
+
     it('shows a refused choice and keeps the chat as it was', async () => {
       await openChat();
       await screen.findByTestId('chat-provider');
@@ -3054,7 +3520,8 @@ describe('ChatsPage', () => {
 
       chooseSelectOption('chat-provider', 'Codex');
 
-      expect(await screen.findByText('Codex is not signed in.')).toBeInTheDocument();
+      const refusal = await screen.findByText('Codex is not signed in.');
+      expect(refusal.closest('.chat-header')).not.toBeNull();
       expect(screen.getByTestId('chat-provider')).toHaveTextContent('Default');
       expect(screen.getByTestId('chat-provider')).not.toHaveTextContent('Codex');
     });

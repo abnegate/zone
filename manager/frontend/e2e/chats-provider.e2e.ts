@@ -385,6 +385,38 @@ for (const width of [1280, 1024, 900, 390]) {
       await expect(modelSelect).toHaveCount(0);
       expect(captured.provider.some((body) => body.provider === 'openai')).toBe(false);
       await shoot('openai-name-model');
+      await modelName.fill('my-dep');
+      await expect(page.getByText('Enter to save')).toBeVisible();
+      await shoot('openai-unsaved-name');
+      await reasoningSelect.focus();
+      await page.getByTestId('chat-settings').click();
+      await expect(page.getByTestId('chat-settings')).toHaveAttribute('aria-expanded', 'false');
+      await page.getByTestId('chat-settings').click();
+      await expect(modelName).toHaveValue('my-dep');
+      await expect(page.getByText('Enter to save')).toBeVisible();
+      await expect(page.locator('.chat-settings-provider')).toHaveText('Anthropic');
+      expect(captured.provider.some((body) => body.provider === 'openai')).toBe(false);
+
+      await page.route(
+        /\/api\/chats\/chat-unusable\/provider$/,
+        (route) => route.fulfill({ status: 409, json: { error: 'OpenAI refused that model.' } }),
+        { times: 1 }
+      );
+      await modelName.fill('refused-name');
+      await modelName.press('Enter');
+      await expect(page.getByText('OpenAI refused that model.')).toBeVisible();
+      await expect(modelName).toBeFocused();
+      await expect(modelName).toHaveValue('refused-name');
+      await expect(providerSelect).toContainText('OpenAI');
+      expect(captured.provider.some((body) => body.provider === 'openai')).toBe(false);
+
+      await page.keyboard.press('Escape');
+      await expect(page.getByTestId('chat-settings')).toHaveAttribute('aria-expanded', 'false');
+      await page.getByTestId('chat-settings').click();
+      await expect(providerSelect).toContainText('Anthropic');
+      await expect(modelName).toHaveCount(0);
+
+      await choose(page, providerSelect, 'OpenAI');
       await modelName.fill('my-deployment');
       await modelName.press('Enter');
       await expect
@@ -393,6 +425,7 @@ for (const width of [1280, 1024, 900, 390]) {
       await expect(page.locator('.chat-settings-provider')).toHaveText('OpenAI');
       await expect(page.locator('.chat-model')).toHaveText('my-deployment');
       await expect(modelName).toHaveValue('my-deployment');
+      await expect(modelName).toBeFocused();
       await shoot('openai-named-model');
 
       await page.goto('/chats');
