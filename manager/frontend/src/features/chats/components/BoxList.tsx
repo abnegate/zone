@@ -3,6 +3,7 @@ import {
   DndContext,
   type DragEndEvent,
   DragOverlay,
+  type DragStartEvent,
   KeyboardSensor,
   type Modifier,
   PointerSensor,
@@ -24,6 +25,7 @@ export interface ListedBox {
 export interface BoxListProps {
   boxes: readonly ListedBox[];
   onMove: (id: PanelBoxId, index: number) => void;
+  onDraggingChange?: (dragging: boolean) => void;
 }
 
 const POINTER = { activationConstraint: { distance: 4 } };
@@ -43,7 +45,7 @@ const INSTRUCTIONS =
   'then space or enter to drop it, or escape to put it back.';
 
 /** The panel's boxes, which the viewer can drag by their grips, or move by keyboard, into the order they like. */
-export function BoxList({ boxes, onMove }: BoxListProps) {
+export function BoxList({ boxes, onMove, onDraggingChange }: BoxListProps) {
   const ids = boxes.map((box) => box.id);
   const current = useRef(ids);
   current.current = ids;
@@ -81,9 +83,15 @@ export function BoxList({ boxes, onMove }: BoxListProps) {
     };
   }, []);
 
+  const start = ({ active }: DragStartEvent) => {
+    setActive(isPanelBox(active.id) ? active.id : null);
+    onDraggingChange?.(true);
+  };
+
   const finish = () => {
     setActive(null);
     setOver(null);
+    onDraggingChange?.(false);
   };
 
   const end = ({ active, over }: DragEndEvent) => {
@@ -101,7 +109,7 @@ export function BoxList({ boxes, onMove }: BoxListProps) {
         container: announcer ?? undefined,
         screenReaderInstructions: { draggable: INSTRUCTIONS },
       }}
-      onDragStart={({ active }) => setActive(isPanelBox(active.id) ? active.id : null)}
+      onDragStart={start}
       onDragOver={({ over }) => setOver(over && isPanelBox(over.id) ? over.id : null)}
       onDragEnd={end}
       onDragCancel={finish}

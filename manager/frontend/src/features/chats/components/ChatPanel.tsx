@@ -87,6 +87,7 @@ export function ChatPanel({
   const toggled = useRef(false);
   const opener = useRef<HTMLElement | null>(null);
   const { order, move } = useBoxOrder(userId);
+  const dragging = useRef(false);
 
   const openSheet = useCallback(() => {
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -225,7 +226,15 @@ export function ChatPanel({
     };
     const listed = order.filter((id) => rendered[id]).map((id) => ({ id, node: rendered[id] }));
     const shown = listed.map((box) => box.id);
-    return <BoxList boxes={listed} onMove={(id, index) => move(shown, id, index)} />;
+    return (
+      <BoxList
+        boxes={listed}
+        onMove={(id, index) => move(shown, id, index)}
+        onDraggingChange={(value) => {
+          dragging.current = value;
+        }}
+      />
+    );
   };
 
   return (
@@ -245,7 +254,13 @@ export function ChatPanel({
       </div>
       <Dialog open={sheet} onOpenChange={setSheet}>
         {sheet && (
-          <DialogContent className="chat-panel-sheet" onCloseAutoFocus={returnFocus}>
+          <DialogContent
+            className="chat-panel-sheet"
+            onCloseAutoFocus={returnFocus}
+            onEscapeKeyDown={(event) => {
+              if (dragging.current) event.preventDefault();
+            }}
+          >
             <DialogTitle className="chat-panel-sheet-title">{PANEL_LABEL}</DialogTitle>
             <DialogDescription className="sr-only">{summary}</DialogDescription>
             <div className="chat-panel-boxes">{boxes('sheet')}</div>

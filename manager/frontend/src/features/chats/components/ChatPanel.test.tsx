@@ -405,7 +405,7 @@ describe('ChatPanel', () => {
 
       expect(shownOrder()).toEqual(['changes', 'sources', 'gallery']);
       const grip = handle('Sources');
-      expect(grip).toHaveAttribute('aria-roledescription', 'movable box');
+      expect(grip).toHaveAttribute('aria-roledescription', 'drag handle');
       expect(grip).toHaveAttribute('tabindex', '0');
       expect(grip.getAttribute('aria-describedby')).toBeTruthy();
       expect(
@@ -508,6 +508,56 @@ describe('ChatPanel', () => {
       renderPanel({ media: [IMAGE] });
 
       expect(within(inPanel()).queryByRole('button', { name: /^Move / })).toBeNull();
+    });
+
+    it('cancels a move in the sheet with escape, and leaves the sheet open', async () => {
+      renderPanel(everything);
+      fireEvent.click(screen.getByRole('button', { name: /^Changes, media and sources: / }));
+      const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+      const grip = within(sheet).getByRole('button', { name: 'Move Changes' });
+      grip.focus();
+
+      await press(grip, 'Space');
+      await press(grip, 'ArrowDown');
+      await press(grip, 'Escape');
+
+      await announced('Moving Changes cancelled. It stays at position 1 of 3.');
+      expect(screen.getByRole('dialog', { name: 'Changes, media and sources' })).toBe(sheet);
+      expect(shownOrder(sheet)).toEqual(['changes', 'sources', 'gallery']);
+
+      await press(sheet, 'Escape');
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    });
+
+    it('keeps every move when the browser refuses to store the order', async () => {
+      spyOn(localStorage, 'setItem').mockImplementation(() => {
+        throw new Error('denied');
+      });
+      const { rerender } = renderPanel(everything);
+      const move = async (title: string, place: string) => {
+        const grip = handle(title);
+        grip.focus();
+        await press(grip, 'Space');
+        await press(grip, 'ArrowUp');
+        await press(grip, 'Space');
+        await announced(`${title} dropped at ${place}.`);
+      };
+
+      await move('Sources', 'position 1 of 3');
+      rerender(panel({ pullRequests: [PULL_REQUEST], media: [IMAGE] }));
+      await move('Gallery', 'position 1 of 2');
+      rerender(panel(everything));
+
+      expect(shownOrder()).toEqual(['sources', 'gallery', 'changes']);
+    });
+
+    it('keeps the grip out of the box heading', () => {
+      renderPanel(everything);
+
+      for (const heading of within(inPanel()).getAllByRole('heading', { level: 4 })) {
+        expect(within(heading).queryByRole('button', { name: /^Move / })).toBeNull();
+      }
+      expect(handle('Gallery').closest('h4')).toBeNull();
     });
 
     it('shows the order the viewer chose in the sheet as well', async () => {

@@ -195,9 +195,14 @@
   background: var(--ui-bg-elevated);
 }
 
-.chat-panel-box-heading {
+.chat-panel-box-header {
   display: flex;
   align-items: stretch;
+}
+
+.chat-panel-box-heading {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   font-size: var(--ui-text-sm);
   font-weight: 600;
@@ -249,7 +254,7 @@
   }
 }
 
-.chat-panel-box-handle + .chat-panel-box-toggle {
+.chat-panel-box-handle + .chat-panel-box-heading .chat-panel-box-toggle {
   padding-left: var(--ui-space-1);
 }
 

@@ -15,7 +15,7 @@ export function BoxSlot({ id, movable, drop, children }: BoxSlotProps) {
   const { attributes, listeners, isDragging, setNodeRef, setActivatorNodeRef } = useDraggable({
     id,
     disabled: !movable,
-    attributes: { roleDescription: 'movable box' },
+    attributes: { roleDescription: 'drag handle' },
   });
   const droppable = useDroppable({ id, disabled: !movable });
   const setDroppable = droppable.setNodeRef;

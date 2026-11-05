@@ -46,31 +46,33 @@ export function PanelBox({
       className={['chat-panel-box', className].filter(Boolean).join(' ')}
       aria-labelledby={heading}
     >
-      <h4 className="chat-panel-box-heading">
+      <div className="chat-panel-box-header">
         <BoxHandle title={title} />
-        <button
-          type="button"
-          id={heading}
-          className="chat-panel-box-toggle"
-          aria-expanded={!collapsed}
-          aria-controls={body}
-          aria-label={`${title}, ${count}`}
-          onClick={toggle}
-        >
-          <svg
-            className="chat-panel-box-chevron"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            aria-hidden="true"
+        <h4 className="chat-panel-box-heading">
+          <button
+            type="button"
+            id={heading}
+            className="chat-panel-box-toggle"
+            aria-expanded={!collapsed}
+            aria-controls={body}
+            aria-label={`${title}, ${count}`}
+            onClick={toggle}
           >
-            <path d="m9 6 6 6-6 6" />
-          </svg>
-          <span className="chat-panel-box-title">{title}</span>
-          <span className="chat-panel-box-count">{count}</span>
-        </button>
-      </h4>
+            <svg
+              className="chat-panel-box-chevron"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
+              <path d="m9 6 6 6-6 6" />
+            </svg>
+            <span className="chat-panel-box-title">{title}</span>
+            <span className="chat-panel-box-count">{count}</span>
+          </button>
+        </h4>
+      </div>
       <div id={body} className="chat-panel-box-body" hidden={collapsed}>
         {children}
       </div>

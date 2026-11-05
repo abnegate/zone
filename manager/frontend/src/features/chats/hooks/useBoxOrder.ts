@@ -23,11 +23,11 @@ export function useBoxOrder(userId: string | null): BoxOrder {
 
   const move = useCallback(
     (shown: readonly PanelBoxId[], id: PanelBoxId, index: number) => {
-      const next = moveBox(readOrder(key), shown, id, index);
+      const next = moveBox(order, shown, id, index);
       setStored({ key, order: next });
       writeSetting(key, JSON.stringify(next));
     },
-    [key]
+    [key, order]
   );
 
   return { order, move };
