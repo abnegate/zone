@@ -1,4 +1,12 @@
-import { type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { popoverOffset, viewportMargin } from '../utils';
 
 const SELECT_MENU = '[data-radix-popper-content-wrapper]';
@@ -64,22 +72,26 @@ export function HeaderPopover({
     };
   }, [open]);
 
+  const place = useCallback(() => {
+    const element = root.current;
+    const width = panel.current?.offsetWidth ?? 0;
+    if (!element || width === 0) return;
+    setOffset(
+      popoverOffset(
+        element.getBoundingClientRect(),
+        width,
+        document.documentElement.clientWidth,
+        viewportMargin(element)
+      )
+    );
+  }, []);
+
+  useLayoutEffect(() => {
+    if (open) place();
+  });
+
   useLayoutEffect(() => {
     if (!open) return;
-    const place = () => {
-      const element = root.current;
-      const width = panel.current?.offsetWidth ?? 0;
-      if (!element || width === 0) return;
-      setOffset(
-        popoverOffset(
-          element.getBoundingClientRect(),
-          width,
-          document.documentElement.clientWidth,
-          viewportMargin(element)
-        )
-      );
-    };
-    place();
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
     for (const element of [root.current, root.current?.parentElement]) {
       if (element) observer?.observe(element);
@@ -89,7 +101,7 @@ export function HeaderPopover({
       observer?.disconnect();
       window.removeEventListener('resize', place);
     };
-  }, [open]);
+  }, [open, place]);
 
   return (
     <div className="chat-header-popover" ref={root}>

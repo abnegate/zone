@@ -185,6 +185,47 @@ describe('HeaderPopover', () => {
     }
   });
 
+  it('re-places an open panel when content added before it moves the trigger', () => {
+    const row = (notice: boolean) => (
+      <div>
+        {notice && <p>Could not turn on auto-approve.</p>}
+        <HeaderPopover
+          className="pill"
+          testId="trigger"
+          label="Settings"
+          triggerLabel="Open settings"
+          title="Settings"
+          trigger={<span>Summary</span>}
+        >
+          <button type="button">Inside</button>
+        </HeaderPopover>
+      </div>
+    );
+    const { rerender } = render(row(false));
+    const anchor = document.querySelector<HTMLElement>('.chat-header-popover')!;
+    const panel = document.querySelector<HTMLElement>('.chat-header-popover-panel')!;
+    Object.defineProperty(document.documentElement, 'clientWidth', {
+      configurable: true,
+      value: 1280,
+    });
+    Object.defineProperty(panel, 'offsetWidth', { configurable: true, value: 320 });
+    const place = (left: number, right: number) => {
+      anchor.getBoundingClientRect = () => ({ left, right }) as DOMRect;
+    };
+    try {
+      place(500, 700);
+      fireEvent.click(screen.getByTestId('trigger'));
+      expect(panel.style.left).toBe('0px');
+
+      place(1000, 1260);
+      rerender(row(true));
+      expect(screen.getByTestId('trigger')).toHaveAttribute('aria-expanded', 'true');
+      expect(panel.style.left).toBe('-60px');
+    } finally {
+      Reflect.deleteProperty(document.documentElement, 'clientWidth');
+    }
+  });
+
   it('re-places an open panel when its row moves and stops once closed', () => {
     const observed: Element[] = [];
     const callbacks: ResizeObserverCallback[] = [];

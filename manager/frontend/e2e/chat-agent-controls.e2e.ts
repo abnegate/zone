@@ -7,6 +7,12 @@ import { blockServiceWorker, routeApi } from './test-utils';
 
 const TIMESTAMP = '2026-11-01T09:00:00Z';
 const TITLE = 'Refactor the indexer';
+const PLACEMENT_SIDES: Record<string, 'start' | 'end' | 'clamped'> = {
+  '1280-open': 'end',
+  '1280-settings-open': 'start',
+  '375-open': 'clamped',
+  '375-settings-open': 'start',
+};
 
 const claudeCode: ChatProviderOffer = {
   provider: 'claude_code',
@@ -178,6 +184,9 @@ async function panelPlacement(page: Page) {
       .map((panel) => {
         const trigger = panel.parentElement!.querySelector('button')!.getBoundingClientRect();
         const box = panel.getBoundingClientRect();
+        const leftFits = trigger.left + box.width <= viewport - margin + 0.5;
+        const rightFits =
+          trigger.right - box.width >= margin - 0.5 && trigger.right <= viewport - margin + 0.5;
         return {
           below: box.top >= trigger.bottom && box.top - trigger.bottom <= 12,
           anchored:
@@ -186,8 +195,10 @@ async function panelPlacement(page: Page) {
             Math.abs(box.left - margin) < 0.5 ||
             Math.abs(box.right - (viewport - margin)) < 0.5,
           onScreen: box.left >= margin - 0.5 && box.right <= viewport - margin + 0.5,
-          alignedLeftWhenItFits:
-            trigger.left + box.width > viewport - margin || Math.abs(box.left - trigger.left) < 0.5,
+          aligned: leftFits
+            ? Math.abs(box.left - trigger.left) < 0.5
+            : !rightFits || Math.abs(box.right - trigger.right) < 0.5,
+          side: leftFits ? 'start' : rightFits ? 'end' : 'clamped',
         };
       });
   });
@@ -267,12 +278,15 @@ for (const width of [1280, 375]) {
         expect(placements, 'exactly the panel this state opens is showing').toHaveLength(
           state.endsWith('open') ? 1 : 0
         );
-        for (const placement of placements) {
+        for (const { side, ...placement } of placements) {
+          expect(side, 'the fixtures reach every placement branch').toBe(
+            PLACEMENT_SIDES[`${width}-${state}`]
+          );
           expect(placement, 'a popover opens under its own trigger and on screen').toEqual({
             below: true,
             anchored: true,
             onScreen: true,
-            alignedLeftWhenItFits: true,
+            aligned: true,
           });
         }
         if (browserName !== 'chromium') return;
@@ -350,9 +364,19 @@ for (const width of [1280, 375]) {
       await agent.focus();
       await expect(agent).toBeFocused();
       expect(
-        await agent.evaluate((element) => element.matches(':focus-visible')),
+        await agent.evaluate((element) => {
+          const style = getComputedStyle(element);
+          return {
+            focusVisible: element.matches(':focus-visible'),
+            styled: style.outlineStyle !== 'none',
+            wide: Number.parseFloat(style.outlineWidth) > 0,
+            opaque:
+              style.outlineColor !== 'transparent' &&
+              !/[,/]\s*0(\.0+)?\s*\)$/.test(style.outlineColor),
+          };
+        }),
         'keyboard focus draws the focus ring'
-      ).toBe(true);
+      ).toEqual({ focusVisible: true, styled: true, wide: true, opaque: true });
       await shoot('focus');
     });
   }
