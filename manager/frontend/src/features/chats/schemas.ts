@@ -467,6 +467,7 @@ export const PullRequestStatusSchema = z.object({
     enabled: z.boolean(),
     unavailable: z.string().nullable(),
   }),
+  draft_unavailable: z.string().nullable().catch(null),
   observed_at: z.string(),
 });
 

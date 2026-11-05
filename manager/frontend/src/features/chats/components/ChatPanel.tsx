@@ -167,7 +167,7 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
           onClick={() => setSheet(true)}
         >
           <PanelIcon />
-          <span>{PANEL_LABEL}</span>
+          <span className="chat-panel-toggle-label">{PANEL_LABEL}</span>
           <span className="chat-panel-toggle-summary">{summary}</span>
         </button>
       </div>
@@ -186,7 +186,6 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
             type="button"
             className="chat-panel-rail"
             aria-expanded={false}
-            aria-controls={panelId}
             aria-label={`Show ${PANEL_LABEL.toLowerCase()} (${summary})`}
             title={`Show ${PANEL_LABEL.toLowerCase()}`}
             onClick={() => setHidden(false)}

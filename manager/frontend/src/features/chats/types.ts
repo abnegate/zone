@@ -506,6 +506,7 @@ export interface PullRequestStatus {
   checks: PullRequestChecks;
   mergeable: PullRequestMergeability;
   auto_merge: PullRequestAutoMerge;
+  draft_unavailable: string | null;
   observed_at: string;
 }
 

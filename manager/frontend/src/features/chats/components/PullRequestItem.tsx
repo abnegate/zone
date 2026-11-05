@@ -30,7 +30,7 @@ function Icon({ path }: { path: string }) {
 const OPEN_ICON = 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5';
 const COPY_ICON = 'M9 9h10v10H9zM5 15V5h10';
 const CHANGES_ICON = 'M12 5v14M5 12h14M5 20h14';
-const MERGE_ICON = 'M6 3v12a6 6 0 0 0 6 6h6M18 15l3 3-3 3';
+const MERGE_ICON = 'M6 3v8a5 5 0 0 0 5 5h8M16 13l3 3-3 3';
 const DRAFT_ICON = 'M4 20h4l10-10-4-4L4 16v4ZM13 7l4 4';
 const DISMISS_ICON = 'M18 6 6 18M6 6l12 12';
 
@@ -66,6 +66,7 @@ function menuItems({
   if (status?.state === 'open') {
     const autoMerge = status.auto_merge;
     const mergeHint = uncredentialed ?? autoMerge.unavailable ?? undefined;
+    const draftHint = uncredentialed ?? status.draft_unavailable ?? undefined;
     items.push(
       {
         label: autoMerge.enabled ? 'Cancel auto-merge' : 'Merge when ready',
@@ -77,8 +78,8 @@ function menuItems({
       {
         label: status.draft ? 'Ready for review' : 'Convert to draft',
         icon: <Icon path={DRAFT_ICON} />,
-        disabled: !actionable,
-        hint: uncredentialed,
+        disabled: Boolean(draftHint),
+        hint: draftHint,
         onSelect: () => onChange(pullRequest, { draft: !status.draft }),
       }
     );

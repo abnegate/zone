@@ -1,16 +1,16 @@
 //! The pull requests a chat opened: noticing them as its turns open them, and
-//! reading and changing them on GitHub with the workspace's own source.
+//! reading and changing them on GitHub through abnegate-vcs with the
+//! workspace's own source.
 
 mod auto_merge;
-mod automation;
 mod cache;
+mod changes;
 mod checks;
 mod credential;
 mod detection;
 mod error;
-mod github;
-mod merge_method;
 mod mergeable;
+mod open;
 mod opened;
 mod recorder;
 mod state;
@@ -18,7 +18,8 @@ mod status;
 mod tracked;
 
 use abnegate_secret::SecretValue;
-use abnegate_vcs::pull_request::{Excerpt, MergeableState, PullRequestState};
+use abnegate_vcs::pull_request::{Excerpt, PullRequestState};
+use abnegate_vcs::{PullRequestReference, PullRequestService};
 use futures::{StreamExt, stream};
 use uuid::Uuid;
 
@@ -28,6 +29,7 @@ use crate::state::AppState;
 
 pub use auto_merge::AutoMerge;
 pub use cache::StatusCache;
+pub use changes::PENDING_RELEASE;
 pub use checks::Checks;
 pub use error::Error;
 pub use mergeable::Mergeable;
@@ -37,8 +39,7 @@ pub use state::State;
 pub use status::Status;
 pub use tracked::Tracked;
 
-use automation::Automation;
-use github::Github;
+use open::Open;
 
 /// The most of a pull request's diff read for one view.
 const DIFF_BYTES: usize = 1024 * 1024;
@@ -69,7 +70,7 @@ pub async fn track(state: &AppState, workspace_id: Uuid, row: PullRequestRow) ->
     };
     let status = match state.pull_request_statuses().get(row.id) {
         Some(cached) => Some(cached),
-        None => match observe(state, &row, &token).await {
+        None => match observed(state, &row, &token).await {
             Ok(status) => {
                 remember(state, &row, &status).await;
                 Some(status)
@@ -94,15 +95,14 @@ pub async fn set_draft(
     row: &PullRequestRow,
     draft: bool,
 ) -> Result<(), Error> {
-    let token = required_token(state, workspace_id, row).await?;
-    let status = observe(state, row, &token).await?;
-    if !status.open() {
-        return Err(Error::Refused(AutoMerge::SETTLED.to_string()));
-    }
+    let Open {
+        service,
+        reference,
+        token,
+        status,
+    } = open(state, workspace_id, row).await?;
     if status.draft != draft {
-        Github::new(state.config())?
-            .set_draft(&token, &status.node_id, draft)
-            .await?;
+        changes::set_draft(&service, &reference, &token, draft).await?;
     }
     state.pull_request_statuses().forget(row.id);
     Ok(())
@@ -115,23 +115,14 @@ pub async fn set_auto_merge(
     row: &PullRequestRow,
     enabled: bool,
 ) -> Result<(), Error> {
-    let token = required_token(state, workspace_id, row).await?;
-    let status = observe(state, row, &token).await?;
+    let Open {
+        service,
+        reference,
+        token,
+        status,
+    } = open(state, workspace_id, row).await?;
     if status.auto_merge.enabled != enabled {
-        if let Some(reason) = &status.auto_merge.unavailable {
-            return Err(Error::Refused(reason.clone()));
-        }
-        let method = match enabled {
-            true => Some(
-                status
-                    .merge_method
-                    .ok_or_else(|| Error::Refused(AutoMerge::NOT_PERMITTED.to_string()))?,
-            ),
-            false => None,
-        };
-        Github::new(state.config())?
-            .set_auto_merge(&token, &status.node_id, method)
-            .await?;
+        changes::set_auto_merge(&service, &reference, &token, enabled).await?;
     }
     state.pull_request_statuses().forget(row.id);
     Ok(())
@@ -147,6 +138,22 @@ pub async fn diff(
     let service = state.config().pull_requests()?;
     let reference = service.pull_request(&row.url)?;
     Ok(service.fetch_diff(&reference, &token, DIFF_BYTES).await?)
+}
+
+async fn open(state: &AppState, workspace_id: Uuid, row: &PullRequestRow) -> Result<Open, Error> {
+    let token = required_token(state, workspace_id, row).await?;
+    let service = state.config().pull_requests()?;
+    let reference = service.pull_request(&row.url)?;
+    let status = observe(&service, &reference, &token, row).await?;
+    if !status.open() {
+        return Err(Error::Refused(AutoMerge::SETTLED.to_string()));
+    }
+    Ok(Open {
+        service,
+        reference,
+        token,
+        status,
+    })
 }
 
 async fn token(
@@ -181,25 +188,23 @@ async fn remember(state: &AppState, row: &PullRequestRow, status: &Status) {
     }
 }
 
-async fn observe(
+async fn observed(
     state: &AppState,
     row: &PullRequestRow,
     token: &SecretValue,
 ) -> Result<Status, Error> {
     let service = state.config().pull_requests()?;
     let reference = service.pull_request(&row.url)?;
-    let repository = reference.repository();
-    let github = Github::new(state.config())?;
-    let (detail, automation) = tokio::join!(
-        service.fetch_pull(&reference, token),
-        github.automation(
-            token,
-            repository.owner(),
-            repository.name(),
-            reference.number().get()
-        ),
-    );
-    let detail = detail?;
+    observe(&service, &reference, token, row).await
+}
+
+async fn observe(
+    service: &PullRequestService,
+    reference: &PullRequestReference,
+    token: &SecretValue,
+    row: &PullRequestRow,
+) -> Result<Status, Error> {
+    let detail = service.fetch_pull(reference, token).await?;
     let lifecycle = match (detail.merged, detail.state) {
         (true, _) => State::Merged,
         (false, PullRequestState::Closed) => State::Closed,
@@ -207,7 +212,7 @@ async fn observe(
     };
     let checks = match lifecycle {
         State::Open => match service
-            .fetch_checks(repository, token, &detail.head_sha)
+            .fetch_checks(reference.repository(), token, &detail.head_sha)
             .await
         {
             Ok(outcome) => Checks::from(&outcome),
@@ -218,11 +223,10 @@ async fn observe(
         },
         State::Closed | State::Merged => Checks::None,
     };
-    let merge_method = automation
-        .as_ref()
-        .ok()
-        .and_then(|automation| automation.method);
-    let auto_merge = automatic(lifecycle, detail.draft, detail.mergeable_state, automation);
+    let unavailable = match lifecycle {
+        State::Open => PENDING_RELEASE,
+        State::Closed | State::Merged => AutoMerge::SETTLED,
+    };
     Ok(Status {
         title: detail.title,
         state: lifecycle,
@@ -232,145 +236,8 @@ async fn observe(
         changed_files: detail.changed_files,
         checks,
         mergeable: Mergeable::from(detail.mergeable_state),
-        auto_merge,
+        auto_merge: AutoMerge::unavailable(unavailable),
+        draft_unavailable: Some(unavailable.to_string()),
         observed_at: chrono::Utc::now(),
-        node_id: detail.node_id,
-        merge_method,
     })
-}
-
-/// Whether auto-merge is on, and when it cannot be turned on, why not.
-fn automatic(
-    lifecycle: State,
-    draft: bool,
-    mergeable: MergeableState,
-    automation: Result<Automation, Error>,
-) -> AutoMerge {
-    if lifecycle != State::Open {
-        return AutoMerge::unavailable(AutoMerge::SETTLED);
-    }
-    let Ok(automation) = automation else {
-        return AutoMerge::unavailable(AutoMerge::UNREAD);
-    };
-    if automation.enabled {
-        return AutoMerge {
-            enabled: true,
-            unavailable: (!automation.changeable).then(|| AutoMerge::NOT_PERMITTED.to_string()),
-        };
-    }
-    let reason = if !automation.allowed {
-        Some(AutoMerge::OFF_FOR_REPOSITORY)
-    } else if draft {
-        Some(AutoMerge::DRAFT)
-    } else if matches!(mergeable, MergeableState::Clean | MergeableState::HasHooks) {
-        Some(AutoMerge::READY)
-    } else if !automation.changeable || automation.method.is_none() {
-        Some(AutoMerge::NOT_PERMITTED)
-    } else {
-        None
-    };
-    AutoMerge {
-        enabled: false,
-        unavailable: reason.map(str::to_string),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use merge_method::MergeMethod;
-
-    fn automation(allowed: bool, enabled: bool, changeable: bool) -> Result<Automation, Error> {
-        Ok(Automation {
-            allowed,
-            enabled,
-            changeable,
-            method: Some(MergeMethod::Squash),
-        })
-    }
-
-    fn reason(auto_merge: &AutoMerge) -> Option<&str> {
-        auto_merge.unavailable.as_deref()
-    }
-
-    #[test]
-    fn auto_merge_can_be_turned_on_only_while_something_is_still_pending() {
-        let blocked = MergeableState::Blocked;
-        assert_eq!(
-            automatic(State::Open, false, blocked, automation(true, false, true)),
-            AutoMerge {
-                enabled: false,
-                unavailable: None
-            }
-        );
-        for (lifecycle, draft, mergeable, read, expected) in [
-            (
-                State::Merged,
-                false,
-                blocked,
-                automation(true, false, true),
-                AutoMerge::SETTLED,
-            ),
-            (
-                State::Open,
-                false,
-                blocked,
-                Err(Error::Unreachable),
-                AutoMerge::UNREAD,
-            ),
-            (
-                State::Open,
-                false,
-                blocked,
-                automation(false, false, true),
-                AutoMerge::OFF_FOR_REPOSITORY,
-            ),
-            (
-                State::Open,
-                true,
-                blocked,
-                automation(true, false, true),
-                AutoMerge::DRAFT,
-            ),
-            (
-                State::Open,
-                false,
-                MergeableState::Clean,
-                automation(true, false, false),
-                AutoMerge::READY,
-            ),
-            (
-                State::Open,
-                false,
-                blocked,
-                automation(true, false, false),
-                AutoMerge::NOT_PERMITTED,
-            ),
-        ] {
-            let auto_merge = automatic(lifecycle, draft, mergeable, read);
-            assert_eq!(reason(&auto_merge), Some(expected));
-            assert!(!auto_merge.enabled);
-        }
-    }
-
-    #[test]
-    fn auto_merge_that_is_on_says_so_and_whether_it_can_be_turned_off() {
-        let on = automatic(
-            State::Open,
-            false,
-            MergeableState::Blocked,
-            automation(true, true, true),
-        );
-        assert!(on.enabled);
-        assert_eq!(reason(&on), None);
-
-        let stuck = automatic(
-            State::Open,
-            false,
-            MergeableState::Blocked,
-            automation(true, true, false),
-        );
-        assert!(stuck.enabled);
-        assert_eq!(reason(&stuck), Some(AutoMerge::NOT_PERMITTED));
-    }
 }

@@ -37,6 +37,7 @@ const STATUS: PullRequestStatus = {
   checks: 'passing',
   mergeable: 'blocked',
   auto_merge: { enabled: false, unavailable: null },
+  draft_unavailable: null,
   observed_at: '2026-11-05T10:00:00Z',
 };
 
@@ -237,6 +238,25 @@ describe('ChangesBox', () => {
     expect(merge).toHaveTextContent('Auto-merge is turned off for this repository.');
     expect(merge).toHaveAttribute('title', 'Auto-merge is turned off for this repository.');
     fireEvent.click(merge);
+    await settleMenu();
+    expect(mockUpdateChatPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('offers the draft change disabled, with the reason, while it cannot be made', async () => {
+    const reason = 'Coming with the next abnegate-vcs release.';
+    await shown([
+      withStatus({
+        auto_merge: { enabled: false, unavailable: reason },
+        draft_unavailable: reason,
+      }),
+    ]);
+
+    await openMenu(MENU);
+    for (const name of [/Merge when ready/, /Convert to draft/]) {
+      expect(menuItem(name)).toHaveAttribute('aria-disabled', 'true');
+      expect(menuItem(name)).toHaveTextContent(reason);
+    }
+    fireEvent.click(menuItem(/Convert to draft/));
     await settleMenu();
     expect(mockUpdateChatPullRequest).not.toHaveBeenCalled();
   });

@@ -1130,10 +1130,6 @@ impl Config {
         reqwest::Url::parse(&format!("{}/", self.github_api_url.trim_end_matches('/'))).ok()
     }
 
-    pub fn github_graphql_url(&self) -> Option<reqwest::Url> {
-        github_graphql_url(&self.github_rest_origin()?)
-    }
-
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
         let jwt_secret = env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
@@ -1407,7 +1403,11 @@ mod tests {
                 Some(rest)
             );
             assert_eq!(
-                config.github_graphql_url().map(String::from).as_deref(),
+                config
+                    .github_rest_origin()
+                    .and_then(|origin| github_graphql_url(&origin))
+                    .map(String::from)
+                    .as_deref(),
                 Some(graphql)
             );
         }

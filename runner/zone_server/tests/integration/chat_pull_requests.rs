@@ -18,19 +18,19 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
 use uuid::Uuid;
-use wiremock::matchers::{body_string_contains, header, method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::llm::AgentKind;
 use zone_server::config::{Config, ModelBackend};
 use zone_server::db::chat_pull_requests::{self, NewPullRequest};
 use zone_server::db::sources;
+use zone_server::services::chat::pull_request::PENDING_RELEASE;
 use zone_server::state::AppState;
 
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 const RECORD_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TOKEN: &str = "ghp_chat_pull_requests_test";
 const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
-const NODE: &str = "PR_kwDOchat";
 const TITLE: &str = "Add widgets";
 
 /// A stand-in for the host's `claude`, held open until the test has done what
@@ -259,7 +259,7 @@ async fn describe(github: &MockServer, draft: bool) {
         .and(path("/repos/acme/widgets/pulls/12"))
         .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "node_id": NODE,
+            "node_id": "PR_kwDOchat",
             "number": 12,
             "title": TITLE,
             "state": "open",
@@ -294,24 +294,6 @@ async fn describe(github: &MockServer, draft: bool) {
             "total_count": 0,
             "statuses": [],
         })))
-        .mount(github)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("autoMergeAllowed"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
-                "autoMergeAllowed": true,
-                "squashMergeAllowed": true,
-                "mergeCommitAllowed": true,
-                "rebaseMergeAllowed": false,
-                "pullRequest": {
-                    "autoMergeRequest": null,
-                    "viewerCanEnableAutoMerge": true,
-                    "viewerCanDisableAutoMerge": false,
-                },
-            }}})),
-        )
         .mount(github)
         .await;
 }
@@ -499,7 +481,7 @@ async fn zones_own_tool_records_the_pull_request_it_opens_with_its_status() {
     assert_eq!(status["mergeable"], "blocked");
     assert_eq!(
         status["auto_merge"],
-        json!({"enabled": false, "unavailable": null})
+        json!({"enabled": false, "unavailable": PENDING_RELEASE})
     );
     assert!(
         !listed.to_string().contains(GITHUB_TOKEN),
@@ -646,63 +628,8 @@ async fn a_dismissed_pull_request_leaves_the_chat_until_it_is_restored() {
 }
 
 #[tokio::test]
-async fn draft_and_auto_merge_changes_reach_github_as_their_mutations() {
+async fn draft_and_auto_merge_changes_wait_for_the_abnegate_vcs_release() {
     let github = MockServer::start().await;
-    describe(&github, false).await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("convertPullRequestToDraft"))
-        .and(body_string_contains(NODE))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"data": {"convertPullRequestToDraft": {"clientMutationId": null}}}),
-        ))
-        .expect(1)
-        .mount(&github)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("enablePullRequestAutoMerge"))
-        .and(body_string_contains("SQUASH"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"data": {"enablePullRequestAutoMerge": {"clientMutationId": null}}}),
-        ))
-        .expect(1)
-        .mount(&github)
-        .await;
-    let database = context_database_url();
-    let pool = PgPool::connect(&database).await.expect("the test database");
-    let workspace = Workspace::new(config(&github, database), pool).await;
-    workspace.connect_github().await;
-    let id = workspace.record(&link(&github, 12)).await;
-
-    let (status, drafted) = workspace.update(id, json!({"draft": true})).await;
-    assert_eq!(status, StatusCode::OK, "{drafted}");
-    let (status, merging) = workspace.update(id, json!({"auto_merge": true})).await;
-    assert_eq!(status, StatusCode::OK, "{merging}");
-}
-
-#[tokio::test]
-async fn auto_merge_on_a_repository_that_forbids_it_is_refused_in_words() {
-    let github = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("autoMergeAllowed"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
-                "autoMergeAllowed": false,
-                "squashMergeAllowed": true,
-                "mergeCommitAllowed": true,
-                "rebaseMergeAllowed": true,
-                "pullRequest": {
-                    "autoMergeRequest": null,
-                    "viewerCanEnableAutoMerge": false,
-                    "viewerCanDisableAutoMerge": false,
-                },
-            }}})),
-        )
-        .with_priority(1)
-        .mount(&github)
-        .await;
     describe(&github, false).await;
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
@@ -712,18 +639,29 @@ async fn auto_merge_on_a_repository_that_forbids_it_is_refused_in_words() {
 
     let listed = workspace.listed(&workspace.token).await;
     assert_eq!(
-        listed[0]["status"]["auto_merge"]["unavailable"],
-        "Auto-merge is turned off for this repository.",
+        listed[0]["status"]["auto_merge"],
+        json!({"enabled": false, "unavailable": PENDING_RELEASE}),
         "{listed}"
     );
-    let (status, refused) = workspace.update(id, json!({"auto_merge": true})).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-    assert!(
-        refused["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("turned off")),
-        "{refused}"
-    );
+    assert_eq!(listed[0]["status"]["draft_unavailable"], PENDING_RELEASE);
+    for body in [json!({"draft": true}), json!({"auto_merge": true})] {
+        let (status, refused) = workspace.update(id, body.clone()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}: {refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(PENDING_RELEASE)),
+            "{refused}"
+        );
+    }
+    let writes: Vec<_> = github
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| request.method.as_str() != "GET")
+        .collect();
+    assert!(writes.is_empty(), "something wrote to GitHub: {writes:?}");
 }
 
 #[tokio::test]

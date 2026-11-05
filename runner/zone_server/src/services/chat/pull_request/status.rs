@@ -3,7 +3,6 @@ use serde::Serialize;
 
 use super::auto_merge::AutoMerge;
 use super::checks::Checks;
-use super::merge_method::MergeMethod;
 use super::mergeable::Mergeable;
 use super::state::State;
 
@@ -19,13 +18,9 @@ pub struct Status {
     pub checks: Checks,
     pub mergeable: Mergeable,
     pub auto_merge: AutoMerge,
+    /// Why it cannot be moved between draft and ready for review, if it cannot.
+    pub draft_unavailable: Option<String>,
     pub observed_at: DateTime<Utc>,
-    /// GitHub's GraphQL id for it, which every change is addressed by.
-    #[serde(skip)]
-    pub node_id: String,
-    /// How auto-merge would merge it: the first way the repository allows.
-    #[serde(skip)]
-    pub merge_method: Option<MergeMethod>,
 }
 
 impl Status {
