@@ -5,6 +5,12 @@
 //! is failing or cannot merge, the row is claimed for a run and that run is
 //! asked to fix it. The claim is what keeps a read that repeats every poll
 //! from starting the same run over and over.
+//!
+//! One run is not a promise. A fix that pushes and still fails leaves the
+//! pull request broken, so once the claimed run settles and the complaint is
+//! still there, another starts. Auto-fix keeps going until the checks pass,
+//! and only one run is ever in flight, so it cannot spin faster than a run
+//! takes to finish.
 
 use uuid::Uuid;
 
@@ -54,11 +60,21 @@ pub async fn consider(state: &AppState, workspace_id: Uuid, row: &PullRequestRow
         }
         return;
     };
-    if row.auto_fix_run_id.is_some() {
-        // A run is already answering for this pull request. Whether it is
-        // still going or has finished without fixing anything, starting a
-        // second one on the same complaint stacks runs on one branch.
-        return;
+    if let Some(claimed) = row.auto_fix_run_id {
+        match tasks::get_task_run(state.db(), claimed).await {
+            // Still working. A second run on the same branch would fight it.
+            Ok(Some(run)) if run.completed_at.is_none() => return,
+            // Settled and the pull request is still broken, so its fix did not
+            // take. Fall through and start another: auto-fix keeps going until
+            // the pull request is green, and the next run sees whatever the
+            // last one left behind. One run at a time means this cannot spin
+            // faster than a run takes to finish.
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(pull_request = %row.id, %error, "could not read the auto-fix run");
+                return;
+            }
+        }
     }
     if let Err(error) = start(state, workspace_id, row, status, complaint).await {
         tracing::warn!(pull_request = %row.id, %error, "could not start an auto-fix run");
