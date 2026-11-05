@@ -1,6 +1,5 @@
 import type { Locator, Page } from '@playwright/test';
 import type { Chat, ChatProviderOffer, ChatProviders } from '../src/features/chats/types';
-import { VIEWPORT_MARGIN } from '../src/features/chats/utils/popoverOffset';
 import { expect, test } from './fixtures';
 import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { installChatSocketMock } from './helpers/chatSocket';
@@ -143,6 +142,8 @@ async function segmentShape(group: Locator) {
     const inner = outer.height - 2 * border;
     const round = (value: string, height: number) =>
       Math.min(Number.parseFloat(value), height / 2);
+    const corner = (value: string, height: number, wanted: number) =>
+      Math.abs(round(value, height) - wanted) < 0.5;
     const expected = round(style.borderTopLeftRadius, outer.height) - border;
     const segments = [
       ...element.querySelectorAll<HTMLElement>(
@@ -156,17 +157,21 @@ async function segmentShape(group: Locator) {
       const last = index === segments.length - 1;
       return {
         fills: Math.abs(box.height - inner) < 0.5 && Math.abs(box.top - outer.top - border) < 0.5,
-        start: round(own.borderTopLeftRadius, box.height) === (first ? expected : 0),
-        startBottom: round(own.borderBottomLeftRadius, box.height) === (first ? expected : 0),
-        end: round(own.borderTopRightRadius, box.height) === (last ? expected : 0),
-        endBottom: round(own.borderBottomRightRadius, box.height) === (last ? expected : 0),
+        start: corner(own.borderTopLeftRadius, box.height, first ? expected : 0),
+        startBottom: corner(own.borderBottomLeftRadius, box.height, first ? expected : 0),
+        end: corner(own.borderTopRightRadius, box.height, last ? expected : 0),
+        endBottom: corner(own.borderBottomRightRadius, box.height, last ? expected : 0),
       };
     });
   });
 }
 
 async function panelPlacement(page: Page) {
-  return page.evaluate((margin) => {
+  return page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const gutter = root.getPropertyValue('--ui-gutter').trim();
+    const margin =
+      Number.parseFloat(gutter) * (gutter.endsWith('rem') ? Number.parseFloat(root.fontSize) : 1);
     const viewport = document.documentElement.clientWidth;
     return [...document.querySelectorAll<HTMLElement>('.chat-header-popover-panel')]
       .filter((panel) => !panel.hidden)
@@ -185,7 +190,7 @@ async function panelPlacement(page: Page) {
             trigger.left + box.width > viewport - margin || Math.abs(box.left - trigger.left) < 0.5,
         };
       });
-  }, VIEWPORT_MARGIN);
+  });
 }
 
 async function closePanel(page: Page, trigger: Locator): Promise<void> {
@@ -245,7 +250,11 @@ for (const width of [1280, 375]) {
             'every permission meets WCAG AA'
           ).toBeGreaterThanOrEqual(AA_TEXT);
         }
-        for (const segment of await segmentShape(group)) {
+        const segments = await segmentShape(group);
+        expect(segments, 'the group holds the agent toggle and, once on, its trigger').toHaveLength(
+          state === 'off' ? 1 : 2
+        );
+        for (const segment of segments) {
           expect(segment, 'each segment fills the pill and shares its outer corners').toEqual({
             fills: true,
             start: true,
@@ -254,7 +263,11 @@ for (const width of [1280, 375]) {
             endBottom: true,
           });
         }
-        for (const placement of await panelPlacement(page)) {
+        const placements = await panelPlacement(page);
+        expect(placements, 'exactly the panel this state opens is showing').toHaveLength(
+          state.endsWith('open') ? 1 : 0
+        );
+        for (const placement of placements) {
           expect(placement, 'a popover opens under its own trigger and on screen').toEqual({
             below: true,
             anchored: true,
@@ -333,7 +346,7 @@ for (const width of [1280, 375]) {
       await agent.hover();
       await shoot('agent-hover');
       await page.mouse.move(0, 0);
-      await page.keyboard.press('Shift');
+      await page.keyboard.press('Tab');
       await agent.focus();
       await expect(agent).toBeFocused();
       expect(
