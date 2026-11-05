@@ -31,7 +31,7 @@
       "minSdkVersion": 24
     },
     "iOS": {
-      "minimumSystemVersion": "14.0"
+      "minimumSystemVersion": "15.0"
     },
     "macOS": {
       "minimumSystemVersion": "13.0"
