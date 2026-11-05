@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'bun:test';
 import { render, screen } from '@testing-library/react';
 import type { Citation } from '../types';
-import { citationAnchorId, formatObservedAt } from '../utils/citations';
-import { Citations } from './Citations';
+import { formatObservedAt } from '../utils/citations';
+import { sourceKey } from '../utils/sources';
+import { CitationItem } from './CitationItem';
 
 const citation = (overrides: Partial<Citation> = {}): Citation => ({
   kind: 'github_build',
@@ -16,20 +17,40 @@ const citation = (overrides: Partial<Citation> = {}): Citation => ({
   ...overrides,
 });
 
-describe('Citations', () => {
-  it('anchors an identified chip so a marker in the reply can link to it', () => {
-    render(
-      <Citations
-        citations={[
-          citation({ identifier: 'web:a3f21c', kind: 'web', url: 'https://example.test/a' }),
-          citation(),
-        ]}
-      />
+function Citations({ citations }: { citations: Citation[] }) {
+  return (
+    <ol>
+      {citations.map((item) => (
+        <CitationItem key={sourceKey(item)} citation={item} sourceKey={sourceKey(item)} />
+      ))}
+    </ol>
+  );
+}
+
+describe('CitationItem', () => {
+  it('carries the key the sources panel finds it by, and marks it while it is being shown', () => {
+    const source = citation({
+      identifier: 'web:a3f21c',
+      kind: 'web',
+      url: 'https://example.test/a',
+    });
+    const { rerender } = render(
+      <ol>
+        <CitationItem citation={source} sourceKey="https://example.test/a" />
+      </ol>
     );
 
-    const [identified, plain] = screen.getAllByTestId('citation');
-    expect(identified).toHaveAttribute('id', citationAnchorId('web:a3f21c'));
-    expect(plain).not.toHaveAttribute('id');
+    const item = screen.getByTestId('citation');
+    expect(item).toHaveAttribute('data-source', 'https://example.test/a');
+    expect(item).not.toHaveAttribute('id');
+    expect(item).not.toHaveClass('is-highlighted');
+
+    rerender(
+      <ol>
+        <CitationItem citation={source} sourceKey="https://example.test/a" highlighted />
+      </ol>
+    );
+    expect(screen.getByTestId('citation')).toHaveClass('is-highlighted');
   });
 
   it('prints a document revision as a date beside the observation, not as a raw stamp', () => {
@@ -101,11 +122,6 @@ describe('Citations', () => {
 
     expect(document.querySelector('.citation-revision')).toBeNull();
     expect(document.querySelector('time')).toHaveAttribute('dateTime', '2026-09-20T20:24:11Z');
-  });
-
-  it('renders nothing without sources', () => {
-    const { container } = render(<Citations citations={[]} />);
-    expect(container.firstChild).toBeNull();
   });
 
   it('renders a clickable source that keeps url, revision and observation time', () => {

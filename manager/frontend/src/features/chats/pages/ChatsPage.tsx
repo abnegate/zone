@@ -32,7 +32,6 @@ import {
   ChatMenu,
   ChatPanel,
   ChatSources,
-  Citations,
   Generation,
   HandoverNotice,
   HeaderPopover,
@@ -41,6 +40,7 @@ import {
   MessageContent,
   ProviderError,
   ProviderPicker,
+  SourcesButton,
 } from '../components';
 import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
@@ -78,6 +78,7 @@ import {
   chatShowsAgent,
   chatShowsCharacter,
   chatShowsReasoning,
+  chatSources,
   contextTokenOptions,
   DEFAULT_PROVIDER,
   defaultContextTokens,
@@ -98,6 +99,7 @@ import {
   MODEL_PLACEHOLDER,
   modelLabel,
   modelSelectOptions,
+  observationKey,
   offersAgent,
   offersAgentOn,
   offersContextOn,
@@ -109,6 +111,7 @@ import {
   readChatSort,
   reasoningOptions,
   requestedModel,
+  type SourceRequest,
   selectedContextTokens,
   shortModelName,
   sourceAttachment,
@@ -276,6 +279,9 @@ export default function ChatsPage() {
   const changes = useChatPullRequests(chatOpen ? selectedChatId : null, streaming);
   const displayedMessages = displayedChat?.messages;
   const media = useMemo(() => galleryItems(displayedMessages ?? []), [displayedMessages]);
+  const sources = useMemo(() => chatSources(displayedMessages ?? []), [displayedMessages]);
+  const [shownSources, setShownSources] = useState<SourceRequest | null>(null);
+  const clearShownSources = useCallback(() => setShownSources(null), []);
   const wasStreaming = useRef(streaming);
   const latestSelectedChatId = useRef(selectedChatId);
 
@@ -288,6 +294,7 @@ export default function ChatsPage() {
 
   useEffect(() => {
     latestSelectedChatId.current = selectedChatId;
+    setShownSources(null);
     setChatOperationError(null);
     setOperationError(null);
   }, [selectedChatId]);
@@ -1482,6 +1489,7 @@ export default function ChatsPage() {
                       const audios = audioAttachments(message.metadata);
                       const toolCalls = message.metadata?.tool_calls ?? [];
                       const citations = message.metadata?.citations ?? [];
+                      const cited = sources.replies.get(message.id);
                       const receipts = message.metadata?.action_receipts ?? [];
                       const handovers =
                         message.role === 'assistant' ? (message.metadata?.handovers ?? []) : [];
@@ -1588,6 +1596,12 @@ export default function ChatsPage() {
                                     links={links}
                                     citations={citations}
                                     breaks={message.role === 'user'}
+                                    onShowSource={(citation) =>
+                                      setShownSources({
+                                        messageId: message.id,
+                                        key: observationKey(citation),
+                                      })
+                                    }
                                   />
                                 ) : (
                                   <HandoverNotice
@@ -1599,7 +1613,12 @@ export default function ChatsPage() {
                               )}
                             </div>
                           ) : null}
-                          {citations.length > 0 && <Citations citations={citations} />}
+                          {cited && (
+                            <SourcesButton
+                              count={cited.length}
+                              onClick={() => setShownSources({ messageId: message.id, key: null })}
+                            />
+                          )}
                         </div>
                       );
                     })
@@ -1783,6 +1802,9 @@ export default function ChatsPage() {
                 userId={user?.id ?? null}
                 changes={changes}
                 media={media}
+                sources={sources}
+                shownSources={shownSources}
+                onSourcesShown={clearShownSources}
                 onShowMessage={(messageId) => selectChat(displayedChat.id, messageId)}
               />
             </div>

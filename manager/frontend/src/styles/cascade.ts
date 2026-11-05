@@ -26,6 +26,7 @@ import '../features/models/pages/SetupPage.css';
 import '../features/chats/components/ContextUsage.css';
 import '../features/chats/pages/ChatsPage.css';
 import '../features/chats/components/ChatPanel.css';
+import '../features/chats/components/SourcesBox.css';
 import '../features/settings/organization/components/AuditLogsSection.css';
 import '../features/settings/organization/components/BillingSection.css';
 import '../features/settings/organization/components/DevicesSection.css';

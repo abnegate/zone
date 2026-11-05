@@ -8,7 +8,7 @@ export const PANEL_WIDTH = {
   largeStep: 64,
 } as const;
 
-export type PanelSetting = 'width' | 'collapsed' | 'changes' | 'gallery';
+export type PanelSetting = 'width' | 'collapsed' | 'changes' | 'gallery' | 'sources';
 
 /** Where one viewer's panel setting is kept, so people sharing a browser keep their own. */
 export function panelKey(userId: string | null | undefined, setting: PanelSetting): string {
@@ -23,12 +23,16 @@ export function readSetting(key: string): string | null {
   }
 }
 
+/** Fired on the window with the setting's key, so every view of that setting can follow it. */
+export const SETTING_CHANGED = 'zone:panel-setting';
+
 export function writeSetting(key: string, value: string): void {
   try {
     localStorage.setItem(key, value);
   } catch {
     return;
   }
+  window.dispatchEvent(new CustomEvent<string>(SETTING_CHANGED, { detail: key }));
 }
 
 export function readFlag(key: string): boolean {

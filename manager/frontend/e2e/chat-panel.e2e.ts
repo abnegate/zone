@@ -29,6 +29,61 @@ const PICTURES = [
   { name: 'dusk.svg', url: picture('#be123c', '#1e1b4b') },
 ];
 
+const REVISION = '4f1c2e0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e';
+
+function citation(overrides: Record<string, unknown>) {
+  return {
+    kind: 'github_issue',
+    revision: REVISION,
+    observed_at: '2026-11-05T09:14:00.000Z',
+    complete: true,
+    outcome: 'pending',
+    provenance: 'server_execution',
+    ...overrides,
+  };
+}
+
+const ART_CITATIONS = [
+  citation({
+    title: '#12 Add the widget catalogue with search and filters',
+    url: 'https://github.com/acme/widgets/pull/12',
+    observed_at: '2026-11-05T09:02:00.000Z',
+    note: 'Checks queued.',
+  }),
+  citation({
+    kind: 'web',
+    title: 'Catalogue cover guidelines',
+    identifier: 'web:c0ffee',
+    url: 'https://design.acme.test/catalogue/cover',
+    revision: null,
+    observed_at: '2026-11-05T09:01:00.000Z',
+    outcome: 'observed',
+  }),
+];
+
+const PULL_REQUEST_CITATIONS = [
+  citation({
+    title: '#12 Add the widget catalogue with search and filters',
+    url: 'https://github.com/acme/widgets/pull/12',
+    note: 'Review bot confidence missing; 20 of 21 checks still running.',
+  }),
+  citation({
+    title: '#13 Fix the price rounding in the cart',
+    url: 'https://github.com/acme/widgets/pull/13',
+    observed_at: '2026-11-05T09:13:00.000Z',
+    complete: false,
+    outcome: 'incomplete',
+    note: '3 unresolved review threads; checks could not be fully read.',
+  }),
+  citation({
+    kind: 'github_build',
+    title: `widgets ${REVISION.slice(0, 7)}`,
+    url: `https://github.com/acme/widgets/commit/${REVISION}`,
+    observed_at: '2026-11-05T09:15:00.000Z',
+    note: 'Observed CI only; required branch checks are not evaluated.',
+  }),
+];
+
 const messages = [
   {
     id: 'msg-user',
@@ -44,13 +99,15 @@ const messages = [
     id: 'msg-art',
     chat_id: 'chat-1',
     role: 'assistant',
-    content: 'Here are the other three covers, and a short theme for the launch video.',
+    content:
+      'Here are the other three covers, following the cover guidelines [web:c0ffee], and a short theme for the launch video.',
     created_at: sentAt,
     metadata: {
       attachments: [
         ...PICTURES.slice(1).map((item) => ({ ...item, mime: 'image/svg+xml' })),
         { name: 'launch-theme.mp3', mime: 'audio/mpeg', url: 'data:audio/mpeg;base64,AA==' },
       ],
+      citations: ART_CITATIONS,
     },
   },
   {
@@ -59,6 +116,7 @@ const messages = [
     role: 'assistant',
     content: 'I opened acme/widgets#12 with the new widget and its tests.',
     created_at: sentAt,
+    metadata: { citations: PULL_REQUEST_CITATIONS },
   },
 ];
 
@@ -146,7 +204,15 @@ const DIFF = [
   '',
 ].join('\n');
 
-async function mockChat(page: Page) {
+function uncited() {
+  return messages.map(({ metadata, ...message }) => {
+    if (!metadata) return message;
+    const { citations: _, ...rest } = metadata as Record<string, unknown>;
+    return Object.keys(rest).length > 0 ? { ...message, metadata: rest } : message;
+  });
+}
+
+async function mockChat(page: Page, transcript: readonly unknown[] = messages) {
   await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
     if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
     const url = route.request().url();
@@ -155,7 +221,7 @@ async function mockChat(page: Page) {
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(
-        url.includes('/chat-1') ? { chat: { ...chat, messages } } : { chats: [chat] }
+        url.includes('/chat-1') ? { chat: { ...chat, messages: transcript } } : { chats: [chat] }
       ),
     });
   });
@@ -179,7 +245,9 @@ async function openChat(page: Page) {
   await page.click('a[href="/chats"]');
   await page.click('.chat-item');
   await expect(page.locator('.message-form textarea')).toBeVisible();
-  await expect(page.getByRole('link', { name: PULL_REQUESTS[0].title })).toBeVisible();
+  await expect(
+    page.getByRole('link', { name: PULL_REQUESTS[0].title, exact: true })
+  ).toBeVisible();
 }
 
 test.describe('Chat changes and gallery panel', () => {
@@ -204,7 +272,7 @@ test.describe('Chat changes and gallery panel', () => {
       await page.mouse.move(0, 0);
       await page.screenshot({ path: `screenshots/${name}.png`, animations: 'disabled' });
     };
-    const panel = page.getByRole('complementary', { name: 'Changes and media' });
+    const panel = page.getByRole('complementary', { name: 'Changes, media and sources' });
     await expect(panel).toBeVisible();
     await expect(panel.getByRole('button', { name: 'Gallery, 5' })).toBeVisible();
     await expect(panel.getByText('widgets #13')).toBeVisible();
@@ -221,7 +289,7 @@ test.describe('Chat changes and gallery panel', () => {
     await capture('chats-panel-dark');
     await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'));
 
-    const separator = panel.getByRole('separator', { name: 'Resize changes and media' });
+    const separator = panel.getByRole('separator', { name: 'Resize changes, media and sources' });
     const before = Number(await separator.getAttribute('aria-valuenow'));
     await separator.focus();
     await page.keyboard.press('ArrowLeft');
@@ -240,16 +308,16 @@ test.describe('Chat changes and gallery panel', () => {
     await openChat(page);
     await expect(
       page
-        .getByRole('complementary', { name: 'Changes and media' })
-        .getByRole('separator', { name: 'Resize changes and media' })
+        .getByRole('complementary', { name: 'Changes, media and sources' })
+        .getByRole('separator', { name: 'Resize changes, media and sources' })
     ).toHaveAttribute('aria-valuenow', String(dragged));
     await capture('chats-panel-wide');
 
-    await page.getByRole('button', { name: 'Hide changes and media' }).click();
-    await expect(page.getByRole('separator', { name: 'Resize changes and media' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Hide changes, media and sources' }).click();
+    await expect(page.getByRole('separator', { name: 'Resize changes, media and sources' })).toHaveCount(0);
     await capture('chats-panel-hidden');
-    await page.getByRole('button', { name: /Show changes and media/ }).click();
-    await expect(page.getByRole('separator', { name: 'Resize changes and media' })).toBeVisible();
+    await page.getByRole('button', { name: /Show changes, media and sources/ }).click();
+    await expect(page.getByRole('separator', { name: 'Resize changes, media and sources' })).toBeVisible();
   });
 
   test('offers what Zone can do to a pull request, and shows its changes', async ({
@@ -303,6 +371,88 @@ test.describe('Chat changes and gallery panel', () => {
     await expect(page.locator('#chat-message-msg-art')).toHaveClass(/message--linked/);
   });
 
+  test('lists the chat\'s sources once each, newest first, and collapses them', async ({
+    page,
+  }, testInfo) => {
+    const capture = async (name: string) => {
+      if (testInfo.project.name !== 'chromium') return;
+      await page.mouse.move(0, 0);
+      await page.screenshot({ path: `screenshots/${name}.png`, animations: 'disabled' });
+    };
+    const panel = page.getByRole('complementary', { name: 'Changes, media and sources' });
+    await panel.getByRole('button', { name: 'Gallery, 5' }).click();
+    const toggle = panel.getByRole('button', { name: 'Sources, 4' });
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const items = panel.getByTestId('citation');
+    await expect(items).toHaveCount(4);
+    await expect(items.first()).toContainText(`widgets ${REVISION.slice(0, 7)}`);
+    await expect(items.first()).toContainText('GitHub build');
+    await expect(items.nth(1)).toContainText('#12 Add the widget catalogue');
+    await expect(items.nth(1)).toContainText('20 of 21 checks still running');
+    await expect(panel.getByText('Checks queued.')).toHaveCount(0);
+    await expect(items.nth(2)).toContainText('Incomplete evidence');
+    await expect(page.locator('.message-citations')).toHaveCount(0);
+    await toggle.scrollIntoViewIfNeeded();
+    await capture('chats-panel-sources');
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(items.first()).toBeHidden();
+    await capture('chats-panel-sources-collapsed');
+
+    await page.reload();
+    await openChat(page);
+    const reopened = page
+      .getByRole('complementary', { name: 'Changes, media and sources' })
+      .getByRole('button', { name: /^Sources, \d+$/ });
+    await expect(reopened).toHaveAttribute('aria-expanded', 'false');
+
+    await page.locator('#chat-message-msg-pr').getByRole('button', { name: '3 sources' }).click();
+    await expect(reopened).toHaveAttribute('aria-expanded', 'true');
+    await expect(panel.getByText('Cited in this reply')).toBeVisible();
+    await expect(panel.getByTestId('citation')).toHaveCount(3);
+    await expect(panel.locator('.citation-link').first()).toBeFocused();
+
+    await page.locator('#chat-message-msg-art').getByRole('button', { name: '2 sources' }).click();
+    const own = panel.getByTestId('citation');
+    await expect(own).toHaveCount(2);
+    await expect(own.first()).toContainText('Checks queued.');
+    await expect(panel.getByText('20 of 21 checks still running')).toHaveCount(0);
+    await capture('chats-panel-sources-shown');
+
+    await panel.getByRole('button', { name: 'All 4 sources' }).click();
+    await expect(panel.getByTestId('citation')).toHaveCount(4);
+    await expect(panel.getByText('Cited in this reply')).toHaveCount(0);
+
+    await page
+      .locator('#chat-message-msg-art')
+      .getByRole('button', { name: '[web:c0ffee] (source: Catalogue cover guidelines)' })
+      .click();
+    const marked = panel.locator('.citation.is-highlighted');
+    await expect(marked).toHaveCount(1);
+    await expect(marked).toContainText('Catalogue cover guidelines');
+    await capture('chats-panel-sources-marker');
+  });
+
+  test('leaves the sources out of a chat whose replies cite nothing', async ({
+    page,
+  }, testInfo) => {
+    await mockChat(page, uncited());
+    await page.reload();
+    await openChat(page);
+    const panel = page.getByRole('complementary', { name: 'Changes, media and sources' });
+    await expect(panel.getByRole('button', { name: 'Gallery, 5' })).toBeVisible();
+    await expect(panel.getByRole('button', { name: /^Sources/ })).toHaveCount(0);
+    await expect(page.locator('.message-sources')).toHaveCount(0);
+    if (testInfo.project.name === 'chromium') {
+      await page.mouse.move(0, 0);
+      await page.screenshot({
+        path: 'screenshots/chats-panel-no-sources.png',
+        animations: 'disabled',
+      });
+    }
+  });
+
   test('becomes a sheet on a phone instead of covering the transcript', async ({
     page,
   }, testInfo) => {
@@ -311,8 +461,11 @@ test.describe('Chat changes and gallery panel', () => {
       await page.screenshot({ path: `screenshots/${name}.png`, animations: 'disabled' });
     };
     await page.setViewportSize({ width: 375, height: 812 });
-    await expect(page.getByRole('complementary', { name: 'Changes and media' })).toBeHidden();
-    const toggle = page.getByRole('button', { name: /^Changes and media/ });
+    await expect(page.getByRole('complementary', { name: 'Changes, media and sources' })).toBeHidden();
+    const toggle = page.getByRole('button', {
+      name: 'Changes, media and sources: 4 changes, 5 media items, 4 sources',
+    });
+    await expect(toggle).toHaveText('4 changes, 5 media items, 4 sources');
     await expect(toggle).toBeVisible();
 
     await expect
@@ -333,9 +486,18 @@ test.describe('Chat changes and gallery panel', () => {
     await capture('chats-panel-phone');
 
     await toggle.click();
-    const sheet = page.getByRole('dialog', { name: 'Changes and media' });
+    const sheet = page.getByRole('dialog', { name: 'Changes, media and sources' });
     await expect(sheet.getByText('widgets #12')).toBeVisible();
     await expect(sheet.getByRole('button', { name: 'Open dawn.svg' })).toBeVisible();
+    await expect(sheet.getByRole('button', { name: 'Sources, 4' })).toBeVisible();
     await capture('chats-panel-phone-sheet');
+    await page.keyboard.press('Escape');
+
+    await page.locator('#chat-message-msg-art').getByRole('button', { name: '2 sources' }).click();
+    const shown = page.getByRole('dialog', { name: 'Changes, media and sources' });
+    await expect(shown.getByText('Cited in this reply')).toBeVisible();
+    await expect(shown.getByTestId('citation')).toHaveCount(2);
+    await expect(shown.getByText('Checks queued.')).toBeVisible();
+    await capture('chats-panel-phone-sources');
   });
 });

@@ -1499,7 +1499,9 @@ describe('ChatsPage', () => {
       renderChatsPage();
       fireEvent.click(await screen.findByText('Chat 1'));
 
-      const panel = await screen.findByRole('complementary', { name: 'Changes and media' });
+      const panel = await screen.findByRole('complementary', {
+        name: 'Changes, media and sources',
+      });
       expect(await within(panel).findByRole('link', { name: 'Add widgets' })).toBeInTheDocument();
       expect(within(panel).getByRole('button', { name: 'Open sunset.png' })).toBeInTheDocument();
       expect(mockGetChatPullRequests).toHaveBeenCalledWith(mockChatWithMessages.id);
@@ -1511,7 +1513,9 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       await waitFor(() => expect(mockGetChatPullRequests).toHaveBeenCalled());
-      expect(screen.queryByRole('complementary', { name: 'Changes and media' })).toBeNull();
+      expect(
+        screen.queryByRole('complementary', { name: 'Changes, media and sources' })
+      ).toBeNull();
     });
 
     it('names Offline on a chat created that way', async () => {
@@ -4673,6 +4677,226 @@ describe('ChatsPage', () => {
 
       expect(await screen.findByText(/Confirmed in/)).toBeInTheDocument();
       expect(screen.queryByRole('link', { name: 'the audit' })).not.toBeInTheDocument();
+    });
+
+    it("lists a reply's sources in the chat panel, not under the reply", async () => {
+      mockGetChat.mockResolvedValue(linkedChat());
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const panel = await screen.findByRole('complementary', {
+        name: 'Changes, media and sources',
+      });
+      expect(within(panel).getByRole('button', { name: 'Sources, 1' })).toBeInTheDocument();
+      expect(within(panel).getByText('an unrelated source')).toBeInTheDocument();
+      const reply = document.getElementById('chat-message-msg-link');
+      expect(reply).not.toBeNull();
+      expect(within(reply as HTMLElement).queryByText('an unrelated source')).toBeNull();
+      expect(within(reply as HTMLElement).queryByTestId('citation')).toBeNull();
+    });
+
+    it('opens the sources beside the reply, even after they were collapsed', async () => {
+      localStorage.setItem('zone:chat-panel:1:sources', 'true');
+      mockGetChat.mockResolvedValue(linkedChat());
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const panel = await screen.findByRole('complementary', {
+        name: 'Changes, media and sources',
+      });
+      const toggle = within(panel).getByRole('button', { name: 'Sources, 1' });
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      const reply = document.getElementById('chat-message-msg-link') as HTMLElement;
+      fireEvent.click(within(reply).getByRole('button', { name: '1 source' }));
+
+      expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      expect(within(panel).getByText('Cited in this reply')).toBeInTheDocument();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      localStorage.removeItem('zone:chat-panel:1:sources');
+    });
+
+    it('opens the sheet instead where the stylesheet hides the panel', async () => {
+      const narrow = document.createElement('style');
+      narrow.textContent = '.chat-panel { display: none; }';
+      document.head.append(narrow);
+      try {
+        mockGetChat.mockResolvedValue(linkedChat());
+        renderChatsPage();
+        fireEvent.click(await screen.findByText('Chat 1'));
+
+        const reply = (await screen.findByText(/Confirmed in/)).closest('.message') as HTMLElement;
+        fireEvent.click(within(reply).getByRole('button', { name: '1 source' }));
+
+        const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+        expect(within(sheet).getByText('Cited in this reply')).toBeInTheDocument();
+        expect(within(sheet).getByText('an unrelated source')).toBeInTheDocument();
+      } finally {
+        narrow.remove();
+      }
+    });
+
+    it("shows a reply its own evidence, not a later reply's newer observation", async () => {
+      const build = {
+        kind: 'github_build' as const,
+        title: 'widgets 4f1c2e0',
+        url: 'https://github.com/acme/widgets/commit/4f1c2e0',
+        provenance: 'server_execution' as const,
+      };
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-claim',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'The build is green.',
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: {
+              citations: [
+                {
+                  ...build,
+                  observed_at: '2024-01-01T00:00:00Z',
+                  complete: false,
+                  outcome: 'incomplete',
+                  note: 'Checks could not be read.',
+                },
+              ],
+            },
+          },
+          {
+            id: 'msg-recheck',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'Checked again.',
+            created_at: '2024-01-01T00:10:00Z',
+            metadata: {
+              citations: [
+                {
+                  ...build,
+                  observed_at: '2024-01-01T00:10:00Z',
+                  complete: true,
+                  outcome: 'success',
+                },
+              ],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const panel = await screen.findByRole('complementary', {
+        name: 'Changes, media and sources',
+      });
+      expect(within(panel).getByTestId('citation')).toHaveTextContent('Passing');
+
+      const claim = document.getElementById('chat-message-msg-claim') as HTMLElement;
+      fireEvent.click(within(claim).getByRole('button', { name: '1 source' }));
+
+      const shown = within(panel).getByTestId('citation');
+      expect(shown).toHaveTextContent('Incomplete evidence');
+      expect(shown).toHaveTextContent('Checks could not be read.');
+      expect(shown).not.toHaveTextContent('Passing');
+    });
+
+    it('shows the source a marker in the reply names', async () => {
+      mockGetChat.mockResolvedValue(
+        linkedChat({
+          content: 'Confirmed [web:a3f21c].',
+          metadata: {
+            citations: [
+              {
+                kind: 'web',
+                title: 'Release log',
+                url: 'https://sourced.example/log',
+                identifier: 'web:a3f21c',
+                observed_at: '2024-01-01T00:00:00Z',
+                complete: true,
+                outcome: 'observed',
+                provenance: 'server_execution',
+              },
+              {
+                kind: 'web',
+                title: 'Another page',
+                url: 'https://sourced.example/other',
+                identifier: 'web:b4e32d',
+                observed_at: '2024-01-01T00:00:00Z',
+                complete: true,
+                outcome: 'observed',
+                provenance: 'server_execution',
+              },
+            ],
+          },
+        })
+      );
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      fireEvent.click(
+        await screen.findByRole('button', { name: '[web:a3f21c] (source: Release log)' })
+      );
+
+      const panel = screen.getByRole('complementary', { name: 'Changes, media and sources' });
+      const highlighted = within(panel)
+        .getAllByTestId('citation')
+        .filter((row) => row.classList.contains('is-highlighted'));
+      expect(highlighted).toHaveLength(1);
+      expect(highlighted[0]).toHaveTextContent('Release log');
+    });
+  });
+
+  describe('reply sources sharing an address', () => {
+    it('points a marker at its own observation when two sources share an address', async () => {
+      const address = 'knowledge://11111111-1111-1111-1111-111111111111';
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-shared',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'The runbook says so [doc:aaaaaa].',
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: {
+              citations: [
+                {
+                  kind: 'workspace_document',
+                  title: 'Runbook document',
+                  url: address,
+                  identifier: 'doc:aaaaaa',
+                  observed_at: '2024-01-01T00:00:00Z',
+                  complete: true,
+                  outcome: 'observed',
+                  provenance: 'server_execution',
+                },
+                {
+                  kind: 'knowledge_passage',
+                  title: 'Runbook passage',
+                  url: address,
+                  identifier: 'kb:bbbbbb',
+                  observed_at: '2024-01-01T00:05:00Z',
+                  complete: true,
+                  outcome: 'observed',
+                  provenance: 'server_execution',
+                },
+              ],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      fireEvent.click(
+        await screen.findByRole('button', { name: '[doc:aaaaaa] (source: Runbook document)' })
+      );
+
+      const panel = screen.getByRole('complementary', { name: 'Changes, media and sources' });
+      const rows = within(panel).getAllByTestId('citation');
+      expect(rows).toHaveLength(2);
+      const highlighted = rows.filter((row) => row.classList.contains('is-highlighted'));
+      expect(highlighted).toHaveLength(1);
+      expect(highlighted[0]).toHaveTextContent('Runbook document');
     });
   });
 

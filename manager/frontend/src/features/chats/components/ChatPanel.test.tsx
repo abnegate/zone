@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ChatPullRequests } from '../hooks/useChatPullRequests';
 import type { ChatPullRequest } from '../types';
 import type { GalleryItem } from '../utils/gallery';
 import { PANEL_WIDTH } from '../utils/panel';
+import type { ChatSource, ChatSources, SourceRequest } from '../utils/sources';
 import { ChatPanel } from './ChatPanel';
 
 const PULL_REQUEST: ChatPullRequest = {
@@ -30,8 +31,31 @@ const IMAGE: GalleryItem = {
   kind: 'image',
 };
 
+const SOURCE: ChatSource = {
+  key: 'https://github.com/abnegate/zone/pull/160',
+  messageId: 'message-2',
+  citation: {
+    kind: 'github_issue',
+    title: '#160 feat(chat): merge chat pull requests when ready',
+    url: 'https://github.com/abnegate/zone/pull/160',
+    revision: 'f4c546c2f5270f38f84d1a9121a3f5c6461d1be2',
+    observed_at: '2026-11-05T09:14:00Z',
+    complete: true,
+    outcome: 'pending',
+    provenance: 'server_execution',
+  },
+};
+
+const CITED: ChatSources = {
+  all: [SOURCE],
+  replies: new Map([[SOURCE.messageId, [SOURCE]]]),
+};
+
+const NO_SOURCES: ChatSources = { all: [], replies: new Map() };
+
+const COLLAPSED_KEY = 'zone:chat-panel:user-1:collapsed';
 const WIDTH_KEY = 'zone:chat-panel:user-1:width';
-const SEPARATOR = 'Resize changes and media';
+const SEPARATOR = 'Resize changes, media and sources';
 
 function changes(pullRequests: ChatPullRequest[] = []): ChatPullRequests {
   return {
@@ -45,20 +69,45 @@ function changes(pullRequests: ChatPullRequest[] = []): ChatPullRequests {
   };
 }
 
-function renderPanel(
-  options: { pullRequests?: ChatPullRequest[]; media?: GalleryItem[]; userId?: string } = {}
-) {
-  const onShowMessage = mock();
-  const view = render(
+interface PanelOptions {
+  pullRequests?: ChatPullRequest[];
+  media?: GalleryItem[];
+  sources?: ChatSources;
+  shownSources?: SourceRequest | null;
+  userId?: string;
+}
+
+function panel(options: PanelOptions, onShowMessage = mock(), onSourcesShown = mock()) {
+  return (
     <ChatPanel
       chatId="chat-1"
       userId={options.userId ?? 'user-1'}
       changes={changes(options.pullRequests)}
       media={options.media ?? []}
+      sources={options.sources ?? NO_SOURCES}
+      shownSources={options.shownSources ?? null}
+      onSourcesShown={onSourcesShown}
       onShowMessage={onShowMessage}
     />
   );
-  return { ...view, onShowMessage };
+}
+
+function renderPanel(options: PanelOptions = {}) {
+  const onShowMessage = mock();
+  const onSourcesShown = mock();
+  const view = render(panel(options, onShowMessage, onSourcesShown));
+  return { ...view, onShowMessage, onSourcesShown };
+}
+
+function phone() {
+  const narrow = document.createElement('style');
+  narrow.textContent = '.chat-panel { display: none; }';
+  document.head.append(narrow);
+  return () => narrow.remove();
+}
+
+function request(): SourceRequest {
+  return { messageId: SOURCE.messageId, key: SOURCE.key };
 }
 
 function separator(): HTMLElement {
@@ -74,7 +123,62 @@ describe('ChatPanel', () => {
     mock.restore();
   });
 
-  it('takes no room in a chat with neither pull requests nor media', () => {
+  it('shows the sources only when a reply in the chat cites one', () => {
+    renderPanel({ sources: CITED });
+
+    const aside = screen.getByRole('complementary', { name: 'Changes, media and sources' });
+    expect(within(aside).getByRole('button', { name: 'Sources, 1' })).toBeInTheDocument();
+    expect(within(aside).getByText(SOURCE.citation.title)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Changes, \d/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Gallery, \d/ })).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Changes, media and sources: 1 source' })
+    ).toHaveTextContent(/^1 source$/);
+  });
+
+  it('comes back from its rail to show the sources a reply points to', () => {
+    localStorage.setItem(COLLAPSED_KEY, 'true');
+    const { rerender, onSourcesShown } = renderPanel({ sources: CITED });
+    expect(screen.queryByRole('separator')).toBeNull();
+
+    rerender(panel({ sources: CITED, shownSources: request() }, mock(), onSourcesShown));
+
+    expect(separator()).toBeInTheDocument();
+    expect(onSourcesShown).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByTestId('citation')[0]).toHaveClass('is-highlighted');
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it("keeps the viewer's choice to hide the panel when it opens to show sources", () => {
+    localStorage.setItem(COLLAPSED_KEY, 'true');
+    const { rerender, unmount } = renderPanel({ sources: CITED });
+
+    rerender(panel({ sources: CITED, shownSources: request() }));
+
+    expect(separator()).toBeInTheDocument();
+    expect(localStorage.getItem(COLLAPSED_KEY)).toBe('true');
+    unmount();
+    renderPanel({ sources: CITED });
+    expect(screen.queryByRole('separator')).toBeNull();
+  });
+
+  it('opens the sheet where the stylesheet hides the panel, to show the sources a reply points to', async () => {
+    const restore = phone();
+    try {
+      const { rerender, onSourcesShown } = renderPanel({ sources: CITED });
+
+      rerender(panel({ sources: CITED, shownSources: request() }, mock(), onSourcesShown));
+
+      const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+      await waitFor(() => expect(onSourcesShown).toHaveBeenCalledTimes(1));
+      expect(within(sheet).getByTestId('citation')).toHaveClass('is-highlighted');
+      expect(localStorage.getItem(COLLAPSED_KEY)).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it('takes no room in a chat with no pull requests, media or sources', () => {
     const { container } = renderPanel();
 
     expect(container.innerHTML).toBe('');
@@ -83,7 +187,9 @@ describe('ChatPanel', () => {
   it('shows the gallery only when the chat holds media', () => {
     renderPanel({ pullRequests: [PULL_REQUEST] });
 
-    expect(screen.getByRole('complementary', { name: 'Changes and media' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('complementary', { name: 'Changes, media and sources' })
+    ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Changes, 1' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Gallery, 1' })).toBeNull();
   });
@@ -167,34 +273,70 @@ describe('ChatPanel', () => {
   it('hides to a rail and remembers that it was hidden', () => {
     const { unmount } = renderPanel({ media: [IMAGE] });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Hide changes and media' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Hide changes, media and sources' }));
 
     expect(screen.queryByRole('separator')).toBeNull();
     expect(document.activeElement).toBe(
-      screen.getByRole('button', { name: /Show changes and media/ })
+      screen.getByRole('button', { name: /Show changes, media and sources/ })
     );
     expect(localStorage.getItem('zone:chat-panel:user-1:collapsed')).toBe('true');
     unmount();
     renderPanel({ media: [IMAGE] });
-    const rail = screen.getByRole('button', { name: /Show changes and media/ });
+    const rail = screen.getByRole('button', { name: /Show changes, media and sources/ });
     expect(rail).toHaveAttribute('aria-expanded', 'false');
 
     fireEvent.click(rail);
     expect(separator()).toBeInTheDocument();
     expect(document.activeElement).toBe(
-      screen.getByRole('button', { name: 'Hide changes and media' })
+      screen.getByRole('button', { name: 'Hide changes, media and sources' })
     );
     expect(localStorage.getItem('zone:chat-panel:user-1:collapsed')).toBe('false');
+  });
+
+  it('returns focus to whatever opened the sheet when it closes', async () => {
+    const restore = phone();
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    try {
+      const { rerender } = renderPanel({ sources: CITED });
+      opener.focus();
+
+      rerender(panel({ sources: CITED, shownSources: request() }));
+      const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+      fireEvent.keyDown(sheet, { key: 'Escape' });
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      await waitFor(() => expect(document.activeElement).toBe(opener));
+    } finally {
+      opener.remove();
+      restore();
+    }
+  });
+
+  it('keeps a box in the panel in step with the same box collapsed in the sheet', async () => {
+    renderPanel({ sources: CITED });
+    const inline = within(
+      screen.getByRole('complementary', { name: 'Changes, media and sources' })
+    ).getByRole('button', { name: 'Sources, 1' });
+    expect(inline).toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: /^Changes, media and sources: / }));
+    const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Sources, 1' }));
+
+    expect(inline).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('opens as a sheet from its toggle, for a screen too narrow to hold it', async () => {
     renderPanel({ pullRequests: [PULL_REQUEST], media: [IMAGE] });
 
-    const toggle = screen.getByRole('button', { name: /^Changes and media/ });
-    expect(toggle).toHaveTextContent('1 change, 1 media item');
+    const toggle = screen.getByRole('button', {
+      name: 'Changes, media and sources: 1 change, 1 media item',
+    });
+    expect(toggle).toHaveTextContent(/^1 change, 1 media item$/);
     fireEvent.click(toggle);
 
-    const sheet = await screen.findByRole('dialog', { name: 'Changes and media' });
+    const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
     expect(sheet).toHaveClass('chat-panel-sheet');
   });
 });

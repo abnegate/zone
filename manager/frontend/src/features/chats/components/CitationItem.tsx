@@ -1,6 +1,5 @@
 import type { Citation } from '../types';
 import {
-  citationAnchorId,
   citationEvidence,
   citationEvidenceLabel,
   citationHref,
@@ -10,7 +9,13 @@ import {
   isRevisionTimestamp,
 } from '../utils/citations';
 
-function CitationItem({ citation }: { citation: Citation }) {
+export interface CitationItemProps {
+  citation: Citation;
+  sourceKey: string;
+  highlighted?: boolean;
+}
+
+export function CitationItem({ citation, sourceKey, highlighted = false }: CitationItemProps) {
   const href = citationHref(citation);
   const evidence = citationEvidence(citation);
   const times = formatCitationTimes(citation);
@@ -25,12 +30,18 @@ function CitationItem({ citation }: { citation: Citation }) {
       <span className="citation-kind">{citationKindLabel(citation.kind)}</span>
     </>
   );
+  const classes = [
+    'citation',
+    `citation--${evidence}`,
+    `citation--${citation.provenance.replace('_', '-')}`,
+    highlighted ? 'is-highlighted' : null,
+  ];
 
   return (
     <li
-      className={`citation citation--${evidence} citation--${citation.provenance.replace('_', '-')}`}
+      className={classes.filter(Boolean).join(' ')}
       data-testid="citation"
-      id={citation.identifier ? citationAnchorId(citation.identifier) : undefined}
+      data-source={sourceKey}
     >
       {href ? (
         <a
@@ -41,7 +52,9 @@ function CitationItem({ citation }: { citation: Citation }) {
           {title}
         </a>
       ) : (
-        <span className="citation-link citation-link--static">{title}</span>
+        <span className="citation-link citation-link--static" tabIndex={-1}>
+          {title}
+        </span>
       )}
       <span className="citation-meta">
         {times.revision ? <span className={revisionClass}>{times.revision}</span> : null}
@@ -55,23 +68,5 @@ function CitationItem({ citation }: { citation: Citation }) {
       </span>
       {citation.note ? <p className="citation-note">{citation.note}</p> : null}
     </li>
-  );
-}
-
-export function Citations({ citations }: { citations: Citation[] }) {
-  if (citations.length === 0) return null;
-
-  return (
-    <aside className="message-citations" aria-label="Sources" data-testid="citations">
-      <h4 className="citations-heading">Sources</h4>
-      <ol className="citation-list">
-        {citations.map((citation) => (
-          <CitationItem
-            key={`${citation.kind}:${citation.url}:${citation.revision ?? ''}:${citation.observed_at}`}
-            citation={citation}
-          />
-        ))}
-      </ol>
-    </aside>
   );
 }

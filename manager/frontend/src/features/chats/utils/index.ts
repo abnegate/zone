@@ -15,3 +15,4 @@ export * from './plainText';
 export * from './popoverOffset';
 export * from './providerOptions';
 export * from './pullRequests';
+export * from './sources';

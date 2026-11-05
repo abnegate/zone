@@ -131,7 +131,9 @@ test.describe('Chat images', () => {
     await page.click('a[href="/chats"]');
     await openImageChat(page);
 
-    await expect(page.getByRole('alert')).toHaveText('Image unavailable');
+    await expect(page.locator('.messages-container').getByRole('alert')).toHaveText(
+      'Image unavailable'
+    );
     await expect(page.getByTestId('message-image')).toHaveCount(0);
   });
 

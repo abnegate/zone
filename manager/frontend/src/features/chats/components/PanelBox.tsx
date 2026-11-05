@@ -1,5 +1,5 @@
-import { type ReactNode, useId, useState } from 'react';
-import { readFlag, writeSetting } from '../utils/panel';
+import { type ReactNode, useEffect, useId, useState } from 'react';
+import { readFlag, SETTING_CHANGED, writeSetting } from '../utils/panel';
 
 export interface PanelBoxProps {
   title: string;
@@ -7,12 +7,45 @@ export interface PanelBoxProps {
   /** Where whether the box is collapsed is remembered. */
   storageKey: string;
   className?: string;
+  /** Opens the box whenever it changes, so something outside can bring its contents into view. */
+  reveal?: number;
   children: ReactNode;
 }
 
 /** One collapsible box of the chat panel, which remembers whether it was open. */
-export function PanelBox({ title, count, storageKey, className, children }: PanelBoxProps) {
+export function PanelBox({
+  title,
+  count,
+  storageKey,
+  className,
+  reveal = 0,
+  children,
+}: PanelBoxProps) {
   const [collapsed, setCollapsed] = useState(() => readFlag(storageKey));
+  const [revealed, setRevealed] = useState(reveal);
+  if (revealed !== reveal) {
+    setRevealed(reveal);
+    setCollapsed(false);
+  }
+
+  useEffect(() => {
+    const follow = (event: Event) => {
+      const key =
+        event instanceof CustomEvent
+          ? event.detail
+          : event instanceof StorageEvent
+            ? event.key
+            : null;
+      if (key === storageKey) setCollapsed(readFlag(storageKey));
+    };
+    window.addEventListener(SETTING_CHANGED, follow);
+    window.addEventListener('storage', follow);
+    return () => {
+      window.removeEventListener(SETTING_CHANGED, follow);
+      window.removeEventListener('storage', follow);
+    };
+  }, [storageKey]);
+
   const heading = useId();
   const body = useId();
 
