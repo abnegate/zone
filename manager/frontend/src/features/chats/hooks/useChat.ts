@@ -149,6 +149,7 @@ type ServerMessage =
       tool_call_id: string;
       name: string;
       arguments: string;
+      at?: number;
       reasoning?: string;
       reason?: string;
     }
@@ -789,6 +790,7 @@ export function useChat(
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
             arguments: payload.arguments,
+            at: payload.at ?? Array.from(assistantContent).length,
             detail: 'Running…',
             pending: true,
             reasoning: preceding,

@@ -57,6 +57,11 @@ export interface ToolCallRecord {
   success: boolean;
   detail: string;
   duration_ms: number;
+  /**
+   * How many code points of the answer were written before the call started,
+   * so the trace is drawn where it happened. Absent on calls stored before it was recorded.
+   */
+  at?: number;
   /** Model thinking that immediately preceded this call. */
   reasoning?: string;
   /**

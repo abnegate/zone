@@ -482,6 +482,8 @@ pub enum ServerMessage {
         tool_call_id: String,
         name: String,
         arguments: String,
+        /// How many Unicode scalar values of the answer were written before it.
+        at: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
         /// The model's stated reason, for side-effecting tools that carry one.
@@ -768,6 +770,7 @@ fn trace_started(
     id: String,
     name: String,
     arguments: &str,
+    at: usize,
     reasoning: Option<String>,
 ) -> (ToolCallRecord, ServerMessage) {
     let reason = crate::agent::memory::trace_reason(&name, crate::agent::reason(arguments));
@@ -780,6 +783,7 @@ fn trace_started(
         success: false,
         detail: "Did not finish".to_string(),
         duration_ms: 0,
+        at: Some(at),
         reasoning: reasoning.clone(),
         reason: reason.clone(),
         preview: None,
@@ -792,6 +796,7 @@ fn trace_started(
         tool_call_id: id,
         name,
         arguments: shown,
+        at,
         reasoning,
         reason,
     };
@@ -3569,8 +3574,14 @@ async fn handle_chat_generation(
                                 let text = std::mem::take(&mut round_reasoning);
                                 (!text.is_empty()).then_some(text)
                             };
-                            let (record, tool_msg) =
-                                trace_started(assistant_message_id, id, name, &arguments, reasoning);
+                            let (record, tool_msg) = trace_started(
+                                assistant_message_id,
+                                id,
+                                name,
+                                &arguments,
+                                full_content.chars().count(),
+                                reasoning,
+                            );
                             tool_calls.push(record);
                             publish(stream, tool_msg).await;
                             persist_now = true;
@@ -6366,6 +6377,7 @@ cat 'DIR/reply.jsonl'
             tool_call_id: "call-1".to_string(),
             name: "read_file".to_string(),
             arguments: "{}".to_string(),
+            at: 0,
             reasoning: None,
             reason: None,
         });
@@ -7440,6 +7452,7 @@ cat 'DIR/reply.jsonl'
             tool_call_id: "call_abc".to_string(),
             name: "search_knowledge".to_string(),
             arguments: r#"{"query":"deploys"}"#.to_string(),
+            at: 0,
             reasoning: Some("Need workspace deploy docs.".to_string()),
             reason: None,
         };
@@ -7481,6 +7494,7 @@ cat 'DIR/reply.jsonl'
             success: true,
             detail: "2 tasks".to_string(),
             duration_ms: 7,
+            at: None,
             reasoning: None,
             reason: None,
             preview: None,
@@ -7510,6 +7524,7 @@ cat 'DIR/reply.jsonl'
             success: true,
             detail: "ok".to_string(),
             duration_ms: 3,
+            at: None,
             reasoning: Some("Inspect the workspace first.".to_string()),
             reason: Some("The user asked which tests are failing.".to_string()),
             preview: None,
@@ -7606,6 +7621,7 @@ cat 'DIR/reply.jsonl'
             "call_1".to_string(),
             MEMORY_WRITE.to_string(),
             r#"{"category":"fact","name":"Deploy window","description":"When we ship.","content":"Thursdays, never Fridays.","reason":"They ship on Thursdays, so remembering it."}"#,
+            0,
             Some("I should remember this.".to_string()),
         );
         let record_json = serde_json::to_string(&record).expect("a record serialises");
@@ -7644,6 +7660,7 @@ cat 'DIR/reply.jsonl'
             "call_2".to_string(),
             "read_file".to_string(),
             r#"{"path":"src/main.rs","reason":"To see what main does."}"#,
+            0,
             None,
         );
         assert!(
@@ -7671,6 +7688,7 @@ cat 'DIR/reply.jsonl'
             success,
             detail: "ok".to_string(),
             duration_ms: 1,
+            at: None,
             reasoning: None,
             reason: None,
             preview: None,
@@ -8014,6 +8032,22 @@ cat 'DIR/reply.jsonl'
     }
 
     #[test]
+    fn a_started_call_records_where_in_the_answer_it_ran_on_the_frame_and_the_record() {
+        let (record, frame) = trace_started(
+            Uuid::nil(),
+            "call_1".to_string(),
+            "read_file".to_string(),
+            r#"{"path":"src/main.rs"}"#,
+            13,
+            None,
+        );
+
+        assert_eq!(record.at, Some(13), "a reload draws the call where it ran");
+        let json = serde_json::to_value(frame).unwrap();
+        assert_eq!(json["at"], 13, "the live trace draws the call where it ran");
+    }
+
+    #[test]
     fn tool_call_carries_the_stated_reason_to_the_console() {
         let json = serde_json::to_value(ServerMessage::ToolCall {
             message_id: Uuid::nil(),
@@ -8021,6 +8055,7 @@ cat 'DIR/reply.jsonl'
             name: "create_pull_request".into(),
             arguments: r#"{"title":"Fix the export","reason":"The user asked me to open it."}"#
                 .into(),
+            at: 0,
             reasoning: None,
             reason: Some("The user asked me to open it.".into()),
         })
@@ -8193,6 +8228,7 @@ cat 'DIR/reply.jsonl'
             tool_call_id: "call_2".to_string(),
             name: wait::WAIT_FOR.to_string(),
             arguments: "{}".to_string(),
+            at: 0,
             reasoning: None,
             reason: None,
         });

@@ -86,6 +86,11 @@ pub struct ToolCallRecord {
     pub success: bool,
     pub detail: String,
     pub duration_ms: u64,
+    /// How many Unicode scalar values of the answer were written before the
+    /// call started, so the console draws it where it happened. Absent on
+    /// records stored before it was kept, which the console draws at the top.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<usize>,
     /// Model thinking that immediately preceded this call, shown in the trace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
@@ -125,6 +130,7 @@ mod tests {
             success: true,
             detail: "3 passages".to_string(),
             duration_ms: 42,
+            at: None,
             reasoning: Some("Search workspace docs first.".into()),
             reason: Some("The user asked what changed in the deploy.".into()),
             preview: None,
@@ -160,6 +166,7 @@ mod tests {
             success: true,
             detail: "Waiting for your answer…".to_string(),
             duration_ms: 1,
+            at: None,
             reasoning: None,
             reason: None,
             preview: None,
@@ -209,6 +216,10 @@ mod tests {
         });
 
         let parsed: ToolCallRecord = serde_json::from_value(stored).unwrap();
+        assert_eq!(
+            parsed.at, None,
+            "a call stored before offsets were kept has none, and the console draws it first"
+        );
         assert_eq!(parsed.reason, None);
         assert_eq!(parsed.reasoning, None);
         assert!(

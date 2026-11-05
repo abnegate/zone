@@ -138,6 +138,7 @@ export const ToolCallRecordSchema = z.object({
   success: z.boolean(),
   detail: z.string(),
   duration_ms: z.number(),
+  at: z.number().int().nonnegative().optional().catch(undefined),
   reasoning: z.string().optional(),
   reason: statedReason,
   preview: observedPreview,

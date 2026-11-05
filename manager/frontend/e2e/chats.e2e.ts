@@ -854,6 +854,122 @@ test.describe('Chats Page', () => {
       );
     });
 
+    test('draws each tool call after the text written before it, live and after reload', async ({
+      page,
+    }, testInfo) => {
+      const opening = "I'll check the projects first. ";
+      const middle = "There are none, so I'll look at the tasks. ";
+      const closing = 'Nothing is open either.';
+      const calls = [
+        {
+          id: 'call_projects',
+          name: 'list_projects',
+          arguments: '{}',
+          success: true,
+          detail: 'This workspace has no projects.',
+          duration_ms: 12,
+          at: Array.from(opening).length,
+        },
+        {
+          id: 'call_tasks',
+          name: 'list_tasks',
+          arguments: '{}',
+          success: true,
+          detail: 'No open tasks.',
+          duration_ms: 9,
+          at: Array.from(opening + middle).length,
+        },
+      ];
+      const agentChat = generateMockChat('chat-1', 'Agent Chat', 'llama3.2', false, {
+        agent_enabled: true,
+      });
+      await mockChatRoutes(page, agentChat);
+      await page.routeWebSocket(/\/ws\/chats\//, (ws) => {
+        ws.onMessage((message) => {
+          const payload = JSON.parse(typeof message === 'string' ? message : message.toString());
+          if (payload.type === 'auth') {
+            ws.send(JSON.stringify({ type: 'init', chat_id: 'chat-1', status: 'connected' }));
+            return;
+          }
+          if (payload.type !== 'send') return;
+          const frames: object[] = [
+            { type: 'message_saved', message_id: 'msg-user', role: 'user', content: payload.content },
+            { type: 'message_start', message_id: 'msg-asst', role: 'assistant' },
+          ];
+          [opening, middle].forEach((text, index) => {
+            const call = calls[index];
+            frames.push(
+              { type: 'chunk', content: text, index },
+              {
+                type: 'tool_call',
+                message_id: 'msg-asst',
+                tool_call_id: call.id,
+                name: call.name,
+                arguments: call.arguments,
+                at: call.at,
+              },
+              {
+                type: 'tool_result',
+                message_id: 'msg-asst',
+                tool_call_id: call.id,
+                name: call.name,
+                success: call.success,
+                detail: call.detail,
+                duration_ms: call.duration_ms,
+              }
+            );
+          });
+          frames.push(
+            { type: 'chunk', content: closing, index: 2 },
+            {
+              type: 'message_end',
+              message_id: 'msg-asst',
+              content: opening + middle + closing,
+              metadata: { tool_calls: calls },
+            }
+          );
+          for (const frame of frames) ws.send(JSON.stringify(frame));
+        });
+      });
+      await page.reload();
+      await page.click('.chat-item');
+      await page.fill('.message-form textarea', 'Is anything in flight?');
+      await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
+
+      const answer = page.locator('.message-assistant .message-content');
+      await expect(answer).toContainText(closing);
+      const order = () =>
+        answer.evaluate((element) =>
+          Array.from(element.children).map((part) =>
+            part.matches('[data-testid="activity"]')
+              ? `tools: ${part.textContent?.includes('Listed projects') ? 'projects' : 'tasks'}`
+              : (part.textContent?.trim() ?? '')
+          )
+        );
+      const expected = [
+        opening.trim(),
+        'tools: projects',
+        middle.trim(),
+        'tools: tasks',
+        closing,
+      ];
+      expect(await order()).toEqual(expected);
+      await page.screenshot({ path: testInfo.outputPath('turn-order-live.png'), animations: 'disabled' });
+
+      await mockChatRoutes(page, agentChat, [
+        generateMockMessage('msg-user', 'chat-1', 'user', 'Is anything in flight?'),
+        {
+          ...generateMockMessage('msg-asst', 'chat-1', 'assistant', opening + middle + closing),
+          metadata: { tool_calls: calls },
+        },
+      ]);
+      await page.reload();
+      await page.click('.chat-item');
+      await expect(answer).toContainText(closing);
+      expect(await order()).toEqual(expected);
+      await page.screenshot({ path: testInfo.outputPath('turn-order-reload.png'), animations: 'disabled' });
+    });
+
     test('shows a durable receipt for a workspace write and keeps it after reload', async ({
       page,
     }) => {

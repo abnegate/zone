@@ -1,9 +1,5 @@
 import type { Handover, HandoverAgent, HandoverReason } from '../types';
 
-export type AnswerPart =
-  | { kind: 'text'; text: string; offset: number }
-  | { kind: 'handover'; handover: Handover; agentChanged: boolean };
-
 const AGENT_NAMES: Record<HandoverAgent, string> = { claude: 'Claude', codex: 'Codex' };
 
 const CAUSES: Record<HandoverReason, string> = {
@@ -32,29 +28,6 @@ export function appendHandover(existing: readonly Handover[], handover: Handover
     (item) => item.at === handover.at && item.to === handover.to && item.from === handover.from
   );
   return repeated ? [...existing] : [...existing, handover];
-}
-
-/** Offsets count code points, as the server does, so the split never halves a surrogate pair. */
-export function splitAtHandovers(content: string, handovers: readonly Handover[]): AnswerPart[] {
-  const parts: AnswerPart[] = [];
-  if (handovers.length === 0) {
-    if (content.trim()) parts.push({ kind: 'text', text: content, offset: 0 });
-    return parts;
-  }
-  const characters = Array.from(content);
-  const pushText = (start: number, end: number): void => {
-    const text = characters.slice(start, end).join('');
-    if (text.trim()) parts.push({ kind: 'text', text, offset: start });
-  };
-  let start = 0;
-  for (const handover of [...handovers].sort((left, right) => left.at - right.at)) {
-    const end = Math.min(Math.max(handover.at, start), characters.length);
-    pushText(start, end);
-    parts.push({ kind: 'handover', handover, agentChanged: agentChanged(handover) });
-    start = end;
-  }
-  pushText(start, characters.length);
-  return parts;
 }
 
 export function resetsIn(resetsAt: string | undefined, now: number): string | undefined {
