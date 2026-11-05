@@ -69,6 +69,7 @@ async fn static_search_supplement_has_identical_preview_and_send_costs() {
             Some((current, Some(&metadata))),
             Mode::Preview,
             route.endpoint().expect("a usable route").clone(),
+            None,
         )
         .await
         .unwrap();
@@ -81,6 +82,7 @@ async fn static_search_supplement_has_identical_preview_and_send_costs() {
             None,
             Mode::Generation(session::Generation::unrouted(backend)),
             route.into_endpoint().expect("a usable route"),
+            None,
         )
         .await
         .unwrap();
@@ -165,6 +167,7 @@ async fn retrieved_search_replaces_the_protected_user_supplement_without_trust_e
         None,
         Mode::Generation(session::Generation::unrouted(backend)),
         route.into_endpoint().expect("a usable route"),
+        None,
     )
     .await
     .unwrap();
@@ -253,6 +256,7 @@ async fn requested_search_preview_preserves_the_draft_and_marks_future_results_i
             .await
             .into_endpoint()
             .expect("a usable route"),
+        None,
     )
     .await
     .unwrap();
@@ -301,9 +305,17 @@ async fn terminal_context_includes_the_same_static_supplement_as_restoration() {
         .await
         .into_endpoint()
         .expect("a usable route");
-    let restored = session::build(&state, &chat, Uuid::new_v4(), None, Mode::Preview, endpoint)
-        .await
-        .unwrap();
+    let restored = session::build(
+        &state,
+        &chat,
+        Uuid::new_v4(),
+        None,
+        Mode::Preview,
+        endpoint,
+        None,
+    )
+    .await
+    .unwrap();
     let restored = restored.context.usage(&restored.model, None);
     assert_eq!(terminal.used, restored.used);
     assert_eq!(terminal.breakdown, restored.breakdown);

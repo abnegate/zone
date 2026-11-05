@@ -583,7 +583,7 @@ pub async fn create_synced_task(
         &tasks::Create {
             workspace_id: input.workspace_id,
             project_ids: &[input.project_id],
-            title: input.title,
+            title: Some(input.title),
             description: input.description,
             acceptance_criteria: None,
             priority: None,

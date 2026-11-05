@@ -1,5 +1,6 @@
 //! Chat database queries
 
+pub mod occupancy;
 pub mod provider;
 mod session;
 

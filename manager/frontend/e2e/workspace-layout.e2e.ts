@@ -209,9 +209,6 @@ for (const viewport of [
           );
           if (wizard.path === 'tasks') {
             await dialog
-              .getByLabel('Title', { exact: true })
-              .fill('Review layout');
-            await dialog
               .getByLabel('Description', { exact: true })
               .fill('Keep typography and spacing consistent.');
           } else if (wizard.path === 'sources' || wizard.path === 'wiki') {

@@ -157,6 +157,10 @@ pub struct Route {
     endpoint: Result<Endpoint, Unusable>,
     saved: Option<Saved>,
     chosen: Option<Choice>,
+    /// Whether the context window a chat keeps for its workspace's provider
+    /// bounds its completions: on that provider, or on the same self-hosted
+    /// endpoint chosen by name.
+    windowed: bool,
 }
 
 #[derive(Clone)]
@@ -220,6 +224,8 @@ impl Route {
         choice: Choice,
     ) -> Self {
         let provider = choice.provider;
+        let windowed = provider == Provider::SelfHosted
+            && Provider::named(&settings.provider) == Some(Provider::SelfHosted);
         let settings = settings.choosing(&choice);
         let endpoint = match provider.configured(&settings) {
             true => Endpoint::try_resolve(config, &settings).map_err(|error| {
@@ -257,6 +263,7 @@ impl Route {
                 settings,
             }),
             chosen: Some(choice),
+            windowed,
         }
     }
 
@@ -297,6 +304,7 @@ impl Route {
                 settings,
             }),
             chosen: None,
+            windowed: true,
         }
     }
 
@@ -305,6 +313,7 @@ impl Route {
             endpoint: Ok(Endpoint::instance(config)),
             saved: None,
             chosen: None,
+            windowed: true,
         }
     }
 
@@ -313,6 +322,7 @@ impl Route {
             endpoint: Err(reason.into()),
             saved: None,
             chosen: None,
+            windowed: true,
         }
     }
 
@@ -340,11 +350,13 @@ impl Route {
     }
 
     /// `chat` as its completions see it: on a chosen provider, the model it
-    /// asks that provider for and none of the context window it keeps for its
-    /// workspace's provider.
+    /// asks that provider for, and the context window it keeps for its
+    /// workspace's provider only when it chose that same self-hosted endpoint.
     pub fn apply(&self, mut chat: ChatRow) -> ChatRow {
         if self.chosen.is_some() {
             chat.model_name = self.requested(&chat.model_name);
+        }
+        if !self.windowed {
             chat.context_tokens = None;
         }
         chat
@@ -1072,6 +1084,32 @@ mod tests {
         assert_eq!(
             applied.context_tokens, None,
             "a chosen provider was held to the window kept for the workspace's provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_self_hosted_endpoint_chosen_by_name_keeps_the_window() {
+        const WINDOW: i64 = 8192;
+        let fixture = Fixture::new(PROVIDER_SELF_HOSTED).await;
+        fixture
+            .organization(Provider::SelfHosted, "http://self-hosted.example:4000")
+            .await;
+        let named = ChatRow {
+            context_tokens: Some(WINDOW),
+            ..fixture
+                .chat(choice(Provider::SelfHosted, Some("qwen3:8b")))
+                .await
+        };
+
+        let route = fixture.route(&named).await;
+        fixture.remove().await;
+
+        let applied = route.apply(named);
+        assert_eq!(applied.model_name, "qwen3:8b");
+        assert_eq!(
+            applied.context_tokens,
+            Some(WINDOW),
+            "a chat that chose its workspace's own self-hosted endpoint lost the window it keeps there"
         );
     }
 

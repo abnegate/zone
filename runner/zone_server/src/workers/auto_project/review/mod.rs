@@ -356,6 +356,7 @@ mod tests {
             created_by: None,
             project_ids: Vec::new(),
             title: "Add a cart".into(),
+            title_pending: false,
             description: "Shoppers need a cart.".into(),
             acceptance_criteria: None,
             status: "completed".into(),

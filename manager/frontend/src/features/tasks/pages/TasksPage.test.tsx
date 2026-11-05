@@ -6,7 +6,7 @@ import { clientModule } from '../../../test/client';
 import { chooseSelect, openSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
-import type { Task, TaskRun, TaskRunLog } from '../types';
+import type { CreateTaskRequest, Task, TaskRun, TaskRunLog } from '../types';
 import TasksPage from './TasksPage';
 
 // Create mock functions for tasks API
@@ -308,23 +308,116 @@ describe('TasksPage', () => {
     expect(screen.queryByRole('combobox', { name: 'Filter by status' })).not.toBeInTheDocument();
   });
 
-  it('saves only the changed title', async () => {
+  it('saves only the changed title, inline from the detail heading', async () => {
     renderTasksPage();
     fireEvent.click((await screen.findByText('Implement login')).closest('td') as HTMLElement);
 
-    await waitFor(() => {
-      expect(screen.getByLabelText('Title')).toBeInTheDocument();
-    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Rename Implement login' }));
     expect(mockGetTask).toHaveBeenCalledWith('task-1');
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Implement logout' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    expect(document.activeElement).toBe(input);
+    fireEvent.change(input, { target: { value: '  Implement logout  ' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
 
     await waitFor(() => {
       expect(mockUpdateTask).toHaveBeenCalledWith('task-1', { title: 'Implement logout' });
     });
     expect(mockUpdateTask).toHaveBeenCalledTimes(1);
+    expect(
+      await screen.findByRole('button', { name: 'Rename Implement logout' })
+    ).toBeInTheDocument();
+    expect(document.querySelector('section.task-details')).not.toBeNull();
+  });
+
+  it('saves an inline title on blur', async () => {
+    renderTasksPage('/tasks?task=task-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'Rename Implement login' }));
+
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    fireEvent.change(input, { target: { value: 'Implement logout' } });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(mockUpdateTask).toHaveBeenCalledWith('task-1', { title: 'Implement logout' });
+    });
+    expect(mockUpdateTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels an inline title edit with Escape', async () => {
+    renderTasksPage('/tasks?task=task-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'Rename Implement login' }));
+
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    fireEvent.change(input, { target: { value: 'Implement logout' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    expect(screen.queryByRole('textbox', { name: 'Task title' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Rename Implement login' })).toBeInTheDocument();
+    expect(document.querySelector('section.task-details')).not.toBeNull();
+    expect(mockUpdateTask).not.toHaveBeenCalled();
+  });
+
+  it('reverts an inline title left empty', async () => {
+    renderTasksPage('/tasks?task=task-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'Rename Implement login' }));
+
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    fireEvent.change(input, { target: { value: '   ' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(screen.queryByRole('textbox', { name: 'Task title' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Rename Implement login' })).toBeInTheDocument();
+    expect(mockUpdateTask).not.toHaveBeenCalled();
+  });
+
+  it('keeps an inline title edit open with the error when saving fails', async () => {
+    mockUpdateTask.mockImplementation(() => Promise.reject(new Error('Task not found')));
+    renderTasksPage('/tasks?task=task-1');
+    fireEvent.click(await screen.findByRole('button', { name: 'Rename Implement login' }));
+
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    fireEvent.change(input, { target: { value: 'Implement logout' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Task not found');
+    expect(screen.getByRole('textbox', { name: 'Task title' })).toHaveValue('Implement logout');
+  });
+
+  it('renames a task from the list without opening it', async () => {
+    renderTasksPage();
+    await screen.findByText('Implement login');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Implement login' }));
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    expect(input).toHaveValue('Implement login');
+    fireEvent.change(input, { target: { value: 'Implement logout' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(mockUpdateTask).toHaveBeenCalledWith('task-1', { title: 'Implement logout' });
+    });
+    expect(document.querySelector('section.task-details')).toBeNull();
+    expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
+    await waitFor(() => {
+      expect(screen.queryByRole('textbox', { name: 'Task title' })).not.toBeInTheDocument();
+    });
+  });
+
+  it('cancels a list rename with Escape without opening the task', async () => {
+    renderTasksPage();
+    await screen.findByText('Implement login');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Implement login' }));
+    const input = screen.getByRole('textbox', { name: 'Task title' });
+    fireEvent.click(input);
+    fireEvent.change(input, { target: { value: 'Implement logout' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    expect(screen.getByText('Implement login')).toBeInTheDocument();
+    expect(document.querySelector('section.task-details')).toBeNull();
+    expect(mockUpdateTask).not.toHaveBeenCalled();
   });
 
   it('does not open the editor from Execute or Delete', async () => {
@@ -419,7 +512,9 @@ describe('TasksPage', () => {
     await waitFor(() => {
       expect(document.querySelector('section.task-details')).not.toBeNull();
     });
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Dirty title' } });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Dirty description' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => {
       expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
@@ -570,6 +665,42 @@ describe('TasksPage', () => {
     expect(button.querySelector('svg.plus-icon')).not.toBeNull();
   });
 
+  it('labels the wizard title optional, generated from the description', async () => {
+    renderTasksPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'New task' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Project Alpha/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    const title = await screen.findByLabelText(/^Title/);
+    expect(title.closest('.form-group')?.querySelector('label')).toHaveTextContent('Titleoptional');
+    expect(document.getElementById(title.getAttribute('aria-describedby') ?? '')).toHaveTextContent(
+      'Leave it blank to have one generated from the description.'
+    );
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+  });
+
+  it('creates a task with only a description', async () => {
+    mockCreateTask.mockImplementation(() => Promise.resolve(mockTasks[0]));
+    renderTasksPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'New task' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Project Alpha/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    fireEvent.change(await screen.findByLabelText('Description'), {
+      target: { value: 'Users on Safari are sent back to the login page' },
+    });
+    fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: '   ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Create Task' }));
+
+    await waitFor(() => {
+      expect(mockCreateTask).toHaveBeenCalledTimes(1);
+    });
+    const [, request] = mockCreateTask.mock.calls[0] as unknown as [string, CreateTaskRequest];
+    expect(request.description).toBe('Users on Safari are sent back to the login page');
+    expect('title' in request).toBe(false);
+  });
+
   it('disables new task button when no projects', async () => {
     mockGetProjects.mockImplementation(() => Promise.resolve([]));
     renderTasksPage();
@@ -624,9 +755,9 @@ describe('TasksPage', () => {
 
     // Step 2: Task details
     await waitFor(() => {
-      expect(screen.getByLabelText('Title')).toBeInTheDocument();
+      expect(screen.getByLabelText(/^Title/)).toBeInTheDocument();
     });
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New Task' } });
+    fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: 'New Task' } });
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Task description' },
     });
@@ -785,9 +916,9 @@ describe('TasksPage', () => {
 
     // Step 2: Fill in details
     await waitFor(() => {
-      expect(screen.getByLabelText('Title')).toBeInTheDocument();
+      expect(screen.getByLabelText(/^Title/)).toBeInTheDocument();
     });
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Test Task' } });
+    fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: 'Test Task' } });
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Test description' },
     });
@@ -824,9 +955,9 @@ describe('TasksPage', () => {
 
     // Step 2: Fill in details
     await waitFor(() => {
-      expect(screen.getByLabelText('Title')).toBeInTheDocument();
+      expect(screen.getByLabelText(/^Title/)).toBeInTheDocument();
     });
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Test Task' } });
+    fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: 'Test Task' } });
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Test description' },
     });
@@ -996,9 +1127,9 @@ describe('TasksPage', () => {
 
     // Step 2: Fill in details
     await waitFor(() => {
-      expect(screen.getByLabelText('Title')).toBeInTheDocument();
+      expect(screen.getByLabelText(/^Title/)).toBeInTheDocument();
     });
-    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New Task' } });
+    fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: 'New Task' } });
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Description' } });
 
     // Go to step 3
@@ -1219,5 +1350,98 @@ describe('TasksPage', () => {
     expect(screen.getByTestId('action-receipt-link')).toHaveAttribute('href', '/wiki?id=doc-1');
     // The bare log line says only that a receipt happened.
     expect(screen.queryByText('Workspace action receipt')).not.toBeInTheDocument();
+  });
+
+  describe('a title generated from the description', () => {
+    const placeholder = 'Users on Safari are sent back to the login page';
+    const generated = 'Fix Safari login redirect loop';
+    const untitled = (): Task => ({
+      ...mockTasks[0],
+      id: 'task-untitled',
+      title: placeholder,
+      title_pending: true,
+      description: placeholder,
+      created_at: new Date().toISOString(),
+    });
+
+    it('replaces the placeholder in the list when it arrives', async () => {
+      const pending = untitled();
+      let arrived = false;
+      mockGetTasks.mockImplementation(() =>
+        Promise.resolve([
+          arrived ? { ...pending, title: generated, title_pending: false } : pending,
+        ])
+      );
+      renderTasksPage();
+
+      const shown = await screen.findByText(placeholder, { selector: 'h3' });
+      expect(shown).toHaveClass('task-title-pending');
+      arrived = true;
+
+      expect(await screen.findByText(generated, {}, { timeout: 5000 })).not.toHaveClass(
+        'task-title-pending'
+      );
+      const calls = mockGetTasks.mock.calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      expect(mockGetTasks.mock.calls.length).toBe(calls);
+    }, 15_000);
+
+    it('stops waiting on a placeholder older than two minutes', async () => {
+      mockGetTasks.mockImplementation(() =>
+        Promise.resolve([
+          { ...untitled(), created_at: new Date(Date.now() - 180_000).toISOString() },
+        ])
+      );
+      renderTasksPage();
+
+      await screen.findByText(placeholder, { selector: 'h3' });
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      expect(mockGetTasks).toHaveBeenCalledTimes(1);
+    }, 10_000);
+
+    it('leaves a generated title that arrives while the rename box is open untouched', async () => {
+      const pending = untitled();
+      let arrived = false;
+      mockGetTasks.mockImplementation(() => Promise.resolve([pending]));
+      mockGetTask.mockImplementation(() =>
+        Promise.resolve(arrived ? { ...pending, title: generated, title_pending: false } : pending)
+      );
+      renderTasksPage('/tasks?task=task-untitled');
+
+      fireEvent.click(await screen.findByRole('button', { name: `Rename ${placeholder}` }));
+      const input = screen.getByRole('textbox', { name: 'Task title' });
+      arrived = true;
+      await waitFor(() => expect(mockGetTask.mock.calls.length).toBeGreaterThan(1), {
+        timeout: 5000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      fireEvent.blur(input);
+
+      const heading = await screen.findByRole('button', { name: `Rename ${generated}` });
+      expect(mockUpdateTask).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(heading);
+    }, 15_000);
+
+    it('replaces the placeholder in the open task and keeps unsaved edits', async () => {
+      const pending = untitled();
+      let arrived = false;
+      mockGetTasks.mockImplementation(() => Promise.resolve([pending]));
+      mockGetTask.mockImplementation(() =>
+        Promise.resolve(arrived ? { ...pending, title: generated, title_pending: false } : pending)
+      );
+      renderTasksPage('/tasks?task=task-untitled');
+
+      await screen.findByRole('button', { name: `Rename ${placeholder}` });
+      fireEvent.change(screen.getByLabelText('Description'), {
+        target: { value: 'Also on iOS' },
+      });
+      arrived = true;
+
+      expect(
+        await screen.findByRole('button', { name: `Rename ${generated}` }, { timeout: 5000 })
+      ).toBeInTheDocument();
+      expect(screen.getByLabelText('Description')).toHaveValue('Also on iOS');
+      expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+    }, 15_000);
   });
 });

@@ -99,6 +99,7 @@ mod task_pr_fields;
 mod task_review_verdict;
 mod task_run_ws_authorization;
 mod task_scope;
+mod task_title;
 mod tenant_admin_permissions;
 mod tenant_isolation;
 mod test_config;

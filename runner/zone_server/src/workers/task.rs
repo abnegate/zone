@@ -897,6 +897,9 @@ pub fn spawn_recovery(state: AppState) -> tokio::task::JoinHandle<()> {
             if let Err(error) = tasks::sweep_task_runs(state.db()).await {
                 tracing::error!(%error, "Could not recover orphaned task runs");
             }
+            if let Err(error) = tasks::settle_stale_titles(state.db()).await {
+                tracing::error!(%error, "Could not settle abandoned task titles");
+            }
             if let Err(error) = crate::db::recovery::reconcile(state.db()).await {
                 tracing::error!(%error, "Could not reconcile terminal task runs");
             }

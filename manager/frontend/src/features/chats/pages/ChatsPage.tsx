@@ -100,7 +100,7 @@ import {
   modelSelectOptions,
   offersAgent,
   offersAgentOn,
-  offersLocalContext,
+  offersContextOn,
   parseCharacterFile,
   parseCharacterText,
   providerChoices,
@@ -326,9 +326,11 @@ export default function ChatsPage() {
     (chatProviders !== null && chatOffer?.provider === chatProviders.default.provider);
   const chatModel = chosenSelection
     ? (chosenSelection.model ?? AUTO_MODEL)
-    : displayedChat
-      ? requestedModel(displayedChat)
-      : AUTO_MODEL;
+    : !displayedChat
+      ? AUTO_MODEL
+      : chatProviders
+        ? displayedChat.model_name
+        : requestedModel(displayedChat);
   const showAgent = displayedChat
     ? agentChat ||
       chatShowsAgent(displayedChat) ||
@@ -374,16 +376,23 @@ export default function ChatsPage() {
       : selectedNewModel
         ? chatShowsReasoning({}, selectedNewModel)
         : false;
-  const showNewChatContext = !newChatOffer && !autoNewChat && offersLocalContext(selectedNewModel);
-  const newChatNative = selectedNewModel?.details?.context_length;
-  const installedLocal =
-    displayedChat && !providerDriven
-      ? findInstalledModel(models, displayedChat.model_name)
-      : undefined;
-  const showChatContext = Boolean(
-    displayedChat && displayedChat.model_name !== AUTO_MODEL && offersLocalContext(installedLocal)
+  const workspaceProvider = workspaceProviders?.default.provider ?? null;
+  const showNewChatContext = offersContextOn(
+    chosenNewOffer?.provider ?? workspaceProvider,
+    workspaceProvider,
+    models,
+    newChatModel
   );
-  const chatNative = installedLocal?.details?.context_length;
+  const newChatNative = selectedNewModel?.details?.context_length;
+  const chatDefaultProvider = chatProviders?.default.provider ?? workspaceProvider;
+  const chatRunsOn = chatProviders
+    ? (chatProviders.selected ?? chatProviders.default).provider
+    : (displayedChat?.provider ?? workspaceProvider);
+  const showChatContext =
+    displayedChat !== null && offersContextOn(chatRunsOn, chatDefaultProvider, models, chatModel);
+  const chatNative = showChatContext
+    ? findInstalledModel(models, chatModel)?.details?.context_length
+    : undefined;
   const providerName = chatProviderName(chatProviders, displayedChat);
   const modelName = chatModelName(chatProviders, displayedChat);
   const chatEffortName = showReasoning
@@ -405,9 +414,7 @@ export default function ChatsPage() {
   ].join(', ');
   const meterCapacity = showChatContext
     ? selectedContextTokens(displayedChat?.context_tokens, chatNative)
-    : chatNative && chatNative > 0
-      ? chatNative
-      : null;
+    : null;
 
   const scrollToBottom = useCallback(() => {
     if (!stickToBottom.current) {
@@ -528,16 +535,16 @@ export default function ChatsPage() {
   const handleNewChatModel = (name: string) => {
     setNewChatModel(name);
     keepNewChatAgent(newChatOffer, name);
+    const installed = findInstalledModel(models, name);
+    setNewChatContext(String(defaultContextTokens(installed?.details?.context_length)));
     if (newChatOffer) {
       setNewChatReasoning(keepEffort(newChatEffort, effortsFor(newChatOffer, name)));
       return;
     }
-    const installed = findInstalledModel(models, name);
     const automatic = name === AUTO_MODEL;
     if (!automatic && !chatShowsReasoning({}, installed)) {
       setNewChatReasoning(AUTO_EFFORT);
     }
-    setNewChatContext(String(defaultContextTokens(installed?.details?.context_length)));
   };
 
   const handleCreateChat = async (event: FormEvent) => {

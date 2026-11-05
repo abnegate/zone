@@ -47,6 +47,7 @@ use crate::db::{
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
+use crate::services::chat::driver::Driver;
 use crate::services::chat::handover::{self, Cause, Handover, Notice};
 use crate::services::chat::pull_request::Recorder;
 use crate::services::chat::session::{self, Session};
@@ -3026,6 +3027,7 @@ async fn prepare_chat(
         )
         .await;
     }
+    let driver = Driver::on(&resolved.backend, model.requested.clone());
     let mut preparation = session::build(
         state,
         &chat,
@@ -3037,6 +3039,7 @@ async fn prepare_chat(
             directory: directory.clone(),
         }),
         endpoint,
+        driver,
     )
     .await?;
     preparation.displaced = match displaced {
@@ -3286,6 +3289,7 @@ async fn handle_chat_generation(
         mut handover,
         displaced,
         effort,
+        driver,
     } = preparation;
     let offline = tools.offline();
     let directory = tools.working_directory().to_path_buf();
@@ -4001,6 +4005,17 @@ async fn handle_chat_generation(
 
     for login in logins {
         settle(state, login, observed.take(login));
+    }
+
+    let owned = failure.as_deref() != Some(OWNERSHIP_LOST);
+    if let (true, Some(driver), Some(occupancy)) = (owned, driver, llm_client.occupancy()) {
+        let ran = Driver::on(llm_client.backend(), driver.model.clone()).unwrap_or(driver);
+        ran.record(state.db(), chat_id, occupancy).await;
+        replay.policy = session::policy(
+            &state.config().chat,
+            &zone_chat::capacity::Capacity::reported(&ran.model, occupancy.window),
+        );
+        replay.reported = occupancy.used;
     }
 
     let leftover = token_filter.finish();
@@ -4895,6 +4910,18 @@ mod tests {
             let limit = windowed_limit(&organization).await;
 
             assert_eq!(limit, u64::try_from(WINDOW).ok());
+        }
+
+        #[tokio::test]
+        async fn a_chat_on_a_coding_agent_is_not_held_to_a_window_it_keeps() {
+            let organization = Organization::on(PROVIDER_CLAUDE_CODE).await;
+
+            let limit = windowed_limit(&organization).await;
+
+            assert_eq!(
+                limit, None,
+                "an agent's window is unknown until it reports one, whatever the chat keeps"
+            );
         }
 
         #[tokio::test]

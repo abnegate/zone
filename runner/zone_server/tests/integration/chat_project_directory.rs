@@ -149,6 +149,7 @@ impl Fixture {
             None,
             Mode::Preview,
             endpoint,
+            None,
         )
         .await
         .expect("a preview builds")
@@ -781,6 +782,7 @@ async fn other_mounted_folders_stay_reachable_from_a_project_chat() {
         None,
         Mode::Generation(generation),
         endpoint,
+        None,
     )
     .await
     .expect("a turn is prepared");
