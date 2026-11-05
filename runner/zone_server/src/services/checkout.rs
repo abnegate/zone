@@ -81,7 +81,10 @@ pub async fn sanitize(base: &Path, origin: &RepositoryUrl) -> Result<(), String>
 /// [`sanitize`]'s rewrite, for a caller already holding the base's lock.
 async fn restore(base: &Path, origin: &RepositoryUrl) -> Result<(), String> {
     let file = base.join(".git").join("config");
-    let configured = Checkout::filesystem(move || configured_origin(&file)).await?;
+    let configured = Checkout::filesystem(move || {
+        GitService::configured_origin(&file).map_err(std::io::Error::other)
+    })
+    .await?;
     if configured.as_deref() != Some(origin.as_str()) {
         return Err("Checkout repository no longer matches the task repository".to_string());
     }
@@ -89,32 +92,6 @@ async fn restore(base: &Path, origin: &RepositoryUrl) -> Result<(), String> {
         .reset_config(base, origin)
         .await
         .map_err(|error| error.to_string())
-}
-
-/// The origin URL a configuration file names, read as data: no include is
-/// followed and no repository around it is consulted.
-pub(crate) fn configured_origin(file: &Path) -> std::io::Result<Option<String>> {
-    let output = std::process::Command::new("git")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_CONFIG")
-        .current_dir("/")
-        .args(["config", "--no-includes", "--file"])
-        .arg(file)
-        .args(["--get", "remote.origin.url"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()?;
-    match output.status.code() {
-        Some(0) => Ok(Some(
-            String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        )),
-        Some(1) => Ok(None),
-        _ => Err(std::io::Error::other(
-            "Cannot read the base clone's configuration",
-        )),
-    }
 }
 
 pub struct Repository {
@@ -756,7 +733,8 @@ impl Checkout {
     /// rewrite the configuration, but not the digest its base was named by.
     fn origin_of(base: &Path) -> std::io::Result<RepositoryUrl> {
         let named = base.file_name().and_then(std::ffi::OsStr::to_str);
-        configured_origin(&base.join(".git").join("config"))?
+        GitService::configured_origin(&base.join(".git").join("config"))
+            .map_err(std::io::Error::other)?
             .filter(|url| named == Some(hex::encode(Sha256::digest(url.as_bytes())).as_str()))
             .and_then(|url| RepositoryUrl::parse(&url).ok())
             .ok_or_else(|| {
@@ -1134,6 +1112,31 @@ mod tests {
             Checkout::bound(&root, &stray).unwrap().is_none(),
             "a worktree of a clone outside the root belongs to no base here"
         );
+    }
+
+    /// An origin with a second address fetches from the first and pushes to
+    /// every one, so a run that slips one in ahead of the task's repository
+    /// must not have its base rewritten as though it were still the task's.
+    #[tokio::test]
+    async fn a_base_whose_origin_names_two_addresses_is_refused() {
+        let (_holder, root) = private_root();
+        let base = base_clone(&root);
+        git(
+            &base,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://example.test/elsewhere.git",
+            ],
+        );
+        git(
+            &base,
+            &["config", "--add", "remote.origin.url", FIXTURE_ORIGIN],
+        );
+
+        sanitize(&base, &url(FIXTURE_ORIGIN))
+            .await
+            .expect_err("an origin with two addresses is not the task's repository");
     }
 
     /// The base a worktree names is the only one asked, and what it refuses

@@ -324,7 +324,7 @@ pub fn format_ram(size: u64) -> String {
 
 pub fn ram_bytes() -> u64 {
     env_u64("ZONE_SETUP_RAM_BYTES")
-        .or_else(detect_ram_bytes)
+        .or_else(abnegate_llm::hardware::system_memory_bytes)
         .unwrap_or(0)
 }
 
@@ -559,33 +559,6 @@ fn env_u64(name: &str) -> Option<u64> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .and_then(|value| value.trim().parse().ok())
-}
-
-fn detect_ram_bytes() -> Option<u64> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = std::process::Command::new("sysctl")
-            .args(["-n", "hw.memsize"])
-            .output()
-            .ok()?;
-        String::from_utf8(output.stdout).ok()?.trim().parse().ok()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-        for line in text.lines() {
-            let Some(rest) = line.strip_prefix("MemTotal:") else {
-                continue;
-            };
-            let kib: u64 = rest.split_whitespace().next()?.parse().ok()?;
-            return Some(kib.saturating_mul(1024));
-        }
-        None
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        None
-    }
 }
 
 fn file_present(models_directory: &Path, weight: &Weight) -> bool {

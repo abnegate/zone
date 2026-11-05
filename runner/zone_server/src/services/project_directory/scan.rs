@@ -3,11 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, PoisonError};
 
+use abnegate_vcs::GitService;
 use uuid::Uuid;
 
 use super::Origin;
 use super::search::Search;
-use crate::services::checkout;
 
 /// How far below a mounted folder a checkout is looked for. A mount is often a whole home, and
 /// this walk runs while a person waits for their turn to start.
@@ -140,7 +140,7 @@ fn matches(checkout: &Path, origin: &Origin) -> bool {
     {
         return false;
     }
-    checkout::configured_origin(&file)
+    GitService::configured_origin(&file)
         .ok()
         .flatten()
         .and_then(|remote| Origin::parse(&remote))

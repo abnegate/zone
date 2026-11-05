@@ -19,7 +19,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::agent::verification::secret_like;
+use abnegate_secret::contains_credential;
 
 /// Why an entry was not remembered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +102,7 @@ static PLAY_DOWN: LazyLock<Regex> = LazyLock::new(|| {
 /// Secrets are judged by the detector citations already use, rather than by a
 /// second one that would drift from it.
 pub fn refused(text: &str) -> Option<Refusal> {
-    if secret_like(text) {
+    if contains_credential(text) {
         return Some(Refusal::Secret);
     }
     if EMAIL.is_match(text) || TELEPHONE.is_match(text) || DIGIT_RUN.is_match(text) {
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn the_secret_arm_uses_the_detector_citations_already_use() {
         for text in [ISSUED_CREDENTIAL, JSON_WEB_TOKEN, HIGH_ENTROPY_BLOB] {
-            assert!(secret_like(text), "{text}");
+            assert!(contains_credential(text), "{text}");
         }
     }
 
