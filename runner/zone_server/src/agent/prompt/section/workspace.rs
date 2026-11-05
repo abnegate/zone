@@ -160,8 +160,8 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
     if tools.has(COMMENT_ON_ISSUE) {
         let comment = tools.qualified(COMMENT_ON_ISSUE);
         bullets.push(format!(
-            "- Leave a comment the user asked for on such a repository with {comment}, not gh or \
-             another server's tool, unless {comment} errors."
+            "- On a connected repository, leave a comment the user asked for with {comment}, not \
+             gh or another server's tool, unless {comment} errors."
         ));
     }
     if !bullets.is_empty() {
