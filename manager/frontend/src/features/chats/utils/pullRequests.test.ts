@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import type { ChatPullRequest, PullRequestStatus } from '../types';
-import { mergeReading, pullRequestKind, pullRequestName, pullRequestTitle } from './pullRequests';
+import {
+  mergeReading,
+  pullRequestKind,
+  pullRequestName,
+  pullRequestTitle,
+  threadsLabel,
+} from './pullRequests';
 
 const STATUS: PullRequestStatus = {
   title: 'Add widgets',
@@ -13,6 +19,7 @@ const STATUS: PullRequestStatus = {
   mergeable: 'clean',
   auto_merge: { enabled: false, unavailable: null },
   draft_unavailable: null,
+  threads: null,
   observed_at: '2026-11-05T10:00:00Z',
 };
 
@@ -60,5 +67,15 @@ describe('pull request kinds', () => {
   it('names one by its repository and number when GitHub gave no title', () => {
     expect(pullRequestTitle(pullRequest(null))).toBe('Pull request #12');
     expect(pullRequestName(pullRequest(null))).toBe('widgets #12');
+  });
+});
+
+describe('threadsLabel', () => {
+  it('names open and resolved review threads apart', () => {
+    expect(threadsLabel({ open: 2, resolved: 3 })).toBe('2 open and 3 resolved review threads');
+  });
+
+  it('names a lone review thread in the singular', () => {
+    expect(threadsLabel({ open: 1, resolved: 0 })).toBe('1 open and 0 resolved review thread');
   });
 });

@@ -409,6 +409,28 @@
   color: var(--chat-change-removed);
 }
 
+.chat-change-threads {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: var(--ui-space-1-5);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-change-threads > span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-0-5);
+}
+
+.chat-change-threads-icon {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
+.chat-change-threads-open {
+  color: var(--chat-change-pending);
+}
+
 .chat-change-auto {
   flex-shrink: 0;
   padding: 0 var(--ui-space-1);

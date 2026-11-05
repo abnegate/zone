@@ -1,4 +1,4 @@
-import type { ChatPullRequest, PullRequestStatus } from '../types';
+import type { ChatPullRequest, PullRequestStatus, PullRequestThreads } from '../types';
 
 export const UNCREDENTIALED_HINT = 'No connected GitHub source holds a credential for it.';
 export const READ_ONLY_HINT = 'Needs write access to this workspace.';
@@ -61,6 +61,11 @@ export function mergeReading(status: PullRequestStatus | null): MergeReading | n
     default:
       return null;
   }
+}
+
+export function threadsLabel({ open, resolved }: PullRequestThreads): string {
+  const noun = open + resolved === 1 ? 'review thread' : 'review threads';
+  return `${open} open and ${resolved} resolved ${noun}`;
 }
 
 export function pullRequestTitle(pullRequest: ChatPullRequest): string {

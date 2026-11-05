@@ -38,6 +38,7 @@ const STATUS: PullRequestStatus = {
   mergeable: 'blocked',
   auto_merge: { enabled: false, unavailable: null },
   draft_unavailable: null,
+  threads: null,
   observed_at: '2026-11-05T10:00:00Z',
 };
 
@@ -106,6 +107,31 @@ describe('ChangesBox', () => {
       'aria-expanded',
       'true'
     );
+  });
+
+  it('counts its open and resolved review threads', async () => {
+    await shown([withStatus({ threads: { open: 2, resolved: 1 } })]);
+
+    const threads = screen.getByRole('img', { name: '2 open and 1 resolved review threads' });
+    expect(threads).toHaveTextContent('21');
+    expect(threads.querySelector('.chat-change-threads-open')).toHaveTextContent('2');
+  });
+
+  it('counts resolved review threads without marking any open', async () => {
+    await shown([withStatus({ threads: { open: 0, resolved: 1 } })]);
+
+    const threads = screen.getByRole('img', { name: '0 open and 1 resolved review thread' });
+    expect(threads.querySelector('.chat-change-threads-open')).toBeNull();
+  });
+
+  it('shows no thread count when it has no review threads or GitHub did not list them', async () => {
+    await shown([
+      withStatus({ threads: { open: 0, resolved: 0 } }),
+      { ...withStatus({ threads: null }), id: 'pr-2', number: 13 },
+    ]);
+
+    expect(screen.queryByRole('img', { name: /review thread/ })).toBeNull();
+    expect(document.querySelector('.chat-change-threads')).toBeNull();
   });
 
   it('names every state a pull request can be in', async () => {

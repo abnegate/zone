@@ -17,6 +17,7 @@ mod push;
 mod recorder;
 mod state;
 mod status;
+mod threads;
 mod tracked;
 
 use abnegate_secret::SecretValue;
@@ -39,6 +40,7 @@ pub use push::push;
 pub use recorder::{Recorder, record};
 pub use state::State;
 pub use status::Status;
+pub use threads::Threads;
 pub use tracked::Tracked;
 
 use observation::Observation;
@@ -217,16 +219,21 @@ async fn observe(
         (false, _) => State::Open,
     };
     let mergeable = Mergeable::from(detail.mergeable_state);
-    let (checks, (auto_merge, methods)) = match lifecycle {
-        State::Open => tokio::join!(
-            checks(service, reference, token, &detail.head_sha, row),
-            automation(service, reference, token, mergeable, row),
-        ),
-        State::Closed | State::Merged => (
-            Checks::None,
-            (AutoMerge::unavailable(AutoMerge::SETTLED), Vec::new()),
-        ),
-    };
+    let ((checks, (auto_merge, methods)), threads) = tokio::join!(
+        async {
+            match lifecycle {
+                State::Open => tokio::join!(
+                    checks(service, reference, token, &detail.head_sha, row),
+                    automation(service, reference, token, mergeable, row),
+                ),
+                State::Closed | State::Merged => (
+                    Checks::None,
+                    (AutoMerge::unavailable(AutoMerge::SETTLED), Vec::new()),
+                ),
+            }
+        },
+        threads(service, reference, token, row),
+    );
     let draft_unavailable = match lifecycle {
         State::Open => None,
         State::Closed | State::Merged => Some(AutoMerge::SETTLED.to_string()),
@@ -243,6 +250,7 @@ async fn observe(
             mergeable,
             auto_merge,
             draft_unavailable,
+            threads,
             observed_at: chrono::Utc::now(),
         },
         node_id: detail.node_id,
@@ -266,6 +274,21 @@ async fn checks(
         Err(error) => {
             tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's checks");
             Checks::Unknown
+        }
+    }
+}
+
+async fn threads(
+    service: &PullRequestService,
+    reference: &PullRequestReference,
+    token: &SecretValue,
+    row: &PullRequestRow,
+) -> Option<Threads> {
+    match service.fetch_review_threads(reference, token).await {
+        Ok(records) => Some(Threads::from(records.as_slice())),
+        Err(error) => {
+            tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's review threads");
+            None
         }
     }
 }

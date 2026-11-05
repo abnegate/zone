@@ -300,6 +300,43 @@ async fn describe(github: &MockServer, draft: bool) {
         .await;
 }
 
+fn threads_read() -> wiremock::MockBuilder {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
+        .and(body_string_contains("reviewThreads"))
+}
+
+/// GitHub listing pull request 12's review threads, one resolved for each
+/// `true` in `resolved`.
+async fn discuss(github: &MockServer, resolved: &[bool]) {
+    let nodes: Vec<Value> = resolved
+        .iter()
+        .enumerate()
+        .map(|(index, resolved)| {
+            json!({
+                "id": format!("PRRT_{index}"),
+                "isResolved": resolved,
+                "isOutdated": false,
+                "path": "src/widgets.rs",
+                "line": 1,
+                "comments": {"nodes": []},
+            })
+        })
+        .collect();
+    threads_read()
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
+                "pullRequest": {"reviewThreads": {
+                    "pageInfo": {"hasNextPage": false, "endCursor": null},
+                    "nodes": nodes,
+                }},
+            }}})),
+        )
+        .mount(github)
+        .await;
+}
+
 /// How GitHub's GraphQL API describes pull request 12's auto-merge and
 /// draft state, and its repository's merge settings.
 #[derive(Clone, Copy)]
@@ -526,6 +563,7 @@ async fn zones_own_tool_records_the_pull_request_it_opens_with_its_status() {
     let github = MockServer::start().await;
     describe(&github, false).await;
     automate(&github, Automation::default()).await;
+    discuss(&github, &[false, true, false]).await;
     Mock::given(method("POST"))
         .and(path("/repos/acme/widgets/pulls"))
         .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
@@ -583,6 +621,7 @@ async fn zones_own_tool_records_the_pull_request_it_opens_with_its_status() {
         json!({"enabled": false, "unavailable": null})
     );
     assert_eq!(status["draft_unavailable"], Value::Null);
+    assert_eq!(status["threads"], json!({"open": 2, "resolved": 1}));
     assert!(
         !listed.to_string().contains(GITHUB_TOKEN),
         "a token reached the response: {listed}"
@@ -1088,6 +1127,48 @@ async fn auto_merge_reads_as_unknown_when_github_will_not_describe_it() {
         "{listed}"
     );
     assert_eq!(listed[0]["status"]["draft_unavailable"], Value::Null);
+}
+
+#[tokio::test]
+async fn review_threads_read_as_unknown_when_github_will_not_list_them() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    threads_read()
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    workspace.record(&link(&github, 12)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
+    assert_eq!(listed[0]["status"]["threads"], Value::Null, "{listed}");
+}
+
+#[tokio::test]
+async fn a_pull_request_without_review_threads_counts_none() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    discuss(&github, &[]).await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    workspace.record(&link(&github, 12)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(
+        listed[0]["status"]["threads"],
+        json!({"open": 0, "resolved": 0}),
+        "{listed}"
+    );
 }
 
 #[tokio::test]
