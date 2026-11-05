@@ -31,6 +31,9 @@ pub struct Environment {
     pub user: Option<String>,
     pub workspace: Option<String>,
     pub effort: Option<Effort>,
+    /// Whether the workspace has an active GitHub source for zone's own
+    /// GitHub tools to act on.
+    pub github: bool,
 }
 
 impl Environment {
@@ -47,6 +50,7 @@ impl Environment {
             user: None,
             workspace: None,
             effort: None,
+            github: false,
         }
     }
 
@@ -62,6 +66,7 @@ impl Environment {
             user: None,
             workspace: None,
             effort: None,
+            github: false,
         }
     }
 
@@ -87,6 +92,11 @@ impl Environment {
 
     pub fn with_effort(mut self, effort: Effort) -> Self {
         self.effort = Some(effort);
+        self
+    }
+
+    pub fn with_github(mut self) -> Self {
+        self.github = true;
         self
     }
 
@@ -121,6 +131,7 @@ mod tests {
         assert!(environment.user.is_none());
         assert!(environment.workspace.is_none());
         assert!(environment.effort.is_none());
+        assert!(!environment.github);
 
         let filled = fixed()
             .with_vcs(Vcs {
@@ -129,7 +140,9 @@ mod tests {
             })
             .with_user("Ari")
             .with_workspace("Zone")
-            .with_effort(Effort::High);
+            .with_effort(Effort::High)
+            .with_github();
+        assert!(filled.github);
         assert_eq!(filled.vcs.unwrap().branch, "main");
         assert_eq!(filled.user.as_deref(), Some("Ari"));
         assert_eq!(filled.workspace.as_deref(), Some("Zone"));

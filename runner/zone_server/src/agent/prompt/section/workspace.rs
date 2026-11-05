@@ -6,7 +6,7 @@
 //! `send_message`, the reminder tools and the GitHub writers it was never
 //! given, which is exactly what the conduct section forbids offering.
 
-use crate::agent::prompt::Context;
+use crate::agent::prompt::{Context, Surface};
 use crate::agent::wait::WAIT_FOR;
 
 /// The tools a bullet is about, the tools whose presence leaves it out, and
@@ -18,6 +18,13 @@ type Bullet = (
 );
 
 const HEADING: &str = "Workspace actions:";
+
+pub(in crate::agent::prompt) const CREATE_PULL_REQUEST: &str = "create_pull_request";
+pub(in crate::agent::prompt) const COMMENT_ON_ISSUE: &str = "comment_on_issue";
+
+/// A denial reaches the model as an error result, so without this the
+/// fallback to gh would post what the user just refused.
+const DENIED: &str = "- A denied call is the user's answer, not an error: never do it another way.";
 
 /// Named because `waiting` counts it over the assembled prompt: it is the one
 /// bullet that says what to do while a runner is still going, and the section
@@ -107,7 +114,7 @@ const BULLETS: &[Bullet] = &[
          check.",
     ),
     (
-        &["create_pull_request", "comment_on_issue"],
+        &[CREATE_PULL_REQUEST, COMMENT_ON_ISSUE],
         &[],
         "- create_pull_request and comment_on_issue write to GitHub. Only use them when the user \
          asked to open a PR or leave a comment.",
@@ -115,14 +122,15 @@ const BULLETS: &[Bullet] = &[
 ];
 
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
-    let bullets: Vec<&str> = BULLETS
+    let mut bullets: Vec<String> = BULLETS
         .iter()
         .filter(|(requires, excludes, _)| {
             requires.iter().all(|name| context.tools.has(name))
                 && !excludes.iter().any(|name| context.tools.has(name))
         })
-        .map(|(_, _, bullet)| *bullet)
+        .map(|(_, _, bullet)| (*bullet).to_string())
         .collect();
+    bullets.extend(tracked(context));
 
     if bullets.is_empty() {
         return None;
@@ -130,12 +138,49 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
     Some(format!("{HEADING}\n{}", bullets.join("\n")))
 }
 
+/// Zone records what its own GitHub tools open and can only guess at what a
+/// shell opened, so a chat holding them is sent to them first, by the name its
+/// model calls them. A chat without a GitHub source for them to act on is told
+/// nothing: the tool could only fail, and the shell is then the right way.
+fn tracked(context: &Context<'_>) -> Vec<String> {
+    if context.surface != Surface::Chat || !context.environment.github {
+        return Vec::new();
+    }
+    let tools = context.tools;
+    let mut bullets = Vec::new();
+    if tools.has(CREATE_PULL_REQUEST) {
+        let pull_request = tools.qualified(CREATE_PULL_REQUEST);
+        bullets.push(format!(
+            "- On a repository connected as a GitHub source, open a pull request the user asked \
+             for by pushing its branch, then calling {pull_request} so Zone can track it, not gh \
+             pr create, hub, the GitHub web UI or another server's tool. Only if {pull_request} \
+             errors, first run gh pr list --head on that branch and reuse a pull request the call \
+             opened anyway; otherwise use gh pr create, say so, and give the pull request's URL \
+             in your reply."
+        ));
+    }
+    if tools.has(COMMENT_ON_ISSUE) {
+        let comment = tools.qualified(COMMENT_ON_ISSUE);
+        bullets.push(format!(
+            "- On a connected repository, leave a comment the user asked for with {comment}, not \
+             gh or another server's tool. If {comment} errors, read the issue's latest comments \
+             first and post with gh only if yours is not there."
+        ));
+    }
+    if !bullets.is_empty() {
+        bullets.push(DENIED.to_string());
+    }
+    bullets
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::prompt::test_support::{chat_context, environment};
+    use crate::agent::prompt::Environment;
+    use crate::agent::prompt::test_support::{chat_context, environment, task_context};
     use crate::agent::{ChatTools, ToolProfile};
     use std::collections::BTreeSet;
+    use zone_core::llm::AgentKind;
 
     /// Every tool any bullet asks for, which is the catalog that renders all of them.
     fn catalog() -> Vec<&'static str> {
@@ -311,5 +356,128 @@ mod tests {
         let tools = ChatTools::with_names(ToolProfile::Task, &["read_file", "run_command"], None);
         let environment = environment();
         assert!(render(&chat_context(&tools, false, &environment)).is_none());
+    }
+
+    const PREFERS_ZONE: &str = "not gh pr create, hub, the GitHub web UI or another server's tool.";
+
+    const CONNECTED: &str = "On a repository connected as a GitHub source";
+
+    fn prompted(tools: &ChatTools, environment: &Environment) -> String {
+        render(&chat_context(tools, false, environment)).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_chat_with_a_github_source_opens_its_pull_requests_with_zones_own_tool() {
+        let tools = ChatTools::with_names(ToolProfile::Chat, &catalog(), None);
+        let rendered = prompted(&tools, &environment().with_github());
+
+        assert!(
+            rendered.contains(
+                "by pushing its branch, then calling create_pull_request so Zone can track it"
+            ),
+            "{rendered}"
+        );
+        assert!(rendered.contains(PREFERS_ZONE), "{rendered}");
+        assert!(
+            rendered.contains(CONNECTED),
+            "a repository no source connects can only be reached with gh: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "Only if create_pull_request errors, first run gh pr list --head on that branch \
+                 and reuse a pull request the call opened anyway; otherwise use gh pr create, \
+                 say so, and give the pull request's URL in your reply."
+            ),
+            "an error can follow a write GitHub accepted, and falling straight back opens a \
+             second pull request: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "If comment_on_issue errors, read the issue's latest comments first and post \
+                 with gh only if yours is not there."
+            ),
+            "an error can follow a comment GitHub posted, and falling straight back posts it \
+             twice: {rendered}"
+        );
+        assert_eq!(rendered.matches(DENIED).count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("with comment_on_issue, not gh"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Only use them when the user asked to open a PR"),
+            "this changes how a pull request is opened, never when: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_coding_agent_is_told_the_name_its_model_calls_zones_tool_by() {
+        for agent in AgentKind::ALL {
+            let tools = ChatTools::with_names(ToolProfile::Chat, &catalog(), None).served_to(agent);
+            let rendered = prompted(&tools, &environment().with_github());
+
+            assert!(
+                rendered
+                    .contains("then calling mcp__zone__create_pull_request so Zone can track it"),
+                "{agent}: {rendered}"
+            );
+            assert!(
+                rendered.contains("Only if mcp__zone__create_pull_request errors"),
+                "{agent}: {rendered}"
+            );
+            assert!(rendered.contains(PREFERS_ZONE), "{agent}: {rendered}");
+            assert!(
+                rendered.contains("with mcp__zone__comment_on_issue, not gh"),
+                "{agent}: {rendered}"
+            );
+        }
+    }
+
+    /// A denial comes back to the model as an error result, and a comment
+    /// that fell back to gh on one would post what the user just refused.
+    #[test]
+    fn a_denied_comment_is_never_posted_another_way() {
+        let without: Vec<&str> = catalog()
+            .into_iter()
+            .filter(|name| *name != CREATE_PULL_REQUEST)
+            .collect();
+        let tools = ChatTools::with_names(ToolProfile::Chat, &without, None);
+        let rendered = prompted(&tools, &environment().with_github());
+
+        assert!(
+            rendered.contains("with comment_on_issue, not gh"),
+            "{rendered}"
+        );
+        assert!(rendered.contains(DENIED), "{rendered}");
+    }
+
+    #[test]
+    fn nothing_is_said_about_zones_tool_without_a_github_source_or_the_tool() {
+        let every = ChatTools::with_names(ToolProfile::Chat, &catalog(), None);
+        let without: Vec<&str> = catalog()
+            .into_iter()
+            .filter(|name| ![CREATE_PULL_REQUEST, COMMENT_ON_ISSUE].contains(name))
+            .collect();
+        let missing = ChatTools::with_names(ToolProfile::Chat, &without, None);
+
+        for rendered in [
+            prompted(&every, &environment()),
+            prompted(&missing, &environment().with_github()),
+        ] {
+            assert!(!rendered.contains("so Zone can track it"), "{rendered}");
+            assert!(!rendered.contains("gh pr create"), "{rendered}");
+            assert!(!rendered.contains("not gh"), "{rendered}");
+            assert!(!rendered.contains(DENIED), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn a_task_run_is_never_told_to_open_its_own_pull_request() {
+        let tools = ChatTools::with_names(ToolProfile::Task, &catalog(), None);
+        let environment = environment().with_github();
+        let rendered = render(&task_context(&tools, &environment)).unwrap_or_default();
+
+        assert!(!rendered.contains("so Zone can track it"), "{rendered}");
+        assert!(!rendered.contains("gh pr create"), "{rendered}");
     }
 }

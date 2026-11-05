@@ -840,6 +840,154 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
     assert_eq!(settings.timeout, CHAT_TIMEOUT);
 }
 
+const CREATE_PULL_REQUEST: &str = "create_pull_request";
+
+/// The chat's system prompt as `backend` would be handed it.
+async fn prompted_on(
+    state: &zone_server::state::AppState,
+    chat: &chats::ChatRow,
+    backend: LlmBackend,
+) -> String {
+    let route = Route::for_workspace(state, chat.workspace_id.expect("a workspace")).await;
+    let preparation = session::build(
+        state,
+        chat,
+        Uuid::new_v4(),
+        None,
+        Mode::Generation(session::Generation::unrouted(backend)),
+        route.into_endpoint().expect("a usable route"),
+        None,
+    )
+    .await
+    .expect("the turn is prepared");
+    assert!(
+        preparation.tools.has(CREATE_PULL_REQUEST),
+        "the turn lost zone's pull request tool"
+    );
+    system_prompt(&preparation)
+}
+
+async fn add_github_source(pool: &PgPool, workspace: Uuid) -> Uuid {
+    zone_server::db::sources::create_source(
+        pool,
+        workspace,
+        &Uuid::new_v4().to_string(),
+        zone_server::db::sources::GITHUB,
+        json!({"owner": "abnegate", "repo": "zone"}),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("a GitHub source")
+    .id
+}
+
+/// Zone records the pull requests its own tool opens, and only guesses at one
+/// a shell opened. So in a workspace with a GitHub source every turn is sent to
+/// that tool, by the name its model calls it, and away from `gh pr create`;
+/// without one, the tool could only fail and nothing is said about it.
+#[tokio::test]
+async fn every_turn_in_a_workspace_on_github_opens_pull_requests_through_zone() {
+    let harness = common::context::Harness::new(None, true, Vec::new()).await;
+    let state = create_test_state(harness.config.clone(), harness.pool.clone());
+    let chat = chats::get_chat(&harness.pool, harness.chat)
+        .await
+        .unwrap()
+        .expect("the harness's chat");
+    let named = || {
+        [
+            (LlmBackend::Http, CREATE_PULL_REQUEST.to_string()),
+            (
+                LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
+                AgentKind::Claude.tool(CREATE_PULL_REQUEST),
+            ),
+            (
+                LlmBackend::cli(AgentKind::Codex, CliSettings::default()),
+                AgentKind::Codex.tool(CREATE_PULL_REQUEST),
+            ),
+        ]
+    };
+
+    let disabled = add_github_source(&harness.pool, harness.workspace).await;
+    sqlx::query("UPDATE sources SET is_active = FALSE WHERE id = $1")
+        .bind(disabled)
+        .execute(&harness.pool)
+        .await
+        .expect("the source disabled");
+
+    for (backend, _) in named() {
+        let prompt = prompted_on(&state, &chat, backend).await;
+        assert!(
+            !prompt.contains("so Zone can track it"),
+            "a disabled source is no source: {prompt}"
+        );
+        assert!(!prompt.contains("gh pr create"), "{prompt}");
+    }
+
+    add_github_source(&harness.pool, harness.workspace).await;
+
+    for (backend, name) in named() {
+        let prompt = prompted_on(&state, &chat, backend).await;
+        assert!(
+            prompt.contains(&format!("then calling {name} so Zone can track it")),
+            "{name}: {prompt}"
+        );
+        assert!(
+            prompt.contains("not gh pr create, hub, the GitHub web UI or another server's tool"),
+            "{name}: {prompt}"
+        );
+    }
+}
+
+/// The instruction is only worth giving where the tool is: a coding agent with
+/// a GitHub source is served zone's pull request tool over MCP whether or not
+/// it keeps its own tools, and the prompt on its stdin names it as it calls it.
+#[tokio::test]
+async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_use_it() {
+    for sandboxed in [true, false] {
+        let harness = Harness::start(true, sandboxed).await;
+        add_github_source(
+            &harness.pool,
+            harness.workspace.parse().expect("a workspace id"),
+        )
+        .await;
+
+        let turn = harness.turn("Open a pull request for this branch.").await;
+        let (arguments, token) = harness.agent.spawned().await;
+        let (endpoint, allowed) = served(&arguments);
+        let qualified = AgentKind::Claude.tool(CREATE_PULL_REQUEST);
+
+        assert!(allowed.contains(&qualified), "{allowed:?}");
+        let (status, listed) = rpc(&endpoint, &token, "tools/list", json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        let names: Vec<&str> = listed["result"]["tools"]
+            .as_array()
+            .expect("a tool catalog")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&CREATE_PULL_REQUEST),
+            "sandboxed {sandboxed}: {names:?}"
+        );
+        assert!(
+            names.contains(&"comment_on_issue"),
+            "sandboxed {sandboxed}: {names:?}"
+        );
+
+        let prompt = std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt");
+        assert!(
+            prompt.contains(&format!("then calling {qualified} so Zone can track it")),
+            "sandboxed {sandboxed}: {prompt}"
+        );
+        assert!(prompt.contains("not gh pr create"), "{prompt}");
+
+        harness.agent.finish();
+        turn.await.expect("the turn ends");
+    }
+}
+
 /// A finished agent turn keeps the window its agent reported for the chat's next turn, and the
 /// turn's last context frame already shows it.
 #[tokio::test]

@@ -10,6 +10,8 @@ use uuid::Uuid;
 
 use super::DbResult;
 
+pub const GITHUB: &str = "github";
+
 /// Source row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SourceRow {
@@ -111,6 +113,23 @@ pub async fn list_sources(
             .await
         }
     }
+}
+
+/// Whether the workspace has an active source of `source_type`. A source whose
+/// `is_active` was never set counts as active, as `get_source`'s callers read it.
+pub async fn has_active(pool: &PgPool, workspace_id: Uuid, source_type: &str) -> DbResult<bool> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM sources
+            WHERE workspace_id = $1 AND source_type = $2 AND COALESCE(is_active, TRUE)
+        )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(source_type)
+    .fetch_one(pool)
+    .await
 }
 
 /// Get source by ID
