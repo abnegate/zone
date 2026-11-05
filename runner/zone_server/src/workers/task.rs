@@ -8135,8 +8135,8 @@ mod cli_tests {
                 .artifacts
                 .as_ref()
                 .expect("a finished run's artifacts")["tool_calls"],
-            budget,
-            "a refused call ran"
+            PAST_THE_OLD_CEILING,
+            "a call was refused, so something is still bounding the attempt"
         );
         fixture.remove().await;
     }
