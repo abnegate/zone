@@ -63,14 +63,15 @@ const PLAIN: &[Section] = &[
 ];
 
 /// Raised by measurement rather than by guess, the way every section that has
-/// widened this has raised it: the chat prompt with the image section's
-/// negative_prompt line is 23,377 characters, so the ceiling is the next round
-/// number above that and the next section to grow has to measure itself too.
-/// The models catalog/train section previously measured 23,287.
-pub const CHAT_MAX_CHARS: usize = 23_400;
+/// widened this has raised it: the chat prompt in a workspace with a GitHub
+/// source, whose bullets send a pull request to zone's own tool, is 23,823
+/// characters, so the ceiling is the next round number above that and the
+/// next section to grow has to measure itself too. The image section's
+/// negative_prompt line previously measured 23,377.
+pub const CHAT_MAX_CHARS: usize = 23_900;
 /// A planner chat adds the interview section to the chat prompt; measured
 /// the same way and rounded up the same way.
-pub const PLANNER_MAX_CHARS: usize = 26_000;
+pub const PLANNER_MAX_CHARS: usize = 26_200;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 14_000;
 
@@ -276,6 +277,12 @@ mod tests {
         "read_document",
         "update_document",
     ];
+
+    /// The worst case for every chat measurement: a workspace with a GitHub
+    /// source, which adds the bullets sending a pull request to zone's tool.
+    fn github() -> Environment {
+        environment().with_github()
+    }
 
     fn names(order: &[Section]) -> Vec<&'static str> {
         order.iter().map(|(name, _)| *name).collect()
@@ -557,7 +564,7 @@ mod tests {
             "astra",
         ];
 
-        let environment = environment();
+        let environment = github();
         let tools = chat_tools();
         let roster = section::mcp::render(&test_support::chat_context(&tools, false, &environment))
             .expect("the magents catalog contributes MCP guidance");
@@ -566,6 +573,12 @@ mod tests {
         for rendered in [
             chat(
                 &ChatTools::with_names(ToolProfile::Chat, CHAT_CATALOG, None),
+                false,
+                &environment,
+            ),
+            chat(
+                &ChatTools::with_names(ToolProfile::Chat, CHAT_CATALOG, None)
+                    .served_to(zone_core::llm::AgentKind::Codex),
                 false,
                 &environment,
             ),
@@ -640,8 +653,8 @@ mod tests {
     /// itself. Counting on each surface is what keeps one section deciding.
     #[test]
     fn one_section_decides_who_opens_a_pull_request_on_each_surface() {
-        let task_prompt = task(&task_tools(), &environment());
-        let chat_prompt = chat(&chat_tools(), false, &environment());
+        let task_prompt = task(&task_tools(), &github());
+        let chat_prompt = chat(&chat_tools(), false, &github());
 
         assert_eq!(
             occurrences(&task_prompt, "opens the pull request"),
@@ -671,6 +684,71 @@ mod tests {
             1,
             "{chat_prompt}"
         );
+        assert_eq!(
+            occurrences(&chat_prompt, "so Zone can track it"),
+            1,
+            "{chat_prompt}"
+        );
+        assert_eq!(
+            occurrences(&task_prompt, "so Zone can track it"),
+            0,
+            "{task_prompt}"
+        );
+    }
+
+    /// A pull request opened through zone's own tool is one Zone records; one
+    /// a shell opened is only caught by reading the shell's output. So the chat
+    /// prompt sends the request to the tool, by the name this turn's model
+    /// calls it, and only while there is a GitHub source for it to act on.
+    #[test]
+    fn a_chat_with_a_github_source_opens_pull_requests_through_zone() {
+        let source = github();
+        let native = chat(&chat_tools(), false, &source);
+
+        assert!(
+            native.contains("push its branch, then call create_pull_request so Zone can track it"),
+            "{native}"
+        );
+        assert!(native.contains("not gh pr create, hub"), "{native}");
+
+        for agent in zone_core::llm::AgentKind::ALL {
+            let served = chat(&chat_tools().served_to(agent), false, &source);
+            assert!(
+                served.contains(
+                    "push its branch, then call mcp__zone__create_pull_request so Zone can track it"
+                ),
+                "{agent}: {served}"
+            );
+            assert!(
+                served.contains("not gh pr create, hub"),
+                "{agent}: {served}"
+            );
+        }
+
+        let without = chat(&chat_tools(), false, &environment());
+        assert!(!without.contains("so Zone can track it"), "{without}");
+        assert!(!without.contains("gh pr create"), "{without}");
+    }
+
+    /// Task runs open their pull request through Zone already, so a GitHub
+    /// source changes nothing in what a run is told, even one whose authorized
+    /// actor hands it the GitHub writers.
+    #[test]
+    fn a_github_source_leaves_the_task_prompt_as_it_was() {
+        let mut catalog = TASK_HOST.to_vec();
+        catalog.extend_from_slice(TASK_DOCUMENTS);
+        catalog.extend(["comment_on_issue", "create_pull_request"]);
+        let tools = ChatTools::with_tiers(
+            ToolProfile::Task,
+            &tiered(ToolProfile::Task, &catalog),
+            None,
+        );
+
+        let with = task(&tools, &github());
+
+        assert_eq!(with, task(&tools, &environment()));
+        assert!(!with.contains("gh pr create"), "{with}");
+        assert_eq!(occurrences(&with, "opens the pull request"), 1, "{with}");
     }
 
     /// `reason` is in seven schemas' `required` arrays and nothing validates
@@ -880,7 +958,7 @@ mod tests {
             &tiers,
             zone_core::mcp::guidance_for_tools(&[MCP_TOOL]),
         );
-        let prompt = chat(&tools, false, &environment());
+        let prompt = chat(&tools, false, &github());
         assert!(prompt.contains("Planning a project:"), "{prompt}");
         assert!(
             prompt.len() <= PLANNER_MAX_CHARS,
@@ -891,7 +969,7 @@ mod tests {
 
     #[test]
     fn every_prompt_stays_inside_its_budget() {
-        let chat_prompt = chat(&chat_tools(), false, &environment());
+        let chat_prompt = chat(&chat_tools(), false, &github());
         let plain_prompt = plain(&environment());
         let task_prompt = task(&task_tools(), &environment());
 

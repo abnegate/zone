@@ -52,14 +52,14 @@ impl AgentTools {
 /// offered its tools as they are.
 pub fn offered(backend: &LlmBackend, tools: ChatTools) -> ChatTools {
     match backend {
-        LlmBackend::Cli { .. } => {
+        LlmBackend::Cli { agent, .. } => {
             let parks: Vec<String> = tools
                 .names()
                 .iter()
                 .filter(|name| tools.ends_turn(name))
                 .cloned()
                 .collect();
-            tools.without(&parks)
+            tools.without(&parks).served_to(*agent)
         }
         LlmBackend::Http => tools,
     }
@@ -299,6 +299,44 @@ mod tests {
 
         assert_eq!(served.len(), ENDPOINT_WAITS.len(), "{served:?}");
         assert_eq!(crate::db::actions::RUNNER_STARTED, RUNNER_STARTED);
+    }
+
+    /// Zone records the pull requests its own tool opens, so an agent's chat
+    /// turn is served it, and the prompt names it the way that agent's model
+    /// calls it rather than by the registry's spelling.
+    #[tokio::test]
+    async fn an_agents_chat_is_served_zones_github_writers_under_the_name_it_calls() {
+        for agent in AgentKind::ALL {
+            let backend = LlmBackend::cli(agent, CliSettings::default());
+            let mut tools = offered(&backend, chat().await);
+
+            assert_eq!(
+                tools.qualified("create_pull_request"),
+                "mcp__zone__create_pull_request",
+                "{agent}"
+            );
+            let served = AgentTools::serve(
+                &backend,
+                &mut tools,
+                testing::scope(Uuid::new_v4()),
+                ENDPOINT,
+            )
+            .unwrap_or_else(|| panic!("{agent} lets zone decide its tools"));
+            let toolset = served.lease.toolset();
+            for name in ["create_pull_request", "comment_on_issue"] {
+                assert!(
+                    toolset.tools.iter().any(|served| served == name),
+                    "{agent} is not served {name}: {:?}",
+                    toolset.tools
+                );
+            }
+        }
+
+        let endpoint = offered(&LlmBackend::Http, chat().await);
+        assert_eq!(
+            endpoint.qualified("create_pull_request"),
+            "create_pull_request"
+        );
     }
 
     #[tokio::test]

@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
+use zone_core::llm::AgentKind;
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::toolbox::{
@@ -292,6 +293,9 @@ pub struct ChatTools {
     /// the one thing here worth caching: a stale name costs nothing, a stale
     /// grant would. Membership is re-read per call in `authorize_workspace`.
     actor_name: OnceCell<String>,
+    /// The coding agent these tools are served to over MCP, whose model calls
+    /// each by another name than the registry's. `None` in zone's own loop.
+    agent: Option<AgentKind>,
 }
 
 impl ChatTools {
@@ -379,6 +383,7 @@ impl ChatTools {
             plan_hold: false,
             unattended: false,
             actor_name: OnceCell::new(),
+            agent: None,
         }
     }
 
@@ -790,6 +795,7 @@ impl ChatTools {
             unattended: false,
             lease: None,
             actor_name: OnceCell::new(),
+            agent: None,
         };
         assembled.cache_catalog();
         assembled.publish_catalog();
@@ -888,6 +894,20 @@ impl ChatTools {
 
     pub fn has(&self, name: &str) -> bool {
         self.name_set.contains(name)
+    }
+
+    /// These tools, served to `agent` over MCP rather than called by zone.
+    pub fn served_to(mut self, agent: AgentKind) -> Self {
+        self.agent = Some(agent);
+        self
+    }
+
+    /// The name this turn's model calls the tool `name` by.
+    pub fn qualified(&self, name: &str) -> String {
+        match self.agent {
+            Some(agent) => agent.tool(name),
+            None => name.to_string(),
+        }
     }
 
     pub fn mcp_guidance(&self) -> Option<String> {

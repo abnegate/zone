@@ -214,6 +214,14 @@ impl AgentKind {
         }
     }
 
+    /// The name this agent's model calls zone's `tool` by, which is how its
+    /// tool list spells a tool served on [`Toolset::SERVER`].
+    pub fn tool(self, tool: &str) -> String {
+        match self {
+            Self::Claude | Self::Codex => Toolset::qualified(Toolset::SERVER, tool),
+        }
+    }
+
     /// The agent whose [`AgentKind::as_str`] is `name`.
     pub fn named(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|agent| agent.as_str() == name)
@@ -708,6 +716,29 @@ mod tests {
     #[test]
     fn every_agent_is_listed() {
         assert_eq!(AgentKind::ALL, [AgentKind::Claude, AgentKind::Codex]);
+    }
+
+    /// Read off each agent's own tool list: Claude Code 2.1.300's init event
+    /// and codex-cli 0.163.0's answer after calling the tool both spell it so.
+    #[test]
+    fn each_agent_names_zones_tools_the_way_its_tool_list_does() {
+        for agent in AgentKind::ALL {
+            assert_eq!(
+                agent.tool("create_pull_request"),
+                "mcp__zone__create_pull_request",
+                "{agent}"
+            );
+        }
+        let toolset = Toolset::new(
+            "http://127.0.0.1:8421/mcp",
+            "token",
+            ["create_pull_request"],
+        );
+        assert_eq!(
+            allowed_tools(&toolset),
+            AgentKind::Claude.tool("create_pull_request"),
+            "the allowlist and the name the model calls must agree"
+        );
     }
 
     #[test]

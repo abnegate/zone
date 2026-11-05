@@ -423,6 +423,19 @@ pub async fn build(
     if let Some(effort) = effort {
         environment = environment.with_effort(effort);
     }
+    if agentic {
+        match crate::db::sources::has_active(state.db(), workspace, crate::db::sources::GITHUB)
+            .await
+        {
+            Ok(true) => environment = environment.with_github(),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                chat_id = %chat.id,
+                %error,
+                "Failed to read whether the workspace has a GitHub source; not naming its tools"
+            ),
+        }
+    }
     // Every chat reads what is remembered about the person it is talking to:
     // a profile and a set of preferences describe them and how they want to be
     // worked with, and a chat with its agent off is still a chat with them.
