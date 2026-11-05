@@ -1,0 +1,35 @@
+# Debian packages carrying the shared libraries Playwright's browsers link
+# against. Read by manager/Dockerfile and checked by the manager-image
+# workflow, so the names here are the only copy of this list.
+#
+# These are Debian's names, not the ones `playwright install-deps` installs:
+# that command only knows Ubuntu packages and fails outright on Debian.
+#
+# manager/browser-libraries.txt says what these have to deliver.
+
+# GTK 4 and its stack
+libgtk-4-1
+libgraphene-1.0-0
+libepoxy0
+
+# GStreamer, which webkit plays media through
+libgstreamer1.0-0
+libgstreamer-plugins-base1.0-0
+libgstreamer-plugins-bad1.0-0
+libgstreamer-gl1.0-0
+
+# Text, images, gamepads and GLES
+libharfbuzz-icu0
+libwebpdemux2
+libmanette-0.2-0
+libgles2
+
+# Spell checking, hyphenation, and the keyring webkit expects
+libenchant-2-2
+libhyphen0
+libsecret-1-0
+
+# Accessibility. Debian renamed both in the 64-bit time_t transition, so
+# either spelling is accepted; see the fallback in manager/Dockerfile.
+libatk1.0-0t64
+libatk-bridge2.0-0t64
