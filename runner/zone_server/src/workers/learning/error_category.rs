@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use zone_context::embeddings::EmbeddingService;
 use zone_context::error::{ContextError, Result as ContextResult};
 
-use crate::workers::promotion::cosine_similarity;
+use abnegate_index::cosine_similarity;
 
 const MINIMUM_SIMILARITY: f32 = 0.45;
 const MINIMUM_MARGIN: f32 = 0.05;
@@ -256,7 +256,7 @@ pub fn categorize(
             let best = reference
                 .exemplars
                 .iter()
-                .map(|exemplar| cosine_similarity(exemplar, embedding))
+                .map(|exemplar| cosine_similarity(exemplar, embedding) as f32)
                 .fold(f32::NEG_INFINITY, f32::max);
             (reference.category, best)
         })

@@ -9428,6 +9428,7 @@ dependencies = [
 name = "zone_context"
 version = "0.1.0"
 dependencies = [
+ "abnegate-http",
  "abnegate-index",
  "async-stream",
  "async-trait",
@@ -9578,6 +9579,7 @@ dependencies = [
  "abnegate-comfy",
  "abnegate-exec",
  "abnegate-http",
+ "abnegate-index",
  "abnegate-llm",
  "abnegate-notify",
  "abnegate-search",

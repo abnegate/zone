@@ -102,6 +102,7 @@ aiusg = { version = "=0.5.0", default-features = false }
 abnegate-comfy = { workspace = true }
 abnegate-exec = { workspace = true }
 abnegate-http = { workspace = true }
+abnegate-index = { workspace = true }
 abnegate-llm = { workspace = true }
 abnegate-notify = { workspace = true, features = ["smtp"] }
 abnegate-search = { workspace = true }

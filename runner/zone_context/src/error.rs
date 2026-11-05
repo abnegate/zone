@@ -99,9 +99,6 @@ pub enum ContextError {
     #[error("Too many redirects")]
     TooManyRedirects,
 
-    #[error("Invalid redirect")]
-    InvalidRedirect,
-
     // Permission errors
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
