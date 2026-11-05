@@ -370,8 +370,10 @@
 }
 
 .chat-header-popover {
+  position: relative;
   display: inline-flex;
   min-width: 0;
+  border-radius: inherit;
 }
 
 .chat-header-popover-chevron {
@@ -387,7 +389,7 @@
 .chat-header-popover-panel {
   position: absolute;
   top: calc(100% + var(--ui-space-1-5));
-  right: 0;
+  left: 0;
   z-index: 30;
   display: flex;
   flex-direction: column;
@@ -480,9 +482,15 @@
   border-color: var(--ui-border-strong);
 }
 
+.agent-controls > .chat-header-popover {
+  align-self: stretch;
+}
+
 .agent-controls .agent-toggle {
-  height: 100%;
+  align-self: stretch;
+  height: auto;
   border: 0;
+  border-radius: inherit;
 }
 
 .agent-controls > .agent-toggle {
@@ -2084,11 +2092,6 @@
     justify-content: flex-start;
     margin-left: 0;
     min-width: 0;
-  }
-
-  .chat-header-popover-panel {
-    left: 0;
-    width: auto;
   }
 
   .chats-sidebar {

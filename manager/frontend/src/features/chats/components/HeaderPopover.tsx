@@ -1,4 +1,5 @@
-import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { popoverOffset } from '../utils';
 
 const SELECT_MENU = '[data-radix-popper-content-wrapper]';
 const OPEN_SELECT = '[role="combobox"][aria-expanded="true"]';
@@ -30,6 +31,7 @@ export function HeaderPopover({
   children,
 }: HeaderPopoverProps) {
   const [open, setOpen] = useState(false);
+  const [offset, setOffset] = useState(0);
   const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -64,6 +66,24 @@ export function HeaderPopover({
       document.removeEventListener('pointerdown', close, true);
       document.removeEventListener('keydown', dismiss);
       element?.removeEventListener('focusout', leave);
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const anchor = root.current?.getBoundingClientRect();
+      const width = panel.current?.offsetWidth ?? 0;
+      if (!anchor || width === 0) return;
+      setOffset(popoverOffset(anchor, width, document.documentElement.clientWidth));
+    };
+    place();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
+    if (root.current) observer?.observe(root.current);
+    window.addEventListener('resize', place);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', place);
     };
   }, [open]);
 
@@ -102,6 +122,7 @@ export function HeaderPopover({
         aria-label={label}
         tabIndex={-1}
         hidden={!open}
+        style={{ left: offset }}
       >
         {children}
       </div>

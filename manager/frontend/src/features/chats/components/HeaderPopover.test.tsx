@@ -158,4 +158,30 @@ describe('HeaderPopover', () => {
     expect(trigger).toBeDisabled();
     expect(screen.queryByRole('dialog')).toBeNull();
   });
+
+  it('opens under its own trigger and flips left only to stay on screen', () => {
+    renderPopover();
+    const anchor = document.querySelector<HTMLElement>('.chat-header-popover')!;
+    const panel = document.querySelector<HTMLElement>('.chat-header-popover-panel')!;
+    Object.defineProperty(document.documentElement, 'clientWidth', {
+      configurable: true,
+      value: 1280,
+    });
+    Object.defineProperty(panel, 'offsetWidth', { configurable: true, value: 320 });
+    const place = (left: number, right: number) => {
+      anchor.getBoundingClientRect = () => ({ left, right }) as DOMRect;
+    };
+    try {
+      place(500, 700);
+      fireEvent.click(screen.getByTestId('trigger'));
+      expect(panel.style.left).toBe('0px');
+      fireEvent.click(screen.getByTestId('trigger'));
+
+      place(1000, 1260);
+      fireEvent.click(screen.getByTestId('trigger'));
+      expect(panel.style.left).toBe('-60px');
+    } finally {
+      Reflect.deleteProperty(document.documentElement, 'clientWidth');
+    }
+  });
 });
