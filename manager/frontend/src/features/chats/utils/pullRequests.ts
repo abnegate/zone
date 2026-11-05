@@ -2,6 +2,7 @@ import type { ChatPullRequest, PullRequestStatus } from '../types';
 
 export const UNCREDENTIALED_HINT = 'No connected GitHub source holds a credential for it.';
 export const READ_ONLY_HINT = 'Needs write access to this workspace.';
+export const AUTO_MERGE_HINT = 'GitHub merges it once its checks and reviews pass.';
 
 export type PullRequestKind =
   | 'merged'

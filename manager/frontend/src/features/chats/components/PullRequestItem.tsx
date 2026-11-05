@@ -1,6 +1,7 @@
 import { ActionMenu, type ActionMenuItem } from '@zone/ui';
 import type { ChatPullRequest, PullRequestChange } from '../types';
 import {
+  AUTO_MERGE_HINT,
   mergeReading,
   pullRequestKind,
   pullRequestName,
@@ -96,6 +97,7 @@ export function PullRequestItem(props: PullRequestItemProps) {
   const title = pullRequestTitle(pullRequest);
   const name = pullRequestName(pullRequest);
   const merge = mergeReading(pullRequest.status);
+  const autoMerging = pullRequest.status?.state === 'open' && pullRequest.status.auto_merge.enabled;
 
   return (
     <li className="chat-change" data-pull-request={pullRequest.id} aria-busy={busy || undefined}>
@@ -122,6 +124,11 @@ export function PullRequestItem(props: PullRequestItemProps) {
                 {'−'}
                 {pullRequest.status.deletions}
               </span>
+            </span>
+          )}
+          {autoMerging && (
+            <span className="chat-change-auto" title={AUTO_MERGE_HINT}>
+              Auto-merge
             </span>
           )}
           {merge && (
