@@ -160,7 +160,7 @@ export function ChatPanel({
   }, [resizing, resize, widthKey]);
 
   const showsChanges = changes.pullRequests.length > 0 || changes.dismissed !== null;
-  const showsTasks = tasks.tasks.length > 0;
+  const showsTasks = tasks.tasks.length > 0 || tasks.error !== null;
   const showsGallery = media.length > 0;
   const showsSources = sources.all.length > 0;
   if (!showsChanges && !showsTasks && !showsGallery && !showsSources) return null;

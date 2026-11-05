@@ -21,6 +21,7 @@ use task_response::TaskResponse;
 use tasks_response::TasksResponse;
 
 const CHAT_WITHOUT_WORKSPACE: &str = "Chat has no workspace association";
+const ACCESS_DENIED: &str = "Access denied to workspace";
 
 /// GET /api/chats/{id}/tasks
 pub async fn list(
@@ -32,7 +33,13 @@ pub async fn list(
     let workspace = chat
         .workspace_id
         .ok_or_else(|| ServerError::Forbidden(CHAT_WITHOUT_WORKSPACE.to_string()))?;
-    let rows = chat_tasks::list(state.db(), workspace, chat.id).await?;
+    let reader = auth
+        .0
+        .user_id()
+        .map_err(|_| ServerError::Unauthorized("Invalid user".to_string()))?;
+    let rows = chat_tasks::read(state.db(), workspace, chat.id, reader)
+        .await?
+        .ok_or_else(|| ServerError::Forbidden(ACCESS_DENIED.to_string()))?;
     Ok(Json(TasksResponse {
         tasks: rows.into_iter().map(TaskResponse::from).collect(),
     }))

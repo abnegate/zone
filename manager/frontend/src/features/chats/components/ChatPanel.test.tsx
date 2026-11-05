@@ -91,13 +91,14 @@ function changes(pullRequests: ChatPullRequest[] = []): ChatPullRequests {
   };
 }
 
-function tasked(tasks: ChatTask[] = []): ChatTasks {
-  return { tasks, error: null, refresh: mock(async () => undefined) };
+function tasked(tasks: ChatTask[] = [], error: string | null = null): ChatTasks {
+  return { tasks, error, refresh: mock(async () => undefined) };
 }
 
 interface PanelOptions {
   pullRequests?: ChatPullRequest[];
   tasks?: ChatTask[];
+  tasksError?: string;
   media?: GalleryItem[];
   sources?: ChatSources;
   shownSources?: SourceRequest | null;
@@ -111,7 +112,7 @@ function panel(options: PanelOptions, onShowMessage = mock(), onSourcesShown = m
         chatId="chat-1"
         userId={options.userId ?? 'user-1'}
         changes={changes(options.pullRequests)}
-        tasks={tasked(options.tasks)}
+        tasks={tasked(options.tasks, options.tasksError ?? null)}
         media={options.media ?? []}
         sources={options.sources ?? NO_SOURCES}
         shownSources={options.shownSources ?? null}
@@ -224,6 +225,13 @@ describe('ChatPanel', () => {
         name: 'Changes, tasks, media and sources: 1 task, 1 media item',
       })
     ).toHaveTextContent(/^1 task, 1 media item$/);
+  });
+
+  it('shows why the tasks could not be read even before any were listed', () => {
+    renderPanel({ tasksError: 'Failed to load tasks' });
+
+    expect(screen.getByRole('button', { name: 'Tasks, 0' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Failed to load tasks');
   });
 
   it('leaves the tasks out of a chat that started none', () => {

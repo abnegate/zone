@@ -140,6 +140,30 @@ describe('useChatTasks', () => {
     });
   });
 
+  it("never shows one chat's tasks while the next chat's are being read", async () => {
+    mockGetChatTasks.mockResolvedValueOnce([RUNNING]);
+    const { result, rerender } = renderHook(({ chat }) => useChatTasks(chat, false), {
+      initialProps: { chat: 'chat-1' },
+    });
+    await waitFor(() => expect(result.current.tasks).toEqual([RUNNING]));
+
+    let answer: (rows: ChatTask[]) => void = () => undefined;
+    mockGetChatTasks.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    rerender({ chat: 'chat-2' });
+
+    expect(result.current.tasks).toEqual([]);
+    await act(async () => answer([DONE]));
+    expect(result.current.tasks).toEqual([DONE]);
+  });
+
+  it('says why the first read failed, with nothing to list', async () => {
+    mockGetChatTasks.mockRejectedValueOnce(new Error('Failed to load tasks'));
+    const { result } = renderHook(() => useChatTasks('chat-1', false));
+
+    await waitFor(() => expect(result.current.error).toBe('Failed to load tasks'));
+    expect(result.current.tasks).toEqual([]);
+  });
+
   it('keeps the tasks it has and says why a read failed', async () => {
     mockGetChatTasks.mockResolvedValueOnce([RUNNING]);
     const { result } = renderHook(() => useChatTasks('chat-1', false));

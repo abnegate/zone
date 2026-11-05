@@ -1,10 +1,10 @@
 //! The tasks each chat's agent created or started, with the run each one is on.
 
 use chrono::NaiveDateTime;
-use sqlx::{Executor, Postgres};
+use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
 
-use super::DbResult;
+use super::{DbResult, workspace_members};
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct ChatTaskRow {
@@ -50,12 +50,33 @@ where
              LIMIT 1 \
          ) r ON TRUE \
          WHERE t.chat_id = $1 AND t.workspace_id = $2 \
-         ORDER BY t.created_at DESC NULLS LAST, t.id DESC",
+         ORDER BY t.created_at DESC, t.id DESC",
     )
     .bind(chat)
     .bind(workspace)
     .fetch_all(executor)
     .await
+}
+
+/// The chat's tasks as `reader` may see them, or `None` when they are not an
+/// active member of `workspace`. Their membership stays locked until the read
+/// is done, so a revocation cannot commit between the check and the read.
+pub async fn read(
+    pool: &PgPool,
+    workspace: Uuid,
+    chat: Uuid,
+    reader: Uuid,
+) -> DbResult<Option<Vec<ChatTaskRow>>> {
+    let mut transaction = pool.begin().await?;
+    if workspace_members::lock_role(&mut transaction, workspace, reader)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let rows = list(&mut *transaction, workspace, chat).await?;
+    transaction.commit().await?;
+    Ok(Some(rows))
 }
 
 #[cfg(test)]
@@ -302,6 +323,41 @@ mod tests {
             stored_chat(&fixture.pool, started["task_id"].as_str().expect("an id")).await,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn only_an_active_member_of_the_workspace_reads_its_chats_tasks() {
+        let stranger = fixture().await.user;
+        let fixture = fixture().await;
+        actions::create_task(
+            &fixture.pool,
+            fixture.workspace,
+            fixture.user,
+            Some(fixture.chat),
+            created("Members only"),
+        )
+        .await
+        .expect("a created task");
+
+        let member = read(&fixture.pool, fixture.workspace, fixture.chat, fixture.user)
+            .await
+            .expect("a member's read");
+        let outsider = read(&fixture.pool, fixture.workspace, fixture.chat, stranger)
+            .await
+            .expect("a stranger's read");
+        sqlx::query("UPDATE workspace_members SET is_active = false WHERE workspace_id = $1 AND user_id = $2")
+            .bind(fixture.workspace)
+            .bind(fixture.user)
+            .execute(&fixture.pool)
+            .await
+            .expect("membership revoked");
+        let revoked = read(&fixture.pool, fixture.workspace, fixture.chat, fixture.user)
+            .await
+            .expect("a revoked member's read");
+
+        assert_eq!(member.map(|rows| rows.len()), Some(1));
+        assert_eq!(outsider, None);
+        assert_eq!(revoked, None);
     }
 
     #[tokio::test]

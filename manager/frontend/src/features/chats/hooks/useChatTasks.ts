@@ -13,33 +13,43 @@ export interface ChatTasks {
   refresh: () => Promise<void>;
 }
 
+interface Reading {
+  chatId: string | null;
+  tasks: ChatTask[];
+  error: string | null;
+}
+
+const NOTHING_READ: Reading = { chatId: null, tasks: [], error: null };
+
 export function useChatTasks(chatId: string | null, streaming: boolean): ChatTasks {
-  const [tasks, setTasks] = useState<ChatTask[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [reading, setReading] = useState<Reading>(NOTHING_READ);
   const read = useRef(0);
   const wasStreaming = useRef(streaming);
-  const watching = streaming || tasks.some(taskActive);
+  const current = reading.chatId === chatId ? reading : NOTHING_READ;
+  const watching = streaming || current.tasks.some(taskActive);
 
   const refresh = useCallback(async () => {
-    const current = ++read.current;
+    const attempt = ++read.current;
     if (!chatId) {
-      setTasks([]);
+      setReading(NOTHING_READ);
       return;
     }
     try {
       const loaded = await chatsApi.getChatTasks(chatId);
-      if (current !== read.current) return;
-      setTasks(loaded);
-      setError(null);
+      if (attempt !== read.current) return;
+      setReading({ chatId, tasks: loaded, error: null });
     } catch (failure) {
-      if (current !== read.current) return;
-      setError(failure instanceof Error ? failure.message : 'Failed to load tasks');
+      if (attempt !== read.current) return;
+      const error = failure instanceof Error ? failure.message : 'Failed to load tasks';
+      setReading((last) => ({
+        chatId,
+        tasks: last.chatId === chatId ? last.tasks : [],
+        error,
+      }));
     }
   }, [chatId]);
 
   useEffect(() => {
-    setTasks([]);
-    setError(null);
     void refresh();
   }, [refresh]);
 
@@ -60,5 +70,5 @@ export function useChatTasks(chatId: string | null, streaming: boolean): ChatTas
     return () => clearInterval(timer);
   }, [watching, refresh]);
 
-  return { tasks, error, refresh };
+  return { tasks: current.tasks, error: current.error, refresh };
 }
