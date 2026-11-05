@@ -8,7 +8,7 @@ export const CONTEXT_TOKEN_STEPS = [
   2_048, 4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576,
 ] as const;
 
-type LocalContextModel = {
+export type LocalContextModel = {
   size?: number;
   details?: { context_length?: number | null } | null;
 };
