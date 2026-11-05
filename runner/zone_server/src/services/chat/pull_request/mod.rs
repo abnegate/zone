@@ -10,8 +10,10 @@ mod credential;
 mod detection;
 mod error;
 mod mergeable;
+mod observation;
 mod open;
 mod opened;
+mod push;
 mod recorder;
 mod state;
 mod status;
@@ -19,7 +21,7 @@ mod tracked;
 
 use abnegate_secret::SecretValue;
 use abnegate_vcs::pull_request::{Excerpt, PullRequestState};
-use abnegate_vcs::{PullRequestReference, PullRequestService};
+use abnegate_vcs::{CommitSha, MergeMethod, PullRequestReference, PullRequestService};
 use futures::{StreamExt, stream};
 use uuid::Uuid;
 
@@ -29,16 +31,17 @@ use crate::state::AppState;
 
 pub use auto_merge::AutoMerge;
 pub use cache::StatusCache;
-pub use changes::PENDING_RELEASE;
 pub use checks::Checks;
 pub use error::Error;
 pub use mergeable::Mergeable;
 pub use opened::Opened;
+pub use push::push;
 pub use recorder::{Recorder, record};
 pub use state::State;
 pub use status::Status;
 pub use tracked::Tracked;
 
+use observation::Observation;
 use open::Open;
 
 /// The most of a pull request's diff read for one view.
@@ -101,14 +104,9 @@ pub async fn set_draft(
     row: &PullRequestRow,
     draft: bool,
 ) -> Result<(), Error> {
-    let Open {
-        service,
-        reference,
-        token,
-        status,
-    } = open(state, workspace_id, row).await?;
-    if status.draft != draft {
-        changes::set_draft(&service, &reference, &token, draft).await?;
+    let open = open(state, workspace_id, row).await?;
+    if open.status.draft != draft {
+        changes::set_draft(&open, draft).await?;
     }
     state.pull_request_statuses().forget(row.id);
     Ok(())
@@ -121,14 +119,9 @@ pub async fn set_auto_merge(
     row: &PullRequestRow,
     enabled: bool,
 ) -> Result<(), Error> {
-    let Open {
-        service,
-        reference,
-        token,
-        status,
-    } = open(state, workspace_id, row).await?;
-    if status.auto_merge.enabled != enabled {
-        changes::set_auto_merge(&service, &reference, &token, enabled).await?;
+    let open = open(state, workspace_id, row).await?;
+    if open.status.auto_merge.enabled != enabled {
+        changes::set_auto_merge(&open, enabled).await?;
     }
     state.pull_request_statuses().forget(row.id);
     Ok(())
@@ -150,15 +143,22 @@ async fn open(state: &AppState, workspace_id: Uuid, row: &PullRequestRow) -> Res
     let token = required_token(state, workspace_id, row).await?;
     let service = state.config().pull_requests()?;
     let reference = service.pull_request(&row.url)?;
-    let status = observe(&service, &reference, &token, row).await?;
+    let Observation {
+        status,
+        node_id,
+        head,
+        methods,
+    } = observe(&service, &reference, &token, row).await?;
     if !status.open() {
         return Err(Error::Refused(AutoMerge::SETTLED.to_string()));
     }
     Ok(Open {
         service,
-        reference,
         token,
         status,
+        node_id,
+        head,
+        methods,
     })
 }
 
@@ -201,7 +201,7 @@ async fn observed(
 ) -> Result<Status, Error> {
     let service = state.config().pull_requests()?;
     let reference = service.pull_request(&row.url)?;
-    observe(&service, &reference, token, row).await
+    Ok(observe(&service, &reference, token, row).await?.status)
 }
 
 async fn observe(
@@ -209,41 +209,84 @@ async fn observe(
     reference: &PullRequestReference,
     token: &SecretValue,
     row: &PullRequestRow,
-) -> Result<Status, Error> {
+) -> Result<Observation, Error> {
     let detail = service.fetch_pull(reference, token).await?;
     let lifecycle = match (detail.merged, detail.state) {
         (true, _) => State::Merged,
         (false, PullRequestState::Closed) => State::Closed,
         (false, _) => State::Open,
     };
-    let checks = match lifecycle {
-        State::Open => match service
-            .fetch_checks(reference.repository(), token, &detail.head_sha)
-            .await
-        {
-            Ok(outcome) => Checks::from(&outcome),
-            Err(error) => {
-                tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's checks");
-                Checks::Unknown
-            }
+    let mergeable = Mergeable::from(detail.mergeable_state);
+    let (checks, (auto_merge, methods)) = match lifecycle {
+        State::Open => tokio::join!(
+            checks(service, reference, token, &detail.head_sha, row),
+            automation(service, reference, token, mergeable, row),
+        ),
+        State::Closed | State::Merged => (
+            Checks::None,
+            (AutoMerge::unavailable(AutoMerge::SETTLED), Vec::new()),
+        ),
+    };
+    let draft_unavailable = match lifecycle {
+        State::Open => None,
+        State::Closed | State::Merged => Some(AutoMerge::SETTLED.to_string()),
+    };
+    Ok(Observation {
+        status: Status {
+            title: detail.title,
+            state: lifecycle,
+            draft: detail.draft,
+            additions: detail.additions,
+            deletions: detail.deletions,
+            changed_files: detail.changed_files,
+            checks,
+            mergeable,
+            auto_merge,
+            draft_unavailable,
+            observed_at: chrono::Utc::now(),
         },
-        State::Closed | State::Merged => Checks::None,
-    };
-    let unavailable = match lifecycle {
-        State::Open => PENDING_RELEASE,
-        State::Closed | State::Merged => AutoMerge::SETTLED,
-    };
-    Ok(Status {
-        title: detail.title,
-        state: lifecycle,
-        draft: detail.draft,
-        additions: detail.additions,
-        deletions: detail.deletions,
-        changed_files: detail.changed_files,
-        checks,
-        mergeable: Mergeable::from(detail.mergeable_state),
-        auto_merge: AutoMerge::unavailable(unavailable),
-        draft_unavailable: Some(unavailable.to_string()),
-        observed_at: chrono::Utc::now(),
+        node_id: detail.node_id,
+        head: detail.head_sha,
+        methods,
     })
+}
+
+async fn checks(
+    service: &PullRequestService,
+    reference: &PullRequestReference,
+    token: &SecretValue,
+    head: &CommitSha,
+    row: &PullRequestRow,
+) -> Checks {
+    match service
+        .fetch_checks(reference.repository(), token, head)
+        .await
+    {
+        Ok(outcome) => Checks::from(&outcome),
+        Err(error) => {
+            tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's checks");
+            Checks::Unknown
+        }
+    }
+}
+
+/// Whether auto-merge is set or can be, and the ways its repository lets it
+/// merge, most preferred first.
+async fn automation(
+    service: &PullRequestService,
+    reference: &PullRequestReference,
+    token: &SecretValue,
+    mergeable: Mergeable,
+    row: &PullRequestRow,
+) -> (AutoMerge, Vec<MergeMethod>) {
+    match service.fetch_automation(reference, token).await {
+        Ok(automation) => (
+            AutoMerge::read(&automation, mergeable),
+            automation.settings.methods,
+        ),
+        Err(error) => {
+            tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's auto-merge");
+            (AutoMerge::unavailable(AutoMerge::UNREAD), Vec::new())
+        }
+    }
 }

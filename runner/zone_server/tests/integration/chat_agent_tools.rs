@@ -934,7 +934,7 @@ async fn every_turn_in_a_workspace_on_github_opens_pull_requests_through_zone() 
             "{name}: {prompt}"
         );
         assert!(
-            prompt.contains("not gh pr create, hub, the GitHub web UI or another server's tool"),
+            prompt.contains("or use gh pr create, hub, the GitHub web UI or another server's tool"),
             "{name}: {prompt}"
         );
     }
@@ -981,7 +981,7 @@ async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_
             prompt.contains(&format!("then calling {qualified} so Zone can track it")),
             "sandboxed {sandboxed}: {prompt}"
         );
-        assert!(prompt.contains("not gh pr create"), "{prompt}");
+        assert!(prompt.contains("or use gh pr create"), "{prompt}");
 
         harness.agent.finish();
         turn.await.expect("the turn ends");

@@ -1146,26 +1146,16 @@
 }
 
 .tool-call-reason {
-  display: grid;
-  gap: var(--ui-space-0-5);
   margin: 0;
   padding: 0 var(--ui-space-3) var(--ui-space-2);
+  color: var(--ui-text-secondary);
   font-size: var(--ui-text-xs);
   line-height: var(--ui-space-4);
-}
-
-.tool-call-reason-label {
-  color: var(--ui-text-muted);
-  font-size: var(--ui-text-2xs);
-}
-
-.tool-call-reason-text {
-  color: var(--ui-text-primary);
   overflow-wrap: anywhere;
 }
 
-.tool-call-reason-text--missing {
-  color: var(--ui-text-secondary);
+.tool-call-reason--missing {
+  color: var(--ui-text-muted);
   font-style: italic;
 }
 

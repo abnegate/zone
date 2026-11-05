@@ -169,7 +169,7 @@ fn folder(mounts: &HostMounts, path: &str) -> Option<PathBuf> {
 }
 
 /// The host paths of the workspace's folders.
-async fn folders(state: &AppState, workspace: Uuid) -> Vec<String> {
+pub(super) async fn folders(state: &AppState, workspace: Uuid) -> Vec<String> {
     workspace_host_directories::list(state.db(), workspace)
         .await
         .unwrap_or_else(|error| {
@@ -197,7 +197,7 @@ fn usable(config: &Config, directory: PathBuf) -> Start {
     Start::Directory(directory)
 }
 
-fn within(directory: &Path, root: &Path) -> bool {
+pub(super) fn within(directory: &Path, root: &Path) -> bool {
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     real(directory).starts_with(real(root))
 }

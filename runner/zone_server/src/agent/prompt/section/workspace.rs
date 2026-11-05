@@ -152,11 +152,11 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
         let pull_request = tools.qualified(CREATE_PULL_REQUEST);
         bullets.push(format!(
             "- On a repository connected as a GitHub source, open a pull request the user asked \
-             for by pushing its branch, then calling {pull_request} so Zone can track it, not gh \
-             pr create, hub, the GitHub web UI or another server's tool. Only if {pull_request} \
-             errors, first run gh pr list --head on that branch and reuse a pull request the call \
-             opened anyway; otherwise use gh pr create, say so, and give the pull request's URL \
-             in your reply."
+             for by committing on its branch, then calling {pull_request} so Zone can track it. \
+             It pushes the branch for you: never git push it or use gh pr create, hub, the \
+             GitHub web UI or another server's tool. Only if {pull_request} errors, reuse a pull \
+             request gh pr list --head <branch> --base <base> finds; otherwise use gh pr create, say \
+             so, and give its URL."
         ));
     }
     if tools.has(COMMENT_ON_ISSUE) {
@@ -358,7 +358,8 @@ mod tests {
         assert!(render(&chat_context(&tools, false, &environment)).is_none());
     }
 
-    const PREFERS_ZONE: &str = "not gh pr create, hub, the GitHub web UI or another server's tool.";
+    const PREFERS_ZONE: &str =
+        "or use gh pr create, hub, the GitHub web UI or another server's tool.";
 
     const CONNECTED: &str = "On a repository connected as a GitHub source";
 
@@ -373,7 +374,7 @@ mod tests {
 
         assert!(
             rendered.contains(
-                "by pushing its branch, then calling create_pull_request so Zone can track it"
+                "by committing on its branch, then calling create_pull_request so Zone can track it"
             ),
             "{rendered}"
         );
@@ -384,9 +385,8 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "Only if create_pull_request errors, first run gh pr list --head on that branch \
-                 and reuse a pull request the call opened anyway; otherwise use gh pr create, \
-                 say so, and give the pull request's URL in your reply."
+                "Only if create_pull_request errors, reuse a pull request gh pr list --head <branch> \
+                 --base <base> finds; otherwise use gh pr create, say so, and give its URL."
             ),
             "an error can follow a write GitHub accepted, and falling straight back opens a \
              second pull request: {rendered}"

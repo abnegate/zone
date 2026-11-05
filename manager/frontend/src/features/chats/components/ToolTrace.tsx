@@ -2,7 +2,6 @@ import { useState } from 'react';
 import {
   type Answer,
   PREVIEW_LABEL,
-  REASON_LABEL,
   REASON_MISSING,
   REASONED_TOOLS,
   type ToolCallRecord,
@@ -252,11 +251,11 @@ function StatedReason({ call }: { call: ToolCallRecord }) {
   if (!stated && !REASONED_TOOLS.has(call.name)) return null;
 
   return (
-    <p className="tool-call-reason" data-testid="tool-call-reason">
-      <span className="tool-call-reason-label">{REASON_LABEL}</span>
-      <span className={`tool-call-reason-text${stated ? '' : ' tool-call-reason-text--missing'}`}>
-        {stated || REASON_MISSING}
-      </span>
+    <p
+      className={`tool-call-reason${stated ? '' : ' tool-call-reason--missing'}`}
+      data-testid="tool-call-reason"
+    >
+      {stated || REASON_MISSING}
     </p>
   );
 }

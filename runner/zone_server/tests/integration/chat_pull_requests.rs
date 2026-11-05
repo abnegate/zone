@@ -18,14 +18,14 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
 use uuid::Uuid;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_partial_json, body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::llm::AgentKind;
 use zone_server::config::{Config, ModelBackend};
 use zone_server::db::chat_pull_requests::{self, NewPullRequest};
 use zone_server::db::sources;
 use zone_server::db::workspace_members::{self, WorkspaceRole};
-use zone_server::services::chat::pull_request::PENDING_RELEASE;
+use zone_server::services::chat::pull_request::AutoMerge;
 use zone_server::state::AppState;
 
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -33,6 +33,7 @@ const RECORD_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TOKEN: &str = "ghp_chat_pull_requests_test";
 const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 const TITLE: &str = "Add widgets";
+const NODE: &str = "PR_kwDOchat";
 
 /// A stand-in for the host's `claude`, held open until the test has done what
 /// it needs to during the turn, then replaying the lines the test gave it.
@@ -260,7 +261,7 @@ async fn describe(github: &MockServer, draft: bool) {
         .and(path("/repos/acme/widgets/pulls/12"))
         .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "node_id": "PR_kwDOchat",
+            "node_id": NODE,
             "number": 12,
             "title": TITLE,
             "state": "open",
@@ -297,6 +298,101 @@ async fn describe(github: &MockServer, draft: bool) {
         })))
         .mount(github)
         .await;
+}
+
+/// How GitHub's GraphQL API describes pull request 12's auto-merge and
+/// draft state, and its repository's merge settings.
+#[derive(Clone, Copy)]
+struct Automation {
+    allowed: bool,
+    draft: bool,
+    enabled: bool,
+}
+
+impl Default for Automation {
+    fn default() -> Self {
+        Self {
+            allowed: true,
+            draft: false,
+            enabled: false,
+        }
+    }
+}
+
+impl Automation {
+    fn answer(self) -> ResponseTemplate {
+        let request = match self.enabled {
+            true => json!({"mergeMethod": "SQUASH", "enabledBy": {"login": "zone"}}),
+            false => Value::Null,
+        };
+        ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
+            "autoMergeAllowed": self.allowed,
+            "squashMergeAllowed": true,
+            "mergeCommitAllowed": true,
+            "rebaseMergeAllowed": false,
+            "pullRequest": {
+                "id": NODE,
+                "isDraft": self.draft,
+                "autoMergeRequest": request,
+                "viewerCanEnableAutoMerge": true,
+                "viewerCanDisableAutoMerge": true,
+            },
+        }}}))
+    }
+}
+
+fn automation_read() -> wiremock::MockBuilder {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
+        .and(body_string_contains("autoMergeAllowed"))
+}
+
+/// GitHub answering every read of pull request 12's automation as `automation`.
+async fn automate(github: &MockServer, automation: Automation) {
+    automation_read()
+        .respond_with(automation.answer())
+        .mount(github)
+        .await;
+}
+
+/// GitHub answering the read a change starts from as `before`, and every read
+/// after it as `after`.
+async fn automate_change(github: &MockServer, before: Automation, after: Automation) {
+    automation_read()
+        .respond_with(before.answer())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(github)
+        .await;
+    automate(github, after).await;
+}
+
+/// GitHub carrying out the GraphQL mutation `name` on pull request 12, once.
+async fn mutation(github: &MockServer, name: &str, variables: Value) {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
+        .and(body_string_contains(name))
+        .and(body_partial_json(json!({"variables": variables})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {name: {"clientMutationId": null}}})),
+        )
+        .expect(1)
+        .mount(github)
+        .await;
+}
+
+async fn mutations(github: &MockServer) -> Vec<String> {
+    github
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .filter(|body| body.contains("mutation"))
+        .collect()
 }
 
 /// A server listening for the coding agent it spawns to call back into.
@@ -429,6 +525,7 @@ fn bash(id: &str, command: &str, printed: &str, is_error: bool) -> [Value; 2] {
 async fn zones_own_tool_records_the_pull_request_it_opens_with_its_status() {
     let github = MockServer::start().await;
     describe(&github, false).await;
+    automate(&github, Automation::default()).await;
     Mock::given(method("POST"))
         .and(path("/repos/acme/widgets/pulls"))
         .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
@@ -483,8 +580,9 @@ async fn zones_own_tool_records_the_pull_request_it_opens_with_its_status() {
     assert_eq!(status["mergeable"], "blocked");
     assert_eq!(
         status["auto_merge"],
-        json!({"enabled": false, "unavailable": PENDING_RELEASE})
+        json!({"enabled": false, "unavailable": null})
     );
+    assert_eq!(status["draft_unavailable"], Value::Null);
     assert!(
         !listed.to_string().contains(GITHUB_TOKEN),
         "a token reached the response: {listed}"
@@ -752,9 +850,165 @@ async fn a_dismissed_pull_request_leaves_the_chat_until_it_is_restored() {
 }
 
 #[tokio::test]
-async fn draft_and_auto_merge_changes_wait_for_the_abnegate_vcs_release() {
+async fn merge_when_ready_sets_auto_merge_on_github_and_lists_it_as_enabled() {
     let github = MockServer::start().await;
     describe(&github, false).await;
+    automate_change(
+        &github,
+        Automation::default(),
+        Automation {
+            enabled: true,
+            ..Automation::default()
+        },
+    )
+    .await;
+    mutation(
+        &github,
+        "enablePullRequestAutoMerge",
+        json!({"input": {"pullRequestId": NODE, "mergeMethod": "SQUASH", "expectedHeadOid": HEAD}}),
+    )
+    .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    let id = workspace.record(&link(&github, 12)).await;
+
+    let (status, changed) = workspace.update(id, json!({"auto_merge": true})).await;
+
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(
+        changed["status"]["auto_merge"],
+        json!({"enabled": true, "unavailable": null}),
+        "{changed}"
+    );
+    let listed = workspace.listed(&workspace.token).await;
+    assert_eq!(
+        listed[0]["status"]["auto_merge"]["enabled"], true,
+        "{listed}"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_auto_merge_takes_it_off_on_github() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate_change(
+        &github,
+        Automation {
+            enabled: true,
+            ..Automation::default()
+        },
+        Automation::default(),
+    )
+    .await;
+    mutation(&github, "disablePullRequestAutoMerge", json!({"id": NODE})).await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    let id = workspace.record(&link(&github, 12)).await;
+
+    let (status, changed) = workspace.update(id, json!({"auto_merge": false})).await;
+
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(
+        changed["status"]["auto_merge"],
+        json!({"enabled": false, "unavailable": null}),
+        "{changed}"
+    );
+}
+
+#[tokio::test]
+async fn convert_to_draft_turns_an_open_pull_request_into_a_draft_on_github() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    mutation(&github, "convertPullRequestToDraft", json!({"id": NODE})).await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    let id = workspace.record(&link(&github, 12)).await;
+
+    let (status, changed) = workspace.update(id, json!({"draft": true})).await;
+
+    assert_eq!(status, StatusCode::OK, "{changed}");
+}
+
+#[tokio::test]
+async fn ready_for_review_takes_a_draft_out_of_draft_on_github() {
+    let github = MockServer::start().await;
+    describe(&github, true).await;
+    automate(
+        &github,
+        Automation {
+            draft: true,
+            ..Automation::default()
+        },
+    )
+    .await;
+    mutation(
+        &github,
+        "markPullRequestReadyForReview",
+        json!({"id": NODE}),
+    )
+    .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    let id = workspace.record(&link(&github, 12)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+    assert_eq!(listed[0]["status"]["draft"], true, "{listed}");
+    assert_eq!(
+        listed[0]["status"]["auto_merge"],
+        json!({"enabled": false, "unavailable": AutoMerge::DRAFT}),
+        "{listed}"
+    );
+    let (status, changed) = workspace.update(id, json!({"draft": false})).await;
+
+    assert_eq!(status, StatusCode::OK, "{changed}");
+}
+
+#[tokio::test]
+async fn a_change_already_made_asks_nothing_of_github() {
+    let github = MockServer::start().await;
+    describe(&github, true).await;
+    automate(
+        &github,
+        Automation {
+            draft: true,
+            ..Automation::default()
+        },
+    )
+    .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    let id = workspace.record(&link(&github, 12)).await;
+
+    for body in [json!({"draft": true}), json!({"auto_merge": false})] {
+        let (status, changed) = workspace.update(id, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}: {changed}");
+    }
+    assert_eq!(mutations(&github).await, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_repository_without_auto_merge_refuses_before_github_is_asked() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(
+        &github,
+        Automation {
+            allowed: false,
+            ..Automation::default()
+        },
+    )
+    .await;
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
@@ -764,28 +1018,76 @@ async fn draft_and_auto_merge_changes_wait_for_the_abnegate_vcs_release() {
     let listed = workspace.listed(&workspace.token).await;
     assert_eq!(
         listed[0]["status"]["auto_merge"],
-        json!({"enabled": false, "unavailable": PENDING_RELEASE}),
+        json!({"enabled": false, "unavailable": AutoMerge::NOT_ALLOWED}),
         "{listed}"
     );
-    assert_eq!(listed[0]["status"]["draft_unavailable"], PENDING_RELEASE);
-    for body in [json!({"draft": true}), json!({"auto_merge": true})] {
-        let (status, refused) = workspace.update(id, body.clone()).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}: {refused}");
-        assert!(
-            refused["error"]
-                .as_str()
-                .is_some_and(|error| error.contains(PENDING_RELEASE)),
-            "{refused}"
-        );
-    }
-    let writes: Vec<_> = github
-        .received_requests()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|request| request.method.as_str() != "GET")
-        .collect();
-    assert!(writes.is_empty(), "something wrote to GitHub: {writes:?}");
+    let (status, refused) = workspace.update(id, json!({"auto_merge": true})).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|error| error.contains(AutoMerge::NOT_ALLOWED)),
+        "{refused}"
+    );
+    assert_eq!(mutations(&github).await, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn githubs_refusal_to_set_auto_merge_reaches_the_reader() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("enablePullRequestAutoMerge"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"enablePullRequestAutoMerge": null},
+            "errors": [{"message": "Pull request Pull request is in dirty status"}],
+        })))
+        .expect(1)
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    let id = workspace.record(&link(&github, 12)).await;
+
+    let (status, refused) = workspace.update(id, json!({"auto_merge": true})).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("dirty status")),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn auto_merge_reads_as_unknown_when_github_will_not_describe_it() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automation_read()
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    workspace.record(&link(&github, 12)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
+    assert_eq!(
+        listed[0]["status"]["auto_merge"],
+        json!({"enabled": false, "unavailable": AutoMerge::UNREAD}),
+        "{listed}"
+    );
+    assert_eq!(listed[0]["status"]["draft_unavailable"], Value::Null);
 }
 
 #[tokio::test]

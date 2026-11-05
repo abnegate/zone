@@ -1,11 +1,12 @@
 //! Web adapter for fetching and parsing HTML content from URLs
 //!
-//! Provides URL validation, SSRF protection, and HTML content extraction.
+//! Fetches through [`abnegate_http::PublicClient`], which refuses internal
+//! targets by URL, by resolved address and on every redirect hop.
 
+use abnegate_http::{PublicClient, TargetPolicy, public_client_builder};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::net::IpAddr;
+use std::time::Duration;
 use url::Url;
 
 use crate::adapters::{ProgressCallback, RateLimitConfig, SourceAdapter};
@@ -14,6 +15,11 @@ use crate::content::{
 };
 use crate::error::{ContextError, Result};
 use zone_core::Source;
+
+const USER_AGENT: &str = "zone-context/1.0";
+const TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAXIMUM_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Configuration for Web sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,10 +43,7 @@ pub struct WebConfig {
 /// Web source adapter
 #[derive(Debug, Clone)]
 pub struct WebAdapter {
-    /// Set of allowed schemes
-    allowed_schemes: HashSet<String>,
-    /// Allow private IPs (for testing only)
-    allow_private_ips: bool,
+    policy: TargetPolicy,
 }
 
 impl Default for WebAdapter {
@@ -50,28 +53,18 @@ impl Default for WebAdapter {
 }
 
 impl WebAdapter {
-    /// Create a new Web adapter
+    /// Create a Web adapter that refuses every target inside the deployment
     pub fn new() -> Self {
-        let mut allowed_schemes = HashSet::new();
-        allowed_schemes.insert("http".to_string());
-        allowed_schemes.insert("https".to_string());
-
         Self {
-            allowed_schemes,
-            allow_private_ips: false,
+            policy: TargetPolicy::Public,
         }
     }
 
-    /// Create a new Web adapter that allows private IPs (for testing)
+    /// Create a Web adapter that reaches loopback, for a local mock server
     #[cfg(test)]
     pub fn new_for_testing() -> Self {
-        let mut allowed_schemes = HashSet::new();
-        allowed_schemes.insert("http".to_string());
-        allowed_schemes.insert("https".to_string());
-
         Self {
-            allowed_schemes,
-            allow_private_ips: true,
+            policy: TargetPolicy::ExceptMetadata,
         }
     }
 
@@ -81,220 +74,84 @@ impl WebAdapter {
             .map_err(|e| ContextError::InvalidSourceConfig(format!("Invalid Web config: {}", e)))
     }
 
-    /// Validate URL for SSRF protection
-    fn validate_url(&self, url_str: &str) -> Result<Url> {
-        // Parse URL
-        let url = Url::parse(url_str)
-            .map_err(|e| ContextError::InvalidSourceConfig(format!("Invalid URL: {}", e)))?;
-
-        // Check scheme
-        if !self.allowed_schemes.contains(url.scheme()) {
-            return Err(ContextError::InvalidSourceConfig(format!(
-                "Unsupported URL scheme: {}. Only HTTP(S) is allowed",
-                url.scheme()
-            )));
-        }
-
-        // Check for credentials in URL (security risk)
-        if !url.username().is_empty() || url.password().is_some() {
-            return Err(ContextError::InvalidSourceConfig(
-                "URLs with embedded credentials are not allowed".to_string(),
-            ));
-        }
-
-        // Get hostname
-        let host = url.host_str().ok_or_else(|| {
-            ContextError::InvalidSourceConfig("URL must have a valid host".to_string())
-        })?;
-
-        // Block private IP ranges (SSRF protection) unless explicitly allowed
-        if !self.allow_private_ips {
-            if let Ok(ip) = host.parse::<IpAddr>()
-                && Self::is_private_ip(&ip)
-            {
-                return Err(ContextError::InvalidSourceConfig(
-                    "Private IP addresses are not allowed (SSRF protection)".to_string(),
-                ));
-            }
-
-            // Block localhost and common internal hostnames
-            let lowercase_host = host.to_lowercase();
-            if lowercase_host == "localhost"
-                || lowercase_host.ends_with(".local")
-                || lowercase_host.ends_with(".internal")
-                || lowercase_host == "metadata.google.internal" // Cloud metadata service
-                || lowercase_host == "169.254.169.254"
-            // AWS metadata service
-            {
-                return Err(ContextError::InvalidSourceConfig(
-                    "Internal/localhost hostnames are not allowed (SSRF protection)".to_string(),
-                ));
-            }
-        }
-
-        Ok(url)
+    fn validate_url(&self, url: &str) -> Result<Url> {
+        self.policy
+            .validate(url)
+            .map_err(|error| ContextError::InvalidSourceConfig(error.to_string()))
     }
 
-    /// Check if an IP address is in a private range
-    fn is_private_ip(ip: &IpAddr) -> bool {
-        match ip {
-            IpAddr::V4(ipv4) => {
-                // 10.0.0.0/8
-                ipv4.octets()[0] == 10
-                    // 172.16.0.0/12
-                    || (ipv4.octets()[0] == 172 && (ipv4.octets()[1] & 0xF0) == 16)
-                    // 192.168.0.0/16
-                    || (ipv4.octets()[0] == 192 && ipv4.octets()[1] == 168)
-                    // 127.0.0.0/8 (loopback)
-                    || ipv4.octets()[0] == 127
-                    // 169.254.0.0/16 (link-local)
-                    || (ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254)
-                    // 0.0.0.0/8
-                    || ipv4.octets()[0] == 0
-            }
-            IpAddr::V6(ipv6) => {
-                // Check for IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
-                if let Some(mapped_v4) = ipv6.to_ipv4_mapped() {
-                    return Self::is_private_ip(&IpAddr::V4(mapped_v4));
-                }
-                // ::1 (loopback)
-                ipv6.is_loopback()
-                    // :: (unspecified)
-                    || ipv6.is_unspecified()
-                    // fe80::/10 (link-local)
-                    || (ipv6.segments()[0] & 0xffc0) == 0xfe80
-                    // fc00::/7 (unique local)
-                    || (ipv6.segments()[0] & 0xfe00) == 0xfc00
-            }
-        }
+    fn client(&self) -> Result<PublicClient> {
+        public_client_builder(TIMEOUT)
+            .with_target_policy(self.policy)
+            .configure(|builder| {
+                builder
+                    .user_agent(USER_AGENT)
+                    .connect_timeout(CONNECT_TIMEOUT)
+            })
+            .build()
+            .map_err(|error| ContextError::Config(format!("Failed to build HTTP client: {error}")))
     }
 
-    /// Validate that a redirect URL is safe (same origin only)
-    fn validate_redirect(&self, original_url: &Url, redirect_url: &Url) -> Result<()> {
-        // Validate scheme is still allowed
-        if !self.allowed_schemes.contains(redirect_url.scheme()) {
-            return Err(ContextError::InvalidSourceConfig(format!(
-                "Redirect to disallowed scheme: {}",
-                redirect_url.scheme()
-            )));
-        }
-
-        // Only allow redirects to the same origin
-        if original_url.origin() != redirect_url.origin() {
-            return Err(ContextError::InvalidSourceConfig(
-                "Cross-origin redirects are not allowed for security".to_string(),
-            ));
-        }
-
-        // Re-validate the redirect URL for SSRF
-        self.validate_url(redirect_url.as_str())?;
-
-        Ok(())
-    }
-
-    /// Fetch HTML content from a URL with manual redirect handling
+    /// Fetch HTML content from a URL, following only same-origin redirects
     async fn fetch_url(&self, url: &Url) -> Result<String> {
-        const MAX_REDIRECTS: u32 = 5;
-        const MAX_RESPONSE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
-
-        if !self.allow_private_ips && !zone_core::vpn::allows_public() {
+        if self.policy == TargetPolicy::Public && !zone_core::vpn::allows_public() {
             return Err(ContextError::adapter(
                 "web",
                 zone_core::vpn::OFFLINE.to_string(),
             ));
         }
 
-        // Build HTTP client with NO auto-redirect (manual handling for security)
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none()) // Disable auto-redirect
-            .user_agent("zone-context/1.0")
-            .timeout(std::time::Duration::from_secs(30))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| ContextError::Config(format!("Failed to build HTTP client: {}", e)))?;
+        let response = self
+            .client()?
+            .get(url.as_str())
+            .map_err(|error| ContextError::InvalidSourceConfig(error.to_string()))?
+            .send()
+            .await
+            .map_err(fetch_error)?;
 
-        let mut current_url = url.clone();
-        let mut redirects = 0;
+        if response.url().origin() != url.origin() {
+            return Err(ContextError::InvalidSourceConfig(
+                "Cross-origin redirects are not allowed for security".to_string(),
+            ));
+        }
 
-        loop {
-            // Validate URL before each request
-            self.validate_url(current_url.as_str())?;
+        if !response.status().is_success() {
+            return Err(ContextError::adapter(
+                "web",
+                format!("HTTP error: {}", response.status()),
+            ));
+        }
 
-            let response =
-                client.get(current_url.as_str()).send().await.map_err(|e| {
-                    ContextError::adapter("web", format!("Failed to fetch URL: {}", e))
-                })?;
-
-            // Handle redirects manually
-            if response.status().is_redirection() {
-                if redirects >= MAX_REDIRECTS {
-                    return Err(ContextError::TooManyRedirects);
-                }
-
-                let location = response
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or(ContextError::InvalidRedirect)?;
-
-                let redirect_url = current_url.join(location).map_err(|e| {
-                    ContextError::InvalidSourceConfig(format!("Invalid redirect URL: {}", e))
-                })?;
-
-                self.validate_redirect(&current_url, &redirect_url)?;
-                current_url = redirect_url;
-                redirects += 1;
-                continue;
-            }
-
-            // Handle error status codes
-            if !response.status().is_success() {
-                return Err(ContextError::adapter(
-                    "web",
-                    format!("HTTP error: {}", response.status()),
-                ));
-            }
-
-            // Check content length before downloading
-            let content_length = response
-                .headers()
-                .get(reqwest::header::CONTENT_LENGTH)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-
-            if let Some(len) = content_length
-                && len > MAX_RESPONSE_SIZE
-            {
-                return Err(ContextError::ContentTooLarge {
-                    size_bytes: len as usize,
-                    max_bytes: MAX_RESPONSE_SIZE as usize,
-                });
-            }
-
-            // Get content type
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-
-            // Verify it's HTML (or text/plain which might be HTML without proper content-type)
-            // In tests, we'll be more lenient
-            if !content_type.is_empty()
-                && !content_type.contains("text/html")
-                && !content_type.contains("text/plain")
-                && !content_type.contains("application/xhtml")
-            {
-                return Err(ContextError::adapter(
-                    "web",
-                    format!("URL does not return HTML content (got: {})", content_type),
-                ));
-            }
-
-            return response.text().await.map_err(|e| {
-                ContextError::adapter("web", format!("Failed to read response: {}", e))
+        if let Some(length) = response.content_length()
+            && length > MAXIMUM_RESPONSE_BYTES
+        {
+            return Err(ContextError::ContentTooLarge {
+                size_bytes: length as usize,
+                max_bytes: MAXIMUM_RESPONSE_BYTES as usize,
             });
         }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if !content_type.is_empty()
+            && !content_type.contains("text/html")
+            && !content_type.contains("text/plain")
+            && !content_type.contains("application/xhtml")
+        {
+            return Err(ContextError::adapter(
+                "web",
+                format!("URL does not return HTML content (got: {})", content_type),
+            ));
+        }
+
+        response
+            .text()
+            .await
+            .map_err(|e| ContextError::adapter("web", format!("Failed to read response: {}", e)))
     }
 
     /// Extract text content from HTML
@@ -507,6 +364,27 @@ impl SourceAdapter for WebAdapter {
     }
 }
 
+fn fetch_error(error: abnegate_http::Error) -> ContextError {
+    if redirected_too_often(&error) {
+        return ContextError::TooManyRedirects;
+    }
+    ContextError::adapter("web", format!("Failed to fetch URL: {error}"))
+}
+
+fn redirected_too_often(error: &abnegate_http::Error) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if matches!(
+            cause.downcast_ref::<abnegate_http::Error>(),
+            Some(abnegate_http::Error::TooManyRedirects)
+        ) {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,48 +467,41 @@ mod tests {
     }
 
     #[test]
-    fn test_is_private_ip() {
-        // Private IPv4 ranges
-        assert!(WebAdapter::is_private_ip(&"127.0.0.1".parse().unwrap()));
-        assert!(WebAdapter::is_private_ip(&"10.0.0.1".parse().unwrap()));
-        assert!(WebAdapter::is_private_ip(&"172.16.0.1".parse().unwrap()));
-        assert!(WebAdapter::is_private_ip(&"192.168.1.1".parse().unwrap()));
-        assert!(WebAdapter::is_private_ip(&"169.254.1.1".parse().unwrap()));
+    fn targets_outside_the_private_ranges_but_inside_the_deployment_are_refused() {
+        let adapter = WebAdapter::new();
+        for url in [
+            "http://100.64.0.1/",
+            "http://198.18.0.1/",
+            "http://[64:ff9b::a00:1]/",
+            "http://[fec0::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://localhost./",
+        ] {
+            assert!(adapter.validate_url(url).is_err(), "{url} must be refused");
+        }
+    }
 
-        // Public IPv4
-        assert!(!WebAdapter::is_private_ip(&"8.8.8.8".parse().unwrap()));
-        assert!(!WebAdapter::is_private_ip(&"1.1.1.1".parse().unwrap()));
+    #[tokio::test]
+    async fn a_production_fetch_never_connects_to_loopback() {
+        let _vpn = zone_core::vpn::Hold::off();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html></html>"))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+        let adapter = WebAdapter::new();
+        let url = Url::parse(&mock_server.uri()).expect("a URL");
 
-        // Private IPv6
-        assert!(WebAdapter::is_private_ip(&"::1".parse().unwrap()));
-        assert!(WebAdapter::is_private_ip(&"fe80::1".parse().unwrap()));
-        assert!(WebAdapter::is_private_ip(&"fc00::1".parse().unwrap()));
-        assert!(WebAdapter::is_private_ip(&"::".parse().unwrap())); // unspecified
+        let error = adapter
+            .fetch_url(&url)
+            .await
+            .expect_err("loopback must not be fetched");
 
-        // IPv4-mapped IPv6 addresses
-        assert!(WebAdapter::is_private_ip(
-            &"::ffff:127.0.0.1".parse().unwrap()
-        )); // loopback
-        assert!(WebAdapter::is_private_ip(
-            &"::ffff:10.0.0.1".parse().unwrap()
-        )); // private
-        assert!(WebAdapter::is_private_ip(
-            &"::ffff:192.168.1.1".parse().unwrap()
-        )); // private
-        assert!(WebAdapter::is_private_ip(
-            &"::ffff:172.16.0.1".parse().unwrap()
-        )); // private
-        assert!(WebAdapter::is_private_ip(
-            &"::ffff:169.254.169.254".parse().unwrap()
-        )); // link-local
-        assert!(!WebAdapter::is_private_ip(
-            &"::ffff:8.8.8.8".parse().unwrap()
-        )); // public
-
-        // Public IPv6
-        assert!(!WebAdapter::is_private_ip(
-            &"2001:4860:4860::8888".parse().unwrap()
-        ));
+        assert!(
+            matches!(error, ContextError::InvalidSourceConfig(_)),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]
@@ -1027,29 +898,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_validate_redirect_scheme() {
-        let adapter = WebAdapter::new();
-        let original = Url::parse("https://example.com/path").unwrap();
+    #[tokio::test]
+    async fn a_cross_origin_redirect_is_refused() {
+        let origin = MockServer::start().await;
+        let elsewhere = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/final", elsewhere.uri())),
+            )
+            .mount(&origin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/final"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("<html><body>Elsewhere</body></html>")
+                    .insert_header("content-type", "text/html"),
+            )
+            .mount(&elsewhere)
+            .await;
+        let adapter = WebAdapter::new_for_testing();
+        let url = Url::parse(&origin.uri()).expect("a URL");
 
-        // Same scheme should work
-        let redirect_https = Url::parse("https://example.com/other").unwrap();
+        let error = adapter
+            .fetch_url(&url)
+            .await
+            .expect_err("the redirect leaves the origin");
+
         assert!(
-            adapter
-                .validate_redirect(&original, &redirect_https)
-                .is_ok()
+            matches!(error, ContextError::InvalidSourceConfig(ref message) if message.contains("Cross-origin")),
+            "{error:?}"
         );
-
-        // Different allowed scheme to same origin should fail (cross-origin check)
-        let redirect_http = Url::parse("http://example.com/other").unwrap();
-        assert!(
-            adapter
-                .validate_redirect(&original, &redirect_http)
-                .is_err()
-        );
-
-        // Disallowed scheme should fail
-        let redirect_ftp = Url::parse("ftp://example.com/other").unwrap();
-        assert!(adapter.validate_redirect(&original, &redirect_ftp).is_err());
     }
 }

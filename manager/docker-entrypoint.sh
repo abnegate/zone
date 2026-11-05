@@ -12,11 +12,13 @@ reclaim() {
     fi
 }
 
+ZONE_PATH="/home/zone/.local/bin:/home/zone/.bun/bin:/opt/tools/bin:$PATH"
+
 if [ "$(id -u)" -eq 0 ]; then
     reclaim /app/artifacts 0755
     reclaim /app/agent-state 0700
     reclaim /tmp/repos 0700
-    exec runuser -u zone -- "$@"
+    exec runuser -u zone -- env PATH="$ZONE_PATH" "$@"
 fi
 
-exec "$@"
+PATH="$ZONE_PATH" exec "$@"

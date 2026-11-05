@@ -37,6 +37,21 @@ pub async fn peek(state: &AppState, chat: Uuid, workspace: Uuid) -> Start {
     find(state, chat, workspace, Search::Known).await
 }
 
+/// Whether `directory` is one of `workspace`'s: under a folder it mounted, or under the clones
+/// Zone made for it. A chat may only name a checkout of its own workspace for Zone to act on.
+pub async fn owns(state: &AppState, workspace: Uuid, directory: &std::path::Path) -> bool {
+    let config = state.config();
+    let clones = config.clones.join(workspace.as_hyphenated().to_string());
+    if candidate::within(directory, &clones) {
+        return true;
+    }
+    candidate::folders(state, workspace)
+        .await
+        .iter()
+        .filter_map(|host| config.host_mounts.mapped_directory(host).ok())
+        .any(|root| candidate::within(directory, &root))
+}
+
 async fn find(state: &AppState, chat: Uuid, workspace: Uuid, search: Search) -> Start {
     let Some(project) = project(state, chat, workspace).await else {
         return Start::Elsewhere;

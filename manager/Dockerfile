@@ -99,10 +99,27 @@ RUN set -eu; \
     mv claude codex codex-code-mode-host /usr/local/bin/; \
     mv bwrap /usr/local/bin/codex-resources/bwrap
 
+FROM oven/bun:1.4.0-slim@sha256:e0ee68d16ccb9927bf02aa7dd8fd4bf3369ee6d46da04faa72b05ce8bfd135f6 AS bun
+
 FROM runtime-base AS runtime
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config openssh-client gh jq ripgrep fd-find less file \
+        procps unzip zip xz-utils bzip2 wget \
+        python3 python3-pip python3-venv nodejs npm \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx
+
 RUN groupadd --system zone \
-    && useradd --system --gid zone --create-home --home-dir /home/zone --shell /bin/bash zone
+    && useradd --system --gid zone --create-home --home-dir /home/zone --shell /bin/bash zone \
+    && mkdir -p /opt/tools/bin \
+    && chown -R zone:zone /opt/tools \
+    && printf 'prefix=/opt/tools\n' > /etc/npmrc \
+    && printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf \
+    && printf '[ "$(id -u)" -ne 0 ] && PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/tools/bin:$PATH"\n' > /etc/profile.d/tools.sh
 
 ENV SHELL=/bin/bash
 # Docker's default seccomp profile blocks the user namespaces bubblewrap needs.
@@ -136,7 +153,7 @@ RUN chmod 0755 /usr/local/bin/manager-entrypoint.sh
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD /usr/bin/curl -f http://localhost:8000/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/manager-entrypoint.sh"]
 CMD ["/app/zone-server"]

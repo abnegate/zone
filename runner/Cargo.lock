@@ -171,9 +171,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-vcs"
-version = "0.1.6"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4263c39f8c7f303a5baf0e80c8d2ec178584d0e2d0baeee2dd09fa1c7cbba50f"
+checksum = "2cd457947da3eba1b8094dd5053931183002275f3090a210bb665bf688e5e099"
 dependencies = [
  "abnegate-secret",
  "base64 0.23.1",
@@ -9428,6 +9428,7 @@ dependencies = [
 name = "zone_context"
 version = "0.1.0"
 dependencies = [
+ "abnegate-http",
  "abnegate-index",
  "async-stream",
  "async-trait",
@@ -9578,6 +9579,7 @@ dependencies = [
  "abnegate-comfy",
  "abnegate-exec",
  "abnegate-http",
+ "abnegate-index",
  "abnegate-llm",
  "abnegate-notify",
  "abnegate-search",

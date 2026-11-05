@@ -40,9 +40,6 @@ jobs:
         with:
           bun-version: 1.4.0
 
-      - name: Install ImageMagick
-        run: sudo apt-get update && sudo apt-get install -y imagemagick
-
       - name: Install dependencies
         run: bun install
         working-directory: ${{ github.workspace }}
@@ -61,37 +58,131 @@ jobs:
 
       - name: Take PR screenshots
         run: |
-          mkdir -p screenshots-pr
+          # screenshots/ holds PNGs committed to the repository, most of them
+          # written by suites this job does not run. Clearing it first leaves
+          # the directory holding exactly what this run rendered, so the
+          # comparison never treats a checked-in file as a fresh render.
+          rm -rf screenshots screenshots-pr
           PLAYWRIGHT_REUSE_SERVER=true PLAYWRIGHT_PORT=4173 bunx playwright test e2e/screenshots.e2e.ts --project=chromium
+          if [ -z "$(ls -A screenshots 2>/dev/null)" ]; then
+            echo "::error::the screenshot suite rendered nothing"
+            exit 1
+          fi
+          mkdir -p screenshots-pr
           cp screenshots/*.png screenshots-pr/
         env:
           RUN_SCREENSHOTS: 'true'
 
-      - name: Download baseline screenshots
+      # Installed only now, and never in the baseline job: it drags in font
+      # packages, and a renderer with extra fonts available produces different
+      # glyphs from one without them for anything that falls back.
+      - name: Install ImageMagick
+        run: sudo apt-get update && sudo apt-get install -y imagemagick
+
+      # The screenshots in this PR were rendered from the merge of the PR into
+      # its base, so the only honest baseline is that same base commit. Falling
+      # straight back to "newest artifact on main" reports everything that has
+      # landed on main since as a change made by this PR.
+      - name: Resolve baseline commit
+        id: baseline
+        run: |
+          base_ref="origin/${BASE_REF}"
+          if git rev-parse --verify --quiet "$base_ref" >/dev/null; then
+            echo "sha=$(git merge-base "$base_ref" HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::$base_ref is not available; falling back to the newest ${BASE_REF} baseline"
+            echo "sha=" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+      - name: Download baseline screenshots (base commit)
+        if: steps.baseline.outputs.sha != ''
         uses: dawidd6/action-download-artifact@d63b86af1b34672e53c440b1b83979861906bad7 # v24
         with:
           workflow: visual-regression.yml
-          branch: main
+          commit: ${{ steps.baseline.outputs.sha }}
           name: baseline-screenshots
           path: manager/frontend/screenshots-baseline
+          if_no_artifact_found: warn
         continue-on-error: true
+
+      # The baseline job is path-filtered, so plenty of base commits never
+      # produced one. Those fall back to the newest baseline on the base branch.
+      - name: Check for a base-commit baseline
+        id: pinned
+        run: |
+          if [ -n "$(ls -A screenshots-baseline 2>/dev/null)" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download baseline screenshots (newest on base branch)
+        if: steps.pinned.outputs.found != 'true'
+        uses: dawidd6/action-download-artifact@d63b86af1b34672e53c440b1b83979861906bad7 # v24
+        with:
+          workflow: visual-regression.yml
+          branch: ${{ github.event.pull_request.base.ref }}
+          name: baseline-screenshots
+          path: manager/frontend/screenshots-baseline
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Describe the baseline
+        id: baseline_source
+        run: |
+          if [ -z "$(ls -A screenshots-baseline 2>/dev/null)" ]; then
+            echo "description=no baseline was available" >> "$GITHUB_OUTPUT"
+          elif [ "$PINNED" = 'true' ]; then
+            echo "description=base commit \`${SHA:0:7}\`" >> "$GITHUB_OUTPUT"
+          else
+            echo "description=the newest \`${BASE_REF}\` run rather than this PR's base commit, so drift from other merges is possible" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          PINNED: ${{ steps.pinned.outputs.found }}
+          SHA: ${{ steps.baseline.outputs.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
 
       - name: Compare screenshots
         id: compare
+        env:
+          # Headless Chromium does not rasterise text and gradients identically
+          # from one runner to the next, so an exact match is not achievable.
+          # Ignore per-pixel colour differences below FUZZ_PERCENT, then ignore
+          # the survivors until they cover enough of the image to be real. The
+          # step logs the measured count for every screenshot it passes, so
+          # these can be retuned against what CI actually reports.
+          FUZZ_PERCENT: '4'
+          MAX_DIFF_RATIO: '0.0002'
+          MIN_DIFF_PIXELS: '150'
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
+          shopt -s nullglob
           mkdir -p screenshots-diff
-          CHANGES=""
-          CHANGED_COUNT=0
+          report=$(mktemp)
+          changed_count=0
 
-          # If no baseline exists, all screenshots are new
-          if [ ! -d "screenshots-baseline" ] || [ -z "$(ls -A screenshots-baseline 2>/dev/null)" ]; then
-            echo "No baseline screenshots found. All screenshots are new."
-            echo "changes=new" >> "$GITHUB_OUTPUT"
-            echo "changed_count=0" >> "$GITHUB_OUTPUT"
+          # ImageMagick 7 drops the legacy binaries in favour of subcommands.
+          if command -v compare >/dev/null 2>&1; then
+            im_compare() { compare "$@"; }
+            im_composite() { composite "$@"; }
+            im_identify() { identify "$@"; }
+          else
+            im_compare() { magick compare "$@"; }
+            im_composite() { magick composite "$@"; }
+            im_identify() { magick identify "$@"; }
+          fi
+
+          if [ -z "$(ls -A screenshots-baseline 2>/dev/null)" ]; then
+            echo "No baseline screenshots found. Nothing to compare against."
+            {
+              echo "changes=new"
+              echo "changed_count=0"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Compare each screenshot
           for pr_file in screenshots-pr/*.png; do
             filename=$(basename "$pr_file")
             baseline_file="screenshots-baseline/$filename"
@@ -99,47 +190,102 @@ jobs:
 
             if [ ! -f "$baseline_file" ]; then
               echo "NEW: $filename"
-              CHANGES="${CHANGES}- **NEW**: \`$filename\`\n"
-              CHANGED_COUNT=$((CHANGED_COUNT + 1))
+              printf -- '- **NEW**: `%s`\n' "$filename" >> "$report"
+              changed_count=$((changed_count + 1))
               cp "$pr_file" "$diff_file"
+              continue
+            fi
+
+            # A size mismatch makes the pixel metric meaningless: compare exits
+            # 2 and writes an error to stderr rather than a count, so catch it
+            # here and report it as the layout change it is.
+            baseline_size=$(im_identify -format '%wx%h' "${baseline_file}[0]" 2>/dev/null || true)
+            pr_size=$(im_identify -format '%wx%h' "${pr_file}[0]" 2>/dev/null || true)
+            if [ -z "$baseline_size" ] || [ -z "$pr_size" ]; then
+              echo "::error::could not read the dimensions of $filename"
+              exit 1
+            fi
+            if [ "$baseline_size" != "$pr_size" ]; then
+              echo "RESIZED: $filename ($baseline_size -> $pr_size)"
+              printf -- '- **RESIZED**: `%s` (%s to %s)\n' "$filename" "$baseline_size" "$pr_size" >> "$report"
+              changed_count=$((changed_count + 1))
+              cp "$pr_file" "$diff_file"
+              continue
+            fi
+
+            # compare exits 0 when identical and 1 when the images differ;
+            # anything higher is a tool failure, not a visual change.
+            metric=$(mktemp)
+            status=0
+            im_compare -metric AE -fuzz "${FUZZ_PERCENT}%" \
+              "$baseline_file" "$pr_file" "$diff_file" 2>"$metric" || status=$?
+            if [ "$status" -gt 1 ]; then
+              echo "::error::comparing $filename failed: $(cat "$metric")"
+              rm -f "$metric"
+              exit 1
+            fi
+
+            # AE is a pixel count, but the exact spelling varies by build, so
+            # take the leading number and refuse to guess if there is not one.
+            diff_pixels=$(tr -d ',' <"$metric" | grep -oE '[0-9]+(\.[0-9]+)?' | head -n 1 || true)
+            rm -f "$metric"
+            if [ -z "$diff_pixels" ]; then
+              echo "::error::no pixel count in the compare output for $filename"
+              exit 1
+            fi
+
+            total=$(( ${baseline_size%x*} * ${baseline_size#*x} ))
+            read -r verdict percent <<<"$(awk \
+              -v diff="$diff_pixels" -v total="$total" \
+              -v ratio="$MAX_DIFF_RATIO" -v floor="$MIN_DIFF_PIXELS" \
+              'BEGIN {
+                 limit = total * ratio
+                 if (limit < floor) limit = floor
+                 printf "%s %.4f", (diff > limit ? "changed" : "same"), (total ? 100 * diff / total : 0)
+               }')"
+
+            if [ "$verdict" = 'changed' ]; then
+              echo "CHANGED: $filename ($diff_pixels of $total px, ${percent}%)"
+              printf -- '- **CHANGED**: `%s` (%s pixels, %s%% of the image)\n' \
+                "$filename" "$diff_pixels" "$percent" >> "$report"
+              changed_count=$((changed_count + 1))
+              im_composite -blend 50% "$baseline_file" "$pr_file" \
+                "screenshots-diff/blend-$filename" 2>/dev/null || true
             else
-              # Use ImageMagick to compare images and calculate difference
-              DIFF=$(compare -metric AE "$baseline_file" "$pr_file" "$diff_file" 2>&1 || true)
-
-              if [ "$DIFF" != "0" ] && [ -n "$DIFF" ]; then
-                echo "CHANGED: $filename (diff: $DIFF pixels)"
-                CHANGES="${CHANGES}- **CHANGED**: \`$filename\` ($DIFF pixels different)\n"
-                CHANGED_COUNT=$((CHANGED_COUNT + 1))
-
-                # Create a visual diff overlay
-                composite -blend 50% "$baseline_file" "$pr_file" "screenshots-diff/blend-$filename" 2>/dev/null || true
-              fi
+              # Within tolerance, so keep it out of the diff artifact entirely.
+              echo "unchanged: $filename ($diff_pixels px, ${percent}%)"
+              rm -f "$diff_file"
             fi
           done
 
-          # Check for removed screenshots
-          if [ -d "screenshots-baseline" ]; then
+          # Baselines uploaded before the rendered-only convention also carried
+          # every committed PNG, so a screenshot this run did not render is not
+          # evidence that anything was deleted. Only a manifested baseline can
+          # support that claim; against an older one, say the check was skipped
+          # rather than reporting dozens of screens as removed.
+          if [ -f screenshots-baseline/rendered-screenshots.txt ]; then
+            echo "removed_check=ran" >> "$GITHUB_OUTPUT"
             for baseline_file in screenshots-baseline/*.png; do
-              if [ -f "$baseline_file" ]; then
-                filename=$(basename "$baseline_file")
-                pr_file="screenshots-pr/$filename"
-
-                if [ ! -f "$pr_file" ]; then
-                  echo "REMOVED: $filename"
-                  CHANGES="${CHANGES}- **REMOVED**: \`$filename\`\n"
-                  CHANGED_COUNT=$((CHANGED_COUNT + 1))
-                fi
+              filename=$(basename "$baseline_file")
+              if [ ! -f "screenshots-pr/$filename" ]; then
+                echo "REMOVED: $filename"
+                printf -- '- **REMOVED**: `%s`\n' "$filename" >> "$report"
+                changed_count=$((changed_count + 1))
               fi
             done
+          else
+            echo "removed_check=skipped" >> "$GITHUB_OUTPUT"
+            echo "::warning::the baseline predates the rendered-only convention, so deleted screenshots were not checked; it is replaced by the next ${BASE_REF} run"
           fi
 
-          # Write to output (escape newlines for GitHub Actions)
-          echo "changed_count=$CHANGED_COUNT" >> "$GITHUB_OUTPUT"
+          echo "Compared against the baseline: $changed_count change(s)."
           {
-            echo 'changes<<EOF'
-            echo -e "$CHANGES"
-            echo 'EOF'
+            echo "changed_count=$changed_count"
+            echo 'changes<<VISUAL_REGRESSION_EOF'
+            cat "$report"
+            echo 'VISUAL_REGRESSION_EOF'
           } >> "$GITHUB_OUTPUT"
+          rm -f "$report"
 
       - name: Upload diff screenshots
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -162,41 +308,67 @@ jobs:
         env:
           CHANGED_COUNT: ${{ steps.compare.outputs.changed_count }}
           CHANGES: ${{ steps.compare.outputs.changes }}
+          BASELINE: ${{ steps.baseline_source.outputs.description }}
+          REMOVED_CHECK: ${{ steps.compare.outputs.removed_check }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
           script: |
             const changedCount = process.env.CHANGED_COUNT || '';
-            const changes = process.env.CHANGES || '';
+            const changes = (process.env.CHANGES || '').trim();
+            const baseline = process.env.BASELINE || 'an unidentified baseline';
+            const runUrl = process.env.RUN_URL;
 
-            let body = '';
+            // A baseline predating the rendered-only convention cannot tell a
+            // deleted screen from one this suite never renders, so that check
+            // is skipped. Say so rather than leaving it out of the report.
+            const caveat = process.env.REMOVED_CHECK === 'skipped'
+              ? ['', '_Deleted screenshots were not checked: the baseline predates the rendered-only convention and is replaced by the next run on the base branch._']
+              : [];
 
-            if (changedCount === '0' && changes !== 'new') {
-              body = `## Visual Regression Report
+            // Built line by line: an indented template literal would give every
+            // line four or more leading spaces, which GitHub renders as code.
+            let lines;
 
-            No visual changes detected in this PR.
-
-            All screenshots match the baseline.`;
-            } else if (changes.trim() === '' || changedCount === '0') {
-              body = `## Visual Regression Report
-
-            **First run - establishing baseline screenshots.**
-
-            All screenshots have been captured and will be used as the baseline for future PRs.
-
-            [Download screenshots](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+            if (changes === 'new') {
+              lines = [
+                '## Visual Regression Report',
+                '',
+                '**First run - establishing baseline screenshots.**',
+                '',
+                'No baseline artifact was available to compare against. These screenshots become the baseline for future PRs.',
+                '',
+                `[Download screenshots](${runUrl})`,
+              ];
+            } else if (changedCount === '0' || changes === '') {
+              lines = [
+                '## Visual Regression Report',
+                '',
+                `No visual changes detected against ${baseline}.`,
+                '',
+                'Every screenshot matched within the comparison tolerance.',
+                ...caveat,
+              ];
             } else {
-              body = `## Visual Regression Report
-
-            **${changedCount} visual change(s) detected!**
-
-            ### Changed Screenshots:
-            ${changes}
-
-            ### Review the changes:
-            1. [Download diff images](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) - Red highlights show changed pixels
-            2. Review each changed screenshot to ensure the changes are intentional
-
-            If these changes are expected, merge the PR to update the baseline.`;
+              lines = [
+                '## Visual Regression Report',
+                '',
+                `**${changedCount} visual change(s) detected** against ${baseline}.`,
+                '',
+                '### Changed screenshots',
+                '',
+                changes,
+                '',
+                '### Review the changes',
+                '',
+                `1. [Download the diff images](${runUrl}) - red highlights show the changed pixels.`,
+                '2. Check each one is intentional.',
+                '',
+                'If the changes are expected, merge the PR to update the baseline.',
+                ...caveat,
+              ];
             }
+
+            const body = lines.join('\n');
 
             // Find existing comment
             const { data: comments } = await github.rest.issues.listComments({
@@ -260,7 +432,19 @@ jobs:
           curl -f http://localhost:4173 || exit 1
 
       - name: Take baseline screenshots
-        run: PLAYWRIGHT_REUSE_SERVER=true PLAYWRIGHT_PORT=4173 bunx playwright test e2e/screenshots.e2e.ts --project=chromium
+        run: |
+          # Mirrors the PR job: only what this run renders may become baseline.
+          rm -rf screenshots
+          PLAYWRIGHT_REUSE_SERVER=true PLAYWRIGHT_PORT=4173 bunx playwright test e2e/screenshots.e2e.ts --project=chromium
+          if [ -z "$(ls -A screenshots 2>/dev/null)" ]; then
+            echo "::error::the screenshot suite rendered nothing"
+            exit 1
+          fi
+          # The manifest marks this artifact as rendered-only. A PR that finds
+          # it can trust that a missing screenshot really was deleted; one that
+          # finds an older artifact cannot, because those carried every
+          # committed PNG as well.
+          (cd screenshots && ls -1 ./*.png | sed 's|^\./||') > screenshots/rendered-screenshots.txt
         env:
           RUN_SCREENSHOTS: 'true'
 
