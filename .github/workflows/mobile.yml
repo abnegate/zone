@@ -233,6 +233,11 @@ jobs:
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
         run: |
+          if [[ -z $APPLE_DEVELOPMENT_TEAM ]]; then
+            APPLE_DEVELOPMENT_TEAM=0000000000
+            echo "APPLE_DEVELOPMENT_TEAM=$APPLE_DEVELOPMENT_TEAM" >> "$GITHUB_ENV"
+          fi
+          export APPLE_DEVELOPMENT_TEAM
           command -v xcodegen >/dev/null || brew install xcodegen
           bun install --frozen-lockfile
           make ios-init
