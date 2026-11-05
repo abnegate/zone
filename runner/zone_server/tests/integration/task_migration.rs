@@ -1,51 +1,14 @@
+use sqlx::ConnectOptions;
 use sqlx::migrate::MigrateError;
-use sqlx::{ConnectOptions, PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
-use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 use zone_server::db::{ai_settings, memory, migrations, tasks};
 
-/// Every test replays the whole chain into an empty database; more at once
-/// only queue on the same disk writes, and the tests' own time bounds with them.
-static DATABASES: Semaphore = Semaphore::const_new(4);
+use crate::common::Database;
 
-struct Database {
-    admin: PgPool,
-    pool: PgPool,
-    name: String,
-    _slot: SemaphorePermit<'static>,
-}
+const PREFIX: &str = "task_migration";
 
 impl Database {
-    async fn new() -> Self {
-        let slot = DATABASES
-            .acquire()
-            .await
-            .expect("the database slots are never closed");
-        let admin =
-            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("disposable database"))
-                .await
-                .unwrap();
-        // Identifiers contain only a fixed prefix and UUID hexadecimal.
-        let name = format!("task_migration_{}", Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let options = (*admin.connect_options()).clone().database(&name);
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(options)
-            .await
-            .unwrap();
-        Self {
-            admin,
-            pool,
-            name,
-            _slot: slot,
-        }
-    }
-
     async fn through(&self, version: i64) {
         sqlx::migrate!("./migrations")
             .run_to(version, &self.pool)
@@ -103,20 +66,11 @@ impl Database {
             .unwrap();
         (workspace, owner)
     }
-
-    async fn cleanup(self) {
-        self.pool.close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {}", self.name)))
-            .execute(&self.admin)
-            .await
-            .unwrap();
-        self.admin.close().await;
-    }
 }
 
 #[tokio::test]
 async fn a_dirty_ledger_refuses_to_migrate() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     sqlx::query("UPDATE _sqlx_migrations SET success=false WHERE version=1")
         .execute(&database.pool)
@@ -131,7 +85,7 @@ async fn a_dirty_ledger_refuses_to_migrate() {
 
 #[tokio::test]
 async fn a_checksum_mismatch_refuses_to_migrate() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     sqlx::query("UPDATE _sqlx_migrations SET checksum='\\x00'::bytea WHERE version=1")
         .execute(&database.pool)
@@ -146,7 +100,7 @@ async fn a_checksum_mismatch_refuses_to_migrate() {
 
 #[tokio::test]
 async fn legacy_completion_and_recovery_both_commit_without_losing_success() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let task = database.task().await;
     let run = Uuid::new_v4();
@@ -193,7 +147,7 @@ async fn legacy_completion_and_recovery_both_commit_without_losing_success() {
 
 #[tokio::test]
 async fn task_migration_works_with_one_connection_fresh_and_applied() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(2))
@@ -212,7 +166,7 @@ async fn task_migration_works_with_one_connection_fresh_and_applied() {
 
 #[tokio::test]
 async fn migration_command_needs_only_database_and_propagates_failures() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     let url = database.pool.connect_options().to_url_lossy().to_string();
     for expected in [true, false] {
         if !expected {
@@ -245,7 +199,7 @@ async fn migration_command_needs_only_database_and_propagates_failures() {
 
 #[tokio::test]
 async fn reconcile_skips_tasks_another_server_locked() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let tasks = database.reconcilable(2).await;
     let (held, free) = (tasks[0], tasks[1]);
@@ -301,7 +255,7 @@ async fn reconcile_skips_tasks_another_server_locked() {
 
 #[tokio::test]
 async fn reconcile_bounds_each_batch() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let total = 105;
     database.reconcilable(total).await;
@@ -341,7 +295,7 @@ async fn reconcile_bounds_each_batch() {
 
 #[tokio::test]
 async fn waiting_runs_hold_the_admission_slot_the_running_index_used_to_hold() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let task = database.task().await;
 
@@ -380,7 +334,7 @@ async fn waiting_runs_hold_the_admission_slot_the_running_index_used_to_hold() {
 
 #[tokio::test]
 async fn a_run_stores_one_pending_question_and_only_known_statuses() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let task = database.task().await;
     let run = Uuid::new_v4();
@@ -437,7 +391,7 @@ async fn a_run_stores_one_pending_question_and_only_known_statuses() {
 
 #[tokio::test]
 async fn a_parked_run_keeps_its_lease_and_gives_it_back_once() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let task = database.task().await;
     let run = tasks::create_task_run(&database.pool, task).await.unwrap();
@@ -520,7 +474,7 @@ async fn a_parked_run_keeps_its_lease_and_gives_it_back_once() {
 
 #[tokio::test]
 async fn the_sweeper_orphans_a_parked_run_whose_worker_died() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let task = database.task().await;
     let run = tasks::create_task_run(&database.pool, task).await.unwrap();
@@ -587,7 +541,7 @@ async fn agent_providers_and_logins_are_accepted() {
         "UPDATE organization_ai_settings SET provider=$2 WHERE organization_id=$1";
     const WORKSPACE_PROVIDER: &str =
         "UPDATE workspace_ai_settings SET provider=$2 WHERE workspace_id=$1";
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let (workspace, _) = database.workspace().await;
     let organization: Uuid =
@@ -642,7 +596,7 @@ async fn agent_providers_and_logins_are_accepted() {
 
 #[tokio::test]
 async fn failed_review_verdicts_and_unlink_events_are_accepted() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
 
     let verdict: bool = sqlx::query_scalar(
@@ -689,7 +643,7 @@ async fn failed_review_verdicts_and_unlink_events_are_accepted() {
 
 #[tokio::test]
 async fn ai_settings_default_to_unrouted_completions() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let (workspace, _) = database.workspace().await;
     let organization: Uuid =
@@ -739,7 +693,7 @@ async fn ai_settings_default_to_unrouted_completions() {
 #[tokio::test]
 async fn a_memory_entry_name_is_unique_per_person() {
     const NAME: &str = "Deploy window";
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let (workspace, owner) = database.workspace().await;
     let entry = "INSERT INTO knowledge_entries(workspace_id,created_by,category,title,content) VALUES($1,$2,$3,$4,'Body')";
@@ -769,7 +723,7 @@ async fn a_memory_entry_name_is_unique_per_person() {
 
 #[tokio::test]
 async fn workspace_theme_defaults_match_the_product() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let (workspace, _) = database.workspace().await;
     sqlx::query("INSERT INTO workspace_themes(workspace_id) VALUES($1)")
@@ -809,7 +763,7 @@ async fn the_chat_login_key_is_added_unvalidated_and_proven_after() {
          WHERE conrelid = 'chats'::regclass AND conname = 'chats_agent_login_id_fkey'";
     const SIGN_IN: &str =
         "INSERT INTO agent_logins(organization_id,agent) VALUES($1,'claude') RETURNING id";
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     database.through(2).await;
     let (workspace, _) = database.workspace().await;
     let organization: Uuid =
@@ -870,7 +824,7 @@ async fn the_chat_provider_checks_are_added_unvalidated_and_proven_after() {
     const CHECK_VIOLATION: &str = "23514";
     const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
          WHERE conrelid = 'chats'::regclass AND conname = $1";
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     database.through(8).await;
     let (workspace, _) = database.workspace().await;
     let kept: Uuid = sqlx::query_scalar(

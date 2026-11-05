@@ -301,6 +301,7 @@ pub fn create_router(state: AppState) -> Router {
             get(chats::pull_requests::diff),
         )
         .route("/api/chats/{id}/tasks", get(chats::tasks::list))
+        .route("/api/chats/{id}/subagents", get(chats::subagents::list))
         // Sources (workspace-scoped)
         .route("/api/sources/types", get(sources::list_types))
         .route(

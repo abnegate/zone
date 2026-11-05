@@ -72,12 +72,16 @@ async fn main() {
 
     tracing::info!("Connected to database");
 
-    // Run migrations
     zone_server::db::migrations::run(&db)
         .await
         .expect("Failed to run migrations");
 
     tracing::info!("Migrations complete");
+
+    match zone_server::db::chat_subagents::abandon(&db).await {
+        Ok(abandoned) => tracing::info!("Stopped {abandoned} subagents whose turns ended"),
+        Err(error) => tracing::warn!("Failed to stop abandoned subagents: {error}"),
+    }
 
     // Connect to cache
     let cache = Cache::connect(&config.redis_url)
