@@ -73,3 +73,11 @@ __pycache__/
 
 # Archives written by `make backup`
 backups/
+
+# Fastlane
+fastlane/README.md
+fastlane/report.xml
+fastlane/google-play-key.json
+vendor/bundle/
+*.keystore
+*.jks

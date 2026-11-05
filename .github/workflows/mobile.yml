@@ -1,0 +1,309 @@
+name: Mobile
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      tag:
+        type: string
+        required: true
+      publish:
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/mobile.yml
+      - .github/scripts/configure-android-signing.sh
+      - fastlane/**
+      - Gemfile
+      - Gemfile.lock
+      - runner/zone_desktop/**
+      - scripts/patch-tauri-*.sh
+      - scripts/tauri-android-main-activity.kt
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-${{ inputs.tag || github.ref }}
+  cancel-in-progress: ${{ !inputs.publish }}
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+      CI: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: inputs.publish
+        with:
+          name: release-version
+          path: runner
+      - name: Check publishing secrets
+        if: inputs.publish
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          missing=()
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD GOOGLE_PLAY_SERVICE_ACCOUNT_JSON; do
+            [[ -n ${!name} ]] || missing+=("$name")
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error title=Android publishing secrets missing::${missing[*]}"
+            exit 1
+          fi
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: echo "version=${INPUT_VERSION:-$(jq -r .version runner/zone_desktop/tauri.conf.json)}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          java-version: '21'
+          distribution: temurin
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: runner
+          key: android
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: ruby/setup-ruby@b1da4809b005e0178fe08a1d57317bffc00b7b4c # v1.332.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - name: Test release scripts
+        run: ruby fastlane/test/release_version_code_test.rb
+      - name: Generate Android project
+        run: |
+          echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          bun install --frozen-lockfile
+          make android-init
+      - name: Configure release signing
+        if: inputs.publish
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          .github/scripts/configure-android-signing.sh \
+            runner/zone_desktop/gen/android \
+            "$RUNNER_TEMP/release.keystore"
+      - name: Resolve Play versionCode
+        if: inputs.publish
+        env:
+          GOOGLE_PLAY_JSON_KEY_PATH: ${{ runner.temp }}/google-play-key.json
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON" > "$GOOGLE_PLAY_JSON_KEY_PATH"
+          bundle exec fastlane android version_code \
+            version:"$VERSION" \
+            config:"$RUNNER_TEMP/android.json"
+      - name: Build APK and AAB
+        working-directory: runner/zone_desktop
+        run: |
+          config=()
+          if [[ -f $RUNNER_TEMP/android.json ]]; then
+            config=(--config "$RUNNER_TEMP/android.json")
+          fi
+          bunx --bun @tauri-apps/cli@2 android build --apk --aab --ci "${config[@]}"
+      - name: Collect
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          outputs=runner/zone_desktop/gen/android/app/build/outputs
+          apk="$(find "$outputs/apk/universal/release" -name '*.apk' | head -n 1)"
+          aab="$(find "$outputs/bundle/universalRelease" -name '*.aab' | head -n 1)"
+          test -n "$apk" && test -n "$aab"
+          if [[ $PUBLISH == true && $apk == *-unsigned.apk ]]; then
+            echo "::error::release APK is unsigned: $apk"
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$apk" "dist/Zone-${VERSION}-android.apk"
+          cp "$aab" "dist/Zone-${VERSION}-android.aab"
+          ls -l dist
+      - name: Verify signature
+        if: inputs.publish
+        run: |
+          apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)"
+          "$apksigner" verify --print-certs dist/*.apk
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-android
+          path: dist/*
+          retention-days: ${{ inputs.publish && 90 || 7 }}
+      - name: Attach to GitHub release
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: gh release upload "$TAG" dist/* --repo "$REPO" --clobber
+      - name: Deploy to Play Store
+        if: inputs.publish
+        env:
+          GOOGLE_PLAY_JSON_KEY_PATH: ${{ runner.temp }}/google-play-key.json
+          TRACK: ${{ vars.PLAY_TRACK || 'internal' }}
+          RELEASE_STATUS: ${{ vars.PLAY_RELEASE_STATUS || 'completed' }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bundle exec fastlane android deploy \
+            aab:"dist/Zone-${VERSION}-android.aab" \
+            track:"$TRACK" \
+            release_status:"$RELEASE_STATUS"
+      - name: Clean up secrets
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore" "$RUNNER_TEMP/google-play-key.json"
+
+  ios:
+    name: iOS
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      CI: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: inputs.publish
+        with:
+          name: release-version
+          path: runner
+      - name: Check publishing secrets
+        if: inputs.publish
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          missing=()
+          for name in APPLE_DEVELOPMENT_TEAM IOS_CERTIFICATE IOS_CERTIFICATE_PASSWORD IOS_MOBILE_PROVISION APP_STORE_CONNECT_API_KEY_ID APP_STORE_CONNECT_API_ISSUER_ID APP_STORE_CONNECT_API_KEY; do
+            [[ -n ${!name} ]] || missing+=("$name")
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error title=iOS publishing secrets missing::${missing[*]}"
+            exit 1
+          fi
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: echo "version=${INPUT_VERSION:-$(jq -r .version runner/zone_desktop/tauri.conf.json)}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: runner
+          key: ios
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: ruby/setup-ruby@b1da4809b005e0178fe08a1d57317bffc00b7b4c # v1.332.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - name: Generate iOS project
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+        run: |
+          if [[ -z $APPLE_DEVELOPMENT_TEAM ]]; then
+            APPLE_DEVELOPMENT_TEAM=0000000000
+            echo "APPLE_DEVELOPMENT_TEAM=$APPLE_DEVELOPMENT_TEAM" >> "$GITHUB_ENV"
+          fi
+          export APPLE_DEVELOPMENT_TEAM
+          command -v xcodegen >/dev/null || brew install xcodegen
+          bun install --frozen-lockfile
+          make ios-init
+      - name: Resolve App Store build number
+        if: inputs.publish
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bundle exec fastlane ios build_number \
+            version:"$VERSION" \
+            config:"$RUNNER_TEMP/ios.json"
+      - name: Build IPA
+        if: inputs.publish
+        working-directory: runner/zone_desktop
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+        run: |
+          bunx --bun @tauri-apps/cli@2 ios build \
+            --export-method app-store-connect \
+            --config "$RUNNER_TEMP/ios.json" \
+            --ci
+      - name: Build unsigned archive
+        if: ${{ !inputs.publish }}
+        working-directory: runner/zone_desktop
+        run: bunx --bun @tauri-apps/cli@2 ios build --no-sign --ci
+      - name: Collect
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+        run: |
+          mkdir -p dist
+          ipa="$(find runner/zone_desktop/gen/apple/build -name '*.ipa' | head -n 1)"
+          if [[ -n $ipa ]]; then
+            cp "$ipa" "dist/Zone-${VERSION}-ios.ipa"
+          elif [[ $PUBLISH == true ]]; then
+            echo "::error::no IPA under runner/zone_desktop/gen/apple/build"
+            exit 1
+          else
+            archive="$(find runner/zone_desktop/gen/apple/build -name '*.xcarchive' -maxdepth 3 | head -n 1)"
+            test -n "$archive"
+            ditto -c -k --keepParent "$archive" "dist/Zone-${VERSION}-ios.xcarchive.zip"
+          fi
+          ls -l dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-ios
+          path: dist/*
+          retention-days: ${{ inputs.publish && 90 || 7 }}
+      - name: Attach to GitHub release
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: gh release upload "$TAG" dist/* --repo "$REPO" --clobber
+      - name: Upload to TestFlight
+        if: inputs.publish
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bundle exec fastlane ios upload ipa:"dist/Zone-${VERSION}-ios.ipa"

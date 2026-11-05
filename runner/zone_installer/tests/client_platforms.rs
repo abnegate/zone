@@ -31,7 +31,7 @@ fn tauri_bundle_targets_every_platform() {
     assert_eq!(conf["identifier"], "com.abnegate.zone");
     assert_eq!(conf["productName"], "Zone");
     assert_eq!(conf["bundle"]["android"]["minSdkVersion"], 24);
-    assert_eq!(conf["bundle"]["iOS"]["minimumSystemVersion"], "14.0");
+    assert_eq!(conf["bundle"]["iOS"]["minimumSystemVersion"], "15.0");
     assert_eq!(conf["bundle"]["macOS"]["minimumSystemVersion"], "13.0");
     let targets = conf["bundle"]["targets"]
         .as_array()
@@ -96,7 +96,7 @@ fn android_and_ios_overlay_configs() {
     let android = read_json(&desktop_dir().join("tauri.android.conf.json"));
     let ios = read_json(&desktop_dir().join("tauri.ios.conf.json"));
     assert_eq!(android["bundle"]["android"]["minSdkVersion"], 24);
-    assert_eq!(ios["bundle"]["iOS"]["minimumSystemVersion"], "14.0");
+    assert_eq!(ios["bundle"]["iOS"]["minimumSystemVersion"], "15.0");
 }
 
 #[test]
