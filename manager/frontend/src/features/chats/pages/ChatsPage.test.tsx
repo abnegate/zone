@@ -3230,8 +3230,11 @@ describe('ChatsPage', () => {
         'aria-label',
         'Agent permissions: auto-approve off, Zone tools only on'
       );
-      expect(trigger).toHaveTextContent('Ask first');
+      expect(trigger).toHaveTextContent('Permissions');
       expect(trigger).not.toHaveTextContent('Host tools');
+      expect(trigger.getAttribute('aria-label')?.toLowerCase()).toContain(
+        trigger.querySelector('.agent-permission-chip-label')?.textContent?.toLowerCase()
+      );
 
       fireEvent.click(trigger);
       expect(screen.getByTestId('agent-sandbox-toggle')).not.toHaveClass(

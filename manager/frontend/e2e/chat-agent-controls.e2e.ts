@@ -76,16 +76,23 @@ async function mockAgentChat(page: Page): Promise<void> {
 
 const GROUP_TEXT = 'button, .agent-permission-chip-label';
 const PANEL_TEXT = '.agent-permission-name, .agent-permission-hint, .agent-permission-state';
+const AA_TEXT = 4.5;
+const AA_GRAPHIC = 3;
 
 async function lowestContrast(scope: Locator, selector: string): Promise<number> {
   return scope.evaluate((root, selector) => {
     type Rgba = [number, number, number, number];
+    const SENTINEL = 'rgb(1, 2, 3)';
     const canvas = document.createElement('canvas').getContext('2d', {
       willReadFrequently: true,
     })!;
     const parse = (value: string): Rgba => {
-      canvas.clearRect(0, 0, 1, 1);
+      canvas.fillStyle = SENTINEL;
       canvas.fillStyle = value;
+      if (canvas.fillStyle === '#010203' && value !== SENTINEL) {
+        throw new Error(`Canvas could not read the color ${value}`);
+      }
+      canvas.clearRect(0, 0, 1, 1);
       canvas.fillRect(0, 0, 1, 1);
       const [r, g, b, a] = canvas.getImageData(0, 0, 1, 1).data;
       return [r, g, b, a / 255];
@@ -99,7 +106,7 @@ async function lowestContrast(scope: Locator, selector: string): Promise<number>
     const luminance = ([r, g, b]: Rgba) => {
       const linear = (channel: number) => {
         const value = channel / 255;
-        return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
       };
       return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
     };
@@ -110,15 +117,18 @@ async function lowestContrast(scope: Locator, selector: string): Promise<number>
       }
       return layers.reduceRight<Rgba>((below, layer) => over(layer, below), [255, 255, 255, 1]);
     };
-    const labels = [...root.querySelectorAll(selector)].filter(
-      (element) => (element as HTMLElement).innerText.trim()
+    const measured = [...root.querySelectorAll(selector)].filter(
+      (element) =>
+        element.checkVisibility() &&
+        (element instanceof SVGElement || Boolean(element.textContent?.trim()))
     );
+    if (measured.length === 0) throw new Error(`Nothing visible matches ${selector}`);
     return Math.min(
-      ...labels.map((element) => {
+      ...measured.map((element) => {
         const background = backdrop(element);
-        const text = luminance(over(parse(getComputedStyle(element).color), background));
+        const foreground = luminance(over(parse(getComputedStyle(element).color), background));
         const behind = luminance(background);
-        return (Math.max(text, behind) + 0.05) / (Math.min(text, behind) + 0.05);
+        return (Math.max(foreground, behind) + 0.05) / (Math.min(foreground, behind) + 0.05);
       })
     );
   }, selector);
@@ -159,6 +169,7 @@ for (const width of [1280, 375]) {
         ).toBe(true);
         const box = await group.boundingBox();
         expect(box, 'the agent controls are on screen').not.toBeNull();
+        expect(box!.x, 'the agent controls start inside the viewport').toBeGreaterThanOrEqual(0);
         expect(box!.x + box!.width, 'the agent controls fit the viewport').toBeLessThanOrEqual(
           width
         );
@@ -166,12 +177,16 @@ for (const width of [1280, 375]) {
         expect(
           await lowestContrast(group, GROUP_TEXT),
           'every label meets WCAG AA'
-        ).toBeGreaterThanOrEqual(4.5);
+        ).toBeGreaterThanOrEqual(AA_TEXT);
+        expect(
+          await lowestContrast(group, 'svg'),
+          'every icon meets WCAG AA for graphics'
+        ).toBeGreaterThanOrEqual(AA_GRAPHIC);
         if (await panel.isVisible()) {
           expect(
             await lowestContrast(panel, PANEL_TEXT),
             'every permission meets WCAG AA'
-          ).toBeGreaterThanOrEqual(4.5);
+          ).toBeGreaterThanOrEqual(AA_TEXT);
         }
         if (browserName !== 'chromium') return;
         const top = (await header.boundingBox())!;
@@ -194,7 +209,7 @@ for (const width of [1280, 375]) {
       await agent.click();
       await expect(agent).toHaveAttribute('aria-pressed', 'true');
       await expect(trigger).toHaveAttribute('aria-expanded', 'false');
-      await expect(chips).toHaveText(['Ask first']);
+      await expect(chips).toHaveText(['Permissions']);
       await page.mouse.move(0, 0);
       await shoot('on');
 
@@ -212,7 +227,7 @@ for (const width of [1280, 375]) {
       await expect(autoApprove).toHaveAttribute('aria-pressed', 'false');
       await expect(sandbox).toHaveAttribute('aria-pressed', 'false');
       await closePanel(page, trigger);
-      await expect(chips).toHaveText(['Ask first', 'Host tools']);
+      await expect(chips).toHaveText(['Permissions', 'Host tools']);
       await expect(chips.last()).toHaveClass(/agent-permission-chip--host/);
       await page.mouse.move(0, 0);
       await shoot('host-tools');
@@ -234,10 +249,16 @@ for (const width of [1280, 375]) {
 
       await trigger.hover();
       await shoot('hover');
+      await agent.hover();
+      await shoot('agent-hover');
       await page.mouse.move(0, 0);
       await page.keyboard.press('Shift');
       await agent.focus();
       await expect(agent).toBeFocused();
+      expect(
+        await agent.evaluate((element) => element.matches(':focus-visible')),
+        'keyboard focus draws the focus ring'
+      ).toBe(true);
       await shoot('focus');
     });
   }
