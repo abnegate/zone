@@ -74,6 +74,7 @@ pub async fn push(
             "--no-write-fetch-head",
             "--no-recurse-submodules",
             "--update-shallow",
+            "--update-head-ok",
             "--",
             &source,
             &format!("+{reference}:{reference}"),
@@ -306,6 +307,19 @@ mod tests {
         assert!(
             refused.contains("not of github.com/owner/repository"),
             "{refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pushes_the_branch_a_fresh_repository_starts_on() {
+        let fixture = fixture("https://github.com/owner/repository.git", "master");
+        let commit = pushed(&fixture, "master")
+            .await
+            .expect("the scratch repository's own unborn branch is fetched into")
+            .expect("the checkout has the branch");
+        assert_eq!(
+            run(&fixture.bare, &["rev-parse", "refs/heads/master"]),
+            commit.as_str()
         );
     }
 

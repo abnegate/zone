@@ -119,10 +119,9 @@ RUN groupadd --system zone \
     && chown -R zone:zone /opt/tools \
     && printf 'prefix=/opt/tools\n' > /etc/npmrc \
     && printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf \
-    && printf 'PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/tools/bin:$PATH"\n' > /etc/profile.d/tools.sh
+    && printf '[ "$(id -u)" -ne 0 ] && PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/tools/bin:$PATH"\n' > /etc/profile.d/tools.sh
 
 ENV SHELL=/bin/bash
-ENV PATH=/home/zone/.local/bin:/home/zone/.bun/bin:/opt/tools/bin:$PATH
 # Docker's default seccomp profile blocks the user namespaces bubblewrap needs.
 ENV ZONE_CODEX_SANDBOX=danger-full-access
 
@@ -154,7 +153,7 @@ RUN chmod 0755 /usr/local/bin/manager-entrypoint.sh
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD /usr/bin/curl -f http://localhost:8000/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/manager-entrypoint.sh"]
 CMD ["/app/zone-server"]
