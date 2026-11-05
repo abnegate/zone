@@ -1053,6 +1053,7 @@ pub async fn finalize(
                 require_plan_approval: false,
                 source_id: None,
                 created_by: Some(actor),
+                chat_id: None,
             },
         )
         .await
@@ -1119,6 +1120,7 @@ pub async fn insert_auto_task(
             require_plan_approval: false,
             source_id: None,
             created_by: Some(actor),
+            chat_id: None,
         },
     )
     .await

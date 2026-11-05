@@ -206,6 +206,7 @@ async fn a_title_edited_while_one_is_generated_is_not_overwritten() {
             require_plan_approval: false,
             source_id: None,
             created_by: Some(fixture.user),
+            chat_id: None,
         },
     )
     .await
@@ -256,6 +257,7 @@ async fn a_placeholder_whose_generation_was_lost_is_kept() {
         &fixture.pool,
         fixture.workspace,
         fixture.user,
+        None,
         actions::Task {
             title: None,
             description: DESCRIPTION.to_string(),
@@ -268,6 +270,7 @@ async fn a_placeholder_whose_generation_was_lost_is_kept() {
         &fixture.pool,
         fixture.workspace,
         fixture.user,
+        None,
         actions::Task {
             title: None,
             description: DESCRIPTION.to_string(),
@@ -356,6 +359,7 @@ async fn a_task_an_agent_creates_without_a_title_is_titled_the_same_way() {
         &fixture.pool,
         fixture.workspace,
         fixture.user,
+        None,
         actions::Task {
             title: None,
             description: DESCRIPTION.to_string(),
@@ -368,6 +372,7 @@ async fn a_task_an_agent_creates_without_a_title_is_titled_the_same_way() {
         &fixture.pool,
         fixture.workspace,
         fixture.user,
+        None,
         serde_json::from_value(json!({"description": DESCRIPTION})).unwrap(),
     )
     .await
@@ -387,6 +392,7 @@ async fn a_task_an_agent_creates_without_a_title_is_titled_the_same_way() {
         &fixture.pool,
         fixture.workspace,
         fixture.user,
+        None,
         actions::Task {
             title: None,
             description: "  ".to_string(),

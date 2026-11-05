@@ -397,9 +397,14 @@ impl WorkspaceAction {
                 .await
             }
             Action::CreateTask => {
-                let created =
-                    actions::create_task(pool, scope.workspace_id, scope.user_id, decode(params)?)
-                        .await?;
+                let created = actions::create_task(
+                    pool,
+                    scope.workspace_id,
+                    scope.user_id,
+                    scope.chat_id,
+                    decode(params)?,
+                )
+                .await?;
                 if created["title_pending"] == json!(true)
                     && let Some(task_id) = created
                         .get("id")
@@ -452,9 +457,14 @@ impl WorkspaceAction {
                 .await
             }
             Action::StartTask => {
-                let mut started =
-                    actions::start_task(pool, scope.workspace_id, scope.user_id, decode(params)?)
-                        .await?;
+                let mut started = actions::start_task(
+                    pool,
+                    scope.workspace_id,
+                    scope.user_id,
+                    scope.chat_id,
+                    decode(params)?,
+                )
+                .await?;
                 if self.wait_for == WaitFor::Withheld {
                     started[actions::RUNNER_MESSAGE] = json!(RUNNER_STARTED_UNWAITED.as_str());
                 }
