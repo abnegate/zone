@@ -10,6 +10,9 @@ export interface LightboxProps {
   onShowMessage: (messageId: string) => void;
 }
 
+/** A focused player keeps the arrow keys for seeking. */
+const MEDIA_TAGS: ReadonlySet<string> = new Set(['AUDIO', 'VIDEO']);
+
 /** One gallery item at full size, stepped through with the arrow keys. */
 export function Lightbox({ items, index, onIndexChange, onShowMessage }: LightboxProps) {
   const [failed, setFailed] = useState<string | null>(null);
@@ -23,7 +26,7 @@ export function Lightbox({ items, index, onIndexChange, onShowMessage }: Lightbo
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.target instanceof HTMLMediaElement) return;
+    if (MEDIA_TAGS.has((event.target as HTMLElement).tagName)) return;
     if (event.key === 'ArrowRight') {
       event.preventDefault();
       step(1);

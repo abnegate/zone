@@ -100,7 +100,7 @@ describe('ChangesBox', () => {
     expect(screen.getByText(/−3/)).toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'Checks passing' })).toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'Merging is blocked' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Changes/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Changes, 1' })).toHaveAttribute(
       'aria-expanded',
       'true'
     );
@@ -224,7 +224,10 @@ describe('ChangesBox', () => {
   it('offers auto-merge disabled, with the reason, when GitHub will not take it', async () => {
     await shown([
       withStatus({
-        auto_merge: { enabled: false, unavailable: 'Auto-merge is turned off for this repository.' },
+        auto_merge: {
+          enabled: false,
+          unavailable: 'Auto-merge is turned off for this repository.',
+        },
       }),
     ]);
 
@@ -270,9 +273,9 @@ describe('ChangesBox', () => {
   it('remembers that it was collapsed', async () => {
     await shown([OPEN]);
 
-    fireEvent.click(screen.getByRole('button', { name: /Changes/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Changes, 1' }));
 
-    expect(screen.getByRole('button', { name: /Changes/ })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Changes, 1' })).toHaveAttribute(
       'aria-expanded',
       'false'
     );

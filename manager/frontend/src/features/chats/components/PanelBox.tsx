@@ -34,6 +34,7 @@ export function PanelBox({ title, count, storageKey, className, children }: Pane
           className="chat-panel-box-toggle"
           aria-expanded={!collapsed}
           aria-controls={body}
+          aria-label={`${title}, ${count}`}
           onClick={toggle}
         >
           <svg
