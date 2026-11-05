@@ -54,6 +54,8 @@ const OPEN: ChatPullRequest = {
   status: STATUS,
   writable: true,
   credentialed: true,
+  auto_fix: false,
+  auto_fixing: false,
 };
 
 const MENU = 'Actions for widgets #12';
@@ -160,6 +162,23 @@ describe('ChangesBox', () => {
     await settleMenu();
     expect(mockUpdateChatPullRequest).toHaveBeenLastCalledWith('chat-1', 'pr-1', {
       auto_merge: false,
+    });
+  });
+
+  it('turns auto-fix on, and off again once it is on', async () => {
+    mockUpdateChatPullRequest.mockResolvedValue({ ...OPEN, auto_fix: true });
+    await shown([OPEN]);
+
+    await chooseMenuItem(MENU, 'Fix automatically');
+    expect(mockUpdateChatPullRequest).toHaveBeenCalledWith('chat-1', 'pr-1', {
+      auto_fix: true,
+    });
+
+    await openMenu(MENU);
+    fireEvent.click(menuItem('Stop fixing automatically'));
+    await settleMenu();
+    expect(mockUpdateChatPullRequest).toHaveBeenLastCalledWith('chat-1', 'pr-1', {
+      auto_fix: false,
     });
   });
 

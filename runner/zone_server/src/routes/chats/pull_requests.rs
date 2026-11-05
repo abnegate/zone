@@ -27,7 +27,8 @@ use update_request::UpdateRequest;
 
 const CHAT_WITHOUT_WORKSPACE: &str = "Chat has no workspace association";
 const PULL_REQUEST_NOT_FOUND: &str = "Pull request not found";
-const NOTHING_TO_CHANGE: &str = "Name at least one of dismissed, draft or auto_merge";
+const NOTHING_TO_CHANGE: &str =
+    "Name at least one of dismissed, draft, auto_merge or auto_fix";
 
 /// GET /api/chats/{id}/pull-requests
 pub async fn list(
@@ -66,6 +67,11 @@ pub async fn update(
     }
     if let Some(enabled) = request.auto_merge {
         pull_request::set_auto_merge(&state, workspace, &row, enabled)
+            .await
+            .map_err(refused)?;
+    }
+    if let Some(enabled) = request.auto_fix {
+        row = pull_request::set_auto_fix(&state, chat.id, &row, enabled)
             .await
             .map_err(refused)?;
     }

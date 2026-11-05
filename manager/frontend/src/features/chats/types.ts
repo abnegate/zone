@@ -523,12 +523,17 @@ export interface ChatPullRequest {
   status: PullRequestStatus | null;
   writable: boolean;
   credentialed: boolean;
+  /** Whether a failing or conflicted state starts a run that fixes it. */
+  auto_fix: boolean;
+  /** Whether such a run is already answering for its current state. */
+  auto_fixing: boolean;
 }
 
 export interface PullRequestChange {
   dismissed?: boolean;
   draft?: boolean;
   auto_merge?: boolean;
+  auto_fix?: boolean;
 }
 
 export interface PullRequestDiff {

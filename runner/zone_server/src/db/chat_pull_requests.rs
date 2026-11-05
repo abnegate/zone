@@ -10,7 +10,7 @@ pub const GITHUB: &str = "github";
 
 macro_rules! columns {
     () => {
-        "id, chat_id, provider, owner, repo, number, url, title, source_id, dismissed_at, created_at"
+        "id, chat_id, provider, owner, repo, number, url, title, source_id, dismissed_at, created_at, auto_fix, auto_fix_run_id"
     };
 }
 
@@ -27,6 +27,10 @@ pub struct PullRequestRow {
     pub source_id: Option<Uuid>,
     pub dismissed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Whether a failing or conflicted state should start a run that fixes it.
+    pub auto_fix: bool,
+    /// The run the newest such state started, if one is still answering for it.
+    pub auto_fix_run_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +127,58 @@ where
     .bind(dismissed)
     .fetch_optional(executor)
     .await
+}
+
+/// Turns the auto-fix preference on or off. Turning it off also drops the run
+/// it was holding, so turning it back on is not answered by a stale one.
+pub async fn set_auto_fix<'e, E>(
+    executor: E,
+    chat_id: Uuid,
+    id: Uuid,
+    auto_fix: bool,
+) -> DbResult<Option<PullRequestRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as(concat!(
+        "UPDATE chat_pull_requests
+         SET auto_fix = $3,
+             auto_fix_run_id = CASE WHEN $3 THEN auto_fix_run_id END
+         WHERE chat_id = $1 AND id = $2
+         RETURNING ",
+        columns!()
+    ))
+    .bind(chat_id)
+    .bind(id)
+    .bind(auto_fix)
+    .fetch_optional(executor)
+    .await
+}
+
+/// Claims this pull request for `run_id`, and answers whether the claim was
+/// taken. The update only lands while the row still holds the run the caller
+/// saw, so two readers observing the same failure start one run between them
+/// rather than one each.
+pub async fn claim_auto_fix<'e, E>(
+    executor: E,
+    id: Uuid,
+    previous: Option<Uuid>,
+    run_id: Uuid,
+) -> DbResult<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let claimed = sqlx::query(
+        "UPDATE chat_pull_requests
+         SET auto_fix_run_id = $3
+         WHERE id = $1 AND auto_fix AND auto_fix_run_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(id)
+    .bind(previous)
+    .bind(run_id)
+    .execute(executor)
+    .await?;
+    Ok(claimed.rows_affected() == 1)
 }
 
 pub async fn retitle<'e, E>(executor: E, id: Uuid, title: &str) -> DbResult<()>

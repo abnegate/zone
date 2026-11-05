@@ -486,6 +486,8 @@ export const ChatPullRequestSchema = z.object({
   status: PullRequestStatusSchema.nullable().catch(null),
   writable: z.boolean(),
   credentialed: z.boolean(),
+  auto_fix: z.boolean().catch(false),
+  auto_fixing: z.boolean().catch(false),
 });
 
 export const ChatPullRequestsResponseSchema = z.object({

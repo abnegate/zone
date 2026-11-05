@@ -2,6 +2,7 @@
 //! reading and changing them on GitHub through abnegate-vcs with the
 //! workspace's own source.
 
+mod auto_fix;
 mod auto_merge;
 mod cache;
 mod changes;
@@ -83,6 +84,9 @@ pub async fn track(state: &AppState, workspace_id: Uuid, row: PullRequestRow) ->
     let status = match observed(state, &row, &token).await {
         Ok(status) => {
             remember(state, &row, &status).await;
+            // A fresh status is the only thing that knows the pull request is
+            // failing, so it is where a run to fix it starts.
+            auto_fix::consider(state, workspace_id, &row, &status).await;
             Some(status)
         }
         Err(error) => {
@@ -125,6 +129,21 @@ pub async fn set_auto_merge(
     }
     state.pull_request_statuses().forget(row.id);
     Ok(())
+}
+
+/// Turns auto-fix on or off. Unlike draft and auto-merge this is zone's own
+/// preference rather than something GitHub holds, so it only touches the row;
+/// what acts on it is the next status read that finds something to fix.
+pub async fn set_auto_fix(
+    state: &AppState,
+    chat_id: Uuid,
+    row: &PullRequestRow,
+    enabled: bool,
+) -> Result<PullRequestRow, Error> {
+    chat_pull_requests::set_auto_fix(state.db(), chat_id, row.id, enabled)
+        .await
+        .map_err(|_| Error::Storage)?
+        .ok_or(Error::Storage)
 }
 
 /// The start of the pull request's unified diff.
