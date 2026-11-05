@@ -7,12 +7,26 @@ export interface PanelBoxProps {
   /** Where whether the box is collapsed is remembered. */
   storageKey: string;
   className?: string;
+  /** Opens the box whenever it changes, so something outside can bring its contents into view. */
+  reveal?: number;
   children: ReactNode;
 }
 
 /** One collapsible box of the chat panel, which remembers whether it was open. */
-export function PanelBox({ title, count, storageKey, className, children }: PanelBoxProps) {
+export function PanelBox({
+  title,
+  count,
+  storageKey,
+  className,
+  reveal = 0,
+  children,
+}: PanelBoxProps) {
   const [collapsed, setCollapsed] = useState(() => readFlag(storageKey));
+  const [revealed, setRevealed] = useState(reveal);
+  if (revealed !== reveal) {
+    setRevealed(reveal);
+    setCollapsed(false);
+  }
   const heading = useId();
   const body = useId();
 

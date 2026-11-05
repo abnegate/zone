@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'bun:test';
-import { render, screen } from '@testing-library/react';
+import { describe, expect, it, mock } from 'bun:test';
+import { createEvent, fireEvent, render, screen } from '@testing-library/react';
 import type { Citation } from '../types';
 import { citationAnchorId } from '../utils/citations';
 import { MessageContent, UNRESOLVED_MARKER_NOTE, UNSOURCED_LINK_NOTE } from './MessageContent';
@@ -185,7 +185,7 @@ const sourced = (identifier: string, title: string): Citation =>
   citation({ identifier, title, kind: 'workspace_document', url: `${INVENTED}/${identifier}` });
 
 describe('MessageContent source markers', () => {
-  it('renders a resolved marker as a reference to its chip', () => {
+  it('renders a resolved marker as a reference to its source', () => {
     render(
       <MessageContent
         content={`Deploys ran green ${WEB_MARKER} last night.`}
@@ -202,6 +202,42 @@ describe('MessageContent source markers', () => {
       reference
     );
     expect(screen.queryByTestId('unresolved-marker')).toBeNull();
+  });
+
+  it('shows the source a marker names instead of following its fragment link', () => {
+    const onShowSource = mock();
+    const second = sourced('kb:9f0011aa22', 'Second source');
+    render(
+      <MessageContent
+        content={`Second source says so ${KB_MARKER}.`}
+        links="citations"
+        citations={[sourced('web:a3f21c', 'First source'), second]}
+        onShowSource={onShowSource}
+      />
+    );
+
+    const reference = screen.getByTestId('citation-reference');
+    const click = createEvent.click(reference);
+    fireEvent(reference, click);
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(onShowSource).toHaveBeenCalledWith(second);
+  });
+
+  it('leaves a marker an ordinary fragment link when nothing shows sources', () => {
+    render(
+      <MessageContent
+        content={`Deploys ran green ${WEB_MARKER} last night.`}
+        links="citations"
+        citations={[sourced('web:a3f21c', 'Release log')]}
+      />
+    );
+
+    const reference = screen.getByTestId('citation-reference');
+    const click = createEvent.click(reference);
+    fireEvent(reference, click);
+
+    expect(click.defaultPrevented).toBe(false);
   });
 
   it('matches a marker by identifier rather than by position in the list', () => {

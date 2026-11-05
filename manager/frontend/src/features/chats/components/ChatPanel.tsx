@@ -19,9 +19,11 @@ import {
   readWidth,
   writeSetting,
 } from '../utils/panel';
+import type { ChatSource, SourceRequest } from '../utils/sources';
 import { ChangesBox } from './ChangesBox';
 import { GalleryBox } from './GalleryBox';
 import { PanelIcon } from './PanelIcon';
+import { SourcesBox } from './SourcesBox';
 import './ChatPanel.css';
 
 export interface ChatPanelProps {
@@ -29,10 +31,18 @@ export interface ChatPanelProps {
   userId: string | null;
   changes: ChatPullRequests;
   media: readonly GalleryItem[];
+  sources: readonly ChatSource[];
+  /** Sources to bring into view, opening the panel or the sheet first. */
+  shownSources?: SourceRequest | null;
+  onSourcesShown?: () => void;
   onShowMessage: (messageId: string) => void;
 }
 
-const PANEL_LABEL = 'Changes and media';
+type Placement = 'panel' | 'sheet';
+
+const PANEL_LABEL = 'Changes, media and sources';
+/** Where the panel gives way to the sheet, matching ChatPanel.css. */
+const PHONE = '(max-width: 768px)';
 const RESIZING = 'chat-panel-resizing';
 /** The most of the chat's width the panel may take, leaving the rest to the transcript. */
 const MAX_SHARE = 0.5;
@@ -41,12 +51,27 @@ function counted(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
+function placement(): Placement {
+  return typeof window.matchMedia === 'function' && window.matchMedia(PHONE).matches
+    ? 'sheet'
+    : 'panel';
+}
+
 /**
- * The chat's pull requests and media, beside the transcript at the top right
+ * The chat's pull requests, media and sources, beside the transcript at the top right
  * of the chat. It can be resized, hidden to a rail, and on a phone opens as a
  * sheet instead, so it never sits over the conversation.
  */
-export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: ChatPanelProps) {
+export function ChatPanel({
+  chatId,
+  userId,
+  changes,
+  media,
+  sources,
+  shownSources = null,
+  onSourcesShown,
+  onShowMessage,
+}: ChatPanelProps) {
   const widthKey = panelKey(userId, 'width');
   const collapsedKey = panelKey(userId, 'collapsed');
   const [width, setWidth] = useState(() => readWidth(widthKey));
@@ -60,6 +85,17 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
   const rail = useRef<HTMLButtonElement>(null);
   const hide = useRef<HTMLButtonElement>(null);
   const toggled = useRef(false);
+  const showingIn = shownSources ? placement() : null;
+
+  useEffect(() => {
+    if (!shownSources) return;
+    if (placement() === 'sheet') {
+      setSheet(true);
+      return;
+    }
+    setCollapsed(false);
+    writeSetting(collapsedKey, 'false');
+  }, [shownSources, collapsedKey]);
 
   useEffect(() => {
     if (!toggled.current) return;
@@ -114,7 +150,8 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
 
   const showsChanges = changes.pullRequests.length > 0 || changes.dismissed !== null;
   const showsGallery = media.length > 0;
-  if (!showsChanges && !showsGallery) return null;
+  const showsSources = sources.length > 0;
+  if (!showsChanges && !showsGallery && !showsSources) return null;
 
   const startDrag = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -145,13 +182,22 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
   const summary = [
     showsChanges ? counted(changes.pullRequests.length, 'change', 'changes') : null,
     showsGallery ? counted(media.length, 'media item', 'media items') : null,
+    showsSources ? counted(sources.length, 'source', 'sources') : null,
   ]
     .filter(Boolean)
     .join(', ');
 
-  const boxes = (
+  const boxes = (target: Placement) => (
     <>
       {showsChanges && <ChangesBox chatId={chatId} userId={userId} changes={changes} />}
+      {showsSources && (
+        <SourcesBox
+          sources={sources}
+          userId={userId}
+          shown={showingIn === target ? shownSources : null}
+          onShown={onSourcesShown}
+        />
+      )}
       {showsGallery && (
         <GalleryBox
           items={media}
@@ -184,7 +230,7 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
           <DialogContent className="chat-panel-sheet">
             <DialogTitle className="chat-panel-sheet-title">{PANEL_LABEL}</DialogTitle>
             <DialogDescription className="sr-only">{summary}</DialogDescription>
-            <div className="chat-panel-boxes">{boxes}</div>
+            <div className="chat-panel-boxes">{boxes('sheet')}</div>
           </DialogContent>
         )}
       </Dialog>
@@ -240,7 +286,7 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
               <PanelIcon />
             </button>
           </div>
-          <div className="chat-panel-boxes">{boxes}</div>
+          <div className="chat-panel-boxes">{boxes('panel')}</div>
         </aside>
       )}
     </>

@@ -1499,7 +1499,9 @@ describe('ChatsPage', () => {
       renderChatsPage();
       fireEvent.click(await screen.findByText('Chat 1'));
 
-      const panel = await screen.findByRole('complementary', { name: 'Changes and media' });
+      const panel = await screen.findByRole('complementary', {
+        name: 'Changes, media and sources',
+      });
       expect(await within(panel).findByRole('link', { name: 'Add widgets' })).toBeInTheDocument();
       expect(within(panel).getByRole('button', { name: 'Open sunset.png' })).toBeInTheDocument();
       expect(mockGetChatPullRequests).toHaveBeenCalledWith(mockChatWithMessages.id);
@@ -1511,7 +1513,9 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       await waitFor(() => expect(mockGetChatPullRequests).toHaveBeenCalled());
-      expect(screen.queryByRole('complementary', { name: 'Changes and media' })).toBeNull();
+      expect(
+        screen.queryByRole('complementary', { name: 'Changes, media and sources' })
+      ).toBeNull();
     });
 
     it('names Offline on a chat created that way', async () => {
@@ -4673,6 +4677,43 @@ describe('ChatsPage', () => {
 
       expect(await screen.findByText(/Confirmed in/)).toBeInTheDocument();
       expect(screen.queryByRole('link', { name: 'the audit' })).not.toBeInTheDocument();
+    });
+
+    it("lists a reply's sources in the chat panel, not under the reply", async () => {
+      mockGetChat.mockResolvedValue(linkedChat());
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const panel = await screen.findByRole('complementary', {
+        name: 'Changes, media and sources',
+      });
+      expect(within(panel).getByRole('button', { name: 'Sources, 1' })).toBeInTheDocument();
+      expect(within(panel).getByText('an unrelated source')).toBeInTheDocument();
+      const reply = document.getElementById('chat-message-msg-link');
+      expect(reply).not.toBeNull();
+      expect(within(reply as HTMLElement).queryByText('an unrelated source')).toBeNull();
+      expect(within(reply as HTMLElement).queryByTestId('citation')).toBeNull();
+    });
+
+    it('opens the sources from a reply, even after they were collapsed', async () => {
+      localStorage.setItem('zone:chat-panel:1:sources', 'true');
+      mockGetChat.mockResolvedValue(linkedChat());
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      expect(await screen.findByRole('button', { name: 'Sources, 1' })).toHaveAttribute(
+        'aria-expanded',
+        'false'
+      );
+      const reply = document.getElementById('chat-message-msg-link') as HTMLElement;
+      fireEvent.click(within(reply).getByRole('button', { name: '1 source' }));
+
+      const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+      expect(within(sheet).getByRole('button', { name: 'Sources, 1' })).toHaveAttribute(
+        'aria-expanded',
+        'true'
+      );
+      expect(within(sheet).getByTestId('citation')).toHaveClass('is-highlighted');
     });
   });
 

@@ -1,0 +1,116 @@
+.citation-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.citation {
+  margin: 0;
+  padding: var(--ui-space-1-5);
+  border-radius: var(--ui-radius-sm);
+  transition: background-color var(--ui-duration-normal) var(--ui-ease-out);
+}
+
+.citation:hover,
+.citation:focus-within {
+  background: var(--ui-bg-surface);
+}
+
+.citation.is-highlighted {
+  background: color-mix(in srgb, var(--ui-accent) 14%, transparent);
+}
+
+.citation-link {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--ui-space-2);
+  min-width: 0;
+  color: var(--ui-text-primary);
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.citation-link--static {
+  text-decoration: none;
+}
+
+.citation-title {
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+}
+
+.citation-kind {
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-xs);
+}
+
+.citation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-1);
+  margin-top: var(--ui-space-0-5);
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-2xs);
+  line-height: var(--ui-space-4);
+}
+
+.citation-meta > * + *:not(.citation-provenance)::before {
+  content: '·';
+  margin-right: var(--ui-space-1);
+}
+
+.citation-revision {
+  font-family: var(--ui-font-mono);
+}
+
+.citation-revision--time {
+  font-family: inherit;
+}
+
+.citation-evidence {
+  font-weight: 600;
+}
+
+.citation--passing .citation-evidence {
+  color: var(--ui-success-600);
+}
+
+.citation--failed .citation-evidence {
+  color: var(--ui-error-600);
+}
+
+.citation--pending .citation-evidence,
+.citation--incomplete .citation-evidence,
+.citation--claimed .citation-evidence {
+  color: var(--ui-warning-600);
+}
+
+.citation--observed .citation-evidence {
+  color: var(--ui-text-secondary);
+}
+
+.citation-provenance {
+  padding: 0 var(--ui-space-1);
+  border: 1px solid var(--ui-warning-600);
+  border-radius: var(--ui-radius-sm);
+  color: var(--ui-warning-600);
+  font-weight: 600;
+}
+
+.citation-note {
+  margin: var(--ui-space-0-5) 0 0;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .citation {
+    transition: none;
+  }
+}

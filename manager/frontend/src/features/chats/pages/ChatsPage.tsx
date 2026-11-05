@@ -32,7 +32,6 @@ import {
   ChatMenu,
   ChatPanel,
   ChatSources,
-  Citations,
   Generation,
   HandoverNotice,
   HeaderPopover,
@@ -41,6 +40,7 @@ import {
   MessageContent,
   ProviderError,
   ProviderPicker,
+  SourcesButton,
 } from '../components';
 import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
@@ -78,6 +78,7 @@ import {
   chatShowsAgent,
   chatShowsCharacter,
   chatShowsReasoning,
+  chatSources,
   contextTokenOptions,
   DEFAULT_PROVIDER,
   defaultContextTokens,
@@ -110,8 +111,11 @@ import {
   reasoningOptions,
   requestedModel,
   selectedContextTokens,
+  type SourceRequest,
   shortModelName,
   sourceAttachment,
+  sourceKey,
+  sourceKeys,
   splitAtHandovers,
   toPlainText,
   videoAttachments,
@@ -276,6 +280,9 @@ export default function ChatsPage() {
   const changes = useChatPullRequests(chatOpen ? selectedChatId : null, streaming);
   const displayedMessages = displayedChat?.messages;
   const media = useMemo(() => galleryItems(displayedMessages ?? []), [displayedMessages]);
+  const sources = useMemo(() => chatSources(displayedMessages ?? []), [displayedMessages]);
+  const [shownSources, setShownSources] = useState<SourceRequest | null>(null);
+  const clearShownSources = useCallback(() => setShownSources(null), []);
   const wasStreaming = useRef(streaming);
   const latestSelectedChatId = useRef(selectedChatId);
 
@@ -288,6 +295,7 @@ export default function ChatsPage() {
 
   useEffect(() => {
     latestSelectedChatId.current = selectedChatId;
+    setShownSources(null);
     setChatOperationError(null);
     setOperationError(null);
   }, [selectedChatId]);
@@ -1588,6 +1596,9 @@ export default function ChatsPage() {
                                     links={links}
                                     citations={citations}
                                     breaks={message.role === 'user'}
+                                    onShowSource={(citation) =>
+                                      setShownSources({ keys: [sourceKey(citation)] })
+                                    }
                                   />
                                 ) : (
                                   <HandoverNotice
@@ -1599,7 +1610,12 @@ export default function ChatsPage() {
                               )}
                             </div>
                           ) : null}
-                          {citations.length > 0 && <Citations citations={citations} />}
+                          {citations.length > 0 && (
+                            <SourcesButton
+                              count={sourceKeys(citations).length}
+                              onClick={() => setShownSources({ keys: sourceKeys(citations) })}
+                            />
+                          )}
                         </div>
                       );
                     })
@@ -1783,6 +1799,9 @@ export default function ChatsPage() {
                 userId={user?.id ?? null}
                 changes={changes}
                 media={media}
+                sources={sources}
+                shownSources={shownSources}
+                onSourcesShown={clearShownSources}
                 onShowMessage={(messageId) => selectChat(displayedChat.id, messageId)}
               />
             </div>

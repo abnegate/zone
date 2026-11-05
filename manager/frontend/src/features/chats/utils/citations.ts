@@ -25,9 +25,9 @@ export function citationKindLabel(kind: Citation['kind']): string {
 
 const ANCHOR_PREFIX = 'citation-';
 
-/// The id the citations aside puts on a chip, and the target a source marker in
-/// the reply links to. Both sides derive it from the identifier alone, so a
-/// reordered citation list never re-points a marker.
+/// The fragment a source marker in the reply links to, and the key it is
+/// resolved back to its source by. Both sides derive it from the identifier
+/// alone, so a reordered citation list never re-points a marker.
 export function citationAnchorId(identifier: string): string {
   return `${ANCHOR_PREFIX}${identifier
     .trim()

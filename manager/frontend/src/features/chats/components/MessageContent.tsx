@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Citation } from '../types';
@@ -17,6 +17,8 @@ interface MessageContentProps {
   citations?: Citation[];
   compact?: boolean;
   breaks?: boolean;
+  /** Shows the source a marker names, in place of following its fragment link. */
+  onShowSource?: (citation: Citation) => void;
 }
 
 export const UNSOURCED_LINK_NOTE = 'Link disabled: not among the sources for this reply';
@@ -233,8 +235,17 @@ export function MessageContent({
   citations,
   compact,
   breaks,
+  onShowSource,
 }: MessageContentProps) {
   const sources = citations ?? [];
+  const showSource = (href: string | undefined, event: MouseEvent<HTMLAnchorElement>) => {
+    const citation = sources.find(
+      (source) => source.identifier && `#${citationAnchorId(source.identifier)}` === href
+    );
+    if (!citation || !onShowSource) return;
+    event.preventDefault();
+    onShowSource(citation);
+  };
   /// Every retrieval path now registers what it returned and mints a citation
   /// for it, so an empty list means nothing was retrieved rather than that the
   /// sources have not caught up. A link on such a reply has nothing behind it
@@ -257,7 +268,13 @@ export function MessageContent({
           a: ({ href, title, className, children }) => {
             if (className === REFERENCE_CLASS) {
               return (
-                <a className={className} href={href} title={title} data-testid="citation-reference">
+                <a
+                  className={className}
+                  href={href}
+                  title={title}
+                  data-testid="citation-reference"
+                  onClick={(event) => showSource(href, event)}
+                >
                   {children}
                   <span className="sr-only">
                     {' '}
