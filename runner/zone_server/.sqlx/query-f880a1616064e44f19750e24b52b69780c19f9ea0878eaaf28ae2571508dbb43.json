@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                SELECT id, title, description, acceptance_criteria, status, priority,\n                       model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                       pr_url, branch_name, pr_status, pr_created_at, created_by\n                FROM tasks\n                WHERE workspace_id = $1\n                ORDER BY created_at DESC\n                ",
+  "query": "\n        UPDATE tasks\n        SET title = COALESCE($2, title),\n            title_pending = title_pending AND $2::text IS NULL,\n            description = COALESCE($3, description),\n            acceptance_criteria = COALESCE($4, acceptance_criteria),\n            status = COALESCE($5, status),\n            priority = COALESCE($6, priority),\n            require_plan_approval = COALESCE($7, require_plan_approval),\n            is_agentic = COALESCE($8, is_agentic),\n            source_id = COALESCE($9, source_id),\n            model_name = COALESCE($10, model_name),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending\n        ",
   "describe": {
     "columns": [
       {
@@ -277,11 +277,31 @@
             "name": "created_by"
           }
         }
+      },
+      {
+        "ordinal": 25,
+        "name": "title_pending",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "title_pending"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Bool",
+        "Bool",
+        "Uuid",
+        "Text"
       ]
     },
     "nullable": [
@@ -309,8 +329,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "4bf703e152c34fe544abb4c32ee55c7f8c1ac74e3a3aef395690d06904a9b58e"
+  "hash": "f880a1616064e44f19750e24b52b69780c19f9ea0878eaaf28ae2571508dbb43"
 }

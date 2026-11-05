@@ -48,11 +48,62 @@ pub enum RunMutation {
     Active(TaskRunRow),
 }
 
+const PLACEHOLDER_CHARACTERS: usize = 60;
+
+const UNTITLED: &str = "Untitled task";
+
+/// What a task without a title is called until a generated title replaces it:
+/// the first line of its description, cut short on a word.
+pub fn placeholder_title(description: &str) -> String {
+    let Some(line) = description
+        .lines()
+        .map(|line| {
+            line.trim_start_matches(['#', '>', '-', '*', ' ', '\t'])
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .find(|line| !line.is_empty())
+    else {
+        return UNTITLED.to_string();
+    };
+    if line.chars().count() <= PLACEHOLDER_CHARACTERS {
+        return line;
+    }
+    let mut characters = line.chars();
+    let cut: String = characters
+        .by_ref()
+        .take(PLACEHOLDER_CHARACTERS - 1)
+        .collect();
+    let whole_word = characters.next().is_some_and(char::is_whitespace);
+    let cut = match cut.rfind(' ') {
+        Some(space) if space > 0 && !whole_word => &cut[..space],
+        _ => cut.as_str(),
+    };
+    format!("{}…", cut.trim_end())
+}
+
+pub const UNTITLED_AND_UNDESCRIBED: &str = "A task needs a title or a description";
+
+/// A title someone gave, trimmed, or `None` for a blank one.
+pub fn given_title(title: Option<&str>) -> Option<&str> {
+    title.map(str::trim).filter(|title| !title.is_empty())
+}
+
+/// The title a task is stored with, and whether it is a placeholder that a
+/// generated title may still replace.
+pub fn stored_title(title: Option<&str>, description: &str) -> (String, bool) {
+    match title {
+        Some(title) => (title.to_string(), false),
+        None => (placeholder_title(description), true),
+    }
+}
+
 /// Values required to create a task and its project associations atomically.
 pub struct Create<'a> {
     pub workspace_id: Uuid,
     pub project_ids: &'a [Uuid],
-    pub title: &'a str,
+    pub title: Option<&'a str>,
     pub description: &'a str,
     pub acceptance_criteria: Option<&'a str>,
     pub priority: Option<i32>,
@@ -88,6 +139,7 @@ pub struct TaskRow {
     pub created_by: Option<Uuid>,
     pub project_ids: Vec<Uuid>, // Associated projects via task_projects join table
     pub title: String,
+    pub title_pending: bool,
     pub description: String,
     pub acceptance_criteria: Option<String>,
     pub status: String,
@@ -185,6 +237,7 @@ macro_rules! map_task_row {
             created_by: $r.created_by,
             project_ids: Vec::new(), // Populated separately from task_projects join table
             title: $r.title,
+            title_pending: $r.title_pending,
             description: $r.description,
             acceptance_criteria: $r.acceptance_criteria,
             status: $r.status,
@@ -369,7 +422,7 @@ pub async fn list_tasks(
                 SELECT DISTINCT t.id, t.title, t.description, t.acceptance_criteria, t.status, t.priority,
                        t.model_name, t.dependencies, t.is_agentic, t.require_plan_approval, t.github_repo_url, t.source_id, t.source_ids,
                        t.workspace_id, t.worker_id, t.queued_at, t.started_at, t.completed_at, t.created_at, t.updated_at,
-                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at, t.created_by
+                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at, t.created_by, t.title_pending
                 FROM tasks t
                 INNER JOIN task_projects tp ON t.id = tp.task_id
                 WHERE t.workspace_id = $1 AND tp.project_id = $2 AND t.status = $3
@@ -392,7 +445,7 @@ pub async fn list_tasks(
                 SELECT DISTINCT t.id, t.title, t.description, t.acceptance_criteria, t.status, t.priority,
                        t.model_name, t.dependencies, t.is_agentic, t.require_plan_approval, t.github_repo_url, t.source_id, t.source_ids,
                        t.workspace_id, t.worker_id, t.queued_at, t.started_at, t.completed_at, t.created_at, t.updated_at,
-                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at, t.created_by
+                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at, t.created_by, t.title_pending
                 FROM tasks t
                 INNER JOIN task_projects tp ON t.id = tp.task_id
                 WHERE t.workspace_id = $1 AND tp.project_id = $2
@@ -413,7 +466,7 @@ pub async fn list_tasks(
                 SELECT id, title, description, acceptance_criteria, status, priority,
                        model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                        workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                       pr_url, branch_name, pr_status, pr_created_at, created_by
+                       pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending
                 FROM tasks
                 WHERE workspace_id = $1 AND status = $2
                 ORDER BY created_at DESC
@@ -433,7 +486,7 @@ pub async fn list_tasks(
                 SELECT id, title, description, acceptance_criteria, status, priority,
                        model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                        workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                       pr_url, branch_name, pr_status, pr_created_at, created_by
+                       pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending
                 FROM tasks
                 WHERE workspace_id = $1
                 ORDER BY created_at DESC
@@ -463,7 +516,7 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
         SELECT id, title, description, acceptance_criteria, status, priority,
                model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-               pr_url, branch_name, pr_status, pr_created_at, created_by
+               pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending
         FROM tasks
         WHERE id = $1
         "#,
@@ -497,7 +550,7 @@ pub async fn create_task(
     let input = Create {
         workspace_id,
         project_ids,
-        title,
+        title: Some(title),
         description,
         acceptance_criteria,
         priority,
@@ -578,24 +631,26 @@ pub async fn start_task_authorized(
 }
 
 async fn insert_task(connection: &mut PgConnection, input: &Create<'_>) -> DbResult<TaskRow> {
+    let (title, title_pending) = stored_title(input.title, input.description);
     let row = sqlx::query!(
         r#"
-        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by, title_pending)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at, created_by
+                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending
         "#,
         input.workspace_id,
-        input.title,
+        title,
         input.description,
         input.acceptance_criteria,
         input.priority,
         input.is_agentic,
         input.require_plan_approval,
         input.source_id,
-        input.created_by
+        input.created_by,
+        title_pending
     )
     .fetch_one(&mut *connection)
     .await?;
@@ -708,6 +763,7 @@ pub(crate) async fn update_task_in(
         r#"
         UPDATE tasks
         SET title = COALESCE($2, title),
+            title_pending = title_pending AND $2::text IS NULL,
             description = COALESCE($3, description),
             acceptance_criteria = COALESCE($4, acceptance_criteria),
             status = COALESCE($5, status),
@@ -721,7 +777,7 @@ pub(crate) async fn update_task_in(
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at, created_by
+                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending
         "#,
         input.id,
         input.title,
@@ -752,6 +808,31 @@ pub(crate) async fn update_task_in(
         }
         None => Ok(None),
     }
+}
+
+/// Replace a placeholder title with `title`, or with `None` keep the
+/// placeholder for good. Either way nothing changes once someone has set the
+/// title, which is what the `false` reports.
+pub async fn complete_title(pool: &PgPool, id: Uuid, title: Option<&str>) -> DbResult<bool> {
+    let result = sqlx::query(
+        "UPDATE tasks SET title = COALESCE($2, title), title_pending = FALSE, updated_at = CASE WHEN $2::text IS NULL THEN updated_at ELSE NOW() END WHERE id = $1 AND title_pending",
+    )
+    .bind(id)
+    .bind(title)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Keep the placeholder of every task whose generation was lost, such as to a
+/// restart, so that nothing waits on it any more.
+pub async fn settle_stale_titles(pool: &PgPool) -> DbResult<u64> {
+    let result = sqlx::query(
+        "UPDATE tasks SET title_pending = FALSE WHERE title_pending AND created_at < NOW() - INTERVAL '5 minutes'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 /// Delete a task
@@ -823,7 +904,7 @@ pub async fn queue_task_as(
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at, created_by
+                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending
         "#,
         id
     )
@@ -895,7 +976,7 @@ async fn queue_task_in(connection: &mut PgConnection, id: Uuid) -> DbResult<Opti
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at, created_by
+                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending
         "#,
         id
     )
@@ -1017,7 +1098,7 @@ pub async fn create_task_as(
     let input = Create {
         workspace_id,
         project_ids,
-        title,
+        title: Some(title),
         description,
         acceptance_criteria,
         priority,
@@ -1632,4 +1713,52 @@ pub async fn mark_pr_status(pool: &PgPool, task_id: Uuid, status: &str) -> DbRes
             .rows_affected()
             == 1,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_placeholder_is_the_first_line_of_the_description_cut_on_a_word() {
+        assert_eq!(
+            placeholder_title("\n  # Fix the   login page\nIt breaks on Safari"),
+            "Fix the login page"
+        );
+        assert_eq!(
+            placeholder_title(
+                "Migrate every remaining handler in the billing service onto the new retry policy",
+            ),
+            "Migrate every remaining handler in the billing service onto…"
+        );
+        let placeholder = placeholder_title(
+            "Migrate every remaining handler in the billing services onto the new retry policy",
+        );
+        assert_eq!(
+            placeholder,
+            "Migrate every remaining handler in the billing services…"
+        );
+        assert!(placeholder.chars().count() <= PLACEHOLDER_CHARACTERS);
+        assert_eq!(placeholder_title(&"界".repeat(100)).chars().count(), 60);
+        assert_eq!(placeholder_title(" \n\t "), UNTITLED);
+    }
+
+    #[test]
+    fn a_blank_title_is_stored_as_a_pending_placeholder() {
+        assert_eq!(
+            stored_title(given_title(Some("  Ship it ")), "Deploy the release"),
+            ("Ship it".to_string(), false)
+        );
+        for title in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                stored_title(given_title(title), "Deploy the release"),
+                ("Deploy the release".to_string(), true)
+            );
+        }
+        assert_eq!(
+            placeholder_title("- [ ] Rotate the keys"),
+            "[ ] Rotate the keys"
+        );
+        assert_eq!(placeholder_title("* Rotate the keys"), "Rotate the keys");
+    }
 }

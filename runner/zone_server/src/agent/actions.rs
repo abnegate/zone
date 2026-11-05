@@ -1,6 +1,7 @@
 //! Authenticated workspace mutations and durable reminders.
 use super::tools::WorkspaceScope;
 use crate::db::{actions, reminders};
+use crate::workers::titles;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -71,6 +72,8 @@ pub(crate) const FROM_CHAT: &str = "from a chat";
 pub(crate) const FROM_RUN: &str = "from inside a run";
 
 pub(crate) const TAIL_TASK_LOG_DESCRIPTION: &str = "Fetch new runner log lines since a previous log ID. Read a run's progress with it once rather than calling it again: from a chat, find out when the run finishes by waiting for it with wait_for kind=task_run; from inside a run, finish and let whoever started it coordinate.";
+
+const GENERATED_TITLE_HINT: &str = "Omit to have one generated from the description.";
 
 /// Where each text an action hands the model sends it to wait_for: the end of
 /// every instruction in it to call the tool.
@@ -307,8 +310,8 @@ impl Tool for WorkspaceAction {
                 json!([]),
             ),
             Action::CreateTask => (
-                json!({"title":{"type":"string","minLength":1},"description":{"type":"string"},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
-                json!(["title"]),
+                json!({"title":{"type":"string","description":GENERATED_TITLE_HINT},"description":{"type":"string","description":"Required without a title."},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
+                json!([]),
             ),
             Action::UpdateTask => (
                 json!({"task_id":identifier,"title":{"type":"string","minLength":1},"description":{"type":"string"},"status":{"type":"string","enum":["created","in_progress","review","complete","blocked"]},"priority":{"type":"integer","minimum":1,"maximum":5,"description":"1 is the most urgent, 5 the least."},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
@@ -332,14 +335,14 @@ impl Tool for WorkspaceAction {
             Action::CancelReminder => (json!({"reminder_id":identifier}), json!(["reminder_id"])),
             Action::StartTask => (
                 json!({
-                    "title":{"type":"string","minLength":1},
+                    "title":{"type":"string","description":GENERATED_TITLE_HINT},
                     "description":{"type":"string","minLength":1},
                     "acceptance_criteria":{"type":"string"},
                     "project_ids":{"type":"array","items":identifier},
                     "source_id":{"type":"string","format":"uuid"},
                     "priority":{"type":"integer","minimum":1,"maximum":5}
                 }),
-                json!(["title", "description"]),
+                json!(["description"]),
             ),
             Action::GetTaskRun => (json!({"run_id":identifier}), json!(["run_id"])),
             Action::TailTaskLog => (
@@ -394,7 +397,18 @@ impl WorkspaceAction {
                 .await
             }
             Action::CreateTask => {
-                actions::create_task(pool, scope.workspace_id, scope.user_id, decode(params)?).await
+                let created =
+                    actions::create_task(pool, scope.workspace_id, scope.user_id, decode(params)?)
+                        .await?;
+                if created["title_pending"] == json!(true)
+                    && let Some(task_id) = created
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                {
+                    titles::spawn_task(scope.state.clone(), task_id);
+                }
+                Ok(created)
             }
             Action::UpdateTask => {
                 actions::update_task(pool, scope.workspace_id, scope.user_id, decode(params)?).await
@@ -454,6 +468,9 @@ impl WorkspaceAction {
                         .and_then(Value::as_str)
                         .and_then(|id| Uuid::parse_str(id).ok()),
                 ) {
+                    if started["title_pending"] == json!(true) {
+                        titles::spawn_task(scope.state.clone(), task_id);
+                    }
                     let state = scope.state.clone();
                     tokio::spawn(async move {
                         crate::workers::task::execute_task_run(&state, run_id, task_id).await;
