@@ -1,5 +1,5 @@
-import type { ReactNode } from 'react';
-import Markdown from 'react-markdown';
+import { type ComponentProps, createContext, type ReactNode, useContext } from 'react';
+import Markdown, { type Components, type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Citation } from '../types';
 import { resolvesToCitation } from '../utils/links';
@@ -228,6 +228,98 @@ function UnsourcedLink({ children }: { children: ReactNode }) {
   );
 }
 
+interface Rendering {
+  links: MessageLinks;
+  sources: readonly Citation[];
+  index: ReadonlyMap<string, Citation>;
+  onShowSource?: (citation: Citation) => void;
+}
+
+const RenderingContext = createContext<Rendering>({
+  links: 'none',
+  sources: [],
+  index: new Map(),
+});
+
+function SourceMarker({ className, title, children, node }: ComponentProps<'button'> & ExtraProps) {
+  const { index, onShowSource } = useContext(RenderingContext);
+  const note = (
+    <span className="sr-only">
+      {' '}
+      ({REFERENCE_NOTE}: {title})
+    </span>
+  );
+  const citation = index.get(normalised(String(node?.properties?.dataIdentifier ?? '')));
+  if (className !== REFERENCE_CLASS || !citation || !onShowSource) {
+    return (
+      <span className={className} title={title} data-testid="citation-reference">
+        {children}
+        {note}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className={className}
+      title={title}
+      data-testid="citation-reference"
+      onClick={() => onShowSource(citation)}
+    >
+      {children}
+      {note}
+    </button>
+  );
+}
+
+/// Every retrieval path now registers what it returned and mints a citation
+/// for it, so an empty list means nothing was retrieved rather than that the
+/// sources have not caught up. A link on such a reply has nothing behind it
+/// and is de-linked like any other unsourced one.
+function MarkdownLink({ href, title, children }: ComponentProps<'a'> & ExtraProps) {
+  const { links, sources } = useContext(RenderingContext);
+  if (links === 'none') return <>{children}</>;
+  if (links === 'citations' && !resolvesToCitation(href, sources)) {
+    return <UnsourcedLink>{children}</UnsourcedLink>;
+  }
+  return (
+    <Anchor href={href} title={title}>
+      {children}
+    </Anchor>
+  );
+}
+
+function MarkdownSpan({ className, title, children }: ComponentProps<'span'> & ExtraProps) {
+  if (className !== UNRESOLVED_CLASS) return <span className={className}>{children}</span>;
+  return (
+    <span className={className} title={title} data-testid="unresolved-marker">
+      {children}
+      <span className="sr-only"> ({UNRESOLVED_MARKER_NOTE})</span>
+    </span>
+  );
+}
+
+function MarkdownImage({ src, alt, title }: ComponentProps<'img'> & ExtraProps) {
+  return src ? (
+    <AuthenticatedImage src={src} alt={alt ?? ''} title={title} className="message-md-image" />
+  ) : null;
+}
+
+function Unquoted({ children }: ComponentProps<'blockquote'> & ExtraProps) {
+  return <>{children}</>;
+}
+
+/// Module-level, so a re-render — every streamed token is one — keeps the same
+/// element types and React keeps the nodes, and the focus on a marker with them.
+const COMPONENTS: Components = {
+  button: SourceMarker,
+  a: MarkdownLink,
+  span: MarkdownSpan,
+  img: MarkdownImage,
+};
+
+const COMPACT_COMPONENTS: Components = { ...COMPONENTS, blockquote: Unquoted };
+
 // Assistant replies are markdown. react-markdown renders no raw HTML unless a
 // rehype plugin enables it, so model output cannot inject markup here. Anchors
 // are the exception: GitHub-flavoured autolinking turns any bare URL the model
@@ -241,90 +333,25 @@ export function MessageContent({
   onShowSource,
 }: MessageContentProps) {
   const sources = citations ?? [];
-  const index = identified(sources);
-  /// Every retrieval path now registers what it returned and mints a citation
-  /// for it, so an empty list means nothing was retrieved rather than that the
-  /// sources have not caught up. A link on such a reply has nothing behind it
-  /// and is de-linked like any other unsourced one.
-  const resolving = links === 'citations';
   /// Markers are read on assistant replies whether or not the citations have
   /// settled yet, so a streaming marker shows as unresolved and then resolves
   /// in place. Reasoning and user text carry no marker convention.
   const marking = links === 'citations';
 
   return (
-    <div className={compact ? 'message-markdown message-markdown--compact' : 'message-markdown'}>
-      <Markdown
-        remarkPlugins={[
-          remarkGfm,
-          ...(marking ? [citationMarkers(sources)] : []),
-          ...(breaks ? [softBreaks()] : []),
-        ]}
-        components={{
-          button: ({ className, title, children, node }) => {
-            const note = (
-              <span className="sr-only">
-                {' '}
-                ({REFERENCE_NOTE}: {title})
-              </span>
-            );
-            const citation = index.get(normalised(String(node?.properties?.dataIdentifier ?? '')));
-            if (className !== REFERENCE_CLASS || !citation || !onShowSource) {
-              return (
-                <span className={className} title={title} data-testid="citation-reference">
-                  {children}
-                  {note}
-                </span>
-              );
-            }
-            return (
-              <button
-                type="button"
-                className={className}
-                title={title}
-                data-testid="citation-reference"
-                onClick={() => onShowSource(citation)}
-              >
-                {children}
-                {note}
-              </button>
-            );
-          },
-          a: ({ href, title, children }) => {
-            if (links === 'none') return <>{children}</>;
-            if (resolving && !resolvesToCitation(href, sources)) {
-              return <UnsourcedLink>{children}</UnsourcedLink>;
-            }
-            return (
-              <Anchor href={href} title={title}>
-                {children}
-              </Anchor>
-            );
-          },
-          span: ({ className, title, children }) => {
-            if (className !== UNRESOLVED_CLASS)
-              return <span className={className}>{children}</span>;
-            return (
-              <span className={className} title={title} data-testid="unresolved-marker">
-                {children}
-                <span className="sr-only"> ({UNRESOLVED_MARKER_NOTE})</span>
-              </span>
-            );
-          },
-          img: ({ src, alt, title }) =>
-            src ? (
-              <AuthenticatedImage
-                src={src}
-                alt={alt ?? ''}
-                title={title}
-                className="message-md-image"
-              />
-            ) : null,
-          ...(compact ? { blockquote: ({ children }) => children } : {}),
-        }}
-      >
-        {content}
-      </Markdown>
-    </div>
+    <RenderingContext.Provider value={{ links, sources, index: identified(sources), onShowSource }}>
+      <div className={compact ? 'message-markdown message-markdown--compact' : 'message-markdown'}>
+        <Markdown
+          remarkPlugins={[
+            remarkGfm,
+            ...(marking ? [citationMarkers(sources)] : []),
+            ...(breaks ? [softBreaks()] : []),
+          ]}
+          components={compact ? COMPACT_COMPONENTS : COMPONENTS}
+        >
+          {content}
+        </Markdown>
+      </div>
+    </RenderingContext.Provider>
   );
 }

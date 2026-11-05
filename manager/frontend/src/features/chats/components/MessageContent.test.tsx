@@ -224,6 +224,27 @@ describe('MessageContent source markers', () => {
     expect(screen.queryByRole('link')).toBeNull();
   });
 
+  it('keeps the same marker and link, and the focus on them, while the reply re-renders', () => {
+    const content = `Deploys ran green ${WEB_MARKER} per [the pull request](${CITED}).`;
+    const props = () => ({
+      links: 'citations' as const,
+      citations: [sourced('web:a3f21c', 'Release log'), citation()],
+      onShowSource: mock(),
+    });
+    const { rerender } = render(<MessageContent content={content} {...props()} />);
+    const marker = screen.getByRole('button', { name: `${WEB_MARKER} (source: Release log)` });
+    const link = screen.getByRole('link', { name: 'the pull request' });
+    marker.focus();
+
+    rerender(<MessageContent content={`${content} More text.`} {...props()} />);
+
+    expect(screen.getByRole('button', { name: `${WEB_MARKER} (source: Release log)` })).toBe(
+      marker
+    );
+    expect(screen.getByRole('link', { name: 'the pull request' })).toBe(link);
+    expect(document.activeElement).toBe(marker);
+  });
+
   it('matches a marker by identifier rather than by position in the list', () => {
     const onShowSource = mock();
     const second = sourced('kb:9f0011aa22', 'Second source');

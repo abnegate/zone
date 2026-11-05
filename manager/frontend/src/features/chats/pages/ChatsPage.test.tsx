@@ -4832,10 +4832,9 @@ describe('ChatsPage', () => {
       renderChatsPage();
       fireEvent.click(await screen.findByText('Chat 1'));
 
-      const marker = { name: '[web:a3f21c] (source: Release log)' };
-      await screen.findByRole('button', marker);
-      await waitFor(() => expect(mockGetChatPullRequests).toHaveBeenCalled());
-      fireEvent.click(screen.getByRole('button', marker));
+      fireEvent.click(
+        await screen.findByRole('button', { name: '[web:a3f21c] (source: Release log)' })
+      );
 
       const panel = screen.getByRole('complementary', { name: 'Changes, media and sources' });
       const highlighted = within(panel)
