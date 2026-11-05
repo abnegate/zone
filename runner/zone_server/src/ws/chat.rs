@@ -31,7 +31,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
-use zone_core::llm::{BuiltinTools, LlmBackend};
+use zone_core::llm::{BuiltinTools, LlmBackend, Observer};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -48,6 +48,7 @@ use crate::db::{
 use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
 use crate::services::chat::handover::{self, Cause, Handover, Notice};
+use crate::services::chat::pull_request::Recorder;
 use crate::services::chat::session::{self, Session};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
@@ -3309,8 +3310,11 @@ async fn handle_chat_generation(
             )
         })
         .flatten();
+    let recorder: Arc<dyn Observer> = Arc::new(Recorder::new(state.clone(), chat_id, workspace_id));
     let mut llm_client = match &agent_tools {
-        Some(served) => llm_client.with_toolset(served.lease.toolset(), builtin_tools(sandboxed)),
+        Some(served) => llm_client
+            .with_toolset(served.lease.toolset(), builtin_tools(sandboxed))
+            .with_observer(recorder.clone()),
         None => llm_client,
     };
     let mut token_filter = TokenFilter::new(stop);
@@ -3849,8 +3853,9 @@ async fn handle_chat_generation(
                 effort,
             ));
             if let Some(served) = &agent_tools {
-                llm_client =
-                    llm_client.with_toolset(served.lease.toolset(), builtin_tools(sandboxed));
+                llm_client = llm_client
+                    .with_toolset(served.lease.toolset(), builtin_tools(sandboxed))
+                    .with_observer(recorder.clone());
             }
             tools = ChatTools::empty();
             continuing = wrote;

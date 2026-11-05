@@ -21,7 +21,9 @@ use super::readiness::{
 };
 use super::releases::{self, Lookup, ReleaseIdentity, ReleasePipeline, RunEvidence};
 use super::tools::{WorkspaceScope, apply_record_cap, json_chars, take_array, truncate};
+use crate::config::{Config, github_graphql_url};
 use crate::db::{sources, workspace_members};
+use crate::services::chat::pull_request::{self as chat_pull_request, Opened};
 use crate::services::prioritisation::{
     Configuration as Prioritisation, Prioritiser, RiskSignal, pull_request,
 };
@@ -398,7 +400,7 @@ impl Integration {
                     .map_err(|_| "The source credentials could not be decrypted.".to_string())?,
             );
         }
-        let github = Github::new(configuration)?;
+        let github = Github::new(configuration)?.at(self.scope.state.config())?;
         let mut result = if write {
             github.write(self.operation, &arguments).await?
         } else {
@@ -406,7 +408,32 @@ impl Integration {
         };
         result["source_id"] = json!(arguments.source_id);
         result["observed_at"] = json!(Utc::now().to_rfc3339());
+        if matches!(self.operation, Operation::CreatePull) {
+            self.record(&arguments, &result).await;
+        }
         Ok(result)
+    }
+
+    /// Notes the pull request this chat just opened as the chat's own. A
+    /// failure to note it never fails the write that already happened.
+    async fn record(&self, arguments: &Arguments, result: &Value) {
+        let Some(chat_id) = self.scope.chat_id else {
+            return;
+        };
+        let created = &result["pull_request"];
+        let Some(url) = created["html_url"].as_str() else {
+            return;
+        };
+        let opened = Opened {
+            chat_id,
+            workspace_id: self.scope.workspace_id,
+            url: url.to_string(),
+            title: created["title"].as_str().map(str::to_string),
+            source_id: Some(arguments.source_id),
+        };
+        if let Err(error) = chat_pull_request::record(&self.scope.state, &opened).await {
+            tracing::warn!(chat = %chat_id, %error, "could not record the pull request a chat opened");
+        }
     }
 }
 
@@ -440,6 +467,14 @@ impl Github {
             signals,
             configuration,
         })
+    }
+
+    /// This client against the GitHub origin the server is configured for.
+    pub(crate) fn at(mut self, config: &Config) -> Result<Self, String> {
+        self.origin = config
+            .github_rest_origin()
+            .ok_or("The configured GitHub API origin is invalid.")?;
+        Ok(self)
     }
 
     /// The `owner/repo` name GitHub reports records under.
@@ -555,10 +590,8 @@ impl Github {
     }
 
     async fn graphql(&self, query: &str, variables: Value) -> Result<Value, String> {
-        let url = self
-            .origin
-            .join("graphql")
-            .map_err(|_| "Could not build the GitHub GraphQL URL.".to_string())?;
+        let url = github_graphql_url(&self.origin)
+            .ok_or_else(|| "Could not build the GitHub GraphQL URL.".to_string())?;
         let response: Value = self
             .dispatch(
                 reqwest::Method::POST,

@@ -990,7 +990,7 @@ impl WaitForTool {
                     .map_err(|_| SOURCE_CREDENTIALS_INVALID.to_string())?,
             );
         }
-        Github::new(configuration)
+        Github::new(configuration)?.at(scope.state.config())
     }
 }
 
