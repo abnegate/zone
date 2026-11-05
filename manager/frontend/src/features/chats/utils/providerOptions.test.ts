@@ -11,6 +11,7 @@ import {
   keepEffort,
   modelChoices,
   modelSelectOptions,
+  offersAgentOn,
   providerChoices,
   reasoningOptions,
   selectionModel,
@@ -63,6 +64,29 @@ describe('isAgentOffer', () => {
     expect(isAgentOffer(claude)).toBe(true);
     expect(isAgentOffer(offer())).toBe(false);
     expect(isAgentOffer(offer({ provider: 'openai' }))).toBe(false);
+  });
+});
+
+describe('offersAgentOn', () => {
+  const installed = [
+    { name: 'qwen3', tools: true },
+    { name: 'gemma3', tools: false },
+  ];
+
+  it('always offers Agent on an agent offer', () => {
+    expect(offersAgentOn(offer({ provider: 'codex' }), [], 'gemma3')).toBe(true);
+  });
+
+  it('reads the installed models when they list what the provider runs', () => {
+    expect(offersAgentOn(offer(), installed, 'qwen3')).toBe(true);
+    expect(offersAgentOn(offer(), installed, 'gemma3')).toBe(false);
+    expect(offersAgentOn(null, installed, ' gemma3 ')).toBe(false);
+    expect(offersAgentOn(null, [{ name: 'gemma3', tools: false }], '  ')).toBe(false);
+  });
+
+  it('offers Agent when the installed models do not describe the provider', () => {
+    expect(offersAgentOn(offer({ provider: 'openai' }), null, 'gemma3')).toBe(true);
+    expect(offersAgentOn(offer({ provider: 'openai' }), null, 'auto')).toBe(true);
   });
 });
 

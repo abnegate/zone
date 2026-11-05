@@ -66,6 +66,7 @@ describe('offersAgentFor', () => {
   });
 
   it('offers Agent for a model zone has no details for', () => {
+    expect(offersAgentFor([...models, { name: 'mistral' }], 'mistral')).toBe(true);
     expect(offersAgentFor(models, 'gpt-4o')).toBe(true);
     expect(offersAgentFor([], 'my-deployment')).toBe(true);
   });

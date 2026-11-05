@@ -3742,10 +3742,32 @@ describe('ChatsPage', () => {
 
     it('ignores the local model profile for a chosen endpoint provider', async () => {
       mockGetChatProviders.mockResolvedValue(
-        chatProviders({ selected: selection(openAiOffer, 'gpt-4o') })
+        chatProviders({ selected: selection(openAiOffer, 'llama2') })
       );
-      await openChat({ model_name: 'llama3.1', provider: 'openai', provider_model: 'gpt-4o' });
+      await openChat({ model_name: 'auto', provider: 'openai', provider_model: 'llama2' });
       await waitFor(() => expect(screen.getByTestId('chat-provider')).toHaveTextContent('OpenAI'));
+      expect(await screen.findByTestId('agent-toggle')).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('offers agent mode on a chosen Self-Hosted chat by its model', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(selfHostedOffer, 'llama3.1') })
+      );
+      await openChat({ model_name: 'auto', provider: 'self_hosted', provider_model: 'llama3.1' });
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-provider')).toHaveTextContent('Self-Hosted')
+      );
+      expect(await screen.findByTestId('agent-toggle')).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('hides agent mode on a chosen Self-Hosted chat whose model cannot call tools', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(selfHostedOffer, 'llama2') })
+      );
+      await openChat({ model_name: 'auto', provider: 'self_hosted', provider_model: 'llama2' });
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-provider')).toHaveTextContent('Self-Hosted')
+      );
       expect(screen.queryByTestId('agent-toggle')).not.toBeInTheDocument();
     });
 

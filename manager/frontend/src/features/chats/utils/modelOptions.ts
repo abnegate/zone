@@ -74,7 +74,7 @@ type ChatHints = {
   needs_character?: boolean | null;
 };
 
-type ModelHints = {
+export type ModelHints = {
   completion?: boolean;
   tools?: boolean;
   reasoning?: boolean;

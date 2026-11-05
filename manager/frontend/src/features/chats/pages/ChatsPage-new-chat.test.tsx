@@ -547,9 +547,36 @@ describe('ChatsPage new chat dialog', () => {
     expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
     chooseSelect('Provider', 'Codex');
     expect(screen.getByLabelText('Agent mode')).not.toBeChecked();
+    fireEvent.click(screen.getByLabelText('Agent mode'));
+    expect(screen.getByLabelText('Auto-approve writes and commands')).not.toBeChecked();
 
     const body = await createdBody();
-    expect(body).toMatchObject({ provider: 'codex', agent_enabled: false, auto_approve: false });
+    expect(body).toMatchObject({ provider: 'codex', agent_enabled: true, auto_approve: false });
+  });
+
+  it('offers agent mode on OpenAI for a model the instance lists as unable to call tools', async () => {
+    installed = [toolModel, { ...toollessModel, name: 'gpt-4o' }];
+    await openNewChatWithProviders(selfHosted);
+
+    chooseSelect('Provider', 'OpenAI');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Model name' }), {
+      target: { value: 'gpt-4o' },
+    });
+
+    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+  });
+
+  it('reads a padded model name as the trimmed one it sends', async () => {
+    installed = [toolModel, toollessModel];
+    await openNewChatWithProviders(openAi);
+
+    chooseSelect('Provider', 'OpenAI');
+    const field = screen.getByRole('textbox', { name: 'Model name' });
+    fireEvent.change(field, { target: { value: 'llama3.2' } });
+    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+    fireEvent.change(field, { target: { value: ' gemma3 ' } });
+
+    expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
   });
 
   it('words the agent model hint so it reads right for any model', async () => {
