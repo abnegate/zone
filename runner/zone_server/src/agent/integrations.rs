@@ -26,9 +26,11 @@ use super::tools::{WorkspaceScope, apply_record_cap, json_chars, take_array, tru
 use crate::config::{Config, github_graphql_url};
 use crate::db::{sources, workspace_members};
 use crate::services::chat::pull_request::{self as chat_pull_request, Opened};
+use crate::services::checkout;
 use crate::services::prioritisation::{
     Configuration as Prioritisation, Prioritiser, RiskSignal, pull_request,
 };
+use crate::services::project_directory::{self, Origin, Start};
 
 const ORIGIN: &str = "https://api.github.com/";
 const API_HOST_LABEL: &str = "api.";
@@ -159,6 +161,7 @@ struct Arguments {
     head: Option<String>,
     base: Option<String>,
     body: Option<String>,
+    directory: Option<String>,
     number: Option<u64>,
     job_id: Option<u64>,
     tag: Option<String>,
@@ -282,6 +285,7 @@ impl Tool for Integration {
             properties["base"] = json!({"type": "string", "description": "Base branch; defaults to the source branch or repository default."});
             properties["body"] =
                 json!({"type": "string", "description": "Pull request description."});
+            properties["directory"] = json!({"type": "string", "description": "Absolute path of the checkout you committed head in. Zone pushes head from it with the source's credential before opening the pull request; do not git push yourself. Defaults to the chat's project directory. Omit for a fork's owner:branch head that is already pushed."});
             required.extend(["title", "head"]);
         }
         if matches!(self.operation, Operation::Comment) {
@@ -428,6 +432,14 @@ impl Integration {
             "https://github.com/{}/{}",
             github.configuration.owner, github.configuration.repo
         );
+        let (_, head, base) = github.pull_fields(arguments)?;
+        if head == base {
+            return Err(format!(
+                "head and base are both {base}. Commit on a branch of its own and open the pull \
+                 request from that."
+            ));
+        }
+        self.push_head(github, arguments, head, &repository).await?;
         let (head, base) = match github.create_pull(arguments).await? {
             Creation::Created(created) => {
                 return Ok(json!({
@@ -454,6 +466,76 @@ impl Integration {
             "pull_request": existing,
             "already_open": true,
         }))
+    }
+
+    /// Pushes `head` from the checkout the chat committed it in, with the
+    /// source's token, so a chat whose agent holds no GitHub credential can
+    /// still open a pull request. A fork's `owner:branch` head, and a chat with
+    /// no checkout to push from, are left for GitHub to find already pushed.
+    async fn push_head(
+        &self,
+        github: &Github,
+        arguments: &Arguments,
+        head: &str,
+        repository: &str,
+    ) -> Result<(), String> {
+        if head.contains(':') {
+            return Ok(());
+        }
+        let Some(directory) = self.checkout(arguments).await? else {
+            return Ok(());
+        };
+        let token = github
+            .configuration
+            .token
+            .as_deref()
+            .ok_or("The source has no credential to push with.")?;
+        let url = abnegate_vcs::RepositoryUrl::parse(repository)
+            .map_err(|_| "The source does not name a GitHub repository.".to_string())?;
+        let origin =
+            Origin::parse(repository).ok_or("The source does not name a GitHub repository.")?;
+        chat_pull_request::push(
+            &checkout::git(),
+            &directory,
+            &url,
+            &origin,
+            head,
+            &SecretValue::new(token),
+        )
+        .await
+        .map(drop)
+        .map_err(|error| format!("Could not push {head}: {error}"))
+    }
+
+    /// The checkout to push from: the one the model names, which must be one
+    /// of this workspace's, or else the directory the chat's project starts
+    /// it in, which the turn itself ran in.
+    async fn checkout(&self, arguments: &Arguments) -> Result<Option<std::path::PathBuf>, String> {
+        if let Some(directory) = arguments
+            .directory
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            let directory = std::path::PathBuf::from(directory);
+            if !project_directory::owns(&self.scope.state, self.scope.workspace_id, &directory)
+                .await
+            {
+                return Err(format!(
+                    "{} is not in one of this workspace's folders.",
+                    directory.display()
+                ));
+            }
+            return Ok(Some(directory));
+        }
+        let Some(chat) = self.scope.chat_id else {
+            return Ok(None);
+        };
+        Ok(
+            match project_directory::peek(&self.scope.state, chat, self.scope.workspace_id).await {
+                Start::Directory(directory) => Some(directory),
+                _ => None,
+            },
+        )
     }
 
     /// Notes the pull request this chat just opened as the chat's own. A
@@ -701,9 +783,12 @@ impl Github {
         }
     }
 
-    /// Opens the pull request, or reports that GitHub refused it as invalid,
-    /// which it also does when one is already open from the same head.
-    async fn create_pull(&self, arguments: &Arguments) -> Result<Creation, String> {
+    /// The title, head and base a pull request is opened with, refused before
+    /// anything is pushed or posted when any is missing or malformed.
+    fn pull_fields<'a>(
+        &self,
+        arguments: &'a Arguments,
+    ) -> Result<(&'a str, &'a str, String), String> {
         let title = arguments
             .title
             .as_deref()
@@ -726,6 +811,13 @@ impl Github {
         if !git_ref(&base) {
             return Err("base is invalid.".to_string());
         }
+        Ok((title, head, base))
+    }
+
+    /// Opens the pull request, or reports that GitHub refused it as invalid,
+    /// which it also does when one is already open from the same head.
+    async fn create_pull(&self, arguments: &Arguments) -> Result<Creation, String> {
+        let (title, head, base) = self.pull_fields(arguments)?;
         let body = json!({
             "title": title,
             "head": head,
@@ -1206,7 +1298,7 @@ impl Github {
         let page = arguments.page.unwrap_or(1);
         let (rows, next) = match arguments.tag.as_deref() {
             Some(tag) => {
-                if !git_ref(tag) {
+                if !segment(tag) {
                     return Err("tag is invalid.".to_string());
                 }
                 (vec![self.get(&["releases", "tags", tag], &[]).await?], None)
@@ -1865,11 +1957,12 @@ fn segment(value: &str) -> bool {
 }
 
 fn git_ref(value: &str) -> bool {
-    if let Some((owner, branch)) = value.split_once(':') {
-        segment(owner) && segment(branch)
-    } else {
-        segment(value)
-    }
+    let branch = match value.split_once(':') {
+        Some((owner, branch)) if segment(owner) => branch,
+        Some(_) => return false,
+        None => value,
+    };
+    BranchName::parse(branch).is_ok()
 }
 
 fn valid_sha(value: &str) -> bool {
@@ -2411,6 +2504,15 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use zone_core::tools::REASON_DESCRIPTION;
 
+    #[test]
+    fn heads_may_be_slashed_branch_names() {
+        assert!(git_ref("feat/features-settings-tab"));
+        assert!(git_ref("owner:feat/branch"));
+        assert!(!git_ref("feat/../main"));
+        assert!(!git_ref("bad owner:branch"));
+        assert!(!git_ref(""));
+    }
+
     const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const BLOB: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const WHY: &str = "The user asked for this to be opened.";
@@ -2582,6 +2684,7 @@ mod tests {
             head: None,
             base: None,
             body: None,
+            directory: None,
             number: Some(number),
             job_id: None,
             tag: None,
@@ -2706,6 +2809,7 @@ mod tests {
                     head: None,
                     base: None,
                     body: None,
+                    directory: None,
                     number: None,
                     job_id: None,
                     tag: None,
@@ -3012,6 +3116,7 @@ mod tests {
                     head: None,
                     base: None,
                     body: None,
+                    directory: None,
                     number: None,
                     job_id: None,
                     tag: None,
@@ -3142,6 +3247,7 @@ mod tests {
                     head: Some("feature".into()),
                     base: None,
                     body: Some("details".into()),
+                    directory: None,
                     number: None,
                     job_id: None,
                     tag: None,
@@ -3186,6 +3292,7 @@ mod tests {
                     head: None,
                     base: None,
                     body: Some("ship it".into()),
+                    directory: None,
                     number: Some(7),
                     job_id: None,
                     tag: None,
@@ -3196,6 +3303,82 @@ mod tests {
             .unwrap();
         assert_eq!(result["comment"]["id"], 99);
         assert_eq!(result["comment"]["body"], "ship it");
+    }
+
+    fn pull_args(head: &str, base: Option<&str>, directory: Option<&str>) -> Arguments {
+        Arguments {
+            base: base.map(str::to_string),
+            directory: directory.map(str::to_string),
+            ..write_args(Some("Fix"), Some(head), None, None)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_head_that_is_the_base_is_refused_before_anything_is_pushed_or_posted() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let refused = tool(Operation::CreatePull)
+            .open_pull(&github(&server), &pull_args("main", None, Some("/nowhere")))
+            .await
+            .expect_err("a pull request from main into main is refused");
+        assert!(refused.contains("head and base are both main"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn invalid_fields_are_refused_before_the_head_is_pushed() {
+        let server = MockServer::start().await;
+        let arguments = Arguments {
+            title: None,
+            ..pull_args("feature", None, Some("/nowhere"))
+        };
+        let refused = tool(Operation::CreatePull)
+            .open_pull(&github(&server), &arguments)
+            .await
+            .expect_err("a pull request with no title is refused");
+        assert!(refused.contains("title is required"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_named_directory_outside_the_workspace_is_never_pushed_from() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let outside = tempfile::tempdir().unwrap();
+        let refused = tool(Operation::CreatePull)
+            .open_pull(
+                &github(&server),
+                &pull_args("feature", None, outside.path().to_str()),
+            )
+            .await
+            .expect_err("another place's checkout is refused");
+        assert!(
+            refused.contains("is not in one of this workspace's folders"),
+            "{refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_directory_in_the_workspaces_own_clones_is_its_own() {
+        let tool = tool(Operation::CreatePull);
+        let clone = tool
+            .scope
+            .state
+            .config()
+            .clones
+            .join(tool.scope.workspace_id.as_hyphenated().to_string())
+            .join("repository");
+        let arguments = pull_args("feature", None, clone.to_str());
+        assert_eq!(
+            tool.checkout(&arguments).await.expect("its own clone"),
+            Some(clone)
+        );
     }
 
     fn write_args(
@@ -3216,6 +3399,7 @@ mod tests {
             head: head.map(str::to_string),
             base: None,
             body: body.map(str::to_string),
+            directory: None,
             number,
             job_id: None,
             tag: None,
@@ -3342,6 +3526,7 @@ mod tests {
             head: None,
             base: None,
             body: None,
+            directory: None,
             number,
             job_id: None,
             tag: None,
@@ -3834,6 +4019,7 @@ mod tests {
             head: None,
             base: None,
             body: None,
+            directory: None,
             number,
             job_id,
             tag: None,

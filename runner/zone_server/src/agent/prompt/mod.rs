@@ -709,7 +709,7 @@ mod tests {
             native.contains("then calling create_pull_request so Zone can track it"),
             "{native}"
         );
-        assert!(native.contains("not gh pr create, hub"), "{native}");
+        assert!(native.contains("or use gh pr create, hub"), "{native}");
 
         for agent in zone_core::llm::AgentKind::ALL {
             let served = chat(&chat_tools().served_to(agent), false, &source);
@@ -718,7 +718,7 @@ mod tests {
                 "{agent}: {served}"
             );
             assert!(
-                served.contains("not gh pr create, hub"),
+                served.contains("or use gh pr create, hub"),
                 "{agent}: {served}"
             );
         }
