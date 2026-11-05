@@ -73,7 +73,7 @@ pub(crate) const FROM_RUN: &str = "from inside a run";
 
 pub(crate) const TAIL_TASK_LOG_DESCRIPTION: &str = "Fetch new runner log lines since a previous log ID. Read a run's progress with it once rather than calling it again: from a chat, find out when the run finishes by waiting for it with wait_for kind=task_run; from inside a run, finish and let whoever started it coordinate.";
 
-const UNTITLED: &str = "Omit to have one generated from the description.";
+const GENERATED_TITLE_HINT: &str = "Omit to have one generated from the description.";
 
 /// Where each text an action hands the model sends it to wait_for: the end of
 /// every instruction in it to call the tool.
@@ -310,7 +310,7 @@ impl Tool for WorkspaceAction {
                 json!([]),
             ),
             Action::CreateTask => (
-                json!({"title":{"type":"string","description":UNTITLED},"description":{"type":"string","description":"Required without a title."},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
+                json!({"title":{"type":"string","description":GENERATED_TITLE_HINT},"description":{"type":"string","description":"Required without a title."},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
                 json!([]),
             ),
             Action::UpdateTask => (
@@ -335,7 +335,7 @@ impl Tool for WorkspaceAction {
             Action::CancelReminder => (json!({"reminder_id":identifier}), json!(["reminder_id"])),
             Action::StartTask => (
                 json!({
-                    "title":{"type":"string","description":UNTITLED},
+                    "title":{"type":"string","description":GENERATED_TITLE_HINT},
                     "description":{"type":"string","minLength":1},
                     "acceptance_criteria":{"type":"string"},
                     "project_ids":{"type":"array","items":identifier},
@@ -468,7 +468,9 @@ impl WorkspaceAction {
                         .and_then(Value::as_str)
                         .and_then(|id| Uuid::parse_str(id).ok()),
                 ) {
-                    titles::spawn_task(scope.state.clone(), task_id);
+                    if started["title_pending"] == json!(true) {
+                        titles::spawn_task(scope.state.clone(), task_id);
+                    }
                     let state = scope.state.clone();
                     tokio::spawn(async move {
                         crate::workers::task::execute_task_run(&state, run_id, task_id).await;

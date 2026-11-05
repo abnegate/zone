@@ -58,7 +58,7 @@ pub fn placeholder_title(description: &str) -> String {
     let Some(line) = description
         .lines()
         .map(|line| {
-            line.trim_start_matches(['#', ' '])
+            line.trim_start_matches(['#', '>', '-', '*', ' ', '\t'])
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -83,10 +83,17 @@ pub fn placeholder_title(description: &str) -> String {
     format!("{}…", cut.trim_end())
 }
 
+pub const UNTITLED_AND_UNDESCRIBED: &str = "A task needs a title or a description";
+
+/// A title someone gave, trimmed, or `None` for a blank one.
+pub fn given_title(title: Option<&str>) -> Option<&str> {
+    title.map(str::trim).filter(|title| !title.is_empty())
+}
+
 /// The title a task is stored with, and whether it is a placeholder that a
-/// generated title may still replace. A blank title counts as none.
+/// generated title may still replace.
 pub fn stored_title(title: Option<&str>, description: &str) -> (String, bool) {
-    match title.filter(|title| !title.trim().is_empty()) {
+    match title {
         Some(title) => (title.to_string(), false),
         None => (placeholder_title(description), true),
     }
@@ -96,7 +103,6 @@ pub fn stored_title(title: Option<&str>, description: &str) -> (String, bool) {
 pub struct Create<'a> {
     pub workspace_id: Uuid,
     pub project_ids: &'a [Uuid],
-    /// `None` titles the task from its description; see [`stored_title`].
     pub title: Option<&'a str>,
     pub description: &'a str,
     pub acceptance_criteria: Option<&'a str>,
@@ -133,8 +139,6 @@ pub struct TaskRow {
     pub created_by: Option<Uuid>,
     pub project_ids: Vec<Uuid>, // Associated projects via task_projects join table
     pub title: String,
-    /// The title is a placeholder that a generated one replaces unless someone
-    /// sets a title first; see `workers::titles::spawn_task`.
     pub title_pending: bool,
     pub description: String,
     pub acceptance_criteria: Option<String>,
@@ -818,6 +822,17 @@ pub async fn complete_title(pool: &PgPool, id: Uuid, title: Option<&str>) -> DbR
     .execute(pool)
     .await?;
     Ok(result.rows_affected() == 1)
+}
+
+/// Keep the placeholder of every task whose generation was lost, such as to a
+/// restart, so that nothing waits on it any more.
+pub async fn settle_stale_titles(pool: &PgPool) -> DbResult<u64> {
+    let result = sqlx::query(
+        "UPDATE tasks SET title_pending = FALSE WHERE title_pending AND created_at < NOW() - INTERVAL '5 minutes'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 /// Delete a task
@@ -1731,14 +1746,19 @@ mod tests {
     #[test]
     fn a_blank_title_is_stored_as_a_pending_placeholder() {
         assert_eq!(
-            stored_title(Some("Ship it"), "Deploy the release"),
+            stored_title(given_title(Some("  Ship it ")), "Deploy the release"),
             ("Ship it".to_string(), false)
         );
         for title in [None, Some(""), Some("   ")] {
             assert_eq!(
-                stored_title(title, "Deploy the release"),
+                stored_title(given_title(title), "Deploy the release"),
                 ("Deploy the release".to_string(), true)
             );
         }
+        assert_eq!(
+            placeholder_title("- [ ] Rotate the keys"),
+            "[ ] Rotate the keys"
+        );
+        assert_eq!(placeholder_title("* Rotate the keys"), "Rotate the keys");
     }
 }

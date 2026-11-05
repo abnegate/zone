@@ -246,7 +246,6 @@ pub struct ListTasksQuery {
 pub struct CreateTaskRequest {
     #[serde(default)]
     project_ids: Vec<Uuid>,
-    /// Without one, the task is titled from its description.
     title: Option<String>,
     description: String,
     acceptance_criteria: Option<String>,
@@ -401,15 +400,9 @@ pub async fn create(
         Ok(user_id) => user_id,
         Err(response) => return *response,
     };
-    let titled = request
-        .title
-        .as_deref()
-        .is_some_and(|title| !title.trim().is_empty());
-    if !titled && request.description.trim().is_empty() {
-        return *denied(
-            StatusCode::BAD_REQUEST,
-            "A task needs a title or a description",
-        );
+    let title = tasks::given_title(request.title.as_deref());
+    if title.is_none() && request.description.trim().is_empty() {
+        return *denied(StatusCode::BAD_REQUEST, tasks::UNTITLED_AND_UNDESCRIBED);
     }
     match tasks::create_task_authorized(
         state.db(),
@@ -417,7 +410,7 @@ pub async fn create(
         tasks::Create {
             workspace_id,
             project_ids: &request.project_ids,
-            title: request.title.as_deref(),
+            title,
             description: &request.description,
             acceptance_criteria: request.acceptance_criteria.as_deref(),
             priority: request.priority,
@@ -475,13 +468,13 @@ pub async fn update(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-    Json(req): Json<UpdateTaskRequest>,
+    Json(request): Json<UpdateTaskRequest>,
 ) -> impl IntoResponse {
     let user_id = match user_id(&auth) {
         Ok(user_id) => user_id,
         Err(response) => return *response,
     };
-    if req
+    if request
         .title
         .as_deref()
         .is_some_and(|title| title.trim().is_empty())
@@ -493,16 +486,16 @@ pub async fn update(
         user_id,
         tasks::Patch {
             id,
-            title: req.title.as_deref(),
-            description: req.description.as_deref(),
-            acceptance_criteria: req.acceptance_criteria.as_deref(),
-            status: req.status.as_deref(),
-            priority: req.priority,
-            project_ids: req.project_ids.as_deref(),
-            require_plan_approval: req.require_plan_approval,
-            is_agentic: req.is_agentic,
-            source_id: req.source_id,
-            model_name: req.model_name.as_deref(),
+            title: request.title.as_deref().map(str::trim),
+            description: request.description.as_deref(),
+            acceptance_criteria: request.acceptance_criteria.as_deref(),
+            status: request.status.as_deref(),
+            priority: request.priority,
+            project_ids: request.project_ids.as_deref(),
+            require_plan_approval: request.require_plan_approval,
+            is_agentic: request.is_agentic,
+            source_id: request.source_id,
+            model_name: request.model_name.as_deref(),
         },
     )
     .await

@@ -177,7 +177,7 @@ async fn a_title_the_user_typed_is_kept_and_never_generated() {
     let fixture = Fixture::new(answering(GENERATED)).await;
 
     let (status, body) = fixture
-        .create(json!({"title": "Safari sign-in", "description": DESCRIPTION}))
+        .create(json!({"title": "  Safari sign-in ", "description": DESCRIPTION}))
         .await;
 
     assert_eq!(status, StatusCode::CREATED);
@@ -247,6 +247,74 @@ async fn a_failed_generation_keeps_the_placeholder() {
     let settled = fixture.settled(id(&body["task"])).await;
     assert_eq!(settled.title, tasks::placeholder_title(DESCRIPTION));
     assert_eq!(fixture.requests().await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_placeholder_whose_generation_was_lost_is_kept() {
+    let fixture = Fixture::new(answering(GENERATED)).await;
+    let created = actions::create_task(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.user,
+        actions::Task {
+            title: None,
+            description: DESCRIPTION.to_string(),
+            assignee_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let fresh = actions::create_task(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.user,
+        actions::Task {
+            title: None,
+            description: DESCRIPTION.to_string(),
+            assignee_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE tasks SET created_at = NOW() - INTERVAL '10 minutes' WHERE id = $1")
+        .bind(id(&created))
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+    assert!(tasks::settle_stale_titles(&fixture.pool).await.unwrap() >= 1);
+
+    let abandoned = fixture.task(id(&created)).await;
+    assert!(!abandoned.title_pending);
+    assert_eq!(abandoned.title, tasks::placeholder_title(DESCRIPTION));
+    assert!(fixture.task(id(&fresh)).await.title_pending);
+    assert!(
+        !titles::title_task(&fixture.state, id(&created))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_task_the_server_creates_keeps_the_title_it_was_given() {
+    let fixture = Fixture::new(answering(GENERATED)).await;
+
+    let task = tasks::create_task(
+        &fixture.pool,
+        fixture.workspace,
+        &[],
+        "",
+        DESCRIPTION,
+        None,
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(!task.title_pending);
+    assert_eq!(task.title, "");
 }
 
 #[tokio::test]

@@ -77,8 +77,6 @@ impl Status {
     }
 }
 
-const UNTITLED_AND_UNDESCRIBED: &str = "Give the task a title or a description";
-
 pub fn invalid(message: &str) -> sqlx::Error {
     sqlx::Error::Protocol(message.to_owned())
 }
@@ -120,10 +118,12 @@ pub async fn create_task(
     user_id: Uuid,
     input: Task,
 ) -> DbResult<Value> {
-    let (title, title_pending) =
-        super::tasks::stored_title(input.title.as_deref(), &input.description);
+    let (title, title_pending) = super::tasks::stored_title(
+        super::tasks::given_title(input.title.as_deref()),
+        &input.description,
+    );
     if title_pending && input.description.trim().is_empty() {
-        return Err(invalid(UNTITLED_AND_UNDESCRIBED));
+        return Err(invalid(super::tasks::UNTITLED_AND_UNDESCRIBED));
     }
     let mut transaction = pool.begin().await?;
     authorize(&mut transaction, workspace_id, user_id, true).await?;
@@ -312,7 +312,7 @@ pub async fn start_task(
         super::tasks::Create {
             workspace_id,
             project_ids: &input.project_ids,
-            title: input.title.as_deref().map(str::trim),
+            title: super::tasks::given_title(input.title.as_deref()),
             description: input.description.trim(),
             acceptance_criteria: input.acceptance_criteria.as_deref(),
             priority: input.priority,
@@ -342,6 +342,7 @@ pub async fn start_task(
         "task_id": task.id,
         "run_id": run.id,
         "title": task.title,
+        "title_pending": task.title_pending,
         "is_agentic": true,
         "status": run.status,
         RUNNER_MESSAGE: RUNNER_STARTED
