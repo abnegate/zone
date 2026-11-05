@@ -18,6 +18,7 @@ pub async fn source(
     if let Some(id) = pull_request.source_id
         && let Some(source) = sources::get_source(state.db(), id, workspace_id).await?
         && usable(&source)
+        && source.credentials_encrypted.is_some()
     {
         return Ok(Some(source));
     }

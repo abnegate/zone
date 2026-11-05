@@ -133,8 +133,9 @@ pub async fn get_source(
     .await
 }
 
-/// The workspace's oldest active source of `source_type` configured for the
-/// repository `owner/repo`, matched as GitHub matches names, without case.
+/// The workspace's oldest active source of `source_type` that holds a
+/// credential for the repository `owner/repo`, matched without case as GitHub
+/// matches names.
 pub async fn get_repository_source(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -148,6 +149,7 @@ pub async fn get_repository_source(
                is_active, last_verified_at, last_error, created_at, updated_at, workspace_id
         FROM sources
         WHERE workspace_id = $1 AND source_type = $2 AND is_active IS NOT FALSE
+          AND credentials_encrypted IS NOT NULL
           AND lower(config->>'owner') = lower($3) AND lower(config->>'repo') = lower($4)
         ORDER BY created_at, id
         LIMIT 1

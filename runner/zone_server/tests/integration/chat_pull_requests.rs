@@ -728,6 +728,49 @@ async fn draft_and_auto_merge_changes_wait_for_the_abnegate_vcs_release() {
 }
 
 #[tokio::test]
+async fn a_source_without_a_credential_never_stands_in_for_one_that_has_one() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    let bare = sources::create_source(
+        workspace.state.db(),
+        workspace.workspace,
+        &format!("widgets-bare-{}", Uuid::new_v4()),
+        "github",
+        json!({"owner": "acme", "repo": "widgets"}),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("a source without a credential")
+    .id;
+    workspace.connect_github().await;
+    let id = chat_pull_requests::record(
+        workspace.state.db(),
+        &NewPullRequest {
+            chat_id: workspace.chat,
+            owner: "acme",
+            repo: "widgets",
+            number: 12,
+            url: &link(&github, 12),
+            title: None,
+            source_id: Some(bare),
+        },
+    )
+    .await
+    .expect("a pull request opened through the bare source")
+    .id;
+
+    let listed = workspace.listed(&workspace.token).await;
+    assert_eq!(listed[0]["id"], id.to_string(), "{listed}");
+    assert_eq!(listed[0]["credentialed"], true, "{listed}");
+    assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
+}
+
+#[tokio::test]
 async fn the_diff_is_read_with_the_sources_credential() {
     let github = MockServer::start().await;
     let diff = "diff --git a/src/widgets.rs b/src/widgets.rs\n+pub struct Widget;\n";
