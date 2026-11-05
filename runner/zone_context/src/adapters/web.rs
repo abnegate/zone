@@ -1107,7 +1107,7 @@ mod tests {
             .dns_resolver(RefusingResolver)
             .build()
             .expect("a client")
-            .get("http://inside.example/?token=hunter2")
+            .get("https://inside.example/?token=hunter2")
             .send()
             .await
             .expect_err("the resolver refuses the name");
