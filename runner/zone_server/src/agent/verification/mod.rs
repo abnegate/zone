@@ -42,7 +42,6 @@ mod role;
 mod roots;
 #[cfg(test)]
 pub(crate) mod scaffold;
-mod secrets;
 mod surface;
 mod validation;
 mod verdict;
@@ -60,6 +59,5 @@ pub use recipe::Recipe;
 pub use references::{Language, Reference, references};
 pub use role::Role;
 pub use roots::{Root, RootError, Roots, Tree};
-pub use secrets::secret_like;
 pub use surface::Surface;
 pub use verdict::Verdict;
