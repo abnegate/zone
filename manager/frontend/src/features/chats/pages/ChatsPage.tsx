@@ -50,8 +50,8 @@ import {
   useChatPullRequests,
   useChatSearch,
   useChatSources,
-  useChatTasks,
   useChats,
+  useChatTasks,
   useWorkspaceChatProviders,
 } from '../hooks';
 import {
