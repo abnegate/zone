@@ -576,7 +576,7 @@ fn is_continuation(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, SignIn};
-    use crate::llm::provider::{Observer, Output, Subagent};
+    use crate::llm::provider::{Observer, Output, Subagent, SubagentStatus};
     use crate::llm::provider::{Occupancy, UNFUNDED, UNFUNDED_CONTEXT};
     use crate::tools::test_support::captured_logs;
     use abnegate_llm::{Credential, RequestOptions};
@@ -2058,6 +2058,83 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         assert!(
             arguments.iter().any(|argument| argument == "--tools"),
             "the agent kept its own file and shell tools: {arguments:?}"
+        );
+    }
+
+    #[derive(Debug, Default)]
+    struct Tracked(std::sync::Mutex<Vec<Subagent>>);
+
+    impl Observer for Tracked {
+        fn observe(&self, _output: &Output) {}
+
+        fn track(&self, subagent: &Subagent) {
+            self.0
+                .lock()
+                .expect("the tracked subagents")
+                .push(subagent.clone());
+        }
+    }
+
+    /// Every update the parser reads goes to the observer as it arrives, the
+    /// background subagent's news after the turn's first result among them,
+    /// and none of it, nor any of a subagent's own calls, reaches the reader.
+    #[tokio::test]
+    async fn news_of_a_subagent_reaches_the_observer_and_never_the_reader() {
+        const STREAM: &str = include_str!("parser/fixtures/claude/subagents.jsonl");
+        let directory = TempDir::new().expect("a temporary directory");
+        let tracked = Arc::new(Tracked::default());
+        let settings = replayed(&directory, STREAM).with_observer(tracked.clone());
+        let provider = CliProvider::agent(AgentKind::Claude, settings);
+
+        let (events, failure, _) = streamed(&provider).await;
+
+        assert!(failure.is_none(), "{failure:?}");
+        let mut reader = AgentKind::Claude.reader();
+        let mut parsed = Vec::new();
+        for line in STREAM.lines() {
+            reader.interpret(line, &mut parsed);
+        }
+        let expected: Vec<Subagent> = parsed
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::Subagent(subagent) => Some(subagent),
+                _ => None,
+            })
+            .collect();
+        let tracked = tracked.0.lock().expect("the tracked subagents").clone();
+        assert_eq!(tracked, expected);
+        assert_eq!(
+            tracked.last(),
+            Some(&Subagent {
+                status: Some(SubagentStatus::Completed),
+                tool_uses: Some(3),
+                duration_ms: Some(61_000),
+                tokens: Some(21_000),
+                summary: Some("The change is sound and its tests pass.".to_string()),
+                ..Subagent::new("toolu_04Review")
+            })
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Subagent(_))),
+            "{events:?}"
+        );
+        let tools: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Tool(call) => Some(call.function.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools, ["Agent", "Agent", "Bash"]);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::Finished { .. }))
+                .count(),
+            2,
+            "the stream reads on past the first result: {events:?}"
         );
     }
 }
