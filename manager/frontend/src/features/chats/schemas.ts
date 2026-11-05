@@ -1,7 +1,14 @@
 import { z } from 'zod';
 import { AiProviderSchema } from '../settings/workspace/schemas';
 import { REASONING_EFFORT_LABELS, type ReasoningEffort } from './provider';
-import { ACTION_TARGETS, HANDOVER_AGENTS, HANDOVER_REASONS } from './types';
+import {
+  ACTION_TARGETS,
+  HANDOVER_AGENTS,
+  HANDOVER_REASONS,
+  PULL_REQUEST_CHECKS,
+  PULL_REQUEST_MERGEABILITY,
+  PULL_REQUEST_STATES,
+} from './types';
 
 export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);
 
@@ -445,4 +452,43 @@ export const ChatSearchResultSchema = z
 export const ChatSearchResponseSchema = z.object({
   results: z.array(ChatSearchResultSchema),
   total: z.number(),
+});
+
+export const PullRequestStatusSchema = z.object({
+  title: z.string(),
+  state: z.enum(PULL_REQUEST_STATES).catch('open'),
+  draft: z.boolean(),
+  additions: z.number(),
+  deletions: z.number(),
+  changed_files: z.number(),
+  checks: z.enum(PULL_REQUEST_CHECKS).catch('unknown'),
+  mergeable: z.enum(PULL_REQUEST_MERGEABILITY).catch('unknown'),
+  auto_merge: z.object({
+    enabled: z.boolean(),
+    unavailable: z.string().nullable(),
+  }),
+  observed_at: z.string(),
+});
+
+export const ChatPullRequestSchema = z.object({
+  id: z.string(),
+  provider: z.string(),
+  owner: z.string(),
+  repo: z.string(),
+  number: z.number(),
+  url: z.string(),
+  title: z.string().nullable(),
+  dismissed: z.boolean(),
+  created_at: z.string(),
+  status: PullRequestStatusSchema.nullable().catch(null),
+  actionable: z.boolean(),
+});
+
+export const ChatPullRequestsResponseSchema = z.object({
+  pull_requests: tolerantArray(ChatPullRequestSchema).default([]),
+});
+
+export const PullRequestDiffSchema = z.object({
+  diff: z.string(),
+  truncated: z.boolean(),
 });

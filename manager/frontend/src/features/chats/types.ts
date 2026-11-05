@@ -473,3 +473,63 @@ export interface ContextUsage {
   updated_at: string;
   reason?: string | null;
 }
+
+export const PULL_REQUEST_STATES = ['open', 'closed', 'merged'] as const;
+export type PullRequestState = (typeof PULL_REQUEST_STATES)[number];
+
+export const PULL_REQUEST_CHECKS = ['passing', 'failing', 'pending', 'none', 'unknown'] as const;
+export type PullRequestChecks = (typeof PULL_REQUEST_CHECKS)[number];
+
+export const PULL_REQUEST_MERGEABILITY = [
+  'clean',
+  'blocked',
+  'behind',
+  'conflicted',
+  'unstable',
+  'draft',
+  'unknown',
+] as const;
+export type PullRequestMergeability = (typeof PULL_REQUEST_MERGEABILITY)[number];
+
+export interface PullRequestAutoMerge {
+  enabled: boolean;
+  unavailable: string | null;
+}
+
+export interface PullRequestStatus {
+  title: string;
+  state: PullRequestState;
+  draft: boolean;
+  additions: number;
+  deletions: number;
+  changed_files: number;
+  checks: PullRequestChecks;
+  mergeable: PullRequestMergeability;
+  auto_merge: PullRequestAutoMerge;
+  observed_at: string;
+}
+
+export interface ChatPullRequest {
+  id: string;
+  provider: string;
+  owner: string;
+  repo: string;
+  number: number;
+  url: string;
+  title: string | null;
+  dismissed: boolean;
+  created_at: string;
+  status: PullRequestStatus | null;
+  actionable: boolean;
+}
+
+export interface PullRequestChange {
+  dismissed?: boolean;
+  draft?: boolean;
+  auto_merge?: boolean;
+}
+
+export interface PullRequestDiff {
+  diff: string;
+  truncated: boolean;
+}
