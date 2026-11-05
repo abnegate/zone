@@ -376,11 +376,8 @@ fn fetch_error(error: abnegate_http::Error) -> ContextError {
 }
 
 fn body_error(error: abnegate_http::Error) -> ContextError {
-    if matches!(error, abnegate_http::Error::OversizedBody { .. }) {
-        return ContextError::ContentTooLarge {
-            size_bytes: MAXIMUM_RESPONSE_BYTES + 1,
-            max_bytes: MAXIMUM_RESPONSE_BYTES,
-        };
+    if let abnegate_http::Error::OversizedBody { limit, .. } = error {
+        return ContextError::ContentOverLimit { max_bytes: limit };
     }
     ContextError::adapter(
         "web",
@@ -400,14 +397,10 @@ fn refusal(error: &abnegate_http::Error) -> Option<&abnegate_http::Error> {
 }
 
 fn described(error: &dyn std::error::Error) -> String {
-    let mut description = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        description.push_str(": ");
-        description.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    description
+    std::iter::successors(Some(error), |cause| cause.source())
+        .map(|cause| cause.to_string().trim_end_matches('.').to_string())
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 fn charset(content_type: &str) -> &'static Encoding {
@@ -971,32 +964,36 @@ mod tests {
     }
 
     const CHUNK_BYTES: usize = 1024 * 1024;
+    const REQUEST_BYTES: usize = 4_096;
+    const CHUNKED_HEAD: &[u8] =
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ntransfer-encoding: chunked\r\n\r\n";
 
-    async fn serve_chunked(chunks: usize) -> Url {
+    async fn serve_raw(parts: Vec<Vec<u8>>) -> Url {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a loopback port");
         let address = listener.local_addr().expect("a bound address");
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("a connection");
-            let mut request = [0_u8; 4_096];
+            let mut request = [0_u8; REQUEST_BYTES];
             let _ = stream.read(&mut request).await;
-            let head =
-                b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ntransfer-encoding: chunked\r\n\r\n";
-            if stream.write_all(head).await.is_err() {
-                return;
-            }
-            let mut chunk = format!("{CHUNK_BYTES:x}\r\n").into_bytes();
-            chunk.extend(std::iter::repeat_n(b'x', CHUNK_BYTES));
-            chunk.extend_from_slice(b"\r\n");
-            for _ in 0..chunks {
-                if stream.write_all(&chunk).await.is_err() {
+            for part in parts {
+                if stream.write_all(&part).await.is_err() {
                     return;
                 }
             }
-            let _ = stream.write_all(b"0\r\n\r\n").await;
         });
         Url::parse(&format!("http://{address}/")).expect("a URL")
+    }
+
+    async fn serve_chunked(chunks: usize) -> Url {
+        let mut chunk = format!("{CHUNK_BYTES:x}\r\n").into_bytes();
+        chunk.extend(std::iter::repeat_n(b'x', CHUNK_BYTES));
+        chunk.extend_from_slice(b"\r\n");
+        let mut parts = vec![CHUNKED_HEAD.to_vec()];
+        parts.extend(std::iter::repeat_n(chunk, chunks));
+        parts.push(b"0\r\n\r\n".to_vec());
+        serve_raw(parts).await
     }
 
     #[tokio::test]
@@ -1011,10 +1008,29 @@ mod tests {
         assert!(
             matches!(
                 error,
-                ContextError::ContentTooLarge {
-                    max_bytes: MAXIMUM_RESPONSE_BYTES,
-                    ..
+                ContextError::ContentOverLimit {
+                    max_bytes: MAXIMUM_RESPONSE_BYTES
                 }
+            ),
+            "the size of a body read only up to the cap is unknown: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_cut_off_mid_stream_says_why_in_one_sentence() {
+        let url = serve_raw(vec![CHUNKED_HEAD.to_vec(), b"400\r\npartial".to_vec()]).await;
+
+        let error = WebAdapter::new_for_testing()
+            .fetch_url(&url)
+            .await
+            .expect_err("the connection closes inside a chunk");
+
+        assert!(
+            matches!(
+                error,
+                ContextError::Adapter { ref message, .. }
+                    if message.starts_with("Failed to read response: Could not read the response body: ")
+                        && !message.contains(".:")
             ),
             "{error:?}"
         );
