@@ -114,6 +114,8 @@ pub struct Create<'a> {
     pub source_id: Option<Uuid>,
     /// Recorded as `tasks.created_by`; a task without one gets no agent tools.
     pub created_by: Option<Uuid>,
+    /// The chat whose agent created the task; kept only when that chat is in the task's workspace.
+    pub chat_id: Option<Uuid>,
 }
 
 /// Sparse values accepted by an atomic task update.
@@ -558,6 +560,7 @@ pub async fn create_task(
         require_plan_approval: false,
         source_id,
         created_by: None,
+        chat_id: None,
     };
     let mut transaction = pool.begin().await?;
     let task = create_in(&mut transaction, &input).await?;
@@ -634,8 +637,8 @@ async fn insert_task(connection: &mut PgConnection, input: &Create<'_>) -> DbRes
     let (title, title_pending) = stored_title(input.title, input.description);
     let row = sqlx::query!(
         r#"
-        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by, title_pending)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by, title_pending, chat_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (SELECT id FROM chats WHERE id = $11 AND workspace_id = $1))
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
@@ -650,7 +653,8 @@ async fn insert_task(connection: &mut PgConnection, input: &Create<'_>) -> DbRes
         input.require_plan_approval,
         input.source_id,
         input.created_by,
-        title_pending
+        title_pending,
+        input.chat_id
     )
     .fetch_one(&mut *connection)
     .await?;
@@ -1106,6 +1110,7 @@ pub async fn create_task_as(
         require_plan_approval: false,
         source_id,
         created_by: actor,
+        chat_id: None,
     };
     let Some(actor) = actor else {
         let mut transaction = pool.begin().await?;

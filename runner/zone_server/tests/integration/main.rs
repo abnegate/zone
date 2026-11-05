@@ -40,6 +40,7 @@ mod chat_sandbox;
 mod chat_search;
 mod chat_sessions;
 mod chat_sources;
+mod chat_tasks;
 mod chat_title;
 mod chat_vision_history;
 mod chat_ws;
