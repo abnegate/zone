@@ -768,6 +768,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
             CliSettings::default(),
         ))),
         route.endpoint().expect("a usable route").clone(),
+        None,
     )
     .await
     .expect("a turn on an agent is prepared");
@@ -778,6 +779,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         None,
         Mode::Generation(session::Generation::unrouted(LlmBackend::Http)),
         route.into_endpoint().expect("a usable route"),
+        None,
     )
     .await
     .expect("a turn on the endpoint is prepared");

@@ -301,6 +301,7 @@ pub fn carried(whole: &RunContext) -> RunContext {
         incomplete: whole.incomplete,
         artifacts: whole.artifacts.clone(),
         vision: whole.vision,
+        reported: whole.reported,
     }
 }
 
