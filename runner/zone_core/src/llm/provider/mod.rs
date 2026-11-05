@@ -27,7 +27,9 @@ mod agent;
 mod cli;
 mod event;
 mod lines;
+mod occupancy;
 mod parser;
+mod rollout;
 mod session;
 mod settings;
 mod transcript;
@@ -36,6 +38,7 @@ pub use agent::{AgentKind, Delivery};
 pub use cli::{AgentStream, CliProvider, OUTGROWN, STDERR_HEADING};
 pub use event::{AgentEvent, activity};
 pub use lines::{Frame, Lines};
+pub use occupancy::Occupancy;
 pub use parser::claude::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
 pub use session::Session;
 pub use settings::{

@@ -1,11 +1,14 @@
 //! Reading `claude --output-format stream-json`.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::llm::provider::event::AgentEvent;
+use crate::llm::provider::occupancy::Occupancy;
 use crate::llm::window;
 use abnegate_llm::{Limit, ToolCall, Usage, Window};
 
@@ -131,6 +134,8 @@ enum Event {
         usage: Option<TokenCounts>,
         #[serde(default, deserialize_with = "lenient")]
         api_error_status: Option<u16>,
+        #[serde(default, rename = "modelUsage", deserialize_with = "lenient")]
+        model_usage: Option<BTreeMap<String, ModelUsage>>,
     },
     #[serde(rename = "rate_limit_event")]
     RateLimit {
@@ -144,9 +149,18 @@ enum Event {
 #[derive(Debug, Deserialize)]
 struct AssistantMessage {
     #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
     content: Vec<Block>,
     #[serde(default)]
     usage: Option<TokenCounts>,
+}
+
+/// What a result reports for one model the turn ran on.
+#[derive(Debug, Deserialize)]
+struct ModelUsage {
+    #[serde(default, rename = "contextWindow")]
+    context_window: Option<u64>,
 }
 
 impl AssistantMessage {
@@ -309,6 +323,22 @@ struct TokenCounts {
     cache_creation_input_tokens: u32,
 }
 
+impl TokenCounts {
+    /// Every token the request sent and its answer took: the share of the
+    /// window the request filled.
+    fn filled(&self) -> u64 {
+        [
+            self.input_tokens,
+            self.cache_read_input_tokens,
+            self.cache_creation_input_tokens,
+            self.output_tokens,
+        ]
+        .into_iter()
+        .map(u64::from)
+        .sum()
+    }
+}
+
 impl From<TokenCounts> for Usage {
     fn from(counts: TokenCounts) -> Self {
         let prompt_tokens = counts
@@ -340,6 +370,11 @@ pub struct Reader {
     resets_at: Option<DateTime<Utc>>,
     window: Option<Window>,
     credits: Credits,
+    /// The model the main agent's requests ran on, which names its window
+    /// among every model the result reports.
+    model: Option<String>,
+    /// The tokens the main agent's latest request and its answer took.
+    used: Option<u64>,
 }
 
 impl Reader {
@@ -370,7 +405,11 @@ impl Reader {
                 result,
                 usage,
                 api_error_status,
-            } => self.result(subtype, is_error, result, usage, api_error_status, events),
+                model_usage,
+            } => {
+                events.extend(self.occupancy(model_usage).map(AgentEvent::Occupancy));
+                self.result(subtype, is_error, result, usage, api_error_status, events);
+            }
             Event::RateLimit {
                 rate_limit_info: Some(info),
             } => self.observe(&info, events),
@@ -424,6 +463,12 @@ impl Reader {
         let Some(message) = message else {
             return;
         };
+        if let Some(model) = message.model.as_ref().filter(|model| !model.is_empty()) {
+            self.model = Some(model.clone());
+        }
+        if let Some(counts) = &message.usage {
+            self.used = Some(counts.filled());
+        }
         for block in message.content {
             match block {
                 Block::Text { text } => events.push(AgentEvent::Text(text)),
@@ -433,6 +478,24 @@ impl Reader {
         if let Some(usage) = message.usage {
             events.push(AgentEvent::Usage(usage.into()));
         }
+    }
+
+    /// The window of the model the main agent ran on, else the widest the
+    /// result reports, with what the main agent's latest request filled.
+    fn occupancy(&self, usage: Option<BTreeMap<String, ModelUsage>>) -> Option<Occupancy> {
+        let usage = usage?;
+        let window = self
+            .model
+            .as_deref()
+            .and_then(|model| usage.get(model))
+            .and_then(|entry| entry.context_window)
+            .or_else(|| {
+                usage
+                    .values()
+                    .filter_map(|entry| entry.context_window)
+                    .max()
+            });
+        Occupancy::reported(window, self.used)
     }
 
     fn result(
@@ -1730,5 +1793,76 @@ mod tests {
             .as_str(),
         );
         assert!(events.is_empty(), "noise produced {events:?}");
+    }
+
+    /// A turn whose main agent ran on one model and its subagent on a wider
+    /// one, in the shape claude 2.1.300's result reports `modelUsage` in.
+    const CONTEXT_WINDOW_STREAM: &str = include_str!("fixtures/claude/context-window.jsonl");
+
+    fn occupancies(events: &[AgentEvent]) -> Vec<Occupancy> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Occupancy(occupancy) => Some(*occupancy),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_result_reports_the_main_models_window_and_its_last_request() {
+        let events = interpret_all(CONTEXT_WINDOW_STREAM);
+
+        assert_eq!(
+            occupancies(&events),
+            [Occupancy {
+                window: 200_000,
+                used: Some(3 + 120 + 16_500 + 9),
+            }],
+            "the subagent's wider model and request are not the main agent's: {events:?}"
+        );
+        let finished = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::Finished { .. }));
+        let reported = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::Occupancy(_)));
+        assert!(
+            reported < finished,
+            "reported before the turn ends: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_result_naming_no_main_model_reports_its_widest_window() {
+        let stream: String = CONTEXT_WINDOW_STREAM
+            .lines()
+            .filter(|line| !line.contains(r#""parent_tool_use_id":null"#))
+            .map(|line| format!("{line}\n"))
+            .collect();
+
+        assert_eq!(
+            occupancies(&interpret_all(&stream)),
+            [Occupancy {
+                window: 1_000_000,
+                used: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_result_without_model_usage_reports_no_window() {
+        assert!(occupancies(&interpret_all(SESSION)).is_empty());
+        let unusable = CONTEXT_WINDOW_STREAM.replace(
+            r#""modelUsage":{"#,
+            r#""modelUsage":"unreported","replaced":{"#,
+        );
+        assert!(occupancies(&interpret_all(&unusable)).is_empty());
+        assert!(
+            interpret_all(&unusable)
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Finished { .. })),
+            "a modelUsage in another shape still finishes the turn"
+        );
     }
 }
