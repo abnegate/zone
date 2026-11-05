@@ -3,9 +3,6 @@ import { type ReactElement, useEffect, useRef, useState } from 'react';
 import type { QueuedMessage } from '../types';
 import './QueueItem.css';
 
-const RUNNING_LABEL = 'Queued';
-const HELD_LABEL = 'Queued · held after stop';
-
 interface QueueItemProps {
   message: QueuedMessage;
   held: boolean;
@@ -39,7 +36,12 @@ export function QueueItem({
   };
 
   return (
-    <div className="message message-user queue-item" data-testid="queued-message">
+    <div
+      className="message message-user queue-item"
+      role="group"
+      aria-label="Queued message"
+      data-testid="queued-message"
+    >
       {editing ? (
         <textarea
           ref={editor}
@@ -61,7 +63,6 @@ export function QueueItem({
         <div className="message-content queue-item-content">{message.content}</div>
       )}
       <div className="queue-item-footer">
-        <span className="queue-item-label">{held ? HELD_LABEL : RUNNING_LABEL}</span>
         {editing ? (
           <>
             <Button type="button" variant="ghost" size="sm" onClick={() => setDraft(null)}>
