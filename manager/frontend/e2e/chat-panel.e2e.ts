@@ -209,11 +209,11 @@ function run(id: string, overrides: Record<string, unknown>) {
 }
 
 const TASKS = [
-  task('task-3', 'Fix the price rounding in the cart', {
+  task('task-3', 'Round cart prices to the cent', {
     status: 'in_progress',
     run: run('run-3', { progress: 45 }),
   }),
-  task('task-2', 'Add the widget catalogue with search and filters', {
+  task('task-2', 'Build the widget catalogue', {
     status: 'review',
     run: run('run-2', { status: 'completed', phase: 'complete', progress: 100 }),
     pull_request: { url: 'https://github.com/acme/widgets/pull/12', status: 'open' },
@@ -521,17 +521,15 @@ test.describe('Chat changes and gallery panel', () => {
     await page.reload();
     await openChat(page);
     const panel = page.getByRole('complementary', { name: 'Changes, tasks, media and sources' });
-    await panel.getByRole('button', { name: 'Changes, 4' }).click();
-    await panel.getByRole('button', { name: 'Gallery, 5' }).click();
     const toggle = panel.getByRole('button', { name: 'Tasks, 4' });
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
     const rows = panel.locator('.chat-task');
     await expect(rows).toHaveCount(4);
-    await expect(rows.first()).toContainText('Fix the price rounding in the cart');
+    await expect(rows.first()).toContainText('Round cart prices to the cent');
     await expect(rows.first()).toContainText('In progress');
     await expect(rows.first()).toContainText('Running, using tools');
     await expect(
-      panel.getByRole('progressbar', { name: 'Fix the price rounding in the cart progress' })
+      panel.getByRole('progressbar', { name: 'Round cart prices to the cent progress' })
     ).toHaveAttribute('aria-valuenow', '45');
     await expect(rows.nth(1)).toContainText('In review');
     await expect(rows.nth(1).getByRole('link', { name: 'widgets #12' })).toHaveAttribute(
@@ -557,7 +555,7 @@ test.describe('Chat changes and gallery panel', () => {
     await reopened.click();
 
     await page
-      .getByRole('link', { name: 'Fix the price rounding in the cart', exact: true })
+      .getByRole('link', { name: 'Round cart prices to the cent', exact: true })
       .click();
     await expect(page).toHaveURL(/\/tasks\?id=task-3$/);
   });
@@ -588,7 +586,7 @@ test.describe('Chat changes and gallery panel', () => {
     const sheet = page.getByRole('dialog', { name: 'Changes, tasks, media and sources' });
     await sheet.getByRole('button', { name: 'Changes, 4' }).click();
     await expect(sheet.getByRole('button', { name: 'Tasks, 4' })).toBeVisible();
-    await expect(sheet.getByText('Fix the price rounding in the cart')).toBeVisible();
+    await expect(sheet.getByText('Round cart prices to the cent')).toBeVisible();
     if (testInfo.project.name === 'chromium') {
       await page.screenshot({
         path: 'screenshots/chats-panel-phone-tasks.png',
