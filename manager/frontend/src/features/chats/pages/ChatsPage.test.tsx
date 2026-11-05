@@ -1817,7 +1817,7 @@ describe('ChatsPage', () => {
         const item = screen.getByTestId('queued-message');
         expect(within(item).queryByText(/queued/i)).not.toBeInTheDocument();
         expect(within(item).getByText('and make it blue')).toBeInTheDocument();
-        expect(within(item).getByRole('button', { name: 'Interrupt now' })).toBeInTheDocument();
+        expect(within(item).getByRole('button', { name: 'Interrupt' })).toBeInTheDocument();
         expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
       });
 
@@ -1855,7 +1855,7 @@ describe('ChatsPage', () => {
         await queueBehindTheTurn();
         const { id } = frames().at(-1);
 
-        fireEvent.click(screen.getByRole('button', { name: 'Interrupt now' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }));
         expect(frames().at(-1)).toEqual({ type: 'interrupt', id });
 
         act(() => {
@@ -1918,9 +1918,7 @@ describe('ChatsPage', () => {
         });
 
         const item = screen.getByTestId('queued-message');
-        expect(
-          within(item).queryByRole('button', { name: 'Interrupt now' })
-        ).not.toBeInTheDocument();
+        expect(within(item).queryByRole('button', { name: 'Interrupt' })).not.toBeInTheDocument();
         fireEvent.click(within(item).getByRole('button', { name: 'Send now' }));
         expect(frames().at(-1)).toEqual({ type: 'interrupt', id });
       });

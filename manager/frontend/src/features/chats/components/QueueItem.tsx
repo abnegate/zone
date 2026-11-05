@@ -102,7 +102,7 @@ export function QueueItem({
               size="sm"
               onClick={() => onInterrupt(message.id)}
             >
-              {held ? 'Send now' : 'Interrupt now'}
+              {held ? 'Send now' : 'Interrupt'}
             </Button>
           </>
         )}
