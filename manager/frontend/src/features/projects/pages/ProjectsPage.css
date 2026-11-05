@@ -593,6 +593,15 @@
   font-weight: 600;
 }
 
+.source-selection-new {
+  border-style: dashed;
+}
+
+.source-selection-icon.new {
+  background: var(--ui-accent-muted);
+  color: var(--ui-accent);
+}
+
 .source-selection-icon svg {
   width: var(--ui-icon-size);
   height: var(--ui-icon-size);

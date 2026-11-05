@@ -399,7 +399,9 @@ export default function ChatsPage() {
   );
   const permissionSummary = [
     `auto-approve ${autoApproved ? 'on' : 'off'}`,
-    ...(showSandbox ? [`Zone tools only ${sandboxed ? 'on' : 'off'}`] : []),
+    ...(showSandbox
+      ? [sandboxed ? 'Zone tools only on' : 'Host tools on (Zone tools only off)']
+      : []),
   ].join(', ');
   const meterCapacity = showChatContext
     ? selectedContextTokens(displayedChat?.context_tokens, chatNative)
