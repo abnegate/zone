@@ -1,4 +1,13 @@
-import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
+import { popoverOffset, viewportMargin } from '../utils';
 
 const SELECT_MENU = '[data-radix-popper-content-wrapper]';
 const OPEN_SELECT = '[role="combobox"][aria-expanded="true"]';
@@ -14,11 +23,6 @@ export interface HeaderPopoverProps {
   children: ReactNode;
 }
 
-/**
- * A pill in the chat header that opens a panel of further controls. The panel
- * stays mounted while closed, so a half-made choice inside it survives closing
- * unsaved: leaving the panel commits nothing.
- */
 export function HeaderPopover({
   className,
   testId,
@@ -30,6 +34,7 @@ export function HeaderPopover({
   children,
 }: HeaderPopoverProps) {
   const [open, setOpen] = useState(false);
+  const [offset, setOffset] = useState(0);
   const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -67,6 +72,37 @@ export function HeaderPopover({
     };
   }, [open]);
 
+  const place = useCallback(() => {
+    const element = root.current;
+    const width = panel.current?.offsetWidth ?? 0;
+    if (!element || width === 0) return;
+    setOffset(
+      popoverOffset(
+        element.getBoundingClientRect(),
+        width,
+        document.documentElement.clientWidth,
+        viewportMargin(element)
+      )
+    );
+  }, []);
+
+  useLayoutEffect(() => {
+    if (open) place();
+  });
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
+    for (const element of [root.current, root.current?.parentElement]) {
+      if (element) observer?.observe(element);
+    }
+    window.addEventListener('resize', place);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', place);
+    };
+  }, [open, place]);
+
   return (
     <div className="chat-header-popover" ref={root}>
       <button
@@ -102,6 +138,7 @@ export function HeaderPopover({
         aria-label={label}
         tabIndex={-1}
         hidden={!open}
+        style={{ left: offset }}
       >
         {children}
       </div>

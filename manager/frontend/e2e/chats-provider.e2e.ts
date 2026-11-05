@@ -275,6 +275,10 @@ for (const width of [1280, 1024, 900, 390]) {
         await page.getByTestId('chat-settings').click();
         await expect(page.getByTestId('chat-provider')).toBeVisible();
       };
+      const closeSettings = async () => {
+        await page.keyboard.press('Escape');
+        await expect(page.getByTestId('chat-settings')).toHaveAttribute('aria-expanded', 'false');
+      };
       const providerSelect = page.getByTestId('chat-provider');
       const modelSelect = page.getByTestId('chat-provider-model');
       const reasoningSelect = page.getByTestId('reasoning-effort');
@@ -282,6 +286,7 @@ for (const width of [1280, 1024, 900, 390]) {
       const sandbox = page.getByTestId('agent-sandbox-toggle');
 
       await openChat('chat-default', 'Release notes draft');
+      await closeSettings();
       await permissions.click();
       await expect(page.getByTestId('auto-approve-toggle')).toBeVisible();
       await expect(sandbox).toHaveCount(0);
@@ -311,6 +316,7 @@ for (const width of [1280, 1024, 900, 390]) {
       await expect(modelSelect).toContainText('Automatic');
       await expect(page.locator('.chat-settings-provider')).toHaveText('Claude Code');
       await expect(page.locator('.chat-model')).toHaveText('Automatic');
+      await closeSettings();
       await permissions.click();
       await expect(sandbox).toBeVisible();
       await expect(sandbox).toHaveAttribute('aria-pressed', 'true');
