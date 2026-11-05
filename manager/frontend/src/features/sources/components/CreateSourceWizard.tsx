@@ -16,6 +16,8 @@ interface CreateSourceWizardProps {
   createSource: (request: CreateSourceRequest) => Promise<Source>;
 }
 
+function keepOpen(): void {}
+
 const WIZARD_STEPS: WizardStep[] = [
   {
     id: 'type',
@@ -278,7 +280,7 @@ export function CreateSourceWizard({
       aria-labelledby={undefined}
       aria-label="Add Source"
       isOpen={isOpen}
-      onClose={handleClose}
+      onClose={loading ? keepOpen : handleClose}
       title="Add Source"
       subtitle="Connect a repository, calendar, email, or other data source"
       size="lg"

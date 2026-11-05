@@ -1,6 +1,6 @@
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { WizardStep } from '@zone/ui';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { client } from '../../../api/client';
 import { Button, Wizard } from '../../../components';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
@@ -68,26 +68,19 @@ export function CreateProjectWizard({
   const [description, setDescription] = useState('');
   const [status, setStatus] = useState<ProjectStatus>('active');
   const [sourceId, setSourceId] = useState('');
-  const [sources, setSources] = useState<Source[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [sourcesLoading, setSourcesLoading] = useState(false);
   const [creatingSource, setCreatingSource] = useState(false);
   const [focusedOption, setFocusedOption] = useState<string | null>(null);
   const canCreateSources = useCanCreateSources(workspaceId);
   const queryClient = useQueryClient();
 
-  useEffect(() => {
-    if (isOpen && workspaceId) {
-      setSourcesLoading(true);
-      client
-        .getSources(workspaceId)
-        .then(setSources)
-        .catch((err) => console.error('Failed to load sources:', err))
-        .finally(() => setSourcesLoading(false));
-    }
-  }, [isOpen, workspaceId]);
+  const { data: sources = [], isLoading: sourcesLoading } = useQuery({
+    queryKey: sourcesQueryKey(workspaceId),
+    queryFn: () => client.getSources(workspaceId as string),
+    enabled: isOpen && !!workspaceId,
+  });
 
   const handleStepChange = useCallback((step: number) => {
     setCurrentStep(step);
@@ -115,12 +108,11 @@ export function CreateProjectWizard({
 
   const handleSourceCreated = useCallback(
     (source: Source) => {
-      setSources((previous) =>
+      queryClient.setQueryData<Source[]>(sourcesQueryKey(workspaceId), (previous = []) =>
         previous.some((existing) => existing.id === source.id) ? previous : [...previous, source]
       );
       setSourceId(source.id);
       setFocusedOption(source.id);
-      queryClient.invalidateQueries({ queryKey: sourcesQueryKey(workspaceId) });
     },
     [queryClient, workspaceId]
   );
@@ -303,7 +295,7 @@ export function CreateProjectWizard({
     <>
       <Wizard
         isOpen={isOpen}
-        onClose={creatingSource ? keepOpen : handleClose}
+        onClose={creatingSource || loading ? keepOpen : handleClose}
         inert={creatingSource}
         title="New Project"
         subtitle="Create a new project to organize your work"

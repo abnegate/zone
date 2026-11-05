@@ -48,6 +48,7 @@ export function SourceStep({
           <button
             type="button"
             className={`source-selection-option ${!selectedId ? 'selected' : ''}`}
+            aria-pressed={!selectedId}
             onClick={() => onSelect('')}
           >
             <div className="source-selection-icon none">
@@ -76,6 +77,7 @@ export function SourceStep({
               }}
               type="button"
               className={`source-selection-option ${selectedId === source.id ? 'selected' : ''}`}
+              aria-pressed={selectedId === source.id}
               onClick={() => onSelect(source.id)}
             >
               <div className={`source-selection-icon ${source.source_type}`}>

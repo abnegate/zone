@@ -88,7 +88,6 @@ function renderWizard() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  queryClient.setQueryData(['sources', 'workspace-1'], [existing]);
   render(
     <QueryClientProvider client={queryClient}>
       <CreateProjectWizard
@@ -135,7 +134,9 @@ describe('CreateProjectWizard new source', () => {
     role = 'member';
     mockGetSources.mockReset();
     mockGetSources.mockImplementation(() => Promise.resolve([existing]));
-    mockCreateSource.mockClear();
+    mockCreateSource.mockReset();
+    mockCreateSource.mockImplementation(() => Promise.resolve(created));
+    mockGetWorkspaceMembers.mockClear();
     mockCreateProject.mockClear();
     mockClose.mockClear();
   });
@@ -151,10 +152,31 @@ describe('CreateProjectWizard new source', () => {
   it('hides the new source card from a viewer', async () => {
     role = 'viewer';
     const user = userEvent.setup();
-    renderWizard();
+    const queryClient = renderWizard();
     await reachSourceStep(user);
-    await waitFor(() => expect(mockGetWorkspaceMembers).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(queryClient.getQueryState(['workspaceRole', 'workspace-1', 'user-1'])?.status).toBe(
+        'success'
+      )
+    );
 
+    expect(within(projectDialog()).queryByRole('button', { name: /New source/ })).toBeNull();
+  });
+
+  it('points a viewer in an empty workspace to the Sources page', async () => {
+    role = 'viewer';
+    mockGetSources.mockImplementation(() => Promise.resolve([]));
+    const user = userEvent.setup();
+    const queryClient = renderWizard();
+    await user.type(within(projectDialog()).getByLabelText('Project Name'), 'Console');
+    await user.click(within(projectDialog()).getByRole('button', { name: 'Next' }));
+    await waitFor(() =>
+      expect(queryClient.getQueryState(['workspaceRole', 'workspace-1', 'user-1'])?.status).toBe(
+        'success'
+      )
+    );
+
+    expect(await within(projectDialog()).findByText('No sources available.')).toBeTruthy();
     expect(within(projectDialog()).queryByRole('button', { name: /New source/ })).toBeNull();
   });
 
@@ -166,10 +188,13 @@ describe('CreateProjectWizard new source', () => {
     await user.click(within(projectDialog()).getByRole('button', { name: 'Next' }));
     await within(projectDialog()).findByRole('button', { name: /New source/ });
 
-    const names = Array.from(
-      projectDialog().querySelectorAll('.source-selection-option .source-selection-name')
-    ).map((node) => node.textContent);
-    expect(names).toEqual(['No Source', 'New source']);
+    await waitFor(() =>
+      expect(
+        Array.from(
+          projectDialog().querySelectorAll('.source-selection-option .source-selection-name')
+        ).map((node) => node.textContent)
+      ).toEqual(['No Source', 'New source'])
+    );
     expect(projectDialog().querySelector('.wizard-empty-state')).toBeNull();
   });
 
@@ -190,9 +215,11 @@ describe('CreateProjectWizard new source', () => {
       })
     );
     expect(mockGetSources).toHaveBeenCalledTimes(1);
-    expect(queryClient.getQueryState(['sources', 'workspace-1'])?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryData(['sources', 'workspace-1'])).toEqual([existing, created]);
     expect(option('jbs').className).not.toContain('selected');
     expect(option('abnegate/zone').className).toContain('selected');
+    expect(option('abnegate/zone')).toHaveAttribute('aria-pressed', 'true');
+    expect(option('jbs')).toHaveAttribute('aria-pressed', 'false');
     expect(document.activeElement).toBe(option('abnegate/zone'));
 
     await user.click(within(projectDialog()).getByRole('button', { name: 'Previous' }));
@@ -248,6 +275,46 @@ describe('CreateProjectWizard new source', () => {
 
     await user.keyboard('{Escape}');
     expect(mockClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays open through Escape while the source is still being created', async () => {
+    let finish: (source: Source) => void = () => {};
+    mockCreateSource.mockImplementation(
+      () =>
+        new Promise<Source>((resolve) => {
+          finish = resolve;
+        })
+    );
+    const user = userEvent.setup();
+    renderWizard();
+    await reachSourceStep(user);
+    await user.click(option('jbs'));
+    const nested = await openNewSource(user);
+    await addGitHubSource(user, nested);
+    await waitFor(() => expect(mockCreateSource).toHaveBeenCalledTimes(1));
+
+    await user.keyboard('{Escape}');
+    expect(sourceDialog()).not.toBeNull();
+    expect(mockClose).not.toHaveBeenCalled();
+
+    finish(created);
+    await waitFor(() => expect(sourceDialog()).toBeNull());
+    expect(option('abnegate/zone').className).toContain('selected');
+  });
+
+  it('keeps the source wizard open with its error and the selection unchanged when creation fails', async () => {
+    mockCreateSource.mockImplementation(() => Promise.reject(new Error('Repository not found')));
+    const user = userEvent.setup();
+    renderWizard();
+    await reachSourceStep(user);
+    await user.click(option('jbs'));
+    const nested = await openNewSource(user);
+    await addGitHubSource(user, nested);
+
+    expect(await within(nested).findByText('Repository not found')).toBeTruthy();
+    expect(sourceDialog()).not.toBeNull();
+    expect(projectDialog().hasAttribute('inert')).toBe(true);
+    expect(option('jbs').className).toContain('selected');
   });
 
   it('hands focus back to the card even when clicking it never focused it, as in Safari', async () => {

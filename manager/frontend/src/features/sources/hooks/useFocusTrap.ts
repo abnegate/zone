@@ -11,7 +11,8 @@ const TABBABLE = [
 
 function tabbables(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(TABBABLE)).filter(
-    (element) => element.tabIndex >= 0
+    (element) =>
+      element.tabIndex >= 0 && !element.closest('[inert]') && element.getClientRects().length > 0
   );
 }
 
