@@ -183,7 +183,9 @@ test.describe('New project wizard: new source', () => {
 
   test('offers no new source card to a viewer', async ({ page }) => {
     await mockWorkspace(page, 'viewer');
+    const members = page.waitForResponse(/\/api\/workspaces\/[^/]+\/members$/);
     const project = await openSourceStep(page);
+    await members;
 
     await expect(project.getByRole('button', { name: /New source/ })).toHaveCount(0);
   });
