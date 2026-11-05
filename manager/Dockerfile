@@ -101,14 +101,153 @@ RUN set -eu; \
 
 FROM oven/bun:1.4.0-slim@sha256:e0ee68d16ccb9927bf02aa7dd8fd4bf3369ee6d46da04faa72b05ce8bfd135f6 AS bun
 
+FROM runtime-base AS fetch
+
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /fetch
+
+# Agents start with only HOME and PATH, so RUSTUP_HOME cannot reach them and
+# rustup's proxies would look for a toolchain in each agent's own HOME. The
+# toolchain is moved out of rustup and put on PATH directly instead.
+FROM fetch AS rust
+
+ARG TARGETARCH
+ARG RUSTUP_VERSION=1.29.3
+ARG RUSTUP_SHA256_AMD64=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
+ARG RUSTUP_SHA256_ARM64=9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282
+ARG RUST_VERSION=1.99.1
+
+RUN set -eu; \
+    case "$TARGETARCH" in \
+        amd64) triple=x86_64-unknown-linux-gnu; sha256=$RUSTUP_SHA256_AMD64 ;; \
+        arm64) triple=aarch64-unknown-linux-gnu; sha256=$RUSTUP_SHA256_ARM64 ;; \
+        *) echo "No Rust toolchain for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --proto '=https' --retry 3 -o rustup-init \
+        "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$triple/rustup-init"; \
+    echo "$sha256  rustup-init" | sha256sum -c -; \
+    chmod 0755 rustup-init; \
+    RUSTUP_HOME=/fetch/rustup CARGO_HOME=/fetch/cargo ./rustup-init -y --no-modify-path \
+        --profile minimal --default-toolchain "$RUST_VERSION" \
+        --component rustfmt --component clippy; \
+    mv "/fetch/rustup/toolchains/$RUST_VERSION-$triple" /opt/rust; \
+    rm -rf /fetch/*
+
+FROM fetch AS go
+
+ARG TARGETARCH
+ARG GO_VERSION=1.27.3
+ARG GO_SHA256_AMD64=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
+ARG GO_SHA256_ARM64=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
+
+RUN set -eu; \
+    case "$TARGETARCH" in \
+        amd64) sha256=$GO_SHA256_AMD64 ;; \
+        arm64) sha256=$GO_SHA256_ARM64 ;; \
+        *) echo "No Go release for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --proto '=https' --retry 3 -o go.tar.gz \
+        "https://go.dev/dl/go$GO_VERSION.linux-$TARGETARCH.tar.gz"; \
+    echo "$sha256  go.tar.gz" | sha256sum -c -; \
+    tar --no-same-owner -C /usr/local -xzf go.tar.gz; \
+    rm go.tar.gz
+
+# Maven Central publishes only a SHA-512 for Maven.
+FROM fetch AS jvm
+
+ARG GRADLE_VERSION=9.8.2
+ARG GRADLE_SHA256=21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607
+ARG MAVEN_VERSION=3.9.16
+ARG MAVEN_SHA512=831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6
+ARG KOTLIN_VERSION=2.4.21
+ARG KOTLIN_SHA256=7cc140e76daf416a0424a5557f99afd7ca89ebd463ea1101261e3e01c33e75cd
+
+RUN set -eu; \
+    fetch() { \
+        curl -fsSL --proto '=https' --retry 3 -o "$1" "$2"; \
+        echo "$4  $1" | "$3" -c -; \
+    }; \
+    fetch gradle.zip "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip" \
+        sha256sum "$GRADLE_SHA256"; \
+    fetch maven.tar.gz "https://repo1.maven.org/maven2/org/apache/maven/apache-maven/$MAVEN_VERSION/apache-maven-$MAVEN_VERSION-bin.tar.gz" \
+        sha512sum "$MAVEN_SHA512"; \
+    fetch kotlin.zip "https://github.com/JetBrains/kotlin/releases/download/v$KOTLIN_VERSION/kotlin-compiler-$KOTLIN_VERSION.zip" \
+        sha256sum "$KOTLIN_SHA256"; \
+    mkdir -p /opt/jvm/maven; \
+    unzip -q gradle.zip -d /opt/jvm; \
+    mv "/opt/jvm/gradle-$GRADLE_VERSION" /opt/jvm/gradle; \
+    tar --no-same-owner --strip-components=1 -C /opt/jvm/maven -xzf maven.tar.gz; \
+    unzip -q kotlin.zip -d /opt/jvm; \
+    rm gradle.zip maven.tar.gz kotlin.zip
+
+FROM fetch AS binaries
+
+ARG TARGETARCH
+ARG COMPOSER_VERSION=2.11.1
+ARG COMPOSER_SHA256=6f1b891e1d4927d62740276c540fb490e47689e19e102c49e8da849794882f8c
+ARG DENO_VERSION=2.9.8
+ARG DENO_SHA256_AMD64=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
+ARG DENO_SHA256_ARM64=d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905
+ARG UV_VERSION=0.13.7
+ARG UV_SHA256_AMD64=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
+ARG UV_SHA256_ARM64=71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc
+
+RUN set -eu; \
+    case "$TARGETARCH" in \
+        amd64) triple=x86_64-unknown-linux-gnu; \
+            deno_sha256=$DENO_SHA256_AMD64; uv_sha256=$UV_SHA256_AMD64 ;; \
+        arm64) triple=aarch64-unknown-linux-gnu; \
+            deno_sha256=$DENO_SHA256_ARM64; uv_sha256=$UV_SHA256_ARM64 ;; \
+        *) echo "No deno or uv release for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    fetch() { \
+        curl -fsSL --proto '=https' --retry 3 -o "$1" "$2"; \
+        echo "$3  $1" | sha256sum -c -; \
+    }; \
+    fetch composer "https://getcomposer.org/download/$COMPOSER_VERSION/composer.phar" "$COMPOSER_SHA256"; \
+    fetch deno.zip "https://github.com/denoland/deno/releases/download/v$DENO_VERSION/deno-$triple.zip" "$deno_sha256"; \
+    fetch uv.tar.gz "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$triple.tar.gz" "$uv_sha256"; \
+    mkdir /opt/bin; \
+    unzip -q deno.zip -d /opt/bin; \
+    tar --no-same-owner --strip-components=1 -C /opt/bin -xzf uv.tar.gz "uv-$triple/uv" "uv-$triple/uvx"; \
+    mv composer /opt/bin/composer; \
+    chmod 0755 /opt/bin/*; \
+    rm deno.zip uv.tar.gz
+
 FROM runtime-base AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential pkg-config openssh-client gh jq ripgrep fd-find less file \
-        procps unzip zip xz-utils bzip2 wget \
-        python3 python3-pip python3-venv nodejs npm \
+        procps unzip zip xz-utils bzip2 wget cmake ninja-build \
+        python3 python3-pip python3-venv pipx nodejs npm \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        php-cli php-mbstring php-xml php-curl php-zip php-intl php-sqlite3 \
+        php-pgsql php-mysql php-gd php-bcmath \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ruby ruby-dev ruby-bundler \
+    && rm -rf /var/lib/apt/lists/*
+COPY manager/rubygems/operating_system.rb /usr/local/lib/site_ruby/rubygems/defaults/operating_system.rb
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-21-jdk-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        erlang-nox erlang-dev elixir \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=rust /opt/rust /opt/rust
+COPY --from=go /usr/local/go /usr/local/go
+COPY --from=jvm /opt/jvm /opt/jvm
+COPY --from=binaries /opt/bin/ /usr/local/bin/
+ENV PATH="$PATH:/opt/rust/bin:/usr/local/go/bin:/opt/jvm/gradle/bin:/opt/jvm/maven/bin:/opt/jvm/kotlinc/bin"
 
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx
@@ -119,7 +258,8 @@ RUN groupadd --system zone \
     && chown -R zone:zone /opt/tools \
     && printf 'prefix=/opt/tools\n' > /etc/npmrc \
     && printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf \
-    && printf '[ "$(id -u)" -ne 0 ] && PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/tools/bin:$PATH"\n' > /etc/profile.d/tools.sh
+    && mkdir -p /etc/xdg \
+    && printf '[ "$(id -u)" -ne 0 ] && PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.gem/bin:$HOME/.config/composer/vendor/bin:$HOME/.deno/bin:/opt/tools/bin:$PATH"\n' > /etc/profile.d/tools.sh
 
 ENV SHELL=/bin/bash
 # Docker's default seccomp profile blocks the user namespaces bubblewrap needs.
