@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { expect, test } from './fixtures';
 import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { installChatSocketMock } from './helpers/chatSocket';
@@ -241,6 +241,12 @@ async function mockChat(page: Page, transcript: readonly unknown[] = messages) {
   );
 }
 
+function boxOrder(container: Locator): Promise<string[]> {
+  return container
+    .locator('.chat-panel-slot')
+    .evaluateAll((slots) => slots.map((slot) => (slot as HTMLElement).dataset.box ?? ''));
+}
+
 async function openChat(page: Page) {
   await page.click('a[href="/chats"]');
   await page.click('.chat-item');
@@ -451,6 +457,59 @@ test.describe('Chat changes and gallery panel', () => {
         animations: 'disabled',
       });
     }
+  });
+
+  test('lets the viewer drag the boxes into their own order, and keeps it', async ({
+    page,
+  }, testInfo) => {
+    const capture = async (name: string) => {
+      if (testInfo.project.name !== 'chromium') return;
+      await page.screenshot({ path: `screenshots/${name}.png`, animations: 'disabled' });
+    };
+    const panel = page.getByRole('complementary', { name: 'Changes, media and sources' });
+    await panel.getByRole('button', { name: 'Sources, 4' }).click();
+    await expect(boxOrder(panel)).resolves.toEqual(['changes', 'sources', 'gallery']);
+    await page.mouse.move(0, 0);
+    await capture('chats-panel-order-default');
+
+    const grip = await panel.getByRole('button', { name: 'Move Gallery' }).boundingBox();
+    const changes = await panel.locator('[data-box="changes"]').boundingBox();
+    await page.mouse.move(grip!.x + grip!.width / 2, grip!.y + grip!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(grip!.x + grip!.width / 2, changes!.y + 12, { steps: 12 });
+    await expect(panel.locator('[data-box="changes"]')).toHaveAttribute('data-drop', 'before');
+    await expect(panel.locator('[data-box="gallery"]')).toHaveAttribute('data-dragging', 'true');
+    await expect(page.locator('.chat-panel-box-ghost')).toHaveText('Gallery');
+    await capture('chats-panel-order-dragging');
+    await page.mouse.up();
+
+    await expect(panel.locator('[data-drop]')).toHaveCount(0);
+    await expect(boxOrder(panel)).resolves.toEqual(['gallery', 'changes', 'sources']);
+    await page.reload();
+    await openChat(page);
+    await expect(boxOrder(panel)).resolves.toEqual(['gallery', 'changes', 'sources']);
+    await page.mouse.move(0, 0);
+    await capture('chats-panel-order-saved');
+  });
+
+  test('moves a box from the keyboard in the sheet on a phone', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.getByRole('button', { name: /^Changes, media and sources: / }).click();
+    const sheet = page.getByRole('dialog', { name: 'Changes, media and sources' });
+    const grip = sheet.getByRole('button', { name: 'Move Changes' });
+
+    await grip.focus();
+    await page.keyboard.press('Space');
+    await expect(sheet.getByText('Picked up Changes, at position 1 of 3.')).toBeAttached();
+    await page.keyboard.press('ArrowDown');
+    await expect(sheet.getByText('Changes would move to position 2 of 3.')).toBeAttached();
+    await page.keyboard.press('ArrowDown');
+    await expect(sheet.getByText('Changes would move to position 3 of 3.')).toBeAttached();
+    await page.keyboard.press('Space');
+
+    await expect(sheet.getByText('Changes dropped at position 3 of 3.')).toBeAttached();
+    await expect(boxOrder(sheet)).resolves.toEqual(['sources', 'gallery', 'changes']);
+    await expect(sheet.getByRole('button', { name: 'Move Changes' })).toBeFocused();
   });
 
   test('becomes a sheet on a phone instead of covering the transcript', async ({

@@ -102,6 +102,7 @@
 
 .chat-panel-hide,
 .chat-panel-rail,
+.chat-panel-box-handle,
 .chat-gallery-tile,
 .chat-lightbox-step,
 .chat-panel-box-toggle,
@@ -156,14 +157,47 @@
   padding: var(--ui-space-2) var(--ui-space-3) var(--ui-space-3);
 }
 
-.chat-panel-box {
+.chat-panel-slot {
+  position: relative;
   flex-shrink: 0;
+}
+
+.chat-panel-slot[data-dragging] {
+  opacity: 0.45;
+}
+
+.chat-panel-slot[data-drop]::before {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 3px;
+  content: '';
+  border-radius: var(--ui-radius-full);
+  background: var(--ui-border-focus);
+  pointer-events: none;
+}
+
+.chat-panel-slot[data-drop='before']::before {
+  top: -6px;
+}
+
+.chat-panel-slot[data-drop='after']::before {
+  bottom: -6px;
+}
+
+.chat-panel-announcer {
+  display: contents;
+}
+
+.chat-panel-box {
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-card);
   background: var(--ui-bg-elevated);
 }
 
 .chat-panel-box-heading {
+  display: flex;
+  align-items: stretch;
   margin: 0;
   font-size: var(--ui-text-sm);
   font-weight: 600;
@@ -182,6 +216,56 @@
 
 .chat-panel-box-toggle:hover {
   background: var(--ui-bg-hover);
+}
+
+.chat-panel-box-handle {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  margin: var(--ui-space-1) 0 var(--ui-space-1) var(--ui-space-1);
+  padding: 0;
+  border-radius: var(--ui-radius-sm);
+  color: var(--ui-text-muted);
+  cursor: grab;
+  touch-action: none;
+}
+
+.chat-panel-box-handle:hover,
+.chat-panel-box-handle[aria-pressed='true'] {
+  background: var(--ui-bg-hover);
+  color: var(--ui-text-primary);
+}
+
+.chat-panel-box-handle svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+@media (pointer: coarse) {
+  .chat-panel-box-handle {
+    width: var(--ui-control-height);
+  }
+}
+
+.chat-panel-box-handle + .chat-panel-box-toggle {
+  padding-left: var(--ui-space-1);
+}
+
+.chat-panel-box-ghost {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--ui-control-height);
+  padding: 0 var(--ui-space-3);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-card);
+  background: var(--ui-bg-elevated);
+  box-shadow: var(--ui-shadow-lg);
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  cursor: grabbing;
 }
 
 .chat-panel-box-chevron {

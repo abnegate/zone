@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ChatPullRequests } from '../hooks/useChatPullRequests';
 import type { ChatPullRequest } from '../types';
 import type { GalleryItem } from '../utils/gallery';
@@ -56,6 +56,8 @@ const NO_SOURCES: ChatSources = { all: [], replies: new Map() };
 const COLLAPSED_KEY = 'zone:chat-panel:user-1:collapsed';
 const WIDTH_KEY = 'zone:chat-panel:user-1:width';
 const SEPARATOR = 'Resize changes, media and sources';
+const ORDER_KEY = 'zone:chat-panel:user-1:order';
+const SLOT_HEIGHT = 120;
 
 function changes(pullRequests: ChatPullRequest[] = []): ChatPullRequests {
   return {
@@ -338,5 +340,185 @@ describe('ChatPanel', () => {
 
     const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
     expect(sheet).toHaveClass('chat-panel-sheet');
+  });
+
+  describe('box order', () => {
+    const everything = { pullRequests: [PULL_REQUEST], media: [IMAGE], sources: CITED };
+    let measure: ReturnType<typeof spyOn>;
+
+    beforeEach(() => {
+      const original = HTMLElement.prototype.getBoundingClientRect;
+      measure = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: HTMLElement
+      ) {
+        const slot = this.closest('.chat-panel-drag-overlay')
+          ? document.querySelector<HTMLElement>('.chat-panel-slot[data-dragging]')
+          : this.closest<HTMLElement>('.chat-panel-slot');
+        if (!slot?.parentElement) return original.call(this);
+        const index = Array.from(slot.parentElement.children).indexOf(slot);
+        const top = index * (SLOT_HEIGHT + 12);
+        const bottom = top + SLOT_HEIGHT;
+        return {
+          x: 0,
+          y: top,
+          top,
+          bottom,
+          left: 0,
+          right: 300,
+          width: 300,
+          height: SLOT_HEIGHT,
+        } as DOMRect;
+      });
+    });
+
+    afterEach(() => {
+      measure.mockRestore();
+    });
+
+    function shownOrder(within: HTMLElement = inPanel()): string[] {
+      return Array.from(within.querySelectorAll<HTMLElement>('.chat-panel-slot')).map(
+        (slot) => slot.dataset.box ?? ''
+      );
+    }
+
+    function inPanel(): HTMLElement {
+      return screen.getByRole('complementary', { name: 'Changes, media and sources' });
+    }
+
+    function handle(title: string): HTMLElement {
+      return within(inPanel()).getByRole('button', { name: `Move ${title}` });
+    }
+
+    async function press(target: HTMLElement, code: string) {
+      await act(async () => {
+        fireEvent.keyDown(target, { code, key: code === 'Space' ? ' ' : code });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+
+    function announced(text: string | RegExp) {
+      return waitFor(() => expect(screen.getByText(text)).toBeInTheDocument());
+    }
+
+    it('shows the boxes in their default order, each with a grip to move it by', () => {
+      renderPanel(everything);
+
+      expect(shownOrder()).toEqual(['changes', 'sources', 'gallery']);
+      const grip = handle('Sources');
+      expect(grip).toHaveAttribute('aria-roledescription', 'movable box');
+      expect(grip).toHaveAttribute('tabindex', '0');
+      expect(grip.getAttribute('aria-describedby')).toBeTruthy();
+      expect(
+        document.getElementById(grip.getAttribute('aria-describedby') ?? '')
+      ).toHaveTextContent(/press space or enter to pick it up/);
+    });
+
+    it('moves a box with the keyboard, says where it goes, and remembers the order', async () => {
+      const { unmount } = renderPanel(everything);
+      const grip = handle('Gallery');
+      grip.focus();
+
+      await press(grip, 'Space');
+      await announced('Picked up Gallery, at position 3 of 3.');
+      await press(grip, 'ArrowUp');
+      await announced('Gallery would move to position 2 of 3.');
+      await waitFor(() =>
+        expect(inPanel().querySelector('[data-box="sources"]')).toHaveAttribute(
+          'data-drop',
+          'before'
+        )
+      );
+      await press(grip, 'ArrowUp');
+      await announced('Gallery would move to position 1 of 3.');
+      await press(grip, 'Space');
+
+      await announced('Gallery dropped at position 1 of 3.');
+      expect(shownOrder()).toEqual(['gallery', 'changes', 'sources']);
+      expect(inPanel().querySelector('[data-drop]')).toBeNull();
+      expect(JSON.parse(localStorage.getItem(ORDER_KEY) ?? '[]')).toEqual([
+        'gallery',
+        'changes',
+        'sources',
+      ]);
+
+      unmount();
+      renderPanel(everything);
+      expect(shownOrder()).toEqual(['gallery', 'changes', 'sources']);
+    });
+
+    it('puts a box back where it was when the move is cancelled', async () => {
+      renderPanel(everything);
+      const grip = handle('Changes');
+      grip.focus();
+
+      await press(grip, 'Space');
+      await press(grip, 'ArrowDown');
+      await announced('Changes would move to position 2 of 3.');
+      await press(grip, 'Escape');
+
+      await announced('Moving Changes cancelled. It stays at position 1 of 3.');
+      expect(shownOrder()).toEqual(['changes', 'sources', 'gallery']);
+      expect(localStorage.getItem(ORDER_KEY)).toBeNull();
+    });
+
+    it('keeps each viewer to their own order, and adds a box they never placed after theirs', () => {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(['gallery', 'retired']));
+
+      const { unmount } = renderPanel(everything);
+      expect(shownOrder()).toEqual(['gallery', 'changes', 'sources']);
+
+      unmount();
+      renderPanel({ ...everything, userId: 'user-2' });
+      expect(shownOrder()).toEqual(['changes', 'sources', 'gallery']);
+    });
+
+    it('keeps a box with nothing to show in its place while the others move', async () => {
+      const { rerender } = renderPanel({ pullRequests: [PULL_REQUEST], media: [IMAGE] });
+      expect(shownOrder()).toEqual(['changes', 'gallery']);
+      const grip = handle('Gallery');
+      grip.focus();
+
+      await press(grip, 'Space');
+      await press(grip, 'ArrowUp');
+      await announced('Gallery would move to position 1 of 2.');
+      await press(grip, 'Space');
+      await announced('Gallery dropped at position 1 of 2.');
+
+      expect(JSON.parse(localStorage.getItem(ORDER_KEY) ?? '[]')).toEqual([
+        'gallery',
+        'sources',
+        'changes',
+      ]);
+      rerender(panel(everything));
+      expect(shownOrder()).toEqual(['gallery', 'sources', 'changes']);
+    });
+
+    it('still collapses a box from its header, apart from its grip', () => {
+      renderPanel(everything);
+      const header = within(inPanel()).getByRole('button', { name: 'Gallery, 1' });
+
+      fireEvent.click(header);
+
+      expect(header).toHaveAttribute('aria-expanded', 'false');
+      fireEvent.click(handle('Gallery'));
+      expect(header).toHaveAttribute('aria-expanded', 'false');
+    });
+
+    it('has nothing to move a lone box by', () => {
+      renderPanel({ media: [IMAGE] });
+
+      expect(within(inPanel()).queryByRole('button', { name: /^Move / })).toBeNull();
+    });
+
+    it('shows the order the viewer chose in the sheet as well', async () => {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(['sources', 'gallery', 'changes']));
+      renderPanel(everything);
+
+      fireEvent.click(screen.getByRole('button', { name: /^Changes, media and sources: / }));
+      const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+
+      expect(shownOrder(sheet)).toEqual(['sources', 'gallery', 'changes']);
+      expect(within(sheet).getByRole('button', { name: 'Move Sources' })).toBeInTheDocument();
+    });
   });
 });
