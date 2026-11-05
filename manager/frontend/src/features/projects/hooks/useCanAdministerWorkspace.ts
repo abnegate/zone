@@ -1,7 +1,5 @@
-import { useQuery } from '@tanstack/react-query';
-import { client } from '../../../api/client';
-import { useAuth } from '../../auth';
 import type { WorkspaceRole } from '../../auth/types';
+import { useWorkspaceRole } from './useWorkspaceRole';
 
 const ADMINISTERING_ROLES: ReadonlySet<WorkspaceRole> = new Set(['owner', 'admin']);
 
@@ -11,15 +9,7 @@ const ADMINISTERING_ROLES: ReadonlySet<WorkspaceRole> = new Set(['owner', 'admin
  * admin is never locked out and the server's refusal speaks for itself.
  */
 export function useCanAdministerWorkspace(workspaceId: string | undefined): boolean {
-  const { isAuthenticated, user } = useAuth();
-  const { data: role, isError } = useQuery({
-    queryKey: ['workspaceRole', workspaceId, user?.id],
-    queryFn: async () => {
-      const { members } = await client.getWorkspaceMembers(workspaceId as string);
-      return members.find((member) => member.user_id === user?.id)?.role ?? null;
-    },
-    enabled: isAuthenticated && !!workspaceId && !!user?.id,
-  });
+  const { data: role, isError } = useWorkspaceRole(workspaceId);
   if (isError) return true;
   return role != null && ADMINISTERING_ROLES.has(role);
 }

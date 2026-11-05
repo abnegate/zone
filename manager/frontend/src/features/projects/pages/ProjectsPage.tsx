@@ -9,6 +9,7 @@ import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import SubNav from '../../../shared/components/SubNav/SubNav';
 import { getErrors } from '../../../validation';
+import { sourcesQueryKey } from '../../sources/hooks/sourcesQueryKey';
 import {
   AutomationPanel,
   AutoProjectModal,
@@ -73,7 +74,7 @@ export default function ProjectsPage() {
   const { currentWorkspace } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
   const { data: sources = [] } = useQuery({
-    queryKey: ['sources', workspaceId],
+    queryKey: sourcesQueryKey(workspaceId),
     queryFn: () => client.getSources(workspaceId as string),
     enabled: isAuthenticated && !!workspaceId,
   });

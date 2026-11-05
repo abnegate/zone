@@ -1,12 +1,18 @@
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { WizardStep } from '@zone/ui';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { client } from '../../../api/client';
 import { Button, Wizard } from '../../../components';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Source } from '../../../types';
 import { getErrors } from '../../../validation';
+import { CreateSourceWizard } from '../../sources/components/CreateSourceWizard';
+import { sourcesQueryKey } from '../../sources/hooks/sourcesQueryKey';
+import type { CreateSourceRequest } from '../../sources/types';
+import { useCanCreateSources } from '../hooks/useCanCreateSources';
 import { CreateProjectRequestSchema } from '../schemas';
 import type { CreateProjectRequest, Project, ProjectStatus } from '../types';
+import { NEW_SOURCE_OPTION, SourceStep } from './SourceStep';
 
 interface CreateProjectWizardProps {
   isOpen: boolean;
@@ -34,6 +40,8 @@ const WIZARD_STEPS: WizardStep[] = [
   },
 ];
 
+function keepOpen(): void {}
+
 const statusLabels: Record<ProjectStatus, string> = {
   active: 'Active',
   on_hold: 'On Hold',
@@ -60,28 +68,54 @@ export function CreateProjectWizard({
   const [description, setDescription] = useState('');
   const [status, setStatus] = useState<ProjectStatus>('active');
   const [sourceId, setSourceId] = useState('');
-  const [sources, setSources] = useState<Source[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [sourcesLoading, setSourcesLoading] = useState(false);
+  const [creatingSource, setCreatingSource] = useState(false);
+  const [focusedOption, setFocusedOption] = useState<string | null>(null);
+  const canCreateSources = useCanCreateSources(workspaceId);
+  const queryClient = useQueryClient();
 
-  // Load sources when wizard opens
-  useEffect(() => {
-    if (isOpen && workspaceId) {
-      setSourcesLoading(true);
-      client
-        .getSources(workspaceId)
-        .then(setSources)
-        .catch((err) => console.error('Failed to load sources:', err))
-        .finally(() => setSourcesLoading(false));
-    }
-  }, [isOpen, workspaceId]);
+  const { data: sources = [], isLoading: sourcesLoading } = useQuery({
+    queryKey: sourcesQueryKey(workspaceId),
+    queryFn: () => client.getSources(workspaceId as string),
+    enabled: isOpen && !!workspaceId,
+  });
 
   const handleStepChange = useCallback((step: number) => {
     setCurrentStep(step);
+    setFocusedOption(null);
     setError(null);
   }, []);
+
+  const createSource = useCallback(
+    (request: CreateSourceRequest): Promise<Source> => {
+      if (!workspaceId) return Promise.reject(new Error('No workspace selected'));
+      return client.createSource(workspaceId, request);
+    },
+    [workspaceId]
+  );
+
+  const handleNewSource = useCallback(() => {
+    setFocusedOption(null);
+    setCreatingSource(true);
+  }, []);
+
+  const handleNewSourceClose = useCallback(() => {
+    setCreatingSource(false);
+    setFocusedOption((focused) => focused ?? NEW_SOURCE_OPTION);
+  }, []);
+
+  const handleSourceCreated = useCallback(
+    (source: Source) => {
+      queryClient.setQueryData<Source[]>(sourcesQueryKey(workspaceId), (previous = []) =>
+        previous.some((existing) => existing.id === source.id) ? previous : [...previous, source]
+      );
+      setSourceId(source.id);
+      setFocusedOption(source.id);
+    },
+    [queryClient, workspaceId]
+  );
 
   const canProceed = useMemo(() => {
     if (currentStep === 0) {
@@ -96,6 +130,8 @@ export function CreateProjectWizard({
     setDescription('');
     setStatus('active');
     setSourceId('');
+    setCreatingSource(false);
+    setFocusedOption(null);
     setError(null);
     setFieldErrors({});
     onClose();
@@ -145,7 +181,10 @@ export function CreateProjectWizard({
     handleClose,
   ]);
 
-  const activeSources = useMemo(() => sources.filter((s) => s.is_active), [sources]);
+  const visibleSources = useMemo(
+    () => sources.filter((source) => source.is_active || source.id === sourceId),
+    [sources, sourceId]
+  );
 
   const renderStepContent = () => {
     switch (currentStep) {
@@ -209,65 +248,15 @@ export function CreateProjectWizard({
 
       case 1:
         return (
-          <div className="wizard-step-content">
-            <p className="wizard-step-intro">
-              Link a data source to this project. Sources provide code repositories, calendars, or
-              other data for your project.
-            </p>
-            {sourcesLoading ? (
-              <div className="wizard-loading">Loading sources...</div>
-            ) : activeSources.length === 0 ? (
-              <div className="wizard-empty-state">
-                <p>No sources available.</p>
-                <p className="wizard-empty-hint">
-                  You can add sources from the Sources page and link them later.
-                </p>
-              </div>
-            ) : (
-              <div className="source-selection-grid">
-                <button
-                  type="button"
-                  className={`source-selection-option ${!sourceId ? 'selected' : ''}`}
-                  onClick={() => setSourceId('')}
-                >
-                  <div className="source-selection-icon none">
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      aria-hidden="true"
-                    >
-                      <circle cx="12" cy="12" r="10" />
-                      <path d="M8 12h8" />
-                    </svg>
-                  </div>
-                  <div className="source-selection-info">
-                    <span className="source-selection-name">No Source</span>
-                    <span className="source-selection-desc">Create project without a source</span>
-                  </div>
-                </button>
-                {activeSources.map((source) => (
-                  <button
-                    key={source.id}
-                    type="button"
-                    className={`source-selection-option ${sourceId === source.id ? 'selected' : ''}`}
-                    onClick={() => setSourceId(source.id)}
-                  >
-                    <div className={`source-selection-icon ${source.source_type}`}>
-                      <span className="source-type-initial">
-                        {source.source_type.charAt(0).toUpperCase()}
-                      </span>
-                    </div>
-                    <div className="source-selection-info">
-                      <span className="source-selection-name">{source.name}</span>
-                      <span className="source-selection-desc">{source.source_type}</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+          <SourceStep
+            sources={visibleSources}
+            loading={sourcesLoading}
+            selectedId={sourceId}
+            onSelect={setSourceId}
+            canCreate={canCreateSources}
+            onCreate={handleNewSource}
+            focusId={focusedOption}
+          />
         );
 
       case 2:
@@ -303,32 +292,41 @@ export function CreateProjectWizard({
   };
 
   return (
-    <Wizard
-      isOpen={isOpen}
-      onClose={handleClose}
-      title="New Project"
-      subtitle="Create a new project to organize your work"
-      className="project-wizard"
-      steps={WIZARD_STEPS}
-      currentStep={currentStep}
-      onStepChange={handleStepChange}
-      onComplete={handleComplete}
-      onCancel={handleClose}
-      completeLabel={loading ? 'Creating...' : 'Create Project'}
-      loading={loading}
-      canProceed={canProceed}
-      allowStepClick
-    >
-      {renderStepContent()}
-      {Object.keys(fieldErrors).length > 0 && (
-        <div className="form-error">
-          {Object.entries(fieldErrors).map(([field, message]) => (
-            <div key={field}>{message}</div>
-          ))}
-        </div>
-      )}
-      {error && <div className="form-error">{error}</div>}
-    </Wizard>
+    <>
+      <Wizard
+        isOpen={isOpen}
+        onClose={creatingSource || loading ? keepOpen : handleClose}
+        inert={creatingSource}
+        title="New Project"
+        subtitle="Create a new project to organize your work"
+        className="project-wizard"
+        steps={WIZARD_STEPS}
+        currentStep={currentStep}
+        onStepChange={handleStepChange}
+        onComplete={handleComplete}
+        onCancel={handleClose}
+        completeLabel={loading ? 'Creating...' : 'Create Project'}
+        loading={loading}
+        canProceed={canProceed}
+        allowStepClick
+      >
+        {renderStepContent()}
+        {Object.keys(fieldErrors).length > 0 && (
+          <div className="form-error">
+            {Object.entries(fieldErrors).map(([field, message]) => (
+              <div key={field}>{message}</div>
+            ))}
+          </div>
+        )}
+        {error && <div className="form-error">{error}</div>}
+      </Wizard>
+      <CreateSourceWizard
+        isOpen={isOpen && creatingSource}
+        onClose={handleNewSourceClose}
+        onCreated={handleSourceCreated}
+        createSource={createSource}
+      />
+    </>
   );
 }
 
