@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { clientModule } from '../../../test/client';
 import type { Source } from '../../../types';
@@ -86,9 +86,10 @@ const mockClose = mock(() => {});
 
 function renderWizard() {
   const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  queryClient.setQueryData(['sources', 'workspace-1'], [existing]);
+  render(
     <QueryClientProvider client={queryClient}>
       <CreateProjectWizard
         isOpen
@@ -98,6 +99,7 @@ function renderWizard() {
       />
     </QueryClientProvider>
   );
+  return queryClient;
 }
 
 const projectDialog = () => screen.getByRole('dialog', { name: 'New Project' });
@@ -171,9 +173,9 @@ describe('CreateProjectWizard new source', () => {
     expect(projectDialog().querySelector('.wizard-empty-state')).toBeNull();
   });
 
-  it('selects the created source, lists it without a reload and keeps every project field', async () => {
+  it('selects the created source, lists it without a reload, refreshes the sources query and keeps every project field', async () => {
     const user = userEvent.setup();
-    renderWizard();
+    const queryClient = renderWizard();
     await reachSourceStep(user);
     const nested = await openNewSource(user);
     await addGitHubSource(user, nested);
@@ -188,6 +190,7 @@ describe('CreateProjectWizard new source', () => {
       })
     );
     expect(mockGetSources).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryState(['sources', 'workspace-1'])?.isInvalidated).toBe(true);
     expect(option('jbs').className).not.toContain('selected');
     expect(option('abnegate/zone').className).toContain('selected');
     expect(document.activeElement).toBe(option('abnegate/zone'));
@@ -199,7 +202,9 @@ describe('CreateProjectWizard new source', () => {
     await user.click(within(projectDialog()).getByRole('button', { name: 'Next' }));
     await within(projectDialog()).findByRole('button', { name: /abnegate\/zone/ });
     await user.click(within(projectDialog()).getByRole('button', { name: 'Next' }));
-    await user.click(await within(projectDialog()).findByRole('button', { name: 'Create Project' }));
+    await user.click(
+      await within(projectDialog()).findByRole('button', { name: 'Create Project' })
+    );
 
     await waitFor(() => expect(mockCreateProject).toHaveBeenCalledTimes(1));
     expect(mockCreateProject).toHaveBeenCalledWith(
@@ -243,6 +248,19 @@ describe('CreateProjectWizard new source', () => {
 
     await user.keyboard('{Escape}');
     expect(mockClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands focus back to the card even when clicking it never focused it, as in Safari', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await reachSourceStep(user);
+    fireEvent.click(option('New source'));
+    await waitFor(() => expect(sourceDialog()).not.toBeNull());
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    await waitFor(() => expect(sourceDialog()).toBeNull());
+    expect(document.activeElement).toBe(option('New source'));
   });
 
   it('holds focus inside the source wizard while the project wizard sits inert beneath it', async () => {

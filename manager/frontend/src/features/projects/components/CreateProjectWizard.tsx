@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import type { WizardStep } from '@zone/ui';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { client } from '../../../api/client';
@@ -6,11 +7,12 @@ import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Source } from '../../../types';
 import { getErrors } from '../../../validation';
 import { CreateSourceWizard } from '../../sources/components/CreateSourceWizard';
+import { sourcesQueryKey } from '../../sources/hooks/sourcesQueryKey';
 import type { CreateSourceRequest } from '../../sources/types';
 import { useCanCreateSources } from '../hooks/useCanCreateSources';
 import { CreateProjectRequestSchema } from '../schemas';
 import type { CreateProjectRequest, Project, ProjectStatus } from '../types';
-import { SourceStep } from './SourceStep';
+import { NEW_SOURCE_OPTION, SourceStep } from './SourceStep';
 
 interface CreateProjectWizardProps {
   isOpen: boolean;
@@ -72,8 +74,9 @@ export function CreateProjectWizard({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [sourcesLoading, setSourcesLoading] = useState(false);
   const [creatingSource, setCreatingSource] = useState(false);
-  const [createdSourceId, setCreatedSourceId] = useState<string | null>(null);
+  const [focusedOption, setFocusedOption] = useState<string | null>(null);
   const canCreateSources = useCanCreateSources(workspaceId);
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     if (isOpen && workspaceId) {
@@ -88,7 +91,7 @@ export function CreateProjectWizard({
 
   const handleStepChange = useCallback((step: number) => {
     setCurrentStep(step);
-    setCreatedSourceId(null);
+    setFocusedOption(null);
     setError(null);
   }, []);
 
@@ -100,13 +103,27 @@ export function CreateProjectWizard({
     [workspaceId]
   );
 
-  const handleSourceCreated = useCallback((source: Source) => {
-    setSources((previous) =>
-      previous.some((existing) => existing.id === source.id) ? previous : [...previous, source]
-    );
-    setSourceId(source.id);
-    setCreatedSourceId(source.id);
+  const handleNewSource = useCallback(() => {
+    setFocusedOption(null);
+    setCreatingSource(true);
   }, []);
+
+  const handleNewSourceClose = useCallback(() => {
+    setCreatingSource(false);
+    setFocusedOption((focused) => focused ?? NEW_SOURCE_OPTION);
+  }, []);
+
+  const handleSourceCreated = useCallback(
+    (source: Source) => {
+      setSources((previous) =>
+        previous.some((existing) => existing.id === source.id) ? previous : [...previous, source]
+      );
+      setSourceId(source.id);
+      setFocusedOption(source.id);
+      queryClient.invalidateQueries({ queryKey: sourcesQueryKey(workspaceId) });
+    },
+    [queryClient, workspaceId]
+  );
 
   const canProceed = useMemo(() => {
     if (currentStep === 0) {
@@ -122,7 +139,7 @@ export function CreateProjectWizard({
     setStatus('active');
     setSourceId('');
     setCreatingSource(false);
-    setCreatedSourceId(null);
+    setFocusedOption(null);
     setError(null);
     setFieldErrors({});
     onClose();
@@ -245,8 +262,8 @@ export function CreateProjectWizard({
             selectedId={sourceId}
             onSelect={setSourceId}
             canCreate={canCreateSources}
-            onCreate={() => setCreatingSource(true)}
-            focusId={createdSourceId}
+            onCreate={handleNewSource}
+            focusId={focusedOption}
           />
         );
 
@@ -313,7 +330,7 @@ export function CreateProjectWizard({
       </Wizard>
       <CreateSourceWizard
         isOpen={isOpen && creatingSource}
-        onClose={() => setCreatingSource(false)}
+        onClose={handleNewSourceClose}
         onCreated={handleSourceCreated}
         createSource={createSource}
       />

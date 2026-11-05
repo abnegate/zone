@@ -107,6 +107,21 @@ test.describe('Projects Page', () => {
       }
     });
 
+    await routeApi(page, /\/api\/workspaces\/[^/]+\/members$/, (route) =>
+      route.fulfill({
+        json: {
+          members: [
+            {
+              id: 'member-1',
+              user_id: 'user-1',
+              workspace_id: '00000000-0000-0000-0000-000000000001',
+              role: 'member',
+            },
+          ],
+        },
+      })
+    );
+
     // Mock organizations with query params
     await routeApi(page, '**/api/organizations?*', (route) => {
       route.fulfill({
@@ -423,7 +438,7 @@ test.describe('Projects Page', () => {
       await expect(dialog.locator('#project-description')).toBeVisible();
       await dialog.locator('#project-name').fill( 'Test Project');
       await dialog.getByRole('button', { name: 'Next' }).click();
-      await expect(dialog.locator('.wizard-empty-state')).toBeVisible();
+      await expect(dialog.getByRole('button', { name: /New source/ })).toBeVisible();
       await dialog.getByRole('button', { name: 'Next' }).click();
       await expect(dialog.locator('.status-selection-option')).toHaveCount(3);
     });
@@ -457,7 +472,7 @@ test.describe('Projects Page', () => {
       const dialog = page.getByRole('dialog', { name: 'New Project' });
       await dialog.locator('#project-name').fill('My New Project');
       await dialog.getByRole('button', { name: 'Next' }).click();
-      await expect(dialog.locator('.wizard-empty-state')).toBeVisible();
+      await expect(dialog.getByRole('button', { name: /New source/ })).toBeVisible();
       await dialog.getByRole('button', { name: 'Next' }).click();
       await expect(dialog.locator('.status-selection-option')).toHaveCount(3);
       await dialog.getByRole('button', { name: 'Create Project' }).click();
@@ -498,7 +513,7 @@ test.describe('Projects Page', () => {
       await dialog.locator('#project-name').fill('Full Project');
       await dialog.locator('#project-description').fill('Full description');
       await dialog.getByRole('button', { name: 'Next' }).click();
-      await expect(dialog.locator('.wizard-empty-state')).toBeVisible();
+      await expect(dialog.getByRole('button', { name: /New source/ })).toBeVisible();
       await dialog.getByRole('button', { name: 'Next' }).click();
       await expect(dialog.locator('.status-selection-option')).toHaveCount(3);
       await dialog.getByRole('button', { name: 'On Hold' }).click();

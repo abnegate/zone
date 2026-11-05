@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import type { Source } from '../../../types';
 
+export const NEW_SOURCE_OPTION = 'new-source';
+
 interface SourceStepProps {
   sources: Source[];
   loading: boolean;
@@ -89,6 +91,10 @@ export function SourceStep({
           ))}
           {canCreate && (
             <button
+              ref={(element) => {
+                if (element) options.current.set(NEW_SOURCE_OPTION, element);
+                else options.current.delete(NEW_SOURCE_OPTION);
+              }}
               type="button"
               className="source-selection-option source-selection-new"
               onClick={onCreate}
@@ -108,7 +114,7 @@ export function SourceStep({
               </div>
               <div className="source-selection-info">
                 <span className="source-selection-name">New source</span>
-                <span className="source-selection-desc">Connect a repository, folder, or page</span>
+                <span className="source-selection-desc">Connect a repository or folder</span>
               </div>
             </button>
           )}
