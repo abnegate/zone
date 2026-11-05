@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type { Citation, Message } from '../types';
-import { chatSources, sourceKey } from './sources';
+import { chatSources, observationKey, sourceKey } from './sources';
 
 function citation(overrides: Partial<Citation> = {}): Citation {
   return {
@@ -85,6 +85,30 @@ describe('chatSources', () => {
     expect(replies.get('message-2')?.map((source) => source.citation)).toEqual([passing]);
   });
 
+  it('keeps a document and its knowledge passage apart in a reply, but once in the chat', () => {
+    const document = citation({
+      kind: 'workspace_document',
+      url: 'knowledge://11111111-1111-1111-1111-111111111111',
+      identifier: 'doc:aaaaaa',
+      observed_at: '2026-11-05T09:00:00Z',
+    });
+    const passage = citation({
+      kind: 'knowledge_passage',
+      url: 'knowledge://11111111-1111-1111-1111-111111111111',
+      identifier: 'kb:bbbbbb',
+      observed_at: '2026-11-05T09:05:00Z',
+    });
+
+    const { all, replies } = chatSources([message('message-1', [document, passage])]);
+
+    expect(replies.get('message-1')?.map((source) => source.key)).toEqual([
+      'kb:bbbbbb',
+      'doc:aaaaaa',
+    ]);
+    expect(all.map((source) => source.citation.identifier)).toEqual(['kb:bbbbbb']);
+    expect(all[0].key).toBe('knowledge://11111111-1111-1111-1111-111111111111');
+  });
+
   it('keeps the later observation when a later reply cites an older one', () => {
     const recent = citation({ outcome: 'success', observed_at: '2026-11-05T09:40:00Z' });
     const stale = citation({ outcome: 'pending', observed_at: '2026-11-05T09:14:00Z' });
@@ -154,6 +178,15 @@ describe('chatSources', () => {
 
     expect(all).toEqual([]);
     expect(replies.size).toBe(0);
+  });
+});
+
+describe('observationKey', () => {
+  it('names an observation by its identifier, falling back to its address', () => {
+    expect(observationKey(citation({ identifier: 'kb:bbbbbb' }))).toBe('kb:bbbbbb');
+    expect(observationKey(citation({ identifier: null }))).toBe(
+      'https://github.com/abnegate/zone/pull/160'
+    );
   });
 });
 

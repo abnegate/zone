@@ -81,13 +81,28 @@ export function ChatPanel({
   const rail = useRef<HTMLButtonElement>(null);
   const hide = useRef<HTMLButtonElement>(null);
   const toggled = useRef(false);
+  const opener = useRef<HTMLElement | null>(null);
+
+  const openSheet = useCallback(() => {
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setSheet(true);
+  }, []);
+
+  function returnFocus(event: Event) {
+    const target = opener.current;
+    opener.current = null;
+    if (!target?.isConnected) return;
+    event.preventDefault();
+    target.focus();
+  }
+
   const showingIn = shownSources ? placement(panel.current) : null;
 
   useEffect(() => {
     if (!shownSources) return;
-    if (placement(panel.current) === 'sheet') setSheet(true);
+    if (placement(panel.current) === 'sheet') openSheet();
     else setCollapsed(false);
-  }, [shownSources]);
+  }, [shownSources, openSheet]);
 
   useEffect(() => {
     if (!toggled.current) return;
@@ -196,6 +211,7 @@ export function ChatPanel({
           items={media}
           userId={userId}
           onShowMessage={(messageId) => {
+            opener.current = null;
             setSheet(false);
             onShowMessage(messageId);
           }}
@@ -213,7 +229,7 @@ export function ChatPanel({
           aria-haspopup="dialog"
           aria-label={`${PANEL_LABEL}: ${summary}`}
           title={PANEL_LABEL}
-          onClick={() => setSheet(true)}
+          onClick={openSheet}
         >
           <PanelIcon />
           <span className="chat-panel-toggle-summary">{summary}</span>
@@ -221,7 +237,7 @@ export function ChatPanel({
       </div>
       <Dialog open={sheet} onOpenChange={setSheet}>
         {sheet && (
-          <DialogContent className="chat-panel-sheet">
+          <DialogContent className="chat-panel-sheet" onCloseAutoFocus={returnFocus}>
             <DialogTitle className="chat-panel-sheet-title">{PANEL_LABEL}</DialogTitle>
             <DialogDescription className="sr-only">{summary}</DialogDescription>
             <div className="chat-panel-boxes">{boxes('sheet')}</div>

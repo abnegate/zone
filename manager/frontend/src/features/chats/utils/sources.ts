@@ -27,6 +27,7 @@ function bare({ key, messageId, citation }: Observed): ChatSource {
 }
 
 const observedTimes = new WeakMap<Citation, number>();
+
 interface Reply {
   messageId: string;
   observed: Observed[];
@@ -37,6 +38,11 @@ const replyCache = new WeakMap<readonly Citation[], Reply>();
 
 export function sourceKey(citation: Citation): string {
   return citation.url || citation.identifier || citation.title;
+}
+
+/** One address can back two sources, a document and its knowledge passage, so a reply keys them apart. */
+export function observationKey(citation: Citation): string {
+  return citation.identifier || sourceKey(citation);
 }
 
 function observedTime(citation: Citation): number {
@@ -66,7 +72,7 @@ function reply(message: Message, citations: readonly Citation[]): Reply {
   if (cached?.messageId === message.id) return cached;
   const observed = latest(
     citations.map((citation, order) => ({
-      key: sourceKey(citation),
+      key: observationKey(citation),
       messageId: message.id,
       citation,
       time: observedTime(citation),
@@ -93,7 +99,7 @@ export function chatSources(messages: readonly Message[]): ChatSources {
     const { observed, sources } = reply(message, citations);
     replies.set(message.id, sources);
     for (const entry of observed) {
-      everything.push({ ...entry, order: offset + entry.order });
+      everything.push({ ...entry, key: sourceKey(entry.citation), order: offset + entry.order });
     }
     offset += citations.length;
   }

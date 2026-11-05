@@ -23,12 +23,16 @@ export function readSetting(key: string): string | null {
   }
 }
 
+/** Fired on the window with the setting's key, so every view of that setting can follow it. */
+export const SETTING_CHANGED = 'zone:panel-setting';
+
 export function writeSetting(key: string, value: string): void {
   try {
     localStorage.setItem(key, value);
   } catch {
     return;
   }
+  window.dispatchEvent(new CustomEvent<string>(SETTING_CHANGED, { detail: key }));
 }
 
 export function readFlag(key: string): boolean {

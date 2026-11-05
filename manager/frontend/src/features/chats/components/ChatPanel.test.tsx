@@ -293,6 +293,40 @@ describe('ChatPanel', () => {
     expect(localStorage.getItem('zone:chat-panel:user-1:collapsed')).toBe('false');
   });
 
+  it('returns focus to whatever opened the sheet when it closes', async () => {
+    const restore = phone();
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    try {
+      const { rerender } = renderPanel({ sources: CITED });
+      opener.focus();
+
+      rerender(panel({ sources: CITED, shownSources: request() }));
+      const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+      fireEvent.keyDown(sheet, { key: 'Escape' });
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      await waitFor(() => expect(document.activeElement).toBe(opener));
+    } finally {
+      opener.remove();
+      restore();
+    }
+  });
+
+  it('keeps a box in the panel in step with the same box collapsed in the sheet', async () => {
+    renderPanel({ sources: CITED });
+    const inline = within(
+      screen.getByRole('complementary', { name: 'Changes, media and sources' })
+    ).getByRole('button', { name: 'Sources, 1' });
+    expect(inline).toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: /^Changes, media and sources: / }));
+    const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Sources, 1' }));
+
+    expect(inline).toHaveAttribute('aria-expanded', 'false');
+  });
+
   it('opens as a sheet from its toggle, for a screen too narrow to hold it', async () => {
     renderPanel({ pullRequests: [PULL_REQUEST], media: [IMAGE] });
 

@@ -4845,6 +4845,61 @@ describe('ChatsPage', () => {
     });
   });
 
+  describe('reply sources sharing an address', () => {
+    it('points a marker at its own observation when two sources share an address', async () => {
+      const address = 'knowledge://11111111-1111-1111-1111-111111111111';
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-shared',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'The runbook says so [doc:aaaaaa].',
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: {
+              citations: [
+                {
+                  kind: 'workspace_document',
+                  title: 'Runbook document',
+                  url: address,
+                  identifier: 'doc:aaaaaa',
+                  observed_at: '2024-01-01T00:00:00Z',
+                  complete: true,
+                  outcome: 'observed',
+                  provenance: 'server_execution',
+                },
+                {
+                  kind: 'knowledge_passage',
+                  title: 'Runbook passage',
+                  url: address,
+                  identifier: 'kb:bbbbbb',
+                  observed_at: '2024-01-01T00:05:00Z',
+                  complete: true,
+                  outcome: 'observed',
+                  provenance: 'server_execution',
+                },
+              ],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      fireEvent.click(
+        await screen.findByRole('button', { name: '[doc:aaaaaa] (source: Runbook document)' })
+      );
+
+      const panel = screen.getByRole('complementary', { name: 'Changes, media and sources' });
+      const rows = within(panel).getAllByTestId('citation');
+      expect(rows).toHaveLength(2);
+      const highlighted = rows.filter((row) => row.classList.contains('is-highlighted'));
+      expect(highlighted).toHaveLength(1);
+      expect(highlighted[0]).toHaveTextContent('Runbook document');
+    });
+  });
+
   describe('action receipts', () => {
     const receiptChat: ChatWithMessages = {
       ...mockChatWithMessages,

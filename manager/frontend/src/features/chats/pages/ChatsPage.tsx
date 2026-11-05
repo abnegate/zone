@@ -99,6 +99,7 @@ import {
   MODEL_PLACEHOLDER,
   modelLabel,
   modelSelectOptions,
+  observationKey,
   offersAgent,
   offersAgentOn,
   offersContextOn,
@@ -114,7 +115,6 @@ import {
   selectedContextTokens,
   shortModelName,
   sourceAttachment,
-  sourceKey,
   splitAtHandovers,
   toPlainText,
   videoAttachments,
@@ -1599,7 +1599,7 @@ export default function ChatsPage() {
                                     onShowSource={(citation) =>
                                       setShownSources({
                                         messageId: message.id,
-                                        key: sourceKey(citation),
+                                        key: observationKey(citation),
                                       })
                                     }
                                   />
