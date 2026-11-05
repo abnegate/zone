@@ -8,11 +8,12 @@ import {
   useRef,
   useState,
 } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { client } from '../../../../api/client';
 import { useTheme, workspaceThemeProperties } from '../../../../shared/context/ThemeContext';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
-import { useModels } from '../../../models';
+import { FeaturesPanel, useModels, usePull } from '../../../models';
 import {
   type AgentModelHints,
   AgentSignIn,
@@ -48,7 +49,9 @@ import type {
 } from '../types';
 import './WorkspaceSettingsPage.css';
 
-type Tab = 'theme' | 'ai' | 'folders' | 'members' | 'devices';
+type Tab = 'theme' | 'ai' | 'features' | 'folders' | 'members' | 'devices';
+
+const TABS: Tab[] = ['theme', 'ai', 'features', 'folders', 'members', 'devices'];
 
 const TITLE = 'Workspace Settings';
 
@@ -117,7 +120,10 @@ function ColorField({
 
 export default function WorkspaceSettingsPage() {
   const { isAuthenticated } = useAuth();
-  const { models: installedModels } = useModels();
+  const { models: installedModels, refresh: refreshModels } = useModels();
+  const pull = usePull();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get('tab');
   const {
     theme,
     workspaceTheme,
@@ -130,7 +136,9 @@ export default function WorkspaceSettingsPage() {
   const orgId = currentOrganization?.id ?? null;
   const workspaceId = currentWorkspace?.id ?? null;
 
-  const [activeTab, setActiveTab] = useState<Tab>('theme');
+  const [activeTab, setActiveTab] = useState<Tab>(() =>
+    TABS.includes(requestedTab as Tab) ? (requestedTab as Tab) : 'theme'
+  );
   const [aiLoading, setAiLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
   const edited = useRef(false);
@@ -439,12 +447,18 @@ export default function WorkspaceSettingsPage() {
     <TabsList aria-label="Workspace settings">
       <TabsTrigger value="theme">Theme</TabsTrigger>
       <TabsTrigger value="ai">AI Settings</TabsTrigger>
+      <TabsTrigger value="features">Features</TabsTrigger>
       <TabsTrigger value="folders">Folders</TabsTrigger>
       <TabsTrigger value="members">Members</TabsTrigger>
       <TabsTrigger value="devices">Devices</TabsTrigger>
     </TabsList>
   );
-  const selectTab = (value: string) => setActiveTab(value as Tab);
+  const selectTab = (value: string) => {
+    setActiveTab(value as Tab);
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', value);
+    setSearchParams(next, { replace: true });
+  };
 
   if (loading) {
     return (
@@ -502,6 +516,10 @@ export default function WorkspaceSettingsPage() {
 
       <TabsContent value="members">
         <WorkspaceMembersSection workspaceId={workspaceId} orgId={orgId} />
+      </TabsContent>
+
+      <TabsContent value="features">
+        <FeaturesPanel pull={pull} onInstalled={refreshModels} />
       </TabsContent>
 
       <TabsContent value="folders">
