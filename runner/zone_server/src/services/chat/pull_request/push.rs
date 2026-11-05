@@ -10,7 +10,8 @@ use crate::services::project_directory::Origin;
 
 /// Publishes `head` from the checkout a chat committed it in to `repository`
 /// with the source's own `token`, so the agent never holds a credential and
-/// the checkout's own remote, SSH or otherwise, is never used.
+/// the checkout's own remote, SSH or otherwise, is never used. Answers `None`
+/// when the checkout has no such branch, which leaves GitHub to find it.
 ///
 /// The checkout is often the user's own, whose configuration Zone's hardened
 /// git refuses to run in. So the branch is only fetched out of it, into a
@@ -22,7 +23,7 @@ pub async fn push(
     origin: &Origin,
     head: &str,
     token: &SecretValue,
-) -> Result<CommitSha, String> {
+) -> Result<Option<CommitSha>, String> {
     let branch = BranchName::parse(head).map_err(|_| format!("{head} is not a branch name."))?;
     if !directory.is_absolute() {
         return Err(format!("{} is not an absolute path.", directory.display()));
@@ -40,21 +41,39 @@ pub async fn push(
             directory.display()
         ));
     }
-    let scratch = Scratch::new();
-    let path = scratch.0.to_string_lossy().to_string();
+    let scratch = Scratch::create()?;
     let source = directory.to_string_lossy().to_string();
     let reference = branch.reference();
-    plain(None, &["init", "-q", &path], directory).await?;
+    plain(Some(&scratch.0), &["init", "-q"], directory).await?;
+    let listed = plain(
+        Some(&scratch.0),
+        &[
+            "-c",
+            FILE_PROTOCOL,
+            "ls-remote",
+            "--heads",
+            "--",
+            &source,
+            &reference,
+        ],
+        directory,
+    )
+    .await
+    .map_err(|error| format!("Could not read {}: {error}", directory.display()))?;
+    if listed.is_empty() {
+        return Ok(None);
+    }
     plain(
         Some(&scratch.0),
         &[
             "-c",
-            "protocol.file.allow=always",
+            FILE_PROTOCOL,
             "fetch",
             "-q",
             "--no-tags",
             "--no-write-fetch-head",
             "--no-recurse-submodules",
+            "--update-shallow",
             "--",
             &source,
             &format!("+{reference}:{reference}"),
@@ -62,7 +81,25 @@ pub async fn push(
         directory,
     )
     .await
-    .map_err(|_| format!("{} has no branch {head}.", directory.display()))?;
+    .map_err(|error| {
+        format!(
+            "Could not fetch {head} from {}: {error}",
+            directory.display()
+        )
+    })?;
+    plain(
+        Some(&scratch.0),
+        &["rev-parse", "--verify", "--quiet", &reference],
+        directory,
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "{head} could not be copied out of {}, which is a shallow checkout; deepen it with git \
+             fetch --unshallow and call again.",
+            directory.display()
+        )
+    })?;
     plain(
         Some(&scratch.0),
         &["symbolic-ref", "HEAD", &reference],
@@ -71,8 +108,11 @@ pub async fn push(
     .await?;
     git.push_with_token(&Checkout::base(&scratch.0), &branch, repository, token)
         .await
+        .map(Some)
         .map_err(|error| error.to_string())
 }
+
+const FILE_PROTOCOL: &str = "protocol.file.allow=always";
 
 /// Runs git outside Zone's hardened service, with no system or global
 /// configuration, trusting only `checkout`, which is commonly owned by the
@@ -104,12 +144,20 @@ async fn plain(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// A directory removed when dropped.
+/// A directory only this process's user can open, removed when dropped: what
+/// is copied into it is a branch nobody has published yet.
 struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("zone-push-{}", Uuid::new_v4().simple())))
+    fn create() -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!("zone-push-{}", Uuid::new_v4().simple()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+            .create(&path)
+            .map_err(|error| format!("Could not make a scratch repository: {error}"))?;
+        Ok(Self(path))
     }
 }
 
@@ -174,7 +222,7 @@ mod tests {
         Origin::parse("https://github.com/owner/repository").unwrap()
     }
 
-    async fn pushed(fixture: &Fixture, head: &str) -> Result<CommitSha, String> {
+    async fn pushed(fixture: &Fixture, head: &str) -> Result<Option<CommitSha>, String> {
         push(
             &GitService::new(),
             &fixture.checkout,
@@ -191,7 +239,8 @@ mod tests {
         let fixture = fixture("git@github.com:owner/repository.git", "feat/settings-tab");
         let commit = pushed(&fixture, "feat/settings-tab")
             .await
-            .expect("the branch is pushed");
+            .expect("the branch is pushed")
+            .expect("the checkout has the branch");
         assert_eq!(
             run(
                 &fixture.bare,
@@ -211,7 +260,8 @@ mod tests {
         );
         let commit = pushed(&fixture, "feature")
             .await
-            .expect("a user's own configuration does not stop the push");
+            .expect("a user's own configuration does not stop the push")
+            .expect("the checkout has the branch");
         assert_eq!(
             run(&fixture.bare, &["rev-parse", "refs/heads/feature"]),
             commit.as_str()
@@ -224,7 +274,8 @@ mod tests {
         run(&fixture.checkout, &["checkout", "-q", "main"]);
         let commit = pushed(&fixture, "feature")
             .await
-            .expect("the branch is pushed");
+            .expect("the branch is pushed")
+            .expect("the checkout has the branch");
         assert_eq!(
             run(&fixture.checkout, &["rev-parse", "feature"]),
             commit.as_str()
@@ -259,11 +310,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refuses_a_branch_the_checkout_does_not_have() {
+    async fn leaves_a_branch_the_checkout_does_not_have_to_github() {
         let fixture = fixture("https://github.com/owner/repository.git", "feature");
-        let refused = pushed(&fixture, "missing")
+        let pushed = pushed(&fixture, "missing")
             .await
-            .expect_err("a missing branch is not pushed");
-        assert!(refused.contains("has no branch missing"), "{refused}");
+            .expect("a branch only GitHub has is not an error");
+        assert!(pushed.is_none(), "nothing is pushed for it");
+    }
+
+    #[tokio::test]
+    async fn pushes_a_branch_of_a_shallow_checkout() {
+        let fixture = fixture("https://github.com/owner/repository.git", "base");
+        for round in 0..3 {
+            std::fs::write(fixture.checkout.join("file.txt"), round.to_string()).unwrap();
+            run(&fixture.checkout, &["commit", "-q", "-am", "more"]);
+        }
+        run(
+            &fixture.checkout,
+            &["push", "-q", fixture.bare.to_str().unwrap(), "base"],
+        );
+        let shallow = fixture._root.path().join("shallow");
+        run(
+            fixture._root.path(),
+            &[
+                "clone",
+                "-q",
+                "--depth",
+                "1",
+                &format!("file://{}", fixture.checkout.display()),
+                shallow.to_str().unwrap(),
+            ],
+        );
+        run(
+            &shallow,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:owner/repository.git",
+            ],
+        );
+        run(&shallow, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(shallow.join("new.txt"), "new").unwrap();
+        run(&shallow, &["add", "."]);
+        run(&shallow, &["commit", "-q", "-m", "new"]);
+        let commit = push(
+            &GitService::new(),
+            &shallow,
+            &RepositoryUrl::local(&fixture.bare).unwrap(),
+            &origin(),
+            "feature",
+            &SecretValue::new("token"),
+        )
+        .await
+        .expect("a shallow checkout's branch is copied out")
+        .expect("the checkout has the branch");
+        assert_eq!(run(&shallow, &["rev-parse", "feature"]), commit.as_str());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_scratch_repository_is_private_to_its_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::create().expect("a scratch directory");
+        let mode = std::fs::metadata(&scratch.0).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 }

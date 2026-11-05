@@ -105,7 +105,7 @@ FROM runtime-base AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential pkg-config openssh-client gh jq ripgrep fd-find less file \
-        procps unzip zip xz-utils bzip2 wget sudo \
+        procps unzip zip xz-utils bzip2 wget \
         python3 python3-pip python3-venv nodejs npm \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
@@ -115,17 +115,14 @@ RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx
 
 RUN groupadd --system zone \
     && useradd --system --gid zone --create-home --home-dir /home/zone --shell /bin/bash zone \
-    && echo 'zone ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt' > /etc/sudoers.d/zone-packages \
-    && chmod 0440 /etc/sudoers.d/zone-packages \
     && mkdir -p /opt/tools/bin \
     && chown -R zone:zone /opt/tools \
     && printf 'prefix=/opt/tools\n' > /etc/npmrc \
-    && printf '[global]\nuser = true\nbreak-system-packages = true\n' > /etc/pip.conf \
-    && printf '[install]\nglobalDir = "/opt/tools/bun"\nglobalBinDir = "/opt/tools/bin"\n' > /etc/bunfig.toml \
-    && printf 'PATH="/opt/tools/bin:$PATH"\n' > /etc/profile.d/tools.sh
+    && printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf \
+    && printf 'PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/tools/bin:$PATH"\n' > /etc/profile.d/tools.sh
 
 ENV SHELL=/bin/bash
-ENV PATH=/opt/tools/bin:$PATH
+ENV PATH=/home/zone/.local/bin:/home/zone/.bun/bin:/opt/tools/bin:$PATH
 # Docker's default seccomp profile blocks the user namespaces bubblewrap needs.
 ENV ZONE_CODEX_SANDBOX=danger-full-access
 

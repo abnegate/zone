@@ -155,8 +155,8 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
              for by committing on its branch, then calling {pull_request} so Zone can track it. \
              It pushes the branch for you: never git push it or use gh pr create, hub, the \
              GitHub web UI or another server's tool. Only if {pull_request} errors, reuse a pull \
-             request gh pr list --head finds for that branch; otherwise use gh pr create, say so, \
-             and give its URL."
+             request gh pr list --head --base finds; otherwise use gh pr create, say so, and give \
+             its URL."
         ));
     }
     if tools.has(COMMENT_ON_ISSUE) {
@@ -385,8 +385,8 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "Only if create_pull_request errors, reuse a pull request gh pr list --head finds \
-                 for that branch; otherwise use gh pr create, say so, and give its URL."
+                "Only if create_pull_request errors, reuse a pull request gh pr list --head --base \
+                 finds; otherwise use gh pr create, say so, and give its URL."
             ),
             "an error can follow a write GitHub accepted, and falling straight back opens a \
              second pull request: {rendered}"
