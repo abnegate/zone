@@ -38,12 +38,7 @@ fn complaint(status: &Status) -> Option<&'static str> {
 /// Never fails the status read that called it. A pull request that could not
 /// be fixed this time is read again on the next poll, and the complaint is
 /// still there if it was real.
-pub async fn consider(
-    state: &AppState,
-    workspace_id: Uuid,
-    row: &PullRequestRow,
-    status: &Status,
-) {
+pub async fn consider(state: &AppState, workspace_id: Uuid, row: &PullRequestRow, status: &Status) {
     if !row.auto_fix {
         return;
     }

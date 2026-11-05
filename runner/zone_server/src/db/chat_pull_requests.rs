@@ -163,7 +163,7 @@ pub async fn claim_auto_fix<'e, E>(
     executor: E,
     id: Uuid,
     previous: Option<Uuid>,
-    run_id: Uuid,
+    run_id: Option<Uuid>,
 ) -> DbResult<bool>
 where
     E: Executor<'e, Database = Postgres>,

@@ -27,8 +27,7 @@ use update_request::UpdateRequest;
 
 const CHAT_WITHOUT_WORKSPACE: &str = "Chat has no workspace association";
 const PULL_REQUEST_NOT_FOUND: &str = "Pull request not found";
-const NOTHING_TO_CHANGE: &str =
-    "Name at least one of dismissed, draft, auto_merge or auto_fix";
+const NOTHING_TO_CHANGE: &str = "Name at least one of dismissed, draft, auto_merge or auto_fix";
 
 /// GET /api/chats/{id}/pull-requests
 pub async fn list(
