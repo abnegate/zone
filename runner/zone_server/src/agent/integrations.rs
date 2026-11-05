@@ -26,9 +26,11 @@ use super::tools::{WorkspaceScope, apply_record_cap, json_chars, take_array, tru
 use crate::config::{Config, github_graphql_url};
 use crate::db::{sources, workspace_members};
 use crate::services::chat::pull_request::{self as chat_pull_request, Opened};
+use crate::services::checkout;
 use crate::services::prioritisation::{
     Configuration as Prioritisation, Prioritiser, RiskSignal, pull_request,
 };
+use crate::services::project_directory::{self, Origin, Start};
 
 const ORIGIN: &str = "https://api.github.com/";
 const API_HOST_LABEL: &str = "api.";
@@ -159,6 +161,7 @@ struct Arguments {
     head: Option<String>,
     base: Option<String>,
     body: Option<String>,
+    directory: Option<String>,
     number: Option<u64>,
     job_id: Option<u64>,
     tag: Option<String>,
@@ -282,6 +285,7 @@ impl Tool for Integration {
             properties["base"] = json!({"type": "string", "description": "Base branch; defaults to the source branch or repository default."});
             properties["body"] =
                 json!({"type": "string", "description": "Pull request description."});
+            properties["directory"] = json!({"type": "string", "description": "Absolute path of the checkout you committed head in. Zone pushes head from it with the source's credential before opening the pull request; do not git push yourself. Defaults to the chat's project directory. Omit for a fork's owner:branch head that is already pushed."});
             required.extend(["title", "head"]);
         }
         if matches!(self.operation, Operation::Comment) {
@@ -428,6 +432,7 @@ impl Integration {
             "https://github.com/{}/{}",
             github.configuration.owner, github.configuration.repo
         );
+        self.push_head(github, arguments, &repository).await?;
         let (head, base) = match github.create_pull(arguments).await? {
             Creation::Created(created) => {
                 return Ok(json!({
@@ -454,6 +459,61 @@ impl Integration {
             "pull_request": existing,
             "already_open": true,
         }))
+    }
+
+    /// Pushes `head` from the checkout the chat committed it in, with the
+    /// source's token, so a chat whose agent holds no GitHub credential can
+    /// still open a pull request. A fork's `owner:branch` head, and a chat with
+    /// no checkout to push from, are left for GitHub to find already pushed.
+    async fn push_head(
+        &self,
+        github: &Github,
+        arguments: &Arguments,
+        repository: &str,
+    ) -> Result<(), String> {
+        let Some(head) = arguments.head.as_deref().filter(|head| !head.contains(':')) else {
+            return Ok(());
+        };
+        let Some(directory) = self.checkout(arguments).await else {
+            return Ok(());
+        };
+        let token = github
+            .configuration
+            .token
+            .as_deref()
+            .ok_or("The source has no credential to push with.")?;
+        let url = abnegate_vcs::RepositoryUrl::parse(repository)
+            .map_err(|_| "The source does not name a GitHub repository.".to_string())?;
+        let origin =
+            Origin::parse(repository).ok_or("The source does not name a GitHub repository.")?;
+        chat_pull_request::push(
+            &checkout::git(),
+            &directory,
+            &url,
+            &origin,
+            head,
+            &SecretValue::new(token),
+        )
+        .await
+        .map(drop)
+        .map_err(|error| format!("Could not push {head}: {error}"))
+    }
+
+    /// The checkout to push from: the one the model names, or else the
+    /// directory the chat's project starts it in.
+    async fn checkout(&self, arguments: &Arguments) -> Option<std::path::PathBuf> {
+        if let Some(directory) = arguments
+            .directory
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Some(std::path::PathBuf::from(directory));
+        }
+        let chat = self.scope.chat_id?;
+        match project_directory::peek(&self.scope.state, chat, self.scope.workspace_id).await {
+            Start::Directory(directory) => Some(directory),
+            _ => None,
+        }
     }
 
     /// Notes the pull request this chat just opened as the chat's own. A
@@ -1865,11 +1925,12 @@ fn segment(value: &str) -> bool {
 }
 
 fn git_ref(value: &str) -> bool {
-    if let Some((owner, branch)) = value.split_once(':') {
-        segment(owner) && segment(branch)
-    } else {
-        segment(value)
-    }
+    let branch = match value.split_once(':') {
+        Some((owner, branch)) if segment(owner) => branch,
+        Some(_) => return false,
+        None => value,
+    };
+    BranchName::parse(branch).is_ok()
 }
 
 fn valid_sha(value: &str) -> bool {
@@ -2411,6 +2472,15 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use zone_core::tools::REASON_DESCRIPTION;
 
+    #[test]
+    fn heads_may_be_slashed_branch_names() {
+        assert!(git_ref("feat/features-settings-tab"));
+        assert!(git_ref("owner:feat/branch"));
+        assert!(!git_ref("feat/../main"));
+        assert!(!git_ref("bad owner:branch"));
+        assert!(!git_ref(""));
+    }
+
     const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const BLOB: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const WHY: &str = "The user asked for this to be opened.";
@@ -2582,6 +2652,7 @@ mod tests {
             head: None,
             base: None,
             body: None,
+            directory: None,
             number: Some(number),
             job_id: None,
             tag: None,
@@ -2706,6 +2777,7 @@ mod tests {
                     head: None,
                     base: None,
                     body: None,
+                    directory: None,
                     number: None,
                     job_id: None,
                     tag: None,
@@ -3012,6 +3084,7 @@ mod tests {
                     head: None,
                     base: None,
                     body: None,
+                    directory: None,
                     number: None,
                     job_id: None,
                     tag: None,
@@ -3142,6 +3215,7 @@ mod tests {
                     head: Some("feature".into()),
                     base: None,
                     body: Some("details".into()),
+                    directory: None,
                     number: None,
                     job_id: None,
                     tag: None,
@@ -3186,6 +3260,7 @@ mod tests {
                     head: None,
                     base: None,
                     body: Some("ship it".into()),
+                    directory: None,
                     number: Some(7),
                     job_id: None,
                     tag: None,
@@ -3216,6 +3291,7 @@ mod tests {
             head: head.map(str::to_string),
             base: None,
             body: body.map(str::to_string),
+            directory: None,
             number,
             job_id: None,
             tag: None,
@@ -3342,6 +3418,7 @@ mod tests {
             head: None,
             base: None,
             body: None,
+            directory: None,
             number,
             job_id: None,
             tag: None,
@@ -3834,6 +3911,7 @@ mod tests {
             head: None,
             base: None,
             body: None,
+            directory: None,
             number,
             job_id,
             tag: None,
