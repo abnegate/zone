@@ -1116,30 +1116,26 @@ mod tests {
     }
 
     /// An origin with a second address fetches from the first and pushes to
-    /// every one, so a run that slips one in ahead of the task's repository
-    /// must not have its base rewritten as though it were still the task's.
+    /// every one, so a base whose origin names another address beside the
+    /// task's repository, in either order, is not rewritten as the task's.
     #[tokio::test]
     async fn a_base_whose_origin_names_two_addresses_is_refused() {
-        let (_holder, root) = private_root();
-        let base = base_clone(&root);
-        git(
-            &base,
-            &[
-                "config",
-                "remote.origin.url",
-                "https://example.test/elsewhere.git",
-            ],
-        );
-        git(
-            &base,
-            &["config", "--add", "remote.origin.url", FIXTURE_ORIGIN],
-        );
+        const ELSEWHERE: &str = "https://example.test/elsewhere.git";
+        for addresses in [[ELSEWHERE, FIXTURE_ORIGIN], [FIXTURE_ORIGIN, ELSEWHERE]] {
+            let (_holder, root) = private_root();
+            let base = base_clone(&root);
+            git(&base, &["config", "remote.origin.url", addresses[0]]);
+            git(
+                &base,
+                &["config", "--add", "remote.origin.url", addresses[1]],
+            );
 
-        let refused = sanitize(&base, &url(FIXTURE_ORIGIN))
-            .await
-            .expect_err("an origin with two addresses is not the task's repository");
+            let refused = sanitize(&base, &url(FIXTURE_ORIGIN))
+                .await
+                .expect_err("an origin with two addresses is not the task's repository");
 
-        assert_eq!(refused, MISMATCHED_ORIGIN);
+            assert_eq!(refused, MISMATCHED_ORIGIN, "{addresses:?}");
+        }
     }
 
     /// A base whose configuration cannot be read is refused with what kept it
