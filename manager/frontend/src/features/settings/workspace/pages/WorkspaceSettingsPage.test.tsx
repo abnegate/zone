@@ -66,14 +66,38 @@ mock.module('../../../../shared/context/ThemeContext', () => ({
     ]),
 }));
 
+const mockRefreshModels = mock();
+
 mock.module('../../../models', () => ({
   useModels: () => ({
     models: [],
     loading: false,
     error: null,
-    refresh: mock(),
+    refresh: mockRefreshModels,
     deleteModel: mock(),
   }),
+  usePull: () => ({
+    jobs: [],
+    pull: mock(),
+    cancel: mock(),
+    dismiss: mock(),
+    canStart: () => true,
+  }),
+  FeaturesPanel: () => <section aria-label="Features">Features panel</section>,
+}));
+
+let searchParams = new URLSearchParams();
+const mockSetSearchParams = mock((next: URLSearchParams) => {
+  searchParams = next;
+});
+
+mock.module('react-router-dom', () => ({
+  useSearchParams: () => [searchParams, mockSetSearchParams],
+  useLocation: () => ({ pathname: '/settings', search: '', hash: '', state: null, key: 'default' }),
+  useNavigate: () => mock(),
+  Link: ({ children, to }: { children: React.ReactNode; to: string }) => (
+    <a href={to}>{children}</a>
+  ),
 }));
 
 const organization = {
@@ -187,6 +211,7 @@ const inheritedAiSettings: WorkspaceAiSettings = {
 describe('WorkspaceSettingsPage', () => {
   beforeEach(() => {
     mock.clearAllMocks();
+    searchParams = new URLSearchParams();
     organizationRole = 'unknown';
     resolvingRole = false;
     agentsApi.list.mockResolvedValue(fixture.agents);
@@ -306,6 +331,22 @@ describe('WorkspaceSettingsPage', () => {
     expect(screen.queryByRole('button', { name: 'Save Changes' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Reset to Defaults' })).toBeNull();
     expect(mockClient.getConnectUrls).toHaveBeenCalled();
+  });
+
+  it('opens the features picker without the save row', async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceSettingsPage />);
+    await user.click(await screen.findByRole('tab', { name: 'Features' }));
+    expect(await screen.findByRole('region', { name: 'Features' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save Changes' })).toBeNull();
+    expect(mockSetSearchParams.mock.calls[0]?.[0].get('tab')).toBe('features');
+  });
+
+  it('starts on the tab the URL asks for', async () => {
+    searchParams = new URLSearchParams('tab=features');
+    render(<WorkspaceSettingsPage />);
+    expect(await screen.findByRole('region', { name: 'Features' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Features' })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('keeps the Devices tab usable while theme settings load', async () => {

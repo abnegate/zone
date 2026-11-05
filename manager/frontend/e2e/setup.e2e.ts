@@ -60,7 +60,7 @@ test.describe('First-run feature setup', () => {
     await expect(page).toHaveURL('/');
     await expect(page.locator('.sidebar')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Set up Zone' })).toHaveCount(0);
-    await page.goto('/models');
+    await page.goto('/settings');
     await expect(page.getByRole('tab', { name: 'Features' })).toBeVisible();
   });
 
