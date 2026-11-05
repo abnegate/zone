@@ -64,17 +64,17 @@ pub struct LlmClient {
     reported: Reported,
 }
 
-/// What a coding agent last reported of its context, shared by every clone of
-/// the client that ran it.
+/// What a coding agent last reported of its context, and which agent did, shared by every clone
+/// of the client that ran it.
 #[derive(Debug, Clone, Default)]
-struct Reported(Arc<Mutex<Option<Occupancy>>>);
+struct Reported(Arc<Mutex<Option<(AgentKind, Occupancy)>>>);
 
 impl Reported {
-    fn record(&self, occupancy: Occupancy) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(occupancy);
+    fn record(&self, agent: AgentKind, occupancy: Occupancy) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((agent, occupancy));
     }
 
-    fn latest(&self) -> Option<Occupancy> {
+    fn latest(&self) -> Option<(AgentKind, Occupancy)> {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -154,15 +154,16 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, Error> {
 
 fn chunks(
     events: AgentStream,
-    provider: String,
+    agent: AgentKind,
     reported: Reported,
 ) -> impl Stream<Item = Result<ChatStreamChunk, Error>> + Send {
+    let provider = agent.to_string();
     async_stream::stream! {
         let mut events = events;
         while let Some(event) = events.next().await {
             let translated = match event {
                 Ok(AgentEvent::Occupancy(occupancy)) => {
-                    reported.record(occupancy);
+                    reported.record(agent, occupancy);
                     continue;
                 }
                 Ok(event) => chunk(event, &provider),
@@ -212,10 +213,17 @@ impl LlmClient {
         }
     }
 
-    /// The context window and fill the coding agent behind this client last
-    /// reported, which no stream chunk has room to carry.
+    /// The context window and fill the coding agent this client now runs on
+    /// last reported, which no stream chunk has room to carry. A report from
+    /// an agent the turn handed over from is not this one's.
     pub fn occupancy(&self) -> Option<Occupancy> {
-        self.reported.latest()
+        let LlmBackend::Cli { agent, .. } = &self.backend else {
+            return None;
+        };
+        self.reported
+            .latest()
+            .filter(|(reporter, _)| reporter == agent)
+            .map(|(_, occupancy)| occupancy)
     }
 
     /// Ask the provider to halt on these strings. Custom GGUFs often ignore
@@ -365,11 +373,7 @@ impl LlmClient {
         refuse_tools(tools, *agent)?;
         let events = CliProvider::agent(*agent, settings.as_ref().clone())
             .stream(CompletionRequest::new(model, messages, options))?;
-        Ok(Box::pin(chunks(
-            events,
-            agent.to_string(),
-            self.reported.clone(),
-        )))
+        Ok(Box::pin(chunks(events, *agent, self.reported.clone())))
     }
 
     /// The endpoint settings, with any temperature a `with_` method set.

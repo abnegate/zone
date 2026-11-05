@@ -25,6 +25,9 @@ use abnegate_llm::{
     ProviderKind, Usage,
 };
 
+/// The longest a finished codex turn waits on its rollout to learn its window.
+const ROLLOUT_TIMEOUT: Duration = Duration::from_secs(5);
+
 const READ_BUFFER: usize = 8 * 1024;
 
 /// Bytes of the agent's stderr that a failure it reported carries.
@@ -252,7 +255,7 @@ impl CliProvider {
                 && let Some(home) = rollout::home(&variables, &environment::inherited())
             {
                 let read = tokio::task::spawn_blocking(move || rollout::occupancy(&home, &thread));
-                if let Ok(Some(occupancy)) = read.await {
+                if let Ok(Ok(Some(occupancy))) = timeout(ROLLOUT_TIMEOUT, read).await {
                     yield AgentEvent::Occupancy(occupancy);
                 }
             }

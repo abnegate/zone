@@ -6,7 +6,8 @@
 //! `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -21,6 +22,14 @@ const DEFAULT_HOME: &str = ".codex";
 const USER_HOME: &str = "HOME";
 const EVENT: &str = "event_msg";
 const TOKEN_COUNT: &str = "token_count";
+
+/// How much of a rollout's end is read first. Codex writes a `token_count`
+/// after every request, so the last one is among the final lines of a turn.
+const TAIL: u64 = 64 * 1024;
+
+/// The most of a rollout's end ever read. A resumed session's rollout holds
+/// its whole history and only grows, and the server reads it every turn.
+const TAIL_LIMIT: u64 = 4 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct Line {
@@ -75,9 +84,46 @@ pub fn home(
 
 /// The window and fill codex last reported for `thread` in its rollout under `home`.
 pub fn occupancy(home: &Path, thread: &str) -> Option<Occupancy> {
-    let path = locate(&home.join(SESSIONS), thread)?;
-    let content = fs::read_to_string(path).ok()?;
-    last(&content)
+    let Some(path) = locate(&home.join(SESSIONS), thread) else {
+        tracing::debug!(home = %home.display(), thread, "no codex rollout names this thread");
+        return None;
+    };
+    let reported = tail(&path);
+    if reported.is_none() {
+        tracing::debug!(path = %path.display(), "the codex rollout reports no context window");
+    }
+    reported
+}
+
+/// The last window `path` reports, read from its end alone and only while it
+/// is a regular file: the agent can write to its home, and a link to a device
+/// or a pipe in a rollout's place would hold the read.
+fn tail(path: &Path) -> Option<Occupancy> {
+    let mut file = File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let length = metadata.len();
+    let mut span = TAIL;
+    loop {
+        let start = length.saturating_sub(span);
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut bytes = Vec::new();
+        file.by_ref().take(span).read_to_end(&mut bytes).ok()?;
+        let text = String::from_utf8_lossy(&bytes);
+        let whole = match start {
+            0 => &text[..],
+            _ => text.split_once('\n').map_or("", |(_, rest)| rest),
+        };
+        if let Some(reported) = last(whole) {
+            return Some(reported);
+        }
+        if start == 0 || span >= TAIL_LIMIT {
+            return None;
+        }
+        span = (span * 2).min(TAIL_LIMIT);
+    }
 }
 
 /// The rollout of `thread`, looked for in the newest day first: a resumed
@@ -91,10 +137,11 @@ fn locate(sessions: &Path, thread: &str) -> Option<PathBuf> {
                     continue;
                 };
                 let found = entries.flatten().find(|entry| {
-                    entry
-                        .file_name()
-                        .to_str()
-                        .is_some_and(|name| name.starts_with(PREFIX) && name.ends_with(&suffix))
+                    entry.file_type().is_ok_and(|kind| kind.is_file())
+                        && entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| name.starts_with(PREFIX) && name.ends_with(&suffix))
                 });
                 if let Some(found) = found {
                     return Some(found.path());
@@ -198,6 +245,72 @@ mod tests {
             })
         );
         assert_eq!(occupancy(home.path(), "019b2c41-missing"), None);
+    }
+
+    #[test]
+    fn only_the_end_of_a_long_rollout_is_read() {
+        let home = tempfile::tempdir().expect("home");
+        let day = home.path().join("sessions/2026/11/05");
+        fs::create_dir_all(&day).expect("a day");
+        let filler = r#"{"type":"response_item","payload":{"type":"message","content":"padding"}}"#;
+        let mut rollout = String::new();
+        while (rollout.len() as u64) < TAIL * 3 {
+            rollout.push_str(filler);
+            rollout.push('\n');
+        }
+        rollout.push_str(ROLLOUT);
+        fs::write(
+            day.join(format!("rollout-2026-11-05T13-36-38-{THREAD}.jsonl")),
+            &rollout,
+        )
+        .expect("a long rollout");
+
+        assert_eq!(
+            occupancy(home.path(), THREAD),
+            Some(Occupancy {
+                window: 475_000,
+                used: Some(24_638),
+            })
+        );
+    }
+
+    #[test]
+    fn a_report_further_back_than_the_first_read_is_still_found() {
+        let home = tempfile::tempdir().expect("home");
+        let day = home.path().join("sessions/2026/11/05");
+        fs::create_dir_all(&day).expect("a day");
+        let filler = r#"{"type":"response_item","payload":{"type":"message","content":"padding"}}"#;
+        let mut rollout = ROLLOUT.to_string();
+        while (rollout.len() as u64) < TAIL * 3 {
+            rollout.push_str(filler);
+            rollout.push('\n');
+        }
+        fs::write(
+            day.join(format!("rollout-2026-11-05T13-36-38-{THREAD}.jsonl")),
+            &rollout,
+        )
+        .expect("a rollout ending in other events");
+
+        assert_eq!(
+            occupancy(home.path(), THREAD).map(|occupancy| occupancy.window),
+            Some(475_000)
+        );
+    }
+
+    #[test]
+    fn a_link_in_a_rollouts_place_is_never_read() {
+        let home = tempfile::tempdir().expect("home");
+        let day = home.path().join("sessions/2026/11/05");
+        fs::create_dir_all(&day).expect("a day");
+        let elsewhere = home.path().join("elsewhere.jsonl");
+        fs::write(&elsewhere, ROLLOUT).expect("a file outside the sessions");
+        std::os::unix::fs::symlink(
+            &elsewhere,
+            day.join(format!("rollout-2026-11-05T13-36-38-{THREAD}.jsonl")),
+        )
+        .expect("a link named as the rollout");
+
+        assert_eq!(occupancy(home.path(), THREAD), None);
     }
 
     #[test]

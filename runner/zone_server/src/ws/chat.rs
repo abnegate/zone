@@ -4002,7 +4002,8 @@ async fn handle_chat_generation(
         settle(state, login, observed.take(login));
     }
 
-    if let (Some(driver), Some(occupancy)) = (driver, llm_client.occupancy()) {
+    let owned = failure.as_deref() != Some(OWNERSHIP_LOST);
+    if let (true, Some(driver), Some(occupancy)) = (owned, driver, llm_client.occupancy()) {
         let ran = Driver::on(llm_client.backend(), driver.model.clone()).unwrap_or(driver);
         ran.record(state.db(), chat_id, occupancy).await;
         replay.policy = session::policy(

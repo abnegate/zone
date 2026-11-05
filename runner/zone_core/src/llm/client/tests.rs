@@ -1311,7 +1311,7 @@ async fn an_agents_successful_ending_becomes_the_one_the_loop_accepts() {
     ]);
 
     let (delivered, failure) =
-        collected(chunks(events, "claude".to_string(), Reported::default())).await;
+        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
 
     assert!(failure.is_none(), "a finished turn failed: {failure:?}");
     assert_eq!(spoken(&delivered), "The suite passes.");
@@ -1343,7 +1343,7 @@ async fn an_agents_tool_use_is_shown_as_reasoning_rather_than_replayed() {
     ]);
 
     let (delivered, failure) =
-        collected(chunks(events, "claude".to_string(), Reported::default())).await;
+        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
 
     assert!(failure.is_none(), "a finished turn failed: {failure:?}");
     assert!(
@@ -1383,7 +1383,7 @@ async fn an_agents_own_tools_are_listed_and_zones_are_left_to_their_cards() {
     ]);
 
     let (delivered, failure) =
-        collected(chunks(events, "claude".to_string(), Reported::default())).await;
+        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
 
     assert!(failure.is_none(), "a finished turn failed: {failure:?}");
     assert_eq!(
@@ -1417,7 +1417,7 @@ async fn a_refusing_agent_ends_the_stream_in_its_own_words() {
     let events = agent_events(vec![Ok(AgentEvent::Failed(REFUSAL.to_string()))]);
 
     let (delivered, failure) =
-        collected(chunks(events, "claude".to_string(), Reported::default())).await;
+        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
 
     let failure = failure.expect("a refused turn to fail");
     assert!(
@@ -1439,7 +1439,7 @@ async fn a_limited_agent_stream_ends_in_a_limited_error_not_an_agent_one() {
     ]);
 
     let (delivered, failure) =
-        collected(chunks(events, "claude".to_string(), Reported::default())).await;
+        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
 
     assert_eq!(spoken(&delivered), "Halfway there.");
     let failure = failure.expect("a limited turn to fail");
@@ -1464,7 +1464,7 @@ async fn a_window_rides_the_chunk_it_arrived_on() {
     ]);
 
     let (delivered, failure) =
-        collected(chunks(events, "claude".to_string(), Reported::default())).await;
+        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
 
     assert!(failure.is_none(), "a window failed the turn: {failure:?}");
     let windows: Vec<Option<&Window>> = delivered
@@ -1490,18 +1490,42 @@ async fn the_context_an_agent_reports_is_kept_on_the_client_not_chunked() {
     ]);
     let reported = Reported::default();
 
-    let (delivered, failure) =
-        collected(chunks(events, "claude".to_string(), reported.clone())).await;
+    let (delivered, failure) = collected(chunks(events, AgentKind::Claude, reported.clone())).await;
 
     assert!(failure.is_none(), "a report failed the turn: {failure:?}");
     assert_eq!(delivered.len(), 2, "no chunk carries the report");
     assert_eq!(
         reported.latest(),
-        Some(Occupancy {
-            window: 200_000,
-            used: Some(16_632),
-        })
+        Some((
+            AgentKind::Claude,
+            Occupancy {
+                window: 200_000,
+                used: Some(16_632),
+            }
+        ))
     );
+}
+
+#[test]
+fn a_client_reports_only_what_the_agent_it_now_runs_on_reported() {
+    let occupancy = Occupancy {
+        window: 200_000,
+        used: Some(16_632),
+    };
+    let client = LlmClient::new(LlmConfig::new("http://localhost:4000", "sonnet", "key"))
+        .with_backend(LlmBackend::cli(AgentKind::Claude, CliSettings::default()));
+    client.reported.record(AgentKind::Claude, occupancy);
+    assert_eq!(client.occupancy(), Some(occupancy));
+
+    let handed = client.with_backend(LlmBackend::cli(AgentKind::Codex, CliSettings::default()));
+    assert_eq!(
+        handed.occupancy(),
+        None,
+        "claude's report was kept as codex's after the turn handed over"
+    );
+
+    let http = handed.with_backend(LlmBackend::Http);
+    assert_eq!(http.occupancy(), None);
 }
 
 #[tokio::test]
@@ -1515,7 +1539,7 @@ async fn the_session_an_agent_announces_rides_the_chunk_it_arrived_on() {
     ]);
 
     let (delivered, failure) =
-        collected(chunks(events, "claude".to_string(), Reported::default())).await;
+        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
 
     assert!(failure.is_none(), "a session failed the turn: {failure:?}");
     let sessions: Vec<Option<&str>> = delivered
