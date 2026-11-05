@@ -29,7 +29,7 @@
 use abnegate_secret::SecretValue;
 use abnegate_vcs::Checkout as GitCheckout;
 use abnegate_vcs::worktree;
-use abnegate_vcs::{BranchFormat, BranchName, CommitSha, GitService, RepositoryUrl};
+use abnegate_vcs::{BranchFormat, BranchName, CommitSha, GitError, GitService, RepositoryUrl};
 use nix::fcntl::{Flock, FlockArg};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -49,6 +49,9 @@ const AUTHOR_NAME: &str = "Zone";
 const AUTHOR_EMAIL: &str = "zone@localhost";
 
 const BRANCH_PREFIX: &str = "zone/task";
+
+pub(crate) const MISMATCHED_ORIGIN: &str =
+    "Checkout repository no longer matches the task repository";
 
 /// Git as a task run uses it: commits made as Zone, and branches named
 /// `zone/task-{short id}-{slug}`.
@@ -81,12 +84,10 @@ pub async fn sanitize(base: &Path, origin: &RepositoryUrl) -> Result<(), String>
 /// [`sanitize`]'s rewrite, for a caller already holding the base's lock.
 async fn restore(base: &Path, origin: &RepositoryUrl) -> Result<(), String> {
     let file = base.join(".git").join("config");
-    let configured = Checkout::filesystem(move || {
-        GitService::configured_origin(&file).map_err(std::io::Error::other)
-    })
-    .await?;
-    if configured.as_deref() != Some(origin.as_str()) {
-        return Err("Checkout repository no longer matches the task repository".to_string());
+    match Checkout::filesystem(move || Ok(GitService::configured_origin(&file))).await? {
+        Ok(Some(configured)) if configured == origin.as_str() => {}
+        Ok(_) | Err(GitError::UnsafeConfig(_)) => return Err(MISMATCHED_ORIGIN.to_string()),
+        Err(error) => return Err(error.to_string()),
     }
     git()
         .reset_config(base, origin)
@@ -1134,9 +1135,28 @@ mod tests {
             &["config", "--add", "remote.origin.url", FIXTURE_ORIGIN],
         );
 
-        sanitize(&base, &url(FIXTURE_ORIGIN))
+        let refused = sanitize(&base, &url(FIXTURE_ORIGIN))
             .await
             .expect_err("an origin with two addresses is not the task's repository");
+
+        assert_eq!(refused, MISMATCHED_ORIGIN);
+    }
+
+    /// A base whose configuration cannot be read is refused with what kept it
+    /// from being read, so the operator can tell it from a changed origin.
+    #[tokio::test]
+    async fn a_base_whose_configuration_cannot_be_read_says_why() {
+        let (_holder, root) = private_root();
+        let base = base_clone(&root);
+        let configuration = base.join(".git").join("config");
+        std::fs::remove_file(&configuration).unwrap();
+        std::fs::create_dir(&configuration).unwrap();
+
+        let refused = sanitize(&base, &url(FIXTURE_ORIGIN))
+            .await
+            .expect_err("a configuration that is a directory is refused");
+
+        assert!(refused.contains("not a regular file"), "{refused}");
     }
 
     /// The base a worktree names is the only one asked, and what it refuses

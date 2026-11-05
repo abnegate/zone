@@ -219,7 +219,7 @@ impl Publication<'_> {
             .await?
             != baseline.repository.as_str()
         {
-            return Err("Checkout repository no longer matches the task repository".into());
+            return Err(checkout::MISMATCHED_ORIGIN.into());
         }
         if self
             .retried(baseline, || self.git.current_branch(worktree))
