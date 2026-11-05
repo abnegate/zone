@@ -2953,6 +2953,28 @@ describe('context freshness', () => {
     unmount();
   });
 
+  it("keeps a stopped turn's calls ahead of its placeholder rather than inside it", async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'blank', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: '\n\n', index: 0 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'blank',
+        tool_call_id: 'tool',
+        name: 'read_file',
+        arguments: '{}',
+        at: 2,
+      });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'blank' });
+    });
+    const stopped = result.current.chat?.messages.find((message) => message.id === 'blank');
+    expect(stopped?.content).toBe('[Stopped before answering]');
+    expect(stopped?.metadata?.tool_calls?.[0]?.at).toBe(0);
+    unmount();
+  });
+
   it('reuses the pending user row when a send fails before it is saved', async () => {
     const { result, unmount } = renderHook(() => useChat('context'), { wrapper: createWrapper() });
     await waitFor(() => {

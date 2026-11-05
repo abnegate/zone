@@ -14,7 +14,11 @@ const handover = (overrides: Partial<Handover> = {}): Handover => ({
   ...overrides,
 });
 
-const call = (id: string, at?: number): ToolCallRecord => ({
+const call = (
+  id: string,
+  at?: number,
+  overrides: Partial<ToolCallRecord> = {}
+): ToolCallRecord => ({
   id,
   name: 'read_file',
   arguments: '{}',
@@ -22,12 +26,16 @@ const call = (id: string, at?: number): ToolCallRecord => ({
   detail: 'ok',
   duration_ms: 1,
   at,
+  ...overrides,
 });
 
 const describeParts = (parts: ReturnType<typeof splitTurn>): string[] =>
   parts.map((part) => {
     if (part.kind === 'text') return `text:${part.text}`;
-    if (part.kind === 'calls') return `calls:${part.calls.map((item) => item.id).join(',')}`;
+    if (part.kind === 'calls') {
+      const ids = part.calls.map((item) => `${item.id}${item.reasoning ? '+thought' : ''}`);
+      return `calls:${ids.join(',')}${part.reasoning ? `|${part.reasoning}` : ''}`;
+    }
     return `handover:${part.handover.to}`;
   });
 
@@ -92,12 +100,91 @@ describe('splitTurn with tool calls', () => {
     ]);
   });
 
-  it('keeps calls either side of a handover at the same offset apart', () => {
-    const moved = handover({ at: 3 });
+  it('keeps a call made before a handover at the same offset above the divider', () => {
+    const moved = handover({ at: 3, calls: 1 });
 
     const parts = splitTurn('abc', [call('before', 3)], [moved]);
 
     expect(describeParts(parts)).toEqual(['text:abc', 'calls:before', 'handover:b@example.com']);
+  });
+
+  it('draws a call the new login made at the same offset below the divider', () => {
+    const moved = handover({ at: 3, calls: 1 });
+
+    const parts = splitTurn('abc', [call('old', 3), call('new', 3)], [moved]);
+
+    expect(describeParts(parts)).toEqual([
+      'text:abc',
+      'calls:old',
+      'handover:b@example.com',
+      'calls:new',
+    ]);
+  });
+});
+
+describe('splitTurn with thinking', () => {
+  it('draws thinking where it began when text came between it and its call', () => {
+    const content = 'Opened. Then wrote this. ';
+    const later = call('later', 25, { reasoning: 'Look next.', reasoning_at: 8 });
+
+    const parts = splitTurn(content, [call('first', 0), later], []);
+
+    expect(describeParts(parts)).toEqual([
+      'calls:first',
+      'text:Opened. ',
+      'calls:|Look next.',
+      'text:Then wrote this. ',
+      'calls:later',
+    ]);
+  });
+
+  it('keeps thinking beside its call when nothing was written between them', () => {
+    const parts = splitTurn(
+      'Done.',
+      [call('a', 0, { reasoning: 'Read it.', reasoning_at: 0 })],
+      []
+    );
+
+    expect(describeParts(parts)).toEqual(['calls:a+thought', 'text:Done.']);
+  });
+
+  it('keeps thinking beside its call when it was stored without an offset', () => {
+    const parts = splitTurn('Hi. Done.', [call('a', 4, { reasoning: 'Read it.' })], []);
+
+    expect(describeParts(parts)).toEqual(['text:Hi. ', 'calls:a+thought', 'text:Done.']);
+  });
+
+  it('draws thinking after the last call below that call, even when the call had none', () => {
+    const calls = [call('a', 0, { reasoning: 'First.', reasoning_at: 0 }), call('b', 5)];
+
+    const parts = splitTurn('Mid. Final.', calls, [], { text: 'Now answer.' });
+
+    expect(describeParts(parts)).toEqual([
+      'calls:a+thought',
+      'text:Mid. ',
+      'calls:b|Now answer.',
+      'text:Final.',
+    ]);
+  });
+
+  it('draws thinking still streaming after the text it followed', () => {
+    const parts = splitTurn('Looked. Thinking more', [call('a', 0)], [], {
+      text: 'Hmm.',
+      at: 8,
+    });
+
+    expect(describeParts(parts)).toEqual([
+      'calls:a',
+      'text:Looked. ',
+      'calls:|Hmm.',
+      'text:Thinking more',
+    ]);
+  });
+
+  it('opens the turn with thinking when there were no calls and no offset', () => {
+    const parts = splitTurn('Answer', [], [], { text: 'Think.' });
+
+    expect(describeParts(parts)).toEqual(['calls:|Think.', 'text:Answer']);
   });
 });
 

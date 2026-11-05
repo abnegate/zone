@@ -230,12 +230,13 @@ pub fn merged<'a>(
         futures::pin_mut!(events);
         loop {
             tokio::select! {
+                // The agent writes before it calls, so what it wrote is counted ahead of the call.
                 biased;
-                Some(call) = calls.recv() => yield call,
                 event = events.next() => match event {
                     Some(event) => yield event,
                     None => break,
                 },
+                Some(call) = calls.recv() => yield call,
             }
         }
         while let Ok(call) = calls.try_recv() {
@@ -268,6 +269,34 @@ mod tests {
     use zone_core::llm::provider::DEFAULT_TIMEOUT;
     use zone_core::tools::Session;
     use zone_core::tools::job::{JobCommand, Jobs};
+
+    #[tokio::test]
+    async fn what_the_agent_wrote_is_yielded_before_a_call_that_arrived_with_it() {
+        let (sender, mut calls) = unbounded_channel();
+        sender
+            .send(AgentEvent::ToolCallStarted {
+                id: "call_1".to_string(),
+                name: "list_chats".to_string(),
+                arguments: "{}".to_string(),
+            })
+            .unwrap();
+        let written = futures::stream::iter(vec![AgentEvent::Chunk("Let me look. ".to_string())]);
+
+        let order: Vec<&str> = merged(written, &mut calls)
+            .map(|event| match event {
+                AgentEvent::Chunk(_) => "text",
+                AgentEvent::ToolCallStarted { .. } => "call",
+                _ => "other",
+            })
+            .collect()
+            .await;
+
+        assert_eq!(
+            order,
+            ["text", "call"],
+            "a call placed ahead of the text before it is drawn above that text"
+        );
+    }
 
     #[tokio::test]
     async fn a_token_reaches_the_turn_it_was_minted_for() {

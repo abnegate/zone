@@ -482,10 +482,11 @@ pub enum ServerMessage {
         tool_call_id: String,
         name: String,
         arguments: String,
-        /// How many Unicode scalar values of the answer were written before it.
         at: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_at: Option<usize>,
         /// The model's stated reason, for side-effecting tools that carry one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
@@ -771,8 +772,11 @@ fn trace_started(
     name: String,
     arguments: &str,
     at: usize,
-    reasoning: Option<String>,
+    thought: Option<Thought>,
 ) -> (ToolCallRecord, ServerMessage) {
+    let (reasoning, reasoning_at) = thought.map_or((None, None), |thought| {
+        (Some(thought.text), Some(thought.at))
+    });
     let reason = crate::agent::memory::trace_reason(&name, crate::agent::reason(arguments));
     let shown = crate::agent::memory::trace_arguments(&name, arguments)
         .unwrap_or_else(|| arguments.to_string());
@@ -785,6 +789,7 @@ fn trace_started(
         duration_ms: 0,
         at: Some(at),
         reasoning: reasoning.clone(),
+        reasoning_at,
         reason: reason.clone(),
         preview: None,
         questions: Vec::new(),
@@ -798,6 +803,7 @@ fn trace_started(
         arguments: shown,
         at,
         reasoning,
+        reasoning_at,
         reason,
     };
     (record, frame)
@@ -812,10 +818,11 @@ fn merge_metadata(
     tool_calls: &[ToolCallRecord],
     citations: &[Citation],
     receipts: &[ActionReceipt],
-    reasoning: Option<&str>,
+    reasoning: Option<&Thinking>,
     handovers: &[Notice],
     usage: Option<Usage>,
 ) -> Option<serde_json::Value> {
+    let reasoning = reasoning.filter(|thinking| !thinking.text.is_empty());
     if tool_calls.is_empty()
         && citations.is_empty()
         && receipts.is_empty()
@@ -845,7 +852,8 @@ fn merge_metadata(
         object.insert("action_receipts".to_string(), serde_json::json!(receipts));
     }
     if let Some(reasoning) = reasoning {
-        object.insert("reasoning".to_string(), serde_json::json!(reasoning));
+        object.insert("reasoning".to_string(), serde_json::json!(reasoning.text));
+        object.insert("reasoning_at".to_string(), serde_json::json!(reasoning.at));
     }
     if !handovers.is_empty() {
         object.insert(HANDOVERS_KEY.to_string(), serde_json::json!(handovers));
@@ -872,10 +880,56 @@ const MEDIA_QUEUED: &str = "Waiting for another generation...";
 
 /// `placeholder` in place of whatever follows the `told` bytes Zone itself opened an answer with,
 /// when the model wrote nothing there.
-fn fill_silence(content: &mut String, told: usize, placeholder: &str) {
-    if content[told..].trim().is_empty() {
+fn fill_silence(content: &mut String, told: usize, placeholder: &str) -> bool {
+    let silent = content[told..].trim().is_empty();
+    if silent {
         content.truncate(told);
         content.push_str(placeholder);
+    }
+    silent
+}
+
+/// Keeps every offset inside the `kept` characters a placeholder was written after.
+fn clamp_offsets(
+    kept: usize,
+    tool_calls: &mut [ToolCallRecord],
+    handovers: &mut [Notice],
+    thinking: &mut Thinking,
+) {
+    for call in tool_calls {
+        call.at = call.at.map(|at| at.min(kept));
+        call.reasoning_at = call.reasoning_at.map(|at| at.min(kept));
+    }
+    for notice in handovers {
+        notice.at = notice.at.min(kept);
+    }
+    thinking.at = thinking.at.min(kept);
+}
+
+/// Model thinking not yet attached to a call, and where in the answer it began.
+#[derive(Debug, Default)]
+struct Thinking {
+    text: String,
+    at: usize,
+}
+
+/// Thinking handed to the call it preceded.
+struct Thought {
+    text: String,
+    at: usize,
+}
+
+impl Thinking {
+    fn push(&mut self, content: &str, at: usize) {
+        if self.text.is_empty() {
+            self.at = at;
+        }
+        self.text.push_str(content);
+    }
+
+    fn take(&mut self) -> Option<Thought> {
+        let text = std::mem::take(&mut self.text);
+        (!text.is_empty()).then_some(Thought { text, at: self.at })
     }
 }
 
@@ -1022,7 +1076,7 @@ async fn publish_live_assistant(
     citations: &[Citation],
     receipts: &[ActionReceipt],
     images: &[ChatImageAttachment],
-    reasoning: &str,
+    reasoning: &Thinking,
     handovers: &[Notice],
     usage: Option<Usage>,
 ) -> Result<(), String> {
@@ -1031,7 +1085,7 @@ async fn publish_live_assistant(
         && citations.is_empty()
         && receipts.is_empty()
         && images.is_empty()
-        && reasoning.is_empty()
+        && reasoning.text.is_empty()
         && handovers.is_empty()
     {
         return Ok(());
@@ -1047,7 +1101,7 @@ async fn publish_live_assistant(
                 tool_calls,
                 citations,
                 receipts,
-                (!reasoning.is_empty()).then_some(reasoning),
+                Some(reasoning),
                 handovers,
                 usage,
             ),
@@ -3364,7 +3418,7 @@ async fn handle_chat_generation(
 
     let mut full_content = String::new();
     let mut pending_content = String::new();
-    let mut round_reasoning = String::new();
+    let mut round_reasoning = Thinking::default();
     let mut pending_images = Vec::<String>::new();
     let mut generated_images = Vec::new();
     let mut chunk_index = 0;
@@ -3504,7 +3558,7 @@ async fn handle_chat_generation(
                         }
                         Some(AgentEvent::Finalizing(message)) => { publish(stream,ServerMessage::Status {message}).await; }
                         Some(AgentEvent::Reasoning(content)) => {
-                            round_reasoning.push_str(&content);
+                            round_reasoning.push(&content, full_content.chars().count());
                             publish(stream, ServerMessage::Reasoning { content }).await;
                             persist = true;
                         }
@@ -3570,17 +3624,14 @@ async fn handle_chat_generation(
                         Some(AgentEvent::ToolCallStarted { id, name, arguments }) => {
                             // Recorded before the tool runs so a turn cancelled
                             // mid-call still shows what it was doing.
-                            let reasoning = {
-                                let text = std::mem::take(&mut round_reasoning);
-                                (!text.is_empty()).then_some(text)
-                            };
+                            let thought = round_reasoning.take();
                             let (record, tool_msg) = trace_started(
                                 assistant_message_id,
                                 id,
                                 name,
                                 &arguments,
                                 full_content.chars().count(),
-                                reasoning,
+                                thought,
                             );
                             tool_calls.push(record);
                             publish(stream, tool_msg).await;
@@ -3827,7 +3878,7 @@ async fn handle_chat_generation(
                 }
             }
             tracing::info!(%chat_id, from = %switch.from.id, to = %switch.to.id, carried = switch.carried, "Handing the turn over to another login");
-            let notice = switch.notice(full_content.chars().count());
+            let notice = switch.notice(full_content.chars().count(), tool_calls.len());
             publish(
                 stream,
                 ServerMessage::Status {
@@ -4091,8 +4142,11 @@ async fn handle_chat_generation(
     // An image is its own answer, so it does not need the placeholder.
     // A turn that ended on a question or a wait is not silent but waiting, and
     // saying so keeps the card's own bubble from reading as a failure.
-    if generated_images.is_empty() {
-        fill_silence(&mut full_content, told, silent_turn(asked, waited));
+    if generated_images.is_empty()
+        && fill_silence(&mut full_content, told, silent_turn(asked, waited))
+    {
+        let kept = full_content[..told].chars().count();
+        clamp_offsets(kept, &mut tool_calls, &mut handovers, &mut round_reasoning);
     }
 
     merge_cited_sources(state, chat_id, &full_content, &mut citations).await;
@@ -4104,7 +4158,7 @@ async fn handle_chat_generation(
         &tool_calls,
         &citations,
         &action_receipts,
-        (!round_reasoning.is_empty()).then_some(round_reasoning.as_str()),
+        Some(&round_reasoning),
         &handovers,
         usage,
     );
@@ -6210,6 +6264,58 @@ cat 'DIR/reply.jsonl'
     }
 
     #[test]
+    fn a_placeholder_keeps_every_offset_ahead_of_it() {
+        let notice = "> The folder is gone.\n\n";
+        let mut content = format!("{notice}\n\n");
+        let kept = notice.chars().count();
+        let mut calls = vec![ToolCallRecord {
+            at: Some(kept + 2),
+            reasoning_at: Some(kept + 1),
+            ..call("read_file", true)
+        }];
+        let mut handovers = vec![moved(kept + 2)];
+        let mut thinking = Thinking {
+            text: "Still thinking.".to_string(),
+            at: kept + 2,
+        };
+
+        assert!(fill_silence(
+            &mut content,
+            notice.len(),
+            STOPPED_BEFORE_ANSWERING
+        ));
+        clamp_offsets(kept, &mut calls, &mut handovers, &mut thinking);
+
+        assert_eq!(
+            calls[0].at,
+            Some(kept),
+            "the call no longer cuts the placeholder"
+        );
+        assert_eq!(calls[0].reasoning_at, Some(kept));
+        assert_eq!(handovers[0].at, kept);
+        assert_eq!(thinking.at, kept);
+        assert!(
+            !fill_silence(&mut format!("{notice}Written."), notice.len(), "[silent]"),
+            "an answer with prose is not silent, so nothing moves"
+        );
+    }
+
+    #[test]
+    fn thinking_remembers_where_it_began_and_hands_that_to_its_call() {
+        let mut thinking = Thinking::default();
+        thinking.push("Look at ", 13);
+        thinking.push("the file.", 20);
+
+        let thought = thinking.take().expect("thinking was written");
+        assert_eq!(thought.at, 13, "the offset is where the thinking began");
+        assert_eq!(thought.text, "Look at the file.");
+        assert!(thinking.take().is_none(), "the call took it");
+
+        thinking.push("Next.", 30);
+        assert_eq!(thinking.at, 30, "the next thought starts its own offset");
+    }
+
+    #[test]
     fn a_silent_turn_keeps_its_placeholder_after_a_notice() {
         let notice = "> The folder is gone.\n\n";
         for (written, expected) in [
@@ -6379,6 +6485,7 @@ cat 'DIR/reply.jsonl'
             arguments: "{}".to_string(),
             at: 0,
             reasoning: None,
+            reasoning_at: None,
             reason: None,
         });
         turn.record(&chunk("Found it", 0));
@@ -6402,6 +6509,7 @@ cat 'DIR/reply.jsonl'
                 .map(|at| at.with_timezone(&chrono::Utc)),
             carried: false,
             at,
+            calls: 0,
         }
     }
 
@@ -6428,6 +6536,7 @@ cat 'DIR/reply.jsonl'
                 "resets_at": "2026-09-23T06:10:00Z",
                 "carried": false,
                 "at": 12,
+                "calls": 0,
             })
         );
     }
@@ -6472,6 +6581,7 @@ cat 'DIR/reply.jsonl'
                     "resets_at": "2026-09-23T06:10:00Z",
                     "carried": false,
                     "at": 10,
+                    "calls": 0,
                 }],
                 "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
             })
@@ -7454,6 +7564,7 @@ cat 'DIR/reply.jsonl'
             arguments: r#"{"query":"deploys"}"#.to_string(),
             at: 0,
             reasoning: Some("Need workspace deploy docs.".to_string()),
+            reasoning_at: None,
             reason: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -7496,6 +7607,7 @@ cat 'DIR/reply.jsonl'
             duration_ms: 7,
             at: None,
             reasoning: None,
+            reasoning_at: None,
             reason: None,
             preview: None,
             questions: Vec::new(),
@@ -7526,6 +7638,7 @@ cat 'DIR/reply.jsonl'
             duration_ms: 3,
             at: None,
             reasoning: Some("Inspect the workspace first.".to_string()),
+            reasoning_at: None,
             reason: Some("The user asked which tests are failing.".to_string()),
             preview: None,
             questions: Vec::new(),
@@ -7622,7 +7735,10 @@ cat 'DIR/reply.jsonl'
             MEMORY_WRITE.to_string(),
             r#"{"category":"fact","name":"Deploy window","description":"When we ship.","content":"Thursdays, never Fridays.","reason":"They ship on Thursdays, so remembering it."}"#,
             0,
-            Some("I should remember this.".to_string()),
+            Some(Thought {
+                text: "I should remember this.".to_string(),
+                at: 0,
+            }),
         );
         let record_json = serde_json::to_string(&record).expect("a record serialises");
         let frame_json = serde_json::to_string(&frame).expect("a frame serialises");
@@ -7690,6 +7806,7 @@ cat 'DIR/reply.jsonl'
             duration_ms: 1,
             at: None,
             reasoning: None,
+            reasoning_at: None,
             reason: None,
             preview: None,
             questions: Vec::new(),
@@ -7750,8 +7867,19 @@ cat 'DIR/reply.jsonl'
         .expect("the turn had calls");
         assert!(wrote.get(MEMORY_USED_KEY).is_none(), "{wrote}");
 
-        let quiet =
-            merge_metadata(None, &[], &[], &[], Some("Thinking."), &[], None).expect("reasoning");
+        let quiet = merge_metadata(
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&Thinking {
+                text: "Thinking.".to_string(),
+                at: 0,
+            }),
+            &[],
+            None,
+        )
+        .expect("reasoning");
         assert!(quiet.get(MEMORY_USED_KEY).is_none(), "{quiet}");
     }
 
@@ -7762,24 +7890,34 @@ cat 'DIR/reply.jsonl'
             &[],
             &[],
             &[],
-            Some("The capital is Paris."),
+            Some(&Thinking {
+                text: "The capital is Paris.".to_string(),
+                at: 0,
+            }),
             &[],
             None,
         )
         .expect("reasoning");
         assert_eq!(merged["reasoning"], "The capital is Paris.");
+        assert_eq!(merged["reasoning_at"], 0);
 
         let merged = merge_metadata(
             Some(serde_json::json!("invalid image metadata")),
             &[],
             &[],
             &[],
-            Some("Recovered"),
+            Some(&Thinking {
+                text: "Recovered".to_string(),
+                at: 0,
+            }),
             &[],
             None,
         )
         .expect("reasoning replaces malformed metadata");
-        assert_eq!(merged, serde_json::json!({"reasoning":"Recovered"}));
+        assert_eq!(
+            merged,
+            serde_json::json!({"reasoning": "Recovered", "reasoning_at": 0})
+        );
     }
 
     #[test]
@@ -8039,12 +8177,21 @@ cat 'DIR/reply.jsonl'
             "read_file".to_string(),
             r#"{"path":"src/main.rs"}"#,
             13,
-            None,
+            Some(Thought {
+                text: "Read main first.".to_string(),
+                at: 5,
+            }),
         );
 
         assert_eq!(record.at, Some(13), "a reload draws the call where it ran");
+        assert_eq!(
+            record.reasoning_at,
+            Some(5),
+            "and its thinking where it began"
+        );
         let json = serde_json::to_value(frame).unwrap();
         assert_eq!(json["at"], 13, "the live trace draws the call where it ran");
+        assert_eq!(json["reasoning_at"], 5);
     }
 
     #[test]
@@ -8057,6 +8204,7 @@ cat 'DIR/reply.jsonl'
                 .into(),
             at: 0,
             reasoning: None,
+            reasoning_at: None,
             reason: Some("The user asked me to open it.".into()),
         })
         .unwrap();
@@ -8230,6 +8378,7 @@ cat 'DIR/reply.jsonl'
             arguments: "{}".to_string(),
             at: 0,
             reasoning: None,
+            reasoning_at: None,
             reason: None,
         });
         turn.record(&ServerMessage::WaitStarted {

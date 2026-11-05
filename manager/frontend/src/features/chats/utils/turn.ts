@@ -3,29 +3,65 @@ import { agentChanged } from './handover';
 
 export type TurnPart =
   | { kind: 'text'; text: string; offset: number }
-  | { kind: 'calls'; calls: ToolCallRecord[] }
+  | { kind: 'calls'; calls: ToolCallRecord[]; reasoning?: string }
   | { kind: 'handover'; handover: Handover; agentChanged: boolean };
 
-type Event =
-  | { at: number; kind: 'call'; call: ToolCallRecord }
-  | { at: number; kind: 'handover'; handover: Handover };
+export interface Thinking {
+  text: string;
+  at?: number;
+}
+
+type Mark =
+  | { at: number; rank: number; kind: 'call'; call: ToolCallRecord }
+  | { at: number; rank: number; kind: 'thinking'; text: string }
+  | { at: number; rank: number; kind: 'handover'; handover: Handover };
+
+const hasText = (characters: string[], start: number, end: number): boolean =>
+  characters.slice(start, end).join('').trim().length > 0;
+
+function marksOf(
+  characters: string[],
+  calls: readonly ToolCallRecord[],
+  handovers: readonly Handover[],
+  thinking?: Thinking
+): Mark[] {
+  const marks: Mark[] = [];
+  calls.forEach((call, index) => {
+    const at = call.at ?? 0;
+    const { reasoning, reasoning_at: thoughtAt } = call;
+    if (reasoning && thoughtAt !== undefined && hasText(characters, thoughtAt, at)) {
+      marks.push({ at: thoughtAt, rank: 2 * index, kind: 'thinking', text: reasoning });
+      marks.push({
+        at,
+        rank: 2 * index + 1,
+        kind: 'call',
+        call: { ...call, reasoning: undefined },
+      });
+    } else {
+      marks.push({ at, rank: 2 * index + 1, kind: 'call', call });
+    }
+  });
+  for (const handover of handovers) {
+    const rank = 2 * (handover.calls ?? 0) - 0.5;
+    marks.push({ at: handover.at, rank, kind: 'handover', handover });
+  }
+  if (thinking?.text.trim()) {
+    const at = thinking.at ?? calls.at(-1)?.at ?? 0;
+    marks.push({ at, rank: 2 * calls.length, kind: 'thinking', text: thinking.text });
+  }
+  return marks.sort((left, right) => left.at - right.at || left.rank - right.rank);
+}
 
 /**
- * A turn as it happened: its text cut wherever a tool was called or the answer
- * moved to another login. Offsets count code points, as the server does, so a
- * cut never halves a surrogate pair. A call stored before offsets were recorded
- * has none and opens the turn, which is where every call used to be drawn.
+ * Offsets count code points, as the server does. Calls stored before offsets
+ * were kept have none and open the turn, where every call used to be drawn.
  */
 export function splitTurn(
   content: string,
   calls: readonly ToolCallRecord[],
-  handovers: readonly Handover[]
+  handovers: readonly Handover[],
+  thinking?: Thinking
 ): TurnPart[] {
-  const events: Event[] = [
-    ...calls.map((call): Event => ({ at: call.at ?? 0, kind: 'call', call })),
-    ...handovers.map((handover): Event => ({ at: handover.at, kind: 'handover', handover })),
-  ].sort((left, right) => left.at - right.at);
-
   const characters = Array.from(content);
   const parts: TurnPart[] = [];
   let start = 0;
@@ -35,19 +71,24 @@ export function splitTurn(
     start = end;
   };
 
-  for (const event of events) {
-    pushText(Math.min(Math.max(event.at, start), characters.length));
-    if (event.kind === 'handover') {
+  for (const mark of marksOf(characters, calls, handovers, thinking)) {
+    pushText(Math.min(Math.max(mark.at, start), characters.length));
+    const previous = parts.at(-1);
+    const open = previous?.kind === 'calls' && previous.reasoning === undefined ? previous : null;
+    if (mark.kind === 'handover') {
       parts.push({
         kind: 'handover',
-        handover: event.handover,
-        agentChanged: agentChanged(event.handover),
+        handover: mark.handover,
+        agentChanged: agentChanged(mark.handover),
       });
-      continue;
+    } else if (mark.kind === 'thinking') {
+      if (open) open.reasoning = mark.text;
+      else parts.push({ kind: 'calls', calls: [], reasoning: mark.text });
+    } else if (open) {
+      open.calls.push(mark.call);
+    } else {
+      parts.push({ kind: 'calls', calls: [mark.call] });
     }
-    const previous = parts.at(-1);
-    if (previous?.kind === 'calls') previous.calls.push(event.call);
-    else parts.push({ kind: 'calls', calls: [event.call] });
   }
   pushText(characters.length);
   return parts;

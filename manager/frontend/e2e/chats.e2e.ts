@@ -860,6 +860,7 @@ test.describe('Chats Page', () => {
       const opening = "I'll check the projects first. ";
       const middle = "There are none, so I'll look at the tasks. ";
       const closing = 'Nothing is open either.';
+      const thought = 'No projects, so tasks are the next place to look.';
       const calls = [
         {
           id: 'call_projects',
@@ -878,6 +879,8 @@ test.describe('Chats Page', () => {
           detail: 'No open tasks.',
           duration_ms: 9,
           at: Array.from(opening + middle).length,
+          reasoning: thought,
+          reasoning_at: Array.from(opening).length,
         },
       ];
       const agentChat = generateMockChat('chat-1', 'Agent Chat', 'llama3.2', false, {
@@ -898,6 +901,7 @@ test.describe('Chats Page', () => {
           ];
           [opening, middle].forEach((text, index) => {
             const call = calls[index];
+            if (call.reasoning) frames.push({ type: 'reasoning', content: call.reasoning });
             frames.push(
               { type: 'chunk', content: text, index },
               {
@@ -938,6 +942,10 @@ test.describe('Chats Page', () => {
 
       const answer = page.locator('.message-assistant .message-content');
       await expect(answer).toContainText(closing);
+      const thinking = answer.locator('[data-testid="activity"]').first();
+      await expect(thinking.getByRole('button', { name: 'Reasoning' })).toBeVisible();
+      await thinking.getByRole('button', { name: 'Reasoning' }).click();
+      await expect(thinking).toContainText(thought);
       const order = () =>
         answer.evaluate((element) =>
           Array.from(element.children).map((part) =>

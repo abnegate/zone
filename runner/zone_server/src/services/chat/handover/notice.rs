@@ -25,6 +25,10 @@ pub struct Notice {
     pub carried: bool,
     /// How many Unicode scalar values of the answer were written before the switch.
     pub at: usize,
+    /// How many tool calls the turn had made before the switch, which orders a
+    /// call at the same offset on the right side of the divider.
+    #[serde(default)]
+    pub calls: usize,
 }
 
 fn named<S: Serializer>(agent: &AgentKind, serializer: S) -> Result<S::Ok, S::Error> {

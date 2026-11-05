@@ -151,6 +151,7 @@ type ServerMessage =
       arguments: string;
       at?: number;
       reasoning?: string;
+      reasoning_at?: number;
       reason?: string;
     }
   | {
@@ -687,13 +688,25 @@ export function useChat(
                 : call
             );
             const hasMedia = Boolean(message.metadata?.attachments?.length);
-            const content =
-              message.content.trim() ||
-              (stopped?.length || hasMedia ? '[Stopped before answering]' : message.content);
+            const replaced = !message.content.trim() && Boolean(stopped?.length || hasMedia);
+            const content = replaced ? '[Stopped before answering]' : message.content;
+            const calls = replaced
+              ? stopped?.map((call) => ({
+                  ...call,
+                  at: call.at === undefined ? undefined : 0,
+                  reasoning_at: call.reasoning_at === undefined ? undefined : 0,
+                }))
+              : stopped;
+            const handovers = replaced
+              ? message.metadata?.handovers?.map((handover) => ({ ...handover, at: 0 }))
+              : message.metadata?.handovers;
             return {
               ...message,
               content,
-              metadata: stopped ? { ...message.metadata, tool_calls: stopped } : message.metadata,
+              metadata:
+                calls || handovers
+                  ? { ...message.metadata, tool_calls: calls, handovers }
+                  : message.metadata,
             };
           }),
         };
@@ -778,14 +791,22 @@ export function useChat(
             assistantMetadata = {
               ...assistantMetadata,
               reasoning: `${assistantMetadata?.reasoning ?? ''}${payload.content}`,
+              reasoning_at: assistantMetadata?.reasoning
+                ? assistantMetadata.reasoning_at
+                : Array.from(assistantContent).length,
             };
             upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
           }
           break;
         case 'tool_call': {
           const preceding = payload.reasoning ?? assistantMetadata?.reasoning;
+          const precedingAt = payload.reasoning_at ?? assistantMetadata?.reasoning_at;
           if (preceding) {
-            assistantMetadata = { ...assistantMetadata, reasoning: undefined };
+            assistantMetadata = {
+              ...assistantMetadata,
+              reasoning: undefined,
+              reasoning_at: undefined,
+            };
           }
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
@@ -794,6 +815,7 @@ export function useChat(
             detail: 'Running…',
             pending: true,
             reasoning: preceding,
+            reasoning_at: preceding ? precedingAt : undefined,
             reason: payload.reason,
           });
           if (assistantId === payload.message_id) {

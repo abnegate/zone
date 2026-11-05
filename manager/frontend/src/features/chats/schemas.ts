@@ -140,6 +140,7 @@ export const ToolCallRecordSchema = z.object({
   duration_ms: z.number(),
   at: z.number().int().nonnegative().optional().catch(undefined),
   reasoning: z.string().optional(),
+  reasoning_at: z.number().int().nonnegative().optional().catch(undefined),
   reason: statedReason,
   preview: observedPreview,
   /**
@@ -230,6 +231,7 @@ export const HandoverSchema = z.object({
   resets_at: absentWhenEmpty,
   carried: z.boolean(),
   at: z.number().int().nonnegative(),
+  calls: z.number().int().nonnegative().optional().catch(undefined),
 });
 
 export const HandoversSchema = tolerantArray(HandoverSchema);
@@ -243,6 +245,7 @@ export const MessageMetadataSchema = z
     web_search: z.boolean().optional(),
     memory_used: z.boolean().optional().catch(undefined),
     reasoning: z.string().optional(),
+    reasoning_at: z.number().int().nonnegative().optional().catch(undefined),
     handovers: HandoversSchema.optional().catch(undefined),
     source: z.string().optional().catch(undefined),
     reminder_id: z.string().optional().catch(undefined),

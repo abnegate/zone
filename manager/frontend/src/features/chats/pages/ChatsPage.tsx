@@ -1508,10 +1508,14 @@ export default function ChatsPage() {
                       const parts = splitTurn(
                         awaitingAnswer ? '' : message.content,
                         toolCalls,
-                        handovers
+                        handovers,
+                        message.metadata?.reasoning
+                          ? {
+                              text: message.metadata.reasoning,
+                              at: message.metadata.reasoning_at,
+                            }
+                          : undefined
                       );
-                      const lastCalls = parts.findLast((part) => part.kind === 'calls');
-                      const leftover = message.metadata?.reasoning?.trim();
                       return (
                         <div
                           key={message.id}
@@ -1586,22 +1590,18 @@ export default function ChatsPage() {
                               ))}
                             </div>
                           )}
-                          {parts.length > 0 || leftover ? (
+                          {parts.length > 0 ? (
                             <div className="message-content">
-                              {leftover && !lastCalls ? (
-                                <Activity
-                                  reasoning={leftover}
-                                  calls={[]}
-                                  live={live}
-                                  answered={index < lastUserIndex}
-                                />
-                              ) : null}
-                              {parts.map((part) => {
+                              {parts.map((part, position) => {
                                 if (part.kind === 'calls') {
                                   return (
                                     <Activity
-                                      key={`calls-${part.calls[0].id}`}
-                                      reasoning={part === lastCalls ? leftover : undefined}
+                                      key={
+                                        part.calls[0]
+                                          ? `calls-${part.calls[0].id}`
+                                          : `thinking-${position}`
+                                      }
+                                      reasoning={part.reasoning}
                                       calls={part.calls}
                                       live={live}
                                       answered={index < lastUserIndex}
