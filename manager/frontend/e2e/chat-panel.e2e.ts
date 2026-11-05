@@ -53,6 +53,7 @@ const ART_CITATIONS = [
   citation({
     kind: 'web',
     title: 'Catalogue cover guidelines',
+    identifier: 'web:c0ffee',
     url: 'https://design.acme.test/catalogue/cover',
     revision: null,
     observed_at: '2026-11-05T09:01:00.000Z',
@@ -98,7 +99,8 @@ const messages = [
     id: 'msg-art',
     chat_id: 'chat-1',
     role: 'assistant',
-    content: 'Here are the other three covers, and a short theme for the launch video.',
+    content:
+      'Here are the other three covers, following the cover guidelines [web:c0ffee], and a short theme for the launch video.',
     created_at: sentAt,
     metadata: {
       attachments: [
@@ -402,14 +404,34 @@ test.describe('Chat changes and gallery panel', () => {
     await openChat(page);
     const reopened = page
       .getByRole('complementary', { name: 'Changes, media and sources' })
-      .getByRole('button', { name: 'Sources, 4' });
+      .getByRole('button', { name: /^Sources, \d+$/ });
     await expect(reopened).toHaveAttribute('aria-expanded', 'false');
 
     await page.locator('#chat-message-msg-pr').getByRole('button', { name: '3 sources' }).click();
     await expect(reopened).toHaveAttribute('aria-expanded', 'true');
-    await expect(page.locator('.citation.is-highlighted')).toHaveCount(3);
-    await expect(page.locator('.citation.is-highlighted .citation-link').first()).toBeFocused();
+    await expect(panel.getByText('Cited in this reply')).toBeVisible();
+    await expect(panel.getByTestId('citation')).toHaveCount(3);
+    await expect(panel.locator('.citation-link').first()).toBeFocused();
+
+    await page.locator('#chat-message-msg-art').getByRole('button', { name: '2 sources' }).click();
+    const own = panel.getByTestId('citation');
+    await expect(own).toHaveCount(2);
+    await expect(own.first()).toContainText('Checks queued.');
+    await expect(panel.getByText('20 of 21 checks still running')).toHaveCount(0);
     await capture('chats-panel-sources-shown');
+
+    await panel.getByRole('button', { name: 'All 4 sources' }).click();
+    await expect(panel.getByTestId('citation')).toHaveCount(4);
+    await expect(panel.getByText('Cited in this reply')).toHaveCount(0);
+
+    await page
+      .locator('#chat-message-msg-art')
+      .getByRole('button', { name: '[web:c0ffee] (source: Catalogue cover guidelines)' })
+      .click();
+    const marked = panel.locator('.citation.is-highlighted');
+    await expect(marked).toHaveCount(1);
+    await expect(marked).toContainText('Catalogue cover guidelines');
+    await capture('chats-panel-sources-marker');
   });
 
   test('leaves the sources out of a chat whose replies cite nothing', async ({
@@ -440,7 +462,10 @@ test.describe('Chat changes and gallery panel', () => {
     };
     await page.setViewportSize({ width: 375, height: 812 });
     await expect(page.getByRole('complementary', { name: 'Changes, media and sources' })).toBeHidden();
-    const toggle = page.getByRole('button', { name: /^Changes, media and sources/ });
+    const toggle = page.getByRole('button', {
+      name: 'Changes, media and sources: 4 changes, 5 media items, 4 sources',
+    });
+    await expect(toggle).toHaveText('4 changes, 5 media items, 4 sources');
     await expect(toggle).toBeVisible();
 
     await expect
@@ -470,7 +495,9 @@ test.describe('Chat changes and gallery panel', () => {
 
     await page.locator('#chat-message-msg-art').getByRole('button', { name: '2 sources' }).click();
     const shown = page.getByRole('dialog', { name: 'Changes, media and sources' });
-    await expect(shown.locator('.citation.is-highlighted')).toHaveCount(2);
+    await expect(shown.getByText('Cited in this reply')).toBeVisible();
+    await expect(shown.getByTestId('citation')).toHaveCount(2);
+    await expect(shown.getByText('Checks queued.')).toBeVisible();
     await capture('chats-panel-phone-sources');
   });
 });

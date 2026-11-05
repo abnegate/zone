@@ -1,8 +1,7 @@
-import type { MouseEvent, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Citation } from '../types';
-import { citationAnchorId } from '../utils/citations';
 import { resolvesToCitation } from '../utils/links';
 import { AuthenticatedImage } from './AuthenticatedImage';
 
@@ -17,7 +16,6 @@ interface MessageContentProps {
   citations?: Citation[];
   compact?: boolean;
   breaks?: boolean;
-  /** Shows the source a marker names, in place of following its fragment link. */
   onShowSource?: (citation: Citation) => void;
 }
 
@@ -44,10 +42,14 @@ const UNRESOLVED_CLASS = 'message-md-citation-unresolved';
 
 /// Markers resolve by identifier, never by position: a citation list's order is
 /// not a contract, and a reordered list would silently re-point every marker.
+function normalised(identifier: string): string {
+  return identifier.trim().toLowerCase();
+}
+
 function identified(citations: readonly Citation[]): Map<string, Citation> {
   const index = new Map<string, Citation>();
   for (const citation of citations) {
-    const identifier = citation.identifier?.trim().toLowerCase();
+    const identifier = citation.identifier ? normalised(citation.identifier) : '';
     if (identifier && !index.has(identifier)) index.set(identifier, citation);
   }
   return index;
@@ -90,11 +92,12 @@ function markerNode(
     type: 'text',
     value: raw,
     data: {
-      hName: 'a',
+      hName: 'button',
       hProperties: {
         className: REFERENCE_CLASS,
-        href: `#${citationAnchorId(citation.identifier)}`,
+        type: 'button',
         title: citation.title,
+        dataIdentifier: citation.identifier,
       },
     },
   };
@@ -123,7 +126,7 @@ function citationMarkers(citations: readonly Citation[]) {
   };
 
   /// A marker inside a link's own label is left as written. Rewriting it there
-  /// would nest an anchor inside an anchor, which is invalid markup and gives a
+  /// would nest a button inside an anchor, which is invalid markup and gives a
   /// reader two overlapping click targets with no way to reach either reliably.
   const walk = (node: MarkdownNode): void => {
     if (node.type === 'link' || node.type === 'linkReference') return;
@@ -238,14 +241,7 @@ export function MessageContent({
   onShowSource,
 }: MessageContentProps) {
   const sources = citations ?? [];
-  const showSource = (href: string | undefined, event: MouseEvent<HTMLAnchorElement>) => {
-    const citation = sources.find(
-      (source) => source.identifier && `#${citationAnchorId(source.identifier)}` === href
-    );
-    if (!citation || !onShowSource) return;
-    event.preventDefault();
-    onShowSource(citation);
-  };
+  const index = identified(sources);
   /// Every retrieval path now registers what it returned and mints a citation
   /// for it, so an empty list means nothing was retrieved rather than that the
   /// sources have not caught up. A link on such a reply has nothing behind it
@@ -265,24 +261,36 @@ export function MessageContent({
           ...(breaks ? [softBreaks()] : []),
         ]}
         components={{
-          a: ({ href, title, className, children }) => {
-            if (className === REFERENCE_CLASS) {
+          button: ({ className, title, children, node }) => {
+            const note = (
+              <span className="sr-only">
+                {' '}
+                ({REFERENCE_NOTE}: {title})
+              </span>
+            );
+            const citation = index.get(normalised(String(node?.properties?.dataIdentifier ?? '')));
+            if (className !== REFERENCE_CLASS || !citation || !onShowSource) {
               return (
-                <a
-                  className={className}
-                  href={href}
-                  title={title}
-                  data-testid="citation-reference"
-                  onClick={(event) => showSource(href, event)}
-                >
+                <span className={className} title={title} data-testid="citation-reference">
                   {children}
-                  <span className="sr-only">
-                    {' '}
-                    ({REFERENCE_NOTE}: {title})
-                  </span>
-                </a>
+                  {note}
+                </span>
               );
             }
+            return (
+              <button
+                type="button"
+                className={className}
+                title={title}
+                data-testid="citation-reference"
+                onClick={() => onShowSource(citation)}
+              >
+                {children}
+                {note}
+              </button>
+            );
+          },
+          a: ({ href, title, children }) => {
             if (links === 'none') return <>{children}</>;
             if (resolving && !resolvesToCitation(href, sources)) {
               return <UnsourcedLink>{children}</UnsourcedLink>;

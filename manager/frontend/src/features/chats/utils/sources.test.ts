@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type { Citation, Message } from '../types';
-import { chatSources, sourceKey, sourceKeys } from './sources';
+import { chatSources, sourceKey } from './sources';
 
 function citation(overrides: Partial<Citation> = {}): Citation {
   return {
@@ -27,6 +27,8 @@ function message(id: string, citations: Citation[] | undefined): Message {
   };
 }
 
+const urls = (sources: { citation: Citation }[]) => sources.map((source) => source.citation.url);
+
 describe('chatSources', () => {
   it('lists every cited source in the chat, newest observation first', () => {
     const older = citation({
@@ -42,71 +44,116 @@ describe('chatSources', () => {
       observed_at: '2026-11-05T10:00:00Z',
     });
 
-    const sources = chatSources([
+    const { all } = chatSources([
       message('message-1', [older, newest]),
       message('message-2', [newer]),
     ]);
 
-    expect(sources.map((source) => source.citation.url)).toEqual([
+    expect(urls(all)).toEqual([
       'https://example.test/newest',
       'https://example.test/newer',
       'https://example.test/older',
     ]);
-    expect(sources.map((source) => source.messageId)).toEqual([
-      'message-1',
-      'message-2',
-      'message-1',
-    ]);
+    expect(all.map((source) => source.messageId)).toEqual(['message-1', 'message-2', 'message-1']);
   });
 
-  it('shows a source cited twice once, as it was last observed', () => {
+  it('shows a source cited twice once in the chat, as it was last observed', () => {
     const pending = citation({ outcome: 'pending', observed_at: '2026-11-05T09:14:00Z' });
     const passing = citation({ outcome: 'success', observed_at: '2026-11-05T09:40:00Z' });
 
-    const sources = chatSources([message('message-1', [pending]), message('message-2', [passing])]);
+    const { all } = chatSources([message('message-1', [pending]), message('message-2', [passing])]);
 
-    expect(sources).toHaveLength(1);
-    expect(sources[0].citation.outcome).toBe('success');
-    expect(sources[0].messageId).toBe('message-2');
+    expect(all).toHaveLength(1);
+    expect(all[0].citation.outcome).toBe('success');
+    expect(all[0].messageId).toBe('message-2');
+  });
+
+  it("keeps each reply to its own evidence, never a later reply's observation of it", () => {
+    const incomplete = citation({
+      complete: false,
+      outcome: 'incomplete',
+      observed_at: '2026-11-05T09:14:00Z',
+    });
+    const passing = citation({ outcome: 'success', observed_at: '2026-11-05T09:40:00Z' });
+
+    const { replies } = chatSources([
+      message('message-1', [incomplete]),
+      message('message-2', [passing]),
+    ]);
+
+    expect(replies.get('message-1')?.map((source) => source.citation)).toEqual([incomplete]);
+    expect(replies.get('message-2')?.map((source) => source.citation)).toEqual([passing]);
   });
 
   it('keeps the later observation when a later reply cites an older one', () => {
     const recent = citation({ outcome: 'success', observed_at: '2026-11-05T09:40:00Z' });
     const stale = citation({ outcome: 'pending', observed_at: '2026-11-05T09:14:00Z' });
 
-    const [source] = chatSources([message('message-1', [recent]), message('message-2', [stale])]);
+    const { all } = chatSources([message('message-1', [recent]), message('message-2', [stale])]);
 
-    expect(source.citation.outcome).toBe('success');
-    expect(source.messageId).toBe('message-1');
+    expect(all[0].citation.outcome).toBe('success');
+    expect(all[0].messageId).toBe('message-1');
   });
 
   it('lets the later citation win an observation tie, and puts it first', () => {
     const first = citation({ url: 'https://example.test/a', note: 'first' });
+    const other = citation({ url: 'https://example.test/b', note: 'other' });
     const repeat = citation({ url: 'https://example.test/a', note: 'repeat' });
-    const other = citation({ url: 'https://example.test/b' });
 
-    const sources = chatSources([
+    const { all } = chatSources([
       message('message-1', [first, other]),
       message('message-2', [repeat]),
     ]);
 
-    expect(sources.map((source) => source.citation.note ?? null)).toEqual(['repeat', null]);
+    expect(all.map((source) => source.citation.note)).toEqual(['repeat', 'other']);
+  });
+
+  it('keeps the order a reply cited same-time sources in, latest cited first', () => {
+    const a = citation({ url: 'https://example.test/a' });
+    const b = citation({ url: 'https://example.test/b' });
+    const c = citation({ url: 'https://example.test/c' });
+
+    const { all, replies } = chatSources([message('message-1', [a, b]), message('message-2', [c])]);
+
+    expect(urls(all)).toEqual([
+      'https://example.test/c',
+      'https://example.test/b',
+      'https://example.test/a',
+    ]);
+    expect(urls(replies.get('message-1') ?? [])).toEqual([
+      'https://example.test/b',
+      'https://example.test/a',
+    ]);
   });
 
   it('orders an unreadable observation time last', () => {
     const unreadable = citation({ url: 'https://example.test/a', observed_at: 'not a time' });
     const dated = citation({ url: 'https://example.test/b' });
 
-    const sources = chatSources([message('message-1', [unreadable, dated])]);
+    const { all } = chatSources([message('message-1', [unreadable, dated])]);
 
-    expect(sources.map((source) => source.citation.url)).toEqual([
-      'https://example.test/b',
-      'https://example.test/a',
-    ]);
+    expect(urls(all)).toEqual(['https://example.test/b', 'https://example.test/a']);
+  });
+
+  it('reuses a reply whose citations did not change, so streaming text does not rebuild it', () => {
+    const cited = message('message-1', [citation()]);
+    const first = chatSources([cited]).replies.get('message-1');
+    const streamed = { ...cited, content: 'more text' };
+
+    expect(chatSources([streamed]).replies.get('message-1')).toBe(first);
+    expect(
+      chatSources([{ ...cited, metadata: { citations: [citation()] } }]).replies.get('message-1')
+    ).not.toBe(first);
   });
 
   it('is empty for a chat whose replies cite nothing', () => {
-    expect(chatSources([message('message-1', undefined), message('message-2', [])])).toEqual([]);
+    const { all, replies } = chatSources([
+      message('message-1', undefined),
+      message('message-2', []),
+    ]);
+
+    expect(all).toEqual([]);
+    expect(replies.size).toBe(0);
   });
 });
 
@@ -115,11 +162,5 @@ describe('sourceKey', () => {
     expect(sourceKey(citation())).toBe('https://github.com/abnegate/zone/pull/160');
     expect(sourceKey(citation({ url: '', identifier: 'web:a3f21c' }))).toBe('web:a3f21c');
     expect(sourceKey(citation({ url: '', identifier: null, title: 'Runbook' }))).toBe('Runbook');
-  });
-
-  it('lists each source once', () => {
-    expect(
-      sourceKeys([citation(), citation(), citation({ url: 'https://example.test/b' })])
-    ).toEqual(['https://github.com/abnegate/zone/pull/160', 'https://example.test/b']);
   });
 });

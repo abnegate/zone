@@ -19,7 +19,7 @@ import {
   readWidth,
   writeSetting,
 } from '../utils/panel';
-import type { ChatSource, SourceRequest } from '../utils/sources';
+import type { ChatSources, SourceRequest } from '../utils/sources';
 import { ChangesBox } from './ChangesBox';
 import { GalleryBox } from './GalleryBox';
 import { PanelIcon } from './PanelIcon';
@@ -31,8 +31,7 @@ export interface ChatPanelProps {
   userId: string | null;
   changes: ChatPullRequests;
   media: readonly GalleryItem[];
-  sources: readonly ChatSource[];
-  /** Sources to bring into view, opening the panel or the sheet first. */
+  sources: ChatSources;
   shownSources?: SourceRequest | null;
   onSourcesShown?: () => void;
   onShowMessage: (messageId: string) => void;
@@ -41,8 +40,6 @@ export interface ChatPanelProps {
 type Placement = 'panel' | 'sheet';
 
 const PANEL_LABEL = 'Changes, media and sources';
-/** Where the panel gives way to the sheet, matching ChatPanel.css. */
-const PHONE = '(max-width: 768px)';
 const RESIZING = 'chat-panel-resizing';
 /** The most of the chat's width the panel may take, leaving the rest to the transcript. */
 const MAX_SHARE = 0.5;
@@ -51,10 +48,9 @@ function counted(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
-function placement(): Placement {
-  return typeof window.matchMedia === 'function' && window.matchMedia(PHONE).matches
-    ? 'sheet'
-    : 'panel';
+/** Below the phone breakpoint ChatPanel.css hides the panel, and the sheet stands in for it. */
+function placement(panel: HTMLElement | null): Placement {
+  return panel && getComputedStyle(panel).display === 'none' ? 'sheet' : 'panel';
 }
 
 /**
@@ -85,17 +81,13 @@ export function ChatPanel({
   const rail = useRef<HTMLButtonElement>(null);
   const hide = useRef<HTMLButtonElement>(null);
   const toggled = useRef(false);
-  const showingIn = shownSources ? placement() : null;
+  const showingIn = shownSources ? placement(panel.current) : null;
 
   useEffect(() => {
     if (!shownSources) return;
-    if (placement() === 'sheet') {
-      setSheet(true);
-      return;
-    }
-    setCollapsed(false);
-    writeSetting(collapsedKey, 'false');
-  }, [shownSources, collapsedKey]);
+    if (placement(panel.current) === 'sheet') setSheet(true);
+    else setCollapsed(false);
+  }, [shownSources]);
 
   useEffect(() => {
     if (!toggled.current) return;
@@ -150,7 +142,7 @@ export function ChatPanel({
 
   const showsChanges = changes.pullRequests.length > 0 || changes.dismissed !== null;
   const showsGallery = media.length > 0;
-  const showsSources = sources.length > 0;
+  const showsSources = sources.all.length > 0;
   if (!showsChanges && !showsGallery && !showsSources) return null;
 
   const startDrag = (event: PointerEvent<HTMLDivElement>) => {
@@ -182,7 +174,7 @@ export function ChatPanel({
   const summary = [
     showsChanges ? counted(changes.pullRequests.length, 'change', 'changes') : null,
     showsGallery ? counted(media.length, 'media item', 'media items') : null,
-    showsSources ? counted(sources.length, 'source', 'sources') : null,
+    showsSources ? counted(sources.all.length, 'source', 'sources') : null,
   ]
     .filter(Boolean)
     .join(', ');
@@ -192,6 +184,7 @@ export function ChatPanel({
       {showsChanges && <ChangesBox chatId={chatId} userId={userId} changes={changes} />}
       {showsSources && (
         <SourcesBox
+          key={chatId}
           sources={sources}
           userId={userId}
           shown={showingIn === target ? shownSources : null}
@@ -218,10 +211,11 @@ export function ChatPanel({
           type="button"
           className="chat-panel-toggle"
           aria-haspopup="dialog"
+          aria-label={`${PANEL_LABEL}: ${summary}`}
+          title={PANEL_LABEL}
           onClick={() => setSheet(true)}
         >
           <PanelIcon />
-          <span className="chat-panel-toggle-label">{PANEL_LABEL}</span>
           <span className="chat-panel-toggle-summary">{summary}</span>
         </button>
       </div>

@@ -1,7 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
-import { createEvent, fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { Citation } from '../types';
-import { citationAnchorId } from '../utils/citations';
 import { MessageContent, UNRESOLVED_MARKER_NOTE, UNSOURCED_LINK_NOTE } from './MessageContent';
 
 const CITED = 'https://github.com/owner/repository/pull/12';
@@ -185,7 +184,31 @@ const sourced = (identifier: string, title: string): Citation =>
   citation({ identifier, title, kind: 'workspace_document', url: `${INVENTED}/${identifier}` });
 
 describe('MessageContent source markers', () => {
-  it('renders a resolved marker as a reference to its source', () => {
+  it('renders a resolved marker as a button that shows its source', () => {
+    const onShowSource = mock();
+    const source = sourced('web:a3f21c', 'Release log');
+    render(
+      <MessageContent
+        content={`Deploys ran green ${WEB_MARKER} last night.`}
+        links="citations"
+        citations={[source]}
+        onShowSource={onShowSource}
+      />
+    );
+
+    const reference = screen.getByRole('button', { name: `${WEB_MARKER} (source: Release log)` });
+    expect(reference).toBe(screen.getByTestId('citation-reference'));
+    expect(reference).toHaveAttribute('title', 'Release log');
+    expect(reference).toHaveTextContent(WEB_MARKER);
+    expect(reference).not.toHaveAttribute('href');
+    expect(screen.queryByRole('link')).toBeNull();
+    expect(screen.queryByTestId('unresolved-marker')).toBeNull();
+
+    fireEvent.click(reference);
+    expect(onShowSource).toHaveBeenCalledWith(source);
+  });
+
+  it('leaves a resolved marker plain text, never a dead fragment link, when nothing shows sources', () => {
     render(
       <MessageContent
         content={`Deploys ran green ${WEB_MARKER} last night.`}
@@ -195,16 +218,13 @@ describe('MessageContent source markers', () => {
     );
 
     const reference = screen.getByTestId('citation-reference');
-    expect(reference).toHaveAttribute('href', `#${citationAnchorId('web:a3f21c')}`);
+    expect(reference.tagName).toBe('SPAN');
     expect(reference).toHaveAttribute('title', 'Release log');
-    expect(reference).toHaveTextContent(WEB_MARKER);
-    expect(screen.getByRole('link', { name: `${WEB_MARKER} (source: Release log)` })).toBe(
-      reference
-    );
-    expect(screen.queryByTestId('unresolved-marker')).toBeNull();
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(screen.queryByRole('link')).toBeNull();
   });
 
-  it('shows the source a marker names instead of following its fragment link', () => {
+  it('matches a marker by identifier rather than by position in the list', () => {
     const onShowSource = mock();
     const second = sourced('kb:9f0011aa22', 'Second source');
     render(
@@ -217,44 +237,9 @@ describe('MessageContent source markers', () => {
     );
 
     const reference = screen.getByTestId('citation-reference');
-    const click = createEvent.click(reference);
-    fireEvent(reference, click);
-
-    expect(click.defaultPrevented).toBe(true);
-    expect(onShowSource).toHaveBeenCalledWith(second);
-  });
-
-  it('leaves a marker an ordinary fragment link when nothing shows sources', () => {
-    render(
-      <MessageContent
-        content={`Deploys ran green ${WEB_MARKER} last night.`}
-        links="citations"
-        citations={[sourced('web:a3f21c', 'Release log')]}
-      />
-    );
-
-    const reference = screen.getByTestId('citation-reference');
-    const click = createEvent.click(reference);
-    fireEvent(reference, click);
-
-    expect(click.defaultPrevented).toBe(false);
-  });
-
-  it('matches a marker by identifier rather than by position in the list', () => {
-    render(
-      <MessageContent
-        content={`Second source says so ${KB_MARKER}.`}
-        links="citations"
-        citations={[
-          sourced('web:a3f21c', 'First source'),
-          sourced('kb:9f0011aa22', 'Second source'),
-        ]}
-      />
-    );
-
-    const reference = screen.getByTestId('citation-reference');
-    expect(reference).toHaveAttribute('href', `#${citationAnchorId('kb:9f0011aa22')}`);
     expect(reference).toHaveAttribute('title', 'Second source');
+    fireEvent.click(reference);
+    expect(onShowSource).toHaveBeenCalledWith(second);
   });
 
   it('renders an unresolved marker inert and keeps its text', () => {

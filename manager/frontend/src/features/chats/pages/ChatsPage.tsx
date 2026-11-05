@@ -115,7 +115,6 @@ import {
   shortModelName,
   sourceAttachment,
   sourceKey,
-  sourceKeys,
   splitAtHandovers,
   toPlainText,
   videoAttachments,
@@ -1490,6 +1489,7 @@ export default function ChatsPage() {
                       const audios = audioAttachments(message.metadata);
                       const toolCalls = message.metadata?.tool_calls ?? [];
                       const citations = message.metadata?.citations ?? [];
+                      const cited = sources.replies.get(message.id);
                       const receipts = message.metadata?.action_receipts ?? [];
                       const handovers =
                         message.role === 'assistant' ? (message.metadata?.handovers ?? []) : [];
@@ -1597,7 +1597,10 @@ export default function ChatsPage() {
                                     citations={citations}
                                     breaks={message.role === 'user'}
                                     onShowSource={(citation) =>
-                                      setShownSources({ keys: [sourceKey(citation)] })
+                                      setShownSources({
+                                        messageId: message.id,
+                                        key: sourceKey(citation),
+                                      })
                                     }
                                   />
                                 ) : (
@@ -1610,10 +1613,10 @@ export default function ChatsPage() {
                               )}
                             </div>
                           ) : null}
-                          {citations.length > 0 && (
+                          {cited && (
                             <SourcesButton
-                              count={sourceKeys(citations).length}
-                              onClick={() => setShownSources({ keys: sourceKeys(citations) })}
+                              count={cited.length}
+                              onClick={() => setShownSources({ messageId: message.id, key: null })}
                             />
                           )}
                         </div>

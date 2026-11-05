@@ -601,11 +601,6 @@
   font-size: var(--ui-text-sm);
 }
 
-.chat-panel-toggle-label {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
 .chat-panel-toggle-summary {
   min-width: 0;
   overflow: hidden;

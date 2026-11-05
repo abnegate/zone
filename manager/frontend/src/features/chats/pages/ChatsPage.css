@@ -1425,6 +1425,7 @@
 
 .message-markdown .message-md-citation-ref {
   padding: 0 var(--ui-space-0-5);
+  border: 0;
   border-radius: var(--ui-radius-sm);
   background: var(--ui-accent-muted);
   color: var(--ui-accent);
@@ -1432,7 +1433,9 @@
   font-size: 0.85em;
   text-decoration: underline;
   text-underline-offset: 2px;
+  line-height: inherit;
   white-space: nowrap;
+  cursor: pointer;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }

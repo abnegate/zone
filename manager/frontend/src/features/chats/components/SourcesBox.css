@@ -109,6 +109,30 @@
   overflow-wrap: anywhere;
 }
 
+
+.chat-citations-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-space-2);
+  padding: 0 var(--ui-space-1-5) var(--ui-space-1);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
+.chat-citations-all {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ui-accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-citations-all:hover {
+  text-decoration: underline;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .citation {
     transition: none;

@@ -3,7 +3,6 @@ export interface SourcesButtonProps {
   onClick: () => void;
 }
 
-/** Points from a reply to its sources in the chat panel. */
 export function SourcesButton({ count, onClick }: SourcesButtonProps) {
   return (
     <button type="button" className="message-sources" onClick={onClick}>

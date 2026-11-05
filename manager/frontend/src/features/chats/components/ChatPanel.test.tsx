@@ -4,7 +4,7 @@ import type { ChatPullRequests } from '../hooks/useChatPullRequests';
 import type { ChatPullRequest } from '../types';
 import type { GalleryItem } from '../utils/gallery';
 import { PANEL_WIDTH } from '../utils/panel';
-import type { ChatSource, SourceRequest } from '../utils/sources';
+import type { ChatSource, ChatSources, SourceRequest } from '../utils/sources';
 import { ChatPanel } from './ChatPanel';
 
 const PULL_REQUEST: ChatPullRequest = {
@@ -46,6 +46,14 @@ const SOURCE: ChatSource = {
   },
 };
 
+const CITED: ChatSources = {
+  all: [SOURCE],
+  replies: new Map([[SOURCE.messageId, [SOURCE]]]),
+};
+
+const NO_SOURCES: ChatSources = { all: [], replies: new Map() };
+
+const COLLAPSED_KEY = 'zone:chat-panel:user-1:collapsed';
 const WIDTH_KEY = 'zone:chat-panel:user-1:width';
 const SEPARATOR = 'Resize changes, media and sources';
 
@@ -64,7 +72,7 @@ function changes(pullRequests: ChatPullRequest[] = []): ChatPullRequests {
 interface PanelOptions {
   pullRequests?: ChatPullRequest[];
   media?: GalleryItem[];
-  sources?: ChatSource[];
+  sources?: ChatSources;
   shownSources?: SourceRequest | null;
   userId?: string;
 }
@@ -76,7 +84,7 @@ function panel(options: PanelOptions, onShowMessage = mock(), onSourcesShown = m
       userId={options.userId ?? 'user-1'}
       changes={changes(options.pullRequests)}
       media={options.media ?? []}
-      sources={options.sources ?? []}
+      sources={options.sources ?? NO_SOURCES}
       shownSources={options.shownSources ?? null}
       onSourcesShown={onSourcesShown}
       onShowMessage={onShowMessage}
@@ -91,20 +99,15 @@ function renderPanel(options: PanelOptions = {}) {
   return { ...view, onShowMessage, onSourcesShown };
 }
 
-function phone(matches: boolean) {
-  spyOn(window, 'matchMedia').mockImplementation(
-    (query: string) =>
-      ({
-        matches,
-        media: query,
-        onchange: null,
-        addEventListener: () => undefined,
-        removeEventListener: () => undefined,
-        addListener: () => undefined,
-        removeListener: () => undefined,
-        dispatchEvent: () => false,
-      }) as MediaQueryList
-  );
+function phone() {
+  const narrow = document.createElement('style');
+  narrow.textContent = '.chat-panel { display: none; }';
+  document.head.append(narrow);
+  return () => narrow.remove();
+}
+
+function request(): SourceRequest {
+  return { messageId: SOURCE.messageId, key: SOURCE.key };
 }
 
 function separator(): HTMLElement {
@@ -121,45 +124,58 @@ describe('ChatPanel', () => {
   });
 
   it('shows the sources only when a reply in the chat cites one', () => {
-    renderPanel({ sources: [SOURCE] });
+    renderPanel({ sources: CITED });
 
     const aside = screen.getByRole('complementary', { name: 'Changes, media and sources' });
     expect(within(aside).getByRole('button', { name: 'Sources, 1' })).toBeInTheDocument();
     expect(within(aside).getByText(SOURCE.citation.title)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Changes, \d/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /^Gallery, \d/ })).toBeNull();
-    expect(screen.getByRole('button', { name: /^Changes, media and sources/ })).toHaveTextContent(
-      '1 source'
-    );
+    expect(
+      screen.getByRole('button', { name: 'Changes, media and sources: 1 source' })
+    ).toHaveTextContent(/^1 source$/);
   });
 
   it('comes back from its rail to show the sources a reply points to', () => {
-    localStorage.setItem('zone:chat-panel:user-1:collapsed', 'true');
-    phone(false);
-    const { rerender, onSourcesShown } = renderPanel({ sources: [SOURCE] });
+    localStorage.setItem(COLLAPSED_KEY, 'true');
+    const { rerender, onSourcesShown } = renderPanel({ sources: CITED });
     expect(screen.queryByRole('separator')).toBeNull();
 
-    rerender(
-      panel({ sources: [SOURCE], shownSources: { keys: [SOURCE.key] } }, mock(), onSourcesShown)
-    );
+    rerender(panel({ sources: CITED, shownSources: request() }, mock(), onSourcesShown));
 
     expect(separator()).toBeInTheDocument();
-    expect(localStorage.getItem('zone:chat-panel:user-1:collapsed')).toBe('false');
     expect(onSourcesShown).toHaveBeenCalledTimes(1);
     expect(screen.getAllByTestId('citation')[0]).toHaveClass('is-highlighted');
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('opens the sheet on a phone to show the sources a reply points to', async () => {
-    phone(true);
-    const { rerender, onSourcesShown } = renderPanel({ sources: [SOURCE] });
+  it("keeps the viewer's choice to hide the panel when it opens to show sources", () => {
+    localStorage.setItem(COLLAPSED_KEY, 'true');
+    const { rerender, unmount } = renderPanel({ sources: CITED });
 
-    rerender(
-      panel({ sources: [SOURCE], shownSources: { keys: [SOURCE.key] } }, mock(), onSourcesShown)
-    );
+    rerender(panel({ sources: CITED, shownSources: request() }));
 
-    const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
-    await waitFor(() => expect(onSourcesShown).toHaveBeenCalledTimes(1));
-    expect(within(sheet).getByTestId('citation')).toHaveClass('is-highlighted');
+    expect(separator()).toBeInTheDocument();
+    expect(localStorage.getItem(COLLAPSED_KEY)).toBe('true');
+    unmount();
+    renderPanel({ sources: CITED });
+    expect(screen.queryByRole('separator')).toBeNull();
+  });
+
+  it('opens the sheet where the stylesheet hides the panel, to show the sources a reply points to', async () => {
+    const restore = phone();
+    try {
+      const { rerender, onSourcesShown } = renderPanel({ sources: CITED });
+
+      rerender(panel({ sources: CITED, shownSources: request() }, mock(), onSourcesShown));
+
+      const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+      await waitFor(() => expect(onSourcesShown).toHaveBeenCalledTimes(1));
+      expect(within(sheet).getByTestId('citation')).toHaveClass('is-highlighted');
+      expect(localStorage.getItem(COLLAPSED_KEY)).toBeNull();
+    } finally {
+      restore();
+    }
   });
 
   it('takes no room in a chat with no pull requests, media or sources', () => {
@@ -280,8 +296,10 @@ describe('ChatPanel', () => {
   it('opens as a sheet from its toggle, for a screen too narrow to hold it', async () => {
     renderPanel({ pullRequests: [PULL_REQUEST], media: [IMAGE] });
 
-    const toggle = screen.getByRole('button', { name: /^Changes, media and sources/ });
-    expect(toggle).toHaveTextContent('1 change, 1 media item');
+    const toggle = screen.getByRole('button', {
+      name: 'Changes, media and sources: 1 change, 1 media item',
+    });
+    expect(toggle).toHaveTextContent(/^1 change, 1 media item$/);
     fireEvent.click(toggle);
 
     const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
