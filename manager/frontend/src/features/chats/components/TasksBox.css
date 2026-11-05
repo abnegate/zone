@@ -1,0 +1,120 @@
+.chat-task-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-task {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+  padding: var(--ui-space-1-5);
+  border-radius: var(--ui-radius-sm);
+}
+
+.chat-task:hover,
+.chat-task:focus-within {
+  background: var(--ui-bg-surface);
+}
+
+.chat-task-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-width: 0;
+}
+
+.chat-task-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-task-title::after {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  content: '';
+}
+
+.chat-task-title:hover {
+  text-decoration: underline;
+}
+
+.chat-task-title:focus-visible {
+  outline: none;
+}
+
+.chat-task:has(.chat-task-title:focus-visible) {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: -2px;
+}
+
+.chat-task-status {
+  flex-shrink: 0;
+}
+
+.chat-task-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-width: 0;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
+.chat-task-run {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-task-percent {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-task-pull-request {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--ui-text-secondary);
+  text-decoration: none;
+}
+
+.chat-task-pull-request:hover {
+  color: var(--ui-text-primary);
+  text-decoration: underline;
+}
+
+.chat-task-progress {
+  height: 0.25rem;
+  overflow: hidden;
+  border-radius: var(--ui-radius-full);
+  background: var(--ui-bg-surface);
+}
+
+.chat-task-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ui-accent);
+  transition: width var(--ui-duration-normal) var(--ui-ease-out);
+}
+
+.chat-tasks-error {
+  margin: var(--ui-space-1) var(--ui-space-1-5) 0;
+  color: var(--chat-change-removed);
+  font-size: var(--ui-text-xs);
+}

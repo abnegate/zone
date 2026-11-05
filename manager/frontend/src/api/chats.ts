@@ -6,6 +6,7 @@ import {
   ChatSearchResponseSchema,
   ChatSourcesResponseSchema,
   ChatsResponseSchema,
+  ChatTasksResponseSchema,
   ContextResponseSchema,
   MessageResponseSchema,
   MessagesResponseSchema,
@@ -19,6 +20,7 @@ import type {
   ChatSearchOptions,
   ChatSearchResponse,
   ChatSource,
+  ChatTask,
   ChatWithMessages,
   ContextUsage,
   CreateChatRequest,
@@ -242,6 +244,16 @@ class ChatsApi {
       throw await ApiError.from(response, 'Failed to load pull requests');
     }
     return parse(ChatPullRequestsResponseSchema, await response.json()).pull_requests;
+  }
+
+  async getChatTasks(chatId: string): Promise<ChatTask[]> {
+    const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/tasks`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load tasks');
+    }
+    return parse(ChatTasksResponseSchema, await response.json()).tasks;
   }
 
   async updateChatPullRequest(

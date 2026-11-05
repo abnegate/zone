@@ -8,7 +8,7 @@ export const PANEL_WIDTH = {
   largeStep: 64,
 } as const;
 
-export type PanelSetting = 'width' | 'collapsed' | 'changes' | 'gallery' | 'sources';
+export type PanelSetting = 'width' | 'collapsed' | 'changes' | 'gallery' | 'sources' | 'tasks';
 
 /** Where one viewer's panel setting is kept, so people sharing a browser keep their own. */
 export function panelKey(userId: string | null | undefined, setting: PanelSetting): string {

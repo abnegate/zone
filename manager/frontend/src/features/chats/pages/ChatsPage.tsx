@@ -50,6 +50,7 @@ import {
   useChatPullRequests,
   useChatSearch,
   useChatSources,
+  useChatTasks,
   useChats,
   useWorkspaceChatProviders,
 } from '../hooks';
@@ -277,6 +278,7 @@ export default function ChatsPage() {
   const displayedChat = activeChat?.id === selectedChatId ? activeChat : null;
   const chatOpen = displayedChat !== null;
   const changes = useChatPullRequests(chatOpen ? selectedChatId : null, streaming);
+  const tasks = useChatTasks(chatOpen ? selectedChatId : null, streaming);
   const displayedMessages = displayedChat?.messages;
   const media = useMemo(() => galleryItems(displayedMessages ?? []), [displayedMessages]);
   const sources = useMemo(() => chatSources(displayedMessages ?? []), [displayedMessages]);
@@ -1801,6 +1803,7 @@ export default function ChatsPage() {
                 chatId={displayedChat.id}
                 userId={user?.id ?? null}
                 changes={changes}
+                tasks={tasks}
                 media={media}
                 sources={sources}
                 shownSources={shownSources}

@@ -3,6 +3,8 @@ import { AiProviderSchema } from '../settings/workspace/schemas';
 import { REASONING_EFFORT_LABELS, type ReasoningEffort } from './provider';
 import {
   ACTION_TARGETS,
+  CHAT_TASK_RUN_STATUSES,
+  CHAT_TASK_STATUSES,
   HANDOVER_AGENTS,
   HANDOVER_REASONS,
   PULL_REQUEST_CHECKS,
@@ -488,6 +490,37 @@ export const ChatPullRequestSchema = z.object({
 
 export const ChatPullRequestsResponseSchema = z.object({
   pull_requests: tolerantArray(ChatPullRequestSchema).default([]),
+});
+
+export const ChatTaskRunSchema = z.object({
+  id: z.string(),
+  status: z.enum(CHAT_TASK_RUN_STATUSES),
+  phase: z.string().nullable(),
+  progress: z.number().nullable(),
+  started_at: z.string().nullable(),
+  completed_at: z.string().nullable(),
+});
+
+export const ChatTaskPublicationSchema = z.object({
+  url: z.string(),
+  status: z.string().nullable(),
+});
+
+export const ChatTaskSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  title_pending: z.boolean(),
+  status: z.enum(CHAT_TASK_STATUSES),
+  is_agentic: z.boolean(),
+  href: z.string(),
+  created_at: z.string().nullable(),
+  updated_at: z.string().nullable(),
+  run: ChatTaskRunSchema.nullable(),
+  pull_request: ChatTaskPublicationSchema.nullable(),
+});
+
+export const ChatTasksResponseSchema = z.object({
+  tasks: tolerantArray(ChatTaskSchema).default([]),
 });
 
 export const PullRequestDiffSchema = z.object({

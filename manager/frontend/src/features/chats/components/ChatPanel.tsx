@@ -10,6 +10,7 @@ import {
   useState,
 } from 'react';
 import type { ChatPullRequests } from '../hooks/useChatPullRequests';
+import type { ChatTasks } from '../hooks/useChatTasks';
 import type { GalleryItem } from '../utils/gallery';
 import {
   clampWidth,
@@ -24,12 +25,14 @@ import { ChangesBox } from './ChangesBox';
 import { GalleryBox } from './GalleryBox';
 import { PanelIcon } from './PanelIcon';
 import { SourcesBox } from './SourcesBox';
+import { TasksBox } from './TasksBox';
 import './ChatPanel.css';
 
 export interface ChatPanelProps {
   chatId: string;
   userId: string | null;
   changes: ChatPullRequests;
+  tasks: ChatTasks;
   media: readonly GalleryItem[];
   sources: ChatSources;
   shownSources?: SourceRequest | null;
@@ -39,7 +42,7 @@ export interface ChatPanelProps {
 
 type Placement = 'panel' | 'sheet';
 
-const PANEL_LABEL = 'Changes, media and sources';
+const PANEL_LABEL = 'Changes, tasks, media and sources';
 const RESIZING = 'chat-panel-resizing';
 /** The most of the chat's width the panel may take, leaving the rest to the transcript. */
 const MAX_SHARE = 0.5;
@@ -54,7 +57,7 @@ function placement(panel: HTMLElement | null): Placement {
 }
 
 /**
- * The chat's pull requests, media and sources, beside the transcript at the top right
+ * The chat's pull requests, tasks, media and sources, beside the transcript at the top right
  * of the chat. It can be resized, hidden to a rail, and on a phone opens as a
  * sheet instead, so it never sits over the conversation.
  */
@@ -62,6 +65,7 @@ export function ChatPanel({
   chatId,
   userId,
   changes,
+  tasks,
   media,
   sources,
   shownSources = null,
@@ -156,9 +160,10 @@ export function ChatPanel({
   }, [resizing, resize, widthKey]);
 
   const showsChanges = changes.pullRequests.length > 0 || changes.dismissed !== null;
+  const showsTasks = tasks.tasks.length > 0;
   const showsGallery = media.length > 0;
   const showsSources = sources.all.length > 0;
-  if (!showsChanges && !showsGallery && !showsSources) return null;
+  if (!showsChanges && !showsTasks && !showsGallery && !showsSources) return null;
 
   const startDrag = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -188,6 +193,7 @@ export function ChatPanel({
 
   const summary = [
     showsChanges ? counted(changes.pullRequests.length, 'change', 'changes') : null,
+    showsTasks ? counted(tasks.tasks.length, 'task', 'tasks') : null,
     showsGallery ? counted(media.length, 'media item', 'media items') : null,
     showsSources ? counted(sources.all.length, 'source', 'sources') : null,
   ]
@@ -197,6 +203,7 @@ export function ChatPanel({
   const boxes = (target: Placement) => (
     <>
       {showsChanges && <ChangesBox chatId={chatId} userId={userId} changes={changes} />}
+      {showsTasks && <TasksBox userId={userId} tasks={tasks} />}
       {showsSources && (
         <SourcesBox
           key={chatId}
