@@ -7,6 +7,7 @@ import {
   defaultContextTokens,
   findInstalledModel,
   offersAgent,
+  offersAgentFor,
   offersLocalContext,
   sameModelName,
   selectedContextTokens,
@@ -48,6 +49,32 @@ describe('offersAgent', () => {
     expect(offersAgent({ tools: false })).toBe(false);
     expect(offersAgent({ completion: false })).toBe(false);
     expect(offersAgent(undefined)).toBe(false);
+  });
+});
+
+describe('offersAgentFor', () => {
+  const models = [
+    { name: 'qwen3:latest', tools: true },
+    { name: 'gemma3', tools: false },
+    { name: 'nomic-embed-text', completion: false },
+  ];
+
+  it('offers Agent for an installed model unless it is known to lack tools or chat', () => {
+    expect(offersAgentFor(models, 'qwen3')).toBe(true);
+    expect(offersAgentFor(models, 'gemma3')).toBe(false);
+    expect(offersAgentFor(models, 'nomic-embed-text')).toBe(false);
+  });
+
+  it('offers Agent for a model zone has no details for', () => {
+    expect(offersAgentFor([...models, { name: 'mistral' }], 'mistral')).toBe(true);
+    expect(offersAgentFor(models, 'gpt-4o')).toBe(true);
+    expect(offersAgentFor([], 'my-deployment')).toBe(true);
+  });
+
+  it('offers Agent on Automatic only when an installed model can call tools', () => {
+    expect(offersAgentFor(models, 'auto')).toBe(true);
+    expect(offersAgentFor([{ name: 'gemma3', tools: false }], 'auto')).toBe(false);
+    expect(offersAgentFor([], 'auto')).toBe(false);
   });
 });
 

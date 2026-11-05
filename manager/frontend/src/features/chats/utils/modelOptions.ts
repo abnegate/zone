@@ -74,7 +74,7 @@ type ChatHints = {
   needs_character?: boolean | null;
 };
 
-type ModelHints = {
+export type ModelHints = {
   completion?: boolean;
   tools?: boolean;
   reasoning?: boolean;
@@ -84,6 +84,15 @@ type ModelHints = {
 
 export function offersAgent(model?: ModelHints): boolean {
   return model !== undefined && model.completion !== false && model.tools !== false;
+}
+
+export function offersAgentFor<T extends ModelHints & { name: string }>(
+  models: T[],
+  name: string
+): boolean {
+  if (name === AUTO_MODEL) return models.some((model) => offersAgent(model));
+  const installed = findInstalledModel(models, name);
+  return installed === undefined || offersAgent(installed);
 }
 
 export function chatShowsAgent(chat: ChatHints, model?: ModelHints): boolean {
