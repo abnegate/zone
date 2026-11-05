@@ -554,10 +554,12 @@ describe('ToolTrace', () => {
     expect(screen.getByText('The user asked me to open the pull request.')).toBeInTheDocument();
   });
 
-  it('labels the reason as stated by the model, not observed by the server', () => {
+  it('shows the stated reason on its own, without a label line', () => {
     render(<ToolTrace calls={[call({ name: 'write_file', reason: 'Persist the config.' })]} />);
 
-    expect(screen.getByTestId('tool-call-reason')).toHaveTextContent('Reason, stated by the model');
+    const reason = screen.getByTestId('tool-call-reason');
+    expect(reason.textContent).toBe('Persist the config.');
+    expect(screen.queryByText('Reason, stated by the model')).not.toBeInTheDocument();
   });
 
   it('says so out loud when a side-effecting call gave no reason', () => {
@@ -662,7 +664,9 @@ describe('ToolTrace', () => {
     expect(screen.getByTestId('tool-call-preview')).not.toHaveTextContent(
       'Reason, stated by the model'
     );
-    expect(screen.getByTestId('tool-call-reason')).toHaveTextContent('Reason, stated by the model');
+    expect(screen.getByTestId('tool-call-reason')).toHaveTextContent(
+      'The user asked me to save the config.'
+    );
   });
 
   it('shows no preview at all for a call that arrived without one', () => {
