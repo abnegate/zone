@@ -145,10 +145,15 @@ describe('ChangesBox', () => {
     );
     await shown([OPEN]);
 
+    expect(screen.queryByText('Auto-merge')).toBeNull();
     await chooseMenuItem(MENU, 'Merge when ready');
     expect(mockUpdateChatPullRequest).toHaveBeenCalledWith('chat-1', 'pr-1', {
       auto_merge: true,
     });
+    expect(await screen.findByText('Auto-merge')).toHaveAttribute(
+      'title',
+      'GitHub merges it once its checks and reviews pass.'
+    );
 
     await openMenu(MENU);
     fireEvent.click(menuItem('Cancel auto-merge'));
@@ -248,7 +253,7 @@ describe('ChangesBox', () => {
   });
 
   it('offers the draft change disabled, with the reason, while it cannot be made', async () => {
-    const reason = 'Coming with the next abnegate-vcs release.';
+    const reason = "This source's token cannot change it.";
     await shown([
       withStatus({
         auto_merge: { enabled: false, unavailable: reason },
@@ -287,6 +292,19 @@ describe('ChangesBox', () => {
       expect(menuItem(name)).toHaveAttribute('aria-disabled', 'true');
       expect(menuItem(name)).toHaveTextContent('Needs write access to this workspace.');
     }
+  });
+
+  it('shows auto-merge only on an open pull request GitHub has it set on', async () => {
+    const enabled = { enabled: true, unavailable: null };
+    await shown([
+      withStatus({ auto_merge: enabled }),
+      { ...withStatus({ state: 'merged', auto_merge: enabled }), id: 'pr-2', number: 13 },
+      { ...withStatus({}), id: 'pr-3', number: 14 },
+    ]);
+
+    expect(screen.getAllByText('Auto-merge')).toHaveLength(1);
+    const row = screen.getByText('Auto-merge').closest('[data-pull-request]');
+    expect(row).toHaveAttribute('data-pull-request', 'pr-1');
   });
 
   it('offers no draft or merge changes once it has merged', async () => {

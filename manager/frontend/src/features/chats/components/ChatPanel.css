@@ -320,6 +320,15 @@
   color: var(--chat-change-removed);
 }
 
+.chat-change-auto {
+  flex-shrink: 0;
+  padding: 0 var(--ui-space-1);
+  border: 1px solid var(--chat-change-added);
+  border-radius: var(--ui-radius-full);
+  color: var(--chat-change-added);
+  line-height: 1.4;
+}
+
 .chat-change-dot {
   flex-shrink: 0;
   width: 0.5rem;
