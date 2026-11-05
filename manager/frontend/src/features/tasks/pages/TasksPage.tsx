@@ -10,6 +10,7 @@ import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard, TaskDetail, TaskTitleInput } from '../components';
 import { useTask, useTasks } from '../hooks';
+import { awaitsTitle } from '../title';
 import type { Task, UpdateTaskRequest } from '../types';
 import { TaskExecutionView } from './TaskExecutionView';
 import './TasksPage.css';
@@ -336,14 +337,15 @@ export default function TasksPage() {
                           <>
                             <h3
                               title={task.title}
-                              className={task.title_pending ? 'task-title-pending' : undefined}
+                              className={awaitsTitle(task) ? 'task-title-pending' : undefined}
+                              aria-busy={awaitsTitle(task) || undefined}
                             >
                               {task.title}
                             </h3>
                             <button
                               type="button"
                               className="task-rename"
-                              aria-label="Rename"
+                              aria-label={`Rename ${task.title}`}
                               title="Rename"
                               onClick={(event) => {
                                 stopRowAction(event);

@@ -389,7 +389,7 @@ describe('TasksPage', () => {
     renderTasksPage();
     await screen.findByText('Implement login');
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Rename' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Implement login' }));
     const input = screen.getByRole('textbox', { name: 'Task title' });
     expect(input).toHaveValue('Implement login');
     fireEvent.change(input, { target: { value: 'Implement logout' } });
@@ -409,7 +409,7 @@ describe('TasksPage', () => {
     renderTasksPage();
     await screen.findByText('Implement login');
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Rename' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Implement login' }));
     const input = screen.getByRole('textbox', { name: 'Task title' });
     fireEvent.click(input);
     fireEvent.change(input, { target: { value: 'Implement logout' } });
@@ -1398,6 +1398,29 @@ describe('TasksPage', () => {
       await new Promise((resolve) => setTimeout(resolve, 2500));
       expect(mockGetTasks).toHaveBeenCalledTimes(1);
     }, 10_000);
+
+    it('leaves a generated title that arrives while the rename box is open untouched', async () => {
+      const pending = untitled();
+      let arrived = false;
+      mockGetTasks.mockImplementation(() => Promise.resolve([pending]));
+      mockGetTask.mockImplementation(() =>
+        Promise.resolve(arrived ? { ...pending, title: generated, title_pending: false } : pending)
+      );
+      renderTasksPage('/tasks?task=task-untitled');
+
+      fireEvent.click(await screen.findByRole('button', { name: `Rename ${placeholder}` }));
+      const input = screen.getByRole('textbox', { name: 'Task title' });
+      arrived = true;
+      await waitFor(() => expect(mockGetTask.mock.calls.length).toBeGreaterThan(1), {
+        timeout: 5000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      fireEvent.blur(input);
+
+      const heading = await screen.findByRole('button', { name: `Rename ${generated}` });
+      expect(mockUpdateTask).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(heading);
+    }, 15_000);
 
     it('replaces the placeholder in the open task and keeps unsaved edits', async () => {
       const pending = untitled();

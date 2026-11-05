@@ -198,7 +198,9 @@ export function CreateTaskWizard({
               <input
                 type="text"
                 id="task-title"
-                aria-describedby="task-title-hint"
+                aria-describedby={
+                  fieldErrors.title ? 'task-title-hint task-title-error' : 'task-title-hint'
+                }
                 value={title}
                 onChange={(e) => {
                   setTitle(e.target.value);
@@ -215,7 +217,11 @@ export function CreateTaskWizard({
               <span id="task-title-hint" className="form-hint">
                 Leave it blank to have one generated from the description.
               </span>
-              {fieldErrors.title && <span className="field-error">{fieldErrors.title}</span>}
+              {fieldErrors.title && (
+                <span id="task-title-error" className="field-error">
+                  {fieldErrors.title}
+                </span>
+              )}
             </div>
             <div className="form-group">
               <label htmlFor="task-description">Description</label>

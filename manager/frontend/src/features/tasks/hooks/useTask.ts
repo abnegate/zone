@@ -7,6 +7,7 @@ export function useTask(id: string | null) {
   const [task, setTask] = useState<Task | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [missedPolls, setMissedPolls] = useState(0);
 
   const loadTask = useCallback(async () => {
     if (!id) {
@@ -35,15 +36,20 @@ export function useTask(id: string | null) {
   useEffect(() => {
     if (!id || !task || task.id !== id || !awaitsTitle(task)) return;
     let cancelled = false;
-    const timer = setTimeout(async () => {
-      const refreshed = await tasksApi.getTask(id).catch(() => null);
-      if (refreshed && !cancelled) setTask(refreshed);
-    }, TITLE_POLL_MS);
+    const timer = setTimeout(
+      async () => {
+        const refreshed = await tasksApi.getTask(id).catch(() => null);
+        if (cancelled) return;
+        if (refreshed) setTask(refreshed);
+        else setMissedPolls((missed) => missed + 1);
+      },
+      TITLE_POLL_MS * (missedPolls + 1)
+    );
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [id, task]);
+  }, [id, task, missedPolls]);
 
   const updateTask = useCallback(
     async (request: UpdateTaskRequest): Promise<Task> => {

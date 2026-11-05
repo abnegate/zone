@@ -1,4 +1,4 @@
-import { type KeyboardEvent, type SyntheticEvent, useEffect, useRef, useState } from 'react';
+import { type KeyboardEvent, type SyntheticEvent, useEffect, useId, useRef, useState } from 'react';
 
 interface TaskTitleInputProps {
   title: string;
@@ -12,11 +12,13 @@ function stopPropagation(event: SyntheticEvent) {
 }
 
 export function TaskTitleInput({ title, className, onSave, onDone }: TaskTitleInputProps) {
+  const original = useRef(title);
   const [value, setValue] = useState(title);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const settled = useRef(false);
   const input = useRef<HTMLInputElement>(null);
+  const errorId = useId();
 
   useEffect(() => {
     input.current?.focus();
@@ -31,17 +33,17 @@ export function TaskTitleInput({ title, className, onSave, onDone }: TaskTitleIn
   const commit = async () => {
     if (settled.current || saving) return;
     const trimmed = value.trim();
-    if (!trimmed || trimmed === title) {
+    if (!trimmed || trimmed === original.current) {
       finish();
       return;
     }
     setSaving(true);
-    setError(null);
+    setMessage(null);
     try {
       await onSave(trimmed);
       finish();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to rename task');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed to rename task');
       setSaving(false);
     }
   };
@@ -58,14 +60,14 @@ export function TaskTitleInput({ title, className, onSave, onDone }: TaskTitleIn
   };
 
   return (
-    <span className={`task-title-edit ${className ?? ''}`}>
+    <span className={['task-title-edit', className].filter(Boolean).join(' ')}>
       <input
         ref={input}
         type="text"
         className="task-title-input"
         aria-label="Task title"
-        aria-invalid={error ? true : undefined}
-        aria-describedby={error ? 'task-title-error' : undefined}
+        aria-invalid={message ? true : undefined}
+        aria-describedby={message ? errorId : undefined}
         value={value}
         readOnly={saving}
         aria-busy={saving || undefined}
@@ -74,9 +76,9 @@ export function TaskTitleInput({ title, className, onSave, onDone }: TaskTitleIn
         onClick={stopPropagation}
         onBlur={() => void commit()}
       />
-      {error && (
-        <span id="task-title-error" className="field-error" role="alert">
-          {error}
+      {message && (
+        <span id={errorId} className="field-error" role="alert">
+          {message}
         </span>
       )}
     </span>

@@ -589,7 +589,7 @@ describeScreenshots('Screenshots - Populated States', () => {
 
       await page.getByRole('button', { name: 'Close' }).click();
       await expect(page.getByRole('table', { name: 'Tasks' })).toBeVisible();
-      await page.getByRole('button', { name: 'Rename', exact: true }).first().click();
+      await page.getByRole('button', { name: `Rename ${mockTasks[0].title}` }).click();
       await expect(page.getByRole('textbox', { name: 'Task title' })).toBeFocused();
       await capturePage(page, { path: `screenshots/task-title-rename-list-${view.name}.png` });
     });

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import PencilIcon from '../../../shared/components/PencilIcon/PencilIcon';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
+import { awaitsTitle } from '../title';
 import type { Task, TaskStatus, UpdateTaskRequest } from '../types';
 import { TaskTitleInput } from './TaskTitleInput';
 
@@ -113,6 +114,13 @@ export function TaskDetail({
   const [renaming, setRenaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hydrated = useRef(task);
+  const renameButton = useRef<HTMLButtonElement>(null);
+  const wasRenaming = useRef(false);
+
+  useEffect(() => {
+    if (wasRenaming.current && !renaming) renameButton.current?.focus();
+    wasRenaming.current = renaming;
+  }, [renaming]);
 
   useEffect(() => {
     const previous = hydrated.current;
@@ -162,10 +170,11 @@ export function TaskDetail({
             onDone={() => setRenaming(false)}
           />
         ) : (
-          <h2 className="task-details-title">
+          <h2 className="task-details-title" aria-busy={awaitsTitle(task) || undefined}>
             <button
+              ref={renameButton}
               type="button"
-              className={`task-title-button${task.title_pending ? ' task-title-pending' : ''}`}
+              className={`task-title-button${awaitsTitle(task) ? ' task-title-pending' : ''}`}
               aria-label={`Rename ${task.title}`}
               title="Rename"
               onClick={() => setRenaming(true)}
