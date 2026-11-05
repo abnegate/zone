@@ -59,6 +59,7 @@ pub fn assemble(context: &RunContext, unseen: &[String], note: String) -> Option
         incomplete: context.incomplete,
         artifacts: context.artifacts.clone(),
         vision: context.vision,
+        reported: context.reported,
     })
 }
 

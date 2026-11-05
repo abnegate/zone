@@ -496,6 +496,74 @@ describe('ChatsPage new chat dialog', () => {
     });
   });
 
+  it("shows Context for an installed model on the workspace's own self-hosted provider", async () => {
+    await openNewChatWithProviders(selfHosted, [instanceModels, openAi, claudeCode, codex]);
+
+    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
+    chooseSelect('Select Model', 'llama3.2');
+    expect(screen.getByRole('combobox', { name: 'Context' })).toBeInTheDocument();
+
+    chooseSelect('Provider', 'Self-Hosted');
+    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
+    chooseSelect('Select Model', 'llama3.2');
+    expect(screen.getByRole('combobox', { name: 'Context' })).toBeInTheDocument();
+  });
+
+  it('hides Context on Claude Code and Codex models whatever the instance has installed', async () => {
+    installed = [
+      toolModel,
+      { name: 'sonnet', size: 1, modified_at: '', completion: true, tools: true },
+      { name: 'gpt-5.5', size: 1, modified_at: '', completion: true, tools: true },
+    ];
+    await openNewChatWithProviders(claudeCode);
+
+    chooseSelect('Select Model', 'Sonnet');
+    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
+
+    chooseSelect('Provider', 'Codex');
+    chooseSelect('Select Model', 'gpt-5.5');
+    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
+  });
+
+  it('hides Context and sends none when the workspace defaults to another provider', async () => {
+    await openNewChatWithProviders(openAi);
+
+    chooseSelect('Select Model', 'llama3.2');
+
+    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
+    const body = await createdBody();
+    expect(body.model_name).toBe('llama3.2');
+    expect(body).not.toHaveProperty('context_tokens');
+  });
+
+  it('hides Context while the providers the model would run on are unknown', async () => {
+    await openNewChat();
+    await screen.findByTestId('new-chat-providers-error');
+
+    chooseSelect('Select Model', 'llama3.2');
+
+    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
+  });
+
+  it('sends the chosen context for a Self-Hosted model and none once Context hides', async () => {
+    await openNewChatWithProviders(selfHosted, [instanceModels, openAi, claudeCode, codex]);
+
+    chooseSelect('Provider', 'Self-Hosted');
+    chooseSelect('Select Model', 'llama3.2');
+    chooseSelect('Context', '8K tokens');
+
+    expect(await createdBody()).toMatchObject({
+      provider: 'self_hosted',
+      provider_model: 'llama3.2',
+      context_tokens: 8192,
+    });
+
+    (globalThis.fetch as unknown as ReturnType<typeof mock>).mockClear();
+    chooseSelect('Select Model', 'Automatic');
+    expect(screen.queryByRole('combobox', { name: 'Context' })).not.toBeInTheDocument();
+    expect(await createdBody()).not.toHaveProperty('context_tokens');
+  });
+
   it('offers agent mode on OpenAI for a typed model zone has no details for', async () => {
     await openNewChatWithProviders(selfHosted);
 

@@ -768,6 +768,7 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
             Some(("A draft", None)),
             Mode::Preview,
             endpoint,
+            None,
         )
         .await
         .unwrap();

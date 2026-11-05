@@ -398,6 +398,7 @@ async fn the_preview_and_the_generation_carry_the_same_memory_bytes() {
         None,
         Mode::Preview,
         endpoint,
+        None,
     )
     .await
     .expect("a preview builds");

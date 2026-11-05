@@ -16,6 +16,7 @@ use tokio::time::{Instant, timeout, timeout_at};
 use super::agent::{AgentKind, Reader};
 use super::event::{AgentEvent, Paragraphs, activity};
 use super::lines::{Frame, Lines};
+use super::rollout;
 use super::settings::{CliSettings, Toolset};
 use super::transcript;
 use crate::environment;
@@ -23,6 +24,9 @@ use abnegate_llm::{
     Completion, CompletionProvider, CompletionRequest, ExitStatus, Limit, Message, ProviderError,
     ProviderKind, Usage,
 };
+
+/// The longest a finished codex turn waits on its rollout to learn its window.
+const ROLLOUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const READ_BUFFER: usize = 8 * 1024;
 
@@ -184,6 +188,8 @@ impl CliProvider {
         let line_limit = self.settings.line_limit;
         let sign_in = self.settings.sign_in;
         let directory = self.settings.working_directory.clone();
+        let agent = self.agent;
+        let variables = self.settings.variables.clone();
 
         Ok(Box::pin(async_stream::try_stream! {
             let mut lines = Lines::new(line_limit);
@@ -193,6 +199,7 @@ impl CliProvider {
             let mut kept = 0_usize;
             let mut ended = false;
             let mut terminal = false;
+            let mut thread: Option<String> = None;
 
             while !ended {
                 let read = session.read(&mut buffer).await?;
@@ -235,11 +242,23 @@ impl CliProvider {
                         )).await)?;
                     }
                     terminal |= event.terminal();
+                    if let AgentEvent::Session(id) = &event {
+                        thread = Some(id.clone());
+                    }
                     yield event;
                 }
             }
 
             session.finish(terminal).await?;
+
+            if let (AgentKind::Codex, Some(thread)) = (agent, thread)
+                && let Some(home) = rollout::home(&variables, &environment::inherited())
+            {
+                let read = tokio::task::spawn_blocking(move || rollout::occupancy(&home, &thread));
+                if let Ok(Ok(Some(occupancy))) = timeout(ROLLOUT_TIMEOUT, read).await {
+                    yield AgentEvent::Occupancy(occupancy);
+                }
+            }
         }))
     }
 
@@ -261,6 +280,9 @@ impl CliProvider {
                 }
                 AgentEvent::Session(id) => {
                     tracing::debug!(provider = %self.name, session = %id, "agent session");
+                }
+                AgentEvent::Occupancy(occupancy) => {
+                    tracing::debug!(provider = %self.name, window = occupancy.window, used = ?occupancy.used, "agent context");
                 }
                 AgentEvent::Limited(limit) => {
                     return Err(ProviderError::limited(&self.name, limit));
@@ -477,6 +499,7 @@ fn retained(event: &AgentEvent) -> usize {
         AgentEvent::Usage(_)
         | AgentEvent::Window(_)
         | AgentEvent::Session(_)
+        | AgentEvent::Occupancy(_)
         | AgentEvent::Finished { .. } => 0,
     }
 }
@@ -536,7 +559,7 @@ fn is_continuation(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, SignIn};
-    use crate::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
+    use crate::llm::provider::{Occupancy, UNFUNDED, UNFUNDED_CONTEXT};
     use crate::tools::test_support::captured_logs;
     use abnegate_llm::{Credential, RequestOptions};
     use serde_json::json;
@@ -834,6 +857,82 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
             Some("The suite passes.")
         );
         assert_eq!(completion.usage.expect("token counts").total_tokens, 48);
+    }
+
+    #[tokio::test]
+    async fn a_codex_turn_ends_with_the_window_its_rollout_reports() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let home = TempDir::new().expect("a codex home");
+        let thread = "019b2c41-0000-7000-8000-000000000001";
+        let day = home.path().join("sessions/2026/11/05");
+        std::fs::create_dir_all(&day).expect("a day of sessions");
+        std::fs::write(
+            day.join(format!("rollout-2026-11-05T13-36-38-{thread}.jsonl")),
+            include_str!("fixtures/codex/rollout.jsonl"),
+        )
+        .expect("a rollout");
+        let script = format!(
+            r#"
+echo '{{"type":"thread.started","thread_id":"{thread}"}}'
+echo '{{"type":"item.completed","item":{{"id":"item_2","type":"agent_message","text":"OK"}}}}'
+echo '{{"type":"turn.completed","usage":{{"input_tokens":24633,"cached_input_tokens":13184,"output_tokens":5}}}}'
+"#
+        );
+        let settings = settings(&directory, &script).with_variable(
+            AgentKind::Codex.home(),
+            home.path().to_str().expect("a UTF-8 home"),
+        );
+        let provider = CliProvider::agent(AgentKind::Codex, settings);
+        let messages = [Message::user("Reply OK")];
+
+        let events: Vec<AgentEvent> = provider
+            .stream(request(&messages))
+            .expect("a running agent")
+            .map(|event| event.expect("an event"))
+            .collect()
+            .await;
+
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::Occupancy(Occupancy {
+                    window: 475_000,
+                    used: Some(24_638),
+                }))
+            ),
+            "the rollout's window ends the turn: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_codex_turn_without_a_rollout_reports_no_window() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let home = TempDir::new().expect("an empty codex home");
+        let script = r#"
+echo '{"type":"thread.started","thread_id":"t1"}'
+echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
+"#;
+        let settings = settings(&directory, script).with_variable(
+            AgentKind::Codex.home(),
+            home.path().to_str().expect("a UTF-8 home"),
+        );
+        let provider = CliProvider::agent(AgentKind::Codex, settings);
+        let messages = [Message::user("hi")];
+
+        let events: Vec<AgentEvent> = provider
+            .stream(request(&messages))
+            .expect("a running agent")
+            .map(|event| event.expect("an event"))
+            .collect()
+            .await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Occupancy(_))),
+            "{events:?}"
+        );
+        assert!(events.iter().any(AgentEvent::terminal), "{events:?}");
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@
 //! this host, behind one client.
 
 use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use abnegate_llm::finish_reason::STOP;
@@ -12,7 +13,8 @@ use abnegate_llm::{
 use futures::{Stream, StreamExt};
 
 use super::provider::{
-    AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Toolset, activity,
+    AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Occupancy, Toolset,
+    activity,
 };
 
 /// The longest a buffered completion may take, from sending the request to
@@ -59,6 +61,22 @@ impl LlmBackend {
 pub struct LlmClient {
     endpoint: abnegate_llm::LlmClient,
     backend: LlmBackend,
+    reported: Reported,
+}
+
+/// What a coding agent last reported of its context, and which agent did, shared by every clone
+/// of the client that ran it.
+#[derive(Debug, Clone, Default)]
+struct Reported(Arc<Mutex<Option<(AgentKind, Occupancy)>>>);
+
+impl Reported {
+    fn record(&self, agent: AgentKind, occupancy: Occupancy) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((agent, occupancy));
+    }
+
+    fn latest(&self) -> Option<(AgentKind, Occupancy)> {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// Refuse a turn that expects zone's tools to be callable.
@@ -106,6 +124,7 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, Error> {
         AgentEvent::Usage(counts) => usage = Some(counts),
         AgentEvent::Window(reported) => window = Some(reported),
         AgentEvent::Session(announced) => session = Some(announced),
+        AgentEvent::Occupancy(_) => {}
         AgentEvent::Finished {
             finish_reason: reported,
         } => {
@@ -135,12 +154,18 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, Error> {
 
 fn chunks(
     events: AgentStream,
-    provider: String,
+    agent: AgentKind,
+    reported: Reported,
 ) -> impl Stream<Item = Result<ChatStreamChunk, Error>> + Send {
+    let provider = agent.to_string();
     async_stream::stream! {
         let mut events = events;
         while let Some(event) = events.next().await {
             let translated = match event {
+                Ok(AgentEvent::Occupancy(occupancy)) => {
+                    reported.record(agent, occupancy);
+                    continue;
+                }
                 Ok(event) => chunk(event, &provider),
                 Err(error) => Err(Error::from(error)),
             };
@@ -184,7 +209,21 @@ impl LlmClient {
         Self {
             endpoint: abnegate_llm::LlmClient::new(config),
             backend: LlmBackend::Http,
+            reported: Reported::default(),
         }
+    }
+
+    /// The context window and fill the coding agent this client now runs on
+    /// last reported, which no stream chunk has room to carry. A report from
+    /// an agent the turn handed over from is not this one's.
+    pub fn occupancy(&self) -> Option<Occupancy> {
+        let LlmBackend::Cli { agent, .. } = &self.backend else {
+            return None;
+        };
+        self.reported
+            .latest()
+            .filter(|(reporter, _)| reporter == agent)
+            .map(|(_, occupancy)| occupancy)
     }
 
     /// Ask the provider to halt on these strings. Custom GGUFs often ignore
@@ -334,7 +373,7 @@ impl LlmClient {
         refuse_tools(tools, *agent)?;
         let events = CliProvider::agent(*agent, settings.as_ref().clone())
             .stream(CompletionRequest::new(model, messages, options))?;
-        Ok(Box::pin(chunks(events, agent.to_string())))
+        Ok(Box::pin(chunks(events, *agent, self.reported.clone())))
     }
 
     /// The endpoint settings, with any temperature a `with_` method set.
