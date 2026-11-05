@@ -12,11 +12,13 @@ import {
 
 describe('panel boxes', () => {
   it('lists every box once, by a stable id', () => {
-    expect(DEFAULT_ORDER).toEqual(['changes', 'tasks', 'sources', 'gallery']);
+    expect(DEFAULT_ORDER).toEqual(['changes', 'subagents', 'tasks', 'sources', 'gallery']);
     expect(new Set(PANEL_BOXES.map((box) => box.id)).size).toBe(PANEL_BOXES.length);
     expect(boxTitle('gallery')).toBe('Gallery');
+    expect(boxTitle('subagents')).toBe('Agents');
     expect(isPanelBox('sources')).toBe(true);
     expect(isPanelBox('tasks')).toBe(true);
+    expect(isPanelBox('subagents')).toBe(true);
     expect(isPanelBox('retired')).toBe(false);
     expect(isPanelBox(3)).toBe(false);
   });
@@ -34,20 +36,28 @@ describe('panel boxes', () => {
   });
 
   it("keeps a viewer's order", () => {
-    expect(mergeOrder(['gallery', 'sources', 'tasks', 'changes'])).toEqual([
+    expect(mergeOrder(['gallery', 'sources', 'subagents', 'tasks', 'changes'])).toEqual([
       'gallery',
       'sources',
+      'subagents',
       'tasks',
       'changes',
     ]);
   });
 
   it('puts a box the viewer never placed after the ones they did, in its default order', () => {
-    expect(mergeOrder(['gallery'])).toEqual(['gallery', 'changes', 'tasks', 'sources']);
+    expect(mergeOrder(['gallery'])).toEqual([
+      'gallery',
+      'changes',
+      'subagents',
+      'tasks',
+      'sources',
+    ]);
     expect(mergeOrder(['gallery', 'sources', 'changes'])).toEqual([
       'gallery',
       'sources',
       'changes',
+      'subagents',
       'tasks',
     ]);
     expect(mergeOrder(['sources'], ['changes', 'sources', 'gallery'])).toEqual([
@@ -57,10 +67,21 @@ describe('panel boxes', () => {
     ]);
   });
 
+  it('puts the agents last for a viewer who saved an order before the box existed', () => {
+    expect(mergeOrder(['changes', 'tasks', 'sources', 'gallery'])).toEqual([
+      'changes',
+      'tasks',
+      'sources',
+      'gallery',
+      'subagents',
+    ]);
+  });
+
   it('drops a saved box that no longer exists, and a box saved twice', () => {
     expect(mergeOrder(['archive', 'gallery', 'retired', 'gallery', 'changes'])).toEqual([
       'gallery',
       'changes',
+      'subagents',
       'tasks',
       'sources',
     ]);

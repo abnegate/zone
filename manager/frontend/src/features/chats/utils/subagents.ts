@@ -6,6 +6,7 @@ const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
 const MILLISECOND_DIGITS = 3;
 const FRACTIONAL_SECONDS = /T[^.]*\.(\d+)/;
+const UNNAMED = 'Agent';
 
 const STATUS_LABELS: Record<SubagentStatus, string> = {
   running: 'Running',
@@ -76,6 +77,11 @@ export function mergeSubagent(list: ChatSubagent[], incoming: ChatSubagent): Cha
 
 export function startedIn(list: ChatSubagent[], messageId: string): ChatSubagent[] {
   return list.filter((subagent) => subagent.message_id === messageId);
+}
+
+/** What the agent was asked to do, or a plain name when it was given no description. */
+export function subagentName(subagent: ChatSubagent): string {
+  return subagent.description.trim() || UNNAMED;
 }
 
 export function subagentActive(subagent: ChatSubagent): boolean {
