@@ -20,4 +20,5 @@ export { ProviderPicker } from './ProviderPicker';
 export { QuestionCard } from './QuestionCard';
 export { Reasoning } from './Reasoning';
 export { SourcesButton } from './SourcesButton';
+export { SubagentChips } from './SubagentChips';
 export { ToolTrace } from './ToolTrace';

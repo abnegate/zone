@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:te
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ChatPullRequests } from '../hooks/useChatPullRequests';
+import type { ChatSubagents } from '../hooks/useChatSubagents';
 import type { ChatTasks } from '../hooks/useChatTasks';
+import type { ChatSubagent, SubagentRequest } from '../subagentTypes';
 import type { ChatPullRequest, ChatTask } from '../types';
 import type { GalleryItem } from '../utils/gallery';
 import { PANEL_WIDTH } from '../utils/panel';
@@ -44,6 +46,28 @@ const TASK: ChatTask = {
   pull_request: null,
 };
 
+const SUBAGENT: ChatSubagent = {
+  id: 'subagent-1',
+  chat_id: 'chat-1',
+  message_id: 'message-1',
+  external_id: 'toolu_01Agent',
+  description: 'Review the cart change',
+  kind: 'general-purpose',
+  model: 'sonnet',
+  background: false,
+  status: 'completed',
+  tool_uses: 2,
+  duration_ms: 42_000,
+  tokens: 9_000,
+  last_tool: 'Read',
+  summary: 'Looks right.',
+  error: null,
+  steps: [{ id: 'toolu_x1', name: 'Read', subject: 'src/cart.ts', status: 'succeeded' }],
+  started_at: '2026-11-05T10:00:00Z',
+  finished_at: '2026-11-05T10:00:42Z',
+  updated_at: '2026-11-05T10:00:42Z',
+};
+
 const IMAGE: GalleryItem = {
   key: 'message-1:0',
   messageId: 'message-1',
@@ -77,7 +101,7 @@ const NO_SOURCES: ChatSources = { all: [], replies: new Map() };
 
 const COLLAPSED_KEY = 'zone:chat-panel:user-1:collapsed';
 const WIDTH_KEY = 'zone:chat-panel:user-1:width';
-const SEPARATOR = 'Resize changes, tasks, media and sources';
+const SEPARATOR = 'Resize changes, agents, tasks, media and sources';
 const ORDER_KEY = 'zone:chat-panel:user-1:order';
 const SLOT_HEIGHT = 120;
 
@@ -93,12 +117,18 @@ function changes(pullRequests: ChatPullRequest[] = []): ChatPullRequests {
   };
 }
 
+function agents(subagents: ChatSubagent[]): ChatSubagents {
+  return { subagents, error: null, refresh: mock(async () => undefined) };
+}
+
 function tasked(tasks: ChatTask[] = [], error: string | null = null): ChatTasks {
   return { tasks, error, refresh: mock(async () => undefined) };
 }
 
 interface PanelOptions {
   pullRequests?: ChatPullRequest[];
+  subagents?: ChatSubagent[];
+  shownSubagent?: SubagentRequest | null;
   tasks?: ChatTask[];
   tasksError?: string;
   media?: GalleryItem[];
@@ -107,13 +137,21 @@ interface PanelOptions {
   userId?: string;
 }
 
-function panel(options: PanelOptions, onShowMessage = mock(), onSourcesShown = mock()) {
+function panel(
+  options: PanelOptions,
+  onShowMessage = mock(),
+  onSourcesShown = mock(),
+  onSubagentShown = mock()
+) {
   return (
     <MemoryRouter>
       <ChatPanel
         chatId="chat-1"
         userId={options.userId ?? 'user-1'}
         changes={changes(options.pullRequests)}
+        subagents={options.subagents && agents(options.subagents)}
+        shownSubagent={options.shownSubagent ?? null}
+        onSubagentShown={onSubagentShown}
         tasks={tasked(options.tasks, options.tasksError ?? null)}
         media={options.media ?? []}
         sources={options.sources ?? NO_SOURCES}
@@ -128,8 +166,9 @@ function panel(options: PanelOptions, onShowMessage = mock(), onSourcesShown = m
 function renderPanel(options: PanelOptions = {}) {
   const onShowMessage = mock();
   const onSourcesShown = mock();
-  const view = render(panel(options, onShowMessage, onSourcesShown));
-  return { ...view, onShowMessage, onSourcesShown };
+  const onSubagentShown = mock();
+  const view = render(panel(options, onShowMessage, onSourcesShown, onSubagentShown));
+  return { ...view, onShowMessage, onSourcesShown, onSubagentShown };
 }
 
 function phone() {
@@ -159,13 +198,15 @@ describe('ChatPanel', () => {
   it('shows the sources only when a reply in the chat cites one', () => {
     renderPanel({ sources: CITED });
 
-    const aside = screen.getByRole('complementary', { name: 'Changes, tasks, media and sources' });
+    const aside = screen.getByRole('complementary', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
     expect(within(aside).getByRole('button', { name: 'Sources, 1' })).toBeInTheDocument();
     expect(within(aside).getByText(SOURCE.citation.title)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Changes, \d/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /^Gallery, \d/ })).toBeNull();
     expect(
-      screen.getByRole('button', { name: 'Changes, tasks, media and sources: 1 source' })
+      screen.getByRole('button', { name: 'Changes, agents, tasks, media and sources: 1 source' })
     ).toHaveTextContent(/^1 source$/);
   });
 
@@ -203,7 +244,7 @@ describe('ChatPanel', () => {
       rerender(panel({ sources: CITED, shownSources: request() }, mock(), onSourcesShown));
 
       const sheet = await screen.findByRole('dialog', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       await waitFor(() => expect(onSourcesShown).toHaveBeenCalledTimes(1));
       expect(within(sheet).getByTestId('citation')).toHaveClass('is-highlighted');
@@ -216,7 +257,9 @@ describe('ChatPanel', () => {
   it('shows the tasks only when the chat started one, and counts them in its summary', () => {
     renderPanel({ tasks: [TASK], media: [IMAGE] });
 
-    const aside = screen.getByRole('complementary', { name: 'Changes, tasks, media and sources' });
+    const aside = screen.getByRole('complementary', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
     expect(within(aside).getByRole('button', { name: 'Tasks, 1' })).toBeInTheDocument();
     expect(within(aside).getByRole('link', { name: TASK.title })).toHaveAttribute(
       'href',
@@ -224,7 +267,7 @@ describe('ChatPanel', () => {
     );
     expect(
       screen.getByRole('button', {
-        name: 'Changes, tasks, media and sources: 1 task, 1 media item',
+        name: 'Changes, agents, tasks, media and sources: 1 task, 1 media item',
       })
     ).toHaveTextContent(/^1 task, 1 media item$/);
   });
@@ -246,7 +289,7 @@ describe('ChatPanel', () => {
     renderPanel({ tasks: [TASK] });
 
     expect(
-      screen.getByRole('complementary', { name: 'Changes, tasks, media and sources' })
+      screen.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' })
     ).toBeInTheDocument();
   });
 
@@ -254,12 +297,101 @@ describe('ChatPanel', () => {
     const restore = phone();
     try {
       renderPanel({ tasks: [TASK] });
-      fireEvent.click(screen.getByRole('button', { name: /^Changes, tasks, media and sources: / }));
+      fireEvent.click(
+        screen.getByRole('button', { name: /^Changes, agents, tasks, media and sources: / })
+      );
       const sheet = await screen.findByRole('dialog', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       expect(within(sheet).getByRole('button', { name: 'Tasks, 1' })).toBeInTheDocument();
       expect(within(sheet).getByRole('link', { name: TASK.title })).toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+
+  it('shows the agents only when the chat started one, and counts them in its summary', () => {
+    renderPanel({ subagents: [SUBAGENT], media: [IMAGE] });
+
+    const aside = screen.getByRole('complementary', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
+    expect(within(aside).getByRole('button', { name: 'Agents, 1' })).toBeInTheDocument();
+    expect(within(aside).getByText(SUBAGENT.description)).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: 'Changes, agents, tasks, media and sources: 1 agent, 1 media item',
+      })
+    ).toHaveTextContent(/^1 agent, 1 media item$/);
+  });
+
+  it('opens the panel for a chat whose only content is an agent', () => {
+    renderPanel({ subagents: [SUBAGENT, { ...SUBAGENT, id: 'subagent-2' }] });
+
+    expect(
+      screen.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Changes, agents, tasks, media and sources: 2 agents' })
+    ).toBeInTheDocument();
+  });
+
+  it('leaves the agents out when it is given none, or none were started', () => {
+    const { unmount } = renderPanel({ media: [IMAGE] });
+    expect(screen.queryByRole('button', { name: /^Agents, \d/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /: 1 media item$/ })).toBeInTheDocument();
+    unmount();
+
+    renderPanel({ subagents: [], media: [IMAGE] });
+    expect(screen.queryByRole('button', { name: /^Agents, \d/ })).toBeNull();
+  });
+
+  it('comes back from its rail to show and expand the agent a chip points to', async () => {
+    localStorage.setItem(COLLAPSED_KEY, 'true');
+    const { rerender, onSubagentShown } = renderPanel({ subagents: [SUBAGENT] });
+    expect(screen.queryByRole('separator')).toBeNull();
+
+    rerender(
+      panel(
+        { subagents: [SUBAGENT], shownSubagent: { id: SUBAGENT.id, nonce: 1 } },
+        mock(),
+        mock(),
+        onSubagentShown
+      )
+    );
+
+    expect(separator()).toBeInTheDocument();
+    expect(onSubagentShown).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(COLLAPSED_KEY)).toBe('true');
+    const toggle = screen.getByRole('button', { name: SUBAGENT.description });
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-expanded', 'true'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('opens the sheet where the stylesheet hides the panel, to show the agent a chip points to', async () => {
+    const restore = phone();
+    try {
+      const { rerender, onSubagentShown } = renderPanel({ subagents: [SUBAGENT] });
+
+      rerender(
+        panel(
+          { subagents: [SUBAGENT], shownSubagent: { id: SUBAGENT.id, nonce: 1 } },
+          mock(),
+          mock(),
+          onSubagentShown
+        )
+      );
+
+      const sheet = await screen.findByRole('dialog', {
+        name: 'Changes, agents, tasks, media and sources',
+      });
+      await waitFor(() => expect(onSubagentShown).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(within(sheet).getByRole('button', { name: SUBAGENT.description })).toHaveAttribute(
+          'aria-expanded',
+          'true'
+        )
+      );
     } finally {
       restore();
     }
@@ -275,7 +407,7 @@ describe('ChatPanel', () => {
     renderPanel({ pullRequests: [PULL_REQUEST] });
 
     expect(
-      screen.getByRole('complementary', { name: 'Changes, tasks, media and sources' })
+      screen.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' })
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Changes, 1' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Gallery, 1' })).toBeNull();
@@ -360,22 +492,26 @@ describe('ChatPanel', () => {
   it('hides to a rail and remembers that it was hidden', () => {
     const { unmount } = renderPanel({ media: [IMAGE] });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Hide changes, tasks, media and sources' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Hide changes, agents, tasks, media and sources' })
+    );
 
     expect(screen.queryByRole('separator')).toBeNull();
     expect(document.activeElement).toBe(
-      screen.getByRole('button', { name: /Show changes, tasks, media and sources/ })
+      screen.getByRole('button', { name: /Show changes, agents, tasks, media and sources/ })
     );
     expect(localStorage.getItem('zone:chat-panel:user-1:collapsed')).toBe('true');
     unmount();
     renderPanel({ media: [IMAGE] });
-    const rail = screen.getByRole('button', { name: /Show changes, tasks, media and sources/ });
+    const rail = screen.getByRole('button', {
+      name: /Show changes, agents, tasks, media and sources/,
+    });
     expect(rail).toHaveAttribute('aria-expanded', 'false');
 
     fireEvent.click(rail);
     expect(separator()).toBeInTheDocument();
     expect(document.activeElement).toBe(
-      screen.getByRole('button', { name: 'Hide changes, tasks, media and sources' })
+      screen.getByRole('button', { name: 'Hide changes, agents, tasks, media and sources' })
     );
     expect(localStorage.getItem('zone:chat-panel:user-1:collapsed')).toBe('false');
   });
@@ -390,7 +526,7 @@ describe('ChatPanel', () => {
 
       rerender(panel({ sources: CITED, shownSources: request() }));
       const sheet = await screen.findByRole('dialog', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       fireEvent.keyDown(sheet, { key: 'Escape' });
 
@@ -405,12 +541,16 @@ describe('ChatPanel', () => {
   it('keeps a box in the panel in step with the same box collapsed in the sheet', async () => {
     renderPanel({ sources: CITED });
     const inline = within(
-      screen.getByRole('complementary', { name: 'Changes, tasks, media and sources' })
+      screen.getByRole('complementary', { name: 'Changes, agents, tasks, media and sources' })
     ).getByRole('button', { name: 'Sources, 1' });
     expect(inline).toHaveAttribute('aria-expanded', 'true');
 
-    fireEvent.click(screen.getByRole('button', { name: /^Changes, tasks, media and sources: / }));
-    const sheet = await screen.findByRole('dialog', { name: 'Changes, tasks, media and sources' });
+    fireEvent.click(
+      screen.getByRole('button', { name: /^Changes, agents, tasks, media and sources: / })
+    );
+    const sheet = await screen.findByRole('dialog', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
     fireEvent.click(within(sheet).getByRole('button', { name: 'Sources, 1' }));
 
     expect(inline).toHaveAttribute('aria-expanded', 'false');
@@ -420,12 +560,14 @@ describe('ChatPanel', () => {
     renderPanel({ pullRequests: [PULL_REQUEST], media: [IMAGE] });
 
     const toggle = screen.getByRole('button', {
-      name: 'Changes, tasks, media and sources: 1 change, 1 media item',
+      name: 'Changes, agents, tasks, media and sources: 1 change, 1 media item',
     });
     expect(toggle).toHaveTextContent(/^1 change, 1 media item$/);
     fireEvent.click(toggle);
 
-    const sheet = await screen.findByRole('dialog', { name: 'Changes, tasks, media and sources' });
+    const sheet = await screen.findByRole('dialog', {
+      name: 'Changes, agents, tasks, media and sources',
+    });
     expect(sheet).toHaveClass('chat-panel-sheet');
   });
 
@@ -469,7 +611,9 @@ describe('ChatPanel', () => {
     }
 
     function inPanel(): HTMLElement {
-      return screen.getByRole('complementary', { name: 'Changes, tasks, media and sources' });
+      return screen.getByRole('complementary', {
+        name: 'Changes, agents, tasks, media and sources',
+      });
     }
 
     function handle(title: string): HTMLElement {
@@ -524,6 +668,7 @@ describe('ChatPanel', () => {
       expect(inPanel().querySelector('[data-drop]')).toBeNull();
       expect(JSON.parse(localStorage.getItem(ORDER_KEY) ?? '[]')).toEqual([
         'gallery',
+        'subagents',
         'tasks',
         'changes',
         'sources',
@@ -574,6 +719,7 @@ describe('ChatPanel', () => {
 
       expect(JSON.parse(localStorage.getItem(ORDER_KEY) ?? '[]')).toEqual([
         'gallery',
+        'subagents',
         'tasks',
         'sources',
         'changes',
@@ -602,6 +748,17 @@ describe('ChatPanel', () => {
       expect(handle('Tasks')).toBeInTheDocument();
     });
 
+    it('puts the agents after the changes by default, and last in an order saved before them', () => {
+      const { unmount } = renderPanel({ ...everything, subagents: [SUBAGENT] });
+      expect(shownOrder()).toEqual(['changes', 'subagents', 'sources', 'gallery']);
+      expect(handle('Agents')).toBeInTheDocument();
+      unmount();
+
+      localStorage.setItem(ORDER_KEY, JSON.stringify(['changes', 'tasks', 'sources', 'gallery']));
+      renderPanel({ ...everything, subagents: [SUBAGENT] });
+      expect(shownOrder()).toEqual(['changes', 'sources', 'gallery', 'subagents']);
+    });
+
     it('has nothing to move a lone box by', () => {
       renderPanel({ media: [IMAGE] });
 
@@ -610,9 +767,11 @@ describe('ChatPanel', () => {
 
     it('cancels a move in the sheet with escape, and leaves the sheet open', async () => {
       renderPanel(everything);
-      fireEvent.click(screen.getByRole('button', { name: /^Changes, tasks, media and sources: / }));
+      fireEvent.click(
+        screen.getByRole('button', { name: /^Changes, agents, tasks, media and sources: / })
+      );
       const sheet = await screen.findByRole('dialog', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       const grip = within(sheet).getByRole('button', { name: 'Move Changes' });
       grip.focus();
@@ -622,7 +781,9 @@ describe('ChatPanel', () => {
       await press(grip, 'Escape');
 
       await announced('Moving Changes cancelled. It stays at position 1 of 3.');
-      expect(screen.getByRole('dialog', { name: 'Changes, tasks, media and sources' })).toBe(sheet);
+      expect(
+        screen.getByRole('dialog', { name: 'Changes, agents, tasks, media and sources' })
+      ).toBe(sheet);
       expect(shownOrder(sheet)).toEqual(['changes', 'sources', 'gallery']);
 
       await press(sheet, 'Escape');
@@ -695,10 +856,12 @@ describe('ChatPanel', () => {
 
     it('lets escape close a sheet that was shut while a box was lifted', async () => {
       renderPanel(everything);
-      const toggle = screen.getByRole('button', { name: /^Changes, tasks, media and sources: / });
+      const toggle = screen.getByRole('button', {
+        name: /^Changes, agents, tasks, media and sources: /,
+      });
       fireEvent.click(toggle);
       const sheet = await screen.findByRole('dialog', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       const grip = within(sheet).getByRole('button', { name: 'Move Changes' });
       grip.focus();
@@ -709,7 +872,7 @@ describe('ChatPanel', () => {
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
       fireEvent.click(toggle);
       const reopened = await screen.findByRole('dialog', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       await press(reopened, 'Escape');
 
@@ -720,9 +883,11 @@ describe('ChatPanel', () => {
       localStorage.setItem(ORDER_KEY, JSON.stringify(['sources', 'gallery', 'changes']));
       renderPanel(everything);
 
-      fireEvent.click(screen.getByRole('button', { name: /^Changes, tasks, media and sources: / }));
+      fireEvent.click(
+        screen.getByRole('button', { name: /^Changes, agents, tasks, media and sources: / })
+      );
       const sheet = await screen.findByRole('dialog', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
 
       expect(shownOrder(sheet)).toEqual(['sources', 'gallery', 'changes']);

@@ -9,6 +9,7 @@ import {
   stepStatusLabel,
   subagentActive,
   subagentDuration,
+  subagentName,
   subagentStatusLabel,
   subagentStatusTint,
 } from './subagents';
@@ -164,6 +165,11 @@ describe('subagent readings', () => {
     const orphan: ChatSubagent = { ...TESTER, id: 'subagent-4', message_id: null };
     expect(startedIn([REVIEWER, other, orphan], 'message-1')).toEqual([REVIEWER]);
     expect(startedIn([REVIEWER, other, orphan], 'message-3')).toEqual([]);
+  });
+
+  it('names an agent by its description, or plainly when it has none', () => {
+    expect(subagentName(REVIEWER)).toBe('Ask for a review');
+    expect(subagentName({ ...REVIEWER, description: '  ' })).toBe('Agent');
   });
 
   it('counts only a running agent as active', () => {

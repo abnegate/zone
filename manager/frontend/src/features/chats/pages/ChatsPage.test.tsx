@@ -40,6 +40,7 @@ const mockUpdateChat = mock();
 const mockGetChatSources = mock();
 const mockGetChatPullRequests = mock();
 const mockGetChatTasks = mock();
+const mockGetChatSubagents = mock();
 const mockSetChatSources = mock();
 const mockGetChatProviders = mock();
 const mockSetChatProvider = mock();
@@ -81,6 +82,7 @@ mock.module('../../../api/chats', () => ({
     getChatSources: mockGetChatSources,
     getChatPullRequests: mockGetChatPullRequests,
     getChatTasks: mockGetChatTasks,
+    getChatSubagents: mockGetChatSubagents,
     setChatSources: mockSetChatSources,
     getChatProviders: mockGetChatProviders,
     setChatProvider: mockSetChatProvider,
@@ -476,6 +478,8 @@ describe('ChatsPage', () => {
     mockGetChatPullRequests.mockResolvedValue([]);
     mockGetChatTasks.mockReset();
     mockGetChatTasks.mockResolvedValue([]);
+    mockGetChatSubagents.mockReset();
+    mockGetChatSubagents.mockResolvedValue([]);
     mockGetChatProviders.mockReset();
     mockSetChatProvider.mockReset();
     mockGetChatProviders.mockResolvedValue(chatProviders());
@@ -1504,7 +1508,7 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       const panel = await screen.findByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       expect(await within(panel).findByRole('link', { name: 'Add widgets' })).toBeInTheDocument();
       expect(within(panel).getByRole('button', { name: 'Open sunset.png' })).toBeInTheDocument();
@@ -1538,7 +1542,7 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       const panel = await screen.findByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       expect(within(panel).getByRole('button', { name: 'Tasks, 1' })).toBeInTheDocument();
       expect(within(panel).getByRole('link', { name: 'Fix the build' })).toHaveAttribute(
@@ -1556,7 +1560,7 @@ describe('ChatsPage', () => {
       await waitFor(() => expect(mockGetChatPullRequests).toHaveBeenCalled());
       await waitFor(() => expect(mockGetChatTasks).toHaveBeenCalled());
       expect(
-        screen.queryByRole('complementary', { name: 'Changes, tasks, media and sources' })
+        screen.queryByRole('complementary', { name: 'Changes, agents, tasks, media and sources' })
       ).toBeNull();
     });
 
@@ -4727,7 +4731,7 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       const panel = await screen.findByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       expect(within(panel).getByRole('button', { name: 'Sources, 1' })).toBeInTheDocument();
       expect(within(panel).getByText('an unrelated source')).toBeInTheDocument();
@@ -4744,7 +4748,7 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       const panel = await screen.findByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       const toggle = within(panel).getByRole('button', { name: 'Sources, 1' });
       expect(toggle).toHaveAttribute('aria-expanded', 'false');
@@ -4770,7 +4774,7 @@ describe('ChatsPage', () => {
         fireEvent.click(within(reply).getByRole('button', { name: '1 source' }));
 
         const sheet = await screen.findByRole('dialog', {
-          name: 'Changes, tasks, media and sources',
+          name: 'Changes, agents, tasks, media and sources',
         });
         expect(within(sheet).getByText('Cited in this reply')).toBeInTheDocument();
         expect(within(sheet).getByText('an unrelated source')).toBeInTheDocument();
@@ -4830,7 +4834,7 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       const panel = await screen.findByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       expect(within(panel).getByTestId('citation')).toHaveTextContent('Passing');
 
@@ -4881,7 +4885,7 @@ describe('ChatsPage', () => {
       );
 
       const panel = screen.getByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       const highlighted = within(panel)
         .getAllByTestId('citation')
@@ -4938,7 +4942,7 @@ describe('ChatsPage', () => {
       );
 
       const panel = screen.getByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       const rows = within(panel).getAllByTestId('citation');
       expect(rows).toHaveLength(2);
