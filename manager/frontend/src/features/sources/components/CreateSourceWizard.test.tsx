@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
+import type { Source } from '../types';
 
 const mockGetSourceTypes = mock();
 
@@ -89,6 +92,77 @@ describe('CreateSourceWizard kinds', () => {
     expect(kinds).not.toContain('Email');
     expect(kinds).not.toContain('Calendar');
     expect(screen.queryByText('Notion')).toBeNull();
+  });
+});
+
+describe('CreateSourceWizard embedding', () => {
+  const created = {
+    id: 'source-zone',
+    name: 'abnegate/zone',
+    source_type: 'github',
+    category: 'file',
+    config: { owner: 'abnegate', repo: 'zone', branch: 'main' },
+    url: 'https://github.com/abnegate/zone',
+    description: null,
+    is_active: true,
+    last_verified_at: null,
+    last_error: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  } as Source;
+
+  beforeEach(() => {
+    mockGetSourceTypes.mockReset();
+    mockGetSourceTypes.mockResolvedValue([kind('github')]);
+  });
+
+  function Opener({ onCreated }: { onCreated: (source: Source) => void }) {
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <button type="button" onClick={() => setOpen(true)}>
+          Open
+        </button>
+        <CreateSourceWizard
+          isOpen={open}
+          onClose={() => setOpen(false)}
+          onCreated={onCreated}
+          createSource={() => Promise.resolve(created)}
+        />
+      </>
+    );
+  }
+
+  it('hands the created source to onCreated', async () => {
+    const user = userEvent.setup();
+    const onCreated = mock((_source: Source) => {});
+    render(<Opener onCreated={onCreated} />);
+    await user.click(screen.getByRole('button', { name: 'Open' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Add Source' });
+
+    await user.click(within(dialog).getByRole('button', { name: 'Next' }));
+    await user.type(await within(dialog).findByLabelText(/Owner/), 'abnegate');
+    await user.type(within(dialog).getByLabelText(/Repository/), 'zone');
+    await user.click(within(dialog).getByRole('button', { name: 'Next' }));
+    await within(dialog).findByLabelText(/Display Name/);
+    await user.click(within(dialog).getByRole('button', { name: 'Add Source' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(created));
+  });
+
+  it('takes focus when it opens and returns it to the opener when it closes', async () => {
+    const user = userEvent.setup();
+    render(<Opener onCreated={() => {}} />);
+    const opener = screen.getByRole('button', { name: 'Open' });
+    await user.click(opener);
+    const dialog = await screen.findByRole('dialog', { name: 'Add Source' });
+
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add Source' })).toBeNull());
+    expect(document.activeElement).toBe(opener);
   });
 });
 
