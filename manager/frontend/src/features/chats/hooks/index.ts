@@ -4,6 +4,8 @@ export type { ChatPullRequests } from './useChatPullRequests';
 export { useChatPullRequests } from './useChatPullRequests';
 export { useChatSearch } from './useChatSearch';
 export { useChatSources } from './useChatSources';
+export type { ChatSubagents } from './useChatSubagents';
+export { useChatSubagents } from './useChatSubagents';
 export type { UseChatsOptions } from './useChats';
 export { useChats } from './useChats';
 export type { ChatTasks } from './useChatTasks';

@@ -29,7 +29,7 @@ export const MessageAttachmentSchema = z.object({
  * would otherwise throw for the whole GET and leave the chat permanently
  * unopenable, since the value is persisted in messages.metadata.
  */
-function tolerantArray<T extends z.ZodTypeAny>(element: T) {
+export function tolerantArray<T extends z.ZodTypeAny>(element: T) {
   return z.array(z.unknown()).transform((items) =>
     items
       .map((item) => element.safeParse(item))

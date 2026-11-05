@@ -13,6 +13,8 @@ import {
   PullRequestDiffSchema,
   WorkspaceChatProvidersSchema,
 } from '../features/chats/schemas';
+import { ChatSubagentsResponseSchema } from '../features/chats/subagentSchemas';
+import type { ChatSubagent } from '../features/chats/subagentTypes';
 import type {
   Chat,
   ChatProviders,
@@ -254,6 +256,16 @@ class ChatsApi {
       throw await ApiError.from(response, 'Failed to load tasks');
     }
     return parse(ChatTasksResponseSchema, await response.json()).tasks;
+  }
+
+  async getChatSubagents(chatId: string): Promise<ChatSubagent[]> {
+    const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/subagents`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load agents');
+    }
+    return parse(ChatSubagentsResponseSchema, await response.json()).subagents;
   }
 
   async updateChatPullRequest(
