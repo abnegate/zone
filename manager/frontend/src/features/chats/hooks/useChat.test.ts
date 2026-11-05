@@ -212,6 +212,7 @@ describe('useChat', () => {
     expect(mockSendMessage).not.toHaveBeenCalled();
     expect(JSON.parse(lastSocket?.sent.at(-1) ?? '{}')).toEqual({
       type: 'send',
+      id: expect.any(String),
       content: 'New message',
     });
 
@@ -1258,6 +1259,7 @@ describe('useChat', () => {
 
     expect(JSON.parse(lastSocket?.sent.at(-1) ?? '{}')).toEqual({
       type: 'send',
+      id: expect.any(String),
       content: 'see this',
       metadata,
     });
@@ -1425,23 +1427,183 @@ describe('useChat', () => {
     });
   });
 
-  it('serializes sends until the current response completes', async () => {
-    mockGetChat.mockResolvedValue(mockChat);
-    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
-    await waitFor(() => {
-      expect(result.current.loading).toBe(false);
-      expect(lastSocket).not.toBeNull();
+  describe('queue', () => {
+    const sent = () => lastSocket?.sent.map((frame) => JSON.parse(frame)) ?? [];
+
+    const running = async () => {
+      mockGetChat.mockResolvedValue(mockChat);
+      const hook = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+      await waitFor(() => {
+        expect(hook.result.current.loading).toBe(false);
+        expect(lastSocket).not.toBeNull();
+      });
+      await act(async () => {
+        await hook.result.current.sendMessage({ content: 'first' });
+      });
+      act(() => {
+        lastSocket?.emit({
+          type: 'message_saved',
+          message_id: 'u-first',
+          role: 'user',
+          content: 'first',
+        });
+        lastSocket?.emit({ type: 'message_start', message_id: 'a-first', role: 'assistant' });
+      });
+      return hook;
+    };
+
+    it('sends a message typed during a turn for the server to queue, without a pending row', async () => {
+      const { result } = await running();
+
+      await act(async () => {
+        await result.current.sendMessage({ content: 'second' });
+      });
+
+      expect(sent().at(-1)).toEqual({ type: 'send', id: expect.any(String), content: 'second' });
+      expect(result.current.chat?.messages.map((message) => message.content)).not.toContain(
+        'second'
+      );
+      expect(result.current.streaming).toBe(true);
     });
 
-    await result.current.sendMessage({ content: 'first' });
-    await expect(result.current.sendMessage({ content: 'second' })).rejects.toThrow(
-      'Wait for the current response to finish'
-    );
+    it('shows what the server queued, and sends it as the next turn when the turn ends', async () => {
+      const { result } = await running();
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-second', content: 'second' }],
+          held: false,
+        })
+      );
+      expect(result.current.queue).toEqual([{ id: 'q-second', content: 'second' }]);
 
-    lastSocket?.emit({ type: 'message_start', message_id: 'a-first', role: 'assistant' });
-    lastSocket?.emit({ type: 'message_end', message_id: 'a-first', content: 'done' });
-    await waitFor(() => expect(result.current.streaming).toBe(false));
-    await expect(result.current.sendMessage({ content: 'second' })).resolves.toBeUndefined();
+      act(() => {
+        lastSocket?.emit({ type: 'message_end', message_id: 'a-first', content: 'done' });
+        lastSocket?.emit({ type: 'queue', messages: [], held: false, started: 'q-second' });
+      });
+
+      expect(result.current.queue).toEqual([]);
+      expect(result.current.streaming).toBe(true);
+      expect(result.current.chat?.messages.at(-1)).toMatchObject({
+        id: 'pending-q-second',
+        role: 'user',
+        content: 'second',
+      });
+
+      act(() =>
+        lastSocket?.emit({
+          type: 'message_saved',
+          message_id: 'u-second',
+          role: 'user',
+          content: 'second',
+        })
+      );
+      const contents = result.current.chat?.messages.map((message) => message.id);
+      expect(contents?.slice(-3)).toEqual(['u-first', 'a-first', 'u-second']);
+    });
+
+    it('asks the server to interrupt the turn for a queued message', async () => {
+      const { result } = await running();
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-second', content: 'second' }],
+          held: false,
+        })
+      );
+
+      act(() => result.current.interruptQueued('q-second'));
+      expect(sent().at(-1)).toEqual({ type: 'interrupt', id: 'q-second' });
+
+      act(() => {
+        lastSocket?.emit({ type: 'cancelled', message_id: 'a-first' });
+        lastSocket?.emit({ type: 'queue', messages: [], held: false, started: 'q-second' });
+      });
+      expect(result.current.streaming).toBe(true);
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('second');
+    });
+
+    it('edits and removes a queued message through the server', async () => {
+      const { result } = await running();
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [
+            { id: 'q-second', content: 'second' },
+            { id: 'q-third', content: 'third' },
+          ],
+          held: false,
+        })
+      );
+
+      act(() => result.current.editQueued('q-second', 'second, edited'));
+      act(() => result.current.removeQueued('q-third'));
+      expect(sent().slice(-2)).toEqual([
+        { type: 'edit_queued', id: 'q-second', content: 'second, edited' },
+        { type: 'remove_queued', id: 'q-third' },
+      ]);
+
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-second', content: 'second, edited' }],
+          held: false,
+        })
+      );
+      expect(result.current.queue).toEqual([{ id: 'q-second', content: 'second, edited' }]);
+    });
+
+    it('keeps a queue a stopped turn held, and says so', async () => {
+      const { result } = await running();
+      act(() => {
+        lastSocket?.emit({ type: 'cancelled', message_id: 'a-first' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-second', content: 'second' }],
+          held: true,
+        });
+      });
+
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.held).toBe(true);
+      expect(result.current.queue).toHaveLength(1);
+    });
+
+    it('drops the pending row of a send the server queued behind a turn this window had not seen', async () => {
+      mockGetChat.mockResolvedValue(mockChat);
+      const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+      await waitFor(() => {
+        expect(result.current.loading).toBe(false);
+        expect(lastSocket).not.toBeNull();
+      });
+      await act(async () => {
+        await result.current.sendMessage({ content: 'raced' });
+      });
+      const { id } = sent().at(-1);
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('raced');
+
+      act(() =>
+        lastSocket?.emit({ type: 'queue', messages: [{ id, content: 'raced' }], held: false })
+      );
+
+      expect(result.current.chat?.messages.map((message) => message.content)).not.toContain(
+        'raced'
+      );
+      expect(result.current.queue).toEqual([{ id, content: 'raced' }]);
+    });
+
+    it('forgets the queue when the socket reconnects, until the server replays it', async () => {
+      const { result } = await running();
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-second', content: 'second' }],
+          held: false,
+        })
+      );
+      act(() => lastSocket?.onclose?.());
+      await waitFor(() => expect(result.current.queue).toEqual([]));
+    });
   });
 
   it('removes an unsaved user message when generation is cancelled', async () => {
@@ -2640,9 +2802,11 @@ describe('useChat', () => {
       await result.current.sendMessage({ content });
     });
 
-    expect(lastSocket?.sent).toContain(
-      JSON.stringify({ type: 'send', content: 'Scope: Other: Only the backlog' })
-    );
+    expect(lastSocket?.sent.map((frame) => JSON.parse(frame))).toContainEqual({
+      type: 'send',
+      id: expect.any(String),
+      content: 'Scope: Other: Only the backlog',
+    });
   });
 
   it('leaves an unanswered question standing when the reader stops the reply', async () => {

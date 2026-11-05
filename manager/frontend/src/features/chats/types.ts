@@ -414,6 +414,13 @@ export interface SendMessageRequest {
   metadata?: MessageMetadata;
 }
 
+/** A message sent while a turn was running, waiting on the server for its turn. */
+export interface QueuedMessage {
+  id: string;
+  content: string;
+  metadata?: MessageMetadata | null;
+}
+
 export interface ChatSearchResult {
   message_id: string;
   chat_id: string;

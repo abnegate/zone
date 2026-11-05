@@ -1,0 +1,41 @@
+.queue-item {
+  gap: var(--ui-space-1);
+}
+
+.queue-item .queue-item-content {
+  border: 1px dashed var(--ui-border-strong);
+  background: transparent;
+  color: var(--ui-text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.queue-item-editor {
+  width: 32rem;
+  max-width: 100%;
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-bg-surface);
+  color: var(--ui-text-primary);
+  font: inherit;
+  resize: vertical;
+}
+
+.queue-item-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ui-space-1);
+}
+
+.queue-item-label {
+  margin-right: auto;
+  padding-right: var(--ui-space-2);
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-xs);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
