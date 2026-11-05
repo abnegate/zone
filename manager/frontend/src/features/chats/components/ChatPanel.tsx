@@ -268,7 +268,7 @@ export function ChatPanel({
               if (dragging.current) event.preventDefault();
             }}
           >
-            <DialogTitle className="chat-panel-sheet-title">{PANEL_LABEL}</DialogTitle>
+            <DialogTitle className="sr-only">{PANEL_LABEL}</DialogTitle>
             <DialogDescription className="sr-only">{summary}</DialogDescription>
             <div className="chat-panel-boxes">{boxes('sheet')}</div>
           </DialogContent>

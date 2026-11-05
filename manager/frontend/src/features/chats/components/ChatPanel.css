@@ -703,13 +703,15 @@
   max-width: none;
   max-height: 85dvh;
   margin: 0;
-  padding: var(--ui-space-4) var(--ui-space-3) var(--ui-space-5);
+  padding: calc(var(--ui-control-height-sm) + var(--ui-space-3)) var(--ui-space-3)
+    var(--ui-space-5);
   border-radius: var(--ui-radius-xl) var(--ui-radius-xl) 0 0;
   gap: var(--ui-space-3);
 }
 
-.chat-panel-sheet-title {
-  padding: 0 var(--ui-control-height) 0 var(--ui-space-1);
+.chat-panel-sheet .ui-dialog-close {
+  top: var(--ui-space-2);
+  right: var(--ui-space-2);
 }
 
 .chat-panel-sheet .chat-panel-boxes {
