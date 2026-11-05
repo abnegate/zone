@@ -312,7 +312,6 @@ export function ChatPanel({
             onDoubleClick={() => resize(PANEL_WIDTH.fallback, true)}
           />
           <div className="chat-panel-bar">
-            <span className="chat-panel-bar-title">{PANEL_LABEL}</span>
             <button
               type="button"
               ref={hide}
