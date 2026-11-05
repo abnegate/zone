@@ -3197,7 +3197,7 @@ describe('ChatsPage', () => {
       const trigger = screen.getByTestId('agent-permissions');
       expect(trigger).toHaveAttribute(
         'aria-label',
-        'Agent permissions: auto-approve on, Zone tools only off'
+        'Agent permissions: auto-approve on, Host tools on (Zone tools only off)'
       );
       expect(
         [...trigger.querySelectorAll('.agent-permission-chip')].map((chip) => chip.textContent)
@@ -3230,13 +3230,32 @@ describe('ChatsPage', () => {
         'aria-label',
         'Agent permissions: auto-approve off, Zone tools only on'
       );
-      expect(trigger).toHaveTextContent('Ask first');
+      expect(trigger).toHaveTextContent('Permissions');
       expect(trigger).not.toHaveTextContent('Host tools');
 
       fireEvent.click(trigger);
       expect(screen.getByTestId('agent-sandbox-toggle')).not.toHaveClass(
         'agent-permission--warning'
       );
+    });
+
+    it.each([
+      { auto_approve: false, agent_sandboxed: true },
+      { auto_approve: true, agent_sandboxed: true },
+      { auto_approve: false, agent_sandboxed: false },
+      { auto_approve: true, agent_sandboxed: false },
+    ])('names every visible permissions chip in the trigger label (%o)', async (permissions) => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+      await openHeader({ agent_enabled: true, ...permissions });
+      const trigger = screen.getByTestId('agent-permissions');
+      const name = trigger.getAttribute('aria-label')?.toLowerCase() ?? '';
+      const chips = [...trigger.querySelectorAll('.agent-permission-chip-label')].map(
+        (chip) => chip.textContent?.toLowerCase() ?? ''
+      );
+      expect(chips.length).toBe(permissions.agent_sandboxed ? 1 : 2);
+      for (const chip of chips) {
+        expect(name).toContain(chip);
+      }
     });
 
     it('offers no permissions while agent mode is off', async () => {
