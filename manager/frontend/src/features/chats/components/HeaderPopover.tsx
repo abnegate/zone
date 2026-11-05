@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { popoverOffset } from '../utils';
+import { popoverOffset, viewportMargin } from '../utils';
 
 const SELECT_MENU = '[data-radix-popper-content-wrapper]';
 const OPEN_SELECT = '[role="combobox"][aria-expanded="true"]';
@@ -15,11 +15,6 @@ export interface HeaderPopoverProps {
   children: ReactNode;
 }
 
-/**
- * A pill in the chat header that opens a panel of further controls. The panel
- * stays mounted while closed, so a half-made choice inside it survives closing
- * unsaved: leaving the panel commits nothing.
- */
 export function HeaderPopover({
   className,
   testId,
@@ -72,14 +67,23 @@ export function HeaderPopover({
   useLayoutEffect(() => {
     if (!open) return;
     const place = () => {
-      const anchor = root.current?.getBoundingClientRect();
+      const element = root.current;
       const width = panel.current?.offsetWidth ?? 0;
-      if (!anchor || width === 0) return;
-      setOffset(popoverOffset(anchor, width, document.documentElement.clientWidth));
+      if (!element || width === 0) return;
+      setOffset(
+        popoverOffset(
+          element.getBoundingClientRect(),
+          width,
+          document.documentElement.clientWidth,
+          viewportMargin(element)
+        )
+      );
     };
     place();
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
-    if (root.current) observer?.observe(root.current);
+    for (const element of [root.current, root.current?.parentElement]) {
+      if (element) observer?.observe(element);
+    }
     window.addEventListener('resize', place);
     return () => {
       observer?.disconnect();

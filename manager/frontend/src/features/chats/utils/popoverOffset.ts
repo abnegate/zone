@@ -1,13 +1,22 @@
 export const VIEWPORT_MARGIN = 16;
 
-export interface Span {
-  left: number;
-  right: number;
+export function popoverOffset(
+  trigger: Pick<DOMRect, 'left' | 'right'>,
+  width: number,
+  viewport: number,
+  margin: number = VIEWPORT_MARGIN
+): number {
+  const fits = trigger.left + width <= viewport - margin;
+  const preferred = fits ? trigger.left : trigger.right - width;
+  const left = Math.max(margin, Math.min(preferred, viewport - margin - width));
+  return left - trigger.left;
 }
 
-export function popoverOffset(trigger: Span, width: number, viewport: number): number {
-  const fits = trigger.left + width <= viewport - VIEWPORT_MARGIN;
-  const preferred = fits ? trigger.left : trigger.right - width;
-  const left = Math.max(VIEWPORT_MARGIN, Math.min(preferred, viewport - VIEWPORT_MARGIN - width));
-  return left - trigger.left;
+export function viewportMargin(element: Element): number {
+  const style = getComputedStyle(element);
+  const gutter = style.getPropertyValue('--ui-gutter').trim();
+  const size = Number.parseFloat(gutter);
+  if (Number.isNaN(size)) return VIEWPORT_MARGIN;
+  if (!gutter.endsWith('rem')) return size;
+  return size * Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
 }

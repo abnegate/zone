@@ -373,7 +373,6 @@
   position: relative;
   display: inline-flex;
   min-width: 0;
-  border-radius: inherit;
 }
 
 .chat-header-popover-chevron {
@@ -484,6 +483,7 @@
 
 .agent-controls > .chat-header-popover {
   align-self: stretch;
+  border-radius: inherit;
 }
 
 .agent-controls .agent-toggle {
