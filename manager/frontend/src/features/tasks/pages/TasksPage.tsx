@@ -4,10 +4,11 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
 import PageBar from '../../../shared/components/PageBar/PageBar';
+import PencilIcon from '../../../shared/components/PencilIcon/PencilIcon';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
-import { CreateTaskWizard, TaskDetail } from '../components';
+import { CreateTaskWizard, TaskDetail, TaskTitleInput } from '../components';
 import { useTask, useTasks } from '../hooks';
 import type { Task, UpdateTaskRequest } from '../types';
 import { TaskExecutionView } from './TaskExecutionView';
@@ -62,6 +63,7 @@ export default function TasksPage() {
     loading: tasksLoading,
     error: tasksError,
     createTask,
+    updateTask: updateListedTask,
     deleteTask: deleteTaskMutation,
   } = useTasks(filterProject || undefined, filterStatus || undefined);
 
@@ -81,6 +83,7 @@ export default function TasksPage() {
   } = useTask(taskParam);
 
   const [executionTask, setExecutionTask] = useState<Task | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -321,7 +324,37 @@ export default function TasksPage() {
                   >
                     <td>
                       <div className="task-card-title">
-                        <h3 title={task.title}>{task.title}</h3>
+                        {renamingId === task.id ? (
+                          <TaskTitleInput
+                            title={task.title}
+                            onSave={async (title) => {
+                              await updateListedTask(task.id, { title });
+                            }}
+                            onDone={() => setRenamingId(null)}
+                          />
+                        ) : (
+                          <>
+                            <h3
+                              title={task.title}
+                              className={task.title_pending ? 'task-title-pending' : undefined}
+                            >
+                              {task.title}
+                            </h3>
+                            <button
+                              type="button"
+                              className="task-rename"
+                              aria-label="Rename"
+                              title="Rename"
+                              onClick={(event) => {
+                                stopRowAction(event);
+                                setRenamingId(task.id);
+                              }}
+                              onKeyDown={stopRowAction}
+                            >
+                              <PencilIcon />
+                            </button>
+                          </>
+                        )}
                         <div className="task-badges">
                           {task.is_agentic && <Badge variant="accent">Agentic</Badge>}
                         </div>

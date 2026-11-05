@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
+import { awaitsTitle, TITLE_POLL_MS } from '../title';
 import type { Task, TaskRun, UpdateTaskRequest } from '../types';
 
 export function useTask(id: string | null) {
@@ -30,6 +31,19 @@ export function useTask(id: string | null) {
   useEffect(() => {
     loadTask();
   }, [loadTask]);
+
+  useEffect(() => {
+    if (!id || !task || task.id !== id || !awaitsTitle(task)) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const refreshed = await tasksApi.getTask(id).catch(() => null);
+      if (refreshed && !cancelled) setTask(refreshed);
+    }, TITLE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [id, task]);
 
   const updateTask = useCallback(
     async (request: UpdateTaskRequest): Promise<Task> => {

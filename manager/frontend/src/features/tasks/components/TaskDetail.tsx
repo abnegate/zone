@@ -1,11 +1,12 @@
 import { Button, Select } from '@zone/ui';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import PencilIcon from '../../../shared/components/PencilIcon/PencilIcon';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
 import type { Task, TaskStatus, UpdateTaskRequest } from '../types';
+import { TaskTitleInput } from './TaskTitleInput';
 
 type Draft = {
-  title: string;
   description: string;
   acceptance_criteria: string;
   status: TaskStatus;
@@ -52,7 +53,6 @@ function sameIds(left: string[], right: string[]): boolean {
 
 function hydrate(task: Task): Draft {
   return {
-    title: task.title,
     description: task.description,
     acceptance_criteria: task.acceptance_criteria ?? '',
     status: task.status,
@@ -65,11 +65,16 @@ function hydrate(task: Task): Draft {
   };
 }
 
+function rebase(draft: Draft, previous: Draft, next: Draft): Draft {
+  const edited = (Object.keys(next) as (keyof Draft)[]).filter(
+    (key) => JSON.stringify(draft[key]) !== JSON.stringify(previous[key])
+  );
+  return Object.assign({ ...next }, Object.fromEntries(edited.map((key) => [key, draft[key]])));
+}
+
 function changed(task: Task, draft: Draft): UpdateTaskRequest {
   const request: UpdateTaskRequest = {};
-  const title = draft.title.trim();
   const description = draft.description.trim();
-  if (title !== task.title) request.title = title;
   if (description !== task.description) request.description = description;
   if (draft.acceptance_criteria !== (task.acceptance_criteria ?? '')) {
     request.acceptance_criteria = draft.acceptance_criteria;
@@ -105,19 +110,24 @@ export function TaskDetail({
 }: TaskDetailProps) {
   const [draft, setDraft] = useState<Draft>(() => hydrate(task));
   const [saving, setSaving] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hydrated = useRef(task);
 
   useEffect(() => {
-    setDraft(hydrate(task));
-    setError(null);
+    const previous = hydrated.current;
+    hydrated.current = task;
+    if (previous === task) return;
+    if (previous.id !== task.id) {
+      setDraft(hydrate(task));
+      setError(null);
+      return;
+    }
+    setDraft((current) => rebase(current, hydrate(previous), hydrate(task)));
   }, [task]);
 
   const request = useMemo(() => changed(task, draft), [task, draft]);
-  const canSave =
-    Object.keys(request).length > 0 &&
-    draft.title.trim().length > 0 &&
-    draft.description.trim().length > 0 &&
-    !saving;
+  const canSave = Object.keys(request).length > 0 && draft.description.trim().length > 0 && !saving;
 
   const toggleProject = (id: string) => {
     setDraft((current) => {
@@ -144,7 +154,27 @@ export function TaskDetail({
   return (
     <section className="task-details">
       <header className="task-details-header">
-        <h2>{task.title}</h2>
+        {renaming ? (
+          <TaskTitleInput
+            title={task.title}
+            className="task-details-title"
+            onSave={(title) => onSave({ title })}
+            onDone={() => setRenaming(false)}
+          />
+        ) : (
+          <h2 className="task-details-title">
+            <button
+              type="button"
+              className={`task-title-button${task.title_pending ? ' task-title-pending' : ''}`}
+              aria-label={`Rename ${task.title}`}
+              title="Rename"
+              onClick={() => setRenaming(true)}
+            >
+              <span className="task-title-text">{task.title}</span>
+              <PencilIcon />
+            </button>
+          </h2>
+        )}
         <Button variant="ghost" onClick={onClose}>
           Close
         </Button>
@@ -156,16 +186,6 @@ export function TaskDetail({
             {error}
           </div>
         )}
-
-        <div className="form-group">
-          <label htmlFor="task-detail-title">Title</label>
-          <input
-            id="task-detail-title"
-            type="text"
-            value={draft.title}
-            onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
-          />
-        </div>
 
         <div className="form-group">
           <label htmlFor="task-detail-description">Description</label>
