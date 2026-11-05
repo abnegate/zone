@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::observer::Observer;
 use super::session::Session;
 use abnegate_llm::{Credential, ReasoningEffort};
 use abnegate_secret::SecretValue;
@@ -161,6 +162,7 @@ pub struct CliSettings {
     /// How hard the agent thinks. `None`, or a level the agent's model does
     /// not take, leaves it to the agent.
     pub effort: Option<ReasoningEffort>,
+    pub observer: Option<Arc<dyn Observer>>,
 }
 
 impl Default for CliSettings {
@@ -179,6 +181,7 @@ impl Default for CliSettings {
             line_limit: DEFAULT_LINE_LIMIT,
             session: None,
             effort: None,
+            observer: None,
         }
     }
 }
@@ -211,6 +214,11 @@ impl CliSettings {
 
     pub fn with_toolset(mut self, toolset: Toolset) -> Self {
         self.toolset = Some(Arc::new(toolset));
+        self
+    }
+
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = Some(observer);
         self
     }
 

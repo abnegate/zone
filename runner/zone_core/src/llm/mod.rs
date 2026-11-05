@@ -11,5 +11,5 @@ pub mod window;
 pub use client::{ChatStream, LlmBackend, LlmClient, READ_TIMEOUT, TIMEOUT};
 pub use provider::{
     AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, CodexSandbox,
-    Session, Toolset,
+    Observer, Output, Session, Toolset,
 };

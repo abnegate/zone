@@ -184,6 +184,7 @@ impl CliProvider {
         let line_limit = self.settings.line_limit;
         let sign_in = self.settings.sign_in;
         let directory = self.settings.working_directory.clone();
+        let observer = self.settings.observer.clone();
 
         Ok(Box::pin(async_stream::try_stream! {
             let mut lines = Lines::new(line_limit);
@@ -219,6 +220,12 @@ impl CliProvider {
                 }
 
                 for event in events.drain(..) {
+                    if let AgentEvent::Output(output) = &event {
+                        if let Some(observer) = &observer {
+                            observer.observe(output);
+                        }
+                        continue;
+                    }
                     let event = paragraphs.separated(event);
                     // The agent's own report of what went wrong beats an exit
                     // code, which says only that something did.
@@ -256,6 +263,7 @@ impl CliProvider {
                 AgentEvent::Tool(call) => {
                     tracing::debug!(provider = %self.name, tool = %call.function.name, "agent tool call");
                 }
+                AgentEvent::Output(_) => {}
                 AgentEvent::Window(window) => {
                     tracing::debug!(provider = %self.name, window = %window.name, used_percent = ?window.used_percent, "agent usage window");
                 }
@@ -474,7 +482,8 @@ fn retained(event: &AgentEvent) -> usize {
         | AgentEvent::Failed(text)
         | AgentEvent::Limited(Limit { message: text, .. }) => text.len(),
         AgentEvent::Tool(call) => activity(call).map_or(0, |line| line.len()),
-        AgentEvent::Usage(_)
+        AgentEvent::Output(_)
+        | AgentEvent::Usage(_)
         | AgentEvent::Window(_)
         | AgentEvent::Session(_)
         | AgentEvent::Finished { .. } => 0,
@@ -536,6 +545,7 @@ fn is_continuation(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, SignIn};
+    use crate::llm::provider::{Observer, Output};
     use crate::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
     use crate::tools::test_support::captured_logs;
     use abnegate_llm::{Credential, RequestOptions};
@@ -544,6 +554,7 @@ mod tests {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -973,6 +984,57 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
             }
         }
         (delivered, failure, after)
+    }
+
+    #[derive(Debug, Default)]
+    struct Collected(std::sync::Mutex<Vec<(String, String, bool)>>);
+
+    impl Observer for Collected {
+        fn observe(&self, output: &Output) {
+            self.0.lock().expect("the collected outputs").push((
+                output.call.function.name.clone(),
+                output.text.clone(),
+                output.succeeded,
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn what_a_tool_printed_reaches_the_observer_and_not_the_reader() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let lines = [
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_01", "name": "Bash", "input": {"command": "gh pr create --fill"}}]}, "parent_tool_use_id": null}),
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "https://github.com/acme/widgets/pull/7"}]}}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Opened it."}]}, "parent_tool_use_id": null}),
+            json!({"type": "result", "subtype": "success", "is_error": false}),
+        ]
+        .map(|line| line.to_string());
+        let collected = Arc::new(Collected::default());
+        let settings =
+            settings(&directory, &replaying(&directory, &lines)).with_observer(collected.clone());
+        let provider = CliProvider::agent(AgentKind::Claude, settings);
+
+        let (events, failure, _) = streamed(&provider).await;
+
+        assert!(failure.is_none(), "{failure:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Output(_))),
+            "{events:?}"
+        );
+        assert_eq!(
+            collected
+                .0
+                .lock()
+                .expect("the collected outputs")
+                .as_slice(),
+            [(
+                "Bash".to_string(),
+                "https://github.com/acme/widgets/pull/7".to_string(),
+                true
+            )]
+        );
     }
 
     #[tokio::test]

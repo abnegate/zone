@@ -2,6 +2,7 @@
 //! this host, behind one client.
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use abnegate_llm::finish_reason::STOP;
@@ -12,7 +13,8 @@ use abnegate_llm::{
 use futures::{Stream, StreamExt};
 
 use super::provider::{
-    AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Toolset, activity,
+    AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Observer, Toolset,
+    activity,
 };
 
 /// The longest a buffered completion may take, from sending the request to
@@ -103,6 +105,7 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, Error> {
         AgentEvent::Tool(call) => {
             delta.reasoning_content = activity(&call);
         }
+        AgentEvent::Output(_) => {}
         AgentEvent::Usage(counts) => usage = Some(counts),
         AgentEvent::Window(reported) => window = Some(reported),
         AgentEvent::Session(announced) => session = Some(announced),
@@ -211,6 +214,16 @@ impl LlmClient {
             **settings = current
                 .with_toolset(toolset)
                 .with_builtin_tools(builtin_tools);
+        }
+        self
+    }
+
+    /// Hand each of the agent's own finished tool calls to `observer`. Like a
+    /// toolset, it belongs to one turn and is not carried to another backend.
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        if let LlmBackend::Cli { settings, .. } = &mut self.backend {
+            let current = std::mem::take(settings.as_mut());
+            **settings = current.with_observer(observer);
         }
         self
     }

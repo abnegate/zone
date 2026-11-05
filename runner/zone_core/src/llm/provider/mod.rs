@@ -27,6 +27,8 @@ mod agent;
 mod cli;
 mod event;
 mod lines;
+mod observer;
+mod output;
 mod parser;
 mod session;
 mod settings;
@@ -36,6 +38,8 @@ pub use agent::{AgentKind, Delivery};
 pub use cli::{AgentStream, CliProvider, OUTGROWN, STDERR_HEADING};
 pub use event::{AgentEvent, activity};
 pub use lines::{Frame, Lines};
+pub use observer::Observer;
+pub use output::Output;
 pub use parser::claude::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
 pub use session::Session;
 pub use settings::{

@@ -1,11 +1,14 @@
 //! Reading `claude --output-format stream-json`.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::llm::provider::event::AgentEvent;
+use crate::llm::provider::output::Output;
 use crate::llm::window;
 use abnegate_llm::{Limit, ToolCall, Usage, Window};
 
@@ -119,6 +122,11 @@ enum Event {
         #[serde(default)]
         api_error: Option<String>,
     },
+    #[serde(rename = "user")]
+    User {
+        #[serde(default)]
+        message: Option<UserMessage>,
+    },
     #[serde(rename = "result")]
     Result {
         #[serde(default)]
@@ -158,6 +166,42 @@ impl AssistantMessage {
                 Block::ToolUse { .. } | Block::Ignored => None,
             })
             .collect()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UserMessage {
+    #[serde(default, deserialize_with = "lenient")]
+    content: Option<Vec<Returned>>,
+}
+
+/// What claude hands the model back for one of its calls.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum Returned {
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: Value,
+        #[serde(default)]
+        is_error: bool,
+    },
+    #[serde(other)]
+    Ignored,
+}
+
+/// A tool result's text, which claude writes either as one string or as a
+/// list of blocks of which only the text ones say anything.
+fn printed(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -340,6 +384,8 @@ pub struct Reader {
     resets_at: Option<DateTime<Utc>>,
     window: Option<Window>,
     credits: Credits,
+    /// Calls still waiting on their result, by the id claude gave each.
+    calls: HashMap<String, ToolCall>,
 }
 
 impl Reader {
@@ -357,13 +403,14 @@ impl Reader {
                 message,
                 parent_tool_use_id: Some(_),
                 ..
-            } => subagent(message, events),
+            } => self.subagent(message, events),
             Event::Assistant {
                 message,
                 parent_tool_use_id: None,
                 is_api_error_message,
                 api_error,
             } => self.assistant(message, is_api_error_message, api_error.as_deref(), events),
+            Event::User { message } => self.returned(message, events),
             Event::Result {
                 subtype,
                 is_error,
@@ -427,11 +474,53 @@ impl Reader {
         for block in message.content {
             match block {
                 Block::Text { text } => events.push(AgentEvent::Text(text)),
-                block => events.extend(block.call().map(AgentEvent::Tool)),
+                block => events.extend(block.call().map(|call| self.called(call))),
             }
         }
         if let Some(usage) = message.usage {
             events.push(AgentEvent::Usage(usage.into()));
+        }
+    }
+
+    fn called(&mut self, call: ToolCall) -> AgentEvent {
+        self.calls.insert(call.id.clone(), call.clone());
+        AgentEvent::Tool(call)
+    }
+
+    /// A line of a subagent's own conversation. Its words, token counts and
+    /// API errors stay there: claude hands a failure to the main agent as the
+    /// result of the call that started the subagent. What it reaches for is
+    /// the turn's.
+    fn subagent(&mut self, message: Option<AssistantMessage>, events: &mut Vec<AgentEvent>) {
+        let calls = message
+            .into_iter()
+            .flat_map(|message| message.content)
+            .filter_map(Block::call);
+        for call in calls {
+            events.push(self.called(call));
+        }
+    }
+
+    fn returned(&mut self, message: Option<UserMessage>, events: &mut Vec<AgentEvent>) {
+        let results = message
+            .and_then(|message| message.content)
+            .unwrap_or_default();
+        for result in results {
+            let Returned::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = result
+            else {
+                continue;
+            };
+            if let Some(call) = self.calls.remove(&tool_use_id) {
+                events.push(AgentEvent::Output(Output::new(
+                    call,
+                    printed(&content),
+                    !is_error,
+                )));
+            }
         }
     }
 
@@ -529,17 +618,6 @@ fn worded(marker: &str, words: &str) -> String {
     } else {
         format!("{marker}: {words}")
     }
-}
-
-/// A line of a subagent's own conversation. Its words, token counts and API
-/// errors stay there: claude hands a failure to the main agent as the result
-/// of the call that started the subagent. What it reaches for is the turn's.
-fn subagent(message: Option<AssistantMessage>, events: &mut Vec<AgentEvent>) {
-    let calls = message
-        .into_iter()
-        .flat_map(|message| message.content)
-        .filter_map(Block::call);
-    events.extend(calls.map(AgentEvent::Tool));
 }
 
 fn fable_refusal(words: &str) -> bool {
@@ -843,6 +921,64 @@ mod tests {
             matches!(last, AgentEvent::Finished { finish_reason } if finish_reason.as_deref() == Some("success")),
             "expected a successful finish, got {last:?}"
         );
+    }
+
+    fn outputs(events: &[AgentEvent]) -> Vec<&Output> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Output(output) => Some(output),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_tool_result_is_paired_with_the_call_it_answers() {
+        let events = interpret_all(SESSION);
+
+        let outputs = outputs(&events);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].call.id, "toolu_01A");
+        assert_eq!(outputs[0].call.function.name, "Read");
+        assert_eq!(outputs[0].text, "fn main() {}");
+        assert!(outputs[0].succeeded);
+    }
+
+    #[test]
+    fn a_result_in_blocks_or_marked_an_error_keeps_its_text_and_failure() {
+        let lines = [
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_02", "name": "Bash", "input": {"command": "gh pr create --fill"}}]}, "parent_tool_use_id": null}),
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_02", "is_error": true, "content": [{"type": "text", "text": "a pull request already exists"}, {"type": "image"}]}]}}),
+        ]
+        .map(|line| line.to_string())
+        .join("\n");
+
+        let events = interpret_all(&lines);
+
+        let outputs = outputs(&events);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].text, "a pull request already exists");
+        assert!(!outputs[0].succeeded);
+    }
+
+    #[test]
+    fn a_subagents_call_is_paired_too_and_an_unknown_result_is_ignored() {
+        let lines = [
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_03", "name": "Bash", "input": {"command": "ls"}}]}, "parent_tool_use_id": "toolu_task"}),
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_03", "content": "a\nb"}]}, "parent_tool_use_id": "toolu_task"}),
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_unknown", "content": "x"}]}}),
+            json!({"type": "user", "message": {"content": "a plain prompt"}}),
+        ]
+        .map(|line| line.to_string())
+        .join("\n");
+
+        let events = interpret_all(&lines);
+
+        let outputs = outputs(&events);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].call.id, "toolu_03");
+        assert_eq!(outputs[0].text, "a\nb");
     }
 
     #[test]

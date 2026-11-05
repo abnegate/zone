@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::llm::provider::event::AgentEvent;
+use crate::llm::provider::output::Output;
 use crate::llm::provider::settings::Toolset;
 use abnegate_llm::{Limit, ToolCall, Usage};
 
@@ -55,6 +56,10 @@ enum Item {
         id: String,
         #[serde(default)]
         command: String,
+        #[serde(default)]
+        aggregated_output: String,
+        #[serde(default)]
+        exit_code: Option<i64>,
     },
     #[serde(rename = "mcp_tool_call")]
     Call {
@@ -107,12 +112,26 @@ pub fn interpret(line: &str, events: &mut Vec<AgentEvent>) {
             item: Item::Message { text },
         } => events.push(AgentEvent::Text(text)),
         Event::Completed {
-            item: Item::Command { id, command },
-        } => events.push(AgentEvent::Tool(ToolCall::function(
-            id,
-            "command_execution",
-            serde_json::json!({ "command": command }).to_string(),
-        ))),
+            item:
+                Item::Command {
+                    id,
+                    command,
+                    aggregated_output,
+                    exit_code,
+                },
+        } => {
+            let call = ToolCall::function(
+                id,
+                "command_execution",
+                serde_json::json!({ "command": command }).to_string(),
+            );
+            events.push(AgentEvent::Tool(call.clone()));
+            events.push(AgentEvent::Output(Output::new(
+                call,
+                aggregated_output,
+                exit_code == Some(0),
+            )));
+        }
         Event::Completed {
             item:
                 Item::Call {
@@ -257,6 +276,36 @@ mod tests {
 
     fn finished(events: &[AgentEvent]) -> bool {
         matches!(events.last(), Some(AgentEvent::Finished { .. }))
+    }
+
+    #[test]
+    fn a_finished_command_carries_what_it_printed_and_whether_it_worked() {
+        let events = interpret_all(SESSION);
+
+        let outputs: Vec<&Output> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Output(output) => Some(output),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].call.id, "item_1");
+        assert_eq!(
+            outputs[0].call.function.arguments,
+            r#"{"command":"cargo test"}"#
+        );
+        assert_eq!(outputs[0].text, "test result: ok. 12 passed\n");
+        assert!(outputs[0].succeeded);
+
+        let mut failed = Vec::new();
+        interpret(
+            r#"{"type":"item.completed","item":{"id":"item_9","type":"command_execution","command":"gh pr create","aggregated_output":"already exists","exit_code":1,"status":"failed"}}"#,
+            &mut failed,
+        );
+        assert!(
+            matches!(&failed[..], [AgentEvent::Tool(_), AgentEvent::Output(output)] if !output.succeeded)
+        );
     }
 
     #[test]
