@@ -22,6 +22,10 @@ const HEADING: &str = "Workspace actions:";
 pub(in crate::agent::prompt) const CREATE_PULL_REQUEST: &str = "create_pull_request";
 pub(in crate::agent::prompt) const COMMENT_ON_ISSUE: &str = "comment_on_issue";
 
+/// A denial reaches the model as an error result, so without this the
+/// fallback to gh would post what the user just refused.
+const DENIED: &str = "- A denied call is the user's answer, not an error: never do it another way.";
+
 /// Named because `waiting` counts it over the assembled prompt: it is the one
 /// bullet that says what to do while a runner is still going, and the section
 /// teaching wait_for sits directly beside it.
@@ -145,20 +149,23 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
     let tools = context.tools;
     let mut bullets = Vec::new();
     if tools.has(CREATE_PULL_REQUEST) {
-        let pull = tools.qualified(CREATE_PULL_REQUEST);
+        let pull_request = tools.qualified(CREATE_PULL_REQUEST);
         bullets.push(format!(
-            "- To open a pull request the user asked for, push its branch, then call {pull} so \
-             Zone can track it, not gh pr create, hub, the GitHub web UI or another server's \
-             tool. Only if {pull} errors, use gh pr create, say so, and give the pull request's \
-             URL in your reply. A denied call is the user's answer, not an error."
+            "- On a repository connected as a GitHub source, open a pull request the user asked \
+             for by pushing its branch, then calling {pull_request} so Zone can track it, not gh \
+             pr create, hub, the GitHub web UI or another server's tool. Only if {pull_request} \
+             errors, use gh pr create, say so, and give the pull request's URL in your reply."
         ));
     }
     if tools.has(COMMENT_ON_ISSUE) {
         let comment = tools.qualified(COMMENT_ON_ISSUE);
         bullets.push(format!(
-            "- Leave a comment the user asked for with {comment}, not gh or another server's \
-             tool, unless {comment} errors."
+            "- Leave a comment the user asked for on such a repository with {comment}, not gh or \
+             another server's tool, unless {comment} errors."
         ));
+    }
+    if !bullets.is_empty() {
+        bullets.push(DENIED.to_string());
     }
     bullets
 }
@@ -167,7 +174,7 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::agent::prompt::Environment;
-    use crate::agent::prompt::test_support::{chat_context, environment};
+    use crate::agent::prompt::test_support::{chat_context, environment, task_context};
     use crate::agent::{ChatTools, ToolProfile};
     use std::collections::BTreeSet;
     use zone_core::llm::AgentKind;
@@ -350,6 +357,8 @@ mod tests {
 
     const PREFERS_ZONE: &str = "not gh pr create, hub, the GitHub web UI or another server's tool.";
 
+    const CONNECTED: &str = "On a repository connected as a GitHub source";
+
     fn prompted(tools: &ChatTools, environment: &Environment) -> String {
         render(&chat_context(tools, false, environment)).unwrap_or_default()
     }
@@ -360,11 +369,16 @@ mod tests {
         let rendered = prompted(&tools, &environment().with_github());
 
         assert!(
-            rendered
-                .contains("push its branch, then call create_pull_request so Zone can track it"),
+            rendered.contains(
+                "by pushing its branch, then calling create_pull_request so Zone can track it"
+            ),
             "{rendered}"
         );
         assert!(rendered.contains(PREFERS_ZONE), "{rendered}");
+        assert!(
+            rendered.contains(CONNECTED),
+            "a repository no source connects can only be reached with gh: {rendered}"
+        );
         assert!(
             rendered.contains(
                 "Only if create_pull_request errors, use gh pr create, say so, and give the pull \
@@ -372,11 +386,7 @@ mod tests {
             ),
             "{rendered}"
         );
-        assert!(
-            rendered.contains("A denied call is the user's answer, not an error."),
-            "a denial falling back to the shell would open the pull request the user refused: \
-             {rendered}"
-        );
+        assert_eq!(rendered.matches(DENIED).count(), 1, "{rendered}");
         assert!(
             rendered.contains("with comment_on_issue, not gh"),
             "{rendered}"
@@ -394,7 +404,8 @@ mod tests {
             let rendered = prompted(&tools, &environment().with_github());
 
             assert!(
-                rendered.contains("then call mcp__zone__create_pull_request so Zone can track it"),
+                rendered
+                    .contains("then calling mcp__zone__create_pull_request so Zone can track it"),
                 "{agent}: {rendered}"
             );
             assert!(
@@ -407,6 +418,24 @@ mod tests {
                 "{agent}: {rendered}"
             );
         }
+    }
+
+    /// A denial comes back to the model as an error result, and a comment
+    /// that fell back to gh on one would post what the user just refused.
+    #[test]
+    fn a_denied_comment_is_never_posted_another_way() {
+        let without: Vec<&str> = catalog()
+            .into_iter()
+            .filter(|name| *name != CREATE_PULL_REQUEST)
+            .collect();
+        let tools = ChatTools::with_names(ToolProfile::Chat, &without, None);
+        let rendered = prompted(&tools, &environment().with_github());
+
+        assert!(
+            rendered.contains("with comment_on_issue, not gh"),
+            "{rendered}"
+        );
+        assert!(rendered.contains(DENIED), "{rendered}");
     }
 
     #[test]
@@ -425,6 +454,7 @@ mod tests {
             assert!(!rendered.contains("so Zone can track it"), "{rendered}");
             assert!(!rendered.contains("gh pr create"), "{rendered}");
             assert!(!rendered.contains("not gh"), "{rendered}");
+            assert!(!rendered.contains(DENIED), "{rendered}");
         }
     }
 
@@ -432,11 +462,7 @@ mod tests {
     fn a_task_run_is_never_told_to_open_its_own_pull_request() {
         let tools = ChatTools::with_names(ToolProfile::Task, &catalog(), None);
         let environment = environment().with_github();
-        let rendered = render(&crate::agent::prompt::test_support::task_context(
-            &tools,
-            &environment,
-        ))
-        .unwrap_or_default();
+        let rendered = render(&task_context(&tools, &environment)).unwrap_or_default();
 
         assert!(!rendered.contains("so Zone can track it"), "{rendered}");
         assert!(!rendered.contains("gh pr create"), "{rendered}");

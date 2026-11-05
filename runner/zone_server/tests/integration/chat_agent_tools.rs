@@ -803,7 +803,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
     assert_eq!(settings.timeout, CHAT_TIMEOUT);
 }
 
-const PULL_REQUEST: &str = "create_pull_request";
+const CREATE_PULL_REQUEST: &str = "create_pull_request";
 
 /// The chat's system prompt as `backend` would be handed it.
 async fn prompted_on(
@@ -823,7 +823,7 @@ async fn prompted_on(
     .await
     .expect("the turn is prepared");
     assert!(
-        preparation.tools.has(PULL_REQUEST),
+        preparation.tools.has(CREATE_PULL_REQUEST),
         "the turn lost zone's pull request tool"
     );
     system_prompt(&preparation)
@@ -856,21 +856,21 @@ async fn every_turn_in_a_workspace_on_github_opens_pull_requests_through_zone() 
         .await
         .unwrap()
         .expect("the harness's chat");
-    let backends = || {
+    let named = || {
         [
-            (LlmBackend::Http, PULL_REQUEST.to_string()),
+            (LlmBackend::Http, CREATE_PULL_REQUEST.to_string()),
             (
                 LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
-                AgentKind::Claude.tool(PULL_REQUEST),
+                AgentKind::Claude.tool(CREATE_PULL_REQUEST),
             ),
             (
                 LlmBackend::cli(AgentKind::Codex, CliSettings::default()),
-                AgentKind::Codex.tool(PULL_REQUEST),
+                AgentKind::Codex.tool(CREATE_PULL_REQUEST),
             ),
         ]
     };
 
-    for (backend, _) in backends() {
+    for (backend, _) in named() {
         let prompt = prompted_on(&state, &chat, backend).await;
         assert!(!prompt.contains("so Zone can track it"), "{prompt}");
         assert!(!prompt.contains("gh pr create"), "{prompt}");
@@ -878,10 +878,10 @@ async fn every_turn_in_a_workspace_on_github_opens_pull_requests_through_zone() 
 
     add_github_source(&harness.pool, harness.workspace).await;
 
-    for (backend, name) in backends() {
+    for (backend, name) in named() {
         let prompt = prompted_on(&state, &chat, backend).await;
         assert!(
-            prompt.contains(&format!("then call {name} so Zone can track it")),
+            prompt.contains(&format!("then calling {name} so Zone can track it")),
             "{name}: {prompt}"
         );
         assert!(
@@ -889,10 +889,6 @@ async fn every_turn_in_a_workspace_on_github_opens_pull_requests_through_zone() 
             "{name}: {prompt}"
         );
     }
-    assert_eq!(
-        AgentKind::Claude.tool(PULL_REQUEST),
-        "mcp__zone__create_pull_request"
-    );
 }
 
 /// The instruction is only worth giving where the tool is: a coding agent with
@@ -911,7 +907,7 @@ async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_
         let turn = harness.turn("Open a pull request for this branch.").await;
         let (arguments, token) = harness.agent.spawned().await;
         let (endpoint, allowed) = served(&arguments);
-        let qualified = AgentKind::Claude.tool(PULL_REQUEST);
+        let qualified = AgentKind::Claude.tool(CREATE_PULL_REQUEST);
 
         assert!(allowed.contains(&qualified), "{allowed:?}");
         let (status, listed) = rpc(&endpoint, &token, "tools/list", json!({})).await;
@@ -923,7 +919,7 @@ async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_
             .filter_map(|tool| tool["name"].as_str())
             .collect();
         assert!(
-            names.contains(&PULL_REQUEST),
+            names.contains(&CREATE_PULL_REQUEST),
             "sandboxed {sandboxed}: {names:?}"
         );
         assert!(
@@ -933,7 +929,7 @@ async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_
 
         let prompt = std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt");
         assert!(
-            prompt.contains(&format!("then call {qualified} so Zone can track it")),
+            prompt.contains(&format!("then calling {qualified} so Zone can track it")),
             "sandboxed {sandboxed}: {prompt}"
         );
         assert!(prompt.contains("not gh pr create"), "{prompt}");

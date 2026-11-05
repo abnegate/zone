@@ -214,11 +214,11 @@ impl AgentKind {
         }
     }
 
-    /// The name this agent's model calls zone's `tool` by, which is how its
-    /// tool list spells a tool served on [`Toolset::SERVER`].
-    pub fn tool(self, tool: &str) -> String {
+    /// The name this agent's model calls zone's tool `name` by, which is how
+    /// its tool list spells a tool served on [`Toolset::SERVER`].
+    pub fn tool(self, name: &str) -> String {
         match self {
-            Self::Claude | Self::Codex => Toolset::qualified(Toolset::SERVER, tool),
+            Self::Claude | Self::Codex => Toolset::qualified(Toolset::SERVER, name),
         }
     }
 

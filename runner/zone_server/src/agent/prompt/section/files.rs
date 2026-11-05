@@ -43,8 +43,8 @@ const READING: &str = "Read only the part of a file you need when you already kn
 
 const GIT: &str = "Git: interactive flags such as rebase -i are not supported here. Commit or push only when \
              the user asks, and branch first when the checkout is on the default branch. Do not \
-             force-push, hard reset, or rewrite history unless the user asked for it. Write a pull \
-             request body to a file and pass it by path so its newlines survive.";
+             force-push, hard reset, or rewrite history unless the user asked for it. When gh opens a \
+             pull request, write its body to a file and pass it by path so its newlines survive.";
 
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
     if !context.tools.has("read_file") {
@@ -131,7 +131,8 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "Write a pull request body to a file and pass it by path so its newlines survive."
+                "When gh opens a pull request, write its body to a file and pass it by path so \
+                 its newlines survive."
             ),
             "{rendered}"
         );

@@ -64,14 +64,14 @@ const PLAIN: &[Section] = &[
 
 /// Raised by measurement rather than by guess, the way every section that has
 /// widened this has raised it: the chat prompt in a workspace with a GitHub
-/// source, whose bullets send a pull request to zone's own tool, is 23,823
+/// source, whose bullets send a pull request to zone's own tool, is 23,941
 /// characters, so the ceiling is the next round number above that and the
 /// next section to grow has to measure itself too. The image section's
 /// negative_prompt line previously measured 23,377.
-pub const CHAT_MAX_CHARS: usize = 23_900;
+pub const CHAT_MAX_CHARS: usize = 24_000;
 /// A planner chat adds the interview section to the chat prompt; measured
 /// the same way and rounded up the same way.
-pub const PLANNER_MAX_CHARS: usize = 26_200;
+pub const PLANNER_MAX_CHARS: usize = 26_400;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 14_000;
 
@@ -706,7 +706,7 @@ mod tests {
         let native = chat(&chat_tools(), false, &source);
 
         assert!(
-            native.contains("push its branch, then call create_pull_request so Zone can track it"),
+            native.contains("then calling create_pull_request so Zone can track it"),
             "{native}"
         );
         assert!(native.contains("not gh pr create, hub"), "{native}");
@@ -714,9 +714,7 @@ mod tests {
         for agent in zone_core::llm::AgentKind::ALL {
             let served = chat(&chat_tools().served_to(agent), false, &source);
             assert!(
-                served.contains(
-                    "push its branch, then call mcp__zone__create_pull_request so Zone can track it"
-                ),
+                served.contains("then calling mcp__zone__create_pull_request so Zone can track it"),
                 "{agent}: {served}"
             );
             assert!(
@@ -982,6 +980,14 @@ mod tests {
             "chat prompt is {} chars",
             chat_prompt.len()
         );
+        for agent in zone_core::llm::AgentKind::ALL {
+            let served = chat(&chat_tools().served_to(agent), false, &github());
+            assert!(
+                served.len() <= CHAT_MAX_CHARS,
+                "{agent}'s chat prompt is {} chars",
+                served.len()
+            );
+        }
         assert!(
             plain_prompt.len() <= PLAIN_MAX_CHARS,
             "plain prompt is {} chars",
