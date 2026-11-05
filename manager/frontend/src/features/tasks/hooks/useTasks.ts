@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { tasksApi } from '../../../api/tasks';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import type { CreateTaskRequest, UpdateTaskRequest } from '../types';
+import { awaitsTitle, TITLE_POLL_MS } from '../title';
+import type { CreateTaskRequest, Task, UpdateTaskRequest } from '../types';
 
 export function useTasks(projectId?: string, status?: string) {
   const queryClient = useQueryClient();
@@ -23,6 +24,10 @@ export function useTasks(projectId?: string, status?: string) {
       return tasksApi.getTasks(workspaceId, projectId, status);
     },
     enabled: !!workspaceId,
+    refetchInterval: (query) =>
+      (query.state.data as Task[] | undefined)?.some((task) => awaitsTitle(task))
+        ? TITLE_POLL_MS
+        : false,
   });
 
   const createTaskMutation = useMutation({
@@ -38,9 +43,7 @@ export function useTasks(projectId?: string, status?: string) {
   const updateTaskMutation = useMutation({
     mutationFn: ({ id, request }: { id: string; request: UpdateTaskRequest }) =>
       tasksApi.updateTask(id, request),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tasks'] });
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tasks'] }),
   });
 
   const deleteTaskMutation = useMutation({

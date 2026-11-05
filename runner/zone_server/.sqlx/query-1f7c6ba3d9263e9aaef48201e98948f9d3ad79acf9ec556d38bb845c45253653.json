@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE tasks\n        SET title = COALESCE($2, title),\n            description = COALESCE($3, description),\n            acceptance_criteria = COALESCE($4, acceptance_criteria),\n            status = COALESCE($5, status),\n            priority = COALESCE($6, priority),\n            require_plan_approval = COALESCE($7, require_plan_approval),\n            is_agentic = COALESCE($8, is_agentic),\n            source_id = COALESCE($9, source_id),\n            model_name = COALESCE($10, model_name),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by\n        ",
+  "query": "\n        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by, title_pending)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending\n        ",
   "describe": {
     "columns": [
       {
@@ -277,6 +277,17 @@
             "name": "created_by"
           }
         }
+      },
+      {
+        "ordinal": 25,
+        "name": "title_pending",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "title_pending"
+          }
+        }
       }
     ],
     "parameters": {
@@ -285,12 +296,12 @@
         "Text",
         "Text",
         "Text",
-        "Text",
         "Int4",
         "Bool",
         "Bool",
         "Uuid",
-        "Text"
+        "Uuid",
+        "Bool"
       ]
     },
     "nullable": [
@@ -318,8 +329,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "d1f54ba86c3aa24fcbdc4c0a8fc08addb8493840204a3d309d5dae0816270dd3"
+  "hash": "1f7c6ba3d9263e9aaef48201e98948f9d3ad79acf9ec556d38bb845c45253653"
 }

@@ -1045,7 +1045,7 @@ pub async fn finalize(
             &Create {
                 workspace_id,
                 project_ids: &[project_id],
-                title: task.title.trim(),
+                title: Some(task.title.trim()),
                 description: task.description.trim(),
                 acceptance_criteria: task.acceptance_criteria.as_deref(),
                 priority: task.priority,
@@ -1111,7 +1111,7 @@ pub async fn insert_auto_task(
         &Create {
             workspace_id,
             project_ids: &[project_id],
-            title,
+            title: Some(title),
             description,
             acceptance_criteria,
             priority: Some(1),

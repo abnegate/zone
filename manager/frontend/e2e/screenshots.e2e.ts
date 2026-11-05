@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures';
 import type { Page } from '@playwright/test';
 import { blockServiceWorker, routeApi } from './test-utils';
-import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
+import { mockTasks, setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 
 const runScreenshots = process.env.RUN_SCREENSHOTS === 'true';
 const describeScreenshots = runScreenshots ? test.describe : test.describe.skip;
@@ -532,6 +532,68 @@ describeScreenshots('Screenshots - Populated States', () => {
       fullPage: true,
     });
   });
+
+  const TASK_TITLE_VIEWS = [
+    { name: 'light', theme: 'light', width: 1280, height: 800 },
+    { name: 'dark', theme: 'dark', width: 1280, height: 800 },
+    { name: '375', theme: 'light', width: 375, height: 812 },
+  ] as const;
+
+  for (const view of TASK_TITLE_VIEWS) {
+    test(`Task title, optional in the wizard and renamed inline (${view.name})`, async ({
+      page,
+    }) => {
+      await setupCommonRoutes(page, true);
+      await routeApi(page, '**/api/tasks/task-1', (route) =>
+        route.fulfill({ status: 200, json: { task: mockTasks[0] } })
+      );
+      await page.setViewportSize({ width: view.width, height: view.height });
+      await page.goto('/login');
+      await page.evaluate(() => localStorage.clear());
+      await setupAdminAuth(page);
+
+      await page.goto('/tasks');
+      await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+      await page.evaluate((theme) => {
+        document.documentElement.setAttribute('data-theme', theme);
+      }, view.theme);
+      await expect(page.locator('.task-card:not(.skeleton-card)').first()).toBeVisible();
+
+      await page.getByRole('button', { name: /New task/ }).click();
+      const wizard = page.getByRole('dialog', { name: 'New Task' });
+      await wizard.locator('.project-selection-option').first().click();
+      await wizard.getByRole('button', { name: 'Next' }).click();
+      await wizard
+        .getByLabel('Description')
+        .fill('Users on Safari are sent back to the login page every time they sign in.');
+      await expect(wizard.getByRole('button', { name: 'Next' })).toBeEnabled();
+      await capturePage(page, { path: `screenshots/task-title-wizard-${view.name}.png` });
+      await wizard.getByRole('button', { name: 'Cancel' }).click();
+      await expect(wizard).toHaveCount(0);
+
+      await page.goto('/tasks?task=task-1');
+      const rename = page.getByRole('button', { name: `Rename ${mockTasks[0].title}` });
+      await expect(rename).toBeVisible();
+      await page.evaluate((theme) => {
+        document.documentElement.setAttribute('data-theme', theme);
+      }, view.theme);
+      await rename.click();
+      const title = page.getByRole('textbox', { name: 'Task title' });
+      await expect(title).toBeFocused();
+      await title.fill('Sign in with Google and GitHub');
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+      ).toBe(true);
+      await capturePage(page, { path: `screenshots/task-title-rename-${view.name}.png` });
+      await title.press('Escape');
+
+      await page.getByRole('button', { name: 'Close' }).click();
+      await expect(page.getByRole('table', { name: 'Tasks' })).toBeVisible();
+      await page.getByRole('button', { name: `Rename ${mockTasks[0].title}` }).click();
+      await expect(page.getByRole('textbox', { name: 'Task title' })).toBeFocused();
+      await capturePage(page, { path: `screenshots/task-title-rename-list-${view.name}.png` });
+    });
+  }
 
   test('Sources page (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);

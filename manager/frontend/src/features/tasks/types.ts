@@ -13,6 +13,8 @@ export interface Task {
   workspace_id: string;
   project_ids: string[];
   title: string;
+  /** The title is a placeholder from the description until a generated one replaces it */
+  title_pending?: boolean;
   description: string;
   acceptance_criteria: string | null;
   status: TaskStatus;
@@ -86,7 +88,8 @@ export interface TaskRunLog {
 
 export interface CreateTaskRequest {
   project_ids?: string[];
-  title: string;
+  /** Omitted, the server titles the task from its description */
+  title?: string;
   description: string;
   acceptance_criteria?: string;
   priority?: number;
