@@ -463,6 +463,14 @@ for (const width of [1280, 1024, 900, 390]) {
       await shoot('new-codex-reasoning');
       await closeMenu(page);
 
+      await choose(page, dialogProvider, 'Self-Hosted');
+      await choose(page, dialogModel, 'qwen3:8b');
+      await dialog.getByRole('checkbox', { name: 'Agent mode', exact: true }).check();
+      await expect(
+        dialog.getByRole('checkbox', { name: 'Auto-approve writes and commands', exact: true })
+      ).toBeVisible();
+      await shoot('new-self-hosted-agent');
+
       await choose(page, dialogProvider, 'OpenAI');
       await expect(
         dialog.getByText('AI Settings save no model for OpenAI, so name one it serves.')

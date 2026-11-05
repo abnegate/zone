@@ -3199,8 +3199,10 @@ describe('ChatsPage', () => {
         'aria-label',
         'Agent permissions: auto-approve on, Zone tools only off'
       );
-      expect(trigger).toHaveTextContent('Auto-approve');
-      expect(trigger).toHaveTextContent('Host tools');
+      expect(
+        [...trigger.querySelectorAll('.agent-permission-chip')].map((chip) => chip.textContent)
+      ).toEqual(['Auto-approve', 'Host tools']);
+      expect(trigger.querySelector('.agent-permission-chip--host')).toHaveTextContent('Host tools');
       expect(screen.getByRole('button', { name: /^Agent$/ })).toBe(
         screen.getByTestId('agent-toggle')
       );
@@ -3214,6 +3216,27 @@ describe('ChatsPage', () => {
       );
       expect(screen.getByTestId('auto-approve-toggle')).toHaveTextContent('On');
       expect(screen.getByTestId('agent-sandbox-toggle')).toHaveTextContent('Off');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveClass('agent-permission--warning');
+      expect(screen.getByTestId('auto-approve-toggle')).not.toHaveClass(
+        'agent-permission--warning'
+      );
+    });
+
+    it('labels the permissions trigger even when no permission is loosened', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+      await openHeader({ agent_enabled: true, auto_approve: false, agent_sandboxed: true });
+      const trigger = screen.getByTestId('agent-permissions');
+      expect(trigger).toHaveAttribute(
+        'aria-label',
+        'Agent permissions: auto-approve off, Zone tools only on'
+      );
+      expect(trigger).toHaveTextContent('Ask first');
+      expect(trigger).not.toHaveTextContent('Host tools');
+
+      fireEvent.click(trigger);
+      expect(screen.getByTestId('agent-sandbox-toggle')).not.toHaveClass(
+        'agent-permission--warning'
+      );
     });
 
     it('offers no permissions while agent mode is off', async () => {
@@ -3719,10 +3742,32 @@ describe('ChatsPage', () => {
 
     it('ignores the local model profile for a chosen endpoint provider', async () => {
       mockGetChatProviders.mockResolvedValue(
-        chatProviders({ selected: selection(openAiOffer, 'gpt-4o') })
+        chatProviders({ selected: selection(openAiOffer, 'llama2') })
       );
-      await openChat({ model_name: 'llama3.1', provider: 'openai', provider_model: 'gpt-4o' });
+      await openChat({ model_name: 'auto', provider: 'openai', provider_model: 'llama2' });
       await waitFor(() => expect(screen.getByTestId('chat-provider')).toHaveTextContent('OpenAI'));
+      expect(await screen.findByTestId('agent-toggle')).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('offers agent mode on a chosen Self-Hosted chat by its model', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(selfHostedOffer, 'llama3.1') })
+      );
+      await openChat({ model_name: 'auto', provider: 'self_hosted', provider_model: 'llama3.1' });
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-provider')).toHaveTextContent('Self-Hosted')
+      );
+      expect(await screen.findByTestId('agent-toggle')).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('hides agent mode on a chosen Self-Hosted chat whose model cannot call tools', async () => {
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(selfHostedOffer, 'llama2') })
+      );
+      await openChat({ model_name: 'auto', provider: 'self_hosted', provider_model: 'llama2' });
+      await waitFor(() =>
+        expect(screen.getByTestId('chat-provider')).toHaveTextContent('Self-Hosted')
+      );
       expect(screen.queryByTestId('agent-toggle')).not.toBeInTheDocument();
     });
 
