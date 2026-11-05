@@ -423,8 +423,28 @@ describe('ProviderPicker', () => {
     expect(onChoose).not.toHaveBeenCalled();
   });
 
-  it('shows no model select on a Default chat whose default is not an agent', () => {
-    renderPicker();
+  it('changes the model of a Default chat on a self-hosted default', () => {
+    const qwen = { name: 'qwen2.5:7b-instruct', label: 'qwen2.5:7b-instruct', efforts: HTTP };
+    const { onChoose, onModel } = renderPicker(
+      { default: { ...selfHosted, models: [...selfHosted.models, qwen] } },
+      'llama3.2:3b'
+    );
+
+    expect(screen.getByTestId('chat-provider-model')).toHaveTextContent('llama3.2:3b');
+    expect(optionNames('Provider model')).toEqual([
+      'Automatic',
+      'llama3.2:3b',
+      'qwen2.5:7b-instruct',
+    ]);
+
+    chooseSelect('Provider model', 'qwen2.5:7b-instruct');
+
+    expect(onModel).toHaveBeenCalledWith('qwen2.5:7b-instruct');
+    expect(onChoose).not.toHaveBeenCalled();
+  });
+
+  it('shows no model select on a Default chat whose default lists no models', () => {
+    renderPicker({ default: { ...openai, requires_model: false } });
 
     expect(screen.queryByTestId('chat-provider-model')).toBeNull();
   });

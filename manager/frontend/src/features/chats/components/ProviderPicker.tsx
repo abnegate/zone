@@ -7,7 +7,6 @@ import {
   asksModelName,
   DEFAULT_PROVIDER,
   DEFAULT_PROVIDER_LABEL,
-  isAgentOffer,
   MODEL_PLACEHOLDER,
   modelSelectOptions,
   providerChoices,
@@ -107,7 +106,7 @@ export function ProviderPicker({
         onValueChange: (value) => onChoose(selected.provider, value === AUTO_MODEL ? null : value),
       };
     }
-    if (!isAgentOffer(providers.default)) return null;
+    if (providers.default.models.length === 0) return null;
     return {
       value: modelName || AUTO_MODEL,
       options: modelSelectOptions(providers.default, modelName),

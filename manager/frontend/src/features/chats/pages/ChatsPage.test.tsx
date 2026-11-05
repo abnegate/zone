@@ -4026,6 +4026,41 @@ describe('ChatsPage', () => {
       expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
     });
 
+    it('changes the model of a chat on a self-hosted default mid-chat', async () => {
+      const served = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'qwen2.5:7b-instruct', label: 'qwen2.5:7b-instruct', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+      await openChat({ model_name: 'llama2', reasoning_effort: 'auto' });
+      await screen.findByTestId('chat-provider-model');
+      expect(optionNames('chat-provider-model')).toEqual([
+        'Automatic',
+        'llama2',
+        'qwen2.5:7b-instruct',
+      ]);
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen2.5:7b-instruct',
+      });
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen2.5:7b-instruct',
+      });
+
+      chooseSelectOption('chat-provider-model', 'qwen2.5:7b-instruct');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', {
+          model_name: 'qwen2.5:7b-instruct',
+        })
+      );
+      await waitFor(() => expect(badge()).toHaveTextContent('qwen2.5:7b-instruct'));
+      expect(mockSetChatProvider).not.toHaveBeenCalled();
+    });
+
     it('hides reasoning for an agent model without efforts', async () => {
       mockGetChatProviders.mockResolvedValue(chatProviders({ default: claudeOffer }));
       await openChat({ model_name: 'haiku', reasoning: true });
