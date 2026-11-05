@@ -1,0 +1,5 @@
+#!/bin/sh
+: "${DOTNET_CLI_TELEMETRY_OPTOUT:=1}"
+: "${DOTNET_NOLOGO:=1}"
+export DOTNET_CLI_TELEMETRY_OPTOUT DOTNET_NOLOGO
+exec /opt/dotnet/dotnet "$@"

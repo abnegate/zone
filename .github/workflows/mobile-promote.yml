@@ -1,0 +1,103 @@
+name: Promote Mobile Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Store to promote in'
+        required: true
+        type: choice
+        options:
+          - android
+          - ios
+      from_track:
+        description: 'Android: source Play track'
+        required: false
+        default: 'internal'
+        type: choice
+        options:
+          - internal
+          - alpha
+          - beta
+      to_track:
+        description: 'Android: destination Play track'
+        required: false
+        default: 'production'
+        type: choice
+        options:
+          - alpha
+          - beta
+          - production
+      release_status:
+        description: 'Android: status of the promoted release. An app that has never been published only takes draft releases outside internal testing.'
+        required: false
+        default: 'completed'
+        type: choice
+        options:
+          - completed
+          - draft
+      version:
+        description: 'iOS: release version to submit for App Store review (e.g. 1.2.0)'
+        required: false
+        type: string
+      build_number:
+        description: 'iOS: TestFlight build number to submit'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Promote ${{ inputs.from_track }} -> ${{ inputs.to_track }}
+    if: inputs.platform == 'android'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b1da4809b005e0178fe08a1d57317bffc00b7b4c # v1.332.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - name: Promote release
+        env:
+          GOOGLE_PLAY_JSON_KEY_PATH: ${{ runner.temp }}/google-play-key.json
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          FROM_TRACK: ${{ inputs.from_track }}
+          TO_TRACK: ${{ inputs.to_track }}
+          RELEASE_STATUS: ${{ inputs.release_status }}
+        run: |
+          trap 'rm -f "$GOOGLE_PLAY_JSON_KEY_PATH"' EXIT
+          echo "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON" > "$GOOGLE_PLAY_JSON_KEY_PATH"
+          bundle exec fastlane android promote \
+            from:"$FROM_TRACK" \
+            to:"$TO_TRACK" \
+            release_status:"${RELEASE_STATUS:-completed}"
+
+  ios:
+    name: Submit ${{ inputs.version }} (${{ inputs.build_number }}) for review
+    if: inputs.platform == 'ios'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@b1da4809b005e0178fe08a1d57317bffc00b7b4c # v1.332.0
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+      - name: Submit for review
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          VERSION: ${{ inputs.version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          : "${VERSION:?pass the version input}"
+          [[ $BUILD_NUMBER =~ ^[0-9]+$ ]] || { echo "build_number must be an integer" >&2; exit 1; }
+          bundle exec fastlane ios submit_review \
+            version:"$VERSION" \
+            build_number:"$BUILD_NUMBER"

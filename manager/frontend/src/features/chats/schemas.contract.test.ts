@@ -17,6 +17,9 @@ import { z } from 'zod';
 import { structFields } from '../../test/rust';
 import {
   ActionReceiptSchema,
+  ChatTaskPublicationSchema,
+  ChatTaskRunSchema,
+  ChatTaskSchema,
   ChoiceSchema,
   CitationSchema,
   JobExitedSchema,
@@ -579,5 +582,21 @@ describe('a chat pull request reads as the server describes it', () => {
   ] as const)('%s variants match', (file, name, values) => {
     const source = readFileSync(join(PULL_REQUEST_RS, file), 'utf8');
     expect([...values].sort()).toEqual(rustVariants(source, name).sort());
+  });
+});
+
+const CHAT_TASKS_RS = join(
+  import.meta.dir,
+  '../../../../../runner/zone_server/src/routes/chats/tasks'
+);
+
+describe('a chat task reads as the server describes it', () => {
+  test.each([
+    ['task_response.rs', 'TaskResponse', ChatTaskSchema],
+    ['run_response.rs', 'RunResponse', ChatTaskRunSchema],
+    ['publication_response.rs', 'PublicationResponse', ChatTaskPublicationSchema],
+  ] as const)('%s carries the same fields on both sides', (file, name, schema) => {
+    const source = readFileSync(join(CHAT_TASKS_RS, file), 'utf8');
+    expect(zodFields(schema)).toEqual(rustStructFields(source, name));
   });
 });

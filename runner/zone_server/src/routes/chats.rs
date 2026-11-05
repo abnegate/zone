@@ -2,6 +2,7 @@
 
 pub(super) mod provider;
 pub(super) mod pull_requests;
+pub(super) mod tasks;
 
 use axum::{
     Json,

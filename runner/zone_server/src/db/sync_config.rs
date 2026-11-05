@@ -591,6 +591,7 @@ pub async fn create_synced_task(
             require_plan_approval: false,
             source_id: None,
             created_by: None,
+            chat_id: None,
         },
     )
     .await?;

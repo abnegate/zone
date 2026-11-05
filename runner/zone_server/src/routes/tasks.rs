@@ -418,6 +418,7 @@ pub async fn create(
             require_plan_approval: request.require_plan_approval.unwrap_or(false),
             source_id: request.source_id,
             created_by: Some(user_id),
+            chat_id: None,
         },
     )
     .await

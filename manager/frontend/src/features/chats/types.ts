@@ -535,3 +535,49 @@ export interface PullRequestDiff {
   diff: string;
   truncated: boolean;
 }
+
+export const CHAT_TASK_STATUSES = [
+  'created',
+  'queued',
+  'in_progress',
+  'review',
+  'complete',
+  'blocked',
+] as const;
+export type ChatTaskStatus = (typeof CHAT_TASK_STATUSES)[number];
+
+export const CHAT_TASK_RUN_STATUSES = [
+  'running',
+  'waiting',
+  'completed',
+  'failed',
+  'cancelled',
+] as const;
+export type ChatTaskRunStatus = (typeof CHAT_TASK_RUN_STATUSES)[number];
+
+export interface ChatTaskRun {
+  id: string;
+  status: ChatTaskRunStatus;
+  phase: string | null;
+  progress: number | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface ChatTaskPublication {
+  url: string;
+  status: string | null;
+}
+
+export interface ChatTask {
+  id: string;
+  title: string;
+  title_pending: boolean;
+  status: ChatTaskStatus;
+  is_agentic: boolean;
+  href: string;
+  created_at: string | null;
+  updated_at: string | null;
+  run: ChatTaskRun | null;
+  pull_request: ChatTaskPublication | null;
+}

@@ -12,11 +12,12 @@ import {
 
 describe('panel boxes', () => {
   it('lists every box once, by a stable id', () => {
-    expect(DEFAULT_ORDER).toEqual(['changes', 'sources', 'gallery']);
+    expect(DEFAULT_ORDER).toEqual(['changes', 'tasks', 'sources', 'gallery']);
     expect(new Set(PANEL_BOXES.map((box) => box.id)).size).toBe(PANEL_BOXES.length);
     expect(boxTitle('gallery')).toBe('Gallery');
     expect(isPanelBox('sources')).toBe(true);
-    expect(isPanelBox('tasks')).toBe(false);
+    expect(isPanelBox('tasks')).toBe(true);
+    expect(isPanelBox('retired')).toBe(false);
     expect(isPanelBox(3)).toBe(false);
   });
 
@@ -33,15 +34,22 @@ describe('panel boxes', () => {
   });
 
   it("keeps a viewer's order", () => {
-    expect(mergeOrder(['gallery', 'sources', 'changes'])).toEqual([
+    expect(mergeOrder(['gallery', 'sources', 'tasks', 'changes'])).toEqual([
       'gallery',
       'sources',
+      'tasks',
       'changes',
     ]);
   });
 
   it('puts a box the viewer never placed after the ones they did, in its default order', () => {
-    expect(mergeOrder(['gallery'])).toEqual(['gallery', 'changes', 'sources']);
+    expect(mergeOrder(['gallery'])).toEqual(['gallery', 'changes', 'tasks', 'sources']);
+    expect(mergeOrder(['gallery', 'sources', 'changes'])).toEqual([
+      'gallery',
+      'sources',
+      'changes',
+      'tasks',
+    ]);
     expect(mergeOrder(['sources'], ['changes', 'sources', 'gallery'])).toEqual([
       'sources',
       'changes',
@@ -50,9 +58,10 @@ describe('panel boxes', () => {
   });
 
   it('drops a saved box that no longer exists, and a box saved twice', () => {
-    expect(mergeOrder(['tasks', 'gallery', 'retired', 'gallery', 'changes'])).toEqual([
+    expect(mergeOrder(['archive', 'gallery', 'retired', 'gallery', 'changes'])).toEqual([
       'gallery',
       'changes',
+      'tasks',
       'sources',
     ]);
     expect(mergeOrder(['gallery', 'changes'], ['changes', 'sources'])).toEqual([

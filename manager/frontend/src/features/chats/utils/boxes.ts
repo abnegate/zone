@@ -1,6 +1,7 @@
 /** Every box the chat panel can hold, in the order a viewer sees them until they move one. */
 export const PANEL_BOXES = [
   { id: 'changes', title: 'Changes' },
+  { id: 'tasks', title: 'Tasks' },
   { id: 'sources', title: 'Sources' },
   { id: 'gallery', title: 'Gallery' },
 ] as const;

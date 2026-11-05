@@ -56,6 +56,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-version
+          path: runner
       - name: Commit version on the default branch when this release is its tip
         env:
           VERSION: ${{ needs.prepare-release.outputs.version }}
@@ -112,9 +113,11 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-version
+          path: runner
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: frontends
+          path: manager/frontend/build
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: stable
@@ -155,9 +158,28 @@ jobs:
             --bundles app \
             --ci \
             -- --locked
+      - name: Import Developer ID certificate
+        if: matrix.kind == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          if [[ -z $APPLE_CERTIFICATE ]]; then
+            echo "APPLE_CERTIFICATE is not set; Zone.app stays ad-hoc signed"
+            exit 0
+          fi
+          .github/scripts/import-signing-certificate.sh "$RUNNER_TEMP/signing.keychain-db"
+          if [[ -n $APP_STORE_CONNECT_API_KEY ]]; then
+            echo "$APP_STORE_CONNECT_API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+            echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
+          fi
       - name: Package
         env:
           VERSION: ${{ needs.prepare-release.outputs.version }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
         run: |
           chmod +x .github/scripts/package-tauri.sh .github/scripts/package-deb.sh
           rust_dir="runner/target/${{ matrix.target }}/release"
@@ -198,6 +220,23 @@ jobs:
         with:
           name: zone-${{ matrix.target }}
           path: dist/*
+      - name: Clean up signing
+        if: always() && matrix.kind == 'macos'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/notary.p8"
+
+  mobile:
+    name: Mobile
+    needs: prepare-release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/mobile.yml
+    with:
+      version: ${{ needs.prepare-release.outputs.version }}
+      tag: ${{ github.event.release.tag_name }}
+      publish: true
+    secrets: inherit
 
   github-release:
     name: GitHub Release
@@ -217,6 +256,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: frontends
+          path: manager/frontend/build
       - name: Package Debian
         env:
           VERSION: ${{ needs.prepare-release.outputs.version }}

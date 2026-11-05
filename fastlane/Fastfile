@@ -1,0 +1,112 @@
+require 'json'
+require_relative 'promotion_target'
+require_relative 'release_version'
+require_relative 'release_version_code'
+
+default_platform(:android)
+
+def write_config(path, config)
+  File.write(path, JSON.generate(config))
+  UI.success("Wrote #{path}: #{JSON.generate(config)}")
+end
+
+platform :android do
+  desc 'Write a Tauri config holding the next Play versionCode (pass version: and config:)'
+  lane :version_code do |options|
+    result = ReleaseVersionCode.next_code(
+      version: options.fetch(:version),
+      code_fetcher: ->(track) { google_play_track_version_codes(track: track) },
+      logger: ->(message) { UI.message(message) },
+    )
+    UI.success("versionCode #{result.code} (remote_max=#{result.remote_max || 'n/a'})")
+    write_config(options.fetch(:config), { bundle: { android: { versionCode: result.code } } })
+  end
+
+  desc 'Upload a signed AAB to a Play track (pass aab:, track:, release_status:)'
+  lane :deploy do |options|
+    upload_to_play_store(
+      track: options[:track] || 'internal',
+      aab: options.fetch(:aab),
+      release_status: options[:release_status] || 'completed',
+      skip_upload_apk: true,
+      skip_upload_metadata: true,
+      skip_upload_changelogs: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+    )
+  end
+
+  desc 'Promote from one track to another (pass from: and to: parameters)'
+  lane :promote do |options|
+    from = options[:from] || 'internal'
+    to = options[:to] || 'beta'
+    version_code = PromotionTarget.version_code(
+      from_track: from,
+      code_fetcher: ->(track) { google_play_track_version_codes(track: track) },
+      explicit: options[:version_code],
+    )
+    UI.user_error!("Track '#{from}' has no release to promote") unless version_code
+
+    upload_to_play_store(
+      track: from,
+      track_promote_to: to,
+      track_promote_release_status: options[:release_status] || 'completed',
+      version_code: version_code,
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+      skip_upload_changelogs: true,
+    )
+    UI.success("Promoted #{version_code} from #{from} to #{to}")
+  end
+end
+
+platform :ios do
+  private_lane :api_key do
+    app_store_connect_api_key(
+      key_id: ENV.fetch('APP_STORE_CONNECT_API_KEY_ID'),
+      issuer_id: ENV.fetch('APP_STORE_CONNECT_API_ISSUER_ID'),
+      key_content: ENV.fetch('APP_STORE_CONNECT_API_KEY'),
+      is_key_content_base64: true,
+    )
+  end
+
+  desc 'Write a Tauri config holding the App Store version and next build number (pass version: and config:)'
+  lane :build_number do |options|
+    api_key
+    latest = latest_testflight_build_number(initial_build_number: 0).to_i
+    write_config(
+      options.fetch(:config),
+      {
+        version: ReleaseVersion.marketing(options.fetch(:version)),
+        bundle: { iOS: { bundleVersion: (latest + 1).to_s } },
+      },
+    )
+  end
+
+  desc 'Upload a signed IPA to TestFlight (pass ipa:)'
+  lane :upload do |options|
+    api_key
+    upload_to_testflight(
+      ipa: options.fetch(:ipa),
+      skip_waiting_for_build_processing: true,
+    )
+  end
+
+  desc 'Submit a TestFlight build for App Store review (pass version: and build_number:)'
+  lane :submit_review do |options|
+    api_key
+    deliver(
+      app_version: ReleaseVersion.marketing(options.fetch(:version)),
+      build_number: options.fetch(:build_number).to_s,
+      submit_for_review: true,
+      automatic_release: false,
+      force: true,
+      skip_binary_upload: true,
+      skip_metadata: true,
+      skip_screenshots: true,
+      run_precheck_before_submit: false,
+      submission_information: { add_id_info_uses_idfa: false },
+    )
+  end
+end
