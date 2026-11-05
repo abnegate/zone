@@ -2,6 +2,7 @@ export * from './answers';
 export * from './arrange';
 export * from './attachments';
 export * from './automation';
+export * from './boxes';
 export * from './characterCard';
 export * from './citations';
 export * from './diff';

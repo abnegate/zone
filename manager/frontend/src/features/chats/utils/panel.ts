@@ -1,3 +1,5 @@
+import type { PanelBoxId } from './boxes';
+
 const PANEL_PREFIX = 'zone:chat-panel';
 
 export const PANEL_WIDTH = {
@@ -8,7 +10,7 @@ export const PANEL_WIDTH = {
   largeStep: 64,
 } as const;
 
-export type PanelSetting = 'width' | 'collapsed' | 'changes' | 'gallery' | 'sources' | 'tasks';
+export type PanelSetting = 'width' | 'collapsed' | 'order' | PanelBoxId;
 
 /** Where one viewer's panel setting is kept, so people sharing a browser keep their own. */
 export function panelKey(userId: string | null | undefined, setting: PanelSetting): string {

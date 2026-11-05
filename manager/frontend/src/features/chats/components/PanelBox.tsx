@@ -1,5 +1,7 @@
-import { type ReactNode, useEffect, useId, useState } from 'react';
-import { readFlag, SETTING_CHANGED, writeSetting } from '../utils/panel';
+import { type ReactNode, useId, useState } from 'react';
+import { useSettingChange } from '../hooks/useSettingChange';
+import { readFlag, writeSetting } from '../utils/panel';
+import { BoxHandle } from './BoxHandle';
 
 export interface PanelBoxProps {
   title: string;
@@ -28,23 +30,7 @@ export function PanelBox({
     setCollapsed(false);
   }
 
-  useEffect(() => {
-    const follow = (event: Event) => {
-      const key =
-        event instanceof CustomEvent
-          ? event.detail
-          : event instanceof StorageEvent
-            ? event.key
-            : null;
-      if (key === storageKey) setCollapsed(readFlag(storageKey));
-    };
-    window.addEventListener(SETTING_CHANGED, follow);
-    window.addEventListener('storage', follow);
-    return () => {
-      window.removeEventListener(SETTING_CHANGED, follow);
-      window.removeEventListener('storage', follow);
-    };
-  }, [storageKey]);
+  useSettingChange(storageKey, () => setCollapsed(readFlag(storageKey)));
 
   const heading = useId();
   const body = useId();
@@ -60,30 +46,33 @@ export function PanelBox({
       className={['chat-panel-box', className].filter(Boolean).join(' ')}
       aria-labelledby={heading}
     >
-      <h4 className="chat-panel-box-heading">
-        <button
-          type="button"
-          id={heading}
-          className="chat-panel-box-toggle"
-          aria-expanded={!collapsed}
-          aria-controls={body}
-          aria-label={`${title}, ${count}`}
-          onClick={toggle}
-        >
-          <svg
-            className="chat-panel-box-chevron"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            aria-hidden="true"
+      <div className="chat-panel-box-header">
+        <BoxHandle title={title} />
+        <h4 className="chat-panel-box-heading">
+          <button
+            type="button"
+            id={heading}
+            className="chat-panel-box-toggle"
+            aria-expanded={!collapsed}
+            aria-controls={body}
+            aria-label={`${title}, ${count}`}
+            onClick={toggle}
           >
-            <path d="m9 6 6 6-6 6" />
-          </svg>
-          <span className="chat-panel-box-title">{title}</span>
-          <span className="chat-panel-box-count">{count}</span>
-        </button>
-      </h4>
+            <svg
+              className="chat-panel-box-chevron"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
+              <path d="m9 6 6 6-6 6" />
+            </svg>
+            <span className="chat-panel-box-title">{title}</span>
+            <span className="chat-panel-box-count">{count}</span>
+          </button>
+        </h4>
+      </div>
       <div id={body} className="chat-panel-box-body" hidden={collapsed}>
         {children}
       </div>

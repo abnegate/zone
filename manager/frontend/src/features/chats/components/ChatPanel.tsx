@@ -3,14 +3,17 @@ import {
   type CSSProperties,
   type KeyboardEvent,
   type PointerEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useId,
   useRef,
   useState,
 } from 'react';
+import { useBoxOrder } from '../hooks/useBoxOrder';
 import type { ChatPullRequests } from '../hooks/useChatPullRequests';
 import type { ChatTasks } from '../hooks/useChatTasks';
+import type { PanelBoxId } from '../utils/boxes';
 import type { GalleryItem } from '../utils/gallery';
 import {
   clampWidth,
@@ -21,6 +24,7 @@ import {
   writeSetting,
 } from '../utils/panel';
 import type { ChatSources, SourceRequest } from '../utils/sources';
+import { BoxList } from './BoxList';
 import { ChangesBox } from './ChangesBox';
 import { GalleryBox } from './GalleryBox';
 import { PanelIcon } from './PanelIcon';
@@ -86,6 +90,8 @@ export function ChatPanel({
   const hide = useRef<HTMLButtonElement>(null);
   const toggled = useRef(false);
   const opener = useRef<HTMLElement | null>(null);
+  const { order, move } = useBoxOrder(userId);
+  const dragging = useRef(false);
 
   const openSheet = useCallback(() => {
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -200,11 +206,11 @@ export function ChatPanel({
     .filter(Boolean)
     .join(', ');
 
-  const boxes = (target: Placement) => (
-    <>
-      {showsChanges && <ChangesBox chatId={chatId} userId={userId} changes={changes} />}
-      {showsTasks && <TasksBox userId={userId} tasks={tasks} />}
-      {showsSources && (
+  const boxes = (target: Placement) => {
+    const rendered: Record<PanelBoxId, ReactNode> = {
+      changes: showsChanges && <ChangesBox chatId={chatId} userId={userId} changes={changes} />,
+      tasks: showsTasks && <TasksBox userId={userId} tasks={tasks} />,
+      sources: showsSources && (
         <SourcesBox
           key={chatId}
           sources={sources}
@@ -212,8 +218,8 @@ export function ChatPanel({
           shown={showingIn === target ? shownSources : null}
           onShown={onSourcesShown}
         />
-      )}
-      {showsGallery && (
+      ),
+      gallery: showsGallery && (
         <GalleryBox
           items={media}
           userId={userId}
@@ -223,9 +229,20 @@ export function ChatPanel({
             onShowMessage(messageId);
           }}
         />
-      )}
-    </>
-  );
+      ),
+    };
+    const listed = order.filter((id) => rendered[id]).map((id) => ({ id, node: rendered[id] }));
+    const shown = listed.map((box) => box.id);
+    return (
+      <BoxList
+        boxes={listed}
+        onMove={(id, index) => move(shown, id, index)}
+        onDraggingChange={(value) => {
+          dragging.current = value;
+        }}
+      />
+    );
+  };
 
   return (
     <>
@@ -244,7 +261,13 @@ export function ChatPanel({
       </div>
       <Dialog open={sheet} onOpenChange={setSheet}>
         {sheet && (
-          <DialogContent className="chat-panel-sheet" onCloseAutoFocus={returnFocus}>
+          <DialogContent
+            className="chat-panel-sheet"
+            onCloseAutoFocus={returnFocus}
+            onEscapeKeyDown={(event) => {
+              if (dragging.current) event.preventDefault();
+            }}
+          >
             <DialogTitle className="chat-panel-sheet-title">{PANEL_LABEL}</DialogTitle>
             <DialogDescription className="sr-only">{summary}</DialogDescription>
             <div className="chat-panel-boxes">{boxes('sheet')}</div>
