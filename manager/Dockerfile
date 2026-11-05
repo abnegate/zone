@@ -328,6 +328,55 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libncurses-dev libpython3-dev libxml2-dev uuid-dev tzdata \
     && rm -rf /var/lib/apt/lists/*
 
+# Shared libraries Playwright's browsers link against. Without them the
+# browsers download and then refuse to launch, so an agent in this image can
+# run the unit tests of a web project but never its end-to-end ones.
+#
+# Named for what they deliver rather than taken from `playwright install-deps`,
+# which only knows Ubuntu package names and fails outright on Debian.
+#   GTK 4 and its stack            libgtk-4-1 libgraphene-1.0-0 libepoxy0
+#   GStreamer, for webkit's media  libgstreamer1.0-0 and plugin bases
+#   Text, images, gamepad, GLES    libharfbuzz-icu0 libwebpdemux2
+#                                  libmanette-0.2-0 libgles2
+#   Spelling, hyphenation, keyring libenchant-2-2 libhyphen0 libsecret-1-0
+#
+# The atk pair is installed separately: Debian renamed both in the 64-bit
+# time_t transition, so either spelling is accepted rather than letting a
+# rename fail the build.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgtk-4-1 libgraphene-1.0-0 libepoxy0 \
+        libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+        libgstreamer-plugins-bad1.0-0 libgstreamer-gl1.0-0 \
+        libharfbuzz-icu0 libwebpdemux2 libmanette-0.2-0 libgles2 \
+        libenchant-2-2 libhyphen0 libsecret-1-0 \
+    && { apt-get install -y --no-install-recommends \
+            libatk1.0-0t64 libatk-bridge2.0-0t64 \
+        || apt-get install -y --no-install-recommends \
+            libatk1.0-0 libatk-bridge2.0-0; } \
+    && rm -rf /var/lib/apt/lists/*
+
+# No workflow builds this image, so the package list above has nothing checking
+# it. Assert the libraries actually arrived: a wrong or renamed package then
+# fails the build naming the library it failed to deliver, rather than shipping
+# an image whose browsers die at launch.
+RUN set -eu; \
+    missing=''; \
+    for library in \
+        libgstreamer-1.0.so.0 libgtk-4.so.1 libgraphene-1.0.so.0 \
+        libgstallocators-1.0.so.0 libgstapp-1.0.so.0 libgstbase-1.0.so.0 \
+        libgstpbutils-1.0.so.0 libgstaudio-1.0.so.0 libgsttag-1.0.so.0 \
+        libgstvideo-1.0.so.0 libgstgl-1.0.so.0 libgstcodecparsers-1.0.so.0 \
+        libgstfft-1.0.so.0 libwebpdemux.so.2 libharfbuzz-icu.so.0 \
+        libepoxy.so.0 libmanette-0.2.so.0 libenchant-2.so.2 libhyphen.so.0 \
+        libsecret-1.so.0 libatk-1.0.so.0 libatk-bridge-2.0.so.0 libGLESv2.so.2 \
+    ; do \
+        ldconfig -p | grep -q "$library" || missing="$missing $library"; \
+    done; \
+    if [ -n "$missing" ]; then \
+        echo "Playwright browsers need these, and the packages above did not deliver them:$missing" >&2; \
+        exit 1; \
+    fi
+
 COPY --from=rust-toolchain /opt/rust /opt/rust
 COPY --from=go-toolchain /usr/local/go /usr/local/go
 COPY --from=jvm /opt/jvm /opt/jvm
