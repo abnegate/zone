@@ -44,7 +44,7 @@ abnegate-llm = "0.1.8"
 abnegate-notify = "0.1.6"
 abnegate-search = "0.1.5"
 abnegate-secret = "0.1.5"
-abnegate-vcs = "0.1.6"
+abnegate-vcs = "0.1.7"
 
 # Server dependencies
 axum = { version = "=0.8.9", features = ["ws", "macros", "multipart"] }
@@ -79,7 +79,3 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
-
-[patch.crates-io]
-abnegate-secret = { git = "https://github.com/abnegate/crates", rev = "86bbee54f590d3fd37b8284f7558835d8382d7d8" }
-abnegate-vcs = { git = "https://github.com/abnegate/crates", rev = "86bbee54f590d3fd37b8284f7558835d8382d7d8" }
