@@ -1866,7 +1866,7 @@ describe('ChatsPage', () => {
         await queueBehindTheTurn();
         const { id } = frames().at(-1);
 
-        fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Remove queued message' }));
         expect(frames().at(-1)).toEqual({ type: 'remove_queued', id });
 
         act(() => socket.emit({ type: 'queue', messages: [], held: false }));
@@ -1877,7 +1877,7 @@ describe('ChatsPage', () => {
         await queueBehindTheTurn();
         const { id } = frames().at(-1);
 
-        fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Edit queued message' }));
         const editor = screen.getByRole('textbox', { name: 'Edit queued message' });
         expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
         fireEvent.change(editor, { target: { value: 'and make it green' } });

@@ -1,5 +1,7 @@
 import { Button } from '@zone/ui';
 import { type ReactElement, useEffect, useRef, useState } from 'react';
+import PencilIcon from '../../../shared/components/PencilIcon/PencilIcon';
+import TrashIcon from '../../../shared/components/TrashIcon/TrashIcon';
 import type { QueuedMessage } from '../types';
 import './QueueItem.css';
 
@@ -74,16 +76,25 @@ export function QueueItem({
           </>
         ) : (
           <>
-            <Button type="button" variant="ghost" size="sm" onClick={() => onRemove(message.id)}>
-              Remove
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label="Remove queued message"
+              title="Remove"
+              onClick={() => onRemove(message.id)}
+            >
+              <TrashIcon />
             </Button>
             <Button
               type="button"
               variant="ghost"
-              size="sm"
+              size="icon"
+              aria-label="Edit queued message"
+              title="Edit"
               onClick={() => setDraft(message.content)}
             >
-              Edit
+              <PencilIcon />
             </Button>
             <Button
               type="button"
