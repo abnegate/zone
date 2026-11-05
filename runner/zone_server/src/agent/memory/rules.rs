@@ -17,9 +17,8 @@
 
 use std::sync::LazyLock;
 
-use regex::Regex;
-
 use abnegate_secret::contains_credential;
+use regex::Regex;
 
 /// Why an entry was not remembered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +137,16 @@ mod tests {
     #[test]
     fn a_credential_is_refused_whichever_family_it_belongs_to() {
         for text in [ISSUED_CREDENTIAL, JSON_WEB_TOKEN, HIGH_ENTROPY_BLOB] {
+            assert_eq!(refused(text), Some(Refusal::Secret), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_credential_a_key_word_or_an_address_names_is_refused() {
+        for text in [
+            "Remember the staging password=Zone2024!",
+            "Remember the database is postgres://zone:p4ssw0rd@localhost/zone",
+        ] {
             assert_eq!(refused(text), Some(Refusal::Secret), "{text}");
         }
     }
