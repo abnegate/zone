@@ -154,14 +154,17 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
             "- On a repository connected as a GitHub source, open a pull request the user asked \
              for by pushing its branch, then calling {pull_request} so Zone can track it, not gh \
              pr create, hub, the GitHub web UI or another server's tool. Only if {pull_request} \
-             errors, use gh pr create, say so, and give the pull request's URL in your reply."
+             errors, first run gh pr list --head on that branch and reuse a pull request the call \
+             opened anyway; otherwise use gh pr create, say so, and give the pull request's URL \
+             in your reply."
         ));
     }
     if tools.has(COMMENT_ON_ISSUE) {
         let comment = tools.qualified(COMMENT_ON_ISSUE);
         bullets.push(format!(
             "- On a connected repository, leave a comment the user asked for with {comment}, not \
-             gh or another server's tool, unless {comment} errors."
+             gh or another server's tool. If {comment} errors, read the issue's latest comments \
+             first and post with gh only if yours is not there."
         ));
     }
     if !bullets.is_empty() {
@@ -381,10 +384,20 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "Only if create_pull_request errors, use gh pr create, say so, and give the pull \
-                 request's URL in your reply."
+                "Only if create_pull_request errors, first run gh pr list --head on that branch \
+                 and reuse a pull request the call opened anyway; otherwise use gh pr create, \
+                 say so, and give the pull request's URL in your reply."
             ),
-            "{rendered}"
+            "an error can follow a write GitHub accepted, and falling straight back opens a \
+             second pull request: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "If comment_on_issue errors, read the issue's latest comments first and post \
+                 with gh only if yours is not there."
+            ),
+            "an error can follow a comment GitHub posted, and falling straight back posts it \
+             twice: {rendered}"
         );
         assert_eq!(rendered.matches(DENIED).count(), 1, "{rendered}");
         assert!(

@@ -829,7 +829,7 @@ async fn prompted_on(
     system_prompt(&preparation)
 }
 
-async fn add_github_source(pool: &PgPool, workspace: Uuid) {
+async fn add_github_source(pool: &PgPool, workspace: Uuid) -> Uuid {
     zone_server::db::sources::create_source(
         pool,
         workspace,
@@ -841,7 +841,8 @@ async fn add_github_source(pool: &PgPool, workspace: Uuid) {
         None,
     )
     .await
-    .expect("a GitHub source");
+    .expect("a GitHub source")
+    .id
 }
 
 /// Zone records the pull requests its own tool opens, and only guesses at one
@@ -870,9 +871,19 @@ async fn every_turn_in_a_workspace_on_github_opens_pull_requests_through_zone() 
         ]
     };
 
+    let disabled = add_github_source(&harness.pool, harness.workspace).await;
+    sqlx::query("UPDATE sources SET is_active = FALSE WHERE id = $1")
+        .bind(disabled)
+        .execute(&harness.pool)
+        .await
+        .expect("the source disabled");
+
     for (backend, _) in named() {
         let prompt = prompted_on(&state, &chat, backend).await;
-        assert!(!prompt.contains("so Zone can track it"), "{prompt}");
+        assert!(
+            !prompt.contains("so Zone can track it"),
+            "a disabled source is no source: {prompt}"
+        );
         assert!(!prompt.contains("gh pr create"), "{prompt}");
     }
 
