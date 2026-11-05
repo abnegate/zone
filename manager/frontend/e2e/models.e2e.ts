@@ -1509,12 +1509,16 @@ test.describe('Models Page', () => {
   });
 
   test('shows loading state while fetching models', async ({ page }) => {
-    // Override route to add delay
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     await page.unroute('**/api/models**');
     await routeApi(page, '**/api/models**', async (route) => {
       const url = route.request().url();
-      if (route.request().method() === 'GET' && !url.includes('?')) {
-        await new Promise(resolve => setTimeout(resolve, 300));
+      const installed = new URL(url).pathname.endsWith('/api/models');
+      if (route.request().method() === 'GET' && (installed || !url.includes('?'))) {
+        if (installed) await held;
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -1531,11 +1535,12 @@ test.describe('Models Page', () => {
       }
     });
 
-    // Reload the page to trigger loading state
     await page.reload();
 
-    // Should show loading state briefly
     await expect(page.locator('.loading-placeholder').first()).toBeVisible();
+    release();
+    await expect(page.locator('.loading-placeholder')).toHaveCount(0);
+    await expect(page.getByText('llama3.2:latest').first()).toBeVisible();
   });
 
   test('shows error message when models API fails', async ({ page }) => {

@@ -12,5 +12,6 @@ export * from './links';
 export * from './modelOptions';
 export * from './panel';
 export * from './plainText';
+export * from './popoverOffset';
 export * from './providerOptions';
 export * from './pullRequests';
