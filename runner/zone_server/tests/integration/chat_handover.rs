@@ -1,5 +1,7 @@
 //! A chat turn whose coding agent login runs out partway through carries on,
-//! in the same reply, on another of the organization's logins.
+//! in the same reply, on another of the organization's logins. A chat whose
+//! provider, model or effort is changed between turns, or while one runs,
+//! takes the change on its next turn.
 //!
 //! These tests drive real turns through the websocket against stand-ins for
 //! `claude` and `codex`. The stand-in `claude` behaves per login, told apart
@@ -107,6 +109,9 @@ const HANDOVER_FIELDS: [&str; 8] = [
 const STATE: &str = "handover-agents";
 
 const CODEX_CREDENTIALS_FILE: &str = "auth.json";
+
+/// While this file is in the stand-in `claude`'s plans, a run that has started holds its answer.
+const HOLD: &str = "hold";
 
 /// A codex login's credentials, enough for anything that reads them to find it signed in.
 const CODEX_CREDENTIALS: &str = r#"{"tokens":{"access_token":"fake-codex-access-token","refresh_token":"fake-codex-refresh-token","account_id":"fake-codex-account"}}"#;
@@ -384,7 +389,8 @@ impl Agent {
              '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"%s\"}}\\n' \"$id\"\nk=0\nwhile \
              ! mkdir \"$plans/$CLAUDE_CODE_OAUTH_TOKEN.$k\" 2>/dev/null; do k=$((k + 1)); \
              done\nplan=\"$plans/$CLAUDE_CODE_OAUTH_TOKEN.$k.jsonl\"\n[ -f \"$plan\" ] || \
-             plan=\"$plans/default.jsonl\"\ncat \"$plan\"\n"
+             plan=\"$plans/default.jsonl\"\nwhile [ -e \"$plans/{HOLD}\" ]; do sleep 0.05; \
+             done\ncat \"$plan\"\n"
         );
         agent.install("CLAUDE_CONFIG_DIR", &body)
     }
@@ -1635,4 +1641,281 @@ async fn a_turn_handed_to_the_other_agent_is_told_the_chats_effort_its_own_way()
         moved.arguments
     );
     assert!(!moved.has(EFFORT), "{:?}", moved.arguments);
+}
+
+const THIRD: &str = "Do tides happen on lakes?";
+
+impl Harness {
+    /// Changes the chat's own settings as the console does, mid-chat.
+    async fn update(&self, settings: Value) -> Value {
+        self.put(&format!("/api/chats/{}", self.chat), settings)
+            .await
+    }
+
+    /// Chooses the chat's provider and model as the console does, mid-chat.
+    async fn choose(&self, choice: Value) -> Value {
+        self.put(&format!("/api/chats/{}/provider", self.chat), choice)
+            .await
+    }
+
+    async fn put(&self, uri: &str, body: Value) -> Value {
+        let response = TestClient::new(create_test_router(self.state.clone()))
+            .put_json_auth(uri, &body, &self.token)
+            .await;
+        assert!(
+            response.status.is_success(),
+            "{uri} refused {body}: {} {}",
+            response.status,
+            response.text()
+        );
+        response.json_value()
+    }
+
+    /// The chat as a reload reads it.
+    async fn reloaded(&self) -> Value {
+        TestClient::new(create_test_router(self.state.clone()))
+            .get_auth(&format!("/api/chats/{}", self.chat), &self.token)
+            .await
+            .json_value()["chat"]
+            .clone()
+    }
+
+    /// Starts a turn whose `claude` run holds its answer until [`Agent::release`], and returns
+    /// once that run has started.
+    async fn held(&self, content: &'static str) -> tokio::task::JoinHandle<Vec<Value>> {
+        let started = self.claude.invocations().len();
+        std::fs::write(self.claude.plans.join(HOLD), "").expect("the hold");
+        let address = self.address.clone();
+        let chat = self.chat;
+        let token = self.token.clone();
+        let turn = tokio::spawn(async move {
+            let (mut socket, _) = connect_async(format!("ws://{address}/ws/chats/{chat}"))
+                .await
+                .expect("the chat socket");
+            send(&mut socket, json!({"type": "auth", "token": token})).await;
+            let initial = next(&mut socket).await;
+            assert_eq!(initial["type"], "init", "initial frame: {initial}");
+            send(&mut socket, json!({"type": "send", "content": content})).await;
+            let frames = finish(&mut socket).await;
+            let _ = socket.close(None).await;
+            frames
+        });
+        let prompt = self.claude.runs.join(started.to_string()).join("prompt");
+        for _ in 0..400 {
+            if prompt.exists() {
+                return turn;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the held turn never started claude");
+    }
+}
+
+impl Agent {
+    fn release(&self) {
+        std::fs::remove_file(self.plans.join(HOLD)).expect("the hold to be released");
+    }
+}
+
+#[tokio::test]
+async fn a_model_changed_mid_chat_runs_the_next_turn_in_the_same_session() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    answered(&harness.turn(QUESTION).await);
+
+    let updated = harness.update(json!({"model_name": "opus"})).await;
+    assert_eq!(updated["chat"]["model_name"], "opus", "{updated}");
+    assert_eq!(harness.reloaded().await["model_name"], "opus");
+    answered(&harness.turn(FOLLOW_UP).await);
+
+    let runs = harness.claude.invocations();
+    let [first, second] = runs.as_slice() else {
+        panic!("two turns run claude twice: {runs:#?}");
+    };
+    assert_eq!(first.after(MODEL), Some("sonnet"), "{:?}", first.arguments);
+    assert_eq!(second.after(MODEL), Some("opus"), "{:?}", second.arguments);
+    assert_eq!(
+        second.after(RESUME),
+        Some(first.pinned()),
+        "a new model resumes the session the chat already holds: {:?}",
+        second.arguments
+    );
+    second.assert_resumes_with(FOLLOW_UP);
+}
+
+#[tokio::test]
+async fn an_effort_changed_mid_chat_reaches_the_next_turn() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    answered(&harness.turn(QUESTION).await);
+
+    let updated = harness.update(json!({"reasoning_effort": "max"})).await;
+    assert_eq!(updated["chat"]["reasoning_effort"], "max", "{updated}");
+    assert_eq!(harness.reloaded().await["reasoning_effort"], "max");
+    answered(&harness.turn(FOLLOW_UP).await);
+    harness.update(json!({"reasoning_effort": "low"})).await;
+    answered(&harness.turn(THIRD).await);
+
+    let runs = harness.claude.invocations();
+    let [first, second, third] = runs.as_slice() else {
+        panic!("three turns run claude three times: {runs:#?}");
+    };
+    assert!(!first.has(EFFORT), "{:?}", first.arguments);
+    assert_eq!(second.after(EFFORT), Some("max"), "{:?}", second.arguments);
+    assert_eq!(third.after(EFFORT), Some("low"), "{:?}", third.arguments);
+    assert_eq!(second.after(RESUME), Some(first.pinned()));
+    assert_eq!(third.after(RESUME), Some(first.pinned()));
+}
+
+#[tokio::test]
+async fn a_provider_changed_mid_chat_replays_the_conversation_to_the_new_one_and_back() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    let carol = harness.sign_in_codex(CAROL).await;
+    answered(&harness.turn(QUESTION).await);
+
+    let chosen = harness
+        .choose(json!({"provider": "codex", "model": "gpt-6-sol"}))
+        .await;
+    assert_eq!(chosen["chat"]["provider"], "codex", "{chosen}");
+    let reloaded = harness.reloaded().await;
+    assert_eq!(reloaded["provider"], "codex", "{reloaded}");
+    assert_eq!(reloaded["provider_model"], "gpt-6-sol", "{reloaded}");
+    let frames = harness.turn(FOLLOW_UP).await;
+    let start = started(&frames);
+    let handovers = handed(&frames, 1);
+    assert_handover(
+        handovers[0],
+        start,
+        &Expected {
+            from: ALICE.label,
+            to: CAROL,
+            from_agent: AgentKind::Claude,
+            agent: AgentKind::Codex,
+            reason: CONFIGURED,
+            carried: false,
+            at: 0,
+            resets: Reset::Unchecked,
+        },
+    );
+    let end = answered(&frames);
+    assert_eq!(end["content"], CODEX_ANSWER, "{end}");
+    assert_recorded(&harness.stored(&start["message_id"]).await, &handovers);
+
+    let codex = harness.codex.invocations();
+    let [moved] = codex.as_slice() else {
+        panic!("the turn runs codex once: {codex:#?}");
+    };
+    assert!(!moved.has(CODEX_RESUME), "{:?}", moved.arguments);
+    assert_eq!(
+        moved.after(MODEL),
+        Some("gpt-6-sol"),
+        "{:?}",
+        moved.arguments
+    );
+    transcript::assert_replays(
+        &moved.prompt,
+        &[
+            (Speaker::User, QUESTION),
+            (Speaker::Assistant, REPLY),
+            (Speaker::User, FOLLOW_UP),
+        ],
+    );
+    let session = harness.session().await;
+    assert_eq!(session.agent, AgentKind::Codex, "{session:?}");
+    assert_eq!(session.login, Some(carol), "{session:?}");
+
+    harness
+        .choose(json!({"provider": "claude_code", "model": "opus"}))
+        .await;
+    answered(&harness.turn(THIRD).await);
+    let claude = harness.claude.invocations();
+    let [first, back] = claude.as_slice() else {
+        panic!("claude runs the first and the last turn: {claude:#?}");
+    };
+    assert!(
+        !back.has(RESUME),
+        "the Claude session missed the codex turn, so it is not resumed: {:?}",
+        back.arguments
+    );
+    assert_ne!(back.pinned(), first.pinned());
+    assert_eq!(back.after(MODEL), Some("opus"), "{:?}", back.arguments);
+    transcript::assert_replays(
+        &back.prompt,
+        &[
+            (Speaker::User, QUESTION),
+            (Speaker::Assistant, REPLY),
+            (Speaker::User, FOLLOW_UP),
+            (Speaker::Assistant, CODEX_ANSWER),
+            (Speaker::User, THIRD),
+        ],
+    );
+}
+
+#[tokio::test]
+async fn settings_changed_while_a_turn_runs_leave_it_whole_and_reach_the_next() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.claude.plan(ALICE, 0, Run::Answers(ANSWER));
+    let turn = harness.held(QUESTION).await;
+
+    harness
+        .update(json!({"model_name": "opus", "reasoning_effort": "max"}))
+        .await;
+    harness.claude.release();
+    let frames = turn.await.expect("the held turn");
+    let end = answered(&frames);
+    assert_eq!(end["content"], ANSWER, "{end}");
+    let reloaded = harness.reloaded().await;
+    assert_eq!(reloaded["model_name"], "opus", "{reloaded}");
+    assert_eq!(reloaded["reasoning_effort"], "max", "{reloaded}");
+
+    answered(&harness.turn(FOLLOW_UP).await);
+    let runs = harness.claude.invocations();
+    let [held, next] = runs.as_slice() else {
+        panic!("two turns run claude twice: {runs:#?}");
+    };
+    assert_eq!(held.after(MODEL), Some("sonnet"), "{:?}", held.arguments);
+    assert_eq!(next.after(MODEL), Some("opus"), "{:?}", next.arguments);
+    assert_eq!(next.after(EFFORT), Some("max"), "{:?}", next.arguments);
+    assert_eq!(
+        next.after(RESUME),
+        Some(held.pinned()),
+        "{:?}",
+        next.arguments
+    );
+    next.assert_resumes_with(FOLLOW_UP);
+}
+
+#[tokio::test]
+async fn a_provider_changed_while_a_turn_runs_leaves_it_whole_and_moves_the_next() {
+    let harness = Harness::start(Sessions::Kept, Tools::Withheld).await;
+    harness.sign_in(ALICE).await;
+    harness.sign_in_codex(CAROL).await;
+    harness.claude.plan(ALICE, 0, Run::Answers(ANSWER));
+    let turn = harness.held(QUESTION).await;
+
+    harness
+        .choose(json!({"provider": "codex", "model": "gpt-6-sol"}))
+        .await;
+    harness.claude.release();
+    let frames = turn.await.expect("the held turn");
+    let end = answered(&frames);
+    assert_eq!(end["content"], ANSWER, "{end}");
+
+    answered(&harness.turn(FOLLOW_UP).await);
+    assert_eq!(harness.claude.invocations().len(), 1);
+    let codex = harness.codex.invocations();
+    let [moved] = codex.as_slice() else {
+        panic!("the next turn runs codex once: {codex:#?}");
+    };
+    transcript::assert_replays(
+        &moved.prompt,
+        &[
+            (Speaker::User, QUESTION),
+            (Speaker::Assistant, ANSWER),
+            (Speaker::User, FOLLOW_UP),
+        ],
+    );
+    assert_eq!(harness.session().await.agent, AgentKind::Codex);
 }
