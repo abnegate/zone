@@ -212,6 +212,91 @@ RUN set -eu; \
     chmod 0755 /opt/bin/*; \
     rm deno.zip uv.tar.gz
 
+# Microsoft publishes only a SHA-512 for the .NET SDK. The userlocal marker
+# installs workloads under each user's HOME instead of the root-owned SDK.
+FROM fetch AS dotnet-sdk
+
+ARG TARGETARCH
+ARG DOTNET_VERSION=10.0.403
+ARG DOTNET_SHA512_AMD64=b7b3d8461cf98b07d2552ce9199702fa3ad010ac2671a5f8cd5136f7534e50f6855ba7bbb02b11494563f1d04156276a31cda1103b900e5eecd0d9473dc7b9c5
+ARG DOTNET_SHA512_ARM64=0966aa2b70f4677b8319be9df447a78a0dcd6164836425b55a68fd714f4023feb87b4cac21b9a996b79472ad54487cd0adcd2a9dfd570e2b2a1d26423a2baa9b
+
+RUN set -eu; \
+    case "$TARGETARCH" in \
+        amd64) rid=x64; sha512=$DOTNET_SHA512_AMD64 ;; \
+        arm64) rid=arm64; sha512=$DOTNET_SHA512_ARM64 ;; \
+        *) echo "No .NET SDK for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --proto '=https' --retry 3 -o dotnet.tar.gz \
+        "https://builds.dotnet.microsoft.com/dotnet/Sdk/$DOTNET_VERSION/dotnet-sdk-$DOTNET_VERSION-linux-$rid.tar.gz"; \
+    echo "$sha512  dotnet.tar.gz" | sha512sum -c -; \
+    mkdir /opt/dotnet; \
+    tar --no-same-owner -C /opt/dotnet -xzf dotnet.tar.gz; \
+    mkdir -p "/opt/dotnet/metadata/workloads/${DOTNET_VERSION%??}00"; \
+    touch "/opt/dotnet/metadata/workloads/${DOTNET_VERSION%??}00/userlocal"; \
+    rm dotnet.tar.gz
+
+FROM fetch AS dart-sdk
+
+ARG TARGETARCH
+ARG DART_VERSION=3.13.7
+ARG DART_SHA256_AMD64=eb99aed266efbcb615c6ae21c12f52cfe935b9f208bccc5fea7f64c21e867229
+ARG DART_SHA256_ARM64=887cbb763bc4a1d6f3d7c34a6ea08f0f05211807abf98c06d6e4263907ccac1a
+
+RUN set -eu; \
+    case "$TARGETARCH" in \
+        amd64) arch=x64; sha256=$DART_SHA256_AMD64 ;; \
+        arm64) arch=arm64; sha256=$DART_SHA256_ARM64 ;; \
+        *) echo "No Dart SDK for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --proto '=https' --retry 3 -o dart.zip \
+        "https://storage.googleapis.com/dart-archive/channels/stable/release/$DART_VERSION/sdk/dartsdk-linux-$arch-release.zip"; \
+    echo "$sha256  dart.zip" | sha256sum -c -; \
+    unzip -q dart.zip -d /opt; \
+    rm dart.zip
+
+# Flutter publishes no arm64 Linux archive, so both architectures check out the
+# release commit. Its Dart SDK is the checksummed one above, which the runtime
+# stage checks is the revision Flutter's DEPS pins, so Flutter never downloads
+# an unverified SDK of its own.
+FROM fetch AS flutter-sdk
+
+ARG FLUTTER_VERSION=3.47.9
+ARG FLUTTER_COMMIT=c197ca5199e9ee5661e865596c9c07294dfab51c
+
+RUN set -eu; \
+    git clone -q --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git /opt/flutter; \
+    test "$(git -C /opt/flutter rev-parse HEAD)" = "$FLUTTER_COMMIT"; \
+    git -C /opt/flutter checkout -q -b stable; \
+    mkdir /opt/flutter/bin/cache; \
+    ln -s /opt/dart-sdk /opt/flutter/bin/cache/dart-sdk; \
+    cp /opt/flutter/bin/internal/engine.version /opt/flutter/bin/cache/engine-dart-sdk.stamp
+
+# Swift publishes PGP signatures, not checksums. These SHA-256s are of the
+# tarballs whose signatures verify against the Swift 6 release signing key,
+# 52BB7E3DE28A71BE22EC05FFEF80A866B47A981F.
+FROM fetch AS swift-toolchain
+
+ARG TARGETARCH
+ARG SWIFT_VERSION=6.4.2
+ARG SWIFT_SHA256_AMD64=8b6fde775b7cfc7a3758739d8abb09bb6fba519c6532d6b1a47faff791646c64
+ARG SWIFT_SHA256_ARM64=bcbdd71d21421b9d18fc80f668b2b8dafefc84fa4ceba85edb0657c0c94bf36a
+
+RUN set -eu; \
+    case "$TARGETARCH" in \
+        amd64) platform=debian13; sha256=$SWIFT_SHA256_AMD64 ;; \
+        arm64) platform=debian13-aarch64; sha256=$SWIFT_SHA256_ARM64 ;; \
+        *) echo "No Swift toolchain for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    release="swift-$SWIFT_VERSION-RELEASE"; \
+    curl -fsSL --proto '=https' --retry 3 -o swift.tar.gz \
+        "https://download.swift.org/swift-$SWIFT_VERSION-release/$platform/$release/$release-$platform.tar.gz"; \
+    echo "$sha256  swift.tar.gz" | sha256sum -c -; \
+    mkdir /opt/swift; \
+    tar --no-same-owner --strip-components=1 -C /opt/swift -xzf swift.tar.gz; \
+    chmod -R o+rX /opt/swift; \
+    rm swift.tar.gz
+
 FROM runtime-base AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -238,12 +323,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         erlang-nox erlang-dev elixir \
     && rm -rf /var/lib/apt/lists/*
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        binutils-gold libicu-dev libcurl4-openssl-dev libedit-dev libsqlite3-dev \
+        libncurses-dev libpython3-dev libxml2-dev uuid-dev tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=rust-toolchain /opt/rust /opt/rust
 COPY --from=go-toolchain /usr/local/go /usr/local/go
 COPY --from=jvm /opt/jvm /opt/jvm
 COPY --from=binaries /opt/bin/ /usr/local/bin/
+COPY --from=dotnet-sdk /opt/dotnet /opt/dotnet
+COPY --from=dart-sdk /opt/dart-sdk /opt/dart-sdk
+COPY --from=swift-toolchain /opt/swift /opt/swift
 COPY manager/rubygems/operating_system.rb /usr/local/lib/site_ruby/rubygems/defaults/operating_system.rb
-ENV PATH="$PATH:/opt/rust/bin:/usr/local/go/bin:/opt/jvm/gradle/bin:/opt/jvm/maven/bin:/opt/jvm/kotlinc/bin"
+COPY manager/bin/dotnet /usr/local/bin/dotnet
+RUN mkdir -p /etc/dotnet && printf '/opt/dotnet\n' > /etc/dotnet/install_location
+ENV PATH="$PATH:/opt/rust/bin:/usr/local/go/bin:/opt/jvm/gradle/bin:/opt/jvm/maven/bin:/opt/jvm/kotlinc/bin:/opt/dart-sdk/bin:/opt/swift/usr/bin"
 
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx
@@ -255,7 +350,18 @@ RUN groupadd --system zone \
     && printf 'prefix=/opt/tools\n' > /etc/npmrc \
     && printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf \
     && mkdir -p /etc/xdg \
-    && printf '[ "$(id -u)" -ne 0 ] && PATH="$PATH:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.gem/bin:$HOME/.config/composer/vendor/bin:$HOME/.deno/bin:/opt/tools/bin"\n' > /etc/profile.d/tools.sh
+    && printf '[ "$(id -u)" -ne 0 ] && PATH="$PATH:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.gem/bin:$HOME/.config/composer/vendor/bin:$HOME/.deno/bin:$HOME/.dotnet/tools:$HOME/.pub-cache/bin:/opt/flutter/bin:/opt/tools/bin"\n' > /etc/profile.d/tools.sh
+
+# Flutter writes into its own SDK directory, so zone owns it and it is on
+# ZONE_PATH only. Analytics are switched off for /home/zone, the HOME every
+# agent runs with.
+COPY --from=flutter-sdk --chown=zone:zone /opt/flutter /opt/flutter
+RUN test "$(cat /opt/dart-sdk/revision)" = "$(sed -n "s/^ *'dart_revision': '\([0-9a-f]*\)',\$/\1/p" /opt/flutter/DEPS)" \
+    && runuser -u zone -- env -i HOME=/home/zone PATH="$PATH:/opt/flutter/bin" sh -c '\
+        dart --disable-analytics \
+        && flutter --disable-analytics \
+        && flutter config --no-cli-animations \
+        && flutter precache --universal --web --linux --no-android --no-ios'
 
 ENV SHELL=/bin/bash
 # Docker's default seccomp profile blocks the user namespaces bubblewrap needs.
