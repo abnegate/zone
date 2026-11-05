@@ -500,7 +500,9 @@ test.describe('Chat changes and gallery panel', () => {
 
     await grip.focus();
     await page.keyboard.press('Space');
+    await expect(sheet.getByText('Picked up Changes, at position 1 of 3.')).toBeAttached();
     await page.keyboard.press('ArrowDown');
+    await expect(sheet.getByText('Changes would move to position 2 of 3.')).toBeAttached();
     await page.keyboard.press('Escape');
     await expect(
       sheet.getByText('Moving Changes cancelled. It stays at position 1 of 3.')
