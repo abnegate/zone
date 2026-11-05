@@ -1,5 +1,6 @@
 import type { Locator, Page } from '@playwright/test';
 import type { Chat, ChatProviderOffer, ChatProviders } from '../src/features/chats/types';
+import { VIEWPORT_MARGIN } from '../src/features/chats/utils/popoverOffset';
 import { expect, test } from './fixtures';
 import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { installChatSocketMock } from './helpers/chatSocket';
@@ -134,6 +135,59 @@ async function lowestContrast(scope: Locator, selector: string): Promise<number>
   }, selector);
 }
 
+async function segmentShape(group: Locator) {
+  return group.evaluate((element) => {
+    const outer = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const border = Number.parseFloat(style.borderTopWidth);
+    const inner = outer.height - 2 * border;
+    const round = (value: string, height: number) =>
+      Math.min(Number.parseFloat(value), height / 2);
+    const expected = round(style.borderTopLeftRadius, outer.height) - border;
+    const segments = [
+      ...element.querySelectorAll<HTMLElement>(
+        ':scope > .agent-toggle, :scope > .chat-header-popover > .agent-toggle'
+      ),
+    ];
+    return segments.map((segment, index) => {
+      const box = segment.getBoundingClientRect();
+      const own = getComputedStyle(segment);
+      const first = index === 0;
+      const last = index === segments.length - 1;
+      return {
+        fills: Math.abs(box.height - inner) < 0.5 && Math.abs(box.top - outer.top - border) < 0.5,
+        start: round(own.borderTopLeftRadius, box.height) === (first ? expected : 0),
+        startBottom: round(own.borderBottomLeftRadius, box.height) === (first ? expected : 0),
+        end: round(own.borderTopRightRadius, box.height) === (last ? expected : 0),
+        endBottom: round(own.borderBottomRightRadius, box.height) === (last ? expected : 0),
+      };
+    });
+  });
+}
+
+async function panelPlacement(page: Page) {
+  return page.evaluate((margin) => {
+    const viewport = document.documentElement.clientWidth;
+    return [...document.querySelectorAll<HTMLElement>('.chat-header-popover-panel')]
+      .filter((panel) => !panel.hidden)
+      .map((panel) => {
+        const trigger = panel.parentElement!.querySelector('button')!.getBoundingClientRect();
+        const box = panel.getBoundingClientRect();
+        return {
+          below: box.top >= trigger.bottom && box.top - trigger.bottom <= 12,
+          anchored:
+            Math.abs(box.left - trigger.left) < 0.5 ||
+            Math.abs(box.right - trigger.right) < 0.5 ||
+            Math.abs(box.left - margin) < 0.5 ||
+            Math.abs(box.right - (viewport - margin)) < 0.5,
+          onScreen: box.left >= margin - 0.5 && box.right <= viewport - margin + 0.5,
+          alignedLeftWhenItFits:
+            trigger.left + box.width > viewport - margin || Math.abs(box.left - trigger.left) < 0.5,
+        };
+      });
+  }, VIEWPORT_MARGIN);
+}
+
 async function closePanel(page: Page, trigger: Locator): Promise<void> {
   await page.keyboard.press('Escape');
   await expect(trigger).toHaveAttribute('aria-expanded', 'false');
@@ -161,6 +215,9 @@ for (const width of [1280, 375]) {
       const autoApprove = page.getByTestId('auto-approve-toggle');
       const sandbox = page.getByTestId('agent-sandbox-toggle');
       const chips = trigger.locator('.agent-permission-chip');
+      const settings = page.getByTestId('chat-settings');
+      const settingsPanel = page.getByRole('dialog', { name: 'Model settings' });
+      const openPanels = page.locator('.chat-header-popover-panel:visible');
 
       const shoot = async (state: string) => {
         expect(
@@ -188,9 +245,26 @@ for (const width of [1280, 375]) {
             'every permission meets WCAG AA'
           ).toBeGreaterThanOrEqual(AA_TEXT);
         }
+        for (const segment of await segmentShape(group)) {
+          expect(segment, 'each segment fills the pill and shares its outer corners').toEqual({
+            fills: true,
+            start: true,
+            startBottom: true,
+            end: true,
+            endBottom: true,
+          });
+        }
+        for (const placement of await panelPlacement(page)) {
+          expect(placement, 'a popover opens under its own trigger and on screen').toEqual({
+            below: true,
+            anchored: true,
+            onScreen: true,
+            alignedLeftWhenItFits: true,
+          });
+        }
         if (browserName !== 'chromium') return;
         const top = (await header.boundingBox())!;
-        const open = (await panel.isVisible()) ? await panel.boundingBox() : null;
+        const open = (await openPanels.count()) ? await openPanels.first().boundingBox() : null;
         const bottom = Math.max(top.y + top.height, open ? open.y + open.height + 8 : 0);
         await page.screenshot({
           path: `screenshots/chats-agent-${theme}-${width}-${state}.png`,
@@ -246,6 +320,13 @@ for (const width of [1280, 375]) {
       await page.mouse.move(0, 0);
       await shoot('open');
       await closePanel(page, trigger);
+
+      await settings.click();
+      await expect(settings).toHaveAttribute('aria-expanded', 'true');
+      await expect(settingsPanel).toBeVisible();
+      await page.mouse.move(0, 0);
+      await shoot('settings-open');
+      await closePanel(page, settings);
 
       await trigger.hover();
       await shoot('hover');
