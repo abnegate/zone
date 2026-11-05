@@ -697,8 +697,10 @@ export default function ChatsPage() {
     } catch (error) {
       reportForChat(chatId, failure(PROVIDER_EFFORT_RESET_FAILED, error));
     } finally {
-      await refreshChats();
-      if (latestSelectedChatId.current === chatId) await refreshChat();
+      await Promise.all([
+        refreshChats(),
+        latestSelectedChatId.current === chatId ? refreshChat() : undefined,
+      ]);
       markChanging(chatId, false);
     }
     return true;
