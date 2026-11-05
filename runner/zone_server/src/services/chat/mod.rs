@@ -6,3 +6,4 @@ pub mod evidence;
 pub mod handover;
 pub mod pull_request;
 pub mod session;
+pub mod subagent;
