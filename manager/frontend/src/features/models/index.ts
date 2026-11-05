@@ -1,7 +1,7 @@
 // Types
 
 // Components
-export { DownloadDock, SetupGate, TrainDock, VirtualBrowseList } from './components';
+export { DownloadDock, FeaturesPanel, SetupGate, TrainDock, VirtualBrowseList } from './components';
 // Hooks
 export { PullProvider, TrainProvider, useBrowse, useModels, usePull, useTrain } from './hooks';
 // Pages

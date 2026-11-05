@@ -263,17 +263,8 @@ describe('ModelsPage', () => {
     it('renders main tabs', () => {
       renderModelsPage();
       expect(screen.getByRole('tab', { name: /Installed/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: 'Features' })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: 'Browse' })).toBeInTheDocument();
-    });
-
-    it('opens the features picker', async () => {
-      renderModelsPage();
-      const tab = screen.getByRole('tab', { name: 'Features' });
-      fireEvent.mouseDown(tab);
-      fireEvent.mouseUp(tab);
-      fireEvent.click(tab);
-      expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
+      expect(screen.queryByRole('tab', { name: 'Features' })).not.toBeInTheDocument();
     });
 
     it('shows installed tab by default with an inline add-model row', () => {
@@ -366,15 +357,12 @@ describe('ModelsPage', () => {
       expect(screen.getByText('No models installed')).toBeInTheDocument();
     });
 
-    it('opens feature setup from the empty state', async () => {
+    it('sends the empty state to the settings features tab', () => {
       mockUseModels.mockReturnValue({ ...defaultModelsHook, models: [] });
       renderModelsPage();
       fireEvent.click(screen.getByRole('button', { name: 'Install features' }));
-      expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: 'Features' })).toHaveAttribute(
-        'aria-selected',
-        'true'
-      );
+      expect(window.location.pathname).toBe('/settings');
+      expect(window.location.search).toBe('?tab=features');
     });
 
     it('displays installed models', () => {

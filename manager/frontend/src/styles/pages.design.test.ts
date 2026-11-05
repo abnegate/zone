@@ -466,6 +466,7 @@ describe('sources page layout', () => {
 
 describe('settings page layout', () => {
   const css = read(join(features, 'settings', 'workspace', 'pages', 'WorkspaceSettingsPage.css'));
+  const page = read(join(features, 'settings', 'workspace', 'pages', 'WorkspaceSettingsPage.tsx'));
 
   it('sticks the save footer to the scroller edge so it does not lift at the end of the scroll', () => {
     const footer = rule(css, '.settings-actions');
@@ -476,6 +477,14 @@ describe('settings page layout', () => {
     const body = rule(css, '.settings-page .page-body:has(.settings-actions)');
     expect(body).toContain('padding-bottom: 0');
     expect(body).toContain('flex-direction: column');
+  });
+
+  it('keeps feature setup on a settings tab without a content card', () => {
+    const panel = read(join(features, 'models', 'components', 'FeaturesPanel.css'));
+    expect(panel).not.toContain('.card');
+    expect(rule(panel, '.models-feature')).toContain('border-bottom: 1px solid var(--ui-border)');
+    expect(page).toContain('value="features"');
+    expect(page).toContain('<FeaturesPanel');
   });
 });
 
@@ -502,7 +511,7 @@ describe('models page layout', () => {
   it('lists installed models and the catalog without content cards', () => {
     expect(css).not.toContain('.card.models-list-panel');
     expect(css).not.toContain('.card.models-browse-panel');
-    expect(page).toContain('value="features"');
+    expect(page).not.toContain('value="features"');
     expect(rule(css, '.models-section-head')).toContain('height: var(--ui-control-height-sm)');
     expect(rule(css, '.browse-filters .filter-pill')).toContain('height: var(--ui-space-6)');
   });
@@ -518,11 +527,9 @@ describe('models page layout', () => {
     expect(rule(pulls, '.pull-job-row')).toContain('height: var(--ui-space-5)');
   });
 
-  it('keeps feature setup on the models page without a content card', () => {
-    const panel = read(join(features, 'models', 'components', 'FeaturesPanel.css'));
-    expect(panel).not.toContain('.card');
-    expect(rule(panel, '.models-feature')).toContain('border-bottom: 1px solid var(--ui-border)');
-    expect(page).toContain('<FeaturesPanel');
+  it('sends the empty state to the settings features tab', () => {
+    expect(page).not.toContain('<FeaturesPanel');
+    expect(page).toContain("navigate('/settings?tab=features')");
   });
 });
 
