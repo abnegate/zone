@@ -15,6 +15,7 @@
 //! contact detail or an instruction to hold something back never becomes
 //! standing.
 
+use abnegate_index::cosine_similarity;
 use chrono::{Duration as CalendarDuration, NaiveDateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -124,7 +125,7 @@ impl QuestionCluster {
     fn affinity(&self, embedding: &[f32]) -> f32 {
         let to_leader = cosine_similarity(&self.leader().question_embedding, embedding);
         let to_centroid = cosine_similarity(&self.centroid, embedding);
-        to_leader.min(to_centroid)
+        to_leader.min(to_centroid) as f32
     }
 
     pub fn exchanges(&self) -> &[Exchange] {
@@ -154,7 +155,7 @@ impl QuestionCluster {
             .iter()
             .skip(1)
             .map(|exchange| cosine_similarity(leader, &exchange.question_embedding))
-            .fold(1.0, f32::min)
+            .fold(1.0, f64::min) as f32
     }
 }
 
@@ -182,30 +183,6 @@ pub struct PromotionReport {
     pub unchanged: usize,
     /// How many of those candidates the rulebook turned away unwritten.
     pub refused: usize,
-}
-
-pub fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
-    if left.len() != right.len() || left.is_empty() {
-        return 0.0;
-    }
-
-    let (dot, left_norm, right_norm) = left.iter().zip(right.iter()).fold(
-        (0.0f32, 0.0f32, 0.0f32),
-        |(dot, left_norm, right_norm), (&left, &right)| {
-            (
-                dot + left * right,
-                left_norm + left * left,
-                right_norm + right * right,
-            )
-        },
-    );
-
-    let magnitude = left_norm.sqrt() * right_norm.sqrt();
-    if magnitude == 0.0 || !magnitude.is_finite() {
-        return 0.0;
-    }
-
-    dot / magnitude
 }
 
 fn normalized(vector: &[f32]) -> Vec<f32> {
@@ -280,7 +257,7 @@ pub fn cluster_questions(exchanges: &[Exchange], policy: &PromotionPolicy) -> Ve
 fn answers_agree(left: &Exchange, right: &Exchange, policy: &PromotionPolicy) -> bool {
     match (&left.answer_embedding, &right.answer_embedding) {
         (Some(left_vector), Some(right_vector)) => {
-            cosine_similarity(left_vector, right_vector) >= policy.answer_similarity
+            cosine_similarity(left_vector, right_vector) as f32 >= policy.answer_similarity
         }
         _ => normalize(&left.answer) == normalize(&right.answer),
     }
@@ -994,19 +971,6 @@ mod tests {
             instruction.provenance.last_confirmed,
             NaiveDate::from_ymd_opt(2026, 9, 4).unwrap()
         );
-    }
-
-    #[test]
-    fn cosine_similarity_handles_degenerate_input() {
-        assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]), 1.0);
-        assert_eq!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
-        assert_eq!(
-            cosine_similarity(&[1.0, 0.0], &[1.0, 0.0, 0.0]),
-            0.0,
-            "mismatched dimensions must never look similar"
-        );
-        assert_eq!(cosine_similarity(&[], &[]), 0.0);
-        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
     }
 
     #[test]
