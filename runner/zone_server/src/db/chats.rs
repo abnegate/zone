@@ -2,6 +2,7 @@
 
 pub mod occupancy;
 pub mod provider;
+pub mod recent;
 mod session;
 
 use abnegate_llm::ReasoningEffort;

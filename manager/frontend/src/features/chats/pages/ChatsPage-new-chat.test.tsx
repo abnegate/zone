@@ -2,7 +2,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import { chooseSelect, openSelect } from '../../../test/select';
-import type { ChatProviderOffer, ReasoningEffort, WorkspaceChatProviders } from '../types';
+import type {
+  ChatProviderOffer,
+  ReasoningEffort,
+  RecentChat,
+  WorkspaceChatProviders,
+} from '../types';
 
 const REFUSAL =
   "This workspace's AI endpoint can't be used: its AI settings couldn't be read. Check AI Settings.";
@@ -75,6 +80,17 @@ const instanceModels: ChatProviderOffer = {
   ],
 };
 
+const recentCodex: RecentChat = {
+  model_name: 'auto',
+  provider: 'codex',
+  provider_model: 'gpt-6-sol',
+  reasoning_effort: 'high',
+  agent_enabled: true,
+  auto_approve: true,
+  offline: true,
+  context_tokens: null,
+};
+
 const firstWorkspace = { id: 'ws-1', name: 'Test Workspace', organization_id: 'org-1' };
 const secondWorkspace = { id: 'ws-2', name: 'Second Workspace', organization_id: 'org-1' };
 
@@ -83,6 +99,7 @@ let modelsError: string | null = null;
 let installed = [toolModel];
 let workspaceProviders: WorkspaceChatProviders | null = null;
 let creation: Response;
+let providersGate: Promise<void> | null = null;
 
 Element.prototype.scrollIntoView = mock();
 
@@ -223,11 +240,13 @@ describe('ChatsPage new chat dialog', () => {
     modelsError = null;
     installed = [toolModel];
     workspaceProviders = null;
+    providersGate = null;
     creation = Response.json({ success: false, error: REFUSAL }, { status: 409 });
     window.history.pushState({}, '', '/');
     globalThis.fetch = mock(async (url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return creation;
       if (/\/api\/workspaces\/[^/]+\/chat-providers$/.test(url)) {
+        if (providersGate) await providersGate;
         return workspaceProviders
           ? Response.json(workspaceProviders)
           : Response.json({ success: false, error: 'Not found' }, { status: 404 });
@@ -447,6 +466,113 @@ describe('ChatsPage new chat dialog', () => {
     );
     expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Automatic');
     expect(optionLabels('Select Model')).toEqual(['Automatic', 'llama3.2']);
+  });
+
+  it("starts from the settings of the workspace's most recent chat and sends them", async () => {
+    workspaceProviders = { default: selfHosted, providers: offers, recent: recentCodex };
+    await openNewChat();
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Codex')
+    );
+    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('gpt-6-sol');
+    expect(screen.getByRole('combobox', { name: 'Reasoning' })).toHaveTextContent('High');
+    expect(screen.getByLabelText('Agent mode')).toBeChecked();
+    expect(screen.getByLabelText('Auto-approve writes and commands')).toBeChecked();
+    expect(screen.getByLabelText('Offline')).toBeChecked();
+
+    expect(await createdBody()).toMatchObject({
+      provider: 'codex',
+      provider_model: 'gpt-6-sol',
+      model_name: 'auto',
+      reasoning_effort: 'high',
+      agent_enabled: true,
+      auto_approve: true,
+      offline: true,
+    });
+  });
+
+  it('falls back to Default when the recent chat ran on a provider no longer offered', async () => {
+    workspaceProviders = {
+      default: selfHosted,
+      providers: offers,
+      recent: { ...recentCodex, provider: 'anthropic', provider_model: 'claude-opus-4' },
+    };
+    await openNewChat();
+    await waitFor(() => expect(screen.getByLabelText('Offline')).toBeChecked());
+
+    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent(
+      'Default (Self-Hosted)'
+    );
+    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Automatic');
+    const body = await createdBody();
+    expect(body.model_name).toBe('auto');
+    expect(body).not.toHaveProperty('provider');
+  });
+
+  it('falls back to Automatic when the recent Default model is no longer installed', async () => {
+    workspaceProviders = {
+      default: selfHosted,
+      providers: offers,
+      recent: { ...recentCodex, provider: null, provider_model: null, model_name: 'qwen3:8b' },
+    };
+    await openNewChat();
+    await waitFor(() => expect(screen.getByLabelText('Offline')).toBeChecked());
+
+    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Automatic');
+    expect((await createdBody()).model_name).toBe('auto');
+  });
+
+  it('starts from the settings the last chat changed to each time the dialog opens', async () => {
+    workspaceProviders = { default: selfHosted, providers: offers, recent: recentCodex };
+    await openNewChat();
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Codex')
+    );
+    closeDialog();
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument()
+    );
+    workspaceProviders = {
+      default: selfHosted,
+      providers: offers,
+      recent: { ...recentCodex, provider: 'claude_code', provider_model: 'opus' },
+    };
+
+    await openDialog();
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Claude Code')
+    );
+    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Opus');
+  });
+
+  it('keeps what was chosen in the dialog when the recent settings load after it', async () => {
+    workspaceProviders = { default: selfHosted, providers: offers };
+    render(page());
+    await waitFor(() =>
+      expect(
+        (globalThis.fetch as unknown as ReturnType<typeof mock>).mock.calls.some(([url]) =>
+          String(url).includes('/chat-providers')
+        )
+      ).toBe(true)
+    );
+    let release = () => {};
+    providersGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    workspaceProviders = { default: selfHosted, providers: offers, recent: recentCodex };
+
+    await openDialog();
+    chooseSelect('Provider', 'Claude Code');
+    release();
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Claude Code')
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Claude Code');
+    expect(screen.getByLabelText('Offline')).not.toBeChecked();
   });
 
   it('starts over when the workspace changes', async () => {
