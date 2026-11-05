@@ -1,7 +1,9 @@
 import {
   type Announcements,
   DndContext,
+  type DragCancelEvent,
   type DragEndEvent,
+  type DragOverEvent,
   DragOverlay,
   type DragStartEvent,
   KeyboardSensor,
@@ -11,7 +13,7 @@ import {
   useSensor,
   useSensors,
 } from '@dnd-kit/core';
-import { type ReactNode, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { boxSteps, nearestBox } from '../utils/boxDrop';
 import { boxTitle, dropSide, isPanelBox, type PanelBoxId } from '../utils/boxes';
@@ -44,6 +46,17 @@ const INSTRUCTIONS =
   'To move a box, press space or enter to pick it up, the up and down arrow keys to move it, ' +
   'then space or enter to drop it, or escape to put it back.';
 
+const SILENT: Announcements = {
+  onDragStart: () => undefined,
+  onDragOver: () => undefined,
+  onDragEnd: () => undefined,
+  onDragCancel: () => undefined,
+};
+
+function title(id: UniqueIdentifier): string {
+  return isPanelBox(id) ? boxTitle(id) : String(id);
+}
+
 /** The panel's boxes, which the viewer can drag by their grips, or move by keyboard, into the order they like. */
 export function BoxList({ boxes, onMove, onDraggingChange }: BoxListProps) {
   const ids = boxes.map((box) => box.id);
@@ -51,80 +64,92 @@ export function BoxList({ boxes, onMove, onDraggingChange }: BoxListProps) {
   current.current = ids;
   const [active, setActive] = useState<PanelBoxId | null>(null);
   const [over, setOver] = useState<PanelBoxId | null>(null);
-  const [announcer, setAnnouncer] = useState<HTMLDivElement | null>(null);
+  const [announcement, setAnnouncement] = useState('');
+  const announcedOver = useRef<UniqueIdentifier | null>(null);
+  const dragging = useRef(onDraggingChange);
+  dragging.current = onDraggingChange;
+  const instructions = useId();
+  const unrendered = useMemo(() => document.createElement('div'), []);
   const movable = ids.length > 1;
+
+  useEffect(() => () => dragging.current?.(false), []);
 
   const steps = useMemo(() => ({ coordinateGetter: boxSteps(() => current.current) }), []);
   const sensors = useSensors(useSensor(PointerSensor, POINTER), useSensor(KeyboardSensor, steps));
 
-  const announcements = useMemo<Announcements>(() => {
-    let announcedOver: UniqueIdentifier | null = null;
-    const place = (id: UniqueIdentifier) =>
-      `position ${current.current.indexOf(id as PanelBoxId) + 1} of ${current.current.length}`;
-    const title = (id: UniqueIdentifier) => (isPanelBox(id) ? boxTitle(id) : String(id));
-    return {
-      onDragStart: ({ active }) => {
-        announcedOver = active.id;
-        return `Picked up ${title(active.id)}, at ${place(active.id)}.`;
-      },
-      onDragOver: ({ active, over }) => {
-        if ((over?.id ?? null) === announcedOver) return undefined;
-        announcedOver = over?.id ?? null;
-        return over
-          ? `${title(active.id)} would move to ${place(over.id)}.`
-          : `${title(active.id)} is not over a place in the list.`;
-      },
-      onDragEnd: ({ active, over }) =>
-        over
-          ? `${title(active.id)} dropped at ${place(over.id)}.`
-          : `${title(active.id)} put back at ${place(active.id)}.`,
-      onDragCancel: ({ active }) =>
-        `Moving ${title(active.id)} cancelled. It stays at ${place(active.id)}.`,
-    };
-  }, []);
-
-  const start = ({ active }: DragStartEvent) => {
-    setActive(isPanelBox(active.id) ? active.id : null);
-    onDraggingChange?.(true);
-  };
+  const place = (id: UniqueIdentifier) =>
+    `position ${current.current.indexOf(id as PanelBoxId) + 1} of ${current.current.length}`;
 
   const finish = () => {
     setActive(null);
     setOver(null);
-    onDraggingChange?.(false);
+    dragging.current?.(false);
+  };
+
+  const start = ({ active }: DragStartEvent) => {
+    setActive(isPanelBox(active.id) ? active.id : null);
+    announcedOver.current = active.id;
+    setAnnouncement(`Picked up ${title(active.id)}, at ${place(active.id)}.`);
+    dragging.current?.(true);
+  };
+
+  const move = ({ active, over }: DragOverEvent) => {
+    setOver(over && isPanelBox(over.id) ? over.id : null);
+    const target = over?.id ?? null;
+    if (target === announcedOver.current) return;
+    announcedOver.current = target;
+    setAnnouncement(
+      over
+        ? `${title(active.id)} would move to ${place(over.id)}.`
+        : `${title(active.id)} is not over a place in the list.`
+    );
   };
 
   const end = ({ active, over }: DragEndEvent) => {
     finish();
-    if (!over || !isPanelBox(active.id) || !isPanelBox(over.id)) return;
-    if (active.id !== over.id) onMove(active.id, ids.indexOf(over.id));
+    const index = over && isPanelBox(over.id) ? ids.indexOf(over.id) : -1;
+    if (!over || index === -1 || !isPanelBox(active.id)) {
+      setAnnouncement(`${title(active.id)} put back at ${place(active.id)}.`);
+      return;
+    }
+    setAnnouncement(`${title(active.id)} dropped at ${place(over.id)}.`);
+    if (active.id !== over.id) onMove(active.id, index);
+  };
+
+  const cancel = ({ active }: DragCancelEvent) => {
+    finish();
+    setAnnouncement(`Moving ${title(active.id)} cancelled. It stays at ${place(active.id)}.`);
   };
 
   return (
     <DndContext
       sensors={sensors}
       collisionDetection={nearestBox}
-      accessibility={{
-        announcements,
-        container: announcer ?? undefined,
-        screenReaderInstructions: { draggable: INSTRUCTIONS },
-      }}
+      accessibility={{ announcements: SILENT, container: unrendered }}
       onDragStart={start}
-      onDragOver={({ over }) => setOver(over && isPanelBox(over.id) ? over.id : null)}
+      onDragOver={move}
       onDragEnd={end}
-      onDragCancel={finish}
+      onDragCancel={cancel}
     >
       {boxes.map((box) => (
         <BoxSlot
           key={box.id}
           id={box.id}
           movable={movable}
+          instructions={instructions}
           drop={dropSide(ids, active, over, box.id)}
         >
           {box.node}
         </BoxSlot>
       ))}
-      <div ref={setAnnouncer} className="chat-panel-announcer" />
+      <div className="chat-panel-announcer">
+        <p id={instructions} hidden>
+          {INSTRUCTIONS}
+        </p>
+        <div className="sr-only" aria-live="assertive" aria-atomic="true">
+          {announcement}
+        </div>
+      </div>
       {createPortal(
         <DragOverlay
           className="chat-panel-drag-overlay"

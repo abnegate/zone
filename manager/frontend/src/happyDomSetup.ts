@@ -29,6 +29,7 @@ Object.assign(globalThis, {
   KeyboardEvent: window.KeyboardEvent,
   FocusEvent: window.FocusEvent,
   InputEvent: window.InputEvent,
+  StorageEvent: window.StorageEvent,
   getComputedStyle: window.getComputedStyle.bind(window),
   requestAnimationFrame: window.requestAnimationFrame.bind(window),
   cancelAnimationFrame: window.cancelAnimationFrame.bind(window),

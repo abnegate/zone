@@ -6,6 +6,7 @@ export interface BoxDrag {
   attributes: DraggableAttributes;
   listeners: DraggableSyntheticListeners;
   dragging: boolean;
+  instructions: string;
 }
 
 export const BoxDragContext = createContext<BoxDrag | null>(null);

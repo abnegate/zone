@@ -560,6 +560,58 @@ describe('ChatPanel', () => {
       expect(handle('Gallery').closest('h4')).toBeNull();
     });
 
+    it('announces moves without leaving a status on the page', async () => {
+      renderPanel(everything);
+      expect(screen.queryByRole('status')).toBeNull();
+      const grip = handle('Gallery');
+      grip.focus();
+
+      await press(grip, 'Space');
+      await announced('Picked up Gallery, at position 3 of 3.');
+
+      expect(screen.queryByRole('status')).toBeNull();
+      expect(screen.getByText('Picked up Gallery, at position 3 of 3.')).toHaveAttribute(
+        'aria-live',
+        'assertive'
+      );
+      await press(grip, 'Escape');
+    });
+
+    it('follows an order saved in another tab, and a cleared one', () => {
+      renderPanel(everything);
+
+      localStorage.setItem(ORDER_KEY, JSON.stringify(['gallery', 'sources', 'changes']));
+      act(() => {
+        window.dispatchEvent(new StorageEvent('storage', { key: ORDER_KEY }));
+      });
+      expect(shownOrder()).toEqual(['gallery', 'sources', 'changes']);
+
+      localStorage.clear();
+      act(() => {
+        window.dispatchEvent(new StorageEvent('storage', { key: null }));
+      });
+      expect(shownOrder()).toEqual(['changes', 'sources', 'gallery']);
+    });
+
+    it('lets escape close a sheet that was shut while a box was lifted', async () => {
+      renderPanel(everything);
+      const toggle = screen.getByRole('button', { name: /^Changes, media and sources: / });
+      fireEvent.click(toggle);
+      const sheet = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+      const grip = within(sheet).getByRole('button', { name: 'Move Changes' });
+      grip.focus();
+      await press(grip, 'Space');
+      await announced('Picked up Changes, at position 1 of 3.');
+
+      fireEvent.click(within(sheet).getByRole('button', { name: 'Close' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      fireEvent.click(toggle);
+      const reopened = await screen.findByRole('dialog', { name: 'Changes, media and sources' });
+      await press(reopened, 'Escape');
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    });
+
     it('shows the order the viewer chose in the sheet as well', async () => {
       localStorage.setItem(ORDER_KEY, JSON.stringify(['sources', 'gallery', 'changes']));
       renderPanel(everything);

@@ -19,7 +19,14 @@ export function useBoxOrder(userId: string | null): BoxOrder {
   const order = stored.key === key ? stored.order : readOrder(key);
   if (stored.key !== key) setStored({ key, order });
 
-  useSettingChange(key, () => setStored({ key, order: readOrder(key) }));
+  useSettingChange(key, () => {
+    const next = readOrder(key);
+    setStored((previous) =>
+      previous.key === key && previous.order.join() === next.join()
+        ? previous
+        : { key, order: next }
+    );
+  });
 
   const move = useCallback(
     (shown: readonly PanelBoxId[], id: PanelBoxId, index: number) => {

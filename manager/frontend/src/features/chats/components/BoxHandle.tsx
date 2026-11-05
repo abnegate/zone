@@ -18,6 +18,7 @@ export function BoxHandle({ title }: BoxHandleProps) {
       {...drag.attributes}
       {...drag.listeners}
       aria-label={`Move ${title}`}
+      aria-describedby={drag.instructions}
     >
       <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
         <circle cx="9" cy="6" r="1.5" />
