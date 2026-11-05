@@ -9,7 +9,7 @@ use futures::{Stream, StreamExt};
 use tempfile::TempDir;
 
 use super::*;
-use crate::llm::provider::{STDERR_HEADING, UNFUNDED};
+use crate::llm::provider::{STDERR_HEADING, Subagent, SubagentStatus, UNFUNDED};
 
 const COMPLETION: &str = r#"{
     "id": "completion",
@@ -1504,6 +1504,33 @@ async fn the_context_an_agent_reports_is_kept_on_the_client_not_chunked() {
             }
         ))
     );
+}
+
+#[tokio::test]
+async fn news_of_a_subagent_never_reaches_the_reader_as_a_chunk() {
+    let events = agent_events(vec![
+        Ok(AgentEvent::Subagent(Subagent {
+            description: Some("Ask for a review".to_string()),
+            status: Some(SubagentStatus::Running),
+            ..Subagent::new("toolu_01Agent")
+        })),
+        Ok(AgentEvent::Finished {
+            finish_reason: Some("success".to_string()),
+        }),
+    ]);
+
+    let (delivered, failure) =
+        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
+
+    assert!(failure.is_none(), "a subagent failed the turn: {failure:?}");
+    assert_eq!(
+        delivered.len(),
+        1,
+        "only the finish is chunked: {delivered:?}"
+    );
+    assert_eq!(spoken(&delivered), "");
+    assert_eq!(reasoned(&delivered), "");
+    assert_eq!(reasons(&delivered), [STOP]);
 }
 
 #[test]

@@ -34,6 +34,7 @@ mod parser;
 mod rollout;
 mod session;
 mod settings;
+mod subagent;
 mod transcript;
 
 pub use agent::{AgentKind, Delivery};
@@ -49,4 +50,5 @@ pub use settings::{
     BuiltinTools, CliSettings, CodexSandbox, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT,
     DEFAULT_TIMEOUT, SignIn, Toolset,
 };
+pub use subagent::{StepStatus, Subagent, SubagentStatus, SubagentStep};
 pub use transcript::{render, render_tail};

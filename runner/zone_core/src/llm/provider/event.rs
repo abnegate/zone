@@ -7,6 +7,7 @@ use serde_json::Value;
 use super::occupancy::Occupancy;
 use super::output::Output;
 use super::settings::Toolset;
+use super::subagent::Subagent;
 
 /// What separates two blocks of an agent's answer.
 const PARAGRAPH_BREAK: &str = "\n\n";
@@ -51,6 +52,10 @@ pub enum AgentEvent {
     Session(String),
     /// The model's context window and how much of it the turn filled.
     Occupancy(Occupancy),
+    /// News of a subagent the agent started for itself. It goes to the turn's
+    /// observer rather than the reader: a subagent runs on after the main
+    /// answer, so it is shown beside the answer, not in it.
+    Subagent(Subagent),
     Failed(String),
     Finished {
         finish_reason: Option<String>,
@@ -114,7 +119,7 @@ pub fn activity(call: &ToolCall) -> Option<String> {
 /// The first line of what a call is about, cut short once it is clean: a token
 /// cut in half no longer looks like a token, and a carriage return left in
 /// would end the line a code span has to stay on.
-fn subject(arguments: &str) -> Option<String> {
+pub(crate) fn subject(arguments: &str) -> Option<String> {
     let arguments: Value = serde_json::from_str(arguments).ok()?;
     let text = SUBJECTS.iter().find_map(|key| {
         arguments
@@ -153,6 +158,7 @@ fn code_span(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::provider::SubagentStatus;
 
     fn call(name: &str, arguments: &str) -> ToolCall {
         ToolCall::function("toolu_01", name, arguments)
@@ -294,6 +300,13 @@ mod tests {
         assert!(!AgentEvent::Usage(Usage::new(1, 1)).terminal());
         assert!(!AgentEvent::Window(Window::new("five_hour").with_used_percent(43.0)).terminal());
         assert!(!AgentEvent::Session("6f1".to_string()).terminal());
+        assert!(
+            !AgentEvent::Subagent(Subagent {
+                status: Some(SubagentStatus::Completed),
+                ..Subagent::new("toolu_01Agent")
+            })
+            .terminal()
+        );
         assert!(AgentEvent::Failed("nope".to_string()).terminal());
         assert!(AgentEvent::Limited(Limit::new("You've hit your session limit")).terminal());
         assert!(

@@ -126,6 +126,7 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, Error> {
         AgentEvent::Window(reported) => window = Some(reported),
         AgentEvent::Session(announced) => session = Some(announced),
         AgentEvent::Occupancy(_) => {}
+        AgentEvent::Subagent(_) => {}
         AgentEvent::Finished {
             finish_reason: reported,
         } => {
@@ -167,6 +168,7 @@ fn chunks(
                     reported.record(agent, occupancy);
                     continue;
                 }
+                Ok(AgentEvent::Subagent(_)) => continue,
                 Ok(event) => chunk(event, &provider),
                 Err(error) => Err(Error::from(error)),
             };

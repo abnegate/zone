@@ -233,6 +233,12 @@ impl CliProvider {
                         }
                         continue;
                     }
+                    if let AgentEvent::Subagent(subagent) = &event {
+                        if let Some(observer) = &observer {
+                            observer.track(subagent);
+                        }
+                        continue;
+                    }
                     let event = paragraphs.separated(event);
                     // The agent's own report of what went wrong beats an exit
                     // code, which says only that something did.
@@ -283,6 +289,7 @@ impl CliProvider {
                     tracing::debug!(provider = %self.name, tool = %call.function.name, "agent tool call");
                 }
                 AgentEvent::Output(_) => {}
+                AgentEvent::Subagent(_) => {}
                 AgentEvent::Window(window) => {
                     tracing::debug!(provider = %self.name, window = %window.name, used_percent = ?window.used_percent, "agent usage window");
                 }
@@ -509,6 +516,7 @@ fn retained(event: &AgentEvent) -> usize {
         | AgentEvent::Window(_)
         | AgentEvent::Session(_)
         | AgentEvent::Occupancy(_)
+        | AgentEvent::Subagent(_)
         | AgentEvent::Finished { .. } => 0,
     }
 }
@@ -568,7 +576,7 @@ fn is_continuation(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, SignIn};
-    use crate::llm::provider::{Observer, Output};
+    use crate::llm::provider::{Observer, Output, Subagent};
     use crate::llm::provider::{Occupancy, UNFUNDED, UNFUNDED_CONTEXT};
     use crate::tools::test_support::captured_logs;
     use abnegate_llm::{Credential, RequestOptions};
@@ -1397,6 +1405,17 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
         let rendered = failure(words, stderr);
 
         assert_eq!(rendered.split_once(STDERR_HEADING), Some((words, stderr)));
+    }
+
+    #[test]
+    fn news_of_a_subagent_counts_nothing_toward_the_answer() {
+        let subagent = Subagent {
+            description: Some("x".repeat(DEFAULT_OUTPUT_LIMIT)),
+            summary: Some("x".repeat(DEFAULT_OUTPUT_LIMIT)),
+            ..Subagent::new("toolu_01Agent")
+        };
+
+        assert_eq!(retained(&AgentEvent::Subagent(subagent)), 0);
     }
 
     #[test]
