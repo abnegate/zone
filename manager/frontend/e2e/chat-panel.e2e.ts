@@ -91,7 +91,8 @@ function pullRequest(number: number, title: string, overrides: Record<string, un
     dismissed: false,
     created_at: sentAt,
     status: status({ title, ...overrides }),
-    actionable: true,
+    writable: true,
+    credentialed: true,
   };
 }
 

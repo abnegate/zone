@@ -12,7 +12,7 @@ use axum::{
 };
 use uuid::Uuid;
 
-use super::{check_workspace_read_access, check_workspace_write_access, get_chat_with_access};
+use super::{check_workspace_write_access, get_chat_with_access};
 use crate::auth::AuthUser;
 use crate::db::chat_pull_requests::{self, PullRequestRow};
 use crate::db::chats::ChatRow;
@@ -36,12 +36,12 @@ pub async fn list(
     Path(id): Path<Uuid>,
 ) -> Result<Json<PullRequestsResponse>, ServerError> {
     let (chat, workspace) = chat(&state, &auth, id).await?;
-    let writer = writer(&state, &auth, workspace).await?;
+    let writable = writable(&state, &auth, workspace).await?;
     let tracked = pull_request::list(&state, workspace, chat.id).await?;
     Ok(Json(PullRequestsResponse {
         pull_requests: tracked
             .into_iter()
-            .map(|tracked| PullRequestResponse::new(tracked, writer))
+            .map(|tracked| PullRequestResponse::new(tracked, writable))
             .collect(),
     }))
 }
@@ -103,8 +103,11 @@ async fn chat(state: &AppState, auth: &AuthUser, id: Uuid) -> Result<(ChatRow, U
     Ok((chat, workspace))
 }
 
-async fn writer(state: &AppState, auth: &AuthUser, workspace: Uuid) -> Result<bool, ServerError> {
-    let user = check_workspace_read_access(state, auth, workspace).await?;
+async fn writable(state: &AppState, auth: &AuthUser, workspace: Uuid) -> Result<bool, ServerError> {
+    let user = auth
+        .0
+        .user_id()
+        .map_err(|_| ServerError::Unauthorized("Invalid user".to_string()))?;
     Ok(workspace_members::can_write(state.db(), workspace, user).await?)
 }
 

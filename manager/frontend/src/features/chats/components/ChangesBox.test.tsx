@@ -52,7 +52,8 @@ const OPEN: ChatPullRequest = {
   dismissed: false,
   created_at: '2026-11-05T10:00:00Z',
   status: STATUS,
-  actionable: true,
+  writable: true,
+  credentialed: true,
 };
 
 const MENU = 'Actions for widgets #12';
@@ -184,6 +185,9 @@ describe('ChangesBox', () => {
     expect(mockUpdateChatPullRequest).toHaveBeenCalledWith('chat-1', 'pr-1', { dismissed: true });
     await waitFor(() => expect(screen.queryByRole('link', { name: STATUS.title })).toBeNull());
     expect(screen.getByText(/Dismissed widgets #12/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Undo' }))
+    );
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
@@ -191,7 +195,8 @@ describe('ChangesBox', () => {
     expect(mockUpdateChatPullRequest).toHaveBeenLastCalledWith('chat-1', 'pr-1', {
       dismissed: false,
     });
-    expect(await screen.findByRole('link', { name: STATUS.title })).toBeInTheDocument();
+    const restored = await screen.findByRole('link', { name: STATUS.title });
+    await waitFor(() => expect(document.activeElement).toBe(restored));
     expect(screen.queryByText(/Dismissed widgets #12/)).toBeNull();
   });
 
@@ -262,7 +267,7 @@ describe('ChangesBox', () => {
   });
 
   it('leaves only open, copy and dismiss to a reader no source lets act', async () => {
-    await shown([{ ...OPEN, actionable: false }]);
+    await shown([{ ...OPEN, credentialed: false }]);
 
     await openMenu(MENU);
     for (const name of [/View changes/, /Merge when ready/, /Convert to draft/]) {
@@ -270,6 +275,17 @@ describe('ChangesBox', () => {
     }
     for (const name of ['Open on GitHub', 'Copy link', 'Dismiss']) {
       expect(menuItem(name)).not.toHaveAttribute('aria-disabled');
+    }
+  });
+
+  it('lets a read-only reader view the changes but not dismiss or change it', async () => {
+    await shown([{ ...OPEN, writable: false }]);
+
+    await openMenu(MENU);
+    expect(menuItem('View changes')).not.toHaveAttribute('aria-disabled');
+    for (const name of [/Dismiss/, /Merge when ready/, /Convert to draft/]) {
+      expect(menuItem(name)).toHaveAttribute('aria-disabled', 'true');
+      expect(menuItem(name)).toHaveTextContent('Needs write access to this workspace.');
     }
   });
 

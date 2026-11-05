@@ -33,16 +33,17 @@ pub const DEFAULT_HUGGINGFACE_MODELS_URL: &str = "https://huggingface.co/api/mod
 pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 
 /// The path GitHub Enterprise serves its REST API under.
-const GITHUB_VERSIONED_REST: &str = "api/v3";
+const GITHUB_VERSIONED_REST: [&str; 2] = ["api", "v3"];
 
 /// Where GitHub's GraphQL API answers for the REST `origin`: beside REST on
 /// GitHub, and at `api/graphql` on an Enterprise install that serves REST
 /// under `api/v3`.
 pub fn github_graphql_url(origin: &reqwest::Url) -> Option<reqwest::Url> {
-    let versioned = origin
-        .path()
-        .trim_end_matches('/')
-        .ends_with(GITHUB_VERSIONED_REST);
+    let segments: Vec<&str> = origin
+        .path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
+        .unwrap_or_default();
+    let versioned = segments.ends_with(&GITHUB_VERSIONED_REST);
     let base = match origin.path().ends_with('/') {
         true => origin.clone(),
         false => reqwest::Url::parse(&format!("{origin}/")).ok()?,

@@ -5,7 +5,10 @@ import {
   pullRequestKind,
   pullRequestName,
   pullRequestTitle,
+  READ_ONLY_HINT,
+  UNCREDENTIALED_HINT,
 } from '../utils/pullRequests';
+import { MenuIcon } from './MenuIcon';
 import { PullRequestStatusIcon } from './PullRequestStatusIcon';
 
 export interface PullRequestItemProps {
@@ -13,18 +16,7 @@ export interface PullRequestItemProps {
   busy: boolean;
   onChange: (pullRequest: ChatPullRequest, change: PullRequestChange) => void;
   onViewChanges: (pullRequest: ChatPullRequest) => void;
-  onCopied: (pullRequest: ChatPullRequest) => void;
-}
-
-export const UNCREDENTIALED_HINT =
-  'Needs write access and a connected GitHub source for this repository.';
-
-function Icon({ path }: { path: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-      <path d={path} />
-    </svg>
-  );
+  onCopied: (pullRequest: ChatPullRequest, copied: boolean) => void;
 }
 
 const OPEN_ICON = 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5';
@@ -40,44 +32,48 @@ function menuItems({
   onViewChanges,
   onCopied,
 }: PullRequestItemProps): ActionMenuItem[] {
-  const { status, actionable, url } = pullRequest;
-  const uncredentialed = actionable ? undefined : UNCREDENTIALED_HINT;
+  const { status, writable, credentialed, url } = pullRequest;
+  const readOnly = writable ? undefined : READ_ONLY_HINT;
+  const uncredentialed = credentialed ? undefined : UNCREDENTIALED_HINT;
   const items: ActionMenuItem[] = [
     {
       label: 'Open on GitHub',
-      icon: <Icon path={OPEN_ICON} />,
+      icon: <MenuIcon path={OPEN_ICON} />,
       onSelect: () => window.open(url, '_blank', 'noopener,noreferrer'),
     },
     {
       label: 'Copy link',
-      icon: <Icon path={COPY_ICON} />,
+      icon: <MenuIcon path={COPY_ICON} />,
       onSelect: () => {
-        void navigator.clipboard?.writeText(url).then(() => onCopied(pullRequest));
+        void navigator.clipboard
+          ?.writeText(url)
+          .then(() => onCopied(pullRequest, true))
+          .catch(() => onCopied(pullRequest, false));
       },
     },
     {
       label: 'View changes',
-      icon: <Icon path={CHANGES_ICON} />,
-      disabled: !actionable,
+      icon: <MenuIcon path={CHANGES_ICON} />,
+      disabled: !credentialed,
       hint: uncredentialed,
       onSelect: () => onViewChanges(pullRequest),
     },
   ];
   if (status?.state === 'open') {
     const autoMerge = status.auto_merge;
-    const mergeHint = uncredentialed ?? autoMerge.unavailable ?? undefined;
-    const draftHint = uncredentialed ?? status.draft_unavailable ?? undefined;
+    const mergeHint = readOnly ?? uncredentialed ?? autoMerge.unavailable ?? undefined;
+    const draftHint = readOnly ?? uncredentialed ?? status.draft_unavailable ?? undefined;
     items.push(
       {
         label: autoMerge.enabled ? 'Cancel auto-merge' : 'Merge when ready',
-        icon: <Icon path={MERGE_ICON} />,
+        icon: <MenuIcon path={MERGE_ICON} />,
         disabled: Boolean(mergeHint),
         hint: mergeHint,
         onSelect: () => onChange(pullRequest, { auto_merge: !autoMerge.enabled }),
       },
       {
         label: status.draft ? 'Ready for review' : 'Convert to draft',
-        icon: <Icon path={DRAFT_ICON} />,
+        icon: <MenuIcon path={DRAFT_ICON} />,
         disabled: Boolean(draftHint),
         hint: draftHint,
         onSelect: () => onChange(pullRequest, { draft: !status.draft }),
@@ -86,8 +82,10 @@ function menuItems({
   }
   items.push({
     label: 'Dismiss',
-    icon: <Icon path={DISMISS_ICON} />,
+    icon: <MenuIcon path={DISMISS_ICON} />,
     destructive: true,
+    disabled: !writable,
+    hint: readOnly,
     onSelect: () => onChange(pullRequest, { dismissed: true }),
   });
   return items;
@@ -100,7 +98,7 @@ export function PullRequestItem(props: PullRequestItemProps) {
   const merge = mergeReading(pullRequest.status);
 
   return (
-    <li className="chat-change" aria-busy={busy || undefined}>
+    <li className="chat-change" data-pull-request={pullRequest.id} aria-busy={busy || undefined}>
       <PullRequestStatusIcon kind={pullRequestKind(pullRequest)} />
       <div className="chat-change-body">
         <a

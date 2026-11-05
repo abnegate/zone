@@ -1469,7 +1469,8 @@ describe('ChatsPage', () => {
           dismissed: false,
           created_at: '2026-11-05T10:00:00Z',
           status: null,
-          actionable: false,
+          writable: true,
+          credentialed: false,
         },
       ]);
       mockGetChat.mockResolvedValue({

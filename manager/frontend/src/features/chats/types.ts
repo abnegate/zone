@@ -521,7 +521,8 @@ export interface ChatPullRequest {
   dismissed: boolean;
   created_at: string;
   status: PullRequestStatus | null;
-  actionable: boolean;
+  writable: boolean;
+  credentialed: boolean;
 }
 
 export interface PullRequestChange {

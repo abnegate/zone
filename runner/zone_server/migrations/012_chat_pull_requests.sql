@@ -21,3 +21,6 @@ CREATE TABLE public.chat_pull_requests (
 
 CREATE UNIQUE INDEX chat_pull_requests_chat_pull_request_key
     ON public.chat_pull_requests USING btree (chat_id, provider, lower(owner), lower(repo), number);
+
+CREATE INDEX chat_pull_requests_source_id_idx
+    ON public.chat_pull_requests USING btree (source_id);

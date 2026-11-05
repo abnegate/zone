@@ -17,13 +17,14 @@ pub struct PullRequestResponse {
     pub dismissed: bool,
     pub created_at: DateTime<Utc>,
     pub status: Option<Status>,
-    /// Whether the reader may change it on GitHub: they can write to the
-    /// workspace, and one of its sources holds a credential for it.
-    pub actionable: bool,
+    /// Whether the reader can write to the chat's workspace.
+    pub writable: bool,
+    /// Whether one of the workspace's sources holds a credential for it.
+    pub credentialed: bool,
 }
 
 impl PullRequestResponse {
-    pub fn new(tracked: Tracked, writer: bool) -> Self {
+    pub fn new(tracked: Tracked, writable: bool) -> Self {
         let Tracked {
             row,
             status,
@@ -43,7 +44,8 @@ impl PullRequestResponse {
             dismissed: row.dismissed_at.is_some(),
             created_at: row.created_at,
             status,
-            actionable: writer && credentialed,
+            writable,
+            credentialed,
         }
     }
 }

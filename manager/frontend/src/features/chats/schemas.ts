@@ -456,7 +456,7 @@ export const ChatSearchResponseSchema = z.object({
 
 export const PullRequestStatusSchema = z.object({
   title: z.string(),
-  state: z.enum(PULL_REQUEST_STATES).catch('open'),
+  state: z.enum(PULL_REQUEST_STATES),
   draft: z.boolean(),
   additions: z.number(),
   deletions: z.number(),
@@ -482,7 +482,8 @@ export const ChatPullRequestSchema = z.object({
   dismissed: z.boolean(),
   created_at: z.string(),
   status: PullRequestStatusSchema.nullable().catch(null),
-  actionable: z.boolean(),
+  writable: z.boolean(),
+  credentialed: z.boolean(),
 });
 
 export const ChatPullRequestsResponseSchema = z.object({

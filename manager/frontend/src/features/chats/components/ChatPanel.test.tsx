@@ -17,7 +17,8 @@ const PULL_REQUEST: ChatPullRequest = {
   dismissed: false,
   created_at: '2026-11-05T10:00:00Z',
   status: null,
-  actionable: false,
+  writable: true,
+  credentialed: false,
 };
 
 const IMAGE: GalleryItem = {
@@ -169,6 +170,9 @@ describe('ChatPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Hide changes and media' }));
 
     expect(screen.queryByRole('separator')).toBeNull();
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: /Show changes and media/ })
+    );
     expect(localStorage.getItem('zone:chat-panel:user-1:collapsed')).toBe('true');
     unmount();
     renderPanel({ media: [IMAGE] });
@@ -177,6 +181,9 @@ describe('ChatPanel', () => {
 
     fireEvent.click(rail);
     expect(separator()).toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'Hide changes and media' })
+    );
     expect(localStorage.getItem('zone:chat-panel:user-1:collapsed')).toBe('false');
   });
 
@@ -184,7 +191,7 @@ describe('ChatPanel', () => {
     renderPanel({ pullRequests: [PULL_REQUEST], media: [IMAGE] });
 
     const toggle = screen.getByRole('button', { name: /^Changes and media/ });
-    expect(toggle).toHaveTextContent('1 changes, 1 media');
+    expect(toggle).toHaveTextContent('1 change, 1 media item');
     fireEvent.click(toggle);
 
     const sheet = await screen.findByRole('dialog', { name: 'Changes and media' });

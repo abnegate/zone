@@ -60,7 +60,16 @@ pub async fn list(state: &AppState, workspace_id: Uuid, chat_id: Uuid) -> DbResu
 }
 
 /// `row` with what GitHub last said of it, asking again once that is stale.
+/// A fresh status was read with a credential, so only a stale one costs a
+/// credential lookup.
 pub async fn track(state: &AppState, workspace_id: Uuid, row: PullRequestRow) -> DbResult<Tracked> {
+    if let Some(cached) = state.pull_request_statuses().get(row.id) {
+        return Ok(Tracked {
+            row,
+            status: Some(cached),
+            credentialed: true,
+        });
+    }
     let Some(token) = token(state, workspace_id, &row).await? else {
         return Ok(Tracked {
             row,
@@ -68,18 +77,15 @@ pub async fn track(state: &AppState, workspace_id: Uuid, row: PullRequestRow) ->
             credentialed: false,
         });
     };
-    let status = match state.pull_request_statuses().get(row.id) {
-        Some(cached) => Some(cached),
-        None => match observed(state, &row, &token).await {
-            Ok(status) => {
-                remember(state, &row, &status).await;
-                Some(status)
-            }
-            Err(error) => {
-                tracing::warn!(pull_request = %row.id, %error, "could not read a chat's pull request from GitHub");
-                None
-            }
-        },
+    let status = match observed(state, &row, &token).await {
+        Ok(status) => {
+            remember(state, &row, &status).await;
+            Some(status)
+        }
+        Err(error) => {
+            tracing::warn!(pull_request = %row.id, %error, "could not read a chat's pull request from GitHub");
+            None
+        }
     };
     Ok(Tracked {
         row,

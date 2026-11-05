@@ -21,6 +21,7 @@ import {
 } from '../utils/panel';
 import { ChangesBox } from './ChangesBox';
 import { GalleryBox } from './GalleryBox';
+import { PanelIcon } from './PanelIcon';
 import './ChatPanel.css';
 
 export interface ChatPanelProps {
@@ -36,13 +37,8 @@ const RESIZING = 'chat-panel-resizing';
 /** The most of the chat's width the panel may take, leaving the rest to the transcript. */
 const MAX_SHARE = 0.5;
 
-function PanelIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d="M15 4v16" />
-    </svg>
-  );
+function counted(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
 }
 
 /**
@@ -61,9 +57,20 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
   const drag = useRef<{ startX: number; startWidth: number } | null>(null);
   const latest = useRef(width);
   const panelId = useId();
+  const rail = useRef<HTMLButtonElement>(null);
+  const hide = useRef<HTMLButtonElement>(null);
+  const toggled = useRef(false);
 
   useEffect(() => {
-    setWidth(readWidth(widthKey));
+    if (!toggled.current) return;
+    toggled.current = false;
+    (collapsed ? rail : hide).current?.focus();
+  }, [collapsed]);
+
+  useEffect(() => {
+    const stored = readWidth(widthKey);
+    latest.current = stored;
+    setWidth(stored);
     setCollapsed(readFlag(collapsedKey));
   }, [widthKey, collapsedKey]);
 
@@ -130,13 +137,14 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
   };
 
   const setHidden = (hidden: boolean) => {
+    toggled.current = true;
     setCollapsed(hidden);
     writeSetting(collapsedKey, String(hidden));
   };
 
   const summary = [
-    showsChanges ? `${changes.pullRequests.length} changes` : null,
-    showsGallery ? `${media.length} media` : null,
+    showsChanges ? counted(changes.pullRequests.length, 'change', 'changes') : null,
+    showsGallery ? counted(media.length, 'media item', 'media items') : null,
   ]
     .filter(Boolean)
     .join(', ');
@@ -184,6 +192,7 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
         <aside ref={panel} className="chat-panel is-collapsed" aria-label={PANEL_LABEL}>
           <button
             type="button"
+            ref={rail}
             className="chat-panel-rail"
             aria-expanded={false}
             aria-label={`Show ${PANEL_LABEL.toLowerCase()} (${summary})`}
@@ -220,6 +229,7 @@ export function ChatPanel({ chatId, userId, changes, media, onShowMessage }: Cha
             <span className="chat-panel-bar-title">{PANEL_LABEL}</span>
             <button
               type="button"
+              ref={hide}
               className="chat-panel-hide"
               aria-expanded={true}
               aria-controls={panelId}

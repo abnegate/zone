@@ -28,7 +28,8 @@ function pullRequest(status: Partial<PullRequestStatus> | null): ChatPullRequest
     dismissed: false,
     created_at: '2026-11-05T10:00:00Z',
     status: status === null ? null : { ...STATUS, ...status },
-    actionable: true,
+    writable: true,
+    credentialed: true,
   };
 }
 

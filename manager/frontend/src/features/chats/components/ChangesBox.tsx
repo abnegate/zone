@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { type ReactElement, useEffect, useRef, useState } from 'react';
 import type { ChatPullRequests } from '../hooks/useChatPullRequests';
 import type { ChatPullRequest } from '../types';
 import { panelKey } from '../utils/panel';
@@ -13,11 +13,29 @@ export interface ChangesBoxProps {
   changes: ChatPullRequests;
 }
 
-/** The pull requests this chat opened, newest last, with what can be done to each. */
-export function ChangesBox({ chatId, userId, changes }: ChangesBoxProps) {
+export function ChangesBox({ chatId, userId, changes }: ChangesBoxProps): ReactElement {
   const { pullRequests, dismissed, pending, error, change, undo } = changes;
   const [viewing, setViewing] = useState<ChatPullRequest | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const list = useRef<HTMLUListElement>(null);
+  const undoButton = useRef<HTMLButtonElement>(null);
+  const restoring = useRef<string | null>(null);
+  const dismissedId = dismissed?.id ?? null;
+
+  useEffect(() => {
+    if (dismissedId) undoButton.current?.focus();
+  }, [dismissedId]);
+
+  useEffect(() => {
+    const id = restoring.current;
+    if (!id || !pullRequests.some((pullRequest) => pullRequest.id === id)) return;
+    restoring.current = null;
+    const rows = list.current?.querySelectorAll<HTMLElement>('[data-pull-request]') ?? [];
+    Array.from(rows)
+      .find((row) => row.dataset.pullRequest === id)
+      ?.querySelector<HTMLElement>('.chat-change-title')
+      ?.focus();
+  }, [pullRequests]);
 
   return (
     <PanelBox
@@ -27,7 +45,7 @@ export function ChangesBox({ chatId, userId, changes }: ChangesBoxProps) {
       className="chat-changes"
     >
       {pullRequests.length > 0 && (
-        <ul className="chat-change-list">
+        <ul ref={list} className="chat-change-list">
           {pullRequests.map((pullRequest) => (
             <PullRequestItem
               key={pullRequest.id}
@@ -38,7 +56,13 @@ export function ChangesBox({ chatId, userId, changes }: ChangesBoxProps) {
                 void change(target, requested);
               }}
               onViewChanges={setViewing}
-              onCopied={(target) => setNotice(`Copied the link to ${pullRequestName(target)}.`)}
+              onCopied={(target, copied) =>
+                setNotice(
+                  copied
+                    ? `Copied the link to ${pullRequestName(target)}.`
+                    : `The link to ${pullRequestName(target)} could not be copied.`
+                )
+              }
             />
           ))}
         </ul>
@@ -47,7 +71,15 @@ export function ChangesBox({ chatId, userId, changes }: ChangesBoxProps) {
         {dismissed && (
           <p className="chat-changes-notice">
             Dismissed {pullRequestName(dismissed)}.{' '}
-            <button type="button" className="chat-changes-undo" onClick={() => void undo()}>
+            <button
+              ref={undoButton}
+              type="button"
+              className="chat-changes-undo"
+              onClick={() => {
+                restoring.current = dismissed.id;
+                void undo();
+              }}
+            >
               Undo
             </button>
           </p>

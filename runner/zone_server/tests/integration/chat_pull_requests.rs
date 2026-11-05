@@ -24,6 +24,7 @@ use zone_core::llm::AgentKind;
 use zone_server::config::{Config, ModelBackend};
 use zone_server::db::chat_pull_requests::{self, NewPullRequest};
 use zone_server::db::sources;
+use zone_server::db::workspace_members::{self, WorkspaceRole};
 use zone_server::services::chat::pull_request::PENDING_RELEASE;
 use zone_server::state::AppState;
 
@@ -471,7 +472,8 @@ async fn zones_own_tool_records_the_pull_request_it_opens_with_its_status() {
     assert_eq!(row["url"], link(&github, 12));
     assert_eq!(row["title"], TITLE);
     assert_eq!(row["dismissed"], false);
-    assert_eq!(row["actionable"], true);
+    assert_eq!(row["writable"], true);
+    assert_eq!(row["credentialed"], true);
     let status = &row["status"];
     assert_eq!(status["state"], "open", "{row}");
     assert_eq!(status["draft"], false);
@@ -539,7 +541,8 @@ async fn a_pull_request_a_cli_agent_opened_is_recorded_but_one_it_only_mentioned
     assert_eq!(urls, [opened.as_str()], "{listed}");
     assert_eq!(listed[0]["number"], 7);
     assert_eq!(listed[0]["status"], Value::Null, "no source can read it");
-    assert_eq!(listed[0]["actionable"], false);
+    assert_eq!(listed[0]["writable"], true);
+    assert_eq!(listed[0]["credentialed"], false);
 }
 
 #[tokio::test]
@@ -590,6 +593,66 @@ async fn another_workspaces_member_can_neither_see_nor_change_a_chats_pull_reque
             .unwrap_or_default()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn a_viewer_can_read_and_diff_a_chats_pull_requests_but_not_change_them() {
+    let github = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/12"))
+        .and(header("Accept", "application/vnd.github.diff"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n"))
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    let id = workspace.record(&link(&github, 12)).await;
+    let registered = workspace
+        .client
+        .post_json(
+            "/api/auth/register",
+            &json!({"email": test_email(), "password": test_password()}),
+        )
+        .await
+        .json_value();
+    let viewer = registered["access_token"]
+        .as_str()
+        .expect("a viewer token")
+        .to_string();
+    let user: Uuid = registered["user"]["id"]
+        .as_str()
+        .expect("a viewer id")
+        .parse()
+        .expect("a user id");
+    workspace_members::add_member(
+        workspace.state.db(),
+        workspace.workspace,
+        user,
+        WorkspaceRole::Viewer,
+        None,
+    )
+    .await
+    .expect("a viewer");
+
+    let listed = workspace.listed(&viewer).await;
+    assert_eq!(listed[0]["writable"], false, "{listed}");
+    assert_eq!(listed[0]["credentialed"], true, "{listed}");
+    let diff = workspace
+        .client
+        .get_auth(&format!("{}/diff", workspace.pull_request(id)), &viewer)
+        .await;
+    assert_eq!(diff.status, StatusCode::OK, "{}", diff.text());
+    let changed = workspace
+        .client
+        .patch_json_auth(
+            &workspace.pull_request(id),
+            &json!({"dismissed": true}),
+            &viewer,
+        )
+        .await;
+    assert_eq!(changed.status, StatusCode::FORBIDDEN, "{}", changed.text());
 }
 
 #[tokio::test]
