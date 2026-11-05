@@ -103,39 +103,35 @@ FROM oven/bun:1.4.0-slim@sha256:e0ee68d16ccb9927bf02aa7dd8fd4bf3369ee6d46da04faa
 
 FROM runtime-base AS fetch
 
-RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+RUN apt-get update && apt-get install -y --no-install-recommends unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /fetch
 
 # Agents start with only HOME and PATH, so RUSTUP_HOME cannot reach them and
 # rustup's proxies would look for a toolchain in each agent's own HOME. The
-# toolchain is moved out of rustup and put on PATH directly instead.
-FROM fetch AS rust
+# standalone toolchain needs no rustup and goes on PATH directly.
+FROM fetch AS rust-toolchain
 
 ARG TARGETARCH
-ARG RUSTUP_VERSION=1.29.3
-ARG RUSTUP_SHA256_AMD64=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
-ARG RUSTUP_SHA256_ARM64=9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282
 ARG RUST_VERSION=1.99.1
+ARG RUST_SHA256_AMD64=231fcae47ee950621374725b5fc3b5441d2fbda2955ac45dd7dc816d8876cfe7
+ARG RUST_SHA256_ARM64=a48fb1e853be56ce9b8e2751f5464dbd5e16440cd81e237920f3a5e7e806333e
 
 RUN set -eu; \
     case "$TARGETARCH" in \
-        amd64) triple=x86_64-unknown-linux-gnu; sha256=$RUSTUP_SHA256_AMD64 ;; \
-        arm64) triple=aarch64-unknown-linux-gnu; sha256=$RUSTUP_SHA256_ARM64 ;; \
+        amd64) triple=x86_64-unknown-linux-gnu; sha256=$RUST_SHA256_AMD64 ;; \
+        arm64) triple=aarch64-unknown-linux-gnu; sha256=$RUST_SHA256_ARM64 ;; \
         *) echo "No Rust toolchain for TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL --proto '=https' --retry 3 -o rustup-init \
-        "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$triple/rustup-init"; \
-    echo "$sha256  rustup-init" | sha256sum -c -; \
-    chmod 0755 rustup-init; \
-    RUSTUP_HOME=/fetch/rustup CARGO_HOME=/fetch/cargo ./rustup-init -y --no-modify-path \
-        --profile minimal --default-toolchain "$RUST_VERSION" \
-        --component rustfmt --component clippy; \
-    mv "/fetch/rustup/toolchains/$RUST_VERSION-$triple" /opt/rust; \
-    rm -rf /fetch/*
+    curl -fsSL --proto '=https' --retry 3 -o rust.tar.xz \
+        "https://static.rust-lang.org/dist/rust-$RUST_VERSION-$triple.tar.xz"; \
+    echo "$sha256  rust.tar.xz" | sha256sum -c -; \
+    tar --no-same-owner -xJf rust.tar.xz; \
+    "./rust-$RUST_VERSION-$triple/install.sh" --prefix=/opt/rust --disable-ldconfig \
+        --components="rustc,cargo,rust-std-$triple,rustfmt-preview,clippy-preview"
 
-FROM fetch AS go
+FROM fetch AS go-toolchain
 
 ARG TARGETARCH
 ARG GO_VERSION=1.27.3
@@ -233,7 +229,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ruby ruby-dev ruby-bundler \
     && rm -rf /var/lib/apt/lists/*
-COPY manager/rubygems/operating_system.rb /usr/local/lib/site_ruby/rubygems/defaults/operating_system.rb
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openjdk-21-jdk-headless \
@@ -243,10 +238,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         erlang-nox erlang-dev elixir \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=rust /opt/rust /opt/rust
-COPY --from=go /usr/local/go /usr/local/go
+COPY --from=rust-toolchain /opt/rust /opt/rust
+COPY --from=go-toolchain /usr/local/go /usr/local/go
 COPY --from=jvm /opt/jvm /opt/jvm
 COPY --from=binaries /opt/bin/ /usr/local/bin/
+COPY manager/rubygems/operating_system.rb /usr/local/lib/site_ruby/rubygems/defaults/operating_system.rb
 ENV PATH="$PATH:/opt/rust/bin:/usr/local/go/bin:/opt/jvm/gradle/bin:/opt/jvm/maven/bin:/opt/jvm/kotlinc/bin"
 
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
@@ -259,7 +255,7 @@ RUN groupadd --system zone \
     && printf 'prefix=/opt/tools\n' > /etc/npmrc \
     && printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf \
     && mkdir -p /etc/xdg \
-    && printf '[ "$(id -u)" -ne 0 ] && PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.gem/bin:$HOME/.config/composer/vendor/bin:$HOME/.deno/bin:/opt/tools/bin:$PATH"\n' > /etc/profile.d/tools.sh
+    && printf '[ "$(id -u)" -ne 0 ] && PATH="$PATH:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.gem/bin:$HOME/.config/composer/vendor/bin:$HOME/.deno/bin:/opt/tools/bin"\n' > /etc/profile.d/tools.sh
 
 ENV SHELL=/bin/bash
 # Docker's default seccomp profile blocks the user namespaces bubblewrap needs.

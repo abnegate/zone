@@ -12,7 +12,7 @@ reclaim() {
     fi
 }
 
-ZONE_PATH="/home/zone/.local/bin:/home/zone/.bun/bin:/home/zone/.cargo/bin:/home/zone/go/bin:/home/zone/.gem/bin:/home/zone/.config/composer/vendor/bin:/home/zone/.deno/bin:/opt/tools/bin:$PATH"
+ZONE_PATH="$PATH:/home/zone/.local/bin:/home/zone/.bun/bin:/home/zone/.cargo/bin:/home/zone/go/bin:/home/zone/.gem/bin:/home/zone/.config/composer/vendor/bin:/home/zone/.deno/bin:/opt/tools/bin"
 
 if [ "$(id -u)" -eq 0 ]; then
     reclaim /app/artifacts 0755
