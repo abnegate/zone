@@ -445,7 +445,7 @@ impl AgentKind {
     /// A reader for one turn of this agent's output.
     pub fn reader(self) -> Reader {
         match self {
-            Self::Claude => Reader::Claude(parser::claude::Reader::default()),
+            Self::Claude => Reader::Claude(Box::default()),
             Self::Codex => Reader::Codex,
         }
     }
@@ -454,7 +454,7 @@ impl AgentKind {
 /// One turn of an agent's output, read a line at a time.
 #[derive(Debug)]
 pub enum Reader {
-    Claude(parser::claude::Reader),
+    Claude(Box<parser::claude::Reader>),
     Codex,
 }
 

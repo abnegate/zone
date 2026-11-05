@@ -17,6 +17,7 @@ use crate::error::ServerError;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
+use crate::services::chat::driver::Driver;
 use crate::services::chat::session;
 use crate::services::model::Model;
 use crate::services::provider::Provider;
@@ -283,6 +284,10 @@ async fn chat_on_route(
         Some(route) => route.apply(chat.clone()),
         None => chat.clone(),
     };
+    let driver = route
+        .as_ref()
+        .and_then(|route| route.agent(state.config()))
+        .map(|agent| Driver::new(agent, &requested.model_name));
     let endpoint = route.map(Route::into_endpoint);
     let host = &state.config().ollama_host;
     let profile = match &endpoint {
@@ -309,6 +314,7 @@ async fn chat_on_route(
                 None,
                 session::Mode::Preview,
                 endpoint,
+                driver,
             )
             .await
             .ok()
@@ -1418,6 +1424,9 @@ pub async fn context(
     };
     let route = Route::for_chat(&state, &chat).await;
     let chat = route.apply(chat);
+    let driver = route
+        .agent(state.config())
+        .map(|agent| Driver::new(agent, &chat.model_name));
     let endpoint = match route.into_endpoint() {
         Ok(endpoint) => endpoint,
         Err(unusable) => return ServerError::Conflict(unusable.to_string()).into_response(),
@@ -1429,6 +1438,7 @@ pub async fn context(
         Some((&request.content, request.metadata.as_ref())),
         session::Mode::Preview,
         endpoint,
+        driver,
     )
     .await
     {

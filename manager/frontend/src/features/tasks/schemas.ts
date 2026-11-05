@@ -28,6 +28,7 @@ export const TaskSchema = z.object({
   workspace_id: z.string(),
   project_ids: z.array(z.string()),
   title: z.string(),
+  title_pending: z.boolean().optional().default(false),
   description: z.string(),
   acceptance_criteria: z.string().nullable(),
   status: TaskStatusSchema,
@@ -116,7 +117,7 @@ export const TaskRunLogSchema = z
 
 export const CreateTaskRequestSchema = z.object({
   project_ids: z.array(z.string()).optional(),
-  title: z.string().min(1, 'Title is required'),
+  title: z.string().min(1).optional(),
   description: z.string().min(1, 'Description is required'),
   acceptance_criteria: z.string().optional(),
   priority: z.number().optional(),

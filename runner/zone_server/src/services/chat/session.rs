@@ -25,6 +25,7 @@ use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::backend;
+use crate::services::chat::driver::Driver;
 use crate::services::chat::handover::Handover;
 use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
@@ -119,6 +120,10 @@ pub struct RunContext {
     pub artifacts: Option<(PathBuf, Uuid, Uuid)>,
     /// False only when the engine declared the model cannot read images.
     pub vision: bool,
+    /// The tokens a coding agent reported its last request on this chat
+    /// filled, its own prompt and tools included, which zone's estimate of
+    /// what it sends leaves out.
+    pub reported: Option<u64>,
 }
 
 impl RunContext {
@@ -147,6 +152,7 @@ impl RunContext {
             incomplete: false,
             artifacts: None,
             vision: true,
+            reported: None,
         }
     }
 
@@ -167,6 +173,12 @@ impl RunContext {
     }
 
     pub fn decorate(&self, usage: &mut ContextUsage) {
+        if let Some(reported) = self.reported.filter(|reported| *reported > usage.used) {
+            usage.used = reported;
+            usage.remaining = usage
+                .threshold
+                .map(|threshold| threshold.saturating_sub(reported));
+        }
         usage.incomplete |= self.incomplete;
         if let Some(reason) = &self.reason {
             usage.reason = Some(match usage.reason.take() {
@@ -319,6 +331,9 @@ pub struct Preparation {
     /// The chat's reasoning effort, which a coding agent the turn hands over to
     /// is told again.
     pub effort: ReasoningEffort,
+    /// The coding agent the turn runs on and the model the chat asked it for,
+    /// whose report of its window the chat keeps.
+    pub driver: Option<Driver>,
 }
 
 /// Read-only common builder. It never classifies intent, executes tools, searches, or summarizes.
@@ -330,6 +345,7 @@ pub async fn build(
     pending: Option<(&str, Option<&Value>)>,
     mode: Mode,
     endpoint: Endpoint,
+    driver: Option<Driver>,
 ) -> Result<Preparation, String> {
     let workspace = chat
         .workspace_id
@@ -358,18 +374,22 @@ pub async fn build(
         };
         tools.starting_in(directory).await
     };
-    let resolver = endpoint.capacity(state.config());
-    let requested = chat
-        .context_tokens
-        .and_then(|value| u64::try_from(value).ok())
-        .filter(|value| *value > 0);
     let capacity = async {
-        resolver
+        if let Some(driver) = &driver {
+            return driver.capacity(state.db(), chat.id).await;
+        }
+        let requested = chat
+            .context_tokens
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0);
+        let capacity = endpoint
+            .capacity(state.config())
             .resolve(&chat.model_name)
             .await
-            .with_request(requested)
+            .with_request(requested);
+        (capacity, None)
     };
-    let (history, capacity, tools) = tokio::join!(store.load(), capacity, catalog);
+    let (history, (capacity, reported), tools) = tokio::join!(store.load(), capacity, catalog);
     if matches!(mode, Mode::Generation(_)) {
         endpoint
             .model(&chat.model_name)
@@ -580,6 +600,7 @@ pub async fn build(
             chat.id,
         )),
         vision: sees_images(&chat.model_name, capacity.vision),
+        reported,
     };
     context.search(&SearchContext::new(&state.config().web_search));
     Ok(Preparation {
@@ -601,6 +622,7 @@ pub async fn build(
         handover: None,
         displaced: None,
         effort: chat.reasoning_effort,
+        driver,
     })
 }
 
@@ -1277,9 +1299,10 @@ mod tests {
             None,
             Mode::Generation(Generation::unrouted(LlmBackend::Http)),
             endpoint.clone(),
+            None,
         )
         .await;
-        let preview = build(&state, &chat, user, None, Mode::Preview, endpoint).await;
+        let preview = build(&state, &chat, user, None, Mode::Preview, endpoint, None).await;
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(organization.id)
             .execute(&pool)
@@ -1383,6 +1406,7 @@ mod tests {
                 CliSettings::default(),
             ))),
             endpoint.clone(),
+            None,
         )
         .await;
         let http = build(
@@ -1392,6 +1416,7 @@ mod tests {
             None,
             Mode::Generation(Generation::unrouted(LlmBackend::Http)),
             endpoint,
+            None,
         )
         .await;
         let answered = match &http {

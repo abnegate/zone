@@ -9,8 +9,10 @@ use uuid::Uuid;
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::llm::AgentKind;
+use zone_core::llm::provider::Occupancy;
 use zone_server::config::{AgentConfig, Config};
 use zone_server::db::agent_logins::{self, Insert};
+use zone_server::db::chats::occupancy::{self, Reported};
 use zone_server::services::model::UNSUPPORTED;
 
 use crate::common::{TestClient, TestResponse, agents, test_config, test_email, test_password};
@@ -1771,4 +1773,128 @@ async fn a_chosen_chat_is_held_to_models_that_can_chat() {
         "the refused model was stored: {read}"
     );
     assert_eq!(read["chat"]["model_name"], json!("gpt-4"), "{read}");
+}
+
+/// Records what a coding agent reported of `chat`'s last turn, as a finished turn does.
+async fn report(tenant: &Tenant, chat: &str, model: &str, window: u64, used: Option<u64>) {
+    let chat: Uuid = chat.parse().expect("a chat id");
+    occupancy::set(
+        tenant.client.state().db(),
+        chat,
+        &Reported {
+            agent: AgentKind::Claude,
+            model: model.to_string(),
+            occupancy: Occupancy::reported(Some(window), used).expect("a reported window"),
+        },
+    )
+    .await
+    .expect("the report is kept");
+}
+
+async fn previewed_context(tenant: &Tenant, chat: &str) -> Value {
+    let previewed = tenant.context(&tenant.owner.token, chat).await;
+    expect(
+        &previewed,
+        StatusCode::OK,
+        "the chat's context is previewed",
+    )["context"]
+        .clone()
+}
+
+#[tokio::test]
+async fn a_cli_chats_window_is_the_one_its_agent_reported_never_a_kept_context() {
+    let tenant = Tenant::new().await;
+    tenant
+        .save_organization_settings(json!({ "provider": "claude_code" }))
+        .await;
+    let created = tenant
+        .create_chat(
+            &tenant.owner.token,
+            json!({ "model_name": "sonnet", "context_tokens": 8192 }),
+        )
+        .await;
+    let chat = expect(
+        &created,
+        StatusCode::CREATED,
+        "a Claude Code chat is created",
+    )["chat"]["id"]
+        .as_str()
+        .expect("the created chat's id")
+        .to_string();
+
+    let fresh = previewed_context(&tenant, &chat).await;
+    assert_eq!(
+        fresh["limit"],
+        Value::Null,
+        "a fresh CLI chat has no window until its agent reports one, not the 8192 it kept: {fresh}"
+    );
+    assert_eq!(fresh["source"], json!("unknown"), "{fresh}");
+
+    report(&tenant, &chat, "sonnet", 200_000, Some(18_400)).await;
+
+    let reported = previewed_context(&tenant, &chat).await;
+    assert_eq!(reported["limit"], json!(200_000), "{reported}");
+    assert_eq!(reported["source"], json!("runtime"), "{reported}");
+    assert!(
+        reported["used"].as_u64().expect("a count of used tokens") >= 18_400,
+        "the agent's own count of its last request is the floor of what is used: {reported}"
+    );
+
+    let read = tenant.get_chat(&tenant.owner.token, &chat).await;
+    let read = expect(&read, StatusCode::OK, "the chat opens");
+    assert_eq!(
+        read["chat"]["context"]["limit"],
+        json!(200_000),
+        "a reloaded chat shows the reported window: {read}"
+    );
+
+    report(&tenant, &chat, "opus", 1_000_000, None).await;
+    let another = previewed_context(&tenant, &chat).await;
+    assert_eq!(
+        another["limit"],
+        Value::Null,
+        "a window reported for another model is not this model's: {another}"
+    );
+}
+
+#[tokio::test]
+async fn a_self_hosted_chat_measures_its_kept_window_through_its_endpoint() {
+    let tenant = Tenant::new().await;
+    let created = tenant
+        .create_chat(&tenant.owner.token, json!({ "context_tokens": 8192 }))
+        .await;
+    let chat = expect(
+        &created,
+        StatusCode::CREATED,
+        "a Self-Hosted chat is created",
+    )["chat"]["id"]
+        .as_str()
+        .expect("the created chat's id")
+        .to_string();
+    report(&tenant, &chat, "gpt-4", 200_000, Some(18_400)).await;
+
+    let following = previewed_context(&tenant, &chat).await;
+    assert_eq!(following["limit"], json!(8192), "{following}");
+    assert_eq!(following["source"], json!("configured"), "{following}");
+
+    let chosen = tenant
+        .choose(
+            &tenant.owner.token,
+            &chat,
+            json!({ "provider": "self_hosted", "model": "gpt-4" }),
+        )
+        .await;
+    expect(
+        &chosen,
+        StatusCode::OK,
+        "the chat chooses Self-Hosted by name",
+    );
+
+    let named = previewed_context(&tenant, &chat).await;
+    assert_eq!(
+        named["limit"],
+        json!(8192),
+        "the same self-hosted endpoint chosen by name keeps the chat's window: {named}"
+    );
+    assert_eq!(named["source"], json!("configured"), "{named}");
 }

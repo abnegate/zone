@@ -1,8 +1,9 @@
 import type { WizardStep } from '@zone/ui';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Wizard } from '../../../components';
 import { getErrors } from '../../../validation';
 import { getSourceById, initializeFormState, sourceRegistry } from '../config';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 import { useSourceKinds } from '../hooks/useSourceKinds';
 import { CreateSourceRequestSchema } from '../schemas';
 import type { CreateSourceRequest, Source, SourceType } from '../types';
@@ -11,9 +12,11 @@ import { FormFieldsRenderer, withCredentialField } from './FormFields';
 interface CreateSourceWizardProps {
   isOpen: boolean;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (source: Source) => void;
   createSource: (request: CreateSourceRequest) => Promise<Source>;
 }
+
+function keepOpen(): void {}
 
 const WIZARD_STEPS: WizardStep[] = [
   {
@@ -50,6 +53,8 @@ export function CreateSourceWizard({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const dialog = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialog, isOpen);
 
   const currentSource = getSourceById(sourceType);
   const serverKinds = useSourceKinds(isOpen);
@@ -144,8 +149,8 @@ export function CreateSourceWizard({
     setError(null);
 
     try {
-      await createSource(request);
-      onCreated();
+      const source = await createSource(request);
+      onCreated(source);
       handleClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create source');
@@ -269,8 +274,13 @@ export function CreateSourceWizard({
 
   return (
     <Wizard
+      ref={dialog}
+      tabIndex={-1}
+      // Every Wizard titles itself with the same element id, so a wizard opened over another names itself
+      aria-labelledby={undefined}
+      aria-label="Add Source"
       isOpen={isOpen}
-      onClose={handleClose}
+      onClose={loading ? keepOpen : handleClose}
       title="Add Source"
       subtitle="Connect a repository, calendar, email, or other data source"
       size="lg"

@@ -20,6 +20,7 @@ import type {
   ChatProviders,
   ChatSearchResult,
   ChatWithMessages,
+  ContextUsage,
   Message,
   ReasoningEffort,
   UpdateChatRequest,
@@ -41,6 +42,7 @@ const mockSetChatSources = mock();
 const mockGetChatProviders = mock();
 const mockSetChatProvider = mock();
 const mockGetWorkspaceChatProviders = mock();
+const mockPreviewContext = mock();
 const mockWsSend = mock();
 const mockWsClose = mock();
 
@@ -79,6 +81,7 @@ mock.module('../../../api/chats', () => ({
     getChatProviders: mockGetChatProviders,
     setChatProvider: mockSetChatProvider,
     getWorkspaceChatProviders: mockGetWorkspaceChatProviders,
+    previewContext: mockPreviewContext,
     setGetAccessToken: mock(),
     getMessages: mock(),
     updateChat: mockUpdateChat,
@@ -468,6 +471,8 @@ describe('ChatsPage', () => {
     mockGetChatProviders.mockReset();
     mockSetChatProvider.mockReset();
     mockGetChatProviders.mockResolvedValue(chatProviders());
+    mockPreviewContext.mockReset();
+    mockPreviewContext.mockRejectedValue(new Error('Context preview unavailable'));
     mockGetWorkspaceChatProviders.mockReset();
     mockGetWorkspaceChatProviders.mockResolvedValue({
       default: selfHostedOffer,
@@ -3197,7 +3202,7 @@ describe('ChatsPage', () => {
       const trigger = screen.getByTestId('agent-permissions');
       expect(trigger).toHaveAttribute(
         'aria-label',
-        'Agent permissions: auto-approve on, Zone tools only off'
+        'Agent permissions: auto-approve on, Host tools on (Zone tools only off)'
       );
       expect(
         [...trigger.querySelectorAll('.agent-permission-chip')].map((chip) => chip.textContent)
@@ -3230,13 +3235,32 @@ describe('ChatsPage', () => {
         'aria-label',
         'Agent permissions: auto-approve off, Zone tools only on'
       );
-      expect(trigger).toHaveTextContent('Ask first');
+      expect(trigger).toHaveTextContent('Permissions');
       expect(trigger).not.toHaveTextContent('Host tools');
 
       fireEvent.click(trigger);
       expect(screen.getByTestId('agent-sandbox-toggle')).not.toHaveClass(
         'agent-permission--warning'
       );
+    });
+
+    it.each([
+      { auto_approve: false, agent_sandboxed: true },
+      { auto_approve: true, agent_sandboxed: true },
+      { auto_approve: false, agent_sandboxed: false },
+      { auto_approve: true, agent_sandboxed: false },
+    ])('names every visible permissions chip in the trigger label (%o)', async (permissions) => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+      await openHeader({ agent_enabled: true, ...permissions });
+      const trigger = screen.getByTestId('agent-permissions');
+      const name = trigger.getAttribute('aria-label')?.toLowerCase() ?? '';
+      const chips = [...trigger.querySelectorAll('.agent-permission-chip-label')].map(
+        (chip) => chip.textContent?.toLowerCase() ?? ''
+      );
+      expect(chips.length).toBe(permissions.agent_sandboxed ? 1 : 2);
+      for (const chip of chips) {
+        expect(name).toContain(chip);
+      }
     });
 
     it('offers no permissions while agent mode is off', async () => {
@@ -3731,6 +3755,105 @@ describe('ChatsPage', () => {
       await openChat({ context_tokens: 32768 });
       await screen.findByTestId('chat-provider-model');
       expect(screen.getByTestId('chat-provider')).toHaveTextContent('Default');
+      expect(screen.queryByTestId('context-tokens')).not.toBeInTheDocument();
+    });
+
+    it('lets a chat on a chosen Self-Hosted local model change its context size', async () => {
+      const local = providerOffer({
+        models: [{ name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS }],
+      });
+      const chosen = {
+        model_name: 'auto',
+        provider: 'self_hosted' as const,
+        provider_model: 'llama2',
+      };
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(local, 'llama2') })
+      );
+      mockClient.updateChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        ...chosen,
+        context_tokens: 8192,
+      });
+      await openChat({ ...chosen, context_tokens: 32768 });
+
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      expect(badge()).toHaveTextContent('Self-Hosted·llama2');
+      chooseSelectOption('context-tokens', '8K tokens');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 8192 })
+      );
+    });
+
+    const runtimeWindow = (model: string): ContextUsage => ({
+      model,
+      used: 1200,
+      limit: 200_000,
+      reserved: 0,
+      threshold: null,
+      remaining: null,
+      estimated: false,
+      incomplete: false,
+      source: 'runtime',
+      status: 'ready',
+      breakdown: {
+        instructions: 0,
+        conversation: 1200,
+        tools: 0,
+        results: 0,
+        summary: 0,
+        attachments: 0,
+        overhead: 0,
+      },
+      revision: 1,
+      compacted_messages: 0,
+      updated_at: '2024-01-01T00:00:00Z',
+    });
+
+    const meter = () => document.querySelector('.context-usage-toggle');
+
+    it("meters a Claude Code chat by the CLI's runtime window, not a stale local size", async () => {
+      listedModels = [...instanceModels, { name: 'sonnet', size: 1, modified_at: '' }];
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(claudeOffer, 'sonnet') })
+      );
+      mockPreviewContext.mockResolvedValue(runtimeWindow('sonnet'));
+      await openChat({
+        model_name: 'sonnet',
+        provider: 'claude_code',
+        provider_model: 'sonnet',
+        context_tokens: 8192,
+        context: runtimeWindow('sonnet'),
+      });
+
+      await waitFor(() => expect(badge()).toHaveTextContent('Claude Code·Sonnet'));
+      expect(meter()).toHaveTextContent('1.2k / 200K');
+      await waitFor(() => expect(mockPreviewContext).toHaveBeenCalled());
+      expect(meter()).toHaveTextContent('1.2k / 200K');
+      expect(screen.queryByTestId('context-tokens')).not.toBeInTheDocument();
+    });
+
+    it("meters a Codex default chat by the CLI's runtime window while its providers cannot load", async () => {
+      mockGetWorkspaceChatProviders.mockResolvedValue({
+        default: codexOffer,
+        providers: [selfHostedOffer, codexOffer],
+      });
+      listedModels = [...instanceModels, { name: 'gpt-5.5', size: 1, modified_at: '' }];
+      mockGetChatProviders.mockRejectedValue(new Error('Failed to load AI providers: 502'));
+      mockPreviewContext.mockResolvedValue(runtimeWindow('gpt-5.5'));
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'gpt-5.5',
+        context_tokens: 8192,
+        context: runtimeWindow('gpt-5.5'),
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByTestId('chat-providers-error');
+      await waitFor(() => expect(mockPreviewContext).toHaveBeenCalled());
+
+      await waitFor(() => expect(meter()).toHaveTextContent('1.2k / 200K'));
       expect(screen.queryByTestId('context-tokens')).not.toBeInTheDocument();
     });
 

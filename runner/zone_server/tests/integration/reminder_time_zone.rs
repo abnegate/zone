@@ -570,6 +570,7 @@ async fn the_session_context_states_the_person_s_own_zone() {
         Some(("When is it?", None)),
         Mode::Preview,
         route.endpoint().expect("a usable route").clone(),
+        None,
     )
     .await
     .expect("the chat previews");

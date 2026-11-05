@@ -25,7 +25,7 @@ const WIZARD_STEPS: WizardStep[] = [
   {
     id: 'details',
     title: 'Task Details',
-    description: 'Title and description',
+    description: 'Description and title',
   },
   {
     id: 'settings',
@@ -75,10 +75,10 @@ export function CreateTaskWizard({
       return !!projectId;
     }
     if (currentStep === 1) {
-      return title.trim().length > 0 && description.trim().length > 0;
+      return description.trim().length > 0;
     }
     return true;
-  }, [currentStep, projectId, title, description]);
+  }, [currentStep, projectId, description]);
 
   const handleClose = useCallback(() => {
     setCurrentStep(0);
@@ -98,12 +98,14 @@ export function CreateTaskWizard({
   const handleComplete = useCallback(async () => {
     const request: CreateTaskRequest = {
       project_ids: projectId ? [projectId] : [],
-      title: title.trim(),
       description: description.trim(),
       priority,
       is_agentic: isAgentic,
       require_plan_approval: requirePlanApproval,
     };
+    if (title.trim()) {
+      request.title = title.trim();
+    }
     if (criteria.trim()) {
       request.acceptance_criteria = criteria.trim();
     }
@@ -189,10 +191,16 @@ export function CreateTaskWizard({
               Describe what needs to be done. Be specific about the task requirements.
             </p>
             <div className="form-group">
-              <label htmlFor="task-title">Title</label>
+              <label htmlFor="task-title">
+                Title
+                <span className="label-optional">optional</span>
+              </label>
               <input
                 type="text"
                 id="task-title"
+                aria-describedby={
+                  fieldErrors.title ? 'task-title-hint task-title-error' : 'task-title-hint'
+                }
                 value={title}
                 onChange={(e) => {
                   setTitle(e.target.value);
@@ -206,7 +214,14 @@ export function CreateTaskWizard({
                 placeholder="What needs to be done?"
                 className={fieldErrors.title ? 'input-error' : ''}
               />
-              {fieldErrors.title && <span className="field-error">{fieldErrors.title}</span>}
+              <span id="task-title-hint" className="form-hint">
+                Leave it blank to have one generated from the description.
+              </span>
+              {fieldErrors.title && (
+                <span id="task-title-error" className="field-error">
+                  {fieldErrors.title}
+                </span>
+              )}
             </div>
             <div className="form-group">
               <label htmlFor="task-description">Description</label>

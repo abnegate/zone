@@ -9,9 +9,11 @@ const chips = (container: HTMLElement) =>
   }));
 
 describe('AgentPermissionSummary', () => {
-  it('says the agent asks first when nothing is loosened, so the trigger is never bare', () => {
+  it('names the control when nothing is loosened, so the trigger is never bare', () => {
     const { container } = render(<AgentPermissionSummary autoApproved={false} hostTools={false} />);
-    expect(chips(container)).toEqual([{ text: 'Ask first', kind: 'agent-permission-chip--ask' }]);
+    expect(chips(container)).toEqual([
+      { text: 'Permissions', kind: 'agent-permission-chip--neutral' },
+    ]);
   });
 
   it('names auto-approve on its own chip', () => {
@@ -24,7 +26,7 @@ describe('AgentPermissionSummary', () => {
   it('flags host tools as a warning chip apart from the approval state', () => {
     const { container } = render(<AgentPermissionSummary autoApproved={false} hostTools />);
     expect(chips(container)).toEqual([
-      { text: 'Ask first', kind: 'agent-permission-chip--ask' },
+      { text: 'Permissions', kind: 'agent-permission-chip--neutral' },
       { text: 'Host tools', kind: 'agent-permission-chip--host' },
     ]);
   });

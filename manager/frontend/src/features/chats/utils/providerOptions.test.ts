@@ -12,6 +12,7 @@ import {
   modelChoices,
   modelSelectOptions,
   offersAgentOn,
+  offersContextOn,
   providerChoices,
   reasoningOptions,
   selectionModel,
@@ -87,6 +88,42 @@ describe('offersAgentOn', () => {
   it('offers Agent when the installed models do not describe the provider', () => {
     expect(offersAgentOn(offer({ provider: 'openai' }), null, 'gemma3')).toBe(true);
     expect(offersAgentOn(offer({ provider: 'openai' }), null, 'auto')).toBe(true);
+  });
+});
+
+describe('offersContextOn', () => {
+  const installed = [
+    { name: 'qwen3:latest', size: 4_000_000_000, details: { context_length: 40_960 } },
+    { name: 'gpt-4o-mini', size: 0 },
+    { name: 'sonnet', size: 1 },
+  ];
+
+  it("offers context for an installed local model on the workspace's own self-hosted endpoint", () => {
+    expect(offersContextOn('self_hosted', 'self_hosted', installed, 'qwen3')).toBe(true);
+    expect(offersContextOn('self_hosted', 'self_hosted', installed, ' qwen3:latest ')).toBe(true);
+  });
+
+  it('offers no context for Automatic, a blank name or a model the instance does not run', () => {
+    expect(offersContextOn('self_hosted', 'self_hosted', installed, 'auto')).toBe(false);
+    expect(offersContextOn('self_hosted', 'self_hosted', installed, '  ')).toBe(false);
+    expect(offersContextOn('self_hosted', 'self_hosted', installed, 'gpt-4o-mini')).toBe(false);
+    expect(offersContextOn('self_hosted', 'self_hosted', installed, 'mistral')).toBe(false);
+  });
+
+  it('offers no context on an agent cli even for a name the instance has installed', () => {
+    expect(offersContextOn('claude_code', 'claude_code', installed, 'sonnet')).toBe(false);
+    expect(offersContextOn('codex', 'self_hosted', installed, 'qwen3')).toBe(false);
+  });
+
+  it('offers no context on any other provider, or on self-hosted when the workspace defaults elsewhere', () => {
+    expect(offersContextOn('openai', 'openai', installed, 'qwen3')).toBe(false);
+    expect(offersContextOn('openai', 'self_hosted', installed, 'qwen3')).toBe(false);
+    expect(offersContextOn('self_hosted', 'openai', installed, 'qwen3')).toBe(false);
+  });
+
+  it('offers no context while the provider or the workspace default is unknown', () => {
+    expect(offersContextOn(null, 'self_hosted', installed, 'qwen3')).toBe(false);
+    expect(offersContextOn('self_hosted', null, installed, 'qwen3')).toBe(false);
   });
 });
 

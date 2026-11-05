@@ -18,6 +18,7 @@ mod db_tests {
             workspace_id: Uuid::new_v4(),
             project_ids: vec![Uuid::new_v4()],
             title: "Test".to_string(),
+            title_pending: false,
             description: "Test desc".to_string(),
             acceptance_criteria: None,
             status: "created".to_string(),

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, title, description, acceptance_criteria, status, priority,\n               model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n               workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n               pr_url, branch_name, pr_status, pr_created_at, created_by\n        FROM tasks\n        WHERE id = $1\n        ",
+  "query": "\n        UPDATE tasks\n        SET status = 'queued',\n            queued_at = NOW(),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending\n        ",
   "describe": {
     "columns": [
       {
@@ -277,6 +277,17 @@
             "name": "created_by"
           }
         }
+      },
+      {
+        "ordinal": 25,
+        "name": "title_pending",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "title_pending"
+          }
+        }
       }
     ],
     "parameters": {
@@ -309,8 +320,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "6ae0bdba3384ca57f8f12ba5cf25e7138a1c2fbd8d4b10a7435849f97eb978eb"
+  "hash": "50f7ea503d94c77a3af6a920695c9408161a1ca308a7b50d2ffe78e6bc8fba32"
 }

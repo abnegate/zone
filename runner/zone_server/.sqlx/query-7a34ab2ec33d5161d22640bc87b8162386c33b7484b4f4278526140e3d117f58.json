@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                SELECT id, title, description, acceptance_criteria, status, priority,\n                       model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                       pr_url, branch_name, pr_status, pr_created_at, created_by\n                FROM tasks\n                WHERE workspace_id = $1 AND status = $2\n                ORDER BY created_at DESC\n                ",
+  "query": "\n                SELECT id, title, description, acceptance_criteria, status, priority,\n                       model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                       pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending\n                FROM tasks\n                WHERE workspace_id = $1\n                ORDER BY created_at DESC\n                ",
   "describe": {
     "columns": [
       {
@@ -277,12 +277,22 @@
             "name": "created_by"
           }
         }
+      },
+      {
+        "ordinal": 25,
+        "name": "title_pending",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "title_pending"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -310,8 +320,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "b8404887a4cd017ad91dea81f3de1cd07c2a285101eebcb40522efb2ed3a9c3a"
+  "hash": "7a34ab2ec33d5161d22640bc87b8162386c33b7484b4f4278526140e3d117f58"
 }

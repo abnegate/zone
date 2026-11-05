@@ -27,11 +27,13 @@ use tokio_tungstenite::connect_async;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+use zone_core::llm::provider::Occupancy;
 use zone_core::llm::{AgentKind, CliSettings, LlmBackend};
 use zone_server::agent::ASK_USER;
 use zone_server::agent::wait::WAIT_FOR;
 use zone_server::config::ModelBackend;
 use zone_server::db::chats;
+use zone_server::db::chats::occupancy;
 use zone_server::services::chat::session::{self, Mode};
 use zone_server::services::route::Route;
 
@@ -118,6 +120,39 @@ impl Agent {
 
     fn finish(&self) {
         std::fs::write(&self.release, "go").expect("releasing the agent");
+    }
+
+    /// Turns the stand-in into one that answers at once and reports its
+    /// model's window the way claude's stream does.
+    fn reporting(&self) {
+        let assistant = json!({
+            "type": "assistant",
+            "message": {
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": ANSWER}],
+                "usage": {
+                    "input_tokens": 3,
+                    "cache_creation_input_tokens": 120,
+                    "cache_read_input_tokens": 16_500,
+                    "output_tokens": 9,
+                },
+            },
+            "parent_tool_use_id": null,
+        });
+        let result = json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "modelUsage": {
+                "claude-sonnet-4-6": {"contextWindow": 200_000, "maxOutputTokens": 32_000},
+                "claude-fable-5-1": {"contextWindow": 1_000_000, "maxOutputTokens": 64_000},
+            },
+        });
+        std::fs::write(
+            &self.executable,
+            format!("#!/bin/sh\ncat > /dev/null\necho '{assistant}'\necho '{result}'\n"),
+        )
+        .expect("the reporting stand-in");
     }
 
     /// Turns the stand-in into one that forks a child of its own before it
@@ -768,6 +803,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
             CliSettings::default(),
         ))),
         route.endpoint().expect("a usable route").clone(),
+        None,
     )
     .await
     .expect("a turn on an agent is prepared");
@@ -778,6 +814,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         None,
         Mode::Generation(session::Generation::unrouted(LlmBackend::Http)),
         route.into_endpoint().expect("a usable route"),
+        None,
     )
     .await
     .expect("a turn on the endpoint is prepared");
@@ -819,6 +856,7 @@ async fn prompted_on(
         None,
         Mode::Generation(session::Generation::unrouted(backend)),
         route.into_endpoint().expect("a usable route"),
+        None,
     )
     .await
     .expect("the turn is prepared");
@@ -948,4 +986,44 @@ async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_
         harness.agent.finish();
         turn.await.expect("the turn ends");
     }
+}
+
+/// A finished agent turn keeps the window its agent reported for the chat's next turn, and the
+/// turn's last context frame already shows it.
+#[tokio::test]
+async fn a_cli_turn_keeps_the_window_its_agent_reported_and_shows_it_as_it_ends() {
+    let harness = Harness::start(false, true).await;
+    harness.agent.reporting();
+
+    let frames = harness
+        .turn("How large is your window?")
+        .await
+        .await
+        .expect("the turn ends");
+
+    let usage = &frames
+        .iter()
+        .rev()
+        .find(|frame| frame["type"] == "context")
+        .unwrap_or_else(|| panic!("no context frame in {frames:?}"))["usage"];
+    assert_eq!(usage["limit"], json!(200_000), "{usage}");
+    assert_eq!(usage["source"], json!("runtime"), "{usage}");
+    assert!(
+        usage["used"].as_u64().expect("a used count") >= 3 + 120 + 16_500 + 9,
+        "{usage}"
+    );
+
+    let kept = occupancy::get(&harness.pool, harness.chat)
+        .await
+        .expect("the chat's report is readable")
+        .expect("the turn kept its agent's report");
+    assert_eq!(kept.agent, AgentKind::Claude);
+    assert_eq!(kept.model, "sonnet");
+    assert_eq!(
+        kept.occupancy,
+        Occupancy {
+            window: 200_000,
+            used: Some(3 + 120 + 16_500 + 9),
+        }
+    );
 }

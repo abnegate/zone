@@ -4,6 +4,7 @@ use abnegate_llm::{Limit, ToolCall, Usage, Window};
 use abnegate_secret::sanitize;
 use serde_json::Value;
 
+use super::occupancy::Occupancy;
 use super::settings::Toolset;
 
 /// What separates two blocks of an agent's answer.
@@ -46,6 +47,8 @@ pub enum AgentEvent {
     /// The id of the session the agent runs this turn under, as it announced
     /// it: the one a later turn resumes.
     Session(String),
+    /// The model's context window and how much of it the turn filled.
+    Occupancy(Occupancy),
     Failed(String),
     Finished {
         finish_reason: Option<String>,

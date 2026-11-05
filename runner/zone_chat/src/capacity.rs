@@ -51,7 +51,21 @@ pub struct Capacity {
 }
 
 impl Capacity {
-    fn unknown(model: &str, reason: &str) -> Self {
+    /// The window the agent running `model` reported it ran in.
+    pub fn reported(model: &str, limit: u64) -> Self {
+        Self {
+            limit: Some(limit),
+            source: Source::Runtime,
+            ollama: None,
+            reasoning: false,
+            vision: None,
+            reason: None,
+            identity: model.into(),
+        }
+    }
+
+    /// No window known for `model`, and why.
+    pub fn unknown(model: &str, reason: &str) -> Self {
         Self {
             limit: None,
             source: Source::Unknown,

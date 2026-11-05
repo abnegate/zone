@@ -1,5 +1,7 @@
 import type { SelectOption } from '@zone/ui';
 import { isAgentProvider } from '../../settings/ai/options';
+import { AiProviderSchema } from '../../settings/workspace/schemas';
+import type { AiProvider } from '../../settings/workspace/types';
 import {
   type ChatProviderModel,
   type ChatProviderOffer,
@@ -9,7 +11,15 @@ import {
   type ReasoningEffort,
 } from '../provider';
 import type { Chat } from '../types';
-import { AUTO_MODEL, type ModelHints, modelLabel, offersAgentFor } from './modelOptions';
+import {
+  AUTO_MODEL,
+  findInstalledModel,
+  type LocalContextModel,
+  type ModelHints,
+  modelLabel,
+  offersAgentFor,
+  offersLocalContext,
+} from './modelOptions';
 
 export const DEFAULT_PROVIDER = 'default';
 
@@ -20,6 +30,8 @@ export const MODEL_PLACEHOLDER = 'Choose a model';
 export const MODEL_NAME_PLACEHOLDER = 'Type a model name';
 
 export const AUTO_EFFORT: ReasoningEffort = 'auto';
+
+const SELF_HOSTED: AiProvider = AiProviderSchema.enum.self_hosted;
 
 export function isAgentOffer(offer: ChatProviderOffer): boolean {
   return isAgentProvider(offer.provider);
@@ -33,6 +45,18 @@ export function offersAgentOn<T extends ModelHints & { name: string }>(
 ): boolean {
   if (offer !== null && isAgentOffer(offer)) return true;
   return installed === null || offersAgentFor(installed, model.trim() || AUTO_MODEL);
+}
+
+/** `installed` describes only the workspace's own provider, so context is offered only on it when self-hosted. Null is unknown. */
+export function offersContextOn<T extends LocalContextModel & { name: string }>(
+  provider: AiProvider | null,
+  workspace: AiProvider | null,
+  installed: T[],
+  model: string
+): boolean {
+  if (provider !== SELF_HOSTED || workspace !== SELF_HOSTED) return false;
+  const name = model.trim();
+  return name !== AUTO_MODEL && offersLocalContext(findInstalledModel(installed, name));
 }
 
 export function requestedModel(
