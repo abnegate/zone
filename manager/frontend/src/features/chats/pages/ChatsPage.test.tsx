@@ -4026,6 +4026,36 @@ describe('ChatsPage', () => {
       expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
     });
 
+    it('fits the context to a smaller model chosen on a self-hosted default', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const served = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+      await openChat({ model_name: 'llama2', context_tokens: 32768, reasoning_effort: 'high' });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockClient.updateChat.mockImplementation(async (_id: string, update: UpdateChatRequest) => ({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        reasoning_effort: 'high',
+        context_tokens: update.context_tokens ?? 32768,
+      }));
+
+      chooseSelectOption('chat-provider-model', 'tinyllama');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 4096 })
+      );
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { model_name: 'tinyllama' });
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(2);
+    });
+
     it('changes the model of a chat on a self-hosted default mid-chat', async () => {
       const served = providerOffer({
         models: [
@@ -4034,7 +4064,7 @@ describe('ChatsPage', () => {
         ],
       });
       mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
-      await openChat({ model_name: 'llama2', reasoning_effort: 'auto' });
+      await openChat({ model_name: 'llama2', reasoning_effort: 'high' });
       await screen.findByTestId('chat-provider-model');
       expect(optionNames('chat-provider-model')).toEqual([
         'Automatic',
@@ -4059,6 +4089,7 @@ describe('ChatsPage', () => {
       );
       await waitFor(() => expect(badge()).toHaveTextContent('qwen2.5:7b-instruct'));
       expect(mockSetChatProvider).not.toHaveBeenCalled();
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
     });
 
     it('hides reasoning for an agent model without efforts', async () => {

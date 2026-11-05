@@ -130,6 +130,7 @@ const NEW_CHAT_MODEL_REQUIRED = 'Choose a model for this provider.';
 const PROVIDER_EFFORT_RESET_FAILED =
   'AI provider changed, but its reasoning effort could not be reset';
 const MODEL_EFFORT_RESET_FAILED = 'Model changed, but its reasoning effort could not be reset';
+const MODEL_CONTEXT_RESET_FAILED = 'Model changed, but its context size could not be fitted to it';
 
 const failure = (prefix: string, error: unknown): string =>
   error instanceof Error ? `${prefix}: ${error.message}` : prefix;
@@ -703,9 +704,17 @@ export default function ChatsPage() {
     return true;
   };
 
+  const fitContext = async (tokens: number | null | undefined, model: string) => {
+    const native = findInstalledModel(models, model)?.details?.context_length;
+    if (tokens && native && tokens > native) {
+      await setContextTokensFn(defaultContextTokens(native));
+    }
+  };
+
   const handleProviderModel = async (name: string) => {
     if (!isAuthenticated || !displayedChat || !chatProviders) return;
     const chatId = displayedChat.id;
+    const contextTokens = displayedChat.context_tokens;
     setChatOperationError(null);
     markChanging(chatId, true);
     try {
@@ -719,6 +728,11 @@ export default function ChatsPage() {
       await settleEffort(effortsFor(chatProviders.default, name));
     } catch (error) {
       reportForChat(chatId, failure(MODEL_EFFORT_RESET_FAILED, error));
+    }
+    try {
+      await fitContext(contextTokens, name);
+    } catch (error) {
+      reportForChat(chatId, failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
       try {
         if (latestSelectedChatId.current === chatId) {
