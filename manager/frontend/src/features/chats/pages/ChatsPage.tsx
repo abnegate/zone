@@ -96,6 +96,7 @@ import {
   modelLabel,
   modelSelectOptions,
   offersAgent,
+  offersAgentOn,
   offersLocalContext,
   parseCharacterFile,
   parseCharacterText,
@@ -104,6 +105,7 @@ import {
   readChatGroupBy,
   readChatSort,
   reasoningOptions,
+  requestedModel,
   selectedContextTokens,
   shortModelName,
   sourceAttachment,
@@ -313,8 +315,19 @@ export default function ChatsPage() {
       message.role === 'user' && !automated(message.metadata) ? index : last,
     -1
   );
+  const chatListsModels =
+    !providerChosen ||
+    (chatProviders !== null && chatOffer?.provider === chatProviders.default.provider);
+  const chatModel = chosenSelection
+    ? (chosenSelection.model ?? AUTO_MODEL)
+    : displayedChat
+      ? requestedModel(displayedChat)
+      : AUTO_MODEL;
   const showAgent = displayedChat
-    ? agentChat || chatShowsAgent(displayedChat, installedForChat)
+    ? agentChat ||
+      chatShowsAgent(displayedChat) ||
+      (displayedChat.tools !== false &&
+        offersAgentOn(chatOffer, chatListsModels ? models : null, chatModel))
     : false;
   const showCharacter = displayedChat ? chatShowsCharacter(displayedChat, installedForChat) : false;
   const showReasoning = !displayedChat
@@ -341,12 +354,13 @@ export default function ChatsPage() {
   const autoNewChat = newChatModel === AUTO_MODEL;
   const newChatNamesModel = newChatOffer !== null && asksModelName(newChatOffer);
   const newChatNeedsModel = Boolean(newChatOffer?.requires_model) && !newChatModel.trim();
-  const showNewChatAgent =
-    newChatOffer !== null
-      ? isAgentOffer(newChatOffer)
-      : autoNewChat
-        ? models.some((model) => offersAgent(model))
-        : offersAgent(selectedNewModel);
+  const newChatShowsAgent = (offer: ChatProviderOffer | null, model: string): boolean =>
+    offersAgentOn(
+      offer,
+      offer === null || offer.provider === workspaceProviders?.default.provider ? models : null,
+      model
+    );
+  const showNewChatAgent = newChatShowsAgent(newChatOffer, newChatModel);
   const showNewChatReasoning = newChatEfforts
     ? newChatEfforts.length > 0
     : autoNewChat
@@ -482,9 +496,16 @@ export default function ChatsPage() {
     void refreshWorkspaceProviders();
   };
 
+  const keepNewChatAgent = (offer: ChatProviderOffer | null, model: string) => {
+    if (newChatShowsAgent(offer, model)) return;
+    setNewChatAgent(false);
+    setNewChatAutoApprove(false);
+  };
+
   const handleNewChatProvider = (provider: string) => {
     const offer = newChatOfferFor(provider);
     const model = offer?.requires_model ? '' : AUTO_MODEL;
+    keepNewChatAgent(offer, model);
     setNewChatProvider(provider);
     setNewChatModel(model);
     setNewChatReasoning(
@@ -498,16 +519,13 @@ export default function ChatsPage() {
 
   const handleNewChatModel = (name: string) => {
     setNewChatModel(name);
+    keepNewChatAgent(newChatOffer, name);
     if (newChatOffer) {
       setNewChatReasoning(keepEffort(newChatEffort, effortsFor(newChatOffer, name)));
       return;
     }
     const installed = findInstalledModel(models, name);
     const automatic = name === AUTO_MODEL;
-    if (!automatic && !offersAgent(installed)) {
-      setNewChatAgent(false);
-      setNewChatAutoApprove(false);
-    }
     if (!automatic && !chatShowsReasoning({}, installed)) {
       setNewChatReasoning(AUTO_EFFORT);
     }

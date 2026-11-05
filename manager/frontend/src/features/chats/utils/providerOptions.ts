@@ -9,7 +9,7 @@ import {
   type ReasoningEffort,
 } from '../provider';
 import type { Chat } from '../types';
-import { AUTO_MODEL, modelLabel } from './modelOptions';
+import { AUTO_MODEL, type ModelHints, modelLabel, offersAgentFor } from './modelOptions';
 
 export const DEFAULT_PROVIDER = 'default';
 
@@ -23,6 +23,16 @@ export const AUTO_EFFORT: ReasoningEffort = 'auto';
 
 export function isAgentOffer(offer: ChatProviderOffer): boolean {
   return isAgentProvider(offer.provider);
+}
+
+/** `installed` is null when the list does not describe the models `offer` runs. */
+export function offersAgentOn<T extends ModelHints & { name: string }>(
+  offer: ChatProviderOffer | null,
+  installed: T[] | null,
+  model: string
+): boolean {
+  if (offer !== null && isAgentOffer(offer)) return true;
+  return installed === null || offersAgentFor(installed, model.trim() || AUTO_MODEL);
 }
 
 export function requestedModel(

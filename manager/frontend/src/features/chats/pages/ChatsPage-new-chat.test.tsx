@@ -64,11 +64,23 @@ const openAi: ChatProviderOffer = {
 
 const offers = [selfHosted, openAi, claudeCode, codex];
 
+const toolModel = { name: 'llama3.2', size: 1, modified_at: '', completion: true, tools: true };
+const toollessModel = { name: 'gemma3', size: 1, modified_at: '', completion: true, tools: false };
+
+const instanceModels: ChatProviderOffer = {
+  ...selfHosted,
+  models: [
+    { name: 'llama3.2', label: 'llama3.2', efforts: HTTP_EFFORTS },
+    { name: 'gemma3', label: 'gemma3', efforts: HTTP_EFFORTS },
+  ],
+};
+
 const firstWorkspace = { id: 'ws-1', name: 'Test Workspace', organization_id: 'org-1' };
 const secondWorkspace = { id: 'ws-2', name: 'Second Workspace', organization_id: 'org-1' };
 
 let currentWorkspace = firstWorkspace;
 let modelsError: string | null = null;
+let installed = [toolModel];
 let workspaceProviders: WorkspaceChatProviders | null = null;
 let creation: Response;
 
@@ -76,7 +88,7 @@ Element.prototype.scrollIntoView = mock();
 
 mock.module('../../models', () => ({
   useModels: () => ({
-    models: [{ name: 'llama3.2', size: 1, modified_at: '', completion: true, tools: true }],
+    models: installed,
     loading: false,
     error: modelsError,
     refresh: mock(),
@@ -174,8 +186,11 @@ const openNewChat = async () => {
   return view;
 };
 
-const openNewChatWithProviders = async (fallback: ChatProviderOffer) => {
-  workspaceProviders = { default: fallback, providers: offers };
+const openNewChatWithProviders = async (
+  fallback: ChatProviderOffer,
+  providers: ChatProviderOffer[] = offers
+) => {
+  workspaceProviders = { default: fallback, providers };
   const view = await openNewChat();
   await screen.findByRole('combobox', { name: 'Provider' });
   return view;
@@ -206,6 +221,7 @@ describe('ChatsPage new chat dialog', () => {
   beforeEach(() => {
     currentWorkspace = firstWorkspace;
     modelsError = null;
+    installed = [toolModel];
     workspaceProviders = null;
     creation = Response.json({ success: false, error: REFUSAL }, { status: 409 });
     window.history.pushState({}, '', '/');
@@ -449,27 +465,117 @@ describe('ChatsPage new chat dialog', () => {
     expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Automatic');
   });
 
-  it('offers agent mode for an agent provider and by model capability otherwise', async () => {
+  it('offers agent mode and then auto-approve on a chosen Self-Hosted model that calls tools', async () => {
+    installed = [toolModel, toollessModel];
+    await openNewChatWithProviders(selfHosted, [instanceModels, openAi, claudeCode, codex]);
+
+    chooseSelect('Provider', 'Self-Hosted');
+    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+    chooseSelect('Select Model', 'llama3.2');
+    expect(screen.queryByLabelText('Auto-approve writes and commands')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Agent mode'));
+
+    expect(screen.getByLabelText('Auto-approve writes and commands')).toBeInTheDocument();
+  });
+
+  it('sends agent mode and auto-approve for a chosen Self-Hosted model', async () => {
+    await openNewChatWithProviders(selfHosted, [instanceModels, openAi, claudeCode, codex]);
+
+    chooseSelect('Provider', 'Self-Hosted');
+    chooseSelect('Select Model', 'llama3.2');
+    fireEvent.click(screen.getByLabelText('Agent mode'));
+    fireEvent.click(screen.getByLabelText('Auto-approve writes and commands'));
+
+    const body = await createdBody();
+    expect(body).toMatchObject({
+      provider: 'self_hosted',
+      provider_model: 'llama3.2',
+      agent_enabled: true,
+      auto_approve: true,
+    });
+  });
+
+  it('offers agent mode on OpenAI for a typed model zone has no details for', async () => {
     await openNewChatWithProviders(selfHosted);
 
     chooseSelect('Provider', 'OpenAI');
     fireEvent.change(screen.getByRole('textbox', { name: 'Model name' }), {
       target: { value: 'gpt-4o' },
     });
-    expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
-
-    chooseSelect('Provider', 'Codex');
     expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Agent mode'));
 
-    chooseSelect('Provider', 'Default (Self-Hosted)');
+    const body = await createdBody();
+    expect(body).toMatchObject({ provider: 'openai', agent_enabled: true, auto_approve: false });
+  });
+
+  it('hides agent mode for a chosen model known not to call tools and sends none', async () => {
+    installed = [toolModel, toollessModel];
+    await openNewChatWithProviders(selfHosted, [instanceModels, openAi, claudeCode, codex]);
+
+    chooseSelect('Provider', 'Self-Hosted');
+    chooseSelect('Select Model', 'llama3.2');
+    fireEvent.click(screen.getByLabelText('Agent mode'));
+    chooseSelect('Select Model', 'gemma3');
+
+    expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Auto-approve writes and commands')).not.toBeInTheDocument();
+
+    chooseSelect('Select Model', 'llama3.2');
+    expect(screen.getByLabelText('Agent mode')).not.toBeChecked();
+  });
+
+  it('offers agent mode on Claude Code whatever the instance can run', async () => {
+    installed = [toollessModel];
+    await openNewChatWithProviders(selfHosted);
+
+    expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
+    chooseSelect('Provider', 'Claude Code');
     expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
   });
 
-  it("does not offer agent mode on a chosen endpoint provider from the instance's models", async () => {
+  it('drops agent mode ticked on an agent provider when switching to one that cannot use it', async () => {
+    installed = [toollessModel];
     await openNewChatWithProviders(selfHosted);
 
+    chooseSelect('Provider', 'Claude Code');
+    fireEvent.click(screen.getByLabelText('Agent mode'));
+    fireEvent.click(screen.getByLabelText('Auto-approve writes and commands'));
     chooseSelect('Provider', 'Self-Hosted');
-    expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Automatic');
+
+    expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
+    chooseSelect('Provider', 'Codex');
+    expect(screen.getByLabelText('Agent mode')).not.toBeChecked();
+    fireEvent.click(screen.getByLabelText('Agent mode'));
+    expect(screen.getByLabelText('Auto-approve writes and commands')).not.toBeChecked();
+
+    const body = await createdBody();
+    expect(body).toMatchObject({ provider: 'codex', agent_enabled: true, auto_approve: false });
+  });
+
+  it('offers agent mode on OpenAI for a model the instance lists as unable to call tools', async () => {
+    installed = [toolModel, { ...toollessModel, name: 'gpt-4o' }];
+    await openNewChatWithProviders(selfHosted);
+
+    chooseSelect('Provider', 'OpenAI');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Model name' }), {
+      target: { value: 'gpt-4o' },
+    });
+
+    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+  });
+
+  it('reads a padded model name as the trimmed one it sends', async () => {
+    installed = [toolModel, toollessModel];
+    await openNewChatWithProviders(openAi);
+
+    chooseSelect('Provider', 'OpenAI');
+    const field = screen.getByRole('textbox', { name: 'Model name' });
+    fireEvent.change(field, { target: { value: 'llama3.2' } });
+    expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+    fireEvent.change(field, { target: { value: ' gemma3 ' } });
+
     expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
   });
 
