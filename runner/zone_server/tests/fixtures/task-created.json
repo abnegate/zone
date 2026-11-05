@@ -4,6 +4,7 @@
     "workspace_id": "00000000-0000-0000-0000-000000000002",
     "project_ids": [],
     "title": "Test task",
+    "title_pending": false,
     "description": "Test description",
     "acceptance_criteria": null,
     "status": "created",

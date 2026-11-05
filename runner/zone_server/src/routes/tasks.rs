@@ -13,6 +13,7 @@ use crate::agent::question::{self, Answer, Question};
 use crate::auth::AuthUser;
 use crate::db::{task_access, tasks, workspace_members};
 use crate::state::AppState;
+use crate::workers::titles;
 
 use super::common::{ErrorResponse, Timestamps};
 
@@ -29,6 +30,7 @@ pub struct TaskData {
     workspace_id: Uuid,
     project_ids: Vec<Uuid>,
     title: String,
+    title_pending: bool,
     description: String,
     acceptance_criteria: Option<String>,
     status: String,
@@ -65,6 +67,7 @@ impl From<tasks::TaskRow> for TaskData {
             workspace_id: row.workspace_id,
             project_ids: row.project_ids,
             title: row.title,
+            title_pending: row.title_pending,
             description: row.description,
             acceptance_criteria: row.acceptance_criteria,
             status: row.status,
@@ -243,7 +246,8 @@ pub struct ListTasksQuery {
 pub struct CreateTaskRequest {
     #[serde(default)]
     project_ids: Vec<Uuid>,
-    title: String,
+    /// Without one, the task is titled from its description.
+    title: Option<String>,
     description: String,
     acceptance_criteria: Option<String>,
     priority: Option<i32>,
@@ -397,13 +401,23 @@ pub async fn create(
         Ok(user_id) => user_id,
         Err(response) => return *response,
     };
+    let titled = request
+        .title
+        .as_deref()
+        .is_some_and(|title| !title.trim().is_empty());
+    if !titled && request.description.trim().is_empty() {
+        return *denied(
+            StatusCode::BAD_REQUEST,
+            "A task needs a title or a description",
+        );
+    }
     match tasks::create_task_authorized(
         state.db(),
         user_id,
         tasks::Create {
             workspace_id,
             project_ids: &request.project_ids,
-            title: &request.title,
+            title: request.title.as_deref(),
             description: &request.description,
             acceptance_criteria: request.acceptance_criteria.as_deref(),
             priority: request.priority,
@@ -416,6 +430,9 @@ pub async fn create(
     .await
     {
         Ok(tasks::Mutation::Applied(task)) => {
+            if task.title_pending {
+                titles::spawn_task(state.clone(), task.id);
+            }
             (StatusCode::CREATED, Json(TaskResponse::from(task))).into_response()
         }
         Ok(tasks::Mutation::NotFound) => *denied(
@@ -464,6 +481,13 @@ pub async fn update(
         Ok(user_id) => user_id,
         Err(response) => return *response,
     };
+    if req
+        .title
+        .as_deref()
+        .is_some_and(|title| title.trim().is_empty())
+    {
+        return *denied(StatusCode::BAD_REQUEST, "Title must not be blank");
+    }
     match tasks::update_task_authorized(
         state.db(),
         user_id,
@@ -725,6 +749,7 @@ mod tests {
                 vec![]
             },
             title: "Test task".into(),
+            title_pending: false,
             description: "Test description".into(),
             acceptance_criteria: populated.then(|| "Checks pass".into()),
             status: "created".into(),

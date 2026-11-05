@@ -320,7 +320,7 @@ async fn agentic_task_creation_rejects_foreign_projects_atomically() {
         owner.workspace,
         owner.user,
         StartTask {
-            title: "Foreign agentic task".to_owned(),
+            title: Some("Foreign agentic task".to_owned()),
             description: "Must not be created".to_owned(),
             acceptance_criteria: None,
             project_ids: vec![foreign_project],

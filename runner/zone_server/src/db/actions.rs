@@ -37,7 +37,7 @@ where
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Task {
-    pub title: String,
+    pub title: Option<String>,
     #[serde(default)]
     pub description: String,
     pub assignee_id: Option<Uuid>,
@@ -76,6 +76,8 @@ impl Status {
         }
     }
 }
+
+const UNTITLED_AND_UNDESCRIBED: &str = "Give the task a title or a description";
 
 pub fn invalid(message: &str) -> sqlx::Error {
     sqlx::Error::Protocol(message.to_owned())
@@ -118,16 +120,18 @@ pub async fn create_task(
     user_id: Uuid,
     input: Task,
 ) -> DbResult<Value> {
-    if input.title.trim().is_empty() {
-        return Err(invalid("Title must not be blank"));
+    let (title, title_pending) =
+        super::tasks::stored_title(input.title.as_deref(), &input.description);
+    if title_pending && input.description.trim().is_empty() {
+        return Err(invalid(UNTITLED_AND_UNDESCRIBED));
     }
     let mut transaction = pool.begin().await?;
     authorize(&mut transaction, workspace_id, user_id, true).await?;
     if let Some(assignee) = input.assignee_id {
         authorize(&mut transaction, workspace_id, assignee, false).await?;
     }
-    let result = sqlx::query_scalar("INSERT INTO tasks (workspace_id, title, description, assignee_id, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING to_jsonb(tasks.*)")
-        .bind(workspace_id).bind(input.title).bind(input.description).bind(input.assignee_id).bind(user_id).fetch_one(&mut *transaction).await?;
+    let result = sqlx::query_scalar("INSERT INTO tasks (workspace_id, title, description, assignee_id, created_by, title_pending) VALUES ($1, $2, $3, $4, $5, $6) RETURNING to_jsonb(tasks.*)")
+        .bind(workspace_id).bind(title).bind(input.description).bind(input.assignee_id).bind(user_id).bind(title_pending).fetch_one(&mut *transaction).await?;
     transaction.commit().await?;
     Ok(result)
 }
@@ -157,7 +161,7 @@ pub async fn update_task(
         authorize(&mut transaction, workspace_id, assignee, false).await?;
     }
     let status = input.status.as_ref().map(Status::as_str);
-    let result = sqlx::query_scalar("UPDATE tasks SET title = COALESCE($3, title), description = COALESCE($4, description), status = COALESCE($5, status), assignee_id = CASE WHEN $6 THEN $7 ELSE assignee_id END, priority = COALESCE($8, priority), started_at = CASE WHEN $5 = 'in_progress' THEN COALESCE(started_at, NOW()) ELSE started_at END, completed_at = CASE WHEN $5 = 'complete' THEN COALESCE(completed_at, NOW()) WHEN $5 IS NOT NULL THEN NULL ELSE completed_at END, updated_at = NOW() WHERE id = $1 AND workspace_id = $2 AND NOT is_agentic RETURNING to_jsonb(tasks.*)")
+    let result = sqlx::query_scalar("UPDATE tasks SET title = COALESCE($3, title), title_pending = title_pending AND $3::text IS NULL, description = COALESCE($4, description), status = COALESCE($5, status), assignee_id = CASE WHEN $6 THEN $7 ELSE assignee_id END, priority = COALESCE($8, priority), started_at = CASE WHEN $5 = 'in_progress' THEN COALESCE(started_at, NOW()) ELSE started_at END, completed_at = CASE WHEN $5 = 'complete' THEN COALESCE(completed_at, NOW()) WHEN $5 IS NOT NULL THEN NULL ELSE completed_at END, updated_at = NOW() WHERE id = $1 AND workspace_id = $2 AND NOT is_agentic RETURNING to_jsonb(tasks.*)")
         .bind(input.task_id).bind(workspace_id).bind(input.title).bind(input.description).bind(status).bind(input.assignee_id.is_some()).bind(input.assignee_id.flatten()).bind(input.priority).fetch_optional(&mut *transaction).await?;
     transaction.commit().await?;
     result.ok_or_else(|| invalid("Task not found or is managed by the task runner"))
@@ -264,7 +268,7 @@ pub async fn list_tasks(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartTask {
-    pub title: String,
+    pub title: Option<String>,
     #[serde(default)]
     pub description: String,
     pub acceptance_criteria: Option<String>,
@@ -293,9 +297,6 @@ pub async fn start_task(
     user_id: Uuid,
     input: StartTask,
 ) -> DbResult<Value> {
-    if input.title.trim().is_empty() {
-        return Err(invalid("Title must not be blank"));
-    }
     if input.description.trim().is_empty() {
         return Err(invalid("Description must not be blank"));
     }
@@ -311,7 +312,7 @@ pub async fn start_task(
         super::tasks::Create {
             workspace_id,
             project_ids: &input.project_ids,
-            title: input.title.trim(),
+            title: input.title.as_deref().map(str::trim),
             description: input.description.trim(),
             acceptance_criteria: input.acceptance_criteria.as_deref(),
             priority: input.priority,
@@ -584,7 +585,7 @@ mod tests {
             workspace,
             user,
             Task {
-                title: "Ship".into(),
+                title: Some("Ship".into()),
                 description: "Keep".into(),
                 assignee_id: Some(user),
             },
@@ -714,7 +715,7 @@ mod tests {
                 workspace,
                 user,
                 Task {
-                    title: "No".into(),
+                    title: Some("No".into()),
                     description: String::new(),
                     assignee_id: None
                 }
@@ -1903,7 +1904,7 @@ mod tests {
             super::super::tasks::Create {
                 workspace_id: workspace,
                 project_ids: &[],
-                title: "protected",
+                title: Some("protected"),
                 description: "",
                 acceptance_criteria: None,
                 priority: None,

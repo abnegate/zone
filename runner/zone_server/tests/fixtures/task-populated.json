@@ -6,6 +6,7 @@
       "00000000-0000-0000-0000-000000000003"
     ],
     "title": "Test task",
+    "title_pending": false,
     "description": "Test description",
     "acceptance_criteria": "Checks pass",
     "status": "created",
