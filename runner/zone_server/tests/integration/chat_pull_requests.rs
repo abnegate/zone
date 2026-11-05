@@ -492,6 +492,67 @@ async fn zones_own_tool_records_the_pull_request_it_opens_with_its_status() {
 }
 
 #[tokio::test]
+async fn a_create_github_refuses_as_already_open_answers_with_the_open_pull_request() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    Mock::given(method("POST"))
+        .and(path("/repos/acme/widgets/pulls"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "message": "Validation Failed",
+            "errors": [{"message": "A pull request already exists for acme:feature."}],
+        })))
+        .expect(1)
+        .mount(&github)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls"))
+        .and(wiremock::matchers::query_param("head", "acme:feature"))
+        .and(wiremock::matchers::query_param("state", "open"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "id": 1,
+            "number": 12,
+            "html_url": link(&github, 12),
+            "state": "open",
+            "title": TITLE,
+            "body": null,
+            "head": {"ref": "feature", "sha": HEAD},
+            "base": {"ref": "main", "sha": HEAD},
+        }])))
+        .mount(&github)
+        .await;
+    let served = Served::start(&github).await;
+    let source = served.workspace.connect_github().await;
+
+    let turn = served.turn("Open the pull request again.").await;
+    let (arguments, token) = served.agent.spawned().await;
+    let called = rpc(
+        &endpoint(&arguments),
+        &token,
+        json!({"name": "create_pull_request", "arguments": {
+            "source_id": source,
+            "title": TITLE,
+            "head": "feature",
+            "base": "main",
+            "reason": "The first attempt timed out.",
+        }}),
+    )
+    .await;
+    served.agent.finish(&[]);
+    turn.await.expect("the turn ends");
+
+    assert_eq!(called["result"]["isError"], false, "{called}");
+    let text = called["result"]["content"][0]["text"]
+        .as_str()
+        .expect("the tool's answer");
+    let answer: Value = serde_json::from_str(text).expect("a JSON answer");
+    assert_eq!(answer["already_open"], true, "{answer}");
+    assert_eq!(answer["pull_request"]["number"], 12, "{answer}");
+    let listed = served.recorded(1).await;
+    assert_eq!(listed[0]["number"], 12, "{listed}");
+    assert_eq!(listed[0]["url"], link(&github, 12), "{listed}");
+}
+
+#[tokio::test]
 async fn a_pull_request_a_cli_agent_opened_is_recorded_but_one_it_only_mentioned_is_not() {
     let github = MockServer::start().await;
     let served = Served::start(&github).await;
