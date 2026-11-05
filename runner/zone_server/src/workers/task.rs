@@ -8105,12 +8105,10 @@ mod cli_tests {
             "reason": "The task asked for this file.",
         }});
         // Comfortably past the ceiling a task used to carry, which is as far
-        // as an unlimited budget can be demonstrated in finite time.
-        const PAST_THE_OLD_CEILING: usize = 150;
-        assert!(
-            PAST_THE_OLD_CEILING > PARKING_CEILING.max_tool_calls,
-            "the probe has to reach past the ceiling it is proving is gone"
-        );
+        // as an unlimited budget can be demonstrated in finite time. Derived
+        // from that ceiling rather than written out, so it stays past it if
+        // the ceiling ever moves.
+        const PAST_THE_OLD_CEILING: usize = PARKING_CEILING.max_tool_calls + 50;
 
         for attempt in 0..PAST_THE_OLD_CEILING {
             let answer = rpc(&token, "tools/call", call.clone()).await;
