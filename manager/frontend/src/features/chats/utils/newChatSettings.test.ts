@@ -33,7 +33,6 @@ const recent = (overrides: Partial<RecentChat> = {}): RecentChat => ({
   provider_model: null,
   reasoning_effort: 'high',
   agent_enabled: true,
-  auto_approve: true,
   offline: true,
   context_tokens: null,
   ...overrides,
@@ -45,7 +44,7 @@ const providers = (
   offered: ChatProviderOffer[] = [selfHosted, codex, openAi]
 ): WorkspaceChatProviders => ({ default: fallback, providers: offered, recent: latest });
 
-const llama = { name: 'llama3.2', completion: true, details: { context_length: 131_072 } };
+const llama = { name: 'llama3.2:latest', completion: true, details: { context_length: 131_072 } };
 const embedder = { name: 'nomic-embed-text', completion: false };
 
 describe('newChatSettings', () => {
@@ -64,7 +63,6 @@ describe('newChatSettings', () => {
       model: 'gpt-6-sol',
       reasoning: 'high',
       agent: true,
-      autoApprove: true,
       offline: true,
       context: DEFAULT_NEW_CHAT.context,
     });
@@ -106,7 +104,7 @@ describe('newChatSettings', () => {
     const settings = newChatSettings(providers(latest), [llama]);
     expect([settings.provider, settings.model, settings.context]).toEqual([
       'default',
-      'llama3.2',
+      'llama3.2:latest',
       '65536',
     ]);
   });
@@ -132,9 +130,33 @@ describe('newChatSettings', () => {
     expect(newChatSettings(providers(latest), [llama]).context).toBe('32768');
   });
 
-  it('never carries auto-approve without agent mode', () => {
-    const latest = recent({ agent_enabled: false, auto_approve: true });
-    const settings = newChatSettings(providers(latest), []);
-    expect([settings.agent, settings.autoApprove]).toEqual([false, false]);
+  it('keeps an effort only where the resolved provider offers it', () => {
+    const fromClaude = recent({
+      provider: 'claude_code',
+      provider_model: 'opus',
+      reasoning_effort: 'max',
+    });
+    expect(newChatSettings(providers(fromClaude), []).reasoning).toBe('auto');
+
+    const onCodex = recent({
+      provider: 'codex',
+      provider_model: 'gpt-6-sol',
+      reasoning_effort: 'medium',
+    });
+    expect(newChatSettings(providers(onCodex), []).reasoning).toBe('auto');
+    const kept = recent({
+      provider: 'codex',
+      provider_model: 'gpt-6-sol',
+      reasoning_effort: 'low',
+    });
+    expect(newChatSettings(providers(kept), []).reasoning).toBe('low');
+
+    const onDefault = recent({ model_name: 'opus', reasoning_effort: 'low' });
+    expect(newChatSettings(providers(onDefault, claudeCode), []).reasoning).toBe('auto');
+  });
+
+  it('starts from the default context when the recent chat named none', () => {
+    const latest = recent({ model_name: 'llama3.2', context_tokens: null });
+    expect(newChatSettings(providers(latest), [llama]).context).toBe('32768');
   });
 });

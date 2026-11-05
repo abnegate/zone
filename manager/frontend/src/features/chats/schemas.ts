@@ -392,7 +392,6 @@ export const RecentChatSchema = z.object({
   provider_model: z.string().nullable(),
   reasoning_effort: ReasoningEffortSchema,
   agent_enabled: z.boolean(),
-  auto_approve: z.boolean(),
   offline: z.boolean(),
   context_tokens: z.number().int().positive().nullable(),
 });

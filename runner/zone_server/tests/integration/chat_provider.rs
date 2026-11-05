@@ -1190,7 +1190,6 @@ async fn the_workspace_reports_the_settings_of_the_chat_it_used_last() {
             "provider_model": "gpt-4o",
             "reasoning_effort": "high",
             "agent_enabled": true,
-            "auto_approve": true,
             "offline": true,
             "context_tokens": null,
         }),

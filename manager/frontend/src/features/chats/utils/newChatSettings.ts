@@ -4,6 +4,7 @@ import type {
   RecentChat,
   WorkspaceChatProviders,
 } from '../provider';
+import { REASONING_EFFORT_OPTIONS } from '../types';
 import {
   AUTO_MODEL,
   contextTokenOptions,
@@ -11,84 +12,104 @@ import {
   findInstalledModel,
   type LocalContextModel,
 } from './modelOptions';
-import { AUTO_EFFORT, asksModelName, DEFAULT_PROVIDER, isAgentOffer } from './providerOptions';
+import {
+  AUTO_EFFORT,
+  DEFAULT_PROVIDER,
+  effortsFor,
+  isAgentOffer,
+  keepEffort,
+} from './providerOptions';
 
 export interface NewChatSettings {
   provider: string;
   model: string;
   reasoning: ReasoningEffort;
   agent: boolean;
-  autoApprove: boolean;
   offline: boolean;
   context: string;
 }
 
-type InstalledModel = LocalContextModel & { name: string; completion?: boolean };
+type ListedModel = LocalContextModel & { name: string; completion?: boolean };
+
+interface Resolved {
+  provider: string;
+  model: string;
+  offer: ChatProviderOffer | null;
+}
 
 export const DEFAULT_NEW_CHAT: NewChatSettings = {
   provider: DEFAULT_PROVIDER,
   model: AUTO_MODEL,
   reasoning: AUTO_EFFORT,
   agent: false,
-  autoApprove: false,
   offline: false,
   context: String(defaultContextTokens()),
 };
 
+const LOCAL_EFFORTS = REASONING_EFFORT_OPTIONS.map((option) => option.value);
+
 function offersModel(offer: ChatProviderOffer, model: string): boolean {
   if (model === AUTO_MODEL) return !offer.requires_model;
-  if (asksModelName(offer) || offer.models.length === 0) return true;
-  return offer.models.some((choice) => choice.name === model);
+  return offer.models.length === 0 || offer.models.some((choice) => choice.name === model);
 }
 
-function installs(installed: InstalledModel[], model: string): boolean {
-  if (model === AUTO_MODEL) return true;
+function installedName(installed: ListedModel[], model: string): string | null {
+  if (model === AUTO_MODEL) return AUTO_MODEL;
   const found = findInstalledModel(installed, model);
-  return found !== undefined && found.completion !== false;
+  return found && found.completion !== false ? found.name : null;
 }
 
-/** The provider and model `recent` ran on, or Default's when the workspace no longer offers them. */
-function resolveModel(
+function resolve(
   recent: RecentChat,
   providers: WorkspaceChatProviders,
-  installed: InstalledModel[]
-): Pick<NewChatSettings, 'provider' | 'model'> {
-  const fallback = { provider: DEFAULT_PROVIDER, model: AUTO_MODEL };
+  installed: ListedModel[]
+): Resolved {
+  const fallback = providers.default;
+  const automatic: Resolved = {
+    provider: DEFAULT_PROVIDER,
+    model: AUTO_MODEL,
+    offer: isAgentOffer(fallback) ? fallback : null,
+  };
   if (recent.provider) {
     const offer = providers.providers.find((candidate) => candidate.provider === recent.provider);
     const model = recent.provider_model ?? AUTO_MODEL;
-    return offer && offersModel(offer, model) ? { provider: offer.provider, model } : fallback;
+    return offer && offersModel(offer, model)
+      ? { provider: offer.provider, model, offer }
+      : automatic;
   }
-  const model = recent.model_name;
-  const offered = isAgentOffer(providers.default)
-    ? offersModel(providers.default, model)
-    : installs(installed, model);
-  return offered ? { provider: DEFAULT_PROVIDER, model } : fallback;
+  if (isAgentOffer(fallback)) {
+    return offersModel(fallback, recent.model_name)
+      ? { ...automatic, model: recent.model_name }
+      : automatic;
+  }
+  const model = installedName(installed, recent.model_name);
+  return model ? { ...automatic, model } : automatic;
 }
 
 /**
- * What a new chat starts with: the settings of the chat the workspace used
- * last, with any provider or model it no longer offers put back to Default.
+ * The settings of the chat the workspace used last, with anything the
+ * workspace no longer offers put back to Default, Automatic or Auto.
  */
 export function newChatSettings(
   providers: WorkspaceChatProviders | null,
-  installed: InstalledModel[]
+  installed: ListedModel[]
 ): NewChatSettings {
   const recent = providers?.recent;
   if (!providers || !recent) return DEFAULT_NEW_CHAT;
-  const { provider, model } = resolveModel(recent, providers, installed);
+  const { provider, model, offer } = resolve(recent, providers, installed);
+  const efforts = offer ? effortsFor(offer, model) : LOCAL_EFFORTS;
   const native = findInstalledModel(installed, model)?.details?.context_length;
-  const context = String(recent.context_tokens);
-  const offeredContext =
-    model === recent.model_name &&
+  const context = recent.context_tokens === null ? null : String(recent.context_tokens);
+  const keepsContext =
+    context !== null &&
+    model !== AUTO_MODEL &&
     contextTokenOptions(native).some((option) => option.value === context);
   return {
     provider,
     model,
-    reasoning: recent.reasoning_effort,
+    reasoning: keepEffort(recent.reasoning_effort, efforts),
     agent: recent.agent_enabled,
-    autoApprove: recent.agent_enabled && recent.auto_approve,
     offline: recent.offline,
-    context: offeredContext ? context : String(defaultContextTokens(native)),
+    context: keepsContext ? context : String(defaultContextTokens(native)),
   };
 }

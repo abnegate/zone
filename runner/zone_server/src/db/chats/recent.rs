@@ -1,6 +1,3 @@
-//! The settings the chat a workspace used last runs with, which a new chat in
-//! that workspace starts from.
-
 use abnegate_llm::ReasoningEffort;
 use serde::Serialize;
 use sqlx::{Executor, FromRow, Postgres};
@@ -10,8 +7,9 @@ use super::effort;
 use crate::db::DbResult;
 use crate::services::provider::Provider;
 
-/// What the workspace's most recently used assistant chat runs with. A
-/// provider is `None` while that chat follows its workspace.
+/// What a new chat in a workspace starts from. A `None` provider follows the
+/// workspace's. Auto-approve is never carried: chats have no owner, so the
+/// chat used last may be another member's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Recent {
     pub model_name: String,
@@ -19,7 +17,6 @@ pub struct Recent {
     pub provider_model: Option<String>,
     pub reasoning_effort: ReasoningEffort,
     pub agent_enabled: bool,
-    pub auto_approve: bool,
     pub offline: bool,
     pub context_tokens: Option<i64>,
 }
@@ -31,7 +28,6 @@ struct Row {
     provider_model: Option<String>,
     reasoning_effort: String,
     agent_enabled: bool,
-    auto_approve: bool,
     offline: bool,
     context_tokens: Option<i64>,
 }
@@ -45,26 +41,25 @@ impl From<Row> for Recent {
             provider,
             reasoning_effort: effort(&row.reasoning_effort),
             agent_enabled: row.agent_enabled,
-            auto_approve: row.auto_approve,
             offline: row.offline,
             context_tokens: row.context_tokens,
         }
     }
 }
 
-/// The settings of the unarchived assistant chat in `workspace` touched last,
-/// or `None` when it has none. Planner and update chats are a project's, not
-/// the member's, so they never count.
+/// The settings of the unarchived assistant chat in `workspace` a member used
+/// last: created, reconfigured or typed in. Planner and update chats belong to
+/// a project, so they never count.
 pub async fn get<'e, E>(executor: E, workspace: Uuid) -> DbResult<Option<Recent>>
 where
     E: Executor<'e, Database = Postgres>,
 {
     let row: Option<Row> = sqlx::query_as(
         "SELECT model_name, provider, provider_model, reasoning_effort, agent_enabled, \
-         auto_approve, offline, context_tokens \
+         offline, context_tokens \
          FROM chats \
          WHERE workspace_id = $1 AND purpose = 'assistant' AND archived IS NOT TRUE \
-         ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST \
+         ORDER BY used_at DESC \
          LIMIT 1",
     )
     .bind(workspace)
@@ -78,8 +73,8 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
-    use crate::db::chats::create_chat_with_title;
-    use crate::db::chats::provider::Choice;
+    use crate::db::chats::provider::{self, Choice};
+    use crate::db::chats::{create_chat_with_title, create_message, update_chat};
     use crate::services::stages::AUTO;
 
     struct Fixture {
@@ -148,7 +143,8 @@ mod tests {
 
         async fn age(&self, chat: Uuid, days: i32) {
             sqlx::query(
-                "UPDATE chats SET updated_at = NOW() - make_interval(days => $2) WHERE id = $1",
+                "UPDATE chats SET used_at = NOW() - make_interval(days => $2), \
+                 updated_at = NOW() - make_interval(days => $2) WHERE id = $1",
             )
             .bind(chat)
             .bind(days)
@@ -157,12 +153,17 @@ mod tests {
             .expect("the chat ages");
         }
 
-        async fn touch(&self, chat: Uuid) {
-            sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
-                .bind(chat)
-                .execute(&self.pool)
+        async fn type_in(&self, chat: Uuid) {
+            create_message(&self.pool, chat, "user", "Hello", None)
                 .await
-                .expect("the chat is touched");
+                .expect("a typed message");
+        }
+
+        async fn recent(&self) -> Recent {
+            get(&self.pool, self.workspace)
+                .await
+                .unwrap()
+                .expect("a recent chat")
         }
 
         async fn cleanup(self) {
@@ -182,7 +183,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_chat_touched_last_is_the_recent_one() {
+    async fn the_chat_created_last_is_the_recent_one() {
         let fixture = Fixture::new().await;
         let codex = Choice {
             provider: Provider::Codex,
@@ -192,34 +193,108 @@ mod tests {
         let following = fixture.chat(fixture.workspace, "qwen3:8b", None).await;
         fixture.age(following, 2).await;
 
-        let recent = get(&fixture.pool, fixture.workspace)
-            .await
-            .unwrap()
-            .expect("a recent chat");
         assert_eq!(
-            recent,
+            fixture.recent().await,
             Recent {
                 model_name: AUTO.to_string(),
                 provider: Some(Provider::Codex),
                 provider_model: Some("gpt-6-sol".to_string()),
                 reasoning_effort: ReasoningEffort::High,
                 agent_enabled: true,
-                auto_approve: true,
                 offline: true,
                 context_tokens: Some(32_768),
-            }
+            },
+            "every setting but auto-approve is carried"
+        );
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn typing_in_or_reconfiguring_an_older_chat_makes_it_the_recent_one() {
+        let fixture = Fixture::new().await;
+        let older = fixture.chat(fixture.workspace, "older", None).await;
+        fixture.age(older, 3).await;
+        let newer = fixture.chat(fixture.workspace, "newer", None).await;
+
+        fixture.type_in(older).await;
+        assert_eq!(fixture.recent().await.model_name, "older", "typing counts");
+
+        fixture.age(older, 3).await;
+        update_chat(
+            &fixture.pool,
+            newer,
+            None,
+            None,
+            None,
+            None,
+            Some(ReasoningEffort::Low),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let recent = fixture.recent().await;
+        assert_eq!(
+            (recent.model_name.as_str(), recent.reasoning_effort),
+            ("newer", ReasoningEffort::Low),
+            "changing a setting counts"
         );
 
-        fixture.touch(following).await;
-        let recent = get(&fixture.pool, fixture.workspace)
+        let openai = Choice {
+            provider: Provider::OpenAI,
+            model: Some("gpt-4.1".to_string()),
+        };
+        provider::set(&fixture.pool, older, Some(&openai))
             .await
-            .unwrap()
             .unwrap();
+        let recent = fixture.recent().await;
         assert_eq!(
-            (recent.model_name.as_str(), recent.provider),
-            ("qwen3:8b", None),
-            "using an older chat makes it the one a new chat starts from"
+            (recent.provider, recent.provider_model.as_deref()),
+            (Some(Provider::OpenAI), Some("gpt-4.1")),
+            "choosing a provider counts"
         );
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn automations_and_renames_never_make_a_chat_the_recent_one() {
+        let fixture = Fixture::new().await;
+        let older = fixture.chat(fixture.workspace, "older", None).await;
+        fixture.age(older, 3).await;
+        fixture.chat(fixture.workspace, "newer", None).await;
+
+        create_message(&fixture.pool, older, "assistant", "Reply", None)
+            .await
+            .unwrap();
+        create_message(
+            &fixture.pool,
+            older,
+            "user",
+            "Scheduled",
+            Some(serde_json::json!({ "source": "reminder" })),
+        )
+        .await
+        .unwrap();
+        update_chat(
+            &fixture.pool,
+            older,
+            Some("Renamed"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
+            .bind(older)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(fixture.recent().await.model_name, "newer");
         fixture.cleanup().await;
     }
 
@@ -230,28 +305,21 @@ mod tests {
         fixture.age(kept, 5).await;
 
         let archived = fixture.chat(fixture.workspace, "archived", None).await;
-        sqlx::query("UPDATE chats SET archived = TRUE, updated_at = NOW() WHERE id = $1")
+        sqlx::query("UPDATE chats SET archived = TRUE WHERE id = $1")
             .bind(archived)
             .execute(&fixture.pool)
             .await
             .unwrap();
         let planner = fixture.chat(fixture.workspace, "planner", None).await;
-        sqlx::query(
-            "UPDATE chats SET purpose = 'project_planner', updated_at = NOW() WHERE id = $1",
-        )
-        .bind(planner)
-        .execute(&fixture.pool)
-        .await
-        .unwrap();
-        let elsewhere = Fixture::workspace(&fixture.pool, fixture.organization).await;
-        let other = fixture.chat(elsewhere, "elsewhere", None).await;
-        fixture.touch(other).await;
-
-        let recent = get(&fixture.pool, fixture.workspace)
+        sqlx::query("UPDATE chats SET purpose = 'project_planner' WHERE id = $1")
+            .bind(planner)
+            .execute(&fixture.pool)
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(recent.model_name, "kept");
+        let elsewhere = Fixture::workspace(&fixture.pool, fixture.organization).await;
+        fixture.chat(elsewhere, "elsewhere", None).await;
+
+        assert_eq!(fixture.recent().await.model_name, "kept");
         let recent = get(&fixture.pool, elsewhere).await.unwrap().unwrap();
         assert_eq!(
             recent.model_name, "elsewhere",

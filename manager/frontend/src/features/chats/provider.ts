@@ -49,15 +49,12 @@ export interface ChatProviders {
   cli?: boolean;
 }
 
-/** The settings of the chat a workspace used last, which a new chat starts from. */
 export interface RecentChat {
   model_name: string;
-  /** Null while that chat follows the workspace's provider. */
   provider: AiProvider | null;
   provider_model: string | null;
   reasoning_effort: ReasoningEffort;
   agent_enabled: boolean;
-  auto_approve: boolean;
   offline: boolean;
   context_tokens: number | null;
 }
@@ -65,7 +62,6 @@ export interface RecentChat {
 export interface WorkspaceChatProviders {
   default: ChatProviderOffer;
   providers: ChatProviderOffer[];
-  /** Absent before the workspace has a chat, and from older servers. */
   recent?: RecentChat | null;
 }
 

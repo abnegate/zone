@@ -86,7 +86,6 @@ const recentCodex: RecentChat = {
   provider_model: 'gpt-6-sol',
   reasoning_effort: 'high',
   agent_enabled: true,
-  auto_approve: true,
   offline: true,
   context_tokens: null,
 };
@@ -100,6 +99,7 @@ let installed = [toolModel];
 let workspaceProviders: WorkspaceChatProviders | null = null;
 let creation: Response;
 let providersGate: Promise<void> | null = null;
+let projects: Array<{ id: string; name: string }> = [];
 
 Element.prototype.scrollIntoView = mock();
 
@@ -128,7 +128,7 @@ mock.module('../../sources/hooks/useSources', () => ({
 
 mock.module('../../projects/hooks', () => ({
   useProjects: () => ({
-    projects: [],
+    projects,
     loading: false,
     error: null,
     createProject: mock(),
@@ -241,6 +241,7 @@ describe('ChatsPage new chat dialog', () => {
     installed = [toolModel];
     workspaceProviders = null;
     providersGate = null;
+    projects = [];
     creation = Response.json({ success: false, error: REFUSAL }, { status: 409 });
     window.history.pushState({}, '', '/');
     globalThis.fetch = mock(async (url: string, init?: RequestInit) => {
@@ -478,7 +479,7 @@ describe('ChatsPage new chat dialog', () => {
     expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('gpt-6-sol');
     expect(screen.getByRole('combobox', { name: 'Reasoning' })).toHaveTextContent('High');
     expect(screen.getByLabelText('Agent mode')).toBeChecked();
-    expect(screen.getByLabelText('Auto-approve writes and commands')).toBeChecked();
+    expect(screen.getByLabelText('Auto-approve writes and commands')).not.toBeChecked();
     expect(screen.getByLabelText('Offline')).toBeChecked();
 
     expect(await createdBody()).toMatchObject({
@@ -487,7 +488,7 @@ describe('ChatsPage new chat dialog', () => {
       model_name: 'auto',
       reasoning_effort: 'high',
       agent_enabled: true,
-      auto_approve: true,
+      auto_approve: false,
       offline: true,
     });
   });
@@ -547,32 +548,60 @@ describe('ChatsPage new chat dialog', () => {
     expect(screen.getByRole('combobox', { name: 'Select Model' })).toHaveTextContent('Opus');
   });
 
-  it('keeps what was chosen in the dialog when the recent settings load after it', async () => {
-    workspaceProviders = { default: selfHosted, providers: offers };
-    render(page());
+  const holdProviders = async (next: WorkspaceChatProviders): Promise<() => void> => {
+    await openDialog();
+    await screen.findByRole('combobox', { name: 'Provider' });
+    closeDialog();
     await waitFor(() =>
-      expect(
-        (globalThis.fetch as unknown as ReturnType<typeof mock>).mock.calls.some(([url]) =>
-          String(url).includes('/chat-providers')
-        )
-      ).toBe(true)
+      expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument()
     );
     let release = () => {};
     providersGate = new Promise((resolve) => {
       release = resolve;
     });
-    workspaceProviders = { default: selfHosted, providers: offers, recent: recentCodex };
-
+    workspaceProviders = next;
     await openDialog();
+    return release;
+  };
+
+  it('keeps what was chosen in the dialog when the recent settings load after it', async () => {
+    workspaceProviders = { default: selfHosted, providers: offers };
+    render(page());
+    const release = await holdProviders({
+      default: claudeCode,
+      providers: offers,
+      recent: recentCodex,
+    });
+
     chooseSelect('Provider', 'Claude Code');
     release();
 
-    await waitFor(() =>
-      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Claude Code')
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor(() => expect(optionLabels('Provider')).toContain('Default (Claude Code)'));
     expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Claude Code');
     expect(screen.getByLabelText('Offline')).not.toBeChecked();
+  });
+
+  it('still starts from the recent settings after a project is chosen', async () => {
+    projects = [{ id: 'project-1', name: 'Launch' }];
+    workspaceProviders = { default: selfHosted, providers: offers };
+    render(page());
+    const release = await holdProviders({
+      default: selfHosted,
+      providers: offers,
+      recent: recentCodex,
+    });
+
+    chooseSelect('Project', 'Launch');
+    release();
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Codex')
+    );
+    expect(await createdBody()).toMatchObject({
+      provider: 'codex',
+      provider_model: 'gpt-6-sol',
+      project_id: 'project-1',
+    });
   });
 
   it('starts over when the workspace changes', async () => {

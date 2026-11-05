@@ -143,7 +143,6 @@ export default function ChatsPage() {
   const { models, error: modelsError } = useModels(currentWorkspace?.id);
   const {
     providers: workspaceProviders,
-    loading: workspaceProvidersLoading,
     error: workspaceProvidersError,
     refresh: refreshWorkspaceProviders,
   } = useWorkspaceChatProviders(currentWorkspace?.id ?? null);
@@ -161,7 +160,7 @@ export default function ChatsPage() {
   const [newChatProject, setNewChatProject] = useState(NO_PROJECT);
   const [newChatOffline, setNewChatOffline] = useState(false);
   const [newChatContext, setNewChatContext] = useState(String(defaultContextTokens()));
-  const newChatEdited = useRef(false);
+  const [newChatEdited, setNewChatEdited] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -504,27 +503,27 @@ export default function ChatsPage() {
     setNewChatProvider(settings.provider);
     setNewChatModel(settings.model);
     setNewChatAgent(settings.agent);
-    setNewChatAutoApprove(settings.autoApprove);
+    setNewChatAutoApprove(false);
     setNewChatReasoning(settings.reasoning);
     setNewChatOffline(settings.offline);
     setNewChatContext(settings.context);
   };
 
   const resetNewChat = () => {
-    newChatEdited.current = false;
+    setNewChatEdited(false);
     applyNewChat(DEFAULT_NEW_CHAT);
     setNewChatProject(NO_PROJECT);
   };
 
   const editNewChat = () => {
-    newChatEdited.current = true;
+    setNewChatEdited(true);
   };
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: an open, untouched new chat follows the workspace's recent chat as it loads
   useEffect(() => {
-    if (!showNewChatModal || workspaceProvidersLoading || newChatEdited.current) return;
+    if (!showNewChatModal || newChatEdited) return;
     applyNewChat(newChatSettings(workspaceProviders, models));
-  }, [showNewChatModal, workspaceProvidersLoading, workspaceProviders, models]);
+  }, [showNewChatModal, newChatEdited, workspaceProviders, models]);
 
   const workspaceId = currentWorkspace?.id ?? null;
   const [newChatWorkspace, setNewChatWorkspace] = useState(workspaceId);
@@ -1931,7 +1930,6 @@ export default function ChatsPage() {
               label="Project"
               value={newChatProject}
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
-                editNewChat();
                 setNewChatProject(event.target.value);
               }}
               helpText="Optional. Group this chat with a project."
