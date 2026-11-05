@@ -71,6 +71,10 @@ base64 = "=0.23.1"
 percent-encoding = "=2.3.2"
 url = "=2.5.8"
 
+# Response decoding
+encoding_rs = "=0.8.35"
+mime = "=0.3.17"
+
 # In-process embeddings (feature: local-embeddings)
 fastembed = { version = "=6.0.2", optional = true }
 dirs = { workspace = true, optional = true }

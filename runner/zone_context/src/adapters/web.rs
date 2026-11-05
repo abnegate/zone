@@ -3,8 +3,9 @@
 //! Fetches through [`abnegate_http::PublicClient`], which refuses internal
 //! targets by URL, by resolved address and on every redirect hop.
 
-use abnegate_http::{PublicClient, TargetPolicy, public_client_builder};
+use abnegate_http::{PublicClient, TargetPolicy, public_client_builder, read_capped};
 use async_trait::async_trait;
+use encoding_rs::{Encoding, UTF_8};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use url::Url;
@@ -19,7 +20,7 @@ use zone_core::Source;
 const USER_AGENT: &str = "zone-context/1.0";
 const TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAXIMUM_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+const MAXIMUM_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Configuration for Web sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,18 +124,18 @@ impl WebAdapter {
         }
 
         if let Some(length) = response.content_length()
-            && length > MAXIMUM_RESPONSE_BYTES
+            && length > MAXIMUM_RESPONSE_BYTES as u64
         {
             return Err(ContextError::ContentTooLarge {
-                size_bytes: length as usize,
-                max_bytes: MAXIMUM_RESPONSE_BYTES as usize,
+                size_bytes: usize::try_from(length).unwrap_or(usize::MAX),
+                max_bytes: MAXIMUM_RESPONSE_BYTES,
             });
         }
 
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
+            .and_then(|value| value.to_str().ok())
             .unwrap_or("");
 
         if !content_type.is_empty()
@@ -148,10 +149,12 @@ impl WebAdapter {
             ));
         }
 
-        response
-            .text()
+        let encoding = charset(content_type);
+        let body = read_capped(response, MAXIMUM_RESPONSE_BYTES)
             .await
-            .map_err(|e| ContextError::adapter("web", format!("Failed to read response: {}", e)))
+            .map_err(body_error)?;
+        let (text, _, _) = encoding.decode(&body);
+        Ok(text.into_owned())
     }
 
     /// Extract text content from HTML
@@ -365,24 +368,50 @@ impl SourceAdapter for WebAdapter {
 }
 
 fn fetch_error(error: abnegate_http::Error) -> ContextError {
-    if redirected_too_often(&error) {
-        return ContextError::TooManyRedirects;
+    match refusal(&error) {
+        Some(abnegate_http::Error::TooManyRedirects) => ContextError::TooManyRedirects,
+        Some(refused) => ContextError::InvalidSourceConfig(refused.to_string()),
+        None => ContextError::adapter("web", format!("Failed to fetch URL: {}", described(&error))),
     }
-    ContextError::adapter("web", format!("Failed to fetch URL: {error}"))
 }
 
-fn redirected_too_often(error: &abnegate_http::Error) -> bool {
+fn body_error(error: abnegate_http::Error) -> ContextError {
+    if let abnegate_http::Error::OversizedBody { limit, .. } = error {
+        return ContextError::ContentOverLimit { max_bytes: limit };
+    }
+    ContextError::adapter(
+        "web",
+        format!("Failed to read response: {}", described(&error)),
+    )
+}
+
+fn refusal(error: &abnegate_http::Error) -> Option<&abnegate_http::Error> {
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {
-        if matches!(
-            cause.downcast_ref::<abnegate_http::Error>(),
-            Some(abnegate_http::Error::TooManyRedirects)
-        ) {
-            return true;
+        if let Some(refused) = cause.downcast_ref::<abnegate_http::Error>() {
+            return Some(refused);
         }
         source = cause.source();
     }
-    false
+    None
+}
+
+fn described(error: &dyn std::error::Error) -> String {
+    std::iter::successors(Some(error), |cause| cause.source())
+        .map(|cause| cause.to_string().trim_end_matches('.').to_string())
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+fn charset(content_type: &str) -> &'static Encoding {
+    content_type
+        .parse::<mime::Mime>()
+        .ok()
+        .and_then(|mime| {
+            mime.get_param(mime::CHARSET)
+                .and_then(|charset| Encoding::for_label(charset.as_str().as_bytes()))
+        })
+        .unwrap_or(UTF_8)
 }
 
 #[cfg(test)]
@@ -391,6 +420,7 @@ mod tests {
     use crate::adapters::NoOpProgress;
     use chrono::Utc;
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use uuid::Uuid;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -931,5 +961,183 @@ mod tests {
             matches!(error, ContextError::InvalidSourceConfig(ref message) if message.contains("Cross-origin")),
             "{error:?}"
         );
+    }
+
+    const CHUNK_BYTES: usize = 1024 * 1024;
+    const REQUEST_BYTES: usize = 4_096;
+    const CHUNKED_HEAD: &[u8] =
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ntransfer-encoding: chunked\r\n\r\n";
+
+    async fn serve_raw(parts: Vec<Vec<u8>>) -> Url {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let address = listener.local_addr().expect("a bound address");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("a connection");
+            let mut request = [0_u8; REQUEST_BYTES];
+            let _ = stream.read(&mut request).await;
+            for part in parts {
+                if stream.write_all(&part).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Url::parse(&format!("http://{address}/")).expect("a URL")
+    }
+
+    async fn serve_chunked(chunks: usize) -> Url {
+        let mut chunk = format!("{CHUNK_BYTES:x}\r\n").into_bytes();
+        chunk.extend(std::iter::repeat_n(b'x', CHUNK_BYTES));
+        chunk.extend_from_slice(b"\r\n");
+        let mut parts = vec![CHUNKED_HEAD.to_vec()];
+        parts.extend(std::iter::repeat_n(chunk, chunks));
+        parts.push(b"0\r\n\r\n".to_vec());
+        serve_raw(parts).await
+    }
+
+    #[tokio::test]
+    async fn a_streamed_body_with_no_length_is_capped() {
+        let url = serve_chunked(MAXIMUM_RESPONSE_BYTES / CHUNK_BYTES + 1).await;
+
+        let error = WebAdapter::new_for_testing()
+            .fetch_url(&url)
+            .await
+            .expect_err("the body outgrows the cap");
+
+        assert!(
+            matches!(
+                error,
+                ContextError::ContentOverLimit {
+                    max_bytes: MAXIMUM_RESPONSE_BYTES
+                }
+            ),
+            "the size of a body read only up to the cap is unknown: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_cut_off_mid_stream_says_why_in_one_sentence() {
+        let url = serve_raw(vec![CHUNKED_HEAD.to_vec(), b"400\r\npartial".to_vec()]).await;
+
+        let error = WebAdapter::new_for_testing()
+            .fetch_url(&url)
+            .await
+            .expect_err("the connection closes inside a chunk");
+
+        assert!(
+            matches!(
+                error,
+                ContextError::Adapter { ref message, .. }
+                    if message.starts_with("Failed to read response: Could not read the response body: ")
+                        && !message.contains(".:")
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_streamed_body_inside_the_cap_is_read_whole() {
+        let url = serve_chunked(2).await;
+
+        let html = WebAdapter::new_for_testing()
+            .fetch_url(&url)
+            .await
+            .expect("two chunks fit under the cap");
+
+        assert_eq!(html.len(), 2 * CHUNK_BYTES);
+    }
+
+    #[tokio::test]
+    async fn the_declared_charset_decodes_the_body() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                b"<html><body>caf\xe9</body></html>".to_vec(),
+                "text/html; charset=iso-8859-1",
+            ))
+            .mount(&mock_server)
+            .await;
+        let url = Url::parse(&mock_server.uri()).expect("a URL");
+
+        let html = WebAdapter::new_for_testing()
+            .fetch_url(&url)
+            .await
+            .expect("the page is fetched");
+
+        assert!(html.contains("café"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_into_a_metadata_service_says_why_it_was_refused() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+            )
+            .mount(&mock_server)
+            .await;
+        let url = Url::parse(&mock_server.uri()).expect("a URL");
+
+        let error = WebAdapter::new_for_testing()
+            .fetch_url(&url)
+            .await
+            .expect_err("the redirect leads to a metadata service");
+
+        assert!(
+            matches!(error, ContextError::InvalidSourceConfig(ref message) if message.contains("metadata")),
+            "{error:?}"
+        );
+    }
+
+    struct RefusingResolver;
+
+    impl reqwest::dns::Resolve for RefusingResolver {
+        fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            let host = name.as_str().to_string();
+            Box::pin(async move { Err(abnegate_http::Error::unfetchable_resolution(host).into()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_name_resolving_inside_the_deployment_says_why_it_was_refused() {
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(RefusingResolver)
+            .build()
+            .expect("a client")
+            .get("https://inside.example/?token=hunter2")
+            .send()
+            .await
+            .expect_err("the resolver refuses the name");
+
+        let error = fetch_error(abnegate_http::Error::from(error));
+
+        assert!(
+            matches!(error, ContextError::InvalidSourceConfig(ref message) if message.contains("inside.example")),
+            "{error:?}"
+        );
+        assert!(!format!("{error:?}").contains("hunter2"), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_connection_keeps_its_cause_but_not_its_query() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("a free port")
+            .port();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/?token=hunter2")).expect("a URL");
+
+        let error = WebAdapter::new_for_testing()
+            .fetch_url(&url)
+            .await
+            .expect_err("nothing listens there");
+
+        assert!(
+            matches!(error, ContextError::Adapter { ref message, .. } if message.contains("refused")),
+            "{error:?}"
+        );
+        assert!(!format!("{error:?}").contains("hunter2"), "{error:?}");
     }
 }

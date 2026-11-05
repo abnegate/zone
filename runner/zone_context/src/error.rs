@@ -76,6 +76,9 @@ pub enum ContextError {
     #[error("Content too large: {size_bytes} bytes (max: {max_bytes} bytes)")]
     ContentTooLarge { size_bytes: usize, max_bytes: usize },
 
+    #[error("Content too large: more than {max_bytes} bytes")]
+    ContentOverLimit { max_bytes: usize },
+
     #[error("Parse error: {0}")]
     Parse(String),
 
@@ -217,6 +220,12 @@ mod tests {
         };
         assert_eq!(err.to_string(), "Token budget exceeded: 150000 > 100000");
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn content_over_limit_names_only_the_limit() {
+        let error = ContextError::ContentOverLimit { max_bytes: 1_024 };
+        assert_eq!(error.to_string(), "Content too large: more than 1024 bytes");
     }
 
     #[test]
