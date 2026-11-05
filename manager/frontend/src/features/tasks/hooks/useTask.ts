@@ -40,8 +40,12 @@ export function useTask(id: string | null) {
       async () => {
         const refreshed = await tasksApi.getTask(id).catch(() => null);
         if (cancelled) return;
-        if (refreshed) setTask(refreshed);
-        else setMissedPolls((missed) => missed + 1);
+        if (refreshed) {
+          setMissedPolls(0);
+          setTask(refreshed);
+        } else {
+          setMissedPolls((missed) => missed + 1);
+        }
       },
       TITLE_POLL_MS * (missedPolls + 1)
     );

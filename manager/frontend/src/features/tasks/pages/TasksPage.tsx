@@ -331,7 +331,9 @@ export default function TasksPage() {
                             onSave={async (title) => {
                               await updateListedTask(task.id, { title });
                             }}
-                            onDone={() => setRenamingId(null)}
+                            onDone={() =>
+                              setRenamingId((current) => (current === task.id ? null : current))
+                            }
                           />
                         ) : (
                           <>
