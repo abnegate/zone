@@ -222,7 +222,7 @@ type ServerMessage =
       error?: string;
     }
   | { type: 'cancelled'; message_id: string | null }
-  | { type: 'queue'; messages: QueuedMessage[]; held: boolean; started?: string }
+  | { type: 'queue'; messages: QueuedMessage[]; held: boolean; started?: QueuedMessage }
   | { type: 'error'; message: string }
   | { type: 'status'; message: string };
 
@@ -620,7 +620,6 @@ export function useChat(
     let automatedTurn = false;
     let assistantContent = '';
     let assistantMetadata: MessageMetadata | undefined;
-    let queued: QueuedMessage[] = [];
     let chunkFrame = 0;
     const flushChunks = () => {
       chunkFrame = 0;
@@ -724,9 +723,11 @@ export function useChat(
     };
 
     // A queued message leaving the queue is this window's send as much as one
-    // typed while idle, so it shows the same pending row until it is saved.
+    // typed while idle, so it shows the same pending row until it is saved. A
+    // row a failed turn left unsaved is reused, as a typed send reuses it.
     const beginQueued = (message: QueuedMessage): void => {
-      const pendingId = `pending-${message.id}`;
+      if (pendingSendIdRef.current === message.id) return;
+      const pendingId = pendingUserIdRef.current ?? `pending-${message.id}`;
       pendingUserIdRef.current = pendingId;
       pendingSendIdRef.current = message.id;
       activeGenerationRef.current = true;
@@ -990,17 +991,17 @@ export function useChat(
           break;
         }
         case 'queue': {
-          const started = queued.find((message) => message.id === payload.started);
-          queued = payload.messages;
           setQueue(payload.messages);
           setHeld(payload.held);
           // Sent while this window thought the chat idle, but the server was
-          // busy and queued it, so the pending row would show it twice.
+          // busy and queued it, so the pending row would show it twice, and
+          // the turn it waits on must be free to end the stream.
           const sent = pendingSendIdRef.current;
           if (sent && payload.messages.some((message) => message.id === sent)) {
             withdrawPending();
+            sendInFlightRef.current = false;
           }
-          if (started) beginQueued(started);
+          if (payload.started) beginQueued(payload.started);
           break;
         }
         case 'error':
@@ -1059,7 +1060,6 @@ export function useChat(
       overflowed = false;
       // Joining replays the queue if it has anything in it, so whatever this
       // window last saw of it may be stale.
-      queued = [];
       setQueue([]);
       setHeld(false);
       // An open socket is not yet a working one: the server accepts every

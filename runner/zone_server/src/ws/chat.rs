@@ -66,7 +66,7 @@ use zone_core::context::ContextUsage;
 
 mod queue;
 
-use queue::{Finished, Interrupted, Queue, Queued};
+use queue::{Finished, Interrupted, Queued, Started};
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
@@ -347,7 +347,7 @@ async fn publish(stream: &ChatStream, message: ServerMessage) {
 
 /// Broadcast the queue as it is now. Read under the lock a joining connection
 /// reads it under, so the last queue frame every connection sees is current.
-async fn announce(stream: &ChatStream, started: Option<Uuid>) {
+async fn announce(stream: &ChatStream, started: Option<Queued>) {
     let _live = stream.live.lock().await;
     let (messages, held) = queue::snapshot(stream.chat_id).unwrap_or_default();
     let _ = stream.events.send(ServerMessage::Queue {
@@ -374,6 +374,13 @@ fn cancel_turns(chat_id: Uuid) {
     crate::agent::ApprovalPolicy::deny_chat(chat_id);
 }
 
+/// Register the turn a message is starting under the queue's lock, so a Stop
+/// or Interrupt that takes the lock next cancels this turn and not one before it.
+fn begin(chat_id: Uuid, started: Started) -> (Queued, Generation) {
+    let generation = Generation::registered(chat_id, started.turn);
+    (started.message, generation)
+}
+
 /// Run a message and then whatever was queued behind it, with nobody needing
 /// to stay connected.
 fn drive(
@@ -381,39 +388,37 @@ fn drive(
     stream: Arc<ChatStream>,
     chat_id: Uuid,
     workspace_id: Uuid,
-    first: Queued,
+    first: (Queued, Generation),
 ) {
     let announcer = stream.clone();
-    tokio::spawn(async move {
-        queue::drain(
-            chat_id,
-            first,
-            move |message| {
-                let state = state.clone();
-                let stream = stream.clone();
-                let generation = Generation::new(chat_id);
-                async move {
-                    handle_send_message(
-                        &state,
-                        &stream,
-                        chat_id,
-                        workspace_id,
-                        message.author,
-                        &message.content,
-                        message.metadata,
-                        generation,
-                        false,
-                    )
-                    .await;
-                }
-            },
-            move |started| {
-                let stream = announcer.clone();
-                async move { announce(&stream, started).await }
-            },
-        )
-        .await;
-    });
+    let turn = move |(message, generation): (Queued, Generation)| {
+        let state = state.clone();
+        let stream = stream.clone();
+        async move {
+            handle_send_message(
+                &state,
+                &stream,
+                chat_id,
+                workspace_id,
+                message.author,
+                &message.content,
+                message.metadata,
+                generation,
+                false,
+            )
+            .await
+        }
+    };
+    let running = turn(first);
+    tokio::spawn(queue::drain(
+        chat_id,
+        running,
+        move |started| turn(begin(chat_id, started)),
+        move |started| {
+            let stream = announcer.clone();
+            async move { announce(&stream, started).await }
+        },
+    ));
 }
 
 /// Send frames the caller already holds to one connection.
@@ -438,7 +443,10 @@ struct Generation {
 
 impl Generation {
     fn new(chat_id: Uuid) -> Self {
-        let message_id = Uuid::new_v4();
+        Self::registered(chat_id, Uuid::new_v4())
+    }
+
+    fn registered(chat_id: Uuid, message_id: Uuid) -> Self {
         let (sender, cancel) = broadcast::channel(1);
         CHAT_CANCELLATIONS.insert((chat_id, message_id), sender);
         Self {
@@ -694,7 +702,7 @@ pub enum ServerMessage {
         messages: Vec<Queued>,
         held: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
-        started: Option<Uuid>,
+        started: Option<Queued>,
     },
     /// Error message
     Error { message: String },
@@ -1448,30 +1456,36 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                 }
 
                                 let message = Queued { id, content, metadata, author: user_id };
-                                let busy = generating(chat_id);
-                                let started = queue::with(chat_id, |queue| queue.submit(message, busy));
-                                announce(&stream, started.as_ref().map(|message| message.id)).await;
-                                if let Some(message) = started {
-                                    drive(state.clone(), stream.clone(), chat_id, workspace_id, message);
+                                let started = queue::with(chat_id, |queue| {
+                                    queue
+                                        .submit(message, generating(chat_id))
+                                        .map(|started| begin(chat_id, started))
+                                });
+                                announce(&stream, started.as_ref().map(|(message, _)| message.clone())).await;
+                                if let Some(started) = started {
+                                    drive(state.clone(), stream.clone(), chat_id, workspace_id, started);
                                 }
                             }
                             Ok(ClientMessage::Cancel) => {
-                                let busy = generating(chat_id);
-                                queue::with(chat_id, |queue| queue.stop(busy));
-                                cancel_turns(chat_id);
+                                queue::with(chat_id, |queue| {
+                                    queue.stop(generating(chat_id));
+                                    cancel_turns(chat_id);
+                                });
                             }
                             Ok(ClientMessage::Interrupt { id }) => {
-                                let busy = generating(chat_id);
-                                match queue::with(chat_id, |queue| queue.interrupt(id, busy)) {
-                                    Interrupted::Cancel => {
-                                        announce(&stream, None).await;
-                                        cancel_turns(chat_id);
+                                let started = queue::with(chat_id, |queue| {
+                                    match queue.interrupt(id, generating(chat_id)) {
+                                        Interrupted::Cancel => {
+                                            cancel_turns(chat_id);
+                                            None
+                                        }
+                                        Interrupted::Start(started) => Some(begin(chat_id, started)),
+                                        Interrupted::Missing => None,
                                     }
-                                    Interrupted::Start(message) => {
-                                        announce(&stream, Some(message.id)).await;
-                                        drive(state.clone(), stream.clone(), chat_id, workspace_id, message);
-                                    }
-                                    Interrupted::Missing => announce(&stream, None).await,
+                                });
+                                announce(&stream, started.as_ref().map(|(message, _)| message.clone())).await;
+                                if let Some(started) = started {
+                                    drive(state.clone(), stream.clone(), chat_id, workspace_id, started);
                                 }
                             }
                             Ok(ClientMessage::EditQueued { id, content }) => {
@@ -1486,7 +1500,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     if content.trim().is_empty() {
                                         queue.remove(id)
                                     } else {
-                                        queue.edit(id, content)
+                                        queue.edit(id, content, user_id)
                                     }
                                 });
                                 announce(&stream, None).await;
@@ -2556,6 +2570,8 @@ async fn handle_audio_generation(
 /// must still be put to somebody. It waits, finds no one, and is declined —
 /// which is the right answer when the alternative is acting unasked. Reading
 /// tools are below that tier and run either way, so a watch still works.
+/// Whether the user's message was saved: a queued turn stopped before then has
+/// left nothing in the chat, so the queue puts it back.
 async fn handle_send_message(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -2566,7 +2582,7 @@ async fn handle_send_message(
     metadata: Option<serde_json::Value>,
     mut request: Generation,
     unattended: bool,
-) {
+) -> bool {
     let generation = CHAT_GENERATIONS
         .entry(chat_id)
         .or_insert_with(|| Arc::new(Semaphore::new(1)))
@@ -2575,7 +2591,7 @@ async fn handle_send_message(
         biased;
         _ = request.cancel.recv() => {
             request.cancelled(stream).await;
-            return;
+            return false;
         }
         permit = generation.acquire() => permit.expect("chat semaphore is never closed"),
     };
@@ -2591,7 +2607,7 @@ async fn handle_send_message(
             },
         )
         .await;
-        return;
+        return false;
     }
     let mut session = match Session::acquire(state, chat_id, workspace_id, request.message_id).await
     {
@@ -2604,7 +2620,7 @@ async fn handle_send_message(
                 },
             )
             .await;
-            return;
+            return false;
         }
     };
     if generation_deadline(state.config().chat.timeout).is_err() {
@@ -2616,20 +2632,21 @@ async fn handle_send_message(
             },
         )
         .await;
-        return;
+        return false;
     }
     crate::agent::ApprovalPolicy::register(chat_id, request.approvals.clone());
     let mut jobs: Vec<String> = Vec::new();
     let preparation = tokio::select! {
         biased;
-        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:OWNERSHIP_LOST.into()}).await; return; }
+        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:OWNERSHIP_LOST.into()}).await; return false; }
         _ = request.cancel.recv() => {
             let _=session.close().await;
                         request.cancelled(stream).await;
-            return;
+            return false;
         }
         result = prepare_message(state, chat_id, workspace_id, content, metadata.as_ref()) => result,
     };
+    let mut saved = false;
     let result = async {
         let routing = preparation?;
         if request.is_cancelled() {
@@ -2641,6 +2658,7 @@ async fn handle_send_message(
         // before honouring Stop. Dropping an INSERT future cannot roll it back.
         let mut message=LlmMessage::user(content);message.images=session::images(metadata.as_ref());
         let user_message=session.store.begin(&session.lease,session.turn,Uuid::new_v4(),content,metadata.clone(),ReplayMessage::from(&message)).await?;
+        saved = true;
         crate::workers::titles::spawn(state.clone(),&user_message);
         spawn_message_embedding_task(state.clone(),user_message.id,chat_id,content.to_string());
         publish(stream,ServerMessage::MessageSaved {message_id:user_message.id,role:"user".into(),content:content.to_string(),metadata:metadata.clone()}).await;
@@ -2765,6 +2783,7 @@ async fn handle_send_message(
         )
         .await;
     }
+    saved
 }
 
 /// Run one chat turn with nobody connected.
@@ -2819,13 +2838,18 @@ pub(crate) async fn run_turn(
         true,
     )
     .await;
-    match queue::with(chat_id, Queue::release) {
-        Finished::Next(message) => {
-            announce(&stream, Some(message.id)).await;
-            drive(state.clone(), stream, chat_id, workspace_id, message);
+    let released = queue::with(chat_id, |queue| match queue.release() {
+        Finished::Next(started) => Some(Some(begin(chat_id, started))),
+        Finished::Held => Some(None),
+        Finished::Idle => None,
+    });
+    match released {
+        Some(Some(started)) => {
+            announce(&stream, Some(started.0.clone())).await;
+            drive(state.clone(), stream, chat_id, workspace_id, started);
         }
-        Finished::Held => announce(&stream, None).await,
-        Finished::Idle => {}
+        Some(None) => announce(&stream, None).await,
+        None => {}
     }
     message_id
 }
@@ -6803,7 +6827,7 @@ cat 'DIR/reply.jsonl'
             panic!("every connection hears the queue change");
         };
         assert!(messages.is_empty());
-        queue::with(chat_id, Queue::finish);
+        queue::with(chat_id, |queue| queue.finish(true));
     }
 
     #[test]

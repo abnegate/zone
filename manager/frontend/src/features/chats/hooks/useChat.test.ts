@@ -1479,7 +1479,12 @@ describe('useChat', () => {
 
       act(() => {
         lastSocket?.emit({ type: 'message_end', message_id: 'a-first', content: 'done' });
-        lastSocket?.emit({ type: 'queue', messages: [], held: false, started: 'q-second' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [],
+          held: false,
+          started: { id: 'q-second', content: 'second' },
+        });
       });
 
       expect(result.current.queue).toEqual([]);
@@ -1517,7 +1522,12 @@ describe('useChat', () => {
 
       act(() => {
         lastSocket?.emit({ type: 'cancelled', message_id: 'a-first' });
-        lastSocket?.emit({ type: 'queue', messages: [], held: false, started: 'q-second' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [],
+          held: false,
+          started: { id: 'q-second', content: 'second' },
+        });
       });
       expect(result.current.streaming).toBe(true);
       expect(result.current.chat?.messages.at(-1)?.content).toBe('second');
@@ -1590,6 +1600,76 @@ describe('useChat', () => {
         'raced'
       );
       expect(result.current.queue).toEqual([{ id, content: 'raced' }]);
+    });
+
+    it('starts a message from the queue frame alone, even one this window never saw queued', async () => {
+      const { result } = await running();
+      act(() => {
+        lastSocket?.emit({ type: 'message_end', message_id: 'a-first', content: 'done' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [],
+          held: false,
+          started: { id: 'q-other-tab', content: 'from another tab' },
+        });
+      });
+      expect(result.current.streaming).toBe(true);
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('from another tab');
+    });
+
+    it('reuses the row a failed queued turn left behind instead of orphaning it', async () => {
+      const { result } = await running();
+      act(() => {
+        lastSocket?.emit({ type: 'message_end', message_id: 'a-first', content: 'done' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-third', content: 'third' }],
+          held: false,
+          started: { id: 'q-second', content: 'second' },
+        });
+        lastSocket?.emit({ type: 'error', message: 'Workspace access denied' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [],
+          held: false,
+          started: { id: 'q-third', content: 'third' },
+        });
+      });
+
+      const pending = result.current.chat?.messages.filter((message) =>
+        message.id.startsWith('pending-')
+      );
+      expect(pending?.map((message) => message.content)).toEqual(['third']);
+    });
+
+    it('lets an automation turn end the stream once a raced send was queued behind it', async () => {
+      mockGetChat.mockResolvedValue(mockChat);
+      const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+      await waitFor(() => {
+        expect(result.current.loading).toBe(false);
+        expect(lastSocket).not.toBeNull();
+      });
+      act(() =>
+        lastSocket?.emit({
+          type: 'message_saved',
+          message_id: 'u-auto',
+          role: 'user',
+          content: 'Daily summary',
+          metadata: { source: 'reminder' },
+        })
+      );
+      await act(async () => {
+        await result.current.sendMessage({ content: 'raced' });
+      });
+      const { id } = sent().at(-1);
+      act(() => {
+        lastSocket?.emit({ type: 'queue', messages: [{ id, content: 'raced' }], held: false });
+        lastSocket?.emit({ type: 'message_start', message_id: 'a-auto', role: 'assistant' });
+        lastSocket?.emit({ type: 'queue', messages: [], held: false });
+        lastSocket?.emit({ type: 'message_end', message_id: 'a-auto', content: 'Summary' });
+      });
+
+      expect(result.current.streaming).toBe(false);
     });
 
     it('forgets the queue when the socket reconnects, until the server replays it', async () => {

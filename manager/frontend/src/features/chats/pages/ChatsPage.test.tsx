@@ -1838,7 +1838,12 @@ describe('ChatsPage', () => {
         act(() => {
           socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' });
           socket.emit({ type: 'message_end', message_id: 'reply', content: 'A red rooster' });
-          socket.emit({ type: 'queue', messages: [], held: false, started: id });
+          socket.emit({
+            type: 'queue',
+            messages: [],
+            held: false,
+            started: { id, content: 'and make it blue' },
+          });
         });
 
         expect(screen.queryByTestId('queued-message')).not.toBeInTheDocument();
@@ -1855,7 +1860,12 @@ describe('ChatsPage', () => {
 
         act(() => {
           socket.emit({ type: 'cancelled', message_id: null });
-          socket.emit({ type: 'queue', messages: [], held: false, started: id });
+          socket.emit({
+            type: 'queue',
+            messages: [],
+            held: false,
+            started: { id, content: 'and make it blue' },
+          });
         });
         expect(screen.queryByTestId('queued-message')).not.toBeInTheDocument();
         expect(screen.getByText('and make it blue')).toBeInTheDocument();
