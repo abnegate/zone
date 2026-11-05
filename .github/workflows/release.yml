@@ -226,6 +226,18 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/notary.p8"
 
+  mobile:
+    name: Mobile
+    needs: prepare-release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/mobile.yml
+    with:
+      version: ${{ needs.prepare-release.outputs.version }}
+      tag: ${{ github.event.release.tag_name }}
+      publish: true
+    secrets: inherit
+
   github-release:
     name: GitHub Release
     needs: [prepare-release, binary]
