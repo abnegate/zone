@@ -3,6 +3,7 @@ export interface AgentPermissionProps {
   hint: string;
   title: string;
   enabled: boolean;
+  warning?: boolean;
   testId: string;
   onToggle: () => void;
 }
@@ -12,13 +13,14 @@ export function AgentPermission({
   hint,
   title,
   enabled,
+  warning = false,
   testId,
   onToggle,
 }: AgentPermissionProps) {
   return (
     <button
       type="button"
-      className="agent-permission"
+      className={warning ? 'agent-permission agent-permission--warning' : 'agent-permission'}
       onClick={onToggle}
       aria-pressed={enabled}
       aria-label={name}

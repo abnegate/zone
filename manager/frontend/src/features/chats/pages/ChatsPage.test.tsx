@@ -3199,8 +3199,10 @@ describe('ChatsPage', () => {
         'aria-label',
         'Agent permissions: auto-approve on, Zone tools only off'
       );
-      expect(trigger).toHaveTextContent('Auto-approve');
-      expect(trigger).toHaveTextContent('Host tools');
+      expect(
+        [...trigger.querySelectorAll('.agent-permission-chip')].map((chip) => chip.textContent)
+      ).toEqual(['Auto-approve', 'Host tools']);
+      expect(trigger.querySelector('.agent-permission-chip--host')).toHaveTextContent('Host tools');
       expect(screen.getByRole('button', { name: /^Agent$/ })).toBe(
         screen.getByTestId('agent-toggle')
       );
@@ -3214,6 +3216,27 @@ describe('ChatsPage', () => {
       );
       expect(screen.getByTestId('auto-approve-toggle')).toHaveTextContent('On');
       expect(screen.getByTestId('agent-sandbox-toggle')).toHaveTextContent('Off');
+      expect(screen.getByTestId('agent-sandbox-toggle')).toHaveClass('agent-permission--warning');
+      expect(screen.getByTestId('auto-approve-toggle')).not.toHaveClass(
+        'agent-permission--warning'
+      );
+    });
+
+    it('labels the permissions trigger even when no permission is loosened', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+      await openHeader({ agent_enabled: true, auto_approve: false, agent_sandboxed: true });
+      const trigger = screen.getByTestId('agent-permissions');
+      expect(trigger).toHaveAttribute(
+        'aria-label',
+        'Agent permissions: auto-approve off, Zone tools only on'
+      );
+      expect(trigger).toHaveTextContent('Ask first');
+      expect(trigger).not.toHaveTextContent('Host tools');
+
+      fireEvent.click(trigger);
+      expect(screen.getByTestId('agent-sandbox-toggle')).not.toHaveClass(
+        'agent-permission--warning'
+      );
     });
 
     it('offers no permissions while agent mode is off', async () => {

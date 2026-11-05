@@ -1,5 +1,6 @@
 export { ActionReceipts } from './ActionReceipts';
 export { AgentPermission } from './AgentPermission';
+export { AgentPermissionSummary } from './AgentPermissionSummary';
 export { AuthenticatedAudio } from './AuthenticatedAudio';
 export { AuthenticatedImage } from './AuthenticatedImage';
 export { AuthenticatedVideo } from './AuthenticatedVideo';
