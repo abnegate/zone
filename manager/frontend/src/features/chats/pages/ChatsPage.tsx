@@ -30,6 +30,7 @@ import {
   AuthenticatedVideo,
   AutomationBadge,
   ChatMenu,
+  ChatPanel,
   ChatSources,
   Citations,
   Generation,
@@ -46,6 +47,7 @@ import { ContextUsage } from '../components/ContextUsage';
 import {
   useChat,
   useChatProviders,
+  useChatPullRequests,
   useChatSearch,
   useChatSources,
   useChats,
@@ -84,6 +86,7 @@ import {
   findInstalledModel,
   formatBytes,
   formatDate,
+  galleryItems,
   imageAttachments,
   isAgentOffer,
   isChatGroupBy,
@@ -128,7 +131,7 @@ const failure = (prefix: string, error: unknown): string =>
   error instanceof Error ? `${prefix}: ${error.message}` : prefix;
 
 export default function ChatsPage() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const { currentWorkspace } = useWorkspace();
   const { models, error: modelsError } = useModels(currentWorkspace?.id);
   const {
@@ -270,6 +273,9 @@ export default function ChatsPage() {
   // previous chat never flashes in the main pane while the next one loads.
   const displayedChat = activeChat?.id === selectedChatId ? activeChat : null;
   const chatOpen = displayedChat !== null;
+  const changes = useChatPullRequests(chatOpen ? selectedChatId : null, streaming);
+  const displayedMessages = displayedChat?.messages;
+  const media = useMemo(() => galleryItems(displayedMessages ?? []), [displayedMessages]);
   const wasStreaming = useRef(streaming);
   const latestSelectedChatId = useRef(selectedChatId);
 
@@ -1445,313 +1451,340 @@ export default function ChatsPage() {
               </div>
             </div>
 
-            <div
-              className="messages-container"
-              ref={messagesContainerRef}
-              onScroll={handleMessagesScroll}
-            >
-              {displayedChat.messages.length === 0 ? (
-                <EmptyState
-                  className="messages-empty"
-                  icon={
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      aria-hidden="true"
-                    >
-                      <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                    </svg>
-                  }
-                  title="No messages yet"
-                  description="Send a message to start the conversation"
-                />
-              ) : (
-                displayedChat.messages.map((message, index) => {
-                  const images = imageAttachments(message.metadata);
-                  const videos = videoAttachments(message.metadata);
-                  const audios = audioAttachments(message.metadata);
-                  const toolCalls = message.metadata?.tool_calls ?? [];
-                  const citations = message.metadata?.citations ?? [];
-                  const receipts = message.metadata?.action_receipts ?? [];
-                  const handovers =
-                    message.role === 'assistant' ? (message.metadata?.handovers ?? []) : [];
-                  const memoryUsed =
-                    message.role === 'assistant' && Boolean(message.metadata?.memory_used);
-                  const links = message.role === 'assistant' ? 'citations' : 'all';
-                  const linked = linkedMessageId === message.id;
-                  // The turn still being written. Anything it detached dies with
-                  // it, so this is also the only turn whose job cards can claim
-                  // to be watching something that is still running.
-                  const live = streaming && message.id === displayedChat.messages.at(-1)?.id;
-                  const body = message.content.trim();
-                  const awaitingAnswer = /^\[waiting for your answer\]$/i.test(body);
-                  return (
-                    <div
-                      key={message.id}
-                      id={`chat-message-${message.id}`}
-                      className={`message message-${message.role}${linked ? ' message--linked' : ''}`}
-                    >
-                      <div className="message-header">
-                        {message.role === 'system' && <span className="message-role">System</span>}
-                        <AutomationBadge metadata={message.metadata} />
-                        <MemoryBadge used={memoryUsed} />
-                        <span className="message-time">{formatDate(message.created_at)}</span>
-                      </div>
-                      {images.length > 0 && (
-                        <div
-                          className="message-images"
-                          data-image-count={Math.min(images.length, 3)}
+            <div className="chat-body">
+              <div className="chat-thread">
+                <div
+                  className="messages-container"
+                  ref={messagesContainerRef}
+                  onScroll={handleMessagesScroll}
+                >
+                  {displayedChat.messages.length === 0 ? (
+                    <EmptyState
+                      className="messages-empty"
+                      icon={
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          aria-hidden="true"
                         >
-                          {images.map((a, index) => {
-                            const starting = attachments.some(
-                              (item) => item.id === `source:${a.url}`
-                            );
-                            return (
-                              <div key={a.url} className="message-image-frame">
-                                <AuthenticatedImage
-                                  src={a.url}
-                                  alt={a.name || `Generated image ${index + 1}`}
-                                  openLabel={`Open ${a.name || `image ${index + 1}`} full size`}
-                                  linkClassName="message-image-link"
-                                  title="Open full size"
-                                  loading="lazy"
-                                  decoding="async"
-                                  data-testid="message-image"
-                                />
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary btn-sm message-image-use"
-                                  onClick={() => addStartingImage(a)}
-                                  disabled={starting}
-                                >
-                                  {starting ? 'Added as starting image' : 'Use as starting image'}
-                                </button>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                      {videos.length > 0 && (
-                        <div className="message-videos">
-                          {videos.map((a, index) => (
-                            <AuthenticatedVideo
-                              key={a.url}
-                              src={a.url}
-                              label={a.name || `Generated video ${index + 1}`}
-                              data-testid="message-video"
-                            />
-                          ))}
-                        </div>
-                      )}
-                      {audios.length > 0 && (
-                        <div className="message-audios">
-                          {audios.map((a, index) => (
-                            <AuthenticatedAudio
-                              key={a.url}
-                              src={a.url}
-                              label={a.name || `Generated audio ${index + 1}`}
-                              data-testid="message-audio"
-                            />
-                          ))}
-                        </div>
-                      )}
-                      <Activity
-                        reasoning={message.metadata?.reasoning}
-                        calls={toolCalls}
-                        live={live}
-                        answered={index < lastUserIndex}
-                        onDecide={approveTool}
-                        onAnswer={handleAnswerQuestions}
-                      />
-                      {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
-                      {(body || handovers.length > 0) && !awaitingAnswer ? (
-                        <div className="message-content">
-                          {splitAtHandovers(message.content, handovers).map((part) =>
-                            part.kind === 'text' ? (
-                              <MessageContent
-                                key={`text-${part.offset}`}
-                                content={part.text}
-                                links={links}
-                                citations={citations}
-                                breaks={message.role === 'user'}
-                              />
-                            ) : (
-                              <HandoverNotice
-                                key={`handover-${part.handover.at}-${part.handover.to}`}
-                                handover={part.handover}
-                                agentChanged={part.agentChanged}
-                              />
-                            )
-                          )}
-                        </div>
-                      ) : null}
-                      {citations.length > 0 && <Citations citations={citations} />}
-                    </div>
-                  );
-                })
-              )}
-              {chatError ? (
-                <div className="chats-error" role="alert">
-                  {chatError}
-                </div>
-              ) : null}
-              {streaming || chatStatus ? (
-                <Generation key={selectedChatId} status={chatStatus || 'Generating response…'} />
-              ) : null}
-              <div ref={messagesEndRef} />
-            </div>
-
-            <div className="chat-composer">
-              <form
-                className={`message-form${isDragging ? ' is-dragging' : ''}`}
-                onSubmit={handleSendMessage}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setIsDragging(true);
-                }}
-                onDragLeave={(e) => {
-                  if (e.currentTarget.contains(e.relatedTarget as Node)) return;
-                  setIsDragging(false);
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setIsDragging(false);
-                  void handleIncomingFiles(e.dataTransfer.files);
-                }}
-              >
-                {attachments.length > 0 && (
-                  <div className="message-attachments">
-                    {attachments.map((attachment) => (
-                      <span
-                        key={attachment.id}
-                        className={`attachment-chip${attachment.rejected ? ' is-rejected' : ''}${attachment.url ? ' has-thumb' : ''}`}
-                      >
-                        {attachment.url ? (
-                          isProtectedArtifactUrl(attachment.url) ? (
-                            <AuthenticatedImage
-                              src={attachment.url}
-                              alt=""
-                              className="attachment-chip-thumb"
-                              linked={false}
-                              compact
-                            />
-                          ) : (
-                            <img className="attachment-chip-thumb" src={attachment.url} alt="" />
-                          )
-                        ) : null}
-                        <span className="attachment-chip-name">{attachment.name}</span>
-                        <span className="attachment-chip-size">
-                          {attachment.rejected ? (
-                            <span className="attachment-chip-note">{attachment.rejected}</span>
-                          ) : isStartingImage(attachment) ? (
-                            <span className="attachment-chip-source">Starting image</span>
-                          ) : (
-                            formatBytes(attachment.size)
-                          )}
-                        </span>
-                        <button
-                          type="button"
-                          className="attachment-chip-remove"
-                          onClick={() => removeAttachment(attachment.id)}
-                          aria-label={`Remove ${attachment.name}`}
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
-                  <p className="message-form-hint">
-                    Ask to generate, edit, remove an object, change the setting, or animate and this
-                    image will be the starting point.
-                  </p>
-                ) : null}
-
-                <div className="message-form-row">
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    hidden
-                    onChange={(e) => {
-                      void handleIncomingFiles(e.target.files);
-                      e.target.value = '';
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn-icon"
-                    onClick={() => fileInputRef.current?.click()}
-                    aria-label="Attach files"
-                    title="Attach files"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.75"
-                      width="16"
-                      height="16"
-                      aria-hidden="true"
-                    >
-                      <rect x="4.5" y="4.5" width="15" height="15" rx="3.5" />
-                      <path d="M12 8.75v6.5M8.75 12h6.5" strokeLinecap="square" />
-                    </svg>
-                  </button>
-                  <textarea
-                    placeholder="Type a message, or drop a file..."
-                    value={messageInput}
-                    onChange={(e) => setMessageInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        handleSendMessage(e);
+                          <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                        </svg>
                       }
-                    }}
-                    onPaste={(e) => {
-                      if (e.clipboardData.files.length > 0) {
-                        e.preventDefault();
-                        void handleIncomingFiles(e.clipboardData.files);
-                      }
-                    }}
-                    disabled={sending}
-                    rows={1}
-                  />
-                  {streaming ? (
-                    <Button type="button" variant="secondary" size="sm" onClick={cancelGeneration}>
-                      Stop
-                    </Button>
+                      title="No messages yet"
+                      description="Send a message to start the conversation"
+                    />
                   ) : (
-                    <Button
-                      type="submit"
-                      variant="primary"
-                      size="sm"
-                      loading={sending}
-                      disabled={!messageInput.trim() && !attachments.some(isSendable)}
-                    >
-                      Send
-                    </Button>
+                    displayedChat.messages.map((message, index) => {
+                      const images = imageAttachments(message.metadata);
+                      const videos = videoAttachments(message.metadata);
+                      const audios = audioAttachments(message.metadata);
+                      const toolCalls = message.metadata?.tool_calls ?? [];
+                      const citations = message.metadata?.citations ?? [];
+                      const receipts = message.metadata?.action_receipts ?? [];
+                      const handovers =
+                        message.role === 'assistant' ? (message.metadata?.handovers ?? []) : [];
+                      const memoryUsed =
+                        message.role === 'assistant' && Boolean(message.metadata?.memory_used);
+                      const links = message.role === 'assistant' ? 'citations' : 'all';
+                      const linked = linkedMessageId === message.id;
+                      // The turn still being written. Anything it detached dies with
+                      // it, so this is also the only turn whose job cards can claim
+                      // to be watching something that is still running.
+                      const live = streaming && message.id === displayedChat.messages.at(-1)?.id;
+                      const body = message.content.trim();
+                      const awaitingAnswer = /^\[waiting for your answer\]$/i.test(body);
+                      return (
+                        <div
+                          key={message.id}
+                          id={`chat-message-${message.id}`}
+                          className={`message message-${message.role}${linked ? ' message--linked' : ''}`}
+                        >
+                          <div className="message-header">
+                            {message.role === 'system' && (
+                              <span className="message-role">System</span>
+                            )}
+                            <AutomationBadge metadata={message.metadata} />
+                            <MemoryBadge used={memoryUsed} />
+                            <span className="message-time">{formatDate(message.created_at)}</span>
+                          </div>
+                          {images.length > 0 && (
+                            <div
+                              className="message-images"
+                              data-image-count={Math.min(images.length, 3)}
+                            >
+                              {images.map((a, index) => {
+                                const starting = attachments.some(
+                                  (item) => item.id === `source:${a.url}`
+                                );
+                                return (
+                                  <div key={a.url} className="message-image-frame">
+                                    <AuthenticatedImage
+                                      src={a.url}
+                                      alt={a.name || `Generated image ${index + 1}`}
+                                      openLabel={`Open ${a.name || `image ${index + 1}`} full size`}
+                                      linkClassName="message-image-link"
+                                      title="Open full size"
+                                      loading="lazy"
+                                      decoding="async"
+                                      data-testid="message-image"
+                                    />
+                                    <button
+                                      type="button"
+                                      className="btn btn-secondary btn-sm message-image-use"
+                                      onClick={() => addStartingImage(a)}
+                                      disabled={starting}
+                                    >
+                                      {starting
+                                        ? 'Added as starting image'
+                                        : 'Use as starting image'}
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {videos.length > 0 && (
+                            <div className="message-videos">
+                              {videos.map((a, index) => (
+                                <AuthenticatedVideo
+                                  key={a.url}
+                                  src={a.url}
+                                  label={a.name || `Generated video ${index + 1}`}
+                                  data-testid="message-video"
+                                />
+                              ))}
+                            </div>
+                          )}
+                          {audios.length > 0 && (
+                            <div className="message-audios">
+                              {audios.map((a, index) => (
+                                <AuthenticatedAudio
+                                  key={a.url}
+                                  src={a.url}
+                                  label={a.name || `Generated audio ${index + 1}`}
+                                  data-testid="message-audio"
+                                />
+                              ))}
+                            </div>
+                          )}
+                          <Activity
+                            reasoning={message.metadata?.reasoning}
+                            calls={toolCalls}
+                            live={live}
+                            answered={index < lastUserIndex}
+                            onDecide={approveTool}
+                            onAnswer={handleAnswerQuestions}
+                          />
+                          {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
+                          {(body || handovers.length > 0) && !awaitingAnswer ? (
+                            <div className="message-content">
+                              {splitAtHandovers(message.content, handovers).map((part) =>
+                                part.kind === 'text' ? (
+                                  <MessageContent
+                                    key={`text-${part.offset}`}
+                                    content={part.text}
+                                    links={links}
+                                    citations={citations}
+                                    breaks={message.role === 'user'}
+                                  />
+                                ) : (
+                                  <HandoverNotice
+                                    key={`handover-${part.handover.at}-${part.handover.to}`}
+                                    handover={part.handover}
+                                    agentChanged={part.agentChanged}
+                                  />
+                                )
+                              )}
+                            </div>
+                          ) : null}
+                          {citations.length > 0 && <Citations citations={citations} />}
+                        </div>
+                      );
+                    })
                   )}
+                  {chatError ? (
+                    <div className="chats-error" role="alert">
+                      {chatError}
+                    </div>
+                  ) : null}
+                  {streaming || chatStatus ? (
+                    <Generation
+                      key={selectedChatId}
+                      status={chatStatus || 'Generating response…'}
+                    />
+                  ) : null}
+                  <div ref={messagesEndRef} />
                 </div>
-              </form>
-              <div className="chat-composer-footer">
-                <ChatSources
-                  attached={attachedSources}
-                  available={workspaceSources}
-                  loading={attachedLoading}
-                  error={attachedError}
-                  onChange={setAttachedSources}
-                />
-                <ContextUsage
-                  usage={context ?? null}
-                  error={contextError}
-                  previewing={previewing}
-                  capacity={meterCapacity}
-                />
+
+                <div className="chat-composer">
+                  <form
+                    className={`message-form${isDragging ? ' is-dragging' : ''}`}
+                    onSubmit={handleSendMessage}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      setIsDragging(true);
+                    }}
+                    onDragLeave={(e) => {
+                      if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                      setIsDragging(false);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setIsDragging(false);
+                      void handleIncomingFiles(e.dataTransfer.files);
+                    }}
+                  >
+                    {attachments.length > 0 && (
+                      <div className="message-attachments">
+                        {attachments.map((attachment) => (
+                          <span
+                            key={attachment.id}
+                            className={`attachment-chip${attachment.rejected ? ' is-rejected' : ''}${attachment.url ? ' has-thumb' : ''}`}
+                          >
+                            {attachment.url ? (
+                              isProtectedArtifactUrl(attachment.url) ? (
+                                <AuthenticatedImage
+                                  src={attachment.url}
+                                  alt=""
+                                  className="attachment-chip-thumb"
+                                  linked={false}
+                                  compact
+                                />
+                              ) : (
+                                <img
+                                  className="attachment-chip-thumb"
+                                  src={attachment.url}
+                                  alt=""
+                                />
+                              )
+                            ) : null}
+                            <span className="attachment-chip-name">{attachment.name}</span>
+                            <span className="attachment-chip-size">
+                              {attachment.rejected ? (
+                                <span className="attachment-chip-note">{attachment.rejected}</span>
+                              ) : isStartingImage(attachment) ? (
+                                <span className="attachment-chip-source">Starting image</span>
+                              ) : (
+                                formatBytes(attachment.size)
+                              )}
+                            </span>
+                            <button
+                              type="button"
+                              className="attachment-chip-remove"
+                              onClick={() => removeAttachment(attachment.id)}
+                              aria-label={`Remove ${attachment.name}`}
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
+                      <p className="message-form-hint">
+                        Ask to generate, edit, remove an object, change the setting, or animate and
+                        this image will be the starting point.
+                      </p>
+                    ) : null}
+
+                    <div className="message-form-row">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        hidden
+                        onChange={(e) => {
+                          void handleIncomingFiles(e.target.files);
+                          e.target.value = '';
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="btn-icon"
+                        onClick={() => fileInputRef.current?.click()}
+                        aria-label="Attach files"
+                        title="Attach files"
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.75"
+                          width="16"
+                          height="16"
+                          aria-hidden="true"
+                        >
+                          <rect x="4.5" y="4.5" width="15" height="15" rx="3.5" />
+                          <path d="M12 8.75v6.5M8.75 12h6.5" strokeLinecap="square" />
+                        </svg>
+                      </button>
+                      <textarea
+                        placeholder="Type a message, or drop a file..."
+                        value={messageInput}
+                        onChange={(e) => setMessageInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleSendMessage(e);
+                          }
+                        }}
+                        onPaste={(e) => {
+                          if (e.clipboardData.files.length > 0) {
+                            e.preventDefault();
+                            void handleIncomingFiles(e.clipboardData.files);
+                          }
+                        }}
+                        disabled={sending}
+                        rows={1}
+                      />
+                      {streaming ? (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          onClick={cancelGeneration}
+                        >
+                          Stop
+                        </Button>
+                      ) : (
+                        <Button
+                          type="submit"
+                          variant="primary"
+                          size="sm"
+                          loading={sending}
+                          disabled={!messageInput.trim() && !attachments.some(isSendable)}
+                        >
+                          Send
+                        </Button>
+                      )}
+                    </div>
+                  </form>
+                  <div className="chat-composer-footer">
+                    <ChatSources
+                      attached={attachedSources}
+                      available={workspaceSources}
+                      loading={attachedLoading}
+                      error={attachedError}
+                      onChange={setAttachedSources}
+                    />
+                    <ContextUsage
+                      usage={context ?? null}
+                      error={contextError}
+                      previewing={previewing}
+                      capacity={meterCapacity}
+                    />
+                  </div>
+                </div>
               </div>
+              <ChatPanel
+                chatId={displayedChat.id}
+                userId={user?.id ?? null}
+                changes={changes}
+                media={media}
+                onShowMessage={(messageId) => selectChat(displayedChat.id, messageId)}
+              />
             </div>
           </>
         ) : selectedChatId && chatError ? (

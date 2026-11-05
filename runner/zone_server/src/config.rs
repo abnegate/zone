@@ -32,6 +32,26 @@ pub const DEFAULT_HUGGINGFACE_MODELS_URL: &str = "https://huggingface.co/api/mod
 /// so pointing it elsewhere does not redirect github.com repositories to it.
 pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 
+/// The path GitHub Enterprise serves its REST API under.
+const GITHUB_VERSIONED_REST: [&str; 2] = ["api", "v3"];
+
+/// Where GitHub's GraphQL API answers for the REST `origin`: beside REST on
+/// GitHub, and at `api/graphql` on an Enterprise install that serves REST
+/// under `api/v3`.
+pub fn github_graphql_url(origin: &reqwest::Url) -> Option<reqwest::Url> {
+    let segments: Vec<&str> = origin
+        .path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
+        .unwrap_or_default();
+    let versioned = segments.ends_with(&GITHUB_VERSIONED_REST);
+    let base = match origin.path().ends_with('/') {
+        true => origin.clone(),
+        false => reqwest::Url::parse(&format!("{origin}/")).ok()?,
+    };
+    base.join(if versioned { "../graphql" } else { "graphql" })
+        .ok()
+}
+
 /// Where a Claude authorization code is exchanged and its tokens renewed.
 pub const DEFAULT_CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 
@@ -1105,6 +1125,12 @@ impl Config {
         }
     }
 
+    /// The configured GitHub REST origin, ending in a slash so that a
+    /// relative path joins beneath it instead of replacing its last segment.
+    pub fn github_rest_origin(&self) -> Option<reqwest::Url> {
+        reqwest::Url::parse(&format!("{}/", self.github_api_url.trim_end_matches('/'))).ok()
+    }
+
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
         let jwt_secret = env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
@@ -1347,6 +1373,44 @@ mod tests {
             auto: Default::default(),
             host_mounts: Default::default(),
             connect_urls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn github_graphql_answers_beside_rest_or_under_an_enterprise_api() {
+        for (configured, rest, graphql) in [
+            (
+                DEFAULT_GITHUB_API_URL,
+                "https://api.github.com/",
+                "https://api.github.com/graphql",
+            ),
+            (
+                "https://github.example.com/api/v3",
+                "https://github.example.com/api/v3/",
+                "https://github.example.com/api/graphql",
+            ),
+            (
+                "http://127.0.0.1:9000",
+                "http://127.0.0.1:9000/",
+                "http://127.0.0.1:9000/graphql",
+            ),
+        ] {
+            let config = Config {
+                github_api_url: configured.to_string(),
+                ..crate::state::test_config()
+            };
+            assert_eq!(
+                config.github_rest_origin().map(String::from).as_deref(),
+                Some(rest)
+            );
+            assert_eq!(
+                config
+                    .github_rest_origin()
+                    .and_then(|origin| github_graphql_url(&origin))
+                    .map(String::from)
+                    .as_deref(),
+                Some(graphql)
+            );
         }
     }
 

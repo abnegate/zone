@@ -27,7 +27,14 @@ import {
   WaitingSchema,
   WaitSettledSchema,
 } from './schemas';
-import { ACTION_TARGETS, AWAITING_ANSWER_DETAIL, REASONED_TOOLS } from './types';
+import {
+  ACTION_TARGETS,
+  AWAITING_ANSWER_DETAIL,
+  PULL_REQUEST_CHECKS,
+  PULL_REQUEST_MERGEABILITY,
+  PULL_REQUEST_STATES,
+  REASONED_TOOLS,
+} from './types';
 
 const CITATIONS_RS = join(
   import.meta.dir,
@@ -556,5 +563,21 @@ describe('the job and wait cards the console draws are the ones the server sent'
     expect(rust).not.toHaveProperty('exited');
     expect(rust).not.toHaveProperty('settled');
     expect(zodFields(ToolCallRecordSchema)).toEqual(rust);
+  });
+});
+
+const PULL_REQUEST_RS = join(
+  import.meta.dir,
+  '../../../../../runner/zone_server/src/services/chat/pull_request'
+);
+
+describe('a chat pull request reads as the server describes it', () => {
+  test.each([
+    ['state.rs', 'State', PULL_REQUEST_STATES],
+    ['checks.rs', 'Checks', PULL_REQUEST_CHECKS],
+    ['mergeable.rs', 'Mergeable', PULL_REQUEST_MERGEABILITY],
+  ] as const)('%s variants match', (file, name, values) => {
+    const source = readFileSync(join(PULL_REQUEST_RS, file), 'utf8');
+    expect([...values].sort()).toEqual(rustVariants(source, name).sort());
   });
 });

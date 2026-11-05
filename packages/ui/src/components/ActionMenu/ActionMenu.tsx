@@ -8,6 +8,8 @@ export interface ActionMenuItem {
   onSelect: () => void;
   icon?: ReactNode;
   destructive?: boolean;
+  disabled?: boolean;
+  hint?: string;
 }
 
 export interface ActionMenuProps {
@@ -84,6 +86,8 @@ export function ActionMenu({ label, items }: ActionMenuProps) {
                 'ui-action-menu-item',
                 item.destructive && 'ui-action-menu-item-destructive'
               )}
+              disabled={item.disabled}
+              title={item.hint}
               onSelect={() => {
                 chosen.current = item;
               }}
@@ -93,7 +97,10 @@ export function ActionMenu({ label, items }: ActionMenuProps) {
                   {item.icon}
                 </span>
               )}
-              {item.label}
+              <span className="ui-action-menu-item-text">
+                {item.label}
+                {item.hint && <span className="ui-action-menu-item-hint">{item.hint}</span>}
+              </span>
             </MenuPrimitive.Item>
           ))}
         </MenuPrimitive.Content>

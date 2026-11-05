@@ -133,6 +133,36 @@ pub async fn get_source(
     .await
 }
 
+/// The workspace's oldest active source of `source_type` that holds a
+/// credential for the repository `owner/repo`, matched without case as GitHub
+/// matches names.
+pub async fn get_repository_source(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    source_type: &str,
+    owner: &str,
+    repo: &str,
+) -> DbResult<Option<SourceRow>> {
+    sqlx::query_as::<_, SourceRow>(
+        r#"
+        SELECT id, name, source_type, config, credentials_encrypted, description, url,
+               is_active, last_verified_at, last_error, created_at, updated_at, workspace_id
+        FROM sources
+        WHERE workspace_id = $1 AND source_type = $2 AND is_active IS NOT FALSE
+          AND credentials_encrypted IS NOT NULL
+          AND lower(config->>'owner') = lower($3) AND lower(config->>'repo') = lower($4)
+        ORDER BY created_at, id
+        LIMIT 1
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(source_type)
+    .bind(owner)
+    .bind(repo)
+    .fetch_optional(pool)
+    .await
+}
+
 /// The credential-bearing columns of a source
 ///
 /// `config` may hold a GitHub App configuration under `github_app`, and

@@ -72,6 +72,25 @@
   background-color: var(--ui-bg-hover);
 }
 
+.ui-action-menu-item[data-disabled] {
+  color: var(--ui-text-disabled);
+  cursor: default;
+}
+
+.ui-action-menu-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--ui-space-1) 0;
+}
+
+.ui-action-menu-item-hint {
+  max-width: 16rem;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+}
+
 .ui-action-menu-item-icon {
   display: inline-flex;
   color: var(--ui-text-secondary);

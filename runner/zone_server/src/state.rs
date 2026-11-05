@@ -20,6 +20,7 @@ use crate::cache::Cache;
 use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
 use crate::pull::PullRegistry;
+use crate::services::chat::pull_request::StatusCache;
 use crate::services::mail::AccountMail;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
@@ -115,6 +116,7 @@ struct AppStateInner {
     pub task_progress: Arc<TaskProgressBroadcaster>,
     /// Live WebSocket holds per device, so the admin list can show Connected.
     pub device_connections: DashMap<Uuid, u32>,
+    pub pull_request_statuses: StatusCache,
 }
 
 impl AppState {
@@ -226,8 +228,14 @@ impl AppState {
                 mcp: OnceCell::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
+                pull_request_statuses: StatusCache::default(),
             }),
         }
+    }
+
+    /// What GitHub last said of each pull request a chat opened.
+    pub fn pull_request_statuses(&self) -> &StatusCache {
+        &self.inner.pull_request_statuses
     }
 
     /// Get the configuration

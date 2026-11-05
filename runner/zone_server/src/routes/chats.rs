@@ -1,6 +1,7 @@
 //! Chat endpoints
 
 pub(super) mod provider;
+pub(super) mod pull_requests;
 
 use axum::{
     Json,

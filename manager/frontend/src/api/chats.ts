@@ -1,5 +1,7 @@
 import {
   ChatProvidersSchema,
+  ChatPullRequestSchema,
+  ChatPullRequestsResponseSchema,
   ChatResponseSchema,
   ChatSearchResponseSchema,
   ChatSourcesResponseSchema,
@@ -7,11 +9,13 @@ import {
   ContextResponseSchema,
   MessageResponseSchema,
   MessagesResponseSchema,
+  PullRequestDiffSchema,
   WorkspaceChatProvidersSchema,
 } from '../features/chats/schemas';
 import type {
   Chat,
   ChatProviders,
+  ChatPullRequest,
   ChatSearchOptions,
   ChatSearchResponse,
   ChatSource,
@@ -19,6 +23,8 @@ import type {
   ContextUsage,
   CreateChatRequest,
   Message,
+  PullRequestChange,
+  PullRequestDiff,
   SendMessageRequest,
   SetChatProviderRequest,
   UpdateChatRequest,
@@ -225,6 +231,47 @@ class ChatsApi {
       throw await ApiError.from(response, 'Failed to attach sources');
     }
     return parse(ChatSourcesResponseSchema, await response.json()).sources;
+  }
+
+  async getChatPullRequests(chatId: string): Promise<ChatPullRequest[]> {
+    const response = await fetch(
+      `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/pull-requests`,
+      { headers: this.getHeaders() }
+    );
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load pull requests');
+    }
+    return parse(ChatPullRequestsResponseSchema, await response.json()).pull_requests;
+  }
+
+  async updateChatPullRequest(
+    chatId: string,
+    pullRequestId: string,
+    change: PullRequestChange
+  ): Promise<ChatPullRequest> {
+    const response = await fetch(
+      `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/pull-requests/${encodeURIComponent(pullRequestId)}`,
+      {
+        method: 'PATCH',
+        headers: this.getHeaders(),
+        body: JSON.stringify(change),
+      }
+    );
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to update the pull request');
+    }
+    return parse(ChatPullRequestSchema, await response.json());
+  }
+
+  async getChatPullRequestDiff(chatId: string, pullRequestId: string): Promise<PullRequestDiff> {
+    const response = await fetch(
+      `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/pull-requests/${encodeURIComponent(pullRequestId)}/diff`,
+      { headers: this.getHeaders() }
+    );
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load the changes');
+    }
+    return parse(PullRequestDiffSchema, await response.json());
   }
 
   async getChatProviders(chatId: string): Promise<ChatProviders> {

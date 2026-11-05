@@ -5,6 +5,7 @@ use abnegate_secret::sanitize;
 use serde_json::Value;
 
 use super::occupancy::Occupancy;
+use super::output::Output;
 use super::settings::Toolset;
 
 /// What separates two blocks of an agent's answer.
@@ -39,6 +40,7 @@ pub enum AgentEvent {
     /// asked to stream partial messages.
     Text(String),
     Tool(ToolCall),
+    Output(Output),
     Usage(Usage),
     /// How much of a usage window the account has spent, reported while the
     /// turn goes on.

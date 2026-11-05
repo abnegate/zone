@@ -1,5 +1,7 @@
 //! Live GitHub observations and writes using an authorized workspace source.
 
+use abnegate_secret::SecretValue;
+use abnegate_vcs::BranchName;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode, Url};
@@ -21,12 +23,15 @@ use super::readiness::{
 };
 use super::releases::{self, Lookup, ReleaseIdentity, ReleasePipeline, RunEvidence};
 use super::tools::{WorkspaceScope, apply_record_cap, json_chars, take_array, truncate};
+use crate::config::{Config, github_graphql_url};
 use crate::db::{sources, workspace_members};
+use crate::services::chat::pull_request::{self as chat_pull_request, Opened};
 use crate::services::prioritisation::{
     Configuration as Prioritisation, Prioritiser, RiskSignal, pull_request,
 };
 
 const ORIGIN: &str = "https://api.github.com/";
+const API_HOST_LABEL: &str = "api.";
 const PAGE_SIZE: usize = 100;
 const FILE_PAGE_CHARS: u64 = 8_000;
 const ISSUE_BODY_CHARS: usize = 1_500;
@@ -398,16 +403,86 @@ impl Integration {
                     .map_err(|_| "The source credentials could not be decrypted.".to_string())?,
             );
         }
-        let github = Github::new(configuration)?;
-        let mut result = if write {
+        let github = Github::new(configuration)?.at(self.scope.state.config())?;
+        let mut result = if matches!(self.operation, Operation::CreatePull) {
+            self.open_pull(&github, &arguments).await?
+        } else if write {
             github.write(self.operation, &arguments).await?
         } else {
             github.observe(self.operation, &arguments).await?
         };
         result["source_id"] = json!(arguments.source_id);
         result["observed_at"] = json!(Utc::now().to_rfc3339());
+        if matches!(self.operation, Operation::CreatePull) {
+            self.record(&arguments, &result).await;
+        }
         Ok(result)
     }
+
+    /// Opens the pull request, or when GitHub refuses it because one is
+    /// already open from the same head into the same base, answers with that
+    /// one, so a retry after a timed-out create gets the pull request the
+    /// first attempt made instead of an error.
+    async fn open_pull(&self, github: &Github, arguments: &Arguments) -> Result<Value, String> {
+        let repository = format!(
+            "https://github.com/{}/{}",
+            github.configuration.owner, github.configuration.repo
+        );
+        let (head, base) = match github.create_pull(arguments).await? {
+            Creation::Created(created) => {
+                return Ok(json!({
+                    "repository": repository,
+                    "pull_request": project(&created, &["number", "html_url", "title", "state"]),
+                }));
+            }
+            Creation::Refused { head, base } => (head, base),
+        };
+        let refused = || status_error(StatusCode::UNPROCESSABLE_ENTITY);
+        let token = github.configuration.token.as_deref().ok_or_else(refused)?;
+        let existing = existing_pull(
+            self.scope.state.config(),
+            &SecretValue::new(token),
+            &github.configuration.owner,
+            &github.configuration.repo,
+            &head,
+            &base,
+        )
+        .await
+        .ok_or_else(refused)?;
+        Ok(json!({
+            "repository": repository,
+            "pull_request": existing,
+            "already_open": true,
+        }))
+    }
+
+    /// Notes the pull request this chat just opened as the chat's own. A
+    /// failure to note it never fails the write that already happened.
+    async fn record(&self, arguments: &Arguments, result: &Value) {
+        let Some(chat_id) = self.scope.chat_id else {
+            return;
+        };
+        let created = &result["pull_request"];
+        let Some(url) = created["html_url"].as_str() else {
+            return;
+        };
+        let opened = Opened {
+            chat_id,
+            workspace_id: self.scope.workspace_id,
+            url: url.to_string(),
+            title: created["title"].as_str().map(str::to_string),
+            source_id: Some(arguments.source_id),
+        };
+        if let Err(error) = chat_pull_request::record(&self.scope.state, &opened).await {
+            tracing::warn!(chat = %chat_id, %error, "could not record the pull request a chat opened");
+        }
+    }
+}
+
+/// What GitHub made of a request to open a pull request.
+enum Creation {
+    Created(Value),
+    Refused { head: String, base: String },
 }
 
 pub struct Github {
@@ -440,6 +515,14 @@ impl Github {
             signals,
             configuration,
         })
+    }
+
+    /// This client against the GitHub origin the server is configured for.
+    pub(crate) fn at(mut self, config: &Config) -> Result<Self, String> {
+        self.origin = config
+            .github_rest_origin()
+            .ok_or("The configured GitHub API origin is invalid.")?;
+        Ok(self)
     }
 
     /// The `owner/repo` name GitHub reports records under.
@@ -555,10 +638,8 @@ impl Github {
     }
 
     async fn graphql(&self, query: &str, variables: Value) -> Result<Value, String> {
-        let url = self
-            .origin
-            .join("graphql")
-            .map_err(|_| "Could not build the GitHub GraphQL URL.".to_string())?;
+        let url = github_graphql_url(&self.origin)
+            .ok_or_else(|| "Could not build the GitHub GraphQL URL.".to_string())?;
         let response: Value = self
             .dispatch(
                 reqwest::Method::POST,
@@ -588,45 +669,13 @@ impl Github {
             self.configuration.owner, self.configuration.repo
         );
         match operation {
-            Operation::CreatePull => {
-                let title = arguments
-                    .title
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-                    .ok_or("title is required.")?;
-                let head = arguments
-                    .head
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-                    .ok_or("head is required.")?;
-                if !git_ref(head) {
-                    return Err("head is invalid.".to_string());
-                }
-                let base = arguments
-                    .base
-                    .clone()
-                    .filter(|value| !value.trim().is_empty())
-                    .or_else(|| self.configuration.branch.clone())
-                    .ok_or("base is required (or set the source branch).")?;
-                if !git_ref(&base) {
-                    return Err("base is invalid.".to_string());
-                }
-                let created = self
-                    .post(
-                        &["pulls"],
-                        &json!({
-                            "title": title,
-                            "head": head,
-                            "base": base,
-                            "body": arguments.body.clone().unwrap_or_default(),
-                        }),
-                    )
-                    .await?;
-                Ok(json!({
+            Operation::CreatePull => match self.create_pull(arguments).await? {
+                Creation::Created(created) => Ok(json!({
                     "repository": repository,
                     "pull_request": project(&created, &["number", "html_url", "title", "state"]),
-                }))
-            }
+                })),
+                Creation::Refused { .. } => Err(status_error(StatusCode::UNPROCESSABLE_ENTITY)),
+            },
             Operation::Comment => {
                 let number = arguments.number.ok_or("number is required.")?;
                 if number == 0 {
@@ -649,6 +698,65 @@ impl Github {
                 }))
             }
             _ => Err("This operation is read-only.".to_string()),
+        }
+    }
+
+    /// Opens the pull request, or reports that GitHub refused it as invalid,
+    /// which it also does when one is already open from the same head.
+    async fn create_pull(&self, arguments: &Arguments) -> Result<Creation, String> {
+        let title = arguments
+            .title
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("title is required.")?;
+        let head = arguments
+            .head
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("head is required.")?;
+        if !git_ref(head) {
+            return Err("head is invalid.".to_string());
+        }
+        let base = arguments
+            .base
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.configuration.branch.clone())
+            .ok_or("base is required (or set the source branch).")?;
+        if !git_ref(&base) {
+            return Err("base is invalid.".to_string());
+        }
+        let body = json!({
+            "title": title,
+            "head": head,
+            "base": base,
+            "body": arguments.body.clone().unwrap_or_default(),
+        });
+        let response = self
+            .send(
+                &reqwest::Method::POST,
+                &self.url(&["pulls"]),
+                false,
+                Some(&body),
+            )
+            .await?;
+        if matches!(
+            rate_limit(&response, Utc::now()),
+            Some(RateLimit::Exhausted)
+        ) {
+            return Err(RATE_LIMIT_EXHAUSTED.to_string());
+        }
+        match response.status() {
+            StatusCode::UNPROCESSABLE_ENTITY => Ok(Creation::Refused {
+                head: head.to_string(),
+                base,
+            }),
+            status if status.is_success() => response
+                .json()
+                .await
+                .map(Creation::Created)
+                .map_err(|_| "GitHub returned an invalid response.".to_string()),
+            status => Err(status_error(status)),
         }
     }
 
@@ -1848,6 +1956,52 @@ fn retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
 }
 
 // Provider response bodies and request errors can contain secrets.
+/// The open pull request from `head` into `base`, found through abnegate-vcs.
+/// A head on a fork (`owner:branch`) is not one the crate can look up.
+async fn existing_pull(
+    config: &Config,
+    token: &SecretValue,
+    owner: &str,
+    repo: &str,
+    head: &str,
+    base: &str,
+) -> Option<Value> {
+    if head.contains(':') {
+        return None;
+    }
+    let service = config.pull_requests().ok()?;
+    let repository = service
+        .parse_github_url(&format!("{}/{owner}/{repo}", github_web_origin(config)?))
+        .ok()?;
+    let branch = BranchName::parse(head).ok()?;
+    let url = service
+        .pull_request_exists_for_branch(&repository, token, &branch)
+        .await
+        .ok()??;
+    let reference = service.pull_request(&url).ok()?;
+    let detail = service.fetch_pull(&reference, token).await.ok()?;
+    (detail.base.as_str() == base).then(|| {
+        json!({
+            "number": detail.number.get(),
+            "html_url": detail.url,
+            "title": detail.title,
+            "state": "open",
+        })
+    })
+}
+
+/// Where the configured GitHub serves repositories to a browser: its API host
+/// without the `api.` label, as abnegate-vcs reads it.
+fn github_web_origin(config: &Config) -> Option<String> {
+    let origin = config.github_rest_origin()?;
+    let host = origin.host_str()?;
+    let host = host.strip_prefix(API_HOST_LABEL).unwrap_or(host);
+    Some(match origin.port() {
+        Some(port) => format!("{}://{host}:{port}", origin.scheme()),
+        None => format!("{}://{host}", origin.scheme()),
+    })
+}
+
 fn status_error(status: StatusCode) -> String {
     format!(
         "GitHub returned HTTP {}. Check source access, permissions, rate limits and the requested resource.",

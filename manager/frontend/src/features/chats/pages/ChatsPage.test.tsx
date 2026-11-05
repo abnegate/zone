@@ -38,6 +38,7 @@ const mockDeleteChat = mock();
 const mockSearchChatMessages = mock();
 const mockUpdateChat = mock();
 const mockGetChatSources = mock();
+const mockGetChatPullRequests = mock();
 const mockSetChatSources = mock();
 const mockGetChatProviders = mock();
 const mockSetChatProvider = mock();
@@ -77,6 +78,7 @@ mock.module('../../../api/chats', () => ({
     deleteChat: mockDeleteChat,
     searchChatMessages: mockSearchChatMessages,
     getChatSources: mockGetChatSources,
+    getChatPullRequests: mockGetChatPullRequests,
     setChatSources: mockSetChatSources,
     getChatProviders: mockGetChatProviders,
     setChatProvider: mockSetChatProvider,
@@ -468,6 +470,8 @@ describe('ChatsPage', () => {
     mockGetChatSources.mockReset();
     mockSetChatSources.mockReset();
     mockGetChatSources.mockResolvedValue([]);
+    mockGetChatPullRequests.mockReset();
+    mockGetChatPullRequests.mockResolvedValue([]);
     mockGetChatProviders.mockReset();
     mockSetChatProvider.mockReset();
     mockGetChatProviders.mockResolvedValue(chatProviders());
@@ -1455,6 +1459,59 @@ describe('ChatsPage', () => {
           expect.objectContaining({ project_id: 'proj-alpha' })
         );
       });
+    });
+
+    it('opens the panel beside a chat that opened a pull request or holds media', async () => {
+      mockGetChatPullRequests.mockResolvedValue([
+        {
+          id: 'pr-1',
+          provider: 'github',
+          owner: 'acme',
+          repo: 'widgets',
+          number: 12,
+          url: 'https://github.com/acme/widgets/pull/12',
+          title: 'Add widgets',
+          dismissed: false,
+          created_at: '2026-11-05T10:00:00Z',
+          status: null,
+          writable: true,
+          credentialed: false,
+        },
+      ]);
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        messages: [
+          ...mockChatWithMessages.messages,
+          {
+            id: 'msg-image',
+            chat_id: mockChatWithMessages.id,
+            role: 'assistant',
+            content: 'Here it is.',
+            created_at: '2024-01-01T00:00:03Z',
+            metadata: {
+              attachments: [
+                { name: 'sunset.png', mime: 'image/png', url: 'data:image/png;base64,AA==' },
+              ],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      const panel = await screen.findByRole('complementary', { name: 'Changes and media' });
+      expect(await within(panel).findByRole('link', { name: 'Add widgets' })).toBeInTheDocument();
+      expect(within(panel).getByRole('button', { name: 'Open sunset.png' })).toBeInTheDocument();
+      expect(mockGetChatPullRequests).toHaveBeenCalledWith(mockChatWithMessages.id);
+    });
+
+    it('keeps the panel out of a chat with nothing to show in it', async () => {
+      mockGetChat.mockResolvedValue(mockChatWithMessages);
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      await waitFor(() => expect(mockGetChatPullRequests).toHaveBeenCalled());
+      expect(screen.queryByRole('complementary', { name: 'Changes and media' })).toBeNull();
     });
 
     it('names Offline on a chat created that way', async () => {

@@ -288,6 +288,18 @@ pub fn create_router(state: AppState) -> Router {
             "/api/chats/{chat_id}/messages/{message_id}",
             delete(chats::delete_message),
         )
+        .route(
+            "/api/chats/{id}/pull-requests",
+            get(chats::pull_requests::list),
+        )
+        .route(
+            "/api/chats/{id}/pull-requests/{pull_request_id}",
+            patch(chats::pull_requests::update),
+        )
+        .route(
+            "/api/chats/{id}/pull-requests/{pull_request_id}/diff",
+            get(chats::pull_requests::diff),
+        )
         // Sources (workspace-scoped)
         .route("/api/sources/types", get(sources::list_types))
         .route(

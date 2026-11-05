@@ -99,7 +99,7 @@ test.describe('Chat audio', () => {
     await mockChatRoutes(page, [userPrompt, assistantAudioMessage(INLINE_AUDIO_DATA_URL)]);
     await openAudioChat(page);
 
-    const audio = page.getByLabel('generated-audio-1.flac');
+    const audio = page.getByLabel('generated-audio-1.flac', { exact: true });
     await expect(audio).toBeVisible();
     await expect(audio).toHaveAttribute('controls');
     await expect(audio).toHaveAttribute('src', INLINE_AUDIO_DATA_URL);
@@ -124,7 +124,7 @@ test.describe('Chat audio', () => {
     await mockChatRoutes(page, [userPrompt, assistantAudioMessage(GENERATED_AUDIO_URL)]);
     await openAudioChat(page);
 
-    const audio = page.getByLabel('generated-audio-1.flac');
+    const audio = page.getByLabel('generated-audio-1.flac', { exact: true });
     await expect(audio).toBeVisible();
     await expect(audio).toHaveAttribute('controls');
     await expect(audio).toHaveAttribute('src', SIGNED_AUDIO_URL);
@@ -160,7 +160,7 @@ test.describe('Chat audio', () => {
     });
 
     await expect(page.getByRole('status')).toHaveCount(0);
-    await expect(page.getByLabel('generated-audio-1.flac')).toBeVisible();
+    await expect(page.getByLabel('generated-audio-1.flac', { exact: true })).toBeVisible();
     await expect(page.locator('.message-assistant .message-content')).toContainText(
       'Generated audio.'
     );
