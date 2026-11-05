@@ -59,6 +59,13 @@ const MAX_CONCURRENT_TASKS: usize = 5;
 // Timeout for task execution (1 hour)
 const TASK_TIMEOUT_SECS: u64 = 3600;
 const TASK_TIMEOUT: Duration = Duration::from_secs(TASK_TIMEOUT_SECS);
+
+/// An explicit ceiling for the tests that need a budget which runs out. A
+/// task's own budget is unlimited, so behaviour that depends on exhausting one
+/// is unobservable without this; these are the numbers a task carried before
+/// it was unbounded.
+#[cfg(test)]
+const PARKING_CEILING: LoopBudget = LoopBudget::bounded(50, 100);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -1312,6 +1319,7 @@ async fn execute_in_checkout(
                 unattended,
                 approval,
                 tokio::time::Instant::now() + TASK_TIMEOUT,
+                LoopBudget::task(),
             )
             .await;
             let outcome = match outcome {
@@ -2271,6 +2279,7 @@ async fn attempt_run(
     unattended: bool,
     approval: &plan::Approval,
     deadline: tokio::time::Instant,
+    budget: LoopBudget,
 ) -> Result<TaskOutcome, Fault> {
     // A task that requires its plan approved changes nothing until it is:
     // every tool that would is refused, turn after turn, until the answer
@@ -2323,7 +2332,7 @@ async fn attempt_run(
             chat: run_id,
             user: actor,
             approval: ApprovalPolicy::auto(),
-            calls: LoopBudget::task().max_tool_calls,
+            calls: budget.max_tool_calls,
         },
         &crate::mcp::local_endpoint(state.config()),
     );
@@ -2360,7 +2369,8 @@ async fn attempt_run(
         // One budget covers every turn of the attempt. A fresh one per park is
         // no ceiling at all: a model looping on `ask_user` restarts it as often
         // as it likes, and an all-optional card answers itself in 30 seconds.
-        let mut budget = LoopBudget::task();
+        // Unlimited by default, so what ends a parking model is the deadline.
+        let mut budget = budget;
         // The wait allowance shares that lifetime, so a retried attempt starts
         // at zero and the waits of one attempt cap only its own park churn.
         wait::reset_session(Session::Task(run_id));
@@ -5813,6 +5823,7 @@ mod watchdog_tests {
                 false,
                 &plan::Approval::default(),
                 tokio::time::Instant::now() + TASK_TIMEOUT,
+                PARKING_CEILING,
             ),
         )
         .await
@@ -5820,7 +5831,7 @@ mod watchdog_tests {
         .unwrap();
         answering.abort();
 
-        let ceiling = LoopBudget::task();
+        let ceiling = PARKING_CEILING;
         assert!(
             outcome.tool_calls <= ceiling.max_tool_calls,
             "{} tool calls ran across the parks, under a ceiling of {}",
@@ -6016,7 +6027,9 @@ mod watchdog_tests {
 
     #[test]
     fn a_spent_budget_never_goes_below_nothing_left() {
-        let ceiling = LoopBudget::task();
+        // An explicit ceiling: overspending an unlimited one cannot be
+        // expressed, since there is no number above `usize::MAX` to spend.
+        let ceiling = PARKING_CEILING;
         assert_eq!(
             ceiling.less(Spend {
                 iterations: 2,
@@ -6795,6 +6808,7 @@ mod watchdog_tests {
             false,
             &plan::Approval::default(),
             tokio::time::Instant::now() + TASK_TIMEOUT,
+            LoopBudget::task(),
         )
         .await
         .expect("an attempt that waits on nothing finishes");
@@ -7958,6 +7972,7 @@ mod cli_tests {
             false,
             &plan::Approval::default(),
             deadline,
+            LoopBudget::task(),
         )
         .await
     }
@@ -8068,10 +8083,11 @@ mod cli_tests {
     }
 
     /// Over MCP the agent runs the loop, so zone counts its calls where they
-    /// arrive: an attempt makes as many as zone's own loop would have made, and
-    /// the next is refused without running.
+    /// arrive. A task's budget is unlimited, so those calls are not cut off:
+    /// an attempt keeps working past any number zone's own loop once stopped
+    /// at, and what ends a runaway attempt is its deadline instead.
     #[tokio::test]
-    async fn a_run_on_a_coding_agent_is_held_to_the_tasks_tool_budget() {
+    async fn a_run_on_a_coding_agent_is_not_cut_off_by_a_tool_budget() {
         let _execution = EXECUTION.lock().await;
         let fixture = Fixture::new(false).await;
         let agent = Agent::write();
@@ -8088,15 +8104,21 @@ mod cli_tests {
             "content": "written",
             "reason": "The task asked for this file.",
         }});
-        let budget = LoopBudget::task().max_tool_calls;
+        // Comfortably past the ceiling a task used to carry, which is as far
+        // as an unlimited budget can be demonstrated in finite time.
+        const PAST_THE_OLD_CEILING: usize = 150;
+        assert!(
+            PAST_THE_OLD_CEILING > PARKING_CEILING.max_tool_calls,
+            "the probe has to reach past the ceiling it is proving is gone"
+        );
 
-        for _ in 0..budget {
+        for attempt in 0..PAST_THE_OLD_CEILING {
             let answer = rpc(&token, "tools/call", call.clone()).await;
-            assert_eq!(answer["result"]["isError"], false, "{answer}");
+            assert_eq!(
+                answer["result"]["isError"], false,
+                "call {attempt} was refused: {answer}"
+            );
         }
-        let refused = rpc(&token, "tools/call", call).await;
-
-        assert_eq!(refused["result"]["isError"], true, "{refused}");
         agent.release();
         tokio::time::timeout(SPAWN_TIMEOUT, running)
             .await
