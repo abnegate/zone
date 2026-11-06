@@ -1,6 +1,8 @@
 import { Button, TabsContent, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { client } from '../../../../api/client';
+import { meetsOrganizationRole } from '../../../../shared/components/ProtectedRoute';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
 import { useModels } from '../../../models';
@@ -28,12 +30,19 @@ import {
   AuditLogsSection,
   BillingSection,
   DevicesSection,
+  GitHubSection,
   InvitationsSection,
   OrgMembersSection,
 } from '../components';
 import type { AiProvider, AiSettings, Workspace } from '../types';
 
-type TabType = 'ai' | 'members' | 'devices' | 'invitations' | 'billing' | 'audit';
+const TABS = ['ai', 'members', 'devices', 'invitations', 'billing', 'audit', 'github'] as const;
+
+type TabType = (typeof TABS)[number];
+
+function isTab(value: string | null): value is TabType {
+  return TABS.some((tab) => tab === value);
+}
 
 const TITLE = 'Organization Settings';
 
@@ -42,7 +51,11 @@ export default function OrgSettingsPage() {
   const { currentOrganization, resolvingRole } = useWorkspace();
   const { models: installedModels } = useModels();
 
-  const [activeTab, setActiveTab] = useState<TabType>('ai');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get('tab');
+  const [activeTab, setActiveTab] = useState<TabType>(() =>
+    isTab(requestedTab) ? requestedTab : 'ai'
+  );
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -155,6 +168,7 @@ export default function OrgSettingsPage() {
       <TabsTrigger value="invitations">Invitations</TabsTrigger>
       <TabsTrigger value="billing">Billing</TabsTrigger>
       <TabsTrigger value="audit">Audit Logs</TabsTrigger>
+      <TabsTrigger value="github">GitHub</TabsTrigger>
     </TabsList>
   );
 
@@ -166,7 +180,15 @@ export default function OrgSettingsPage() {
     );
   }
 
-  const selectTab = (value: string) => setActiveTab(value as TabType);
+  const selectTab = (value: string) => {
+    if (!isTab(value)) {
+      return;
+    }
+    setActiveTab(value);
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', value);
+    setSearchParams(next, { replace: true });
+  };
 
   if (loading && activeTab === 'ai') {
     return (
@@ -196,6 +218,16 @@ export default function OrgSettingsPage() {
       </TabsContent>
       <TabsContent value="audit">
         <AuditLogsSection orgId={currentOrganization.id} />
+      </TabsContent>
+      <TabsContent value="github">
+        <GitHubSection
+          key={currentOrganization.id}
+          organizationId={currentOrganization.id}
+          canManage={
+            currentOrganization.role !== undefined &&
+            meetsOrganizationRole(currentOrganization.role, 'admin')
+          }
+        />
       </TabsContent>
       <TabsContent value="ai">
         <form onSubmit={handleSave} className="settings-form">
