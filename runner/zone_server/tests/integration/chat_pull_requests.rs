@@ -36,6 +36,7 @@ const GITHUB_TOKEN: &str = "ghp_chat_pull_requests_test";
 const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 const TITLE: &str = "Add widgets";
 const NODE: &str = "PR_kwDOchat";
+const NUMBER: u64 = 12;
 
 /// A stand-in for the host's `claude`, held open until the test has done what
 /// it needs to during the turn, then replaying the lines the test gave it.
@@ -321,6 +322,12 @@ fn threads_read() -> wiremock::MockBuilder {
 /// GitHub's page of pull request 12's review threads, one resolved for each
 /// `true` in `resolved`, read without their comments.
 fn threads_answer(resolved: &[bool]) -> ResponseTemplate {
+    threads_answer_for(NUMBER, resolved)
+}
+
+/// GitHub's page of review threads answered for pull request `number`, one
+/// resolved for each `true` in `resolved`, read without their comments.
+fn threads_answer_for(number: u64, resolved: &[bool]) -> ResponseTemplate {
     let nodes: Vec<Value> = resolved
         .iter()
         .enumerate()
@@ -332,11 +339,24 @@ fn threads_answer(resolved: &[bool]) -> ResponseTemplate {
         })
         .collect();
     ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
-        "pullRequest": {"reviewThreads": {
+        "pullRequest": {"number": number, "reviewThreads": {
             "pageInfo": {"hasNextPage": false, "endCursor": null},
             "nodes": nodes,
         }},
     }}}))
+}
+
+/// GitHub's answer to a review thread read that found nothing at `path` in
+/// the query.
+fn threads_missing_at(path: &[&str]) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "data": {"repository": null},
+        "errors": [{
+            "type": "NOT_FOUND",
+            "path": path,
+            "message": "Could not resolve to a node.",
+        }],
+    }))
 }
 
 async fn discuss(github: &MockServer, resolved: &[bool]) {
@@ -1243,7 +1263,7 @@ async fn review_threads_read_as_unknown_when_github_stops_short_of_every_thread(
     threads_read()
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
-                "pullRequest": {"reviewThreads": {
+                "pullRequest": {"number": NUMBER, "reviewThreads": {
                     "pageInfo": {"hasNextPage": true, "endCursor": null},
                     "nodes": [{"id": "PRRT_0", "isResolved": true}],
                 }},
@@ -1262,6 +1282,59 @@ async fn review_threads_read_as_unknown_when_github_stops_short_of_every_thread(
 
     assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
     assert_eq!(listed[0]["status"]["threads"], Value::Null, "{listed}");
+}
+
+#[tokio::test]
+async fn review_threads_read_as_unknown_when_github_answers_for_another_pull_request() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    threads_read()
+        .respond_with(threads_answer_for(NUMBER + 1, &[false]))
+        .expect(1..)
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    workspace.record(&link(&github, NUMBER)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
+    assert_eq!(listed[0]["status"]["threads"], Value::Null, "{listed}");
+}
+
+#[tokio::test]
+async fn review_threads_read_as_unknown_when_github_finds_no_repository_or_pull_request() {
+    for missing in [&["repository"][..], &["repository", "pullRequest"][..]] {
+        let github = MockServer::start().await;
+        describe(&github, false).await;
+        automate(&github, Automation::default()).await;
+        threads_read()
+            .respond_with(threads_missing_at(missing))
+            .expect(1..)
+            .mount(&github)
+            .await;
+        let database = context_database_url();
+        let pool = PgPool::connect(&database).await.expect("the test database");
+        let workspace = Workspace::new(config(&github, database), pool).await;
+        workspace.connect_github().await;
+        workspace.record(&link(&github, NUMBER)).await;
+
+        let listed = workspace.listed(&workspace.token).await;
+
+        assert_eq!(
+            listed[0]["status"]["state"], "open",
+            "{missing:?}: {listed}"
+        );
+        assert_eq!(
+            listed[0]["status"]["threads"],
+            Value::Null,
+            "{missing:?}: {listed}"
+        );
+    }
 }
 
 #[tokio::test]
