@@ -107,14 +107,14 @@ abnegate-llm = { workspace = true }
 abnegate-notify = { workspace = true, features = ["smtp"] }
 abnegate-search = { workspace = true }
 abnegate-secret = { workspace = true, features = ["sqlx"] }
-abnegate-vcs = { workspace = true, features = ["github"] }
+abnegate-vcs = { workspace = true, features = ["github", "github-app"] }
 zone_chat = { path = "../zone_chat" }
 zone_core = { path = "../zone_core", features = ["sqlx"] }
 zone_context = { path = "../zone_context" }
 
 [dev-dependencies]
 abnegate-notify = { workspace = true, features = ["testing"] }
-abnegate-vcs = { workspace = true, features = ["github", "testing"] }
+abnegate-vcs = { workspace = true, features = ["github", "github-app", "testing"] }
 zone_chat = { path = "../zone_chat" }
 zone_core = { path = "../zone_core", features = ["sqlx", "test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
