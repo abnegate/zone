@@ -168,26 +168,32 @@ sealed with a key derived from `ENCRYPTION_KEY`, and a restored instance needs
 the same `ENCRYPTION_KEY` to use them: under another key, every Claude Code
 sign-in shows as expired until an organization admin signs in again.
 
-## Upgrading to migration 048
+## Upgrading to the v1 baseline
 
-The first start of a server that includes coding agent sign-ins applies
-migration 048, which adds the `agent_logins` table and lets AI settings store
-the `claude_code` and `codex` providers. An image built before it cannot start
-against the migrated database: it stops with
-`Failed to run migrations: VersionMissing(48)`. Run `make backup` before the
-upgrade. Going back to an older image means restoring that backup, and losing
-whatever changed after it was taken.
+The numbered migrations `001_initial_schema.sql` to `024_chat_subagents.sql`
+are squashed into one baseline, `0001_v1.sql`, whose schema is identical to
+theirs. A fresh database applies the baseline and every later migration.
 
-## Upgrading to migration 049
+A database migrated through 024 moves onto the baseline at the first start of
+a server that includes it: under the migration lock, its 23 rows in
+`_sqlx_migrations` become the baseline's one row, and any index an
+interrupted `CREATE INDEX CONCURRENTLY` left invalid is rebuilt. No table,
+column or row is changed.
 
-The first start of a server that records failed reviewer rounds applies
-migrations 049 and 050, which let `task_reviews` store the `failed` verdict.
-049 swaps the verdict check without reading the table, and 050 then validates
-it while reviews stay writable. An image built before them cannot start
-against the migrated database: it stops with
-`Failed to run migrations: VersionMissing(49)`. Run `make backup` before the
-upgrade. Going back to an older image means restoring that backup, and losing
-whatever changed after it was taken.
+A database stopped short of 024, or with a migration recorded that `main`
+never had, cannot be moved: the server stops with
+`Failed to run migrations: while resolving migrations: this database stopped
+partway through the migrations from before the v1 baseline` and names the missing, failed and unrecognised
+versions, writing nothing. Start a build from commit `218739e7` against it
+once to finish the old migrations, then upgrade. A disposable development
+database holding a branch's own migration is quicker to recreate.
+
+Run `make backup` before the upgrade. An image built before the baseline
+cannot start against the moved database: it stops with
+`Failed to run migrations: VersionMismatch(1)`. Going back to an older image
+means restoring that backup, and losing whatever changed after it was taken.
+
+## Failed reviewer rounds
 
 An auto-project reviewer model that errors now records a failed round: the
 next tick asks the next reviewer, and a second round on the same head without
@@ -203,49 +209,7 @@ count; however far apart its attempts land while sibling tasks are reviewed,
 they still add up. The counts live in the driver's memory, so a restart starts
 them over and the task asks its round's own reviewer first again.
 
-## Upgrading to migration 051
-
-The first start of a server that skips repeated sync deliveries applies
-migrations 051, 052 and 053. 051 adds the `sync_deliveries` table and lets
-`sync_events` record the `unlink` event of a deleted GitHub issue, swapping the
-event type check without reading the table; 052 then validates it while sync
-events stay writable; 053 adds the `sync_unlinked_items` table that keeps a
-deleted issue from becoming a task again. An image built before them cannot
-start against the migrated database: it stops with
-`Failed to run migrations: VersionMissing(51)`. Run `make backup` before the
-upgrade. Going back to an older image means restoring that backup, and losing
-whatever changed after it was taken.
-
-## Upgrading to migration 003
-
-The first start of a server that signs an organization in to several accounts
-per agent applies migrations 003 and 004 on top of the squashed initial
-schema, `001_initial_schema.sql`, and of 002, which lets a chat stay off the
-public web. They upgrade a database those two created.
-A database migrated before the squash, with any of the old versions 002 to 055
-recorded, cannot be upgraded in place: the server stops with
-`Failed to run migrations: VersionMissing(n)` for the first old version the
-new history lacks, and only a fresh database that starts from the squashed 001
-gets past it.
-
-- 003 drops the key that allowed one sign-in per organization and agent, and
-  adds a unique index on organization, agent and account for sign-ins that
-  name an account, and an index on organization and agent. It adds the
-  columns each sign-in records its account and usage in: `account`,
-  `windows`, `headroom`, `usage_fetched_at`, `exhausted_until` and
-  `last_used_at`. It adds to `chats` the sign-in a chat runs on,
-  `agent_login_id`, and the CLI session it resumes: `agent_session_id`,
-  `agent_session_agent`, `agent_session_entry` and `agent_session_prompt`.
-- The foreign key from `chats.agent_login_id` to `agent_logins`, which clears
-  a chat's sign-in when that account is signed out, is added `NOT VALID`, so
-  003 does not read `chats`; 004 then validates it while chats stay writable.
-  `chats.agent_login_id` has no index of its own, so signing an account out
-  scans `chats` once to clear it.
-
-An image built before them cannot start against the migrated database: it
-stops with `Failed to run migrations: VersionMissing(3)`. Run `make backup`
-before the upgrade. Going back to an older image means restoring that backup,
-and losing whatever changed after it was taken.
+## Several sign-ins per agent
 
 Every sign-in the organization held stays signed in, as one account, with no
 account recorded:

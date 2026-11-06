@@ -5,6 +5,10 @@
 //! same rules: the same version order, the same SHA-384 checksums, the same
 //! `_sqlx_migrations` ledger and the same advisory lock. Sharing all four is what keeps
 //! the two paths one schema rather than two.
+//!
+//! Only `zone_server` moves a ledger recorded before the v1 baseline onto it. Here such a
+//! ledger is refused as `MissingFromBinary`, so a pre-v1 database has to start the server once
+//! before this runner can migrate it.
 
 mod checksum;
 mod embedded;

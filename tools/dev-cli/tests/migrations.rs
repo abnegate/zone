@@ -22,7 +22,7 @@ impl Fixture {
         fs::write(path.join("package.json"), "{}").unwrap();
         fs::create_dir_all(path.join("runner/zone_server/migrations")).unwrap();
         fs::write(
-            path.join("runner/zone_server/migrations/001_initial_schema.sql"),
+            path.join("runner/zone_server/migrations/0001_v1.sql"),
             "SELECT 1;",
         )
         .unwrap();
