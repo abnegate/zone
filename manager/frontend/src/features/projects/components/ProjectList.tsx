@@ -59,7 +59,6 @@ function dropSide(
   return ids.indexOf(over) < ids.indexOf(active) ? 'before' : 'after';
 }
 
-/** The project cards, which can be dragged by their grips, or moved by keyboard, into a custom order. */
 export function ProjectList({ projects, movable, renderCard, onMove }: ProjectListProps) {
   const ids = projects.map((project) => project.id);
   const current = useRef(ids);
@@ -137,6 +136,7 @@ export function ProjectList({ projects, movable, renderCard, onMove }: ProjectLi
         <ProjectSlot
           key={project.id}
           id={project.id}
+          name={project.name}
           movable={moving}
           instructions={instructions}
           drop={dropSide(ids, active, over, project.id)}

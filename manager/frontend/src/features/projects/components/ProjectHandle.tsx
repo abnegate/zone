@@ -1,25 +1,30 @@
-import { useProjectDrag } from '../hooks/useProjectDrag';
+import type { DraggableAttributes, DraggableSyntheticListeners } from '@dnd-kit/core';
 
 export interface ProjectHandleProps {
   name: string;
+  setHandle: (element: HTMLElement | null) => void;
+  attributes: DraggableAttributes;
+  listeners: DraggableSyntheticListeners;
+  instructions: string;
 }
 
-/** The grip a project card is dragged by, kept apart from the card so a click still opens it. */
-export function ProjectHandle({ name }: ProjectHandleProps) {
-  const drag = useProjectDrag();
-  if (!drag) return null;
-
+export function ProjectHandle({
+  name,
+  setHandle,
+  attributes,
+  listeners,
+  instructions,
+}: ProjectHandleProps) {
   return (
     <button
       type="button"
-      ref={drag.setHandle}
+      ref={setHandle}
       className="project-card-handle"
       title={`Move ${name}`}
-      {...drag.attributes}
-      {...drag.listeners}
+      {...attributes}
+      {...listeners}
       aria-label={`Move ${name}`}
-      aria-describedby={drag.instructions}
-      onClick={(event) => event.stopPropagation()}
+      aria-describedby={instructions}
     >
       <svg viewBox="6 3 12 18" fill="currentColor" aria-hidden="true">
         <circle cx="9" cy="6" r="1.5" />

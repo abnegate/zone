@@ -15,7 +15,7 @@ import {
 } from '@dnd-kit/core';
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { slotSteps, nearestSlot } from '../../../shared/utils/listDrop';
+import { nearestSlot, slotSteps } from '../../../shared/utils/listDrop';
 import { boxTitle, dropSide, isPanelBox, type PanelBoxId } from '../utils/boxes';
 import { BoxSlot } from './BoxSlot';
 

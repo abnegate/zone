@@ -46,6 +46,7 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
   });
 
   const reorderProjectsMutation = useMutation({
+    scope: { id: 'project-order' },
     mutationFn: (order: readonly string[]) => {
       if (!workspaceId) {
         return Promise.reject(new Error('No workspace selected'));
@@ -67,7 +68,7 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
       }
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      queryClient.invalidateQueries({ queryKey: ['projects'], refetchType: 'inactive' });
     },
   });
 

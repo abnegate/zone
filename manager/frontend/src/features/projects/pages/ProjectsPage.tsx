@@ -16,7 +16,6 @@ import {
   CreateProjectWizard,
   SyncConfigCard,
 } from '../components';
-import { ProjectHandle } from '../components/ProjectHandle';
 import { ProjectList } from '../components/ProjectList';
 import {
   useAutomation,
@@ -39,6 +38,7 @@ import type {
 } from '../types';
 import { formatDate } from '../utils/formatters';
 import {
+  isProjectSort,
   moveId,
   PROJECT_SORT_OPTIONS,
   type ProjectSort,
@@ -454,10 +454,12 @@ export default function ProjectsPage() {
       id,
       index
     );
+    const previous = sort;
     chooseSort('custom');
     setOrderError(null);
-    reorderProjects(order).catch((err: unknown) => {
-      setOrderError(err instanceof Error ? err.message : 'Failed to reorder projects');
+    reorderProjects(order).catch((error: unknown) => {
+      chooseSort(previous);
+      setOrderError(error instanceof Error ? error.message : 'Failed to reorder projects');
     });
   };
   const searchEmpty = !loading && !error && projects.length > 0 && visibleProjects.length === 0;
@@ -492,14 +494,14 @@ export default function ProjectsPage() {
           <Select
             compact
             value={sort}
-            onValueChange={(value) => chooseSort(value as ProjectSort)}
+            onValueChange={(value) => isProjectSort(value) && chooseSort(value)}
             aria-label="Sort projects"
             options={[...PROJECT_SORT_OPTIONS]}
           />
         </div>
         <Tabs
           value={statusFilter}
-          onValueChange={(v) => setStatusFilter(v as ProjectStatus | 'all')}
+          onValueChange={(value) => setStatusFilter(value as ProjectStatus | 'all')}
           className="projects-tabs"
         >
           <TabsList>
@@ -593,13 +595,10 @@ export default function ProjectsPage() {
                     <div
                       className={`card--list project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
                       onClick={() => selectProject(project)}
-                      onKeyDown={(e) =>
-                        e.key === 'Enter' && e.target === e.currentTarget && selectProject(project)
-                      }
+                      onKeyDown={(event) => event.key === 'Enter' && selectProject(project)}
                       role="button"
                       tabIndex={0}
                     >
-                      <ProjectHandle name={project.name} />
                       <div className="project-card-header">
                         <h3 className="project-name">{project.name}</h3>
                         <span className="project-card-badges">

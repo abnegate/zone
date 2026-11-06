@@ -80,12 +80,13 @@
   position: absolute;
   top: 50%;
   left: 0;
+  z-index: 1;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: var(--ui-space-3);
+  justify-content: flex-start;
+  width: var(--ui-space-6);
   height: var(--ui-space-6);
-  padding: 0;
+  padding: 0 0 0 var(--ui-space-1);
   border: none;
   border-radius: var(--ui-radius-sm);
   background: transparent;
@@ -102,7 +103,7 @@
   height: 0.75rem;
 }
 
-.project-card:hover .project-card-handle,
+.project-slot:hover .project-card-handle,
 .project-card-handle:focus-visible,
 .project-slot[data-dragging] .project-card-handle {
   opacity: 1;

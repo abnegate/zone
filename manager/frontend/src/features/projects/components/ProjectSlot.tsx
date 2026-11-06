@@ -1,19 +1,20 @@
 import { useDraggable, useDroppable } from '@dnd-kit/core';
-import { type ReactNode, useCallback, useMemo } from 'react';
-import { ProjectDragContext } from '../hooks/useProjectDrag';
+import { type ReactNode, useCallback } from 'react';
+import { ProjectHandle } from './ProjectHandle';
 
 export type DropSide = 'before' | 'after';
 
 export interface ProjectSlotProps {
   id: string;
+  name: string;
   movable: boolean;
   instructions: string;
   drop: DropSide | null;
   children: ReactNode;
 }
 
-/** Where one project sits in the list: what it is dragged by, and where another can be dropped beside it. */
-export function ProjectSlot({ id, movable, instructions, drop, children }: ProjectSlotProps) {
+/** The card's grip sits beside the card, not in it, so the card stays one control. */
+export function ProjectSlot({ id, name, movable, instructions, drop, children }: ProjectSlotProps) {
   const { attributes, listeners, isDragging, setNodeRef, setActivatorNodeRef } = useDraggable({
     id,
     disabled: !movable,
@@ -30,12 +31,6 @@ export function ProjectSlot({ id, movable, instructions, drop, children }: Proje
     [setNodeRef, setDroppable]
   );
 
-  const drag = useMemo(
-    () =>
-      movable ? { setHandle: setActivatorNodeRef, attributes, listeners, instructions } : null,
-    [movable, setActivatorNodeRef, attributes, listeners, instructions]
-  );
-
   return (
     <div
       ref={setSlot}
@@ -44,7 +39,16 @@ export function ProjectSlot({ id, movable, instructions, drop, children }: Proje
       data-drop={drop ?? undefined}
       data-dragging={isDragging || undefined}
     >
-      <ProjectDragContext value={drag}>{children}</ProjectDragContext>
+      {children}
+      {movable && (
+        <ProjectHandle
+          name={name}
+          setHandle={setActivatorNodeRef}
+          attributes={attributes}
+          listeners={listeners}
+          instructions={instructions}
+        />
+      )}
     </div>
   );
 }

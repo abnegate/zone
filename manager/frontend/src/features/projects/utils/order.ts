@@ -72,10 +72,7 @@ const COMPARE: Record<ProjectSort, (left: Project, right: Project) => number> = 
     STATUS_RANK[left.status] - STATUS_RANK[right.status] || custom(left, right),
 };
 
-/**
- * The projects as the chosen sort lays them out; projects never used follow the ones that
- * were. Ties keep the order the server listed them in, which is the custom one.
- */
+/** The projects as the chosen sort lays them out; projects never used follow the ones that were. */
 export function sortProjects(projects: readonly Project[], sort: ProjectSort): Project[] {
   return [...projects].sort(COMPARE[sort]);
 }

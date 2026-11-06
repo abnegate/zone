@@ -157,7 +157,8 @@ describe('project order', () => {
     userId = 'user-1';
     role = 'member';
     stored = PROJECTS.map((item) => ({ ...item }));
-    mockGetProjects.mockClear();
+    mockGetProjects.mockReset();
+    mockGetProjects.mockImplementation(() => Promise.resolve(stored));
     mockReorderProjects.mockClear();
   });
 
@@ -281,7 +282,6 @@ describe('project order', () => {
     it('moves a project by keyboard, saves the order and switches to custom', async () => {
       renderPage();
       await ready();
-      chooseSelect('Sort projects', 'Name');
       const handle = grip('Zone');
       handle.focus();
 
@@ -295,9 +295,27 @@ describe('project order', () => {
 
       await announced('Zone dropped at position 1 of 3.');
       expect(mockReorderProjects).toHaveBeenCalledWith('workspace-1', ['zone', 'cloud', 'jbs']);
+      await waitFor(() => expect(shownOrder()).toEqual(['zone', 'cloud', 'jbs']));
+    });
+
+    it('saves the order shown by another sort and switches to custom', async () => {
+      renderPage();
+      await ready();
+      chooseSelect('Sort projects', 'Most recently used');
+      expect(shownOrder()).toEqual(['jbs', 'cloud', 'zone']);
+      const handle = grip('Zone');
+      handle.focus();
+
+      await press(handle, 'Space');
+      await press(handle, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(handle, 'Space');
+
+      await announced('Zone dropped at position 2 of 3.');
+      expect(mockReorderProjects).toHaveBeenCalledWith('workspace-1', ['jbs', 'zone', 'cloud']);
       expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent('Custom');
       expect(localStorage.getItem(sortKey('user-1'))).toBe('custom');
-      await waitFor(() => expect(shownOrder()).toEqual(['zone', 'cloud', 'jbs']));
+      await waitFor(() => expect(shownOrder()).toEqual(['jbs', 'zone', 'cloud']));
     });
 
     it('leaves the order alone when a move is cancelled', async () => {
@@ -326,12 +344,11 @@ describe('project order', () => {
       expect(screen.queryByRole('heading', { name: 'JBS', level: 2 })).toBeNull();
     });
 
-    it('puts the order back and says so when saving it fails', async () => {
+    async function failingMove() {
       mockReorderProjects.mockImplementationOnce(() =>
         Promise.reject(new Error('Workspace write access required'))
       );
-      renderPage();
-      await ready();
+      mockGetProjects.mockImplementation(() => new Promise(() => {}));
       const handle = grip('Zone');
       handle.focus();
 
@@ -342,7 +359,28 @@ describe('project order', () => {
 
       const alert = await screen.findByRole('alert');
       expect(within(alert).getByText('Workspace write access required')).toBeInTheDocument();
-      await waitFor(() => expect(shownOrder()).toEqual(['cloud', 'jbs', 'zone']));
+    }
+
+    it('puts the order back without waiting for a reload when saving it fails', async () => {
+      renderPage();
+      await ready();
+
+      await failingMove();
+
+      expect(shownOrder()).toEqual(['cloud', 'jbs', 'zone']);
+    });
+
+    it('puts the sort back when saving a move made in another sort fails', async () => {
+      renderPage();
+      await ready();
+      chooseSelect('Sort projects', 'Most recently used');
+
+      await failingMove();
+
+      expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent(
+        'Most recently used'
+      );
+      expect(localStorage.getItem(sortKey('user-1'))).toBe('recent');
     });
   });
 });

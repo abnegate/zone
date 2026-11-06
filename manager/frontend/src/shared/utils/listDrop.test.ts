@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 import type { ClientRect, DroppableContainer, UniqueIdentifier } from '@dnd-kit/core';
-import { slotSteps, nearestSlot } from './listDrop';
+import { nearestSlot, slotSteps } from './listDrop';
 
 function rect(top: number, height: number): ClientRect {
   return { top, height, bottom: top + height, left: 0, right: 300, width: 300 };
