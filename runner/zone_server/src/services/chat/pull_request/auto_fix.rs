@@ -13,12 +13,14 @@
 //! and only one run is ever in flight, so it cannot spin faster than a run
 //! takes to finish.
 
+use abnegate_vcs::{BranchName, GitService};
 use uuid::Uuid;
 
 use super::checks::Checks;
 use super::mergeable::Mergeable;
 use super::status::Status;
 use crate::db::chat_pull_requests::{self, PullRequestRow};
+use crate::db::projects;
 use crate::db::tasks::Create;
 use crate::state::AppState;
 
@@ -39,8 +41,9 @@ fn complaint(status: &Status) -> Option<&'static str> {
     }
 }
 
-/// Starts a run to fix `row` when its fresh `status` asks for one and no run
-/// of its own is still working, and leaves `row` saying what it claims now.
+/// Starts a run to fix `row` on its head `branch` when its fresh `status` asks
+/// for one and no run of its own is still working, and leaves `row` saying
+/// what it claims now.
 ///
 /// Never fails the status read that called it. A pull request that could not
 /// be fixed this time is read again on the next poll, and the complaint is
@@ -50,6 +53,7 @@ pub async fn consider(
     workspace_id: Uuid,
     row: &mut PullRequestRow,
     status: &Status,
+    branch: &BranchName,
 ) {
     // A run still working answers for whatever the branch shows now, and a
     // second run on the same branch would fight it.
@@ -59,7 +63,31 @@ pub async fn consider(
     let Some(complaint) = complaint(status) else {
         return;
     };
-    match start(state, workspace_id, row, status, complaint).await {
+    let Some(actor) = row.auto_fix_by else {
+        tracing::warn!(pull_request = %row.id, "auto-fix is on with no one to act as");
+        return;
+    };
+    let project = match project(state, workspace_id, row).await {
+        Ok(Some(project)) => project,
+        Ok(None) => {
+            tracing::warn!(
+                pull_request = %row.id,
+                "no project of the workspace can push to this pull request's repository"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(pull_request = %row.id, %error, "could not read the workspace's projects");
+            return;
+        }
+    };
+    let fix = Fix {
+        actor,
+        project,
+        branch,
+        complaint,
+    };
+    match start(state, workspace_id, row, status, &fix).await {
         Ok(Some(run_id)) => {
             row.auto_fix_run_id = Some(run_id);
             row.auto_fixing = true;
@@ -87,6 +115,39 @@ async fn refresh(state: &AppState, row: &mut PullRequestRow) {
     }
 }
 
+/// The workspace project that holds a push credential for the pull request's
+/// repository. A task's checkout reaches a repository only through one.
+async fn project(
+    state: &AppState,
+    workspace_id: Uuid,
+    row: &PullRequestRow,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let Some(wanted) = repository(&format!("https://github.com/{}/{}", row.owner, row.repo)) else {
+        return Ok(None);
+    };
+    Ok(projects::list_projects(state.db(), workspace_id, None)
+        .await?
+        .into_iter()
+        .find(|project| {
+            project.github_access_token.is_some()
+                && project.github_repo_url.as_deref().and_then(repository) == Some(wanted.clone())
+        })
+        .map(|project| project.id))
+}
+
+fn repository(url: &str) -> Option<String> {
+    GitService::repository_url(url)
+        .ok()
+        .map(|url| url.as_str().to_ascii_lowercase())
+}
+
+struct Fix<'a> {
+    actor: Uuid,
+    project: Uuid,
+    branch: &'a BranchName,
+    complaint: &'a str,
+}
+
 /// Claims `row` for a new run and sets that run going, answering with its id,
 /// or with nothing when another reader or a toggle got there first.
 async fn start(
@@ -94,13 +155,14 @@ async fn start(
     workspace_id: Uuid,
     row: &PullRequestRow,
     status: &Status,
-    complaint: &str,
+    fix: &Fix<'_>,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     let title = format!("Fix {}/{} #{}", row.owner, row.repo, row.number);
-    let description = prompt(row, status, complaint);
+    let description = prompt(row, status, fix.complaint);
+    let project_ids = [fix.project];
     let task = Create {
         workspace_id,
-        project_ids: &[],
+        project_ids: &project_ids,
         title: Some(&title),
         description: &description,
         acceptance_criteria: Some(ACCEPTANCE),
@@ -108,11 +170,18 @@ async fn start(
         is_agentic: true,
         require_plan_approval: false,
         source_id: row.source_id,
-        created_by: None,
-        chat_id: None,
+        created_by: Some(fix.actor),
+        chat_id: Some(row.chat_id),
     };
-    let Some((task, run)) =
-        chat_pull_requests::start_auto_fix(state.db(), row.id, row.auto_fix_run_id, &task).await?
+    let Some((task, run)) = chat_pull_requests::start_auto_fix(
+        state.db(),
+        row.id,
+        row.auto_fix_run_id,
+        &task,
+        fix.branch.as_str(),
+        &row.url,
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -132,13 +201,14 @@ fn prompt(row: &PullRequestRow, status: &Status, complaint: &str) -> String {
         "# Fix pull request #{number}\n\n\
          {url}\n\n\
          This pull request is set to fix itself, and {complaint}.\n\n\
-         Check out its head branch and do all of the following that apply:\n\n\
+         You are on its head branch already. Do all of the following that apply:\n\n\
          - Make the failing checks pass. Read the failing job's log for the real cause rather \
            than guessing from the job name.\n\
          - Resolve any conflict with the base branch.\n\
          - Address every unresolved review comment, from a person or a review bot. Where you \
            disagree with one, reply saying why instead of changing the code.\n\n\
-         Push to the same branch. Do not open a second pull request, and do not merge this one. \
+         Commit your work on this branch; it is pushed to the pull request when you finish. Do \
+         not switch branches, do not open a second pull request, and do not merge this one. \
          Do not weaken or delete a test to make a check pass: a check that fails because the code \
          is wrong is fixed by fixing the code.\n\n\
          What GitHub last reported: checks {checks:?}, mergeability {mergeable:?}.",
@@ -213,7 +283,7 @@ mod tests {
         assert_eq!(complaint(&closed), None);
     }
 
-    async fn watched(pool: &PgPool) -> (Uuid, PullRequestRow) {
+    async fn watched(pool: &PgPool, repository: Option<&str>) -> (Uuid, PullRequestRow) {
         let organization = Uuid::new_v4();
         sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Auto-fix', $1::text)")
             .bind(organization)
@@ -229,6 +299,32 @@ mod tests {
         .execute(pool)
         .await
         .expect("a workspace");
+        let user = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $1::text, 'test-only', 'Fixer')",
+        )
+        .bind(user)
+        .execute(pool)
+        .await
+        .expect("a user");
+        sqlx::query(
+            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(workspace)
+        .bind(user)
+        .execute(pool)
+        .await
+        .expect("a membership");
+        sqlx::query(
+            "INSERT INTO projects (id, workspace_id, name, github_repo_url, github_access_token)
+             VALUES ($1, $2, 'Widgets', $3, 'sealed')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workspace)
+        .bind(repository)
+        .execute(pool)
+        .await
+        .expect("a project");
         let chat = create_chat(pool, None, "Changes", "qwen3:8b", false, true)
             .await
             .expect("a chat");
@@ -246,7 +342,7 @@ mod tests {
         )
         .await
         .expect("the pull request");
-        let row = chat_pull_requests::set_auto_fix(pool, chat.id, row.id, true)
+        let row = chat_pull_requests::set_auto_fix(pool, chat.id, row.id, true, user)
             .await
             .expect("the update")
             .expect("the row");
@@ -259,17 +355,18 @@ mod tests {
             PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
                 .await
                 .expect("the test database accepts connections");
-        let (workspace, mut row) = watched(&pool).await;
+        let (workspace, mut row) = watched(&pool, Some("https://github.com/Acme/Widgets")).await;
         let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
         let failing = status(Checks::Failing, Mergeable::Unstable);
+        let branch = BranchName::parse("fix/widgets").expect("a branch");
 
-        consider(&state, workspace, &mut row, &failing).await;
+        consider(&state, workspace, &mut row, &failing, &branch).await;
         let run = row
             .auto_fix_run_id
             .expect("a failing pull request claims a run");
         assert!(row.auto_fixing, "the row reports the run it just started");
 
-        consider(&state, workspace, &mut row, &failing).await;
+        consider(&state, workspace, &mut row, &failing, &branch).await;
         assert_eq!(
             row.auto_fix_run_id,
             Some(run),
@@ -293,5 +390,30 @@ mod tests {
         })
         .await
         .expect("the claimed run is executed rather than left for recovery to fail");
+    }
+
+    #[tokio::test]
+    async fn a_repository_no_project_can_push_to_is_left_alone() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .expect("the test database accepts connections");
+        let (workspace, mut row) = watched(&pool, Some("https://github.com/acme/gadgets")).await;
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+        let branch = BranchName::parse("fix/widgets").expect("a branch");
+
+        consider(
+            &state,
+            workspace,
+            &mut row,
+            &status(Checks::Failing, Mergeable::Unstable),
+            &branch,
+        )
+        .await;
+
+        assert_eq!(
+            row.auto_fix_run_id, None,
+            "a run with no way to push would only spin"
+        );
     }
 }

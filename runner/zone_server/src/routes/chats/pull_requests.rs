@@ -70,7 +70,7 @@ pub async fn update(
             .map_err(refused)?;
     }
     if let Some(enabled) = request.auto_fix {
-        row = pull_request::set_auto_fix(&state, chat.id, &row, enabled)
+        row = pull_request::set_auto_fix(&state, chat.id, &row, enabled, user(&auth)?)
             .await
             .map_err(refused)?;
     }
@@ -109,11 +109,13 @@ async fn chat(state: &AppState, auth: &AuthUser, id: Uuid) -> Result<(ChatRow, U
 }
 
 async fn writable(state: &AppState, auth: &AuthUser, workspace: Uuid) -> Result<bool, ServerError> {
-    let user = auth
-        .0
+    Ok(workspace_members::can_write(state.db(), workspace, user(auth)?).await?)
+}
+
+fn user(auth: &AuthUser) -> Result<Uuid, ServerError> {
+    auth.0
         .user_id()
-        .map_err(|_| ServerError::Unauthorized("Invalid user".to_string()))?;
-    Ok(workspace_members::can_write(state.db(), workspace, user).await?)
+        .map_err(|_| ServerError::Unauthorized("Invalid user".to_string()))
 }
 
 async fn owned(state: &AppState, chat: Uuid, id: Uuid) -> Result<PullRequestRow, ServerError> {

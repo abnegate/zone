@@ -11,7 +11,7 @@ pub const GITHUB: &str = "github";
 
 macro_rules! columns {
     () => {
-        "id, chat_id, provider, owner, repo, number, url, title, source_id, dismissed_at, created_at, auto_fix, auto_fix_run_id,
+        "id, chat_id, provider, owner, repo, number, url, title, source_id, dismissed_at, created_at, auto_fix, auto_fix_run_id, auto_fix_by,
          EXISTS (
              SELECT 1 FROM task_runs
              WHERE task_runs.id = chat_pull_requests.auto_fix_run_id AND task_runs.completed_at IS NULL
@@ -36,6 +36,8 @@ pub struct PullRequestRow {
     pub auto_fix: bool,
     /// The newest run auto-fix started, settled or not.
     pub auto_fix_run_id: Option<Uuid>,
+    /// Who turned auto-fix on, and so whom its runs act as.
+    pub auto_fix_by: Option<Uuid>,
     /// Whether that run is still working.
     pub auto_fixing: bool,
 }
@@ -136,21 +138,23 @@ where
     .await
 }
 
-/// Turns the auto-fix preference on or off. The newest run stays claimed
-/// either way, so turning it back on while that run works cannot start a
-/// second one on the same branch.
+/// Turns the auto-fix preference on for `user`, whose runs then act as them,
+/// or off. The newest run stays claimed either way, so turning it back on
+/// while that run works cannot start a second one on the same branch.
 pub async fn set_auto_fix<'e, E>(
     executor: E,
     chat_id: Uuid,
     id: Uuid,
     auto_fix: bool,
+    user: Uuid,
 ) -> DbResult<Option<PullRequestRow>>
 where
     E: Executor<'e, Database = Postgres>,
 {
     sqlx::query_as(concat!(
         "UPDATE chat_pull_requests
-         SET auto_fix = $3
+         SET auto_fix = $3,
+             auto_fix_by = CASE WHEN $3 THEN $4 END
          WHERE chat_id = $1 AND id = $2
          RETURNING ",
         columns!()
@@ -158,35 +162,72 @@ where
     .bind(chat_id)
     .bind(id)
     .bind(auto_fix)
+    .bind(user)
     .fetch_optional(executor)
     .await
 }
 
-/// Creates `task` with a run and claims the pull request for that run, all or
-/// nothing. Nothing is created unless auto-fix is on and the row still holds
-/// `previous`, so two readers observing the same failure start one run between
-/// them rather than one each.
+/// Creates `task` with a run on the pull request's own `branch`, and claims
+/// the pull request for that run, all or nothing.
+///
+/// Nothing is created unless auto-fix is still on for the task's creator, the
+/// row still holds `previous` and that run has settled, and the task's source is still an active one
+/// of its workspace. So two readers observing the same failure start one run
+/// between them rather than one each, and the run acts only as whoever turned
+/// auto-fix on, with their write access checked as it is admitted.
 pub async fn start_auto_fix(
     pool: &PgPool,
     id: Uuid,
     previous: Option<Uuid>,
     task: &Create<'_>,
+    branch: &str,
+    url: &str,
 ) -> DbResult<Option<(TaskRow, TaskRunRow)>> {
+    let Some(actor) = task.created_by else {
+        return Ok(None);
+    };
     let mut transaction = pool.begin().await?;
+    // The source is held before the pull request, the order deleting a source
+    // takes them in as it clears the pull request's reference to it.
+    if let Some(source_id) = task.source_id {
+        let active: Option<Option<bool>> = sqlx::query_scalar(
+            "SELECT is_active FROM sources WHERE id = $1 AND workspace_id = $2 FOR SHARE",
+        )
+        .bind(source_id)
+        .bind(task.workspace_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if !matches!(active, Some(None) | Some(Some(true))) {
+            return Ok(None);
+        }
+    }
     let claimable: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM chat_pull_requests
-         WHERE id = $1 AND auto_fix AND auto_fix_run_id IS NOT DISTINCT FROM $2
-         FOR UPDATE",
+         WHERE id = $1 AND auto_fix AND auto_fix_by = $3
+           AND auto_fix_run_id IS NOT DISTINCT FROM $2
+           AND NOT EXISTS (
+               SELECT 1 FROM task_runs
+               WHERE task_runs.id = chat_pull_requests.auto_fix_run_id
+                 AND task_runs.completed_at IS NULL
+           )
+         FOR UPDATE OF chat_pull_requests",
     )
     .bind(id)
     .bind(previous)
+    .bind(actor)
     .fetch_optional(&mut *transaction)
     .await?;
     if claimable.is_none() {
         return Ok(None);
     }
     let created = tasks::create_in(&mut transaction, task).await?;
-    let run = tasks::create_task_run_in(&mut transaction, created.id, None).await?;
+    sqlx::query("UPDATE tasks SET branch_name = $2, pr_url = $3 WHERE id = $1")
+        .bind(created.id)
+        .bind(branch)
+        .bind(url)
+        .execute(&mut *transaction)
+        .await?;
+    let run = tasks::create_task_run_in(&mut transaction, created.id, Some(actor)).await?;
     sqlx::query("UPDATE chat_pull_requests SET auto_fix_run_id = $2 WHERE id = $1")
         .bind(id)
         .bind(run.id)
@@ -304,7 +345,15 @@ mod tests {
         );
     }
 
-    async fn workspace(pool: &PgPool) -> Uuid {
+    const BRANCH: &str = "fix/widgets";
+
+    struct Watched {
+        workspace: Uuid,
+        user: Uuid,
+        row: PullRequestRow,
+    }
+
+    async fn member(pool: &PgPool) -> (Uuid, Uuid) {
         let organization = Uuid::new_v4();
         sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Auto-fix', $1::text)")
             .bind(organization)
@@ -320,12 +369,28 @@ mod tests {
         .execute(pool)
         .await
         .expect("a workspace");
-        workspace
+        let user = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $1::text, 'test-only', 'Fixer')",
+        )
+        .bind(user)
+        .execute(pool)
+        .await
+        .expect("a user");
+        sqlx::query(
+            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(workspace)
+        .bind(user)
+        .execute(pool)
+        .await
+        .expect("a membership");
+        (workspace, user)
     }
 
-    fn fix(workspace_id: Uuid) -> Create<'static> {
+    fn fix(watched: &Watched) -> Create<'static> {
         Create {
-            workspace_id,
+            workspace_id: watched.workspace,
             project_ids: &[],
             title: Some("Fix acme/widgets #7"),
             description: "Make the checks pass.",
@@ -334,9 +399,23 @@ mod tests {
             is_agentic: true,
             require_plan_approval: false,
             source_id: None,
-            created_by: None,
+            created_by: Some(watched.user),
             chat_id: None,
         }
+    }
+
+    async fn start(pool: &PgPool, watched: &Watched, previous: Option<Uuid>) -> Option<TaskRunRow> {
+        start_auto_fix(
+            pool,
+            watched.row.id,
+            previous,
+            &fix(watched),
+            BRANCH,
+            &watched.row.url,
+        )
+        .await
+        .expect("the start")
+        .map(|(_, run)| run)
     }
 
     async fn tasks_in(pool: &PgPool, workspace_id: Uuid) -> i64 {
@@ -347,32 +426,67 @@ mod tests {
             .expect("the count")
     }
 
-    async fn watched(pool: &PgPool, auto_fix: bool) -> (Uuid, PullRequestRow) {
-        let workspace_id = workspace(pool).await;
+    async fn watched(pool: &PgPool, auto_fix: bool) -> Watched {
+        let (workspace, user) = member(pool).await;
         let chat_id = chat(pool).await;
         let row = record(pool, &opened(chat_id, "acme", None))
             .await
             .expect("the pull request");
-        let row = set_auto_fix(pool, chat_id, row.id, auto_fix)
+        let row = set_auto_fix(pool, chat_id, row.id, auto_fix, user)
             .await
             .expect("the update")
             .expect("the row");
-        (workspace_id, row)
+        Watched {
+            workspace,
+            user,
+            row,
+        }
+    }
+
+    async fn reread(pool: &PgPool, row: &PullRequestRow) -> PullRequestRow {
+        get(pool, row.chat_id, row.id)
+            .await
+            .expect("the read")
+            .expect("the row")
+    }
+
+    #[tokio::test]
+    async fn an_auto_fix_run_acts_on_the_pull_request_as_whoever_turned_it_on() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+        assert_eq!(watched.row.auto_fix_by, Some(watched.user));
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+
+        let task = tasks::get_task(&pool, run.task_id)
+            .await
+            .expect("the read")
+            .expect("the task");
+        assert_eq!(
+            task.created_by,
+            Some(watched.user),
+            "an actorless task can never publish"
+        );
+        assert_eq!(run.triggered_by, Some(watched.user));
+        assert_eq!(
+            task.branch_name.as_deref(),
+            Some(BRANCH),
+            "the fix lands on the pull request's branch"
+        );
+        assert_eq!(task.pr_url.as_deref(), Some(watched.row.url.as_str()));
     }
 
     #[tokio::test]
     async fn an_auto_fix_run_is_claimed_and_reads_as_working_until_it_settles() {
         let pool = pool().await;
-        let (workspace_id, row) = watched(&pool, true).await;
+        let watched = watched(&pool, true).await;
 
-        let (_, run) = start_auto_fix(&pool, row.id, None, &fix(workspace_id))
+        let run = start(&pool, &watched, None)
             .await
-            .expect("the start")
             .expect("auto-fix is on and nothing is claimed");
-        let claimed = get(&pool, row.chat_id, row.id)
-            .await
-            .expect("the read")
-            .expect("the row");
+        let claimed = reread(&pool, &watched.row).await;
         assert_eq!(claimed.auto_fix_run_id, Some(run.id));
         assert!(
             claimed.auto_fixing,
@@ -382,10 +496,7 @@ mod tests {
         tasks::complete_task_run(&pool, run.id, "failed", Some("checks still fail"), None)
             .await
             .expect("the run settles");
-        let settled = get(&pool, row.chat_id, row.id)
-            .await
-            .expect("the read")
-            .expect("the row");
+        let settled = reread(&pool, &watched.row).await;
         assert_eq!(
             settled.auto_fix_run_id,
             Some(run.id),
@@ -400,59 +511,62 @@ mod tests {
     #[tokio::test]
     async fn a_reader_that_lost_the_claim_leaves_no_task_behind() {
         let pool = pool().await;
-        let (workspace_id, row) = watched(&pool, true).await;
+        let watched = watched(&pool, true).await;
 
-        start_auto_fix(&pool, row.id, None, &fix(workspace_id))
+        start(&pool, &watched, None)
             .await
-            .expect("the start")
             .expect("the first reader claims it");
-        let lost = start_auto_fix(&pool, row.id, None, &fix(workspace_id))
-            .await
-            .expect("the start");
+        let lost = start(&pool, &watched, None).await;
 
         assert!(
             lost.is_none(),
             "a reader holding a stale claim starts nothing"
         );
-        assert_eq!(tasks_in(&pool, workspace_id).await, 1);
+        assert_eq!(tasks_in(&pool, watched.workspace).await, 1);
     }
 
     #[tokio::test]
     async fn auto_fix_turned_off_starts_nothing() {
         let pool = pool().await;
-        let (workspace_id, row) = watched(&pool, false).await;
+        let watched = watched(&pool, false).await;
+        assert_eq!(watched.row.auto_fix_by, None);
 
-        let started = start_auto_fix(&pool, row.id, None, &fix(workspace_id))
-            .await
-            .expect("the start");
+        let started = start(&pool, &watched, None).await;
 
         assert!(started.is_none());
-        assert_eq!(tasks_in(&pool, workspace_id).await, 0);
+        assert_eq!(tasks_in(&pool, watched.workspace).await, 0);
     }
 
     #[tokio::test]
     async fn turning_auto_fix_off_keeps_the_run_it_claimed() {
         let pool = pool().await;
-        let (workspace_id, row) = watched(&pool, true).await;
-        let (_, run) = start_auto_fix(&pool, row.id, None, &fix(workspace_id))
-            .await
-            .expect("the start")
-            .expect("the claim");
+        let watched = watched(&pool, true).await;
+        let run = start(&pool, &watched, None).await.expect("the claim");
 
-        let off = set_auto_fix(&pool, row.chat_id, row.id, false)
-            .await
-            .expect("the update")
-            .expect("the row");
+        let off = set_auto_fix(
+            &pool,
+            watched.row.chat_id,
+            watched.row.id,
+            false,
+            watched.user,
+        )
+        .await
+        .expect("the update")
+        .expect("the row");
         assert_eq!(off.auto_fix_run_id, Some(run.id));
         assert!(off.auto_fixing);
 
-        let on = set_auto_fix(&pool, row.chat_id, row.id, true)
-            .await
-            .expect("the update")
-            .expect("the row");
-        let again = start_auto_fix(&pool, row.id, None, &fix(workspace_id))
-            .await
-            .expect("the start");
+        let on = set_auto_fix(
+            &pool,
+            watched.row.chat_id,
+            watched.row.id,
+            true,
+            watched.user,
+        )
+        .await
+        .expect("the update")
+        .expect("the row");
+        let again = start(&pool, &watched, Some(run.id)).await;
         assert!(on.auto_fixing);
         assert!(
             again.is_none(),
