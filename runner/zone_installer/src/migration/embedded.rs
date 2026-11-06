@@ -39,6 +39,8 @@ pub const EMBEDDED: &[Source] = &[
     source!("017_chat_used_at.sql"),
     source!("018_project_position.sql"),
     source!("019_typed_message_index.sql"),
+    source!("020_chat_pull_request_auto_fix.sql"),
+    source!("021_chat_pull_request_auto_fix_validation.sql"),
     source!("022_task_origin.sql"),
     source!("023_task_origin_backfill.sql"),
 ];

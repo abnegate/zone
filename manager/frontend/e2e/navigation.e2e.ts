@@ -99,7 +99,6 @@ test.describe('Navigation', () => {
       });
     });
 
-    // Mock organization members for organization settings
     await routeApi(page, '**/api/organizations/*/members*', (route) => {
       route.fulfill({
         status: 200,
@@ -149,15 +148,14 @@ test.describe('Navigation', () => {
 
   test('sidebar shows all navigation items', async ({ page }) => {
     const navItems = page.locator('.nav-item');
-    await expect(navItems).toHaveCount(8);
+    await expect(navItems).toHaveCount(7);
     await expect(navItems.nth(0)).toContainText('Chats');
     await expect(navItems.nth(1)).toContainText('Projects');
     await expect(navItems.nth(2)).toContainText('Tasks');
     await expect(navItems.nth(3)).toContainText('Sources');
     await expect(navItems.nth(4)).toContainText('Models');
     await expect(navItems.nth(5)).toContainText('Wiki');
-    await expect(navItems.nth(6)).toContainText('Organization');
-    await expect(navItems.nth(7)).toContainText('Workspace');
+    await expect(navItems.nth(6)).toContainText('Settings');
   });
 
   test('Chats page is default route', async ({ page }) => {
@@ -219,18 +217,25 @@ test.describe('Navigation', () => {
     await expect(page.getByRole('heading', { name: 'Knowledge Base' })).toBeVisible();
   });
 
-  test('navigates to Organization settings page', async ({ page }) => {
-    // Wait for organizations to load before clicking
-    await page.waitForSelector('.nav-item:has-text("Organization")');
-    await page.click('a[href="/org-settings"]');
-    await page.waitForURL('/org-settings', { timeout: 10000 });
-    await expect(page.getByRole('heading', { name: 'Organization Settings' })).toBeVisible();
+  test('offers one Settings item in place of Organization and Workspace', async ({ page }) => {
+    const sidebar = page.locator('.sidebar-nav');
+    await expect(sidebar.getByRole('link', { name: 'Settings', exact: true })).toHaveCount(1);
+    await expect(sidebar.getByRole('link', { name: 'Settings', exact: true })).toHaveAttribute(
+      'href',
+      '/settings'
+    );
+    await expect(sidebar.getByRole('link', { name: /^(Organization|Workspace)$/ })).toHaveCount(0);
+    await expect(page.locator('a[href="/org-settings"]')).toHaveCount(0);
   });
 
-  test('navigates to Workspace settings page', async ({ page }) => {
+  test('one Settings click lands on workspace general settings', async ({ page }) => {
     await page.click('a[href="/settings"]');
-    await page.waitForURL('/settings', { timeout: 10000 });
-    await expect(page.getByRole('heading', { name: 'Workspace Settings' })).toBeVisible();
+    await expect(page).toHaveURL('/settings/workspace/general');
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Settings', exact: true })
+    ).toBeVisible();
+    await expect(page.getByRole('region', { name: 'General', exact: true })).toBeVisible();
+    await expect(page.locator('.nav-item:has-text("Settings")')).toHaveClass(/active/);
   });
 
   test('active nav item updates on navigation', async ({ page }) => {

@@ -1,3 +1,9 @@
+.sessions-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
+}
+
 .sessions-body {
   display: flex;
   flex-direction: column;
@@ -90,7 +96,7 @@
   white-space: nowrap;
 }
 
-.sessions-page .alert {
+.sessions-section .alert {
   padding: var(--ui-space-2) var(--ui-space-3);
   border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
   border-radius: var(--ui-radius-md);

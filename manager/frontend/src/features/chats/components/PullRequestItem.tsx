@@ -26,6 +26,7 @@ const COPY_ICON = 'M9 9h10v10H9zM5 15V5h10';
 const CHANGES_ICON = 'M12 5v14M5 12h14M5 20h14';
 const MERGE_ICON = 'M6 3v8a5 5 0 0 0 5 5h8M16 13l3 3-3 3';
 const DRAFT_ICON = 'M4 20h4l10-10-4-4L4 16v4ZM13 7l4 4';
+const FIX_ICON = 'M14.7 6.3a4 4 0 0 1-5 5L5 16v3h3l4.7-4.7a4 4 0 0 0 5-5l-2.4 2.4-2.1-2.1Z';
 const DISMISS_ICON = 'M18 6 6 18M6 6l12 12';
 
 function menuItems({
@@ -61,7 +62,8 @@ function menuItems({
       onSelect: () => onViewChanges(pullRequest),
     },
   ];
-  if (status?.state === 'open') {
+  const open = status?.state === 'open';
+  if (open) {
     const autoMerge = status.auto_merge;
     const mergeHint = readOnly ?? uncredentialed ?? autoMerge.unavailable ?? undefined;
     const draftHint = readOnly ?? uncredentialed ?? status.draft_unavailable ?? undefined;
@@ -81,6 +83,24 @@ function menuItems({
         onSelect: () => onChange(pullRequest, { draft: !status.draft }),
       }
     );
+  }
+  if (pullRequest.auto_fix) {
+    items.push({
+      label: 'Stop fixing automatically',
+      icon: <MenuIcon path={FIX_ICON} />,
+      disabled: !writable,
+      hint: readOnly,
+      onSelect: () => onChange(pullRequest, { auto_fix: false }),
+    });
+  } else if (open) {
+    const fixHint = readOnly ?? uncredentialed;
+    items.push({
+      label: 'Fix automatically',
+      icon: <MenuIcon path={FIX_ICON} />,
+      disabled: Boolean(fixHint),
+      hint: fixHint,
+      onSelect: () => onChange(pullRequest, { auto_fix: true }),
+    });
   }
   items.push({
     label: 'Dismiss',

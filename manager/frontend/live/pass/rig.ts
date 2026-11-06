@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import type { Page } from '@playwright/test';
 import {
   api,
+  chooseOption,
   expect,
   signIn,
   state,
@@ -164,6 +165,7 @@ export const test = base;
 export {
   api,
   approveIfAsked,
+  chooseOption,
   expect,
   newChat,
   send,

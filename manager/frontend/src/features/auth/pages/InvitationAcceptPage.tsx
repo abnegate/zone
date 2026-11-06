@@ -58,8 +58,7 @@ export default function InvitationAcceptPage() {
     try {
       const { client } = await import('../../../api/client');
       await client.acceptInvitation(token);
-      // Redirect to org-settings or home after successful acceptance
-      navigate('/org-settings');
+      navigate('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to accept invitation');
     } finally {

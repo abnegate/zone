@@ -161,7 +161,7 @@ describe('InvitationAcceptPage', () => {
     expect(screen.getByRole('button', { name: /accept invitation/i })).toBeInTheDocument();
   });
 
-  it('accepts invitation successfully when authenticated', async () => {
+  it('lands on home after accepting, since members cannot open organization settings', async () => {
     mockUseAuth.mockReturnValue({ isAuthenticated: true });
     mockAcceptInvitation.mockResolvedValue();
 
@@ -177,7 +177,10 @@ describe('InvitationAcceptPage', () => {
       expect(mockAcceptInvitation).toHaveBeenCalledWith('test-token');
     });
 
-    expect(mockNavigate).toHaveBeenCalledWith('/org-settings');
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith('/');
+    });
+    expect(mockNavigate).not.toHaveBeenCalledWith('/org-settings');
   });
 
   it('displays error when invitation fetch fails', async () => {

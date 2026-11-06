@@ -66,4 +66,44 @@ describe('HostFoldersPanel', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Skip for now' }));
     expect(onSkip).toHaveBeenCalled();
   });
+
+  it('offers editing controls by default', async () => {
+    render(<HostFoldersPanel workspaceId="ws-1" orgId="org-1" />);
+    expect(await screen.findByLabelText('Folder 1')).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Add folder' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
+    expect(screen.queryByText("Viewers can't change host folders.")).not.toBeInTheDocument();
+  });
+
+  it('shows saved folders without editing controls when read-only', async () => {
+    mockClient.getWorkspaceHostDirectories.mockResolvedValue({
+      directories: ['/Users/jake/Local/jbs', '/Users/jake/Local/zone'],
+      folders: [
+        { host: '/Users/jake/Local/jbs', mapped: '/host/jbs', exists: true },
+        { host: '/Users/jake/Local/zone', mapped: '/host/zone', exists: true },
+      ],
+    });
+    render(<HostFoldersPanel workspaceId="ws-1" orgId="org-1" readOnly />);
+    expect(await screen.findByText("Viewers can't change host folders.")).toBeInTheDocument();
+    expect(screen.getByLabelText('Folder 1')).toBeDisabled();
+    expect(screen.getByLabelText('Folder 1')).toHaveValue('/Users/jake/Local/jbs');
+    expect(screen.getByLabelText('Folder 2')).toBeDisabled();
+    expect(screen.getByLabelText('Folder 2')).toHaveValue('/Users/jake/Local/zone');
+    expect(screen.getByText('/host/zone')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add folder' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save Changes' })).not.toBeInTheDocument();
+    expect(mockClient.updateWorkspaceHostDirectories).not.toHaveBeenCalled();
+  });
+
+  it('keeps skip available when read-only', async () => {
+    const onSkip = mock();
+    render(
+      <HostFoldersPanel workspaceId="ws-1" orgId="org-1" variant="setup" readOnly onSkip={onSkip} />
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Skip for now' }));
+    expect(onSkip).toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Save and continue' })).not.toBeInTheDocument();
+  });
 });
