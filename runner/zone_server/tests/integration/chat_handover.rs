@@ -786,7 +786,7 @@ impl Harness {
     fn holds(&self, login: Uuid, id: &str) -> bool {
         Session::resumed(id)
             .locate(
-                abnegate_agent_cli::AgentKind::Claude,
+                AgentKind::Claude,
                 &self.home(AgentKind::Claude, login),
                 &self
                     .config

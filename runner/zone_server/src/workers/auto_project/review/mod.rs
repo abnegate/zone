@@ -473,10 +473,9 @@ mod tests {
         );
     }
 
-    /// abnegate-agent-cli reads a refusal for usage credits only from the
-    /// `api_error` claude types it with: a Fable refusal in claude's words
-    /// alone is a failed round, where Zone's own provider paused the task on
-    /// those words. A context the account cannot fund pauses it as a model
+    /// A refusal for usage credits is read only from the `api_error` claude
+    /// types it with: a Fable refusal in claude's words alone is a failed
+    /// round. A context the account cannot fund pauses the task as a model
     /// does.
     #[tokio::test]
     async fn a_reviewer_is_unfunded_only_by_claudes_typed_refusal() {

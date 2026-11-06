@@ -637,8 +637,7 @@ mod tests {
     }
 
     /// A chat that names no model leaves the choice to the agent, so it is offered the efforts
-    /// of the model the agent picks. abnegate-agent-cli reads a blank model the same way, where
-    /// Zone's own provider offered a blank model no effort at all.
+    /// of the model the agent picks, as a blank model is.
     #[test]
     fn a_blank_model_offers_the_agents_default_efforts() {
         for &agent in AgentKind::ALL {

@@ -315,8 +315,8 @@ pub fn remedy(agent: AgentKind, sign_in: SignIn, message: &str) -> Option<String
     })
 }
 
-/// A coding agent's own words about a failure it reported. zone_core follows
-/// them with [`STDERR_HEADING`] and the tail of the agent's stderr.
+/// A coding agent's own words about a failure it reported, without the
+/// [`STDERR_HEADING`] and stderr tail that follow them.
 pub fn own_words(message: &str) -> &str {
     message
         .split_once(STDERR_HEADING)
@@ -407,7 +407,7 @@ mod tests {
     use tempfile::TempDir;
     use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
 
-    use crate::config::{AgentConfig, ModelBackend};
+    use crate::config::{AgentConfig, GRANTED_SANDBOXES, ModelBackend};
     use crate::db::agent_logins::{self, Insert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, workspaces};
@@ -1165,8 +1165,8 @@ mod tests {
         );
     }
 
-    /// A CLI's failure as the chat loop reports it: zone_core redacts it, and
-    /// the loop and `LlmClient` wrap it.
+    /// A CLI's failure as the chat loop reports it: redacted, and wrapped by
+    /// the loop and `LlmClient`.
     fn reported(agent: AgentKind, failure: &str) -> String {
         format!(
             "Failed to generate response: {}",
@@ -1305,7 +1305,7 @@ mod tests {
         );
     }
 
-    /// The stderr tail zone_core appends to an agent's failure is read for a
+    /// The stderr tail that follows an agent's failure is read for a
     /// renewal the agent reports nowhere else, and for nothing more: a line
     /// about some other server is not this agent's sign-in failing.
     #[test]
@@ -1460,8 +1460,7 @@ mod tests {
         );
     }
 
-    /// The variables Zone's own provider set on every Claude backend before it ran on
-    /// abnegate-agent-cli, which `isolate()` now sets on the run instead.
+    /// The variables `isolate()` sets on every Claude run.
     const ISOLATION_VARIABLES: [&str; 5] = [
         "DISABLE_AUTOUPDATER",
         "MCP_TOOL_TIMEOUT",
@@ -1469,9 +1468,6 @@ mod tests {
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
     ];
-
-    const GRANTED_SANDBOXES: [CodexSandbox; 2] =
-        [CodexSandbox::WorkspaceWrite, CodexSandbox::DangerFullAccess];
 
     const SIGN_INS: [SignIn; 3] = [SignIn::Instance, SignIn::Organization, SignIn::Host];
 
@@ -1563,8 +1559,8 @@ mod tests {
         ]
     }
 
-    /// abnegate-agent-cli gives a run five minutes. Every backend Zone runs an agent on starts
-    /// from Zone's thirty, so a task or a review that never bounds its backend outlives it.
+    /// Every backend Zone runs an agent on allows thirty minutes, not the crate's default
+    /// five, so a task or a review that never bounds its backend is not cut short.
     #[test]
     fn production_agent_backends_allow_thirty_minutes() {
         for &agent in AgentKind::ALL {
@@ -1580,8 +1576,8 @@ mod tests {
         }
     }
 
-    /// Zone no longer folds Claude's isolation variables into a backend: `confined` isolates
-    /// every run, and the crate sets them there, beside the MCP timeouts only a toolset asks for.
+    /// Claude's isolation variables are not folded into a backend: `confined` isolates every
+    /// run and sets them there, beside the MCP timeouts only a toolset asks for.
     #[test]
     fn prepared_settings_carry_no_claude_defaults() {
         for &agent in AgentKind::ALL {
