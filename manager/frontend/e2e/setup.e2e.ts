@@ -61,7 +61,13 @@ test.describe('First-run feature setup', () => {
     await expect(page.locator('.sidebar')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Set up Zone' })).toHaveCount(0);
     await page.goto('/settings');
-    await expect(page.getByRole('tab', { name: 'Features' })).toBeVisible();
+    await page
+      .getByRole('navigation', { name: 'Settings' })
+      .getByRole('group', { name: 'This server' })
+      .getByRole('link', { name: 'Features' })
+      .click();
+    await expect(page).toHaveURL('/settings/server/features');
+    await expect(page.getByRole('heading', { name: 'Features', exact: true })).toBeVisible();
   });
 
   test('saving host folders finishes setup', async ({ page }) => {

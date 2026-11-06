@@ -2,6 +2,7 @@ import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures';
 import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { chooseSelect } from './helpers/select';
+import { aiSettingsResponse } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 const workspace = '00000000-0000-0000-0000-000000000001';
@@ -69,31 +70,32 @@ async function prepare(
   await routeApi(page, /\/settings\/ai/, async (route) => {
     if (route.request().method() !== 'GET')
       writes.push(`ai:${route.request().method()}`);
+    const path = new URL(route.request().url()).pathname;
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        provider: 'openai',
-        has_litellm_key: false,
-        litellm_host: null,
-        has_openai_api_key: true,
-        openai_base_url: null,
-        has_anthropic_api_key: false,
-        anthropic_base_url: null,
-        has_runpod_api_key: false,
-        bedrock_region: null,
-        bedrock_use_iam_role: false,
-        has_bedrock_credentials: false,
-        model_fast: 'gpt-4o-mini',
-        model_reasoning: 'gpt-4o',
-        model_embedding: 'text-embedding-3-small',
-        model_image: 'flux1-schnell-fp8.safetensors',
-        model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
-        model_audio: 'ace_step_v1_3.5b.safetensors',
-        completions_routed: true,
-        overrides: false,
-        organization_keys: { litellm: false, openai: false, anthropic: false },
-      }),
+      body: JSON.stringify(
+        aiSettingsResponse(path, {
+          provider: 'openai',
+          has_litellm_key: false,
+          litellm_host: null,
+          has_openai_api_key: true,
+          openai_base_url: null,
+          has_anthropic_api_key: false,
+          anthropic_base_url: null,
+          has_runpod_api_key: false,
+          bedrock_region: null,
+          bedrock_use_iam_role: false,
+          has_bedrock_credentials: false,
+          model_fast: 'gpt-4o-mini',
+          model_reasoning: 'gpt-4o',
+          model_embedding: 'text-embedding-3-small',
+          model_image: 'flux1-schnell-fp8.safetensors',
+          model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
+          model_audio: 'ace_step_v1_3.5b.safetensors',
+          completions_routed: true,
+        }),
+      ),
     });
   });
   return writes;
@@ -101,6 +103,7 @@ async function prepare(
 
 async function openSettings(page: Page): Promise<void> {
   await page.goto('/settings');
+  await expect(page).toHaveURL('/settings/workspace/general');
   await expect(page.locator('#font-family')).toBeVisible();
 }
 
@@ -126,17 +129,22 @@ async function verifyTheme(page: Page, mode: 'light' | 'dark'): Promise<void> {
   await expect(
     page.getByRole('button', { name: 'Secondary Button', exact: true }),
   ).toHaveCSS('color', mode === 'light' ? 'rgb(255, 255, 255)' : 'rgb(0, 0, 0)');
-  for (const name of ['Theme', 'AI Settings', 'Members']) {
-    await expect(page.getByRole('tab', { name, exact: true })).toBeVisible();
+  const workspaceSections = page
+    .getByRole('navigation', { name: 'Settings' })
+    .getByRole('group', { name: 'Workspace' });
+  for (const name of ['General', 'AI', 'Members']) {
+    await expect(workspaceSections.getByRole('link', { name, exact: true })).toBeVisible();
   }
   await expect(page.locator('html')).toHaveCSS('font-size', '18px');
   await expect(page.locator('body')).toHaveCSS('font-family', /Roboto/i);
   await expect(page.locator('.page-bar-title')).toHaveCSS('font-family', /Roboto/i);
-  expect(
-    await page.evaluate(
-      async () => (await document.fonts.load('18px Roboto')).length,
-    ),
-  ).toBeGreaterThan(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        async () => (await document.fonts.load('18px Roboto')).length,
+      ),
+    )
+    .toBeGreaterThan(0);
   await expect(
     page.getByRole('button', { name: 'Primary Button', exact: true }),
   ).toHaveCSS('border-radius', '0px');

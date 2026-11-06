@@ -30,7 +30,14 @@ test.describe('the console against a real server', () => {
   test('reaches every workspace page without a console error', async ({ page, consoleErrors }) => {
     await signIn(page);
 
-    for (const path of ['/chats', '/models', '/tasks', '/projects', '/sources', '/settings']) {
+    for (const path of [
+      '/chats',
+      '/models',
+      '/tasks',
+      '/projects',
+      '/sources',
+      '/settings/workspace/general',
+    ]) {
       await page.goto(path);
       await expect(page.locator('main, .app-content, .workspace-content').first()).toBeVisible();
     }

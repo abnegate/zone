@@ -130,6 +130,25 @@ describe('AiProviderFields', () => {
     }
   );
 
+  it.each(AiProviderSchema.options)(
+    'leaves the Runpod key out of the workspace %s provider editor',
+    (provider) => {
+      render(
+        <AiProviderFields
+          level="workspace"
+          provider={provider}
+          onProviderChange={() => undefined}
+          credentials={emptyCredentials}
+          configured={{ ...nothingConfigured, runpod: true }}
+          onChange={() => undefined}
+        />
+      );
+
+      expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
+      expect(screen.queryByLabelText(/^Runpod/)).toBeNull();
+    }
+  );
+
   it('reports each edit by field and hides the Bedrock keys behind the IAM toggle', () => {
     const onChange = mock();
     const { rerender } = render(

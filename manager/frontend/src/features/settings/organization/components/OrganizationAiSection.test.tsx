@@ -16,12 +16,10 @@ import { clientModule } from '../../../../test/client';
 import { chooseSelect, selectOptionValues } from '../../../../test/select';
 import type { AiSettings, OrgRole } from '../types';
 
-// Mock client
 const mockClient = {
   getOrgAiSettings: mock(),
   updateOrgAiSettings: mock(),
   resetOrgAiSettings: mock(),
-  getOrgMembers: mock(),
   getWorkspaces: mock(),
 };
 
@@ -38,30 +36,6 @@ const agentsApi = {
 
 mock.module('../../../../api/agents', () => ({ agentsApi }));
 
-mock.module('../components', () => ({
-  Button: ({ children, ...props }: React.ComponentProps<'button'>) => (
-    <button {...props}>{children}</button>
-  ),
-  OrgMembersSection: ({ orgId }: { orgId: string }) => (
-    <div data-testid="org-members-section">OrgMembersSection: {orgId}</div>
-  ),
-  InvitationsSection: ({ orgId, workspaces }: { orgId: string; workspaces: unknown[] }) => (
-    <div data-testid="invitations-section">
-      InvitationsSection: {orgId}, workspaces: {workspaces.length}
-    </div>
-  ),
-  BillingSection: ({ orgId }: { orgId: string }) => (
-    <div data-testid="billing-section">BillingSection: {orgId}</div>
-  ),
-  DevicesSection: ({ orgId }: { orgId: string }) => (
-    <div data-testid="devices-section">DevicesSection: {orgId}</div>
-  ),
-  AuditLogsSection: ({ orgId }: { orgId: string }) => (
-    <div data-testid="audit-logs-section">AuditLogsSection: {orgId}</div>
-  ),
-}));
-
-// Mock useAuth
 const mockUseAuth = mock(() => ({
   isAuthenticated: true,
   user: { id: '1', email: 'test@test.com' },
@@ -83,7 +57,6 @@ mock.module('../../../models', () => ({
   }),
 }));
 
-// Mock useWorkspace
 const mockSetCurrentOrganization = mock();
 const mockSetCurrentWorkspace = mock();
 const mockRefreshOrganizations = mock();
@@ -100,7 +73,7 @@ const mockCurrentOrganization = {
 };
 
 const mockWorkspaceContext: {
-  currentOrganization: typeof mockCurrentOrganization & { role?: OrgRole };
+  currentOrganization: (typeof mockCurrentOrganization & { role?: OrgRole }) | null;
   [key: string]: unknown;
 } = {
   currentOrganization: mockCurrentOrganization,
@@ -119,10 +92,10 @@ mock.module('../../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: () => mockWorkspaceContext,
 }));
 
-let OrgSettingsPage: typeof import('./OrgSettingsPage').default;
+let OrganizationAiSection: typeof import('./OrganizationAiSection').OrganizationAiSection;
 
 beforeAll(async () => {
-  OrgSettingsPage = (await import('./OrgSettingsPage')).default;
+  OrganizationAiSection = (await import('./OrganizationAiSection')).OrganizationAiSection;
 });
 
 afterAll(() => {
@@ -150,49 +123,55 @@ const mockAiSettings: AiSettings = {
   completions_routed: true,
 };
 
-describe('OrgSettingsPage', () => {
+describe('OrganizationAiSection', () => {
   beforeEach(() => {
     mock.clearAllMocks();
     installedModels = [];
     mockWorkspaceContext.currentOrganization = mockCurrentOrganization;
     mockClient.getOrgAiSettings.mockResolvedValue(mockAiSettings);
-    mockClient.getWorkspaces.mockResolvedValue([]);
     agentsApi.list.mockResolvedValue(fixture.agents);
   });
 
   describe('Loading State', () => {
     it('shows loading state initially', () => {
       mockClient.getOrgAiSettings.mockImplementation(() => new Promise(() => {}));
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       expect(screen.getByText('Loading settings...')).toBeInTheDocument();
     });
 
     it('shows error when loading fails', async () => {
       mockClient.getOrgAiSettings.mockRejectedValueOnce(new Error('Failed to load'));
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByText('Failed to load')).toBeInTheDocument();
       });
     });
+
+    it('loads only the AI settings, leaving workspaces to the members section', async () => {
+      render(<OrganizationAiSection />);
+      await screen.findByLabelText('AI Provider');
+      expect(mockClient.getOrgAiSettings).toHaveBeenCalledWith(mockCurrentOrganization.id);
+      expect(mockClient.getWorkspaces).not.toHaveBeenCalled();
+    });
+
+    it('asks for an organization when none is selected', () => {
+      mockWorkspaceContext.currentOrganization = null;
+      render(<OrganizationAiSection />);
+      expect(screen.getByText('Please select an organization')).toBeInTheDocument();
+      expect(mockClient.getOrgAiSettings).not.toHaveBeenCalled();
+    });
   });
 
   describe('Page Structure', () => {
-    it('renders page header', async () => {
-      render(<OrgSettingsPage />);
-      await waitFor(() => {
-        expect(screen.getByText('Organization Settings')).toBeInTheDocument();
-      });
-    });
-
     it('renders AI Provider Configuration section', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByText('AI Provider Configuration')).toBeInTheDocument();
       });
     });
 
     it('renders save and reset buttons', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
@@ -202,7 +181,7 @@ describe('OrgSettingsPage', () => {
 
   describe('Provider Selection', () => {
     it('renders provider dropdown with current value', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         const select = screen.getByLabelText('AI Provider');
         expect(select).toHaveTextContent('Self-Hosted (Ollama via LiteLLM)');
@@ -210,7 +189,7 @@ describe('OrgSettingsPage', () => {
     });
 
     it('changes provider when dropdown changes', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
       });
@@ -220,7 +199,7 @@ describe('OrgSettingsPage', () => {
     });
 
     it('shows all provider options', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
       });
@@ -255,7 +234,7 @@ describe('OrgSettingsPage', () => {
 
     it('asks for sign-in status only once a coding agent is chosen', async () => {
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await screen.findByLabelText('AI Provider');
       expect(agentsApi.list).not.toHaveBeenCalled();
       expect(screen.queryByText('Claude Code sign-in')).toBeNull();
@@ -288,7 +267,7 @@ describe('OrgSettingsPage', () => {
         },
       ];
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
 
       await waitFor(() =>
         expect(selectOptionValues('Fast Model')).toEqual(['', 'sonnet', 'opus', 'haiku'])
@@ -300,7 +279,7 @@ describe('OrgSettingsPage', () => {
 
     it('names no other provider as the embedding default when none are installed', async () => {
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
 
       const embedding = await screen.findByLabelText('Embedding Model');
       expect(embedding).toHaveAttribute('placeholder', 'Server default');
@@ -312,7 +291,7 @@ describe('OrgSettingsPage', () => {
         ...agentSettings,
         model_fast: 'claude-sonnet-4-5',
       });
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
 
       await waitFor(() =>
         expect(screen.getByLabelText('Fast Model')).toHaveTextContent('claude-sonnet-4-5')
@@ -321,7 +300,7 @@ describe('OrgSettingsPage', () => {
 
     it('saves a coding agent provider without any credentials, its models back on Automatic', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await screen.findByLabelText('AI Provider');
       expect(screen.getByLabelText('Fast Model')).toHaveTextContent('llama3.1:8b');
       chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
@@ -349,7 +328,7 @@ describe('OrgSettingsPage', () => {
 
     it('sends an empty host to clear the one saved, so the next save cannot bring it back', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValue({ ...mockAiSettings, litellm_host: null });
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
 
       const host = await screen.findByLabelText(/LiteLLM Host/);
       await waitFor(() => expect(host).toHaveValue('http://localhost:4000'));
@@ -368,7 +347,7 @@ describe('OrgSettingsPage', () => {
     it('sends an empty model to clear one saved before Automatic was picked', async () => {
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
       mockClient.updateOrgAiSettings.mockResolvedValue({ ...agentSettings, model_reasoning: null });
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
 
       await screen.findByLabelText('Reasoning Model');
       await waitFor(() =>
@@ -386,7 +365,7 @@ describe('OrgSettingsPage', () => {
 
     it('says Automatic lets the agent choose, titles and summaries included', async () => {
       mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
 
       const fast = await screen.findByLabelText('Fast Model');
       expect(fast.closest('.form-group')?.querySelector('.ui-select-help-text')?.textContent).toBe(
@@ -427,7 +406,7 @@ describe('OrgSettingsPage', () => {
           expires_at: later(),
         });
         agentsApi.cancel.mockRejectedValue(new Error('Failed to cancel the codex sign-in: 500'));
-        render(<OrgSettingsPage />);
+        render(<OrganizationAiSection />);
 
         fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }));
         expect(await screen.findByText('ABCD-EFGHI')).toBeInTheDocument();
@@ -457,7 +436,7 @@ describe('OrgSettingsPage', () => {
         agentsApi.submitCode.mockRejectedValue(
           new Error('Claude rejected the code: Invalid authorization code')
         );
-        render(<OrgSettingsPage />);
+        render(<OrganizationAiSection />);
 
         fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Claude' }));
         fireEvent.change(await screen.findByLabelText('Code from claude.com'), {
@@ -479,7 +458,7 @@ describe('OrgSettingsPage', () => {
     it('asks to save a provider the organization is signed in to but has not chosen yet', async () => {
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
       mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
 
       await screen.findByLabelText('AI Provider');
       chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
@@ -489,47 +468,6 @@ describe('OrgSettingsPage', () => {
 
       expect(await screen.findByText('Settings saved successfully')).toBeInTheDocument();
       expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
-    });
-
-    it('keeps a Claude sign-in in flight while another tab is open', async () => {
-      const [claudeStatus, codexStatus] = fixture.agents;
-      const link = 'https://claude.com/cai/oauth/authorize?code=true&state=kept-state';
-      mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
-      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
-      agentsApi.list.mockResolvedValue([
-        {
-          ...claudeStatus,
-          state: 'signed_out',
-          source: null,
-          label: null,
-          expires_at: null,
-          logins: [],
-        },
-        codexStatus,
-      ]);
-      agentsApi.start.mockResolvedValue({
-        agent: 'claude',
-        authorize_url: link,
-        expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
-        flow: 'paste',
-      });
-      render(<OrgSettingsPage />);
-
-      fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Claude' }));
-      expect(await screen.findByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
-        'href',
-        link
-      );
-
-      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Members' }), { button: 0 });
-      expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
-      fireEvent.mouseDown(screen.getByRole('tab', { name: 'AI Settings' }), { button: 0 });
-
-      expect(await screen.findByRole('link', { name: 'Open claude.com' })).toHaveAttribute(
-        'href',
-        link
-      );
-      expect(agentsApi.start).toHaveBeenCalledTimes(1);
     });
 
     it('lets an owner sign in and shows a member whom to ask', async () => {
@@ -546,12 +484,12 @@ describe('OrgSettingsPage', () => {
         fixture.agents[1],
       ]);
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
-      const { unmount } = render(<OrgSettingsPage />);
+      const { unmount } = render(<OrganizationAiSection />);
       expect(await screen.findByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
       unmount();
 
       mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'member' };
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       expect(await screen.findByText('Ask an organization admin to sign in.')).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Sign in with Claude' })).toBeNull();
     });
@@ -559,21 +497,21 @@ describe('OrgSettingsPage', () => {
 
   describe('Self-Hosted Provider', () => {
     it('shows LiteLLM configuration for self_hosted provider', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText(/LiteLLM Host/i)).toBeInTheDocument();
       });
     });
 
     it('displays LiteLLM host value from settings', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText(/LiteLLM Host/i)).toHaveValue('http://localhost:4000');
       });
     });
 
     it('shows the Runpod train key beside the provider credentials', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       expect(await screen.findByLabelText(/^Runpod/)).toHaveAttribute(
         'placeholder',
         'Enter API key'
@@ -585,7 +523,7 @@ describe('OrgSettingsPage', () => {
         ...mockAiSettings,
         has_runpod_api_key: true,
       });
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       expect(await screen.findByLabelText(/^Runpod/)).toHaveAttribute('placeholder', '••••••••');
       expect(screen.getByText(/\(configured\)/i)).toBeInTheDocument();
     });
@@ -599,7 +537,7 @@ describe('OrgSettingsPage', () => {
         has_openai_api_key: true,
       });
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText(/OpenAI API Key/i)).toBeInTheDocument();
       });
@@ -612,7 +550,7 @@ describe('OrgSettingsPage', () => {
         has_openai_api_key: true,
       });
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByText(/\(configured\)/i)).toBeInTheDocument();
       });
@@ -626,7 +564,7 @@ describe('OrgSettingsPage', () => {
         provider: 'anthropic',
       });
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText(/Anthropic API Key/i)).toBeInTheDocument();
       });
@@ -641,7 +579,7 @@ describe('OrgSettingsPage', () => {
         bedrock_region: 'us-east-1',
       });
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText(/AWS Region/i)).toBeInTheDocument();
         expect(screen.getByLabelText(/Use IAM Role/i)).toBeInTheDocument();
@@ -656,7 +594,7 @@ describe('OrgSettingsPage', () => {
         bedrock_use_iam_role: false,
       });
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText(/Access Key ID/i)).toBeInTheDocument();
         expect(screen.getByLabelText(/Secret Access Key/i)).toBeInTheDocument();
@@ -671,7 +609,7 @@ describe('OrgSettingsPage', () => {
         bedrock_use_iam_role: true,
       });
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.queryByLabelText(/Access Key ID/i)).not.toBeInTheDocument();
         expect(screen.queryByLabelText(/Secret Access Key/i)).not.toBeInTheDocument();
@@ -681,35 +619,35 @@ describe('OrgSettingsPage', () => {
 
   describe('Model Selection', () => {
     it('shows model selection section', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByText('Default Models')).toBeInTheDocument();
       });
     });
 
     it('shows fast model dropdown', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText('Fast Model')).toBeInTheDocument();
       });
     });
 
     it('shows reasoning model dropdown', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText('Reasoning Model')).toBeInTheDocument();
       });
     });
 
     it('shows embedding model dropdown', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText('Embedding Model')).toBeInTheDocument();
       });
     });
 
     it('displays current model values', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText('Fast Model')).toHaveTextContent('llama3.1:8b');
         expect(screen.getByLabelText('Reasoning Model')).toHaveTextContent('deepseek-r1:7b');
@@ -722,7 +660,7 @@ describe('OrgSettingsPage', () => {
     it('saves settings on form submit', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
       });
@@ -741,7 +679,7 @@ describe('OrgSettingsPage', () => {
         model_audio: null,
       });
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText('Video Model')).toHaveTextContent(
           'wan2.2_ti2v_5B_fp16.safetensors'
@@ -765,7 +703,7 @@ describe('OrgSettingsPage', () => {
         model_audio: null,
       });
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByLabelText('Audio Model')).toHaveTextContent(
           'ace_step_v1_3.5b.safetensors'
@@ -786,7 +724,7 @@ describe('OrgSettingsPage', () => {
     it('shows success message after save', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
       });
@@ -802,7 +740,7 @@ describe('OrgSettingsPage', () => {
       const notice = '2 workspace keys wait for their admins to save again.';
       mockClient.updateOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
 
       expect(await screen.findByText(notice)).toBeInTheDocument();
@@ -812,7 +750,7 @@ describe('OrgSettingsPage', () => {
     it('shows error when save fails', async () => {
       mockClient.updateOrgAiSettings.mockRejectedValueOnce(new Error('Save failed'));
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
       });
@@ -829,7 +767,7 @@ describe('OrgSettingsPage', () => {
         "Failed to update org AI settings: litellm_host: The URL's host is not one this instance allows endpoints on.";
       mockClient.updateOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 400));
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
 
       expect(await screen.findByText(message)).toHaveClass('alert-error');
@@ -840,7 +778,7 @@ describe('OrgSettingsPage', () => {
     it('resets settings on reset button click', async () => {
       mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
       });
@@ -855,7 +793,7 @@ describe('OrgSettingsPage', () => {
     it('shows success message after reset', async () => {
       mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
       });
@@ -871,7 +809,7 @@ describe('OrgSettingsPage', () => {
       const notice = '1 workspace key waits for its admin to save again.';
       mockClient.resetOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       fireEvent.click(await screen.findByRole('button', { name: 'Reset to Defaults' }));
 
       expect(await screen.findByText(notice)).toBeInTheDocument();
@@ -884,7 +822,7 @@ describe('OrgSettingsPage', () => {
       mockClient.updateOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
       mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
       expect(await screen.findByText(notice)).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Reset to Defaults' }));
@@ -896,7 +834,7 @@ describe('OrgSettingsPage', () => {
     it('shows error when reset fails', async () => {
       mockClient.resetOrgAiSettings.mockRejectedValueOnce(new Error('Reset failed'));
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
       });
@@ -913,7 +851,7 @@ describe('OrgSettingsPage', () => {
         'Failed to reset org AI settings: Only organization admins can manage AI settings';
       mockClient.resetOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 403));
 
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       fireEvent.click(await screen.findByRole('button', { name: 'Reset to Defaults' }));
 
       expect(await screen.findByText(message)).toHaveClass('alert-error');
@@ -922,116 +860,13 @@ describe('OrgSettingsPage', () => {
 
   describe('Button States', () => {
     it('buttons are initially enabled', async () => {
-      render(<OrgSettingsPage />);
+      render(<OrganizationAiSection />);
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
       });
 
       expect(screen.getByRole('button', { name: 'Save Changes' })).toBeEnabled();
       expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeEnabled();
-    });
-  });
-
-  describe('Tab Navigation', () => {
-    it('shows AI Settings tab by default', async () => {
-      render(<OrgSettingsPage />);
-      await waitFor(() => {
-        expect(screen.getByText('AI Provider Configuration')).toBeInTheDocument();
-      });
-    });
-
-    it('switches to Members tab', async () => {
-      render(<OrgSettingsPage />);
-      await waitFor(() => {
-        expect(screen.getByRole('tab', { name: 'Members' })).toBeInTheDocument();
-      });
-
-      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Members' }), {
-        button: 0,
-        ctrlKey: false,
-      });
-
-      expect(screen.getByTestId('org-members-section')).toBeInTheDocument();
-      expect(screen.queryByText('AI Provider Configuration')).not.toBeInTheDocument();
-    });
-
-    it('switches to Invitations tab', async () => {
-      render(<OrgSettingsPage />);
-      await waitFor(() => {
-        expect(screen.getByRole('tab', { name: 'Invitations' })).toBeInTheDocument();
-      });
-
-      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Invitations' }), {
-        button: 0,
-        ctrlKey: false,
-      });
-
-      expect(screen.getByTestId('invitations-section')).toBeInTheDocument();
-      expect(screen.queryByText('AI Provider Configuration')).not.toBeInTheDocument();
-    });
-
-    it('switches to Billing tab', async () => {
-      render(<OrgSettingsPage />);
-      await waitFor(() => {
-        expect(screen.getByRole('tab', { name: 'Billing' })).toBeInTheDocument();
-      });
-
-      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Billing' }), {
-        button: 0,
-        ctrlKey: false,
-      });
-
-      expect(screen.getByTestId('billing-section')).toBeInTheDocument();
-      expect(screen.queryByText('AI Provider Configuration')).not.toBeInTheDocument();
-    });
-
-    it('switches to Audit Logs tab', async () => {
-      render(<OrgSettingsPage />);
-      await waitFor(() => {
-        expect(screen.getByRole('tab', { name: 'Audit Logs' })).toBeInTheDocument();
-      });
-
-      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Audit Logs' }), {
-        button: 0,
-        ctrlKey: false,
-      });
-
-      expect(screen.getByTestId('audit-logs-section')).toBeInTheDocument();
-      expect(screen.queryByText('AI Provider Configuration')).not.toBeInTheDocument();
-    });
-
-    it('renders all tab buttons', async () => {
-      render(<OrgSettingsPage />);
-      await waitFor(() => {
-        expect(screen.getByRole('tab', { name: 'AI Settings' })).toBeInTheDocument();
-      });
-
-      expect(screen.getByRole('tab', { name: 'AI Settings' })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: 'Members' })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: 'Invitations' })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: 'Billing' })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: 'Audit Logs' })).toBeInTheDocument();
-    });
-
-    it('sets correct aria-selected on active tab', async () => {
-      render(<OrgSettingsPage />);
-      await waitFor(() => {
-        expect(screen.getByRole('tab', { name: 'AI Settings' })).toBeInTheDocument();
-      });
-
-      const aiTab = screen.getByRole('tab', { name: 'AI Settings' });
-      expect(aiTab).toHaveAttribute('aria-selected', 'true');
-
-      fireEvent.keyDown(screen.getByRole('tab', { name: 'Audit Logs' }), { key: 'Enter' });
-
-      await waitFor(() => {
-        expect(screen.getByRole('tab', { name: 'Audit Logs' })).toHaveAttribute(
-          'aria-selected',
-          'true'
-        );
-      });
-
-      expect(aiTab).toHaveAttribute('aria-selected', 'false');
     });
   });
 });

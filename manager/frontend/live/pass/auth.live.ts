@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { Browser, Page } from '@playwright/test';
 import {
   api,
+  chooseOption,
   enabled,
   evidenceDir,
   expect,
@@ -15,9 +16,9 @@ import {
   sql,
   stamp,
   state,
+  type Tenant,
   test,
   tokenFor,
-  type Tenant,
 } from './rig';
 
 /**
@@ -51,6 +52,8 @@ function savedAccount(): Account {
 }
 
 const port = process.env.ZONE_LIVE_PORT ?? '4179';
+const ORGANIZATION_AI = '/settings/organization/ai';
+const ORGANIZATION_MEMBERS = '/settings/organization/members';
 
 async function signInAs(
   page: Page,
@@ -280,7 +283,7 @@ test.describe('auth and account', () => {
       )) ?? '';
 
     await signIn(page);
-    await page.goto('/sessions');
+    await page.goto('/settings/you/sessions');
     await page.waitForTimeout(4_000);
     const pageText = await page.locator('main').innerText();
     const table = page.locator('table.sessions-table');
@@ -336,7 +339,7 @@ test.describe('auth and account', () => {
       result: listed && rowsListed >= 2 && signedOut ? 'WORKS' : 'FAILS',
       cause: listed
         ? undefined
-        : 'product: /sessions renders "No active sessions found" with a validation error, because the console schema requires user_id and location that GET /api/auth/sessions does not send',
+        : 'product: /settings/you/sessions renders "No active sessions found" with a validation error, because the console schema requires user_id and location that GET /api/auth/sessions does not send',
       sessions_page_text: pageText.replace(/\s+/g, ' ').slice(0, 400),
       sessions_listed_in_console: rowsListed,
       sessions_from_api: apiSessions,
@@ -474,8 +477,7 @@ test.describe('auth and account', () => {
       `delete from invitations where organization_id = '${state.owner.organization.id}' and email = '${state.intruder.email}' returning accepted_at is not null`,
     );
     await signIn(page);
-    await page.goto('/org-settings');
-    await page.getByRole('tab', { name: 'Invitations' }).click();
+    await page.goto(ORGANIZATION_MEMBERS);
     page.on('dialog', (dialog) => dialog.accept());
     // A pending invitation for the same address from an earlier run blocks a new
     // one (the table is unique per email and organization), so it is revoked first.
@@ -513,11 +515,9 @@ test.describe('auth and account', () => {
     const modal = page.getByRole('dialog', { name: 'Invite Member' });
     await expect(modal).toBeVisible();
     await modal.locator('#email').fill(state.intruder.email);
-    await modal.locator('#org-role').selectOption('member');
-    await modal
-      .locator('#workspace')
-      .selectOption({ label: state.owner.workspace.name });
-    await modal.locator('#workspace-role').selectOption('member');
+    await chooseOption(modal.locator('#org-role'), 'member');
+    await chooseOption(modal.locator('#workspace'), state.owner.workspace.id);
+    await chooseOption(modal.locator('#workspace-role'), 'member');
     await shot(page, '06-invite-form');
     const created = page.waitForResponse(
       (r) =>
@@ -565,7 +565,9 @@ test.describe('auth and account', () => {
         .catch(() => false)
     ) {
       await second.getByRole('button', { name: 'Accept Invitation' }).click();
-      await expect(second).toHaveURL(/\/org-settings/, { timeout: 30_000 });
+      await expect
+        .poll(() => new URL(second.url()).pathname, { timeout: 30_000 })
+        .toBe('/');
       acceptedVia = 'console-accept: Accept Invitation';
     } else {
       // The page could not render the invitation, so the server's accept is
@@ -579,7 +581,7 @@ test.describe('auth and account', () => {
     }
     await other.close();
 
-    await page.getByRole('tab', { name: 'Members' }).click();
+    await page.goto(ORGANIZATION_MEMBERS);
     await page.waitForTimeout(3_000);
     const membersText = (await page.locator('main').innerText()).replace(
       /\s+/g,
@@ -589,13 +591,11 @@ test.describe('auth and account', () => {
       hasText: state.intruder.email,
     });
     const rowShown = (await row.count()) > 0;
-    const roleSelect = row.locator('select.role-select');
+    const roleSelect = row.locator('.role-select');
     const badge = !rowShown
       ? 'no row carries the member email'
       : (await roleSelect.count()) > 0
-        ? await roleSelect.evaluate(
-            (select: HTMLSelectElement) => select.selectedOptions[0]?.text ?? '',
-          )
+        ? await roleSelect.innerText()
         : await row.locator('.role-badge').innerText();
     const memberRows = await page
       .locator('table.members-table tbody tr')
@@ -640,7 +640,7 @@ test.describe('auth and account', () => {
     expect(consoleAccepted, acceptText.slice(0, 200)).toBe(true);
   });
 
-  test('7: a member without the role is refused the page and the API call', async ({
+  test('7: a member is kept off the organization AI defaults, sees members read-only, and is refused the API call', async ({
     page,
   }) => {
     const membership = sql(
@@ -658,12 +658,45 @@ test.describe('auth and account', () => {
     await page.goto('/org-settings');
     await page.waitForTimeout(4_000);
     const url = page.url();
-    const text = await page.locator('main, body').first().innerText();
+    const landing = new URL(url).pathname;
+    const navigation = page.getByRole('navigation', { name: 'Settings' });
+    const aiDefaultsListed = await navigation
+      .getByRole('link', { name: 'AI defaults' })
+      .count();
+    const keptOffAiDefaults =
+      landing.startsWith('/settings/') &&
+      landing !== ORGANIZATION_AI &&
+      aiDefaultsListed === 0 &&
+      (await page.locator('#ai-provider').count()) === 0;
     const orgShown = await page
       .locator('.sidebar, aside')
       .first()
       .innerText()
       .catch(() => '');
+
+    await navigation
+      .getByRole('group', { name: 'Organization', exact: true })
+      .getByRole('link', { name: 'Members', exact: true })
+      .click({ timeout: 15_000 })
+      .catch(() => undefined);
+    const membersTable = page.locator('table.members-table');
+    await membersTable
+      .waitFor({ state: 'visible', timeout: 30_000 })
+      .catch(() => undefined);
+    const membersUrl = page.url();
+    const landedOnMembers =
+      new URL(membersUrl).pathname === ORGANIZATION_MEMBERS &&
+      (await membersTable.isVisible());
+    const addMemberButtons = await page
+      .getByRole('button', { name: 'Add Member' })
+      .count();
+    const inviteButtons = await page
+      .getByRole('button', { name: 'Invite Member' })
+      .count();
+    const roleSelects = await page.locator('.role-select').count();
+    const readOnly =
+      addMemberButtons === 0 && inviteButtons === 0 && roleSelects === 0;
+    const text = await page.locator('main, body').first().innerText();
     await shot(page, '07-member-at-org-settings');
 
     const token = await tokenFor(state.intruder);
@@ -688,16 +721,20 @@ test.describe('auth and account', () => {
     const name = sql(
       `select name from organizations where id = '${state.owner.organization.id}'`,
     );
-    const pageRefused =
-      /\/unauthorized/.test(url) || /Access Denied/.test(text);
     const apiRefused =
       [401, 403].includes(rename.status) && [401, 403].includes(promote.status);
+    const pageGated = keptOffAiDefaults && landedOnMembers && readOnly;
     record(7, {
-      result: pageRefused && apiRefused ? 'WORKS' : 'FAILS',
-      cause: pageRefused
+      result: pageGated && apiRefused ? 'WORKS' : 'FAILS',
+      cause: pageGated
         ? undefined
-        : 'product: a member of the organization opens /org-settings and sees its settings; only the API refuses the writes',
+        : 'product: a member who opens /org-settings sees the organization AI defaults, cannot reach the organization members list, or can edit it',
       url_after_visit: url,
+      ai_defaults_listed: aiDefaultsListed,
+      members_url: membersUrl,
+      add_member_buttons: addMemberButtons,
+      invite_member_buttons: inviteButtons,
+      role_selects: roleSelects,
       page_text: text.replace(/\s+/g, ' ').slice(0, 300),
       sidebar_context: orgShown.replace(/\s+/g, ' ').slice(0, 120),
       read_settings_status: settings.status,
@@ -711,6 +748,17 @@ test.describe('auth and account', () => {
       `rename=${rename.status} promote=${promote.status}`,
     ).toBe(true);
     expect(name[0]).not.toContain('Hijacked');
-    expect(pageRefused, `the page was not refused: ${url}`).toBe(true);
+    expect(
+      keptOffAiDefaults,
+      `the member reached the AI defaults: ${url}`,
+    ).toBe(true);
+    expect(
+      landedOnMembers,
+      `the members list did not open: ${membersUrl}`,
+    ).toBe(true);
+    expect(
+      readOnly,
+      `add=${addMemberButtons} invite=${inviteButtons} roles=${roleSelects}`,
+    ).toBe(true);
   });
 });

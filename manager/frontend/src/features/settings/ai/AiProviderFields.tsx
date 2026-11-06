@@ -1,6 +1,6 @@
 import { Select } from '@zone/ui';
 import type { ReactNode } from 'react';
-import type { AiProvider, AiSettings, OrganizationKeys } from '../workspace/types';
+import type { AiProvider, CommonAiSettings, OrganizationKeys } from '../workspace/types';
 import {
   awsRegions,
   missesOrganizationKey,
@@ -10,7 +10,7 @@ import {
   providerOptions,
   routingOf,
 } from './options';
-import type { SettingsLevel } from './types';
+import { SettingsLevel } from './types';
 
 interface AiProviderFieldsProps {
   level: SettingsLevel;
@@ -19,7 +19,7 @@ interface AiProviderFieldsProps {
   credentials: ProviderCredentials;
   configured: ProviderConfigured;
   onChange: <K extends keyof ProviderCredentials>(key: K, value: ProviderCredentials[K]) => void;
-  saved?: AiSettings | null;
+  saved?: CommonAiSettings | null;
   organizationKeys?: OrganizationKeys;
 }
 
@@ -111,7 +111,7 @@ interface EndpointHintsProps {
   provider: AiProvider;
   credentials: ProviderCredentials;
   configured: ProviderConfigured;
-  saved: AiSettings | null;
+  saved: CommonAiSettings | null;
   organizationKeys: OrganizationKeys | undefined;
 }
 
@@ -125,7 +125,7 @@ function EndpointHints({
 }: EndpointHintsProps) {
   const routing = routingOf(saved, provider);
   const keyless =
-    level === 'workspace' &&
+    level === SettingsLevel.Workspace &&
     organizationKeys !== undefined &&
     missesOrganizationKey(provider, credentials, configured, organizationKeys);
   return (
@@ -145,7 +145,7 @@ function EndpointHints({
       {provider === 'anthropic' && (
         <p className="form-hint">Completions go through Anthropic's OpenAI-compatible endpoint.</p>
       )}
-      {level === 'workspace' && (
+      {level === SettingsLevel.Workspace && (
         <p className="form-hint">
           A workspace host needs its own key; it never receives the organization's.
         </p>
@@ -326,16 +326,18 @@ export function AiProviderFields({
         </>
       )}
 
-      <Field id="runpod-key" label="Runpod" configured={configured.runpod} optional>
-        <input
-          type="password"
-          id="runpod-key"
-          value={credentials.runpodApiKey}
-          onChange={(event) => onChange('runpodApiKey', event.target.value)}
-          placeholder={configured.runpod ? MASK : 'Enter API key'}
-          className="form-input"
-        />
-      </Field>
+      {level === SettingsLevel.Organization && (
+        <Field id="runpod-key" label="Runpod" configured={configured.runpod} optional>
+          <input
+            type="password"
+            id="runpod-key"
+            value={credentials.runpodApiKey}
+            onChange={(event) => onChange('runpodApiKey', event.target.value)}
+            placeholder={configured.runpod ? MASK : 'Enter API key'}
+            className="form-input"
+          />
+        </Field>
+      )}
     </div>
   );
 }

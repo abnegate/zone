@@ -3,20 +3,24 @@ import { expect, test } from './fixtures';
 import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
 import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 
+const compactWidth = 768;
+
 const screens = [
   {
-    path: '/org-settings',
-    title: 'Organization Settings',
+    path: '/settings/organization/ai',
+    name: 'Organization AI defaults',
+    title: 'Settings',
+    compactTitle: 'AI defaults',
     content: '.settings-form',
     body: '.page-body',
-    tabs: 'Organization settings',
   },
   {
-    path: '/settings',
-    title: 'Workspace Settings',
+    path: '/settings/workspace/general',
+    name: 'Workspace general settings',
+    title: 'Settings',
+    compactTitle: 'General',
     content: '#font-family',
     body: '.page-body',
-    tabs: 'Workspace settings',
   },
   { path: '/models', title: 'Models', content: '.model-item', tabs: true },
   { path: '/projects', title: 'Projects', content: '.project-card', tabs: true },
@@ -25,11 +29,15 @@ const screens = [
   { path: '/chats', title: 'Chats', content: '.chat-item', tabs: true },
 ];
 
+function nameOf(screen: (typeof screens)[number]): string {
+  return screen.name ?? screen.title;
+}
+
 async function open(page: Page, screen: (typeof screens)[number]): Promise<void> {
+  const compact = (page.viewportSize()?.width ?? Number.POSITIVE_INFINITY) <= compactWidth;
+  const title = compact ? (screen.compactTitle ?? screen.title) : screen.title;
   await page.goto(screen.path, { waitUntil: 'domcontentloaded' });
-  await expect(
-    page.getByRole('heading', { level: 1, name: screen.title, exact: true })
-  ).toBeVisible();
+  await expect(page.getByRole('heading', { level: 1, name: title, exact: true })).toBeVisible();
   await expect(page.locator(screen.content).first()).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
 }
@@ -59,10 +67,7 @@ async function expectNoSidewaysScroll(
 async function expectTabsBelowTitle(page: Page, screen: (typeof screens)[number]): Promise<void> {
   if (!screen.tabs) return;
   const title = page.locator('.page-bar-title').first();
-  const tabs =
-    typeof screen.tabs === 'string'
-      ? page.getByRole('tablist', { name: screen.tabs })
-      : page.locator('.page-bar .ui-tabs-list').first();
+  const tabs = page.locator('.page-bar .ui-tabs-list').first();
   const titleBox = await title.boundingBox();
   const tabsBox = await tabs.boundingBox();
   expect(titleBox).not.toBeNull();
@@ -97,34 +102,62 @@ test.beforeEach(async ({ context, page }) => {
 test.describe('Page bar on a 375px phone', () => {
   test.use({ viewport: { width: 375, height: 812 } });
 
-  test('organization settings never scrolls sideways', async ({ page }) => {
+  test('organization AI defaults never scrolls sideways', async ({ page }) => {
     await open(page, screens[0]);
     await expectNoSidewaysScroll(page, screens[0]);
-    await expectTabsBelowTitle(page, screens[0]);
     await expectBoxContainsChildren(page, '.page-bar');
   });
 
-  test('the last organization tab scrolls the tab list, not the page', async ({ page }) => {
-    await open(page, screens[0]);
-    const list = page.getByRole('tablist', { name: 'Organization settings' });
-    const last = list.getByRole('tab', { name: 'Audit Logs', exact: true });
+  test('settings list never scrolls sideways at 375px', async ({ page }) => {
+    await page.goto('/settings', { waitUntil: 'domcontentloaded' });
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Settings', exact: true })
+    ).toBeVisible();
+    const list = page.getByRole('navigation', { name: 'Settings', exact: true });
+    for (const group of ['Workspace', 'Organization', 'This server', 'You']) {
+      await expect(list.getByRole('group', { name: group, exact: true })).toBeVisible();
+    }
+    await expect(page).toHaveURL(/\/settings$/);
+    await page.evaluate(() => document.fonts.ready);
 
-    await list.getByRole('tab', { name: 'AI Settings', exact: true }).focus();
-    await page.keyboard.press('End');
-    await expect(last).toBeFocused();
-    await expect(last).toHaveAttribute('aria-selected', 'true');
-    expect((await width(page)).left).toBe(0);
+    const main = await width(page);
+    expect(main.scroll).toBeLessThanOrEqual(main.client);
+    const body = await width(page, '.page-body');
+    expect(body.scroll, '.page-body scrolls sideways').toBeLessThanOrEqual(body.client);
+    await expectBoxContainsChildren(page, '.page-bar');
+    await expectBoxContainsChildren(page, '.settings-nav');
+    const viewport = page.viewportSize()!.width;
+    const items = await list.getByRole('link').evaluateAll((links) =>
+      links.map((link) => {
+        const rect = link.getBoundingClientRect();
+        return { label: link.textContent, left: rect.left, right: rect.right };
+      })
+    );
+    expect(items.length).toBe(12);
+    for (const item of items) {
+      expect(item.left, `${item.label} starts off screen`).toBeGreaterThanOrEqual(0);
+      expect(item.right, `${item.label} ends off screen`).toBeLessThanOrEqual(viewport);
+    }
 
+    const last = list.getByRole('link', { name: 'Sessions', exact: true });
     await last.scrollIntoViewIfNeeded();
     await expect(last).toBeInViewport({ ratio: 0.95 });
-    expect(await list.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
-    const main = await width(page);
-    expect(main.left).toBe(0);
-    expect(main.scroll).toBeLessThanOrEqual(main.client);
+    expect((await width(page)).left).toBe(0);
+    await last.click();
+    await expect(page).toHaveURL(/\/settings\/you\/sessions$/);
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Sessions', exact: true })
+    ).toBeVisible();
+    const back = page.getByRole('link', { name: 'Back to settings', exact: true });
+    await expect(back).toBeVisible();
+    expect((await width(page)).scroll).toBeLessThanOrEqual((await width(page)).client);
+    await back.click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await expect(list).toBeVisible();
   });
 
   for (const screen of screens.slice(1)) {
-    test(`${screen.title} never scrolls sideways`, async ({ page }) => {
+    test(`${nameOf(screen)} never scrolls sideways`, async ({ page }) => {
       await open(page, screen);
       await expectNoSidewaysScroll(page, screen);
       await expectTabsBelowTitle(page, screen);
@@ -239,7 +272,7 @@ test.describe('Page bar beside the sidebar at 769px', () => {
   test.use({ viewport: { width: 769, height: 900 } });
 
   for (const screen of screens) {
-    test(`${screen.title} never scrolls sideways`, async ({ page }) => {
+    test(`${nameOf(screen)} never scrolls sideways`, async ({ page }) => {
       await open(page, screen);
       const main = await width(page);
       expect(main.scroll).toBeLessThanOrEqual(main.client);
@@ -251,10 +284,27 @@ test.describe('Page bar on a 1440px desktop', () => {
   test.use({ viewport: { width: 1440, height: 1000 } });
 
   for (const screen of screens) {
-    test(`${screen.title} keeps one 48px row`, async ({ page }) => {
+    test(`${nameOf(screen)} keeps one 48px row`, async ({ page }) => {
       await open(page, screen);
       const bar = await page.locator('.page-bar').boundingBox();
       expect(bar?.height).toBeCloseTo(48, 1);
     });
   }
+});
+
+test.describe('Settings on a 1280x720 laptop', () => {
+  test.use({ viewport: { width: 1280, height: 720 } });
+
+  test('controls below the fold never grow the document past the viewport', async ({
+    page,
+  }) => {
+    await open(page, screens[0]);
+    const body = page.locator('.page-body');
+    expect(await body.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(
+      true
+    );
+    expect(
+      await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight)
+    ).toBe(0);
+  });
 });

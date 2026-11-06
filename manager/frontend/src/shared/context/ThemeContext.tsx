@@ -25,6 +25,8 @@ interface ThemeContextType {
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 export const THEME_STORAGE_KEY = 'manager_theme';
+
+export const FONT_SIZE_PROPERTY = 'font-size';
 const WORKSPACE_THEME_STORAGE_KEY = 'manager_workspace_theme';
 
 const FONT_MAP: Record<FontFamily, string> = {
@@ -139,7 +141,7 @@ export function workspaceThemeProperties(
     Number.isFinite(Number.parseFloat(workspace.font_size_base)) &&
     Number.parseFloat(workspace.font_size_base) > 0
   ) {
-    properties.set('font-size', workspace.font_size_base);
+    properties.set(FONT_SIZE_PROPERTY, workspace.font_size_base);
   }
   if (workspace?.border_radius && Object.hasOwn(RADIUS_MAP, workspace.border_radius)) {
     for (const [size, radius] of Object.entries(RADIUS_MAP[workspace.border_radius])) {

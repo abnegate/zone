@@ -1347,7 +1347,7 @@ describe('TrainPanel', () => {
     render(<TrainPanel onTrained={mock()} />);
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
     expect(screen.getByLabelText('Subject')).toHaveTextContent('Other');
-    expect(screen.getByText('Save a Runpod API key in Workspace Settings.')).toBeInTheDocument();
+    expect(screen.getByText('Save a Runpod API key in Settings → AI.')).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('Compute'));
     expect(await screen.findByRole('option', { name: 'Runpod' })).toHaveAttribute('data-disabled');
     fireEvent.click(screen.getByRole('option', { name: 'Local' }));
@@ -1363,7 +1363,7 @@ describe('TrainPanel', () => {
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
     await selectSubject('Person');
     await waitFor(() => {
-      expect(screen.queryByText('Save a Runpod API key in Workspace Settings.')).toBeNull();
+      expect(screen.queryByText('Save a Runpod API key in Settings → AI.')).toBeNull();
     });
     await selectOption('Compute', 'Runpod');
     await selectMethod('Fine-tune');
@@ -1391,7 +1391,7 @@ describe('TrainPanel', () => {
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
     await selectSubject('Person');
     await waitFor(() => {
-      expect(screen.queryByText('Save a Runpod API key in Workspace Settings.')).toBeNull();
+      expect(screen.queryByText('Save a Runpod API key in Settings → AI.')).toBeNull();
     });
     await selectOption('Compute', 'Runpod');
     expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
@@ -1411,7 +1411,7 @@ describe('TrainPanel', () => {
       expect(screen.getByLabelText('Base')).toHaveTextContent('qwen2.5 32B');
     });
     await waitFor(() => {
-      expect(screen.queryByText('Save a Runpod API key in Workspace Settings.')).toBeNull();
+      expect(screen.queryByText('Save a Runpod API key in Settings → AI.')).toBeNull();
     });
     await selectOption('Compute', 'Runpod');
     expect(screen.getByText('A 24 GB GPU is enough for this method.')).toBeInTheDocument();
@@ -1437,7 +1437,7 @@ describe('TrainPanel', () => {
     render(<TrainPanel onTrained={mock()} />);
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
     await waitFor(() => {
-      expect(screen.queryByText('Save a Runpod API key in Workspace Settings.')).toBeNull();
+      expect(screen.queryByText('Save a Runpod API key in Settings → AI.')).toBeNull();
     });
     await selectBase('FLUX.1 Schnell');
     await selectOption('Compute', 'Runpod');

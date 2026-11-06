@@ -65,8 +65,7 @@ test.describe('Dialog footers', () => {
     await page.getByRole('button', { name: /Add Sync/ }).click();
     await expectFooterGap(page, 'Add External Sync');
 
-    await page.goto('/org-settings', { waitUntil: 'domcontentloaded' });
-    await page.getByRole('tab', { name: 'Invitations', exact: true }).click();
+    await page.goto('/settings/organization/members', { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Invite Member', exact: true }).click();
     await expectFooterGap(page, 'Invite Member');
   });
@@ -126,7 +125,7 @@ for (const width of [1440, 390]) {
       test('confirmation dialog keeps its fixed panel and spacing', async ({
         page,
       }, information) => {
-        await page.goto('/sessions', { waitUntil: 'domcontentloaded' });
+        await page.goto('/settings/you/sessions', { waitUntil: 'domcontentloaded' });
         await page.getByRole('button', { name: 'Revoke All Other Sessions' }).click();
         const dialog = page.getByRole('dialog');
         await expect(dialog).toBeVisible();
