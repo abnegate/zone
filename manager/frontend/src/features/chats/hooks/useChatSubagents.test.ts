@@ -1,15 +1,19 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { SubagentFrameSchema } from '../subagentSchemas';
-import type { ChatSubagent, SubagentStep } from '../subagentTypes';
+import type { ChatSubagent, SubagentList, SubagentStep } from '../subagentTypes';
 import { publishFrame } from '../utils/frames';
 
 const mockGetChatSubagents = mock();
 const mockGetChatSubagentSteps = mock();
 
+function listed(answer: ChatSubagent[] | SubagentList): SubagentList {
+  return Array.isArray(answer) ? { subagents: answer, complete: true } : answer;
+}
+
 mock.module('../../../api/chats', () => ({
   chatsApi: {
-    getChatSubagents: mockGetChatSubagents,
+    getChatSubagents: async (chatId: string) => listed(await mockGetChatSubagents(chatId)),
     getChatSubagentSteps: mockGetChatSubagentSteps,
   },
 }));
@@ -297,16 +301,19 @@ describe('useChatSubagents', () => {
     });
   });
 
-  it('reads once at mount, without a second read for the init that races it', async () => {
+  it('reads once more after the first read when init raced it', async () => {
     const read = deferred();
     mockGetChatSubagents.mockReturnValueOnce(read.promise);
     const { result } = renderHook(() => useChatSubagents('chat-1', false));
 
     send('chat-1', { type: 'init', chat_id: 'chat-1' });
+    expect(mockGetChatSubagents).toHaveBeenCalledTimes(1);
+
+    mockGetChatSubagents.mockResolvedValueOnce([COMPLETED]);
     await act(async () => read.answer([RUNNING]));
 
-    expect(result.current.subagents).toEqual([RUNNING]);
-    expect(mockGetChatSubagents).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(result.current.subagents).toEqual([COMPLETED]));
+    expect(mockGetChatSubagents).toHaveBeenCalledTimes(2);
   });
 
   it('parses only the frame types it handles', async () => {
@@ -360,6 +367,10 @@ describe('useChatSubagents', () => {
 
     await act(() => result.current.refresh());
     expect(result.current.subagents).toEqual([elsewhere]);
+
+    send('chat-1', update({ ...COMPLETED, revision: 9 }, [PASSED]));
+    expect(result.current.subagents).toEqual([elsewhere]);
+    expect(result.current.steps[RUNNING.id]).toBeUndefined();
   });
 
   describe('reconnecting', () => {
@@ -411,6 +422,20 @@ describe('useChatSubagents', () => {
       mockGetChatSubagents.mockResolvedValueOnce([RUNNING]);
       await act(() => result.current.refresh());
       expect(result.current.subagents).toEqual([RUNNING]);
+    });
+
+    it('drops no agent a read listed only in part', async () => {
+      mockGetChatSubagents.mockResolvedValueOnce([RUNNING, SIBLING]);
+      const { result } = renderHook(() => useChatSubagents('chat-1', false));
+      await waitFor(() => expect(result.current.subagents).toEqual([RUNNING, SIBLING]));
+
+      mockGetChatSubagents.mockResolvedValueOnce({ subagents: [COMPLETED], complete: false });
+      await act(() => result.current.refresh());
+      expect(result.current.subagents).toEqual([COMPLETED, SIBLING]);
+
+      mockGetChatSubagents.mockResolvedValueOnce([COMPLETED, SIBLING]);
+      await act(() => result.current.refresh());
+      expect(result.current.subagents).toEqual([COMPLETED, SIBLING]);
     });
 
     it('updates the agents the read still lists by revision', async () => {
@@ -504,6 +529,41 @@ describe('useChatSubagents', () => {
         await loading;
       });
       expect(result.current.steps[RUNNING.id]).toEqual([PASSED, READ]);
+    });
+
+    it('takes the steps a read answers over the ones it held before it', async () => {
+      const { result } = await opened();
+      mockGetChatSubagentSteps.mockResolvedValueOnce([BASH]);
+      await act(() => result.current.loadSteps(RUNNING.id));
+
+      const widened: SubagentStep = { ...BASH, subject: 'cargo test --workspace' };
+      mockGetChatSubagentSteps.mockResolvedValueOnce([widened]);
+      send('chat-1', { type: 'init', chat_id: 'chat-1' });
+
+      await waitFor(() => expect(result.current.steps[RUNNING.id]).toEqual([widened]));
+    });
+
+    it('reads the steps again when a frame older than one it applied arrives', async () => {
+      const { result } = await opened();
+      mockGetChatSubagentSteps.mockResolvedValueOnce([BASH, READ]);
+      await act(() => result.current.loadSteps(RUNNING.id));
+
+      const finished: ChatSubagent = { ...COMPLETED, revision: 3 };
+      send('chat-1', update(finished, [PASSED]));
+      expect(result.current.steps[RUNNING.id]).toEqual([PASSED, READ]);
+
+      const abandoned: SubagentStep = { ...READ, status: 'failed' };
+      const stopped: ChatSubagent = { ...RUNNING, status: 'stopped', revision: 2 };
+      const read = deferred<SubagentStep[]>();
+      mockGetChatSubagentSteps.mockReturnValueOnce(read.promise);
+      send('chat-1', update(stopped, [{ ...BASH, status: 'failed' }, abandoned]));
+
+      expect(result.current.steps[RUNNING.id]).toEqual([PASSED, READ]);
+      expect(result.current.subagents).toEqual([finished]);
+      expect(mockGetChatSubagentSteps).toHaveBeenCalledTimes(2);
+
+      await act(async () => read.answer([PASSED, abandoned]));
+      expect(result.current.steps[RUNNING.id]).toEqual([PASSED, abandoned]);
     });
 
     it('says when the steps could not be read', async () => {

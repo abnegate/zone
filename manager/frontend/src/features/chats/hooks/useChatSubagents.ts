@@ -52,6 +52,7 @@ interface Reading {
 }
 
 const NO_STEPS: StepCaches = {};
+const NONE_GONE: ReadonlySet<string> = new Set();
 const NOTHING_READ: Reading = { chatId: null, subagents: [], steps: NO_STEPS, error: null };
 
 function forChat(reading: Reading, chatId: string): Reading {
@@ -77,7 +78,8 @@ function withoutSteps(caches: StepCaches, ids: ReadonlySet<string>): StepCaches 
  * announced while it was in flight; the rest are merged rather than swapped
  * in, so a frame that lands mid-read is never undone by the older answer.
  * Steps are read only for the agents someone asked to see, then kept current
- * from each frame's changed steps.
+ * from each frame's changed steps. A frame older than one already applied may
+ * hold step changes the newer one has since overtaken, so it reads them again.
  */
 export function useChatSubagents(chatId: string | null, streaming: boolean): ChatSubagents {
   const [reading, setReading] = useState<Reading>(NOTHING_READ);
@@ -87,6 +89,9 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
   const removed = useRef(new Set<string>());
   const announced = useRef(new Set<string>());
   const stepReads = useRef(new Map<string, number>());
+  const arrivals = useRef(new Map<string, SubagentStep[]>());
+  const revisions = useRef(new Map<string, number>());
+  const owed = useRef(false);
   const wasStreaming = useRef(streaming);
   const current = reading.chatId === chatId ? reading : NOTHING_READ;
 
@@ -95,8 +100,45 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
       removed.current.add(id);
       requested.current.delete(id);
       stepReads.current.delete(id);
+      arrivals.current.delete(id);
+      revisions.current.delete(id);
     }
   }, []);
+
+  const loadSteps = useCallback(
+    async (id: string) => {
+      if (!chatId) return;
+      const reads = stepReads.current;
+      const attempt = (reads.get(id) ?? 0) + 1;
+      reads.set(id, attempt);
+      requested.current.add(id);
+      const arrived: SubagentStep[] = [];
+      arrivals.current.set(id, arrived);
+      setReading((last) => {
+        const base = forChat(last, chatId);
+        if (base.steps[id]) return base;
+        return { ...base, steps: { ...base.steps, [id]: { steps: [], loaded: false } } };
+      });
+      const stale = () => reads !== stepReads.current || reads.get(id) !== attempt;
+      let loaded: SubagentStep[];
+      try {
+        loaded = await chatsApi.getChatSubagentSteps(chatId, id);
+      } catch (failure) {
+        if (stale()) return;
+        arrivals.current.delete(id);
+        throw failure;
+      }
+      if (stale()) return;
+      arrivals.current.delete(id);
+      setReading((last) => {
+        const cache = last.chatId === chatId ? last.steps[id] : undefined;
+        if (!cache) return last;
+        const steps = mergeSteps(loaded, arrived);
+        return { ...last, steps: { ...last.steps, [id]: { steps, loaded: true } } };
+      });
+    },
+    [chatId]
+  );
 
   const refresh = useCallback(async () => {
     const attempt = ++read.current;
@@ -106,14 +148,14 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
       return;
     }
     try {
-      const answer = await chatsApi.getChatSubagents(chatId);
+      const { subagents: listed, complete } = await chatsApi.getChatSubagents(chatId);
       if (attempt !== read.current) return;
-      const loaded = withoutSubagents(answer, removed.current);
+      const loaded = withoutSubagents(listed, removed.current);
       const kept = new Set([...announced.current, ...loaded.map((subagent) => subagent.id)]);
       answered.current = chatId;
       setReading((last) => {
         const base = forChat(last, chatId);
-        const gone = absentSubagents(base.subagents, kept);
+        const gone = complete ? absentSubagents(base.subagents, kept) : NONE_GONE;
         forget(gone);
         return {
           ...base,
@@ -128,41 +170,17 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
       const error = failure instanceof Error ? failure.message : SUBAGENTS_LOAD_FAILED;
       setReading((last) => ({ ...forChat(last, chatId), error }));
     }
-  }, [chatId, forget]);
-
-  const loadSteps = useCallback(
-    async (id: string) => {
-      if (!chatId) return;
-      const reads = stepReads.current;
-      const attempt = (reads.get(id) ?? 0) + 1;
-      reads.set(id, attempt);
-      requested.current.add(id);
-      setReading((last) => {
-        const base = forChat(last, chatId);
-        if (base.steps[id]) return base;
-        return { ...base, steps: { ...base.steps, [id]: { steps: [], loaded: false } } };
-      });
-      const stale = () => reads !== stepReads.current || reads.get(id) !== attempt;
-      let loaded: SubagentStep[];
-      try {
-        loaded = await chatsApi.getChatSubagentSteps(chatId, id);
-      } catch (failure) {
-        if (stale()) return;
-        throw failure;
-      }
-      if (stale()) return;
-      setReading((last) => {
-        const cache = last.chatId === chatId ? last.steps[id] : undefined;
-        if (!cache) return last;
-        const steps = mergeSteps(loaded, cache.steps);
-        return { ...last, steps: { ...last.steps, [id]: { steps, loaded: true } } };
-      });
-    },
-    [chatId]
-  );
+    if (!owed.current) return;
+    owed.current = false;
+    void refresh();
+    for (const id of requested.current) void loadSteps(id).catch(() => undefined);
+  }, [chatId, forget, loadSteps]);
 
   const resync = useCallback(() => {
-    if (answered.current !== chatId) return;
+    if (answered.current !== chatId) {
+      owed.current = true;
+      return;
+    }
     void refresh();
     for (const id of requested.current) void loadSteps(id).catch(() => undefined);
   }, [chatId, refresh, loadSteps]);
@@ -172,6 +190,9 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
     requested.current = new Set();
     removed.current = new Set();
     stepReads.current = new Map();
+    arrivals.current = new Map();
+    revisions.current = new Map();
+    owed.current = false;
     void refresh();
   }, [refresh]);
 
@@ -191,7 +212,16 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
       const update = SubagentFrameSchema.safeParse(frame);
       if (!update.success || update.data.chat_id !== chatId) return;
       const { subagent, steps } = update.data;
+      if (removed.current.has(subagent.id)) return;
       announced.current.add(subagent.id);
+      if (subagent.revision < (revisions.current.get(subagent.id) ?? 0)) {
+        if (steps.length > 0 && requested.current.has(subagent.id)) {
+          void loadSteps(subagent.id).catch(() => undefined);
+        }
+        return;
+      }
+      revisions.current.set(subagent.id, subagent.revision);
+      arrivals.current.get(subagent.id)?.push(...steps);
       setReading((last) => {
         const base = forChat(last, chatId);
         const subagents = mergeSubagent(base.subagents, subagent);
@@ -238,7 +268,7 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
           return;
       }
     });
-  }, [chatId, resync, forget]);
+  }, [chatId, resync, forget, loadSteps]);
 
   const byMessage = useMemo(() => groupByMessage(current.subagents), [current.subagents]);
   const steps = useMemo(() => loadedSteps(current.steps), [current.steps]);

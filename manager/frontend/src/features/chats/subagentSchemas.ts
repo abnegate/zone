@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { tolerantArray } from './schemas';
-import { STEP_STATUSES, SUBAGENT_STATUSES } from './subagentTypes';
+import { STEP_STATUSES, SUBAGENT_STATUSES, type SubagentList } from './subagentTypes';
 
 export const SUBAGENT_FRAME = 'subagent';
 export const SUBAGENTS_REMOVED_FRAME = 'subagents_removed';
@@ -52,9 +52,14 @@ export const ChatSubagentSchema = z.object({
   updated_at: z.string(),
 });
 
-export const ChatSubagentsResponseSchema = z.object({
-  subagents: tolerantArray(ChatSubagentSchema).default([]),
-});
+const ReadableSubagentsSchema = tolerantArray(ChatSubagentSchema);
+
+export const ChatSubagentsResponseSchema = z
+  .object({ subagents: z.array(z.unknown()).optional() })
+  .transform(({ subagents: rows }): SubagentList => {
+    const subagents = ReadableSubagentsSchema.parse(rows ?? []);
+    return { subagents, complete: rows !== undefined && subagents.length === rows.length };
+  });
 
 export const SubagentStepsResponseSchema = z.object({
   steps: tolerantArray(SubagentStepSchema).default([]),

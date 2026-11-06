@@ -258,22 +258,25 @@ describe('chatsApi.getChatSubagents', () => {
     const request = mock(async () => Response.json({ subagents: [SUBAGENT] }));
     globalThis.fetch = request as unknown as typeof globalThis.fetch;
 
-    const subagents = await chatsApi.getChatSubagents('chat 1');
+    const list = await chatsApi.getChatSubagents('chat 1');
 
     expect(sent(request)).toEqual({
       url: '/api/chats/chat%201/subagents',
       method: 'GET',
       body: undefined,
     });
-    expect(subagents).toEqual([SUBAGENT]);
+    expect(list).toEqual({ subagents: [SUBAGENT], complete: true });
   });
 
-  it('drops an unreadable agent and keeps the rest', async () => {
+  it('drops an unreadable agent, keeps the rest, and says the list is incomplete', async () => {
     globalThis.fetch = mock(async () =>
       Response.json({ subagents: [{ id: 'broken' }, SUBAGENT] })
     ) as unknown as typeof globalThis.fetch;
 
-    expect(await chatsApi.getChatSubagents('chat 1')).toEqual([SUBAGENT]);
+    expect(await chatsApi.getChatSubagents('chat 1')).toEqual({
+      subagents: [SUBAGENT],
+      complete: false,
+    });
   });
 
   it('reads an unknown status as settled, and an unreadable count as none', async () => {
@@ -283,7 +286,10 @@ describe('chatsApi.getChatSubagents', () => {
       })
     ) as unknown as typeof globalThis.fetch;
 
-    const [subagent] = await chatsApi.getChatSubagents('chat 1');
+    const { subagents, complete } = await chatsApi.getChatSubagents('chat 1');
+    const [subagent] = subagents;
+
+    expect(complete).toBe(true);
 
     expect(subagent.status).toBe('stopped');
     expect(subagent.tokens).toBeNull();
@@ -291,10 +297,10 @@ describe('chatsApi.getChatSubagents', () => {
     expect(subagent.revision).toBe(4);
   });
 
-  it('reads no agents from an answer without a list', async () => {
+  it('reads an answer without a list as an incomplete one', async () => {
     globalThis.fetch = mock(async () => Response.json({})) as unknown as typeof globalThis.fetch;
 
-    expect(await chatsApi.getChatSubagents('chat 1')).toEqual([]);
+    expect(await chatsApi.getChatSubagents('chat 1')).toEqual({ subagents: [], complete: false });
   });
 
   it('names the reason a load is refused', async () => {

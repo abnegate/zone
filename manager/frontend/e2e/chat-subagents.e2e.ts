@@ -8,6 +8,7 @@ const CHAT_ID = 'chat-1';
 const MESSAGE_ID = 'msg-agents';
 const PANEL_LABEL = 'Changes, agents, tasks, media and sources';
 const sentAt = '2026-11-05T09:30:00.000Z';
+const NOW = Date.parse('2026-11-05T09:32:00.000Z');
 const RUNNING_FOR = 95_000;
 
 const chat = {
@@ -153,7 +154,7 @@ const REVIEW = subagent({
   updated_at: '2026-11-05T09:30:47.000Z',
 });
 
-const benchmarkStarted = new Date(Date.now() - RUNNING_FOR).toISOString();
+const benchmarkStarted = new Date(NOW - RUNNING_FOR).toISOString();
 
 const BENCHMARK = subagent({
   id: 'agent-benchmark',
@@ -205,8 +206,8 @@ const BENCHMARK_FINISHED = {
   step_count: 3,
   revision: 3,
   last_tool: 'Write',
-  finished_at: new Date().toISOString(),
-  updated_at: new Date(Date.now() + 1_000).toISOString(),
+  finished_at: new Date(NOW).toISOString(),
+  updated_at: new Date(NOW + 1_000).toISOString(),
 };
 
 const BENCHMARK_FINISHED_STEPS = [
@@ -255,6 +256,7 @@ test.describe('Chat subagents', () => {
 
   test.beforeEach(async ({ context, page }) => {
     stepReads = [];
+    await page.clock.setFixedTime(NOW);
     socket = await installChatSocketMock(page);
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
@@ -302,7 +304,7 @@ test.describe('Chat subagents', () => {
     await expect(benchmark).toContainText('general-purpose');
     await expect(benchmark).toContainText('haiku');
     await expect(benchmark).toContainText('2 tools');
-    await expect(benchmark.locator('.chat-subagent-duration')).toHaveText(/^1m \d\ds$/);
+    await expect(benchmark.locator('.chat-subagent-duration')).toHaveText('1m 35s');
     await expect(benchmark).toContainText('Bash');
     const notes = panel.locator('[data-subagent="agent-notes"]');
     await expect(notes).toContainText('gpt-5-codex');

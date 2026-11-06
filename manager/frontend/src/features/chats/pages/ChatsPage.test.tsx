@@ -480,7 +480,7 @@ describe('ChatsPage', () => {
     mockGetChatTasks.mockReset();
     mockGetChatTasks.mockResolvedValue([]);
     mockGetChatSubagents.mockReset();
-    mockGetChatSubagents.mockResolvedValue([]);
+    mockGetChatSubagents.mockResolvedValue({ subagents: [], complete: true });
     mockGetChatProviders.mockReset();
     mockSetChatProvider.mockReset();
     mockGetChatProviders.mockResolvedValue(chatProviders());
