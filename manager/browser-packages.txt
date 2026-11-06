@@ -4,7 +4,8 @@
 # list. manager/browser-libraries.txt says what these have to deliver.
 #
 # Listed by hand rather than run through `playwright install-deps`, which needs
-# Playwright at build time and adds Xvfb and fonts for headed runs.
+# Playwright at build time and adds Xvfb for headed runs plus emoji and CJK
+# fonts.
 
 # GTK and its stack
 libgtk-4-1
