@@ -38,13 +38,13 @@ rmcp = { version = "=3.4.0", default-features = false }
 abnegate-comfy = "0.2.1"
 abnegate-config = "0.1.6"
 abnegate-exec = "0.1.9"
-abnegate-http = "0.1.4"
+abnegate-http = "0.1.5"
 abnegate-index = "0.1"
 abnegate-llm = "0.1.9"
 abnegate-notify = "0.1.6"
 abnegate-search = "0.1.5"
-abnegate-secret = "0.1.6"
-abnegate-vcs = { git = "https://github.com/abnegate/crates", rev = "870da51565c439af924ae6e080516d783454ad65" }
+abnegate-secret = "0.1.7"
+abnegate-vcs = { git = "https://github.com/abnegate/crates", rev = "b514d4570079d26c6646126d55d6541ab3a63418" }
 
 # Server dependencies
 axum = { version = "=0.8.9", features = ["ws", "macros", "multipart"] }
@@ -70,7 +70,8 @@ version = "=0.31.3"
 features = ["signal", "process"]
 
 [patch.crates-io]
-abnegate-secret = { git = "https://github.com/abnegate/crates", rev = "870da51565c439af924ae6e080516d783454ad65" }
+abnegate-http = { git = "https://github.com/abnegate/crates", rev = "b514d4570079d26c6646126d55d6541ab3a63418" }
+abnegate-secret = { git = "https://github.com/abnegate/crates", rev = "b514d4570079d26c6646126d55d6541ab3a63418" }
 
 [profile.release]
 lto = true

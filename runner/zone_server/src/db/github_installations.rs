@@ -283,6 +283,27 @@ pub async fn credential(
     .await
 }
 
+/// The installation and its app's key, if it belongs to `organization_id`.
+pub async fn organization_credential(
+    pool: &PgPool,
+    organization_id: Uuid,
+    id: Uuid,
+) -> DbResult<Option<InstallationCredential>> {
+    sqlx::query_as::<_, InstallationCredential>(
+        "SELECT installation.id, installation.organization_id, app.app_id, \
+                installation.installation_id, app.private_key, \
+                installation.suspended_at, installation.revoked_at \
+         FROM github_installations installation \
+         JOIN github_apps app ON app.id = installation.github_app_id \
+           AND app.organization_id = installation.organization_id \
+         WHERE installation.organization_id = $1 AND installation.id = $2",
+    )
+    .bind(organization_id)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn mark_revoked(pool: &PgPool, id: Uuid) -> DbResult<bool> {
     let result = sqlx::query(
         "UPDATE github_installations \
@@ -691,6 +712,49 @@ mod tests {
         for workspace in [theirs, Uuid::new_v4()] {
             assert!(
                 credential(&pool, workspace, row.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn organization_credential_carries_the_apps_key() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let app = seed_app(&pool, organization, "acme").await;
+        let row = seeded(&pool, &app).await;
+        mark_revoked(&pool, row.id).await.unwrap();
+
+        let credential = organization_credential(&pool, organization, row.id)
+            .await
+            .unwrap()
+            .expect("the organization's own installation");
+
+        assert_eq!(credential.id, row.id);
+        assert_eq!(credential.organization_id, organization);
+        assert_eq!(credential.app_id, app.app_id);
+        assert_eq!(credential.installation_id, row.installation_id);
+        assert_eq!(credential.private_key, app.private_key);
+        assert_eq!(credential.status(), InstallationStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn organization_credential_is_refused_to_another_organization() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let stranger = seed_organization(&pool).await;
+        let app = seed_app(&pool, organization, "acme").await;
+        let row = seeded(&pool, &app).await;
+
+        for (asking, id) in [
+            (stranger, row.id),
+            (Uuid::new_v4(), row.id),
+            (organization, Uuid::new_v4()),
+        ] {
+            assert!(
+                organization_credential(&pool, asking, id)
                     .await
                     .unwrap()
                     .is_none()
