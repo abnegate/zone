@@ -5,6 +5,7 @@ import { AiProviderSchema } from '../workspace/schemas';
 import type {
   AiProvider,
   AiSettings,
+  CommonAiSettings,
   OrganizationKeys,
   UpdateAiSettingsRequest,
 } from '../workspace/types';
@@ -235,7 +236,7 @@ export function credentialsFromSettings(settings: AiSettings): ProviderCredentia
   };
 }
 
-export function configuredFromSettings(settings: AiSettings): ProviderConfigured {
+export function configuredFromSettings(settings: CommonAiSettings): ProviderConfigured {
   return {
     litellm: settings.has_litellm_key,
     openai: settings.has_openai_api_key,
@@ -283,14 +284,14 @@ export function isEndpointProvider(provider: AiProvider): provider is EndpointPr
   return provider in endpointFields;
 }
 
-function savesEndpoint(settings: AiSettings, provider: EndpointProvider): boolean {
+function savesEndpoint(settings: CommonAiSettings, provider: EndpointProvider): boolean {
   const fields = endpointFields[provider];
   return Boolean(settings[fields.savedUrl]?.trim()) || settings[fields.savedKey];
 }
 
 export type Routing = 'none' | 'pending' | 'routed';
 
-export function routingOf(settings: AiSettings | null, provider: AiProvider): Routing {
+export function routingOf(settings: CommonAiSettings | null, provider: AiProvider): Routing {
   if (!settings || !isEndpointProvider(provider) || !savesEndpoint(settings, provider)) {
     return 'none';
   }
@@ -317,7 +318,7 @@ export function needsKeyAgain(
   provider: AiProvider,
   credentials: ProviderCredentials,
   configured: ProviderConfigured,
-  saved: AiSettings | null
+  saved: CommonAiSettings | null
 ): boolean {
   if (!isEndpointProvider(provider)) return false;
   const fields = endpointFields[provider];
@@ -344,7 +345,7 @@ function endpointUrl(entered: string, saved: string | null): string | undefined 
 export function credentialFields(
   provider: AiProvider,
   credentials: ProviderCredentials,
-  saved: AiSettings | null = null
+  saved: CommonAiSettings | null = null
 ): UpdateAiSettingsRequest {
   const request: UpdateAiSettingsRequest = {};
   if (credentials.runpodApiKey) request.runpod_api_key = credentials.runpodApiKey;

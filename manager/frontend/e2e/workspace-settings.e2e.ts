@@ -41,15 +41,47 @@ type ModelKey = (typeof MODEL_KEYS)[number];
 
 type Models = Record<ModelKey, string | null>;
 
-type AiRequest = Partial<Record<ModelKey, string>> & { provider?: string };
+const CHAT_MODEL_KEYS: readonly ModelKey[] = ['model_fast', 'model_reasoning', 'model_embedding'];
+
+const ENDPOINTS = [
+  { url: 'litellm_host', key: 'litellm_key', saved: 'has_litellm_key' },
+  { url: 'openai_base_url', key: 'openai_api_key', saved: 'has_openai_api_key' },
+  { url: 'anthropic_base_url', key: 'anthropic_api_key', saved: 'has_anthropic_api_key' },
+] as const;
+
+type UrlKey = (typeof ENDPOINTS)[number]['url'];
+type SecretKey = (typeof ENDPOINTS)[number]['key'] | 'runpod_api_key';
+type SavedKey = (typeof ENDPOINTS)[number]['saved'];
+
+type AiRequest = Partial<Record<ModelKey | UrlKey | SecretKey, string>> & { provider?: string };
 
 interface AiWrite {
   method: string;
   body: AiRequest | null;
 }
 
-const providerSettings = {
-  provider: 'openai',
+interface WorkspaceRow {
+  provider: string | null;
+  models: Models;
+  urls: Record<UrlKey, string | null>;
+  keys: Record<SavedKey, boolean>;
+  runpod: boolean;
+}
+
+const ORGANIZATION_PROVIDER = 'openai';
+
+const organizationModels: Models = {
+  model_fast: 'gpt-4o-mini',
+  model_reasoning: 'gpt-4o',
+  model_embedding: 'text-embedding-3-small',
+  model_image: IMAGE_MODEL,
+  model_video: VIDEO_MODEL,
+  model_audio: AUDIO_MODEL,
+};
+
+const organizationSettings = {
+  ...organizationModels,
+  provider: ORGANIZATION_PROVIDER,
   has_litellm_key: false,
   litellm_host: null,
   has_openai_api_key: true,
@@ -61,18 +93,6 @@ const providerSettings = {
   bedrock_use_iam_role: false,
   has_bedrock_credentials: false,
   completions_routed: true,
-  organization_keys: { litellm: false, openai: false, anthropic: false },
-};
-
-const effectiveAiSettings = {
-  ...providerSettings,
-  model_fast: 'gpt-4o-mini',
-  model_reasoning: 'gpt-4o',
-  model_embedding: 'text-embedding-3-small',
-  model_image: IMAGE_MODEL,
-  model_video: VIDEO_MODEL,
-  model_audio: AUDIO_MODEL,
-  overrides: true,
 };
 
 const inheritedModels: Models = {
@@ -84,29 +104,83 @@ const inheritedModels: Models = {
   model_audio: null,
 };
 
-function workspaceAiSettings(models: Models, overrides: boolean) {
+function emptyRow(): WorkspaceRow {
   return {
-    ...providerSettings,
-    ...models,
-    has_openai_api_key: false,
-    overrides,
-    inherits_provider: true,
+    provider: null,
+    models: { ...inheritedModels },
+    urls: { litellm_host: null, openai_base_url: null, anthropic_base_url: null },
+    keys: { has_litellm_key: false, has_openai_api_key: false, has_anthropic_api_key: false },
+    runpod: false,
   };
 }
 
-function appliedModels(models: Models, request: AiRequest): Models {
-  const next = { ...models };
+function cleared(value: string): string | null {
+  return value.trim() === '' ? null : value;
+}
+
+function overrides(row: WorkspaceRow): boolean {
+  return (
+    row.provider !== null ||
+    MODEL_KEYS.some((key) => row.models[key] !== null) ||
+    ENDPOINTS.some((endpoint) => row.urls[endpoint.url] !== null || row.keys[endpoint.saved]) ||
+    row.runpod
+  );
+}
+
+function applied(row: WorkspaceRow, request: AiRequest): WorkspaceRow {
+  const next: WorkspaceRow = {
+    provider: request.provider ?? null,
+    models: { ...row.models },
+    urls: { ...row.urls },
+    keys: { ...row.keys },
+    runpod: request.runpod_api_key === undefined ? row.runpod : cleared(request.runpod_api_key) !== null,
+  };
   for (const key of MODEL_KEYS) {
     const value = request[key];
-    if (value !== undefined) {
-      next[key] = value.trim() === '' ? null : value;
-    }
+    if (value !== undefined) next.models[key] = cleared(value);
+  }
+  for (const endpoint of ENDPOINTS) {
+    const url = request[endpoint.url];
+    const key = request[endpoint.key];
+    if (url !== undefined) next.urls[endpoint.url] = cleared(url);
+    if (key !== undefined) next.keys[endpoint.saved] = cleared(key) !== null;
   }
   return next;
 }
 
+function workspaceAiSettings(row: WorkspaceRow) {
+  return {
+    ...organizationSettings,
+    ...row.models,
+    ...row.urls,
+    ...row.keys,
+    provider: row.provider ?? 'self_hosted',
+    has_runpod_api_key: row.runpod,
+    bedrock_use_iam_role: null,
+    overrides: overrides(row),
+    inherits_provider: row.provider === null,
+    organization_keys: { litellm: false, openai: false, anthropic: false },
+  };
+}
+
+function effectiveAiSettings(row: WorkspaceRow) {
+  const effective = { ...organizationSettings, has_runpod_api_key: row.runpod };
+  if (row.provider !== null) {
+    if (row.provider !== ORGANIZATION_PROVIDER) {
+      for (const key of CHAT_MODEL_KEYS) effective[key] = null;
+    }
+    effective.provider = row.provider;
+  }
+  for (const key of MODEL_KEYS) {
+    const value = row.models[key];
+    if (value !== null) effective[key] = value;
+  }
+  return effective;
+}
+
 test.describe('Workspace Settings Page', () => {
   let aiWrites: AiWrite[] = [];
+  let workspaceRow: WorkspaceRow = emptyRow();
 
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
@@ -114,8 +188,7 @@ test.describe('Workspace Settings Page', () => {
     await mockCommonEndpoints(page);
 
     aiWrites = [];
-    let savedModels: Models = { ...inheritedModels, model_video: VIDEO_MODEL };
-    let savedOverrides = true;
+    workspaceRow = { ...emptyRow(), models: { ...inheritedModels, model_video: VIDEO_MODEL } };
     await routeApiContext(
       context,
       '**/**/api/organizations/**/workspaces/**/settings/ai/effective**',
@@ -123,7 +196,7 @@ test.describe('Workspace Settings Page', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify(effectiveAiSettings),
+          body: JSON.stringify(effectiveAiSettings(workspaceRow)),
         });
       }
     );
@@ -135,19 +208,17 @@ test.describe('Workspace Settings Page', () => {
         if (method === 'PUT') {
           const request: AiRequest = route.request().postDataJSON();
           aiWrites.push({ method, body: request });
-          savedModels = appliedModels(savedModels, request);
-          savedOverrides = true;
+          workspaceRow = applied(workspaceRow, request);
         } else if (method === 'DELETE') {
           aiWrites.push({ method, body: null });
-          savedModels = { ...inheritedModels };
-          savedOverrides = false;
+          workspaceRow = emptyRow();
           route.fulfill({ status: 204 });
           return;
         }
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify(workspaceAiSettings(savedModels, savedOverrides)),
+          body: JSON.stringify(workspaceAiSettings(workspaceRow)),
         });
       }
     );
@@ -598,14 +669,69 @@ test.describe('Workspace Settings Page', () => {
       await expect(page.locator('.alert-success')).toHaveText(
         'Video Model follows the organization'
       );
-      expect(aiWrites).toEqual([
-        { method: 'PUT', body: { model_video: '' } },
-        { method: 'DELETE', body: null },
-      ]);
+      expect(aiWrites).toEqual([{ method: 'PUT', body: { model_video: '' } }]);
       await expect(row.locator('.inherited-field-badge')).toHaveText(INHERITED);
       await expect(
         page.getByRole('button', { name: 'Reset all AI settings to the organization' })
       ).toHaveCount(0);
+    });
+  });
+
+  test.describe('Provider', () => {
+    test('overriding with another provider sets it for this workspace', async ({ page }) => {
+      await page.goto(AI_PATH);
+      const row = page.getByRole('group', { name: 'Provider', exact: true });
+
+      await expect(row.locator('.inherited-field-value')).toHaveText('OpenAI');
+      await expect(row.locator('.inherited-field-badge')).toHaveText(INHERITED);
+      await row.getByRole('button', { name: 'Override Provider' }).click();
+      await chooseSelect(row.getByRole('combobox', { name: 'AI Provider' }), 'Anthropic');
+      await row.getByRole('button', { name: 'Save Provider' }).click();
+
+      await expect(page.locator('.alert-success')).toHaveText('Provider saved');
+      expect(aiWrites).toEqual([
+        {
+          method: 'PUT',
+          body: { provider: 'anthropic', model_fast: '', model_reasoning: '', model_embedding: '' },
+        },
+      ]);
+      await expect(row.locator('.inherited-field-value')).toHaveText('Anthropic');
+      await expect(row.locator('.inherited-field-badge')).toHaveText(OVERRIDDEN);
+      await expect(row.getByRole('button', { name: 'Reset Provider' })).toBeVisible();
+    });
+
+    test('reset asks before removing the saved key, then inherits again', async ({ page }) => {
+      workspaceRow = {
+        ...workspaceRow,
+        provider: 'anthropic',
+        keys: { ...workspaceRow.keys, has_anthropic_api_key: true },
+      };
+      await page.goto(AI_PATH);
+      const row = page.getByRole('group', { name: 'Provider', exact: true });
+      await expect(row.locator('.inherited-field-badge')).toHaveText(OVERRIDDEN);
+
+      await row.getByRole('button', { name: 'Reset Provider' }).click();
+      const dialog = page.getByRole('dialog', { name: 'Reset Provider to the organization?' });
+      await expect(dialog.getByRole('listitem')).toHaveText(['Anthropic API key']);
+      expect(aiWrites).toEqual([]);
+      await dialog.getByRole('button', { name: 'Reset' }).click();
+
+      await expect(page.locator('.alert-success')).toHaveText('Provider follows the organization');
+      expect(aiWrites).toEqual([
+        {
+          method: 'PUT',
+          body: {
+            model_fast: '',
+            model_reasoning: '',
+            model_embedding: '',
+            anthropic_base_url: '',
+            anthropic_api_key: '',
+          },
+        },
+      ]);
+      await expect(dialog).toHaveCount(0);
+      await expect(row.locator('.inherited-field-value')).toHaveText('OpenAI');
+      await expect(row.locator('.inherited-field-badge')).toHaveText(INHERITED);
     });
   });
 

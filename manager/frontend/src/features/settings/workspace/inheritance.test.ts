@@ -3,16 +3,20 @@ import { emptyCredentials, type ProviderCredentials } from '../ai/options';
 import {
   FieldSource,
   InheritableField,
-  inheritsEverything,
+  MODEL_FIELDS,
   type ModelField,
   modelOverrideRequest,
   modelResetRequest,
   providerOverrideRequest,
+  providerResetRemovals,
   providerResetRequest,
+  runpodOverrideRequest,
+  runpodResetRequest,
   sourceOf,
+  workspaceCredentials,
   workspaceProvider,
 } from './inheritance';
-import type { WorkspaceAiSettings } from './types';
+import type { AiSettings, WorkspaceAiSettings } from './types';
 
 const inherited: WorkspaceAiSettings = {
   provider: 'self_hosted',
@@ -24,7 +28,7 @@ const inherited: WorkspaceAiSettings = {
   anthropic_base_url: null,
   has_runpod_api_key: false,
   bedrock_region: null,
-  bedrock_use_iam_role: false,
+  bedrock_use_iam_role: null,
   has_bedrock_credentials: false,
   model_fast: null,
   model_reasoning: null,
@@ -52,6 +56,14 @@ const credentials = (changes: Partial<ProviderCredentials> = {}): ProviderCreden
   ...changes,
 });
 
+const organizationBedrock: AiSettings = {
+  ...inherited,
+  provider: 'bedrock',
+  bedrock_region: 'eu-west-1',
+  bedrock_use_iam_role: true,
+  has_bedrock_credentials: false,
+};
+
 const modelFields: { field: ModelField; key: keyof WorkspaceAiSettings }[] = [
   { field: InheritableField.Fast, key: 'model_fast' },
   { field: InheritableField.Reasoning, key: 'model_reasoning' },
@@ -71,8 +83,15 @@ describe('inheritance constants', () => {
       Image: 'image',
       Video: 'video',
       Audio: 'audio',
+      Runpod: 'runpod',
     });
     expect(FieldSource).toEqual({ Organization: 'organization', Workspace: 'workspace' });
+  });
+});
+
+describe('MODEL_FIELDS', () => {
+  it('lists every model field and neither the provider nor the Runpod key', () => {
+    expect(MODEL_FIELDS).toEqual(modelFields.map(({ field }) => field));
   });
 });
 
@@ -103,6 +122,13 @@ describe('sourceOf', () => {
     expect(
       sourceOf(InheritableField.Provider, settings({ overrides: false, inherits_provider: false }))
     ).toBe(FieldSource.Organization);
+  });
+
+  it('reads the Runpod key from the workspace only when the workspace saved one', () => {
+    expect(sourceOf(InheritableField.Runpod, explicitOpenai)).toBe(FieldSource.Organization);
+    expect(
+      sourceOf(InheritableField.Runpod, settings({ overrides: true, has_runpod_api_key: true }))
+    ).toBe(FieldSource.Workspace);
   });
 
   it('reads each model from the workspace only when the workspace sets it', () => {
@@ -172,6 +198,7 @@ describe('providerOverrideRequest', () => {
       providerOverrideRequest(
         'openai',
         credentials({ openaiApiKey: 'sk-new', openaiBaseUrl: 'https://openai.example' }),
+        credentials(),
         inherited,
         'openai'
       )
@@ -187,6 +214,7 @@ describe('providerOverrideRequest', () => {
       providerOverrideRequest(
         'openai',
         credentials({ openaiApiKey: 'sk-new' }),
+        credentials(),
         inherited,
         'bedrock'
       )
@@ -204,6 +232,7 @@ describe('providerOverrideRequest', () => {
       providerOverrideRequest(
         'self_hosted',
         credentials({ litellmHost: 'http://litellm.local:4000' }),
+        credentials(),
         inherited,
         'self_hosted'
       )
@@ -214,6 +243,7 @@ describe('providerOverrideRequest', () => {
     expect(
       providerOverrideRequest(
         'anthropic',
+        credentials(),
         credentials(),
         settings({
           provider: 'anthropic',
@@ -226,7 +256,7 @@ describe('providerOverrideRequest', () => {
     ).toEqual({ provider: 'anthropic', anthropic_base_url: '' });
   });
 
-  it('sends the bedrock credentials with a provider switch', () => {
+  it('sends the bedrock region and keys the user entered with a provider switch', () => {
     expect(
       providerOverrideRequest(
         'bedrock',
@@ -235,13 +265,13 @@ describe('providerOverrideRequest', () => {
           bedrockAccessKey: 'AKIA',
           bedrockSecretKey: 'secret',
         }),
+        credentials(),
         inherited,
         'openai'
       )
     ).toEqual({
       provider: 'bedrock',
       bedrock_region: 'eu-west-1',
-      bedrock_use_iam_role: false,
       bedrock_access_key: 'AKIA',
       bedrock_secret_key: 'secret',
       model_fast: '',
@@ -250,19 +280,59 @@ describe('providerOverrideRequest', () => {
     });
   });
 
-  it('sends only the provider and the runpod key for an agent provider', () => {
+  it('sends only the provider for an agent provider, never the Runpod key', () => {
     expect(
       providerOverrideRequest(
         'claude_code',
         credentials({ runpodApiKey: 'rp-key', openaiApiKey: 'ignored' }),
+        credentials(),
         inherited,
         'claude_code'
       )
-    ).toEqual({ provider: 'claude_code', runpod_api_key: 'rp-key' });
+    ).toEqual({ provider: 'claude_code' });
+  });
+
+  it("keeps the organization's bedrock region and IAM role the user left alone", () => {
+    const prefilled = workspaceCredentials(inherited, organizationBedrock);
+
+    expect(prefilled.bedrockRegion).toBe('eu-west-1');
+    expect(prefilled.bedrockUseIamRole).toBe(true);
+    expect(providerOverrideRequest('bedrock', prefilled, prefilled, inherited, 'bedrock')).toEqual({
+      provider: 'bedrock',
+    });
+  });
+
+  it('sends only the bedrock fields the user changed', () => {
+    const prefilled = workspaceCredentials(inherited, organizationBedrock);
+
+    expect(
+      providerOverrideRequest(
+        'bedrock',
+        { ...prefilled, bedrockRegion: 'us-west-2' },
+        prefilled,
+        inherited,
+        'bedrock'
+      )
+    ).toEqual({ provider: 'bedrock', bedrock_region: 'us-west-2' });
+    expect(
+      providerOverrideRequest(
+        'bedrock',
+        { ...prefilled, bedrockUseIamRole: false, bedrockAccessKey: 'AKIA' },
+        prefilled,
+        inherited,
+        'bedrock'
+      )
+    ).toEqual({ provider: 'bedrock', bedrock_use_iam_role: false, bedrock_access_key: 'AKIA' });
   });
 
   it('never touches the media models', () => {
-    const request = providerOverrideRequest('codex', credentials(), inherited, 'openai');
+    const request = providerOverrideRequest(
+      'codex',
+      credentials(),
+      credentials(),
+      inherited,
+      'openai'
+    );
 
     expect(request.model_image).toBeUndefined();
     expect(request.model_video).toBeUndefined();
@@ -320,12 +390,11 @@ describe('providerResetRequest', () => {
     });
   });
 
-  it('clears the runpod key when the workspace saved one', () => {
+  it('keeps the Runpod key the workspace saved', () => {
     expect(providerResetRequest({ ...explicitOpenai, has_runpod_api_key: true })).toEqual({
       model_fast: '',
       model_reasoning: '',
       model_embedding: '',
-      runpod_api_key: '',
     });
   });
 
@@ -348,6 +417,9 @@ describe('providerResetRequest', () => {
       bedrockCleared
     );
     expect(providerResetRequest({ ...bedrock, bedrock_use_iam_role: true })).toEqual(
+      bedrockCleared
+    );
+    expect(providerResetRequest({ ...bedrock, bedrock_use_iam_role: false })).toEqual(
       bedrockCleared
     );
   });
@@ -376,55 +448,77 @@ describe('providerResetRequest', () => {
   });
 });
 
-describe('inheritsEverything', () => {
-  it('is true for a workspace that sets nothing', () => {
-    expect(inheritsEverything(inherited)).toBe(true);
+describe('providerResetRemovals', () => {
+  it('names nothing for a bare provider override', () => {
+    expect(providerResetRemovals(explicitOpenai)).toEqual([]);
+    expect(providerResetRemovals({ ...explicitOpenai, has_runpod_api_key: true })).toEqual([]);
   });
 
-  it('treats a stored false IAM role as nothing set', () => {
-    expect(inheritsEverything(settings({ overrides: true, bedrock_use_iam_role: false }))).toBe(
-      true
-    );
+  it('names each saved endpoint URL and key', () => {
+    expect(
+      providerResetRemovals(
+        settings({
+          overrides: true,
+          litellm_host: 'http://litellm.local:4000',
+          has_litellm_key: true,
+          has_openai_api_key: true,
+          anthropic_base_url: 'https://anthropic.example',
+        })
+      )
+    ).toEqual(['LiteLLM host', 'LiteLLM API key', 'OpenAI API key', 'Anthropic base URL']);
   });
 
-  it('is true once a bedrock workspace has had its provider reset', () => {
-    expect(inheritsEverything(settings({ provider: 'bedrock', overrides: true }))).toBe(true);
+  it('names each saved bedrock field, a stored false IAM role included', () => {
+    expect(
+      providerResetRemovals(
+        settings({
+          overrides: true,
+          bedrock_region: 'eu-west-1',
+          has_bedrock_credentials: true,
+          bedrock_use_iam_role: false,
+        })
+      )
+    ).toEqual(['AWS Bedrock region', 'AWS Bedrock access keys', 'AWS Bedrock IAM role choice']);
+  });
+});
+
+describe('runpod requests', () => {
+  it('sends the key alone while the provider is inherited', () => {
+    expect(runpodOverrideRequest('rp-key', inherited)).toEqual({ runpod_api_key: 'rp-key' });
+    expect(runpodResetRequest(inherited)).toEqual({ runpod_api_key: '' });
   });
 
-  it('is false while the workspace sets its own provider', () => {
-    expect(inheritsEverything(explicitSelfHosted)).toBe(false);
-    expect(inheritsEverything(explicitOpenai)).toBe(false);
+  it('resends an explicit provider so the override survives the PUT', () => {
+    expect(runpodOverrideRequest('rp-key', explicitOpenai)).toEqual({
+      provider: 'openai',
+      runpod_api_key: 'rp-key',
+    });
+    expect(runpodResetRequest(explicitSelfHosted)).toEqual({
+      provider: 'self_hosted',
+      runpod_api_key: '',
+    });
+  });
+});
+
+describe('workspaceCredentials', () => {
+  it('fills the endpoint URLs from the workspace and bedrock from the effective settings', () => {
+    expect(
+      workspaceCredentials(
+        settings({ openai_base_url: 'https://proxy.example/v1', bedrock_region: null }),
+        organizationBedrock
+      )
+    ).toEqual({
+      ...emptyCredentials,
+      openaiBaseUrl: 'https://proxy.example/v1',
+      bedrockRegion: 'eu-west-1',
+      bedrockUseIamRole: true,
+    });
   });
 
-  it('is false while any model is overridden', () => {
-    for (const { key } of modelFields) {
-      expect(inheritsEverything(settings({ overrides: true, [key]: 'chosen-model' }))).toBe(false);
-    }
-  });
-
-  it('is false while any endpoint URL or key is saved', () => {
-    for (const changes of [
-      { litellm_host: 'http://litellm.local:4000' },
-      { has_litellm_key: true },
-      { openai_base_url: 'https://openai.example' },
-      { has_openai_api_key: true },
-      { anthropic_base_url: 'https://anthropic.example' },
-      { has_anthropic_api_key: true },
-      { has_runpod_api_key: true },
-    ] satisfies Partial<WorkspaceAiSettings>[]) {
-      expect(inheritsEverything(settings({ overrides: true, ...changes }))).toBe(false);
-    }
-  });
-
-  it('is false while a bedrock field is left over', () => {
-    expect(inheritsEverything(settings({ overrides: true, bedrock_region: 'us-east-1' }))).toBe(
-      false
-    );
-    expect(inheritsEverything(settings({ overrides: true, has_bedrock_credentials: true }))).toBe(
-      false
-    );
-    expect(inheritsEverything(settings({ overrides: true, bedrock_use_iam_role: true }))).toBe(
-      false
-    );
+  it('falls back to the default region when nothing sets one', () => {
+    expect(
+      workspaceCredentials(inherited, { ...organizationBedrock, bedrock_region: null })
+        .bedrockRegion
+    ).toBe(emptyCredentials.bedrockRegion);
   });
 });

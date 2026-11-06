@@ -11,7 +11,6 @@ import {
   agentAccess,
   agentOf,
   configuredFromSettings,
-  credentialsFromSettings,
   emptyCredentials,
   imageModelOptions,
   type ModelOption,
@@ -24,24 +23,31 @@ import {
   withCurrent,
 } from '../../ai';
 import {
+  FieldSource,
   InheritableField,
-  inheritsEverything,
   MODEL_FIELDS,
   type ModelField,
   modelOverrideRequest,
   modelResetRequest,
   providerOverrideRequest,
+  providerResetRemovals,
   providerResetRequest,
+  runpodOverrideRequest,
+  runpodResetRequest,
   sourceOf,
+  workspaceCredentials,
   workspaceProvider,
 } from '../inheritance';
+import { AiProviderSchema } from '../schemas';
 import type {
   AiProvider,
   AiSettings,
+  CommonAiSettings,
   UpdateAiSettingsRequest,
   WorkspaceAiSettings,
 } from '../types';
-import { InheritedField } from './InheritedField';
+import InheritedField from './InheritedField';
+import ResetDialog from './ResetDialog';
 
 interface WorkspaceAiSectionProps {
   editable: boolean;
@@ -49,6 +55,13 @@ interface WorkspaceAiSectionProps {
 }
 
 type Mutation = (organizationId: string, workspaceId: string) => Promise<WorkspaceAiSettings>;
+
+interface PendingReset {
+  title: string;
+  removals: string[];
+  confirmLabel: string;
+  run: () => void;
+}
 
 const FIELD_LABELS: Record<InheritableField, string> = {
   [InheritableField.Provider]: 'Provider',
@@ -58,11 +71,18 @@ const FIELD_LABELS: Record<InheritableField, string> = {
   [InheritableField.Image]: 'Image Model',
   [InheritableField.Video]: 'Video Model',
   [InheritableField.Audio]: 'Audio Model',
+  [InheritableField.Runpod]: 'Runpod API key',
 };
+
+const ROW_ORDER: readonly InheritableField[] = [
+  InheritableField.Provider,
+  ...MODEL_FIELDS,
+  InheritableField.Runpod,
+];
 
 type ChatField = Extract<ModelField, 'fast' | 'reasoning' | 'embedding'>;
 
-const CHAT_FIELDS: readonly ModelField[] = [
+const CHAT_FIELDS: readonly InheritableField[] = [
   InheritableField.Fast,
   InheritableField.Reasoning,
   InheritableField.Embedding,
@@ -70,9 +90,12 @@ const CHAT_FIELDS: readonly ModelField[] = [
 
 const AUTOMATIC = 'Automatic';
 const SERVER_DEFAULT = 'Server default';
+const KEY_SET = 'Set';
+const KEY_NOT_SET = 'Not set';
+const SAVE_LABEL = 'Save';
 const FLASH_DURATION = 3000;
 
-function isChatField(field: ModelField): field is ChatField {
+function isChatField(field: InheritableField): field is ChatField {
   return CHAT_FIELDS.includes(field);
 }
 
@@ -80,7 +103,7 @@ function providerLabel(provider: AiProvider): string {
   return providerOptions.find((option) => option.value === provider)?.label ?? provider;
 }
 
-function modelOf(settings: AiSettings, field: ModelField): string | null {
+function modelOf(settings: CommonAiSettings, field: ModelField): string | null {
   return settings[`model_${field}`];
 }
 
@@ -92,7 +115,11 @@ function reasonOf(failure: unknown, fallback: string): string {
   return failure instanceof Error ? failure.message : fallback;
 }
 
-export function WorkspaceAiSection({
+function refreshFailed(message: string): string {
+  return `${message}, but the refreshed values couldn't load. Reload the page to see them.`;
+}
+
+export default function WorkspaceAiSection({
   editable,
   organizationDefaultsPath,
 }: WorkspaceAiSectionProps) {
@@ -110,11 +137,15 @@ export function WorkspaceAiSection({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [editing, setEditing] = useState<InheritableField | null>(null);
+  const [pendingReset, setPendingReset] = useState<PendingReset | null>(null);
   const [draftModel, setDraftModel] = useState('');
-  const [draftProvider, setDraftProvider] = useState<AiProvider>('self_hosted');
+  const [draftKey, setDraftKey] = useState('');
+  const [draftProvider, setDraftProvider] = useState<AiProvider>(AiProviderSchema.enum.self_hosted);
   const [credentials, setCredentials] = useState<ProviderCredentials>(emptyCredentials);
+  const [prefilled, setPrefilled] = useState<ProviderCredentials>(emptyCredentials);
 
   const editingProvider = editing === InheritableField.Provider;
   const agent = editingProvider
@@ -136,8 +167,10 @@ export function WorkspaceAiSection({
     setSaved(null);
     setEffective(null);
     setEditing(null);
+    setPendingReset(null);
     setBusy(false);
     setError(null);
+    setWarning(null);
     setSuccess(null);
     if (!organizationId || !workspaceId) {
       setLoading(false);
@@ -177,22 +210,27 @@ export function WorkspaceAiSection({
     const stale = () => currentScope.current !== started;
     setBusy(true);
     setError(null);
+    setWarning(null);
     setSuccess(null);
     try {
-      let settings = await mutation(organizationId, workspaceId);
+      const settings = await mutation(organizationId, workspaceId);
       if (stale()) return;
-      if (settings.overrides && inheritsEverything(settings)) {
-        settings = await client.resetWorkspaceAiSettings(organizationId, workspaceId);
-        if (stale()) return;
-      }
       setSaved(settings);
       setEditing(null);
+    } catch (failure) {
+      if (!stale()) {
+        setError(reasonOf(failure, fallback));
+        setBusy(false);
+      }
+      return;
+    }
+    try {
       const merged = await client.getEffectiveAiSettings(organizationId, workspaceId);
       if (stale()) return;
       setEffective(merged);
       flash(message);
-    } catch (failure) {
-      if (!stale()) setError(reasonOf(failure, fallback));
+    } catch {
+      if (!stale()) setWarning(refreshFailed(message));
     } finally {
       if (!stale()) setBusy(false);
     }
@@ -213,6 +251,12 @@ export function WorkspaceAiSection({
       'Failed to reset AI settings'
     );
 
+  const confirmReset = () => {
+    const reset = pendingReset;
+    setPendingReset(null);
+    reset?.run();
+  };
+
   if (loading) {
     return <div className="loading-state">Loading AI settings...</div>;
   }
@@ -229,8 +273,12 @@ export function WorkspaceAiSection({
     if (!saved || !effective) return;
     setError(null);
     if (field === InheritableField.Provider) {
+      const initial = workspaceCredentials(saved, effective);
       setDraftProvider(workspaceProvider(saved) ?? effective.provider);
-      setCredentials(credentialsFromSettings(saved));
+      setCredentials(initial);
+      setPrefilled(initial);
+    } else if (field === InheritableField.Runpod) {
+      setDraftKey('');
     } else {
       setDraftModel(modelOf(saved, field) ?? modelOf(effective, field) ?? '');
     }
@@ -255,12 +303,12 @@ export function WorkspaceAiSection({
       </Button>
       <Button
         size="sm"
-        aria-label={`Save ${label}`}
+        aria-label={`${SAVE_LABEL} ${label}`}
         loading={busy}
         disabled={disabled}
         onClick={onSave}
       >
-        Save
+        {SAVE_LABEL}
       </Button>
     </div>
   );
@@ -302,9 +350,37 @@ export function WorkspaceAiSection({
     );
   };
 
+  const runpodEditor = (settings: WorkspaceAiSettings) => {
+    const label = FIELD_LABELS[InheritableField.Runpod];
+    const id = 'override-runpod';
+    const value = draftKey.trim();
+    return (
+      <>
+        <div className="form-group">
+          <label htmlFor={id}>{label}</label>
+          <input
+            type="password"
+            id={id}
+            value={draftKey}
+            onChange={(event) => setDraftKey(event.target.value)}
+            placeholder="Enter API key"
+            autoComplete="off"
+            className="form-input"
+          />
+        </div>
+        {editorActions(
+          label,
+          () => save(runpodOverrideRequest(value, settings), `${label} saved`),
+          busy || !value
+        )}
+      </>
+    );
+  };
+
   const providerEditor = (settings: WorkspaceAiSettings, merged: AiSettings) => {
     const label = FIELD_LABELS[InheritableField.Provider];
     const providerAgent = agentOf(draftProvider);
+    const current = workspaceProvider(settings) ?? merged.provider;
     return (
       <>
         <AiProviderFields
@@ -324,7 +400,9 @@ export function WorkspaceAiSection({
             agent={providerAgent}
             access={agentAccess(currentOrganization?.role, resolvingRole)}
             heading="h3"
-            unsaved={draftProvider !== workspaceProvider(settings)}
+            level="workspace"
+            unsaved={draftProvider !== current}
+            saveLabel={SAVE_LABEL}
             status={agents.statuses[providerAgent]}
             attempt={agents.attempts[providerAgent]}
             loadError={agents.error}
@@ -336,7 +414,13 @@ export function WorkspaceAiSection({
           label,
           () =>
             save(
-              providerOverrideRequest(draftProvider, credentials, settings, merged.provider),
+              providerOverrideRequest(
+                draftProvider,
+                credentials,
+                prefilled,
+                settings,
+                merged.provider
+              ),
               `${label} saved`
             ),
           busy
@@ -345,33 +429,75 @@ export function WorkspaceAiSection({
     );
   };
 
-  const row = (
-    field: InheritableField,
-    value: string,
-    settings: WorkspaceAiSettings,
-    editor: () => ReactNode,
-    resetRequest: () => UpdateAiSettingsRequest
-  ) => {
+  const resetField = (field: InheritableField, settings: WorkspaceAiSettings) => {
     const label = FIELD_LABELS[field];
+    const message = `${label} follows the organization`;
+    const confirm = (removals: string[], request: UpdateAiSettingsRequest) => {
+      const run = () => save(request, message);
+      if (removals.length === 0) {
+        void run();
+        return;
+      }
+      setPendingReset({
+        title: `Reset ${label} to the organization?`,
+        removals,
+        confirmLabel: 'Reset',
+        run,
+      });
+    };
+    if (field === InheritableField.Provider) {
+      confirm(providerResetRemovals(settings), providerResetRequest(settings));
+    } else if (field === InheritableField.Runpod) {
+      confirm([label], runpodResetRequest(settings));
+    } else {
+      void save(modelResetRequest(field, settings), message);
+    }
+  };
+
+  const requestResetAll = (settings: WorkspaceAiSettings) => {
+    const overridden = ROW_ORDER.filter(
+      (field) => sourceOf(field, settings) === FieldSource.Workspace
+    ).map((field) => FIELD_LABELS[field]);
+    setPendingReset({
+      title: 'Reset all AI settings to the organization?',
+      removals: [...overridden, ...providerResetRemovals(settings)],
+      confirmLabel: 'Reset all',
+      run: () => void resetAll(),
+    });
+  };
+
+  const shownValue = (field: InheritableField, merged: AiSettings): string => {
+    if (field === InheritableField.Provider) return providerLabel(merged.provider);
+    if (field === InheritableField.Runpod) return merged.has_runpod_api_key ? KEY_SET : KEY_NOT_SET;
+    return modelOf(merged, field) || (isChatField(field) ? AUTOMATIC : SERVER_DEFAULT);
+  };
+
+  const editorOf = (field: InheritableField, settings: WorkspaceAiSettings, merged: AiSettings) => {
+    if (field === InheritableField.Provider) return providerEditor(settings, merged);
+    if (field === InheritableField.Runpod) return runpodEditor(settings);
+    return modelEditor(field, settings, merged);
+  };
+
+  const row = (field: InheritableField, settings: WorkspaceAiSettings, merged: AiSettings) => {
     const isEditing = editing === field;
+    const elsewhere = editing !== null && !isEditing;
+    const editor: ReactNode = isEditing ? editorOf(field, settings, merged) : null;
     return (
       <InheritedField
         key={field}
-        label={label}
-        value={value}
+        label={FIELD_LABELS[field]}
+        value={shownValue(field, merged)}
         source={sourceOf(field, settings)}
         editable={editable}
         editing={isEditing}
-        busy={busy}
+        busy={busy || elsewhere}
         onOverride={() => startEditing(field)}
-        onReset={() => save(resetRequest(), `${label} follows the organization`)}
+        onReset={() => resetField(field, settings)}
       >
-        {isEditing && editor()}
+        {editor}
       </InheritedField>
     );
   };
-
-  const fallbackFor = (field: ModelField) => (isChatField(field) ? AUTOMATIC : SERVER_DEFAULT);
 
   const headerActions =
     organizationDefaultsPath || (editable && saved?.overrides) ? (
@@ -386,8 +512,8 @@ export function WorkspaceAiSection({
             variant="ghost"
             size="sm"
             aria-label="Reset all AI settings to the organization"
-            disabled={busy}
-            onClick={resetAll}
+            disabled={busy || editing !== null}
+            onClick={() => requestResetAll(saved)}
           >
             Reset all to organization
           </Button>
@@ -411,30 +537,23 @@ export function WorkspaceAiSection({
 
       {!editable && <p className="form-hint">Only workspace admins can change AI settings.</p>}
       {error && <div className="alert alert-error">{error}</div>}
+      {warning && <div className="alert alert-warning">{warning}</div>}
       {success && <div className="alert alert-success">{success}</div>}
 
       {saved && effective && (
         <div className="settings-card">
-          {row(
-            InheritableField.Provider,
-            providerLabel(effective.provider),
-            saved,
-            () => providerEditor(saved, effective),
-            () => providerResetRequest(saved)
-          )}
-          {MODEL_FIELDS.map((field) =>
-            row(
-              field,
-              modelOf(effective, field) || fallbackFor(field),
-              saved,
-              () => modelEditor(field, saved, effective),
-              () => modelResetRequest(field, saved)
-            )
-          )}
+          {ROW_ORDER.map((field) => row(field, saved, effective))}
         </div>
       )}
+
+      <ResetDialog
+        open={pendingReset !== null}
+        title={pendingReset?.title ?? ''}
+        removals={pendingReset?.removals ?? []}
+        confirmLabel={pendingReset?.confirmLabel ?? ''}
+        onConfirm={confirmReset}
+        onClose={() => setPendingReset(null)}
+      />
     </section>
   );
 }
-
-export default WorkspaceAiSection;

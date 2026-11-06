@@ -266,6 +266,7 @@ async function mockApi(page: Page, scenario: Scenario): Promise<Captured[]> {
       await route.fulfill({
         json: {
           ...settings(scenario.workspaceProvider ?? 'self_hosted'),
+          bedrock_use_iam_role: null,
           overrides: scenario.workspaceProvider !== undefined,
           inherits_provider: scenario.workspaceProvider === undefined,
           organization_keys: { litellm: false, openai: false, anthropic: false },
@@ -980,7 +981,7 @@ test.describe('Coding agent sign-in', () => {
     await expect(panel.getByText('jake@example.com')).toBeVisible();
     await expect(panel.getByText('alex@example.com')).toBeVisible();
     await expect(panel.getByRole('button')).toHaveCount(0);
-    await expect(panel.getByText('Save Changes to use this provider.')).toHaveCount(0);
+    await expect(panel.getByText('Save to use this provider.')).toHaveCount(0);
     await captureWorkspace(page, 'member-view');
     expect(
       captured.filter((request) => request.method !== 'GET' && request.path.startsWith(agentsPath))

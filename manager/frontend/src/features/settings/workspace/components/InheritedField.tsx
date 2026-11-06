@@ -20,7 +20,7 @@ interface InheritedFieldProps {
   children?: ReactNode;
 }
 
-export function InheritedField({
+export default function InheritedField({
   label,
   value,
   source,
@@ -80,5 +80,3 @@ export function InheritedField({
     </div>
   );
 }
-
-export default InheritedField;

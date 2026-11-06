@@ -82,10 +82,10 @@ mock.module('../../../../shared/context/WorkspaceContext', () => ({
   }),
 }));
 
-let WorkspaceAiSection: typeof import('./WorkspaceAiSection').WorkspaceAiSection;
+let WorkspaceAiSection: typeof import('./WorkspaceAiSection').default;
 
 beforeAll(async () => {
-  WorkspaceAiSection = (await import('./WorkspaceAiSection')).WorkspaceAiSection;
+  WorkspaceAiSection = (await import('./WorkspaceAiSection')).default;
 });
 
 afterAll(() => {
@@ -123,6 +123,7 @@ const inherited: WorkspaceAiSettings = {
   model_image: null,
   model_video: null,
   model_audio: null,
+  bedrock_use_iam_role: null,
   overrides: false,
   inherits_provider: true,
   organization_keys: noOrganizationKeys,
@@ -130,6 +131,7 @@ const inherited: WorkspaceAiSettings = {
 
 const overridden: WorkspaceAiSettings = {
   ...organizationSettings,
+  bedrock_use_iam_role: null,
   overrides: true,
   inherits_provider: false,
   organization_keys: noOrganizationKeys,
@@ -150,6 +152,8 @@ const codexEffective: AiSettings = {
 };
 
 const row = (label: string) => screen.getByRole('group', { name: label });
+
+const RESET_ALL = 'Reset all AI settings to the organization';
 
 const sentRequest = async () => {
   await waitFor(() => expect(mockClient.updateWorkspaceAiSettings).toHaveBeenCalled());
@@ -223,12 +227,103 @@ describe('WorkspaceAiSection', () => {
     expect(within(row('Video Model')).getByText('Inherited from organization')).toBeInTheDocument();
   });
 
-  it('asks for the Runpod key in the provider editor', async () => {
+  it('leaves the Runpod key out of the provider editor', async () => {
     const user = await renderSection();
 
     await user.click(screen.getByRole('button', { name: 'Edit Provider' }));
 
-    expect(screen.getByLabelText(/^Runpod/)).toHaveAttribute('placeholder', 'Enter API key');
+    expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
+    expect(within(row('Provider')).queryByLabelText(/^Runpod/)).toBeNull();
+  });
+
+  describe('Runpod API key', () => {
+    it('says whether a key applies without showing it', async () => {
+      await renderSection();
+
+      expect(within(row('Runpod API key')).getByText('Not set')).toBeInTheDocument();
+      expect(
+        within(row('Runpod API key')).getByText('Inherited from organization')
+      ).toBeInTheDocument();
+      expect(within(row('Runpod API key')).queryByRole('textbox')).toBeNull();
+    });
+
+    it('reads a key the workspace saved as set for this workspace', async () => {
+      mockClient.getWorkspaceAiSettings.mockResolvedValue({
+        ...overridden,
+        has_runpod_api_key: true,
+      });
+      mockClient.getEffectiveAiSettings.mockResolvedValue({
+        ...organizationSettings,
+        has_runpod_api_key: true,
+      });
+      await renderSection();
+
+      expect(within(row('Runpod API key')).getByText('Set')).toBeInTheDocument();
+      expect(within(row('Runpod API key')).getByText('Set for this workspace')).toBeInTheDocument();
+    });
+
+    it('saves a key alone while the provider is inherited', async () => {
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inherited);
+      mockClient.updateWorkspaceAiSettings.mockResolvedValue({
+        ...inherited,
+        overrides: true,
+        has_runpod_api_key: true,
+      });
+      const user = await renderSection();
+
+      await user.click(screen.getByRole('button', { name: 'Override Runpod API key' }));
+      const save = screen.getByRole('button', { name: 'Save Runpod API key' });
+      expect(save).toBeDisabled();
+      await user.type(screen.getByLabelText('Runpod API key', { selector: 'input' }), 'rp-secret');
+      await user.click(save);
+
+      expect(await sentRequest()).toEqual({ runpod_api_key: 'rp-secret' });
+      expect(await screen.findByText('Runpod API key saved')).toHaveClass('alert-success');
+      expect(within(row('Provider')).getByText('Inherited from organization')).toBeInTheDocument();
+    });
+
+    it('resends the workspace provider with the key', async () => {
+      const user = await renderSection();
+
+      await user.click(screen.getByRole('button', { name: 'Override Runpod API key' }));
+      await user.type(screen.getByLabelText('Runpod API key', { selector: 'input' }), 'rp-secret');
+      await user.click(screen.getByRole('button', { name: 'Save Runpod API key' }));
+
+      expect(await sentRequest()).toEqual({
+        provider: 'self_hosted',
+        runpod_api_key: 'rp-secret',
+      });
+    });
+
+    it('asks before a reset removes the key, then clears it alone', async () => {
+      mockClient.getWorkspaceAiSettings.mockResolvedValue({
+        ...overridden,
+        has_runpod_api_key: true,
+      });
+      const user = await renderSection();
+
+      await user.click(screen.getByRole('button', { name: 'Reset Runpod API key' }));
+      const dialog = screen.getByRole('dialog', {
+        name: 'Reset Runpod API key to the organization?',
+      });
+      expect(within(dialog).getByText('Runpod API key')).toBeInTheDocument();
+      expect(mockClient.updateWorkspaceAiSettings).not.toHaveBeenCalled();
+      await user.click(within(dialog).getByRole('button', { name: 'Reset' }));
+
+      expect(await sentRequest()).toEqual({ provider: 'self_hosted', runpod_api_key: '' });
+    });
+
+    it('keeps the key when the provider is reset', async () => {
+      mockClient.getWorkspaceAiSettings.mockResolvedValue({
+        ...overridden,
+        has_runpod_api_key: true,
+      });
+      const user = await renderSection();
+
+      await user.click(screen.getByRole('button', { name: 'Reset Provider' }));
+
+      expect(await sentRequest()).not.toHaveProperty('runpod_api_key');
+    });
   });
 
   it('closes the editor on Cancel without saving', async () => {
@@ -320,7 +415,7 @@ describe('WorkspaceAiSection', () => {
     expect(mockClient.getEffectiveAiSettings).toHaveBeenCalledTimes(2);
   });
 
-  it('clears the provider, its keys and bedrock on a provider reset', async () => {
+  it('asks before a provider reset removes saved credentials, naming them', async () => {
     mockClient.getWorkspaceAiSettings.mockResolvedValue({
       ...inherited,
       provider: 'bedrock',
@@ -339,11 +434,19 @@ describe('WorkspaceAiSection', () => {
 
     await user.click(screen.getByRole('button', { name: 'Reset Provider' }));
 
+    const dialog = screen.getByRole('dialog', { name: 'Reset Provider to the organization?' });
+    expect(
+      within(dialog)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent)
+    ).toEqual(['AWS Bedrock region', 'AWS Bedrock access keys']);
+    expect(mockClient.updateWorkspaceAiSettings).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: 'Reset' }));
+
     expect(await sentRequest()).toEqual({
       model_fast: '',
       model_reasoning: '',
       model_embedding: '',
-      runpod_api_key: '',
       bedrock_region: '',
       bedrock_access_key: '',
       bedrock_secret_key: '',
@@ -351,26 +454,107 @@ describe('WorkspaceAiSection', () => {
     });
   });
 
-  it('drops the workspace row once the last override is reset', async () => {
+  it('cancels a provider reset without sending anything', async () => {
+    mockClient.getWorkspaceAiSettings.mockResolvedValue({
+      ...overridden,
+      provider: 'openai',
+      has_openai_api_key: true,
+    });
+    const user = await renderSection();
+
+    await user.click(screen.getByRole('button', { name: 'Reset Provider' }));
+    const dialog = screen.getByRole('dialog', { name: 'Reset Provider to the organization?' });
+    expect(within(dialog).getByText('OpenAI API key')).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(mockClient.updateWorkspaceAiSettings).not.toHaveBeenCalled();
+  });
+
+  it('resets a provider that saved no credentials in one click', async () => {
+    const user = await renderSection();
+
+    await user.click(screen.getByRole('button', { name: 'Reset Provider' }));
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(await sentRequest()).toEqual({
+      model_fast: '',
+      model_reasoning: '',
+      model_embedding: '',
+    });
+  });
+
+  it('trusts the save to drop the workspace row once the last override is reset', async () => {
     mockClient.getWorkspaceAiSettings.mockResolvedValue({
       ...inherited,
       overrides: true,
       model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
     });
-    mockClient.updateWorkspaceAiSettings.mockResolvedValue({ ...inherited, overrides: true });
+    mockClient.updateWorkspaceAiSettings.mockResolvedValue(inherited);
     const user = await renderSection();
 
     await user.click(screen.getByRole('button', { name: 'Reset Video Model' }));
 
     expect(await sentRequest()).toEqual({ model_video: '' });
-    await waitFor(() =>
-      expect(mockClient.resetWorkspaceAiSettings).toHaveBeenCalledWith(
-        ORGANIZATION_ID,
-        WORKSPACE_ID
-      )
-    );
     await waitFor(() => expect(mockClient.getEffectiveAiSettings).toHaveBeenCalledTimes(2));
-    expect(screen.queryByRole('button', { name: /Reset all/ })).toBeNull();
+    expect(mockClient.resetWorkspaceAiSettings).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: RESET_ALL })).toBeNull();
+  });
+
+  it('says the save worked when only the refreshed values fail to load', async () => {
+    mockClient.getEffectiveAiSettings
+      .mockResolvedValueOnce(organizationSettings)
+      .mockRejectedValueOnce(new Error('Network down'));
+    const user = await renderSection();
+
+    await user.click(screen.getByRole('button', { name: 'Reset Video Model' }));
+
+    expect(
+      await screen.findByText(
+        "Video Model follows the organization, but the refreshed values couldn't load. Reload the page to see them."
+      )
+    ).toHaveClass('alert-warning');
+    expect(screen.queryByText('Failed to save AI settings')).toBeNull();
+    expect(screen.queryByText('Network down')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Reset Image Model' })).toBeEnabled();
+  });
+
+  it('locks the other rows while one row is open', async () => {
+    const user = await renderSection();
+
+    await user.click(screen.getByRole('button', { name: 'Edit Provider' }));
+    chooseSelect('AI Provider', 'OpenAI');
+
+    expect(screen.getByRole('button', { name: 'Edit Fast Model' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reset Fast Model' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Override Runpod API key' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: RESET_ALL })).toBeDisabled();
+    expect(screen.getByLabelText('AI Provider')).toHaveTextContent('OpenAI');
+
+    await user.click(within(row('Provider')).getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('button', { name: 'Edit Fast Model' })).toBeEnabled();
+  });
+
+  it('names the saved credentials Reset all removes', async () => {
+    mockClient.getWorkspaceAiSettings.mockResolvedValue({
+      ...inherited,
+      overrides: true,
+      has_runpod_api_key: true,
+      litellm_host: 'http://litellm.local:4000',
+      has_litellm_key: true,
+    });
+    const user = await renderSection();
+
+    await user.click(screen.getByRole('button', { name: RESET_ALL }));
+
+    const dialog = screen.getByRole('dialog', {
+      name: 'Reset all AI settings to the organization?',
+    });
+    expect(
+      within(dialog)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent)
+    ).toEqual(['Runpod API key', 'LiteLLM host', 'LiteLLM API key']);
   });
 
   it('offers Reset all only to an editor of a workspace that overrides', async () => {
@@ -396,10 +580,29 @@ describe('WorkspaceAiSection', () => {
       .mockResolvedValueOnce({ ...organizationSettings, provider: 'claude_code' });
     const user = await renderSection();
 
-    const reset = screen.getByRole('button', { name: 'Reset all AI settings to the organization' });
+    const reset = screen.getByRole('button', { name: RESET_ALL });
     expect(reset).toHaveTextContent('Reset all to organization');
     expect(reset.closest('.section-row-actions')).not.toBeNull();
     await user.click(reset);
+
+    const dialog = screen.getByRole('dialog', {
+      name: 'Reset all AI settings to the organization?',
+    });
+    expect(
+      within(dialog)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent)
+    ).toEqual([
+      'Provider',
+      'Fast Model',
+      'Reasoning Model',
+      'Embedding Model',
+      'Image Model',
+      'Video Model',
+      'Audio Model',
+    ]);
+    expect(mockClient.resetWorkspaceAiSettings).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: 'Reset all' }));
 
     expect(
       await within(row('Provider')).findByText('Claude Code (Claude subscription)')
@@ -410,6 +613,41 @@ describe('WorkspaceAiSection', () => {
     expect(
       screen.queryByRole('button', { name: 'Reset all AI settings to the organization' })
     ).toBeNull();
+  });
+
+  describe('bedrock override', () => {
+    const organizationBedrock: AiSettings = {
+      ...organizationSettings,
+      provider: 'bedrock',
+      bedrock_region: 'eu-west-1',
+      bedrock_use_iam_role: true,
+      has_bedrock_credentials: false,
+    };
+
+    it("keeps the organization's region and IAM role the user left alone", async () => {
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inherited);
+      mockClient.getEffectiveAiSettings.mockResolvedValue(organizationBedrock);
+      const user = await renderSection();
+
+      await user.click(screen.getByRole('button', { name: 'Override Provider' }));
+      expect(screen.getByLabelText('AWS Region')).toHaveTextContent('eu-west-1');
+      expect(screen.getByLabelText(/Use IAM Role/)).toBeChecked();
+      await user.click(screen.getByRole('button', { name: 'Save Provider' }));
+
+      expect(await sentRequest()).toEqual({ provider: 'bedrock' });
+    });
+
+    it('sends only the bedrock field the user changed', async () => {
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inherited);
+      mockClient.getEffectiveAiSettings.mockResolvedValue(organizationBedrock);
+      const user = await renderSection();
+
+      await user.click(screen.getByRole('button', { name: 'Override Provider' }));
+      chooseSelect('AWS Region', 'us-west-2');
+      await user.click(screen.getByRole('button', { name: 'Save Provider' }));
+
+      expect(await sentRequest()).toEqual({ provider: 'bedrock', bedrock_region: 'us-west-2' });
+    });
   });
 
   it('shows the reason the server refused the save', async () => {
@@ -431,9 +669,8 @@ describe('WorkspaceAiSection', () => {
     mockClient.resetWorkspaceAiSettings.mockRejectedValue(new ApiError(message, 403));
     const user = await renderSection();
 
-    await user.click(
-      screen.getByRole('button', { name: 'Reset all AI settings to the organization' })
-    );
+    await user.click(screen.getByRole('button', { name: RESET_ALL }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Reset all' }));
 
     expect(await screen.findByText(message)).toHaveClass('alert-error');
   });
@@ -639,7 +876,44 @@ describe('WorkspaceAiSection', () => {
       await user.click(screen.getByRole('button', { name: 'Override Provider' }));
       chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
 
-      expect(await screen.findByText('Save Changes to use this provider.')).toBeInTheDocument();
+      expect(await screen.findByText('Save to use this provider.')).toBeInTheDocument();
+    });
+
+    it('asks a signed-out organization to sign in for this workspace', async () => {
+      organizationRole = 'owner';
+      agentsApi.list.mockResolvedValue([
+        { ...fixture.agents[0], state: 'signed_out', source: null, label: null, logins: [] },
+        fixture.agents[1],
+      ]);
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inherited);
+      const user = await renderSection();
+
+      await user.click(screen.getByRole('button', { name: 'Override Provider' }));
+      chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
+
+      expect(
+        await screen.findByText(
+          'Sign in with a Claude subscription to use Claude Code in this workspace.'
+        )
+      ).toBeInTheDocument();
+    });
+
+    it('asks nothing while overriding with the provider the workspace already inherits', async () => {
+      organizationRole = 'owner';
+      mockClient.getWorkspaceAiSettings.mockResolvedValue(inherited);
+      mockClient.getEffectiveAiSettings.mockResolvedValue({
+        ...organizationSettings,
+        provider: 'claude_code',
+      });
+      const user = await renderSection();
+
+      await user.click(screen.getByRole('button', { name: 'Override Provider' }));
+
+      const panel = await screen.findByRole('region', { name: 'Claude Code sign-in' });
+      expect(
+        await within(within(panel).getByRole('status')).findByText('Signed in')
+      ).toBeInTheDocument();
+      expect(screen.queryByText('Save to use this provider.')).toBeNull();
     });
 
     it('asks nothing of an override already saved', async () => {
@@ -656,7 +930,7 @@ describe('WorkspaceAiSection', () => {
       expect(
         await within(within(panel).getByRole('status')).findByText('Signed in')
       ).toBeInTheDocument();
-      expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
+      expect(screen.queryByText('Save to use this provider.')).toBeNull();
     });
 
     it('saves the coding agent override without credentials', async () => {

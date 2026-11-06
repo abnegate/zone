@@ -1,5 +1,12 @@
-import { credentialFields, type ProviderCredentials } from '../ai/options';
-import type { AiProvider, AiSettings, UpdateAiSettingsRequest, WorkspaceAiSettings } from './types';
+import { credentialFields, emptyCredentials, type ProviderCredentials } from '../ai/options';
+import { AiProviderSchema } from './schemas';
+import type {
+  AiProvider,
+  AiSettings,
+  CommonAiSettings,
+  UpdateAiSettingsRequest,
+  WorkspaceAiSettings,
+} from './types';
 
 export const InheritableField = {
   Provider: 'provider',
@@ -9,11 +16,12 @@ export const InheritableField = {
   Image: 'image',
   Video: 'video',
   Audio: 'audio',
+  Runpod: 'runpod',
 } as const;
 
 export type InheritableField = (typeof InheritableField)[keyof typeof InheritableField];
 
-export type ModelField = Exclude<InheritableField, 'provider'>;
+export type ModelField = Exclude<InheritableField, 'provider' | 'runpod'>;
 
 export const FieldSource = {
   Organization: 'organization',
@@ -24,21 +32,50 @@ export type FieldSource = (typeof FieldSource)[keyof typeof FieldSource];
 
 type ModelKey = `model_${ModelField}`;
 
-export const MODEL_FIELDS: readonly ModelField[] = Object.values(InheritableField).filter(
-  (field): field is ModelField => field !== InheritableField.Provider
-);
+function isModelField(field: InheritableField): field is ModelField {
+  return field !== InheritableField.Provider && field !== InheritableField.Runpod;
+}
+
+export const MODEL_FIELDS: readonly ModelField[] =
+  Object.values(InheritableField).filter(isModelField);
 
 const ENDPOINT_PAIRS = [
-  { url: 'litellm_host', key: 'litellm_key', saved: 'has_litellm_key' },
-  { url: 'openai_base_url', key: 'openai_api_key', saved: 'has_openai_api_key' },
-  { url: 'anthropic_base_url', key: 'anthropic_api_key', saved: 'has_anthropic_api_key' },
+  {
+    url: 'litellm_host',
+    key: 'litellm_key',
+    saved: 'has_litellm_key',
+    urlLabel: 'LiteLLM host',
+    keyLabel: 'LiteLLM API key',
+  },
+  {
+    url: 'openai_base_url',
+    key: 'openai_api_key',
+    saved: 'has_openai_api_key',
+    urlLabel: 'OpenAI base URL',
+    keyLabel: 'OpenAI API key',
+  },
+  {
+    url: 'anthropic_base_url',
+    key: 'anthropic_api_key',
+    saved: 'has_anthropic_api_key',
+    urlLabel: 'Anthropic base URL',
+    keyLabel: 'Anthropic API key',
+  },
 ] as const satisfies readonly {
-  url: keyof AiSettings & keyof UpdateAiSettingsRequest;
+  url: keyof CommonAiSettings & keyof UpdateAiSettingsRequest;
   key: keyof UpdateAiSettingsRequest;
-  saved: keyof AiSettings;
+  saved: keyof CommonAiSettings;
+  urlLabel: string;
+  keyLabel: string;
 }[];
 
 type EndpointPair = (typeof ENDPOINT_PAIRS)[number];
+
+const BEDROCK_LABELS = {
+  region: 'AWS Bedrock region',
+  credentials: 'AWS Bedrock access keys',
+  iamRole: 'AWS Bedrock IAM role choice',
+} as const;
 
 const CLEARED_CHAT_MODELS: UpdateAiSettingsRequest = {
   model_fast: '',
@@ -50,26 +87,28 @@ function modelKey(field: ModelField): ModelKey {
   return `model_${field}`;
 }
 
-function savesEndpoint(saved: AiSettings, pair: EndpointPair): boolean {
-  return Boolean(saved[pair.url]?.trim()) || saved[pair.saved];
+function savesUrl(saved: CommonAiSettings, pair: EndpointPair): boolean {
+  return Boolean(saved[pair.url]?.trim());
 }
 
-function savesBedrock(saved: AiSettings): boolean {
+function savesEndpoint(saved: CommonAiSettings, pair: EndpointPair): boolean {
+  return savesUrl(saved, pair) || saved[pair.saved];
+}
+
+function savesBedrock(saved: WorkspaceAiSettings): boolean {
   return (
-    saved.bedrock_region !== null || saved.has_bedrock_credentials || saved.bedrock_use_iam_role
+    saved.bedrock_region !== null ||
+    saved.has_bedrock_credentials ||
+    saved.bedrock_use_iam_role !== null
   );
 }
 
-function modelRequest(
-  field: ModelField,
-  value: string,
-  saved: WorkspaceAiSettings
+function withWorkspaceProvider(
+  saved: WorkspaceAiSettings,
+  changes: UpdateAiSettingsRequest
 ): UpdateAiSettingsRequest {
-  const request: UpdateAiSettingsRequest = {};
   const provider = workspaceProvider(saved);
-  if (provider !== undefined) request.provider = provider;
-  request[modelKey(field)] = value;
-  return request;
+  return provider === undefined ? changes : { provider, ...changes };
 }
 
 export function workspaceProvider(saved: WorkspaceAiSettings): AiProvider | undefined {
@@ -77,11 +116,29 @@ export function workspaceProvider(saved: WorkspaceAiSettings): AiProvider | unde
 }
 
 export function sourceOf(field: InheritableField, saved: WorkspaceAiSettings): FieldSource {
-  const overridden =
-    field === InheritableField.Provider
-      ? saved.overrides && !saved.inherits_provider
-      : saved[modelKey(field)] !== null;
+  let overridden: boolean;
+  if (field === InheritableField.Provider) {
+    overridden = saved.overrides && !saved.inherits_provider;
+  } else if (field === InheritableField.Runpod) {
+    overridden = saved.has_runpod_api_key;
+  } else {
+    overridden = saved[modelKey(field)] !== null;
+  }
   return overridden ? FieldSource.Workspace : FieldSource.Organization;
+}
+
+export function workspaceCredentials(
+  saved: WorkspaceAiSettings,
+  effective: AiSettings
+): ProviderCredentials {
+  return {
+    ...emptyCredentials,
+    litellmHost: saved.litellm_host ?? '',
+    openaiBaseUrl: saved.openai_base_url ?? '',
+    anthropicBaseUrl: saved.anthropic_base_url ?? '',
+    bedrockRegion: effective.bedrock_region || emptyCredentials.bedrockRegion,
+    bedrockUseIamRole: effective.bedrock_use_iam_role,
+  };
 }
 
 export function modelOverrideRequest(
@@ -89,25 +146,61 @@ export function modelOverrideRequest(
   value: string,
   saved: WorkspaceAiSettings
 ): UpdateAiSettingsRequest {
-  return modelRequest(field, value, saved);
+  const changes: UpdateAiSettingsRequest = {};
+  changes[modelKey(field)] = value;
+  return withWorkspaceProvider(saved, changes);
 }
 
 export function modelResetRequest(
   field: ModelField,
   saved: WorkspaceAiSettings
 ): UpdateAiSettingsRequest {
-  return modelRequest(field, '', saved);
+  return modelOverrideRequest(field, '', saved);
+}
+
+export function runpodOverrideRequest(
+  key: string,
+  saved: WorkspaceAiSettings
+): UpdateAiSettingsRequest {
+  return withWorkspaceProvider(saved, { runpod_api_key: key });
+}
+
+export function runpodResetRequest(saved: WorkspaceAiSettings): UpdateAiSettingsRequest {
+  return runpodOverrideRequest('', saved);
+}
+
+function changedBedrockFields(
+  credentials: ProviderCredentials,
+  prefilled: ProviderCredentials
+): UpdateAiSettingsRequest {
+  const request: UpdateAiSettingsRequest = {};
+  if (credentials.bedrockRegion !== prefilled.bedrockRegion) {
+    request.bedrock_region = credentials.bedrockRegion;
+  }
+  if (credentials.bedrockUseIamRole !== prefilled.bedrockUseIamRole) {
+    request.bedrock_use_iam_role = credentials.bedrockUseIamRole;
+  }
+  if (!credentials.bedrockUseIamRole) {
+    if (credentials.bedrockAccessKey) request.bedrock_access_key = credentials.bedrockAccessKey;
+    if (credentials.bedrockSecretKey) request.bedrock_secret_key = credentials.bedrockSecretKey;
+  }
+  return request;
 }
 
 export function providerOverrideRequest(
   provider: AiProvider,
   credentials: ProviderCredentials,
+  prefilled: ProviderCredentials,
   saved: WorkspaceAiSettings,
   effectiveProvider: AiProvider
 ): UpdateAiSettingsRequest {
+  const fields =
+    provider === AiProviderSchema.enum.bedrock
+      ? changedBedrockFields(credentials, prefilled)
+      : credentialFields(provider, { ...credentials, runpodApiKey: '' }, saved);
   return {
     provider,
-    ...credentialFields(provider, credentials, saved),
+    ...fields,
     ...(provider === effectiveProvider ? {} : CLEARED_CHAT_MODELS),
   };
 }
@@ -119,7 +212,6 @@ export function providerResetRequest(saved: WorkspaceAiSettings): UpdateAiSettin
     request[pair.url] = '';
     request[pair.key] = '';
   }
-  if (saved.has_runpod_api_key) request.runpod_api_key = '';
   if (savesBedrock(saved)) {
     request.bedrock_region = '';
     request.bedrock_access_key = '';
@@ -129,12 +221,14 @@ export function providerResetRequest(saved: WorkspaceAiSettings): UpdateAiSettin
   return request;
 }
 
-export function inheritsEverything(saved: WorkspaceAiSettings): boolean {
-  return (
-    saved.inherits_provider &&
-    MODEL_FIELDS.every((field) => saved[modelKey(field)] === null) &&
-    ENDPOINT_PAIRS.every((pair) => !savesEndpoint(saved, pair)) &&
-    !saved.has_runpod_api_key &&
-    !savesBedrock(saved)
-  );
+export function providerResetRemovals(saved: WorkspaceAiSettings): string[] {
+  const removals: string[] = [];
+  for (const pair of ENDPOINT_PAIRS) {
+    if (savesUrl(saved, pair)) removals.push(pair.urlLabel);
+    if (saved[pair.saved]) removals.push(pair.keyLabel);
+  }
+  if (saved.bedrock_region !== null) removals.push(BEDROCK_LABELS.region);
+  if (saved.has_bedrock_credentials) removals.push(BEDROCK_LABELS.credentials);
+  if (saved.bedrock_use_iam_role !== null) removals.push(BEDROCK_LABELS.iamRole);
+  return removals;
 }

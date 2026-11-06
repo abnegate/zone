@@ -1,6 +1,6 @@
 import { Select } from '@zone/ui';
 import type { ReactNode } from 'react';
-import type { AiProvider, AiSettings, OrganizationKeys } from '../workspace/types';
+import type { AiProvider, CommonAiSettings, OrganizationKeys } from '../workspace/types';
 import {
   awsRegions,
   missesOrganizationKey,
@@ -19,7 +19,7 @@ interface AiProviderFieldsProps {
   credentials: ProviderCredentials;
   configured: ProviderConfigured;
   onChange: <K extends keyof ProviderCredentials>(key: K, value: ProviderCredentials[K]) => void;
-  saved?: AiSettings | null;
+  saved?: CommonAiSettings | null;
   organizationKeys?: OrganizationKeys;
 }
 
@@ -111,7 +111,7 @@ interface EndpointHintsProps {
   provider: AiProvider;
   credentials: ProviderCredentials;
   configured: ProviderConfigured;
-  saved: AiSettings | null;
+  saved: CommonAiSettings | null;
   organizationKeys: OrganizationKeys | undefined;
 }
 
@@ -326,16 +326,18 @@ export function AiProviderFields({
         </>
       )}
 
-      <Field id="runpod-key" label="Runpod" configured={configured.runpod} optional>
-        <input
-          type="password"
-          id="runpod-key"
-          value={credentials.runpodApiKey}
-          onChange={(event) => onChange('runpodApiKey', event.target.value)}
-          placeholder={configured.runpod ? MASK : 'Enter API key'}
-          className="form-input"
-        />
-      </Field>
+      {level === 'organization' && (
+        <Field id="runpod-key" label="Runpod" configured={configured.runpod} optional>
+          <input
+            type="password"
+            id="runpod-key"
+            value={credentials.runpodApiKey}
+            onChange={(event) => onChange('runpodApiKey', event.target.value)}
+            placeholder={configured.runpod ? MASK : 'Enter API key'}
+            className="form-input"
+          />
+        </Field>
+      )}
     </div>
   );
 }

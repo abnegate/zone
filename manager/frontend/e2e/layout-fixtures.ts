@@ -54,6 +54,7 @@ const mockAiSettings: AiSettings = {
 
 const mockWorkspaceAiSettings: WorkspaceAiSettings = {
   ...mockAiSettings,
+  bedrock_use_iam_role: null,
   overrides: false,
   inherits_provider: true,
   organization_keys: { litellm: false, openai: false, anthropic: false },

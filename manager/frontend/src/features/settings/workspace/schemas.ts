@@ -212,6 +212,7 @@ export const OrganizationKeysSchema = z.object({
 });
 
 export const WorkspaceAiSettingsResponseSchema = AiSettingsResponseSchema.extend({
+  bedrock_use_iam_role: z.boolean().nullable(),
   overrides: z.boolean(),
   inherits_provider: z.boolean(),
   organization_keys: OrganizationKeysSchema,

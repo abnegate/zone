@@ -26,6 +26,7 @@ import {
 import type { AiProvider, AiSettings } from '../types';
 
 const SUCCESS_DURATION_MS = 3000;
+const SAVE_LABEL = 'Save Changes';
 
 export function OrganizationAiSection() {
   const { isAuthenticated } = useAuth();
@@ -175,7 +176,9 @@ export function OrganizationAiSection() {
               agent={agent}
               access={agentAccess(currentOrganization.role, resolvingRole)}
               heading="h4"
+              level="organization"
               unsaved={provider !== savedProvider}
+              saveLabel={SAVE_LABEL}
               status={agents.statuses[agent]}
               attempt={agents.attempts[agent]}
               loadError={agents.error}
@@ -204,7 +207,7 @@ export function OrganizationAiSection() {
             Reset to Defaults
           </Button>
           <Button type="submit" loading={saving}>
-            {saving ? 'Saving...' : 'Save Changes'}
+            {saving ? 'Saving...' : SAVE_LABEL}
           </Button>
         </div>
       </form>
