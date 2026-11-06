@@ -462,6 +462,10 @@ describe('sources page layout', () => {
     );
     expect(rule(css, '.source-details-actions')).toContain('height: var(--ui-header-height)');
   });
+
+  it('aligns the access token disclosure with the field labels', () => {
+    expect(rule(css, '.github-configuration > .ui-btn-link')).toContain('padding-inline: 0');
+  });
 });
 
 describe('settings page layout', () => {

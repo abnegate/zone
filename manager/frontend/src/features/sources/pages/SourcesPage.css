@@ -267,6 +267,10 @@
   border-top: 1px solid var(--ui-border);
 }
 
+.github-configuration > .ui-btn-link {
+  padding-inline: 0;
+}
+
 .source-github-connection {
   display: flex;
   flex-direction: column;
