@@ -1175,6 +1175,11 @@ async fn the_workspace_lists_chat_providers_before_any_chat_exists() {
         ["self_hosted"],
         "a workspace with nothing saved offers only the instance: {listed}"
     );
+    assert_eq!(
+        listed["recent"],
+        Value::Null,
+        "a workspace without chats has no recent settings: {listed}"
+    );
 
     let stranger = account(&tenant.client).await;
     let refused = tenant.workspace_providers(&stranger.token).await;
@@ -1183,6 +1188,89 @@ async fn the_workspace_lists_chat_providers_before_any_chat_exists() {
         StatusCode::FORBIDDEN,
         "a stranger listed the workspace's providers: {}",
         refused.text()
+    );
+}
+
+#[tokio::test]
+async fn the_workspace_reports_the_settings_of_the_chat_it_used_last() {
+    let tenant = Tenant::new().await;
+    tenant
+        .save_organization_settings(json!({ "openai_api_key": OPENAI_KEY }))
+        .await;
+
+    let created = tenant
+        .create_chat(
+            &tenant.owner.token,
+            json!({
+                "provider": "openai",
+                "provider_model": "gpt-4o",
+                "reasoning_effort": "high",
+                "agent_enabled": true,
+                "auto_approve": true,
+                "offline": true,
+            }),
+        )
+        .await;
+    let created = expect(&created, StatusCode::CREATED, "a chat is created on OpenAI");
+    let chosen = created["chat"]["id"].as_str().expect("the chat's id");
+    let listed = tenant.workspace_offers().await;
+    assert_hides_the_key(
+        &tenant.workspace_providers(&tenant.owner.token).await,
+        "the listing",
+    );
+    assert_eq!(
+        listed["recent"],
+        json!({
+            "model_name": "gpt-4",
+            "provider": "openai",
+            "provider_model": "gpt-4o",
+            "reasoning_effort": "high",
+            "agent_enabled": true,
+            "offline": true,
+            "context_tokens": null,
+        }),
+        "a new chat starts from the one just created: {listed}"
+    );
+
+    tenant.chat(&tenant.owner.token).await;
+    let recent = &tenant.workspace_offers().await["recent"];
+    assert_eq!(recent["provider"], Value::Null, "{recent}");
+    assert_eq!(recent["provider_model"], Value::Null, "{recent}");
+    assert_eq!(recent["model_name"], json!("gpt-4"), "{recent}");
+    assert_eq!(recent["reasoning_effort"], json!("auto"), "{recent}");
+
+    let chose = tenant
+        .choose(
+            &tenant.owner.token,
+            chosen,
+            json!({ "provider": "openai", "model": "gpt-4.1" }),
+        )
+        .await;
+    expect(&chose, StatusCode::OK, "the older chat changes its model");
+    let recent = &tenant.workspace_offers().await["recent"];
+    assert_eq!(
+        (&recent["provider"], &recent["provider_model"]),
+        (&json!("openai"), &json!("gpt-4.1")),
+        "changing a chat's model makes it the one a new chat starts from: {recent}"
+    );
+
+    let updated = tenant
+        .update_chat(
+            &tenant.owner.token,
+            chosen,
+            json!({ "reasoning_effort": "low" }),
+        )
+        .await;
+    expect(&updated, StatusCode::OK, "the chat changes its effort");
+    let recent = &tenant.workspace_offers().await["recent"];
+    assert_eq!(recent["reasoning_effort"], json!("low"), "{recent}");
+
+    let viewer = tenant.seated("viewer").await;
+    let seen = tenant.workspace_providers(&viewer.token).await;
+    let seen = expect(&seen, StatusCode::OK, "a viewer lists the providers");
+    assert_eq!(
+        seen["recent"], *recent,
+        "a viewer reads the same recent settings"
     );
 }
 

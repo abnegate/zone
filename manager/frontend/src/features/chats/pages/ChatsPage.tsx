@@ -84,6 +84,7 @@ import {
   chatShowsReasoning,
   chatSources,
   contextTokenOptions,
+  DEFAULT_NEW_CHAT,
   DEFAULT_PROVIDER,
   defaultContextTokens,
   effectiveOffer,
@@ -103,6 +104,8 @@ import {
   MODEL_PLACEHOLDER,
   modelLabel,
   modelSelectOptions,
+  type NewChatSettings,
+  newChatSettings,
   observationKey,
   offersAgent,
   offersAgentOn,
@@ -160,6 +163,7 @@ export default function ChatsPage() {
   const [newChatProject, setNewChatProject] = useState(NO_PROJECT);
   const [newChatOffline, setNewChatOffline] = useState(false);
   const [newChatContext, setNewChatContext] = useState(String(defaultContextTokens()));
+  const [newChatEdited, setNewChatEdited] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -508,16 +512,31 @@ export default function ChatsPage() {
     setSearchParams({}, { replace: true });
   };
 
-  const resetNewChat = () => {
-    setNewChatProvider(DEFAULT_PROVIDER);
-    setNewChatModel(AUTO_MODEL);
-    setNewChatAgent(false);
+  const applyNewChat = (settings: NewChatSettings) => {
+    setNewChatProvider(settings.provider);
+    setNewChatModel(settings.model);
+    setNewChatAgent(settings.agent);
     setNewChatAutoApprove(false);
-    setNewChatReasoning(AUTO_EFFORT);
-    setNewChatProject(NO_PROJECT);
-    setNewChatOffline(false);
-    setNewChatContext(String(defaultContextTokens()));
+    setNewChatReasoning(settings.reasoning);
+    setNewChatOffline(settings.offline);
+    setNewChatContext(settings.context);
   };
+
+  const resetNewChat = () => {
+    setNewChatEdited(false);
+    applyNewChat(DEFAULT_NEW_CHAT);
+    setNewChatProject(NO_PROJECT);
+  };
+
+  const editNewChat = () => {
+    setNewChatEdited(true);
+  };
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: an open, untouched new chat follows the workspace's recent chat as it loads
+  useEffect(() => {
+    if (!showNewChatModal || newChatEdited) return;
+    applyNewChat(newChatSettings(workspaceProviders, models));
+  }, [showNewChatModal, newChatEdited, workspaceProviders, models]);
 
   const workspaceId = currentWorkspace?.id ?? null;
   const [newChatWorkspace, setNewChatWorkspace] = useState(workspaceId);
@@ -540,6 +559,7 @@ export default function ChatsPage() {
   };
 
   const handleNewChatProvider = (provider: string) => {
+    editNewChat();
     const offer = newChatOfferFor(provider);
     const model = offer?.requires_model ? '' : AUTO_MODEL;
     keepNewChatAgent(offer, model);
@@ -555,6 +575,7 @@ export default function ChatsPage() {
   };
 
   const handleNewChatModel = (name: string) => {
+    editNewChat();
     setNewChatModel(name);
     keepNewChatAgent(newChatOffer, name);
     const installed = findInstalledModel(models, name);
@@ -1959,6 +1980,7 @@ export default function ChatsPage() {
               label="Context"
               value={newChatContext}
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                editNewChat();
                 setNewChatContext(event.target.value);
               }}
               helpText={
@@ -1973,7 +1995,10 @@ export default function ChatsPage() {
             label="Offline"
             helpText="Never use web search, page fetch, or curl/wget. Connected sources still work."
             checked={newChatOffline}
-            onCheckedChange={setNewChatOffline}
+            onCheckedChange={(checked) => {
+              editNewChat();
+              setNewChatOffline(checked);
+            }}
           />
           {showNewChatAgent && (
             <Checkbox
@@ -1981,6 +2006,7 @@ export default function ChatsPage() {
               helpText="Search workspace content, use connected GitHub data and run tools when asked. Needs a tool-calling model."
               checked={newChatAgent}
               onCheckedChange={(checked) => {
+                editNewChat();
                 setNewChatAgent(checked);
                 if (!checked) setNewChatAutoApprove(false);
               }}
@@ -1991,7 +2017,10 @@ export default function ChatsPage() {
               label="Auto-approve writes and commands"
               helpText="Skip the confirmation prompt for write_file, apply_patch, run_command and run_shell. You can change this later on the chat."
               checked={newChatAutoApprove}
-              onCheckedChange={setNewChatAutoApprove}
+              onCheckedChange={(checked) => {
+                editNewChat();
+                setNewChatAutoApprove(checked);
+              }}
             />
           )}
           {showNewChatReasoning && (
@@ -1999,6 +2028,7 @@ export default function ChatsPage() {
               label="Reasoning"
               value={newChatEffort}
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                editNewChat();
                 setNewChatReasoning(event.target.value as ReasoningEffort);
               }}
               helpText={
