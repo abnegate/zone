@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use tokio::process::Command;
 
 use super::error::SealingError;
+use super::listing::CUSTOM_FORMAT;
 use super::listing::Listing;
 
 /// The client that reads a `pg_dump -Fc` archive's table of contents.
@@ -68,6 +69,12 @@ impl Backup {
         }
 
         let listing = Listing::parse(&String::from_utf8_lossy(&output.stdout));
+        if listing.format() != CUSTOM_FORMAT {
+            return Err(SealingError::NotCustomFormat {
+                path: path.to_path_buf(),
+                format: listing.format().to_string(),
+            });
+        }
         if listing.database() != database {
             return Err(SealingError::DatabaseMismatch {
                 expected: database.to_string(),

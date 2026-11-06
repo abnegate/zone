@@ -2,12 +2,17 @@ use std::collections::BTreeSet;
 
 const COMMENT: char = ';';
 const DATABASE_HEADER: &str = "dbname:";
+const FORMAT_HEADER: &str = "Format:";
 const TABLE_DATA: [&str; 3] = ["TABLE", "DATA", "public"];
+
+/// The format `pg_restore --list` names a `pg_dump -Fc` archive by.
+pub const CUSTOM_FORMAT: &str = "CUSTOM";
 
 /// What `pg_restore --list` says an archive holds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Listing {
     database: String,
+    format: String,
     tables: BTreeSet<String>,
 }
 
@@ -15,11 +20,15 @@ impl Listing {
     /// Parse the table of contents `pg_restore --list` printed.
     pub fn parse(listing: &str) -> Self {
         let mut database = String::new();
+        let mut format = String::new();
         let mut tables = BTreeSet::new();
         for line in listing.lines() {
             if let Some(comment) = line.strip_prefix(COMMENT) {
-                if let Some(name) = comment.trim().strip_prefix(DATABASE_HEADER) {
+                let comment = comment.trim();
+                if let Some(name) = comment.strip_prefix(DATABASE_HEADER) {
                     database = name.trim().to_string();
+                } else if let Some(name) = comment.strip_prefix(FORMAT_HEADER) {
+                    format = name.trim().to_string();
                 }
                 continue;
             }
@@ -32,12 +41,21 @@ impl Listing {
                     .map(|(table, _)| table.to_string()),
             );
         }
-        Self { database, tables }
+        Self {
+            database,
+            format,
+            tables,
+        }
     }
 
     /// The database the archive was dumped from.
     pub fn database(&self) -> &str {
         &self.database
+    }
+
+    /// The archive format `pg_dump` wrote, such as `CUSTOM` for `-Fc` or `TAR` for `-Ft`.
+    pub fn format(&self) -> &str {
+        &self.format
     }
 
     /// Whether the archive holds the rows of `public.<table>`.
@@ -48,6 +66,7 @@ impl Listing {
 
 #[cfg(test)]
 mod tests {
+    use super::CUSTOM_FORMAT;
     use super::Listing;
 
     const LISTING: &str = ";
@@ -87,6 +106,14 @@ mod tests {
     }
 
     #[test]
+    fn the_header_names_the_format() {
+        assert_eq!(Listing::parse(LISTING).format(), CUSTOM_FORMAT);
+        let tar = LISTING.replace(";     Format: CUSTOM", ";     Format: TAR");
+        assert_eq!(Listing::parse(&tar).format(), "TAR");
+        assert_eq!(Listing::parse(&tar).database(), "zone_test");
+    }
+
+    #[test]
     fn only_table_data_entries_count_as_holding_a_table() {
         let listing = Listing::parse(LISTING);
         for table in ["projects", "sources", "sync_configs", "_sqlx_migrations"] {
@@ -104,5 +131,6 @@ mod tests {
         let listing = Listing::parse(";4693; 0 16992 TABLE DATA public projects postgres\n");
         assert!(!listing.holds_data_for("projects"));
         assert_eq!(listing.database(), "");
+        assert_eq!(listing.format(), "");
     }
 }

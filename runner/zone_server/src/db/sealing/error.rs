@@ -14,6 +14,8 @@ pub enum SealingError {
     BackupEmpty { path: PathBuf },
     #[error("The backup at {} is not a pg_dump -Fc archive: {stderr}", path.display())]
     NotAnArchive { path: PathBuf, stderr: String },
+    #[error("The backup at {} is a {format:?} archive, not a pg_dump -Fc archive", path.display())]
+    NotCustomFormat { path: PathBuf, format: String },
     #[error(
         "pg_restore is not installed, so the backup cannot be verified; install postgresql-client"
     )]
