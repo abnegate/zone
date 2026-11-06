@@ -14,7 +14,7 @@ import './VirtualBrowseList.css';
 interface VirtualBrowseListProps {
   models: BrowseModel[];
   onItemClick: (model: BrowseModel) => void;
-  onInstall: (model: BrowseModel) => void;
+  onInstall?: (model: BrowseModel) => void;
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => void;
@@ -25,7 +25,7 @@ const ROW_HEIGHT = 72;
 type BrowseRowProps = {
   models: BrowseModel[];
   onItemClick: (model: BrowseModel) => void;
-  onInstall: (model: BrowseModel) => void;
+  onInstall?: (model: BrowseModel) => void;
 };
 
 function specParts(model: BrowseModel): string[] {
@@ -105,17 +105,19 @@ function BrowseRow({
             ) : null}
           </div>
         </div>
-        <button
-          className="btn btn-secondary btn-small"
-          disabled={download.name === null}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (download.name !== null) onInstall(model);
-          }}
-          type="button"
-        >
-          {download.label}
-        </button>
+        {onInstall && (
+          <button
+            className="btn btn-secondary btn-small"
+            disabled={download.name === null}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (download.name !== null) onInstall(model);
+            }}
+            type="button"
+          >
+            {download.label}
+          </button>
+        )}
       </div>
     </div>
   );

@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { BrowserRouter } from 'react-router-dom';
 import { chooseSelect, openSelect } from '../../../test/select';
 import type { OrgRole } from '../../../types';
+import { MODEL_ACCESS_NOTICE } from '../components/ModelAccessNotice';
 
 const mockUseModels = mock();
 const mockUseBrowse = mock();
@@ -20,6 +21,12 @@ mock.module('../hooks/useBrowse', () => ({
 
 mock.module('../hooks/usePull', () => ({
   usePull: mockUsePull,
+}));
+
+const access = { canInstall: true, canRemove: true };
+
+mock.module('../hooks/useModelAccess', () => ({
+  useModelAccess: () => access,
 }));
 
 mock.module('../hooks/useTrain', () => ({
@@ -102,7 +109,7 @@ mock.module('../components/VirtualBrowseList', () => ({
       sizes?: Array<{ name: string; label: string; size?: number | null }>;
     }>;
     onItemClick: (model: unknown) => void;
-    onInstall: (model: unknown) => void;
+    onInstall?: (model: unknown) => void;
   }) {
     return (
       <div data-testid="virtual-browse-list">
@@ -110,7 +117,7 @@ mock.module('../components/VirtualBrowseList', () => ({
           <div key={m.id} data-testid={`browse-model-${m.id}`}>
             <span>{m.name}</span>
             <button onClick={() => onItemClick(m)}>Details</button>
-            <button onClick={() => onInstall(m)}>Install</button>
+            {onInstall && <button onClick={() => onInstall(m)}>Install</button>}
           </div>
         ))}
       </div>
@@ -251,6 +258,103 @@ describe('ModelsPage', () => {
     mockUseModels.mockReturnValue(defaultModelsHook);
     mockUseBrowse.mockReturnValue(defaultBrowseHook);
     mockUsePull.mockReturnValue(defaultPullHook);
+    access.canInstall = true;
+    access.canRemove = true;
+  });
+
+  describe('read-only access', () => {
+    const installed = [{ name: 'llama2', size: 1, modified_at: '2024-01-01T00:00:00Z' }];
+
+    const openTab = async (name: string) => {
+      const tab = screen.getByRole('tab', { name });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+      await waitFor(() => expect(tab).toHaveAttribute('aria-selected', 'true'));
+    };
+
+    it('replaces the install row with a notice for a user who cannot install', () => {
+      access.canInstall = false;
+      renderModelsPage();
+      expect(screen.queryByRole('region', { name: 'Add model' })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Model name')).not.toBeInTheDocument();
+      expect(screen.getByText(MODEL_ACCESS_NOTICE)).toHaveAttribute('role', 'note');
+      expect(screen.getByRole('heading', { name: 'Installed Models' })).toBeInTheDocument();
+    });
+
+    it('offers no feature install from the empty state to a user who cannot install', () => {
+      access.canInstall = false;
+      renderModelsPage();
+      expect(screen.getByText('No models installed')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Install features' })).not.toBeInTheDocument();
+    });
+
+    it('hides delete for a user who cannot remove models', async () => {
+      access.canRemove = false;
+      mockUseModels.mockReturnValue({ ...defaultModelsHook, models: installed });
+      renderModelsPage();
+      expect(screen.getByText('llama2')).toBeInTheDocument();
+      expect(screen.queryByTitle('Delete model')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /^llama2/ }));
+      expect(await screen.findAllByRole('button', { name: 'Close' })).not.toHaveLength(0);
+      expect(screen.queryByRole('button', { name: 'Delete Model' })).not.toBeInTheDocument();
+    });
+
+    it('closes an open delete confirmation when the remove grant is lost', async () => {
+      const deleteModelMock = mock(() => Promise.resolve(true));
+      mockUseModels.mockReturnValue({
+        ...defaultModelsHook,
+        models: installed,
+        deleteModel: deleteModelMock,
+      });
+      const { rerender } = renderModelsPage();
+      fireEvent.click(screen.getByTitle('Delete model'));
+      expect(await screen.findByText(/Are you sure you want to delete/)).toBeInTheDocument();
+      access.canRemove = false;
+      rerender(
+        <QueryClientProvider client={new QueryClient()}>
+          <BrowserRouter>
+            <ModelsPage />
+          </BrowserRouter>
+        </QueryClientProvider>
+      );
+      await waitFor(() =>
+        expect(screen.queryByText(/Are you sure you want to delete/)).not.toBeInTheDocument()
+      );
+      expect(deleteModelMock).not.toHaveBeenCalled();
+    });
+
+    it('keeps delete for a user who can remove but not install', () => {
+      access.canInstall = false;
+      mockUseModels.mockReturnValue({ ...defaultModelsHook, models: installed });
+      renderModelsPage();
+      expect(screen.getByTitle('Delete model')).toBeInTheDocument();
+    });
+
+    it('browses the catalog without install actions for a user who cannot install', async () => {
+      access.canInstall = false;
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        models: [{ id: 'm1', name: 'catalog-model', install_name: 'catalog-model:7b' }],
+      });
+      renderModelsPage();
+      await openTab('Browse');
+      expect(await screen.findByText('catalog-model')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Install' })).not.toBeInTheDocument();
+      expect(screen.getByText(MODEL_ACCESS_NOTICE)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+      expect(await screen.findAllByRole('button', { name: 'Close' })).not.toHaveLength(0);
+      expect(screen.queryByRole('button', { name: 'Install Model' })).not.toBeInTheDocument();
+      expect(defaultPullHook.pull).not.toHaveBeenCalled();
+    });
+
+    it('shows the notice instead of the training form to a user who cannot install', async () => {
+      access.canInstall = false;
+      renderModelsPage();
+      await openTab('Train');
+      expect(screen.getByText(MODEL_ACCESS_NOTICE)).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Train a LoRA' })).not.toBeInTheDocument();
+    });
   });
 
   describe('rendering', () => {

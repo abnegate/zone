@@ -13,11 +13,6 @@ function needsAttention(call: ToolCallRecord): boolean {
   return call.approval === 'pending' || Boolean(call.pending);
 }
 
-/**
- * Everything an assistant turn did before it answered: its thinking and the
- * tools it called, in the order they happened, under one label. The thinking
- * folds away as a whole once the turn is over; the tool rows stay.
- */
 export function Activity({
   reasoning,
   calls,
@@ -64,7 +59,6 @@ export function Activity({
           <span>{LABEL}</span>
         </button>
       ) : null}
-      {!traced && leftover ? <Reasoning content={leftover} open={expanded} /> : null}
       {calls.length > 0 ? (
         <ToolTrace
           calls={calls}
@@ -75,7 +69,7 @@ export function Activity({
           onAnswer={onAnswer}
         />
       ) : null}
-      {traced && leftover ? <Reasoning content={leftover} open={expanded} /> : null}
+      {leftover ? <Reasoning content={leftover} open={expanded} /> : null}
     </section>
   );
 }

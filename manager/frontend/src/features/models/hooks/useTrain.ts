@@ -10,6 +10,7 @@ import {
   useState,
 } from 'react';
 import { modelsApi, type TrainJob } from '../../../api/models';
+import { PERMISSIONS } from '../../../shared/types/permissions';
 import { useAuth } from '../../auth/context';
 
 const POLL_MS = 2000;
@@ -23,7 +24,8 @@ export interface TrainApi {
 const TrainContext = createContext<TrainApi | null>(null);
 
 export function useTrainState(): TrainApi {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, hasPermission } = useAuth();
+  const canInstall = hasPermission(PERMISSIONS.MODELS.CREATE);
   const [job, setJob] = useState<TrainJob | null>(null);
   const [dismissedId, setDismissedId] = useState<string | null>(null);
   const dismissTimer = useRef<number | null>(null);
@@ -82,10 +84,11 @@ export function useTrainState(): TrainApi {
     clearDismissTimer();
     const key = job?.id ?? 'current';
     setDismissedId(key);
+    if (!canInstall) return;
     void modelsApi.dismissTrain().catch(() => {
       setDismissedId((current) => (current === key ? null : current));
     });
-  }, [clearDismissTimer, job?.id]);
+  }, [canInstall, clearDismissTimer, job?.id]);
 
   const visible = job && dismissedId && (job.id ?? 'current') === dismissedId ? null : job;
 

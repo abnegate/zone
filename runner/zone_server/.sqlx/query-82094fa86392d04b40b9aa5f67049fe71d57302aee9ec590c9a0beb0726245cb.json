@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE projects\n        SET \"position\" = placed.\"position\"\n        FROM UNNEST($1::uuid[], $2::integer[]) AS placed(id, \"position\")\n        WHERE projects.id = placed.id\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Int4Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "82094fa86392d04b40b9aa5f67049fe71d57302aee9ec590c9a0beb0726245cb"
+}

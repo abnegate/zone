@@ -16,6 +16,7 @@
 
 mod agent_tools;
 mod endpoint;
+mod progress;
 mod protocol;
 mod scope;
 mod turn;
