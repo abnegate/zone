@@ -5423,6 +5423,101 @@ describe('ChatsPage', () => {
     });
   });
 
+  describe('turn order', () => {
+    const traceOf = (answer: Element | null | undefined): string[] =>
+      Array.from(answer?.children ?? []).map((part) =>
+        part.matches('[data-testid="activity"]')
+          ? `tools:${part.textContent?.includes('Read a file') ? 'read' : 'listed'}`
+          : `text:${part.textContent?.trim()}`
+      );
+
+    const call = (id: string, name: string, at: number) => ({
+      id,
+      name,
+      arguments: '{}',
+      success: true,
+      detail: 'ok',
+      duration_ms: 1,
+      at,
+    });
+
+    it('streams each tool call after the text written before it', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      const input = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+        'Type a message, or drop a file...'
+      );
+      fireEvent.change(input, { target: { value: 'Look into it' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => expect(input.value).toBe(''));
+
+      act(() => {
+        socket.emit({
+          type: 'message_start',
+          message_id: 'ordered',
+          role: 'assistant',
+        });
+        socket.emit({ type: 'chunk', content: 'Let me look. ', index: 0 });
+        socket.emit({
+          type: 'tool_call',
+          message_id: 'ordered',
+          tool_call_id: 'call-1',
+          name: 'read_file',
+          arguments: '{}',
+          at: Array.from('Let me look. ').length,
+        });
+        socket.emit({ type: 'chunk', content: 'Found it. ', index: 1 });
+        socket.emit({
+          type: 'tool_call',
+          message_id: 'ordered',
+          tool_call_id: 'call-2',
+          name: 'list_files',
+          arguments: '{}',
+          at: Array.from('Let me look. Found it. ').length,
+        });
+        socket.emit({ type: 'chunk', content: 'All done.', index: 2 });
+      });
+
+      await waitFor(() => expect(screen.getByText('All done.')).toBeInTheDocument());
+      const answer = screen.getByText('All done.').closest('.message-content');
+      expect(traceOf(answer)).toEqual([
+        'text:Let me look.',
+        'tools:read',
+        'text:Found it.',
+        'tools:listed',
+        'text:All done.',
+      ]);
+    });
+
+    it('rebuilds the same order from the stored reply on reload', async () => {
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          {
+            ...mockChatWithMessages.messages[1],
+            content: 'Let me look. Found it. All done.',
+            metadata: {
+              tool_calls: [call('call-1', 'read_file', 13), call('call-2', 'list_files', 23)],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      await waitFor(() => expect(screen.getByText('All done.')).toBeInTheDocument());
+      const answer = screen.getByText('All done.').closest('.message-content');
+      expect(traceOf(answer)).toEqual([
+        'text:Let me look.',
+        'tools:read',
+        'text:Found it.',
+        'tools:listed',
+        'text:All done.',
+      ]);
+    });
+  });
+
   describe('account handover', () => {
     const resetsAt = () => new Date(Date.now() + (2 * 60 + 10) * 60_000).toISOString();
     const NOTICE =

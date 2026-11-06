@@ -57,8 +57,11 @@ export interface ToolCallRecord {
   success: boolean;
   detail: string;
   duration_ms: number;
+  /** Absent on calls stored before offsets were kept; those are drawn first. */
+  at?: number;
   /** Model thinking that immediately preceded this call. */
   reasoning?: string;
+  reasoning_at?: number;
   /**
    * Why the model said it was making this call. Side-effecting tools are asked
    * for one. Model-authored prose, so it is shown as stated, never as observed.
@@ -264,6 +267,8 @@ export interface Handover {
   resets_at?: string;
   carried: boolean;
   at: number;
+  calls?: number;
+  reasoning?: string;
 }
 
 export interface MessageMetadata {
@@ -277,6 +282,7 @@ export interface MessageMetadata {
   memory_used?: boolean;
   /** Model thinking text, when the deployment advertised reasoning. */
   reasoning?: string;
+  reasoning_at?: number;
   handovers?: Handover[];
   source?: string;
   reminder_id?: string;

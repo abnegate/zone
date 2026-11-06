@@ -122,7 +122,7 @@ import {
   selectedContextTokens,
   shortModelName,
   sourceAttachment,
-  splitAtHandovers,
+  splitTurn,
   toPlainText,
   videoAttachments,
   writeChatGroupBy,
@@ -1577,6 +1577,17 @@ export default function ChatsPage() {
                       const live = streaming && message.id === displayedChat.messages.at(-1)?.id;
                       const body = message.content.trim();
                       const awaitingAnswer = /^\[waiting for your answer\]$/i.test(body);
+                      const parts = splitTurn(
+                        awaitingAnswer ? '' : message.content,
+                        toolCalls,
+                        handovers,
+                        message.metadata?.reasoning
+                          ? {
+                              text: message.metadata.reasoning,
+                              at: message.metadata.reasoning_at,
+                            }
+                          : undefined
+                      );
                       return (
                         <div
                           key={message.id}
@@ -1651,19 +1662,36 @@ export default function ChatsPage() {
                               ))}
                             </div>
                           )}
-                          <Activity
-                            reasoning={message.metadata?.reasoning}
-                            calls={toolCalls}
-                            live={live}
-                            answered={index < lastUserIndex}
-                            onDecide={approveTool}
-                            onAnswer={handleAnswerQuestions}
-                          />
-                          {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
-                          {(body || handovers.length > 0) && !awaitingAnswer ? (
+                          {parts.length > 0 ? (
                             <div className="message-content">
-                              {splitAtHandovers(message.content, handovers).map((part) =>
-                                part.kind === 'text' ? (
+                              {parts.map((part, position) => {
+                                if (part.kind === 'calls') {
+                                  return (
+                                    <Activity
+                                      key={
+                                        part.calls[0]
+                                          ? `calls-${part.calls[0].id}`
+                                          : `thinking-${position}`
+                                      }
+                                      reasoning={part.reasoning}
+                                      calls={part.calls}
+                                      live={live}
+                                      answered={index < lastUserIndex}
+                                      onDecide={approveTool}
+                                      onAnswer={handleAnswerQuestions}
+                                    />
+                                  );
+                                }
+                                if (part.kind === 'handover') {
+                                  return (
+                                    <HandoverNotice
+                                      key={`handover-${part.handover.at}-${part.handover.to}`}
+                                      handover={part.handover}
+                                      agentChanged={part.agentChanged}
+                                    />
+                                  );
+                                }
+                                return (
                                   <MessageContent
                                     key={`text-${part.offset}`}
                                     content={part.text}
@@ -1677,16 +1705,11 @@ export default function ChatsPage() {
                                       })
                                     }
                                   />
-                                ) : (
-                                  <HandoverNotice
-                                    key={`handover-${part.handover.at}-${part.handover.to}`}
-                                    handover={part.handover}
-                                    agentChanged={part.agentChanged}
-                                  />
-                                )
-                              )}
+                                );
+                              })}
                             </div>
                           ) : null}
+                          {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                           {cited && (
                             <SourcesButton
                               count={cited.length}

@@ -765,6 +765,7 @@ test.describe('Chat regressions', () => {
         tool_call_id: 'tool',
         name: 'read_file',
         arguments: '{}',
+        at: 'Half a'.length,
       });
     });
 
@@ -793,6 +794,7 @@ test.describe('Chat regressions', () => {
       tool_call_id: 'tool',
       name: 'read_file',
       arguments: '{}',
+      at: 'Half a'.length,
     });
     await expect(page.getByText('Running…')).toBeVisible();
     await expect(page.getByText('Did not finish')).toHaveCount(0);
@@ -813,8 +815,9 @@ test.describe('Chat regressions', () => {
       content: 'Half a reply, finished after the drop.',
     });
 
-    await expect(page.getByText('Half a reply, finished after the drop.')).toBeVisible();
-    await expect(page.getByText('Read 20 lines')).toBeVisible();
+    await expect(page.locator('.message-assistant .message-content')).toHaveText(
+      /^Half a.*Read 20 lines.*reply, finished after the drop\.$/
+    );
     await expect(page.getByText('[Stopped before answering]')).toHaveCount(0);
     await page.screenshot({
       path: testInfo.outputPath('resumes-after-drop.png'),
