@@ -88,6 +88,13 @@ function isSameRepository(
   return first != null && repositoryKey(first) === repositoryKey(second);
 }
 
+function statusMessage(loading: boolean, searching: boolean): string {
+  if (loading) {
+    return 'Loading repositories…';
+  }
+  return searching ? 'Searching…' : '';
+}
+
 function keepInputFocused(event: MouseEvent) {
   event.preventDefault();
 }
@@ -117,6 +124,7 @@ export function RepositoryPicker({ organizationId, value, onChange }: Repository
     repositories,
     installations,
     loading,
+    searching,
     error,
     hasMore,
     loadingMore,
@@ -139,7 +147,7 @@ export function RepositoryPicker({ organizationId, value, onChange }: Repository
 
   const optionId = (repository: GitHubRepository) => `${listboxId}-${repositoryKey(repository)}`;
   const active = activeIndex >= 0 ? selectable[activeIndex] : undefined;
-  const showNoResults = !loading && error === null && repositories.length === 0;
+  const showNoResults = !loading && !searching && error === null && repositories.length === 0;
   const expanded = open && (repositories.length > 0 || showNoResults || hasMore);
   const activeId = expanded && active ? optionId(active) : undefined;
   const listboxShown = expanded && repositories.length > 0;
@@ -352,7 +360,7 @@ export function RepositoryPicker({ organizationId, value, onChange }: Repository
         </div>
       )}
       <p role="status" className="form-hint repository-picker-live">
-        {loading ? 'Loading repositories…' : ''}
+        {statusMessage(loading, searching)}
       </p>
       {error !== null && (
         <div className="repository-picker-error">

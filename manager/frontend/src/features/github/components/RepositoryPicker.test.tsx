@@ -269,6 +269,60 @@ describe('RepositoryPicker fetching and debounce', () => {
     expect(screen.queryByRole('option')).not.toBeInTheDocument();
   });
 
+  it('announces a search in flight instead of saying nothing matched', async () => {
+    const search = deferred<GitHubRepositoriesResponse>();
+    listRepositories.mockImplementation(async (_organizationId, parameters) => {
+      if (parameters?.query === 'nothing') {
+        return page([]);
+      }
+      return parameters?.query === 'nothing-else' ? search.promise : firstPage;
+    });
+    const { user } = renderPicker();
+    await waitForOptions(user);
+    await user.type(combobox(), 'nothing');
+    await screen.findByText('No repositories match “nothing”.');
+    const status = screen.getByRole('status');
+
+    await user.type(combobox(), '-else');
+    await waitFor(() => expect(queries()).toContain('nothing-else'));
+
+    await waitFor(() => expect(status).toHaveTextContent('Searching…'));
+    expect(screen.queryByText(/^No repositories match/)).not.toBeInTheDocument();
+
+    search.resolve(page([]));
+
+    expect(await screen.findByText('No repositories match “nothing-else”.')).toBeInTheDocument();
+    expect(status.textContent).toBe('');
+  });
+
+  it('shows the newer search when an older response arrives after it', async () => {
+    const older = deferred<GitHubRepositoriesResponse>();
+    const newer = deferred<GitHubRepositoriesResponse>();
+    listRepositories.mockImplementation(async (_organizationId, parameters) => {
+      if (parameters?.query === 'acme') {
+        return older.promise;
+      }
+      return parameters?.query === 'abnegate' ? newer.promise : firstPage;
+    });
+    const { user } = renderPicker();
+    await waitForOptions(user);
+    await user.type(combobox(), 'acme');
+    await waitFor(() => expect(queries()).toContain('acme'));
+
+    await user.clear(combobox());
+    await user.type(combobox(), 'abnegate');
+    await waitFor(() => expect(queries()).toContain('abnegate'));
+
+    newer.resolve(page([zone]));
+    await waitFor(() =>
+      expect(screen.queryByRole('option', { name: /^acme\/api/ })).not.toBeInTheDocument()
+    );
+    older.resolve(page([api, web]));
+    await new Promise((settle) => setTimeout(settle, 50));
+
+    expect(option(/^abnegate\/zone/)).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /^acme\// })).not.toBeInTheDocument();
+  });
 });
 
 describe('RepositoryPicker listbox and selection', () => {

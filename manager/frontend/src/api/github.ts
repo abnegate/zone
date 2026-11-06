@@ -14,14 +14,10 @@ import type {
 } from '../features/github/types';
 import { parse } from '../validation';
 import { ApiError } from './ApiError';
-import { deviceHeaders } from './device';
-import { session } from './session';
-
-const API_BASE = import.meta.env.VITE_API_URL || '';
+import { API_BASE, client } from './client';
 
 export interface GitHubRepositorySearch {
   query?: string;
-  installationId?: string;
   page?: number;
   perPage?: number;
   refresh?: boolean;
@@ -31,20 +27,8 @@ function githubUrl(organizationId: string): string {
   return `${API_BASE}/api/organizations/${encodeURIComponent(organizationId)}/github`;
 }
 
-function headers(): HeadersInit {
-  const result: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...deviceHeaders(),
-  };
-  const token = session.getAccessToken();
-  if (token) {
-    result.Authorization = `Bearer ${token}`;
-  }
-  return result;
-}
-
 async function send(url: string, init: RequestInit, action: string): Promise<Response> {
-  const response = await fetch(url, { ...init, headers: headers() });
+  const response = await fetch(url, { ...init, headers: client.getHeaders() });
   if (!response.ok) {
     throw await ApiError.from(response, action);
   }
@@ -55,9 +39,6 @@ function repositorySearchParameters(search: GitHubRepositorySearch): URLSearchPa
   const parameters = new URLSearchParams();
   if (search.query) {
     parameters.append('query', search.query);
-  }
-  if (search.installationId) {
-    parameters.append('installation_id', search.installationId);
   }
   parameters.append('page', String(search.page ?? 1));
   parameters.append('per_page', String(search.perPage ?? REPOSITORY_PAGE_SIZE));
