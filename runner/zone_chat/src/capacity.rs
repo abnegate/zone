@@ -501,7 +501,11 @@ fn provider_reasoning(info: &Value) -> bool {
 }
 
 fn native_limit(body: &Value) -> Option<u64> {
-    let metadata = body.get("model_info")?;
+    native_window(body.get("model_info")?)
+}
+
+/// The context window an Ollama model's `model_info` gives its architecture.
+pub fn native_window(metadata: &Value) -> Option<u64> {
     let architecture = metadata.get("general.architecture")?.as_str()?;
     metadata
         .get(format!("{architecture}.context_length"))?

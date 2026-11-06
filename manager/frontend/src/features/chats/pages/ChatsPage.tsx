@@ -136,6 +136,7 @@ const NEW_CHAT_MODEL_REQUIRED = 'Choose a model for this provider.';
 const PROVIDER_EFFORT_RESET_FAILED =
   'AI provider changed, but its reasoning effort could not be reset';
 const MODEL_EFFORT_RESET_FAILED = 'Model changed, but its reasoning effort could not be reset';
+const MODEL_CONTEXT_RESET_FAILED = 'Model changed, but its context size could not be fitted to it';
 
 const failure = (prefix: string, error: unknown): string =>
   error instanceof Error ? `${prefix}: ${error.message}` : prefix;
@@ -639,6 +640,10 @@ export default function ChatsPage() {
     if (latestSelectedChatId.current === chatId) setChatOperationError(message);
   };
 
+  const reportAll = (chatId: string, problems: string[]) => {
+    if (problems.length > 0) reportForChat(chatId, problems.join('. '));
+  };
+
   const handleToggleAgent = async () => {
     if (!isAuthenticated || !displayedChat) return;
     const chatId = displayedChat.id;
@@ -713,6 +718,7 @@ export default function ChatsPage() {
     if (!isAuthenticated || !displayedChat) return false;
     const chatId = displayedChat.id;
     const modelName = displayedChat.model_name;
+    const contextTokens = displayedChat.context_tokens;
     setChatOperationError(null);
     markChanging(chatId, true);
     try {
@@ -725,24 +731,46 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return false;
     }
+    const runs = provider === null ? modelName : model;
+    const problems: string[] = [];
     try {
       const offer = offerFor(provider);
-      if (offer) await settleEffort(effortsFor(offer, provider === null ? modelName : model));
+      if (offer) await settleEffort(effortsFor(offer, runs));
     } catch (error) {
-      reportForChat(chatId, failure(PROVIDER_EFFORT_RESET_FAILED, error));
+      problems.push(failure(PROVIDER_EFFORT_RESET_FAILED, error));
+    }
+    try {
+      await fitContext(provider ?? chatDefaultProvider, contextTokens, runs ?? AUTO_MODEL);
+    } catch (error) {
+      problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
-      await Promise.all([
-        refreshChats(),
-        latestSelectedChatId.current === chatId ? refreshChat() : undefined,
-      ]);
-      markChanging(chatId, false);
+      reportAll(chatId, problems);
+      try {
+        await Promise.all([
+          refreshChats(),
+          latestSelectedChatId.current === chatId ? refreshChat() : undefined,
+        ]);
+      } finally {
+        markChanging(chatId, false);
+      }
     }
     return true;
+  };
+
+  const fitContext = async (
+    provider: AiProvider | null,
+    tokens: number | null | undefined,
+    model: string
+  ) => {
+    if (!offersContextOn(provider, chatDefaultProvider, models, model)) return;
+    const native = findInstalledModel(models, model)?.details?.context_length;
+    if (tokens && native && tokens > native) await setContextTokensFn(native);
   };
 
   const handleProviderModel = async (name: string) => {
     if (!isAuthenticated || !displayedChat || !chatProviders) return;
     const chatId = displayedChat.id;
+    const contextTokens = displayedChat.context_tokens;
     setChatOperationError(null);
     markChanging(chatId, true);
     try {
@@ -752,11 +780,18 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return;
     }
+    const problems: string[] = [];
     try {
       await settleEffort(effortsFor(chatProviders.default, name));
     } catch (error) {
-      reportForChat(chatId, failure(MODEL_EFFORT_RESET_FAILED, error));
+      problems.push(failure(MODEL_EFFORT_RESET_FAILED, error));
+    }
+    try {
+      await fitContext(chatDefaultProvider, contextTokens, name);
+    } catch (error) {
+      problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
+      reportAll(chatId, problems);
       try {
         await Promise.all([
           refreshChats(),
