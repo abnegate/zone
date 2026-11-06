@@ -127,6 +127,8 @@ const USER_CODE: &str = "ABCD-EFGHI";
 const MISSING_CODEX: &str = "/nonexistent/zone/codex";
 const CREDENTIALS: &str = "auth.json";
 const STAGING: &str = ".login";
+/// How abnegate-agent-cli names each attempt's directory under [`STAGING`].
+const ATTEMPT_PREFIX: &str = "attempt-";
 const SAVED_LOGIN: &str = "{\"auth_mode\":\"chatgpt\",\"OPENAI_API_KEY\":null,\"tokens\":{\"id_token\":\"fixture\",\"access_token\":\"fixture\",\"refresh_token\":\"fixture\",\"account_id\":\"00000000-0000-4000-8000-000000000000\"},\"last_refresh\":\"2026-09-23T07:27:26.827371Z\"}\n";
 const FIXTURE_ACCOUNT: &str = "00000000-0000-4000-8000-000000000000";
 const OTHER_ACCOUNT: &str = "00000000-0000-4000-8000-000000000001";
@@ -3199,7 +3201,10 @@ async fn a_codex_sign_in_zone_cannot_prepare_names_no_server_path() {
     let stage = Stage::codex(&codex.executable).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
-    let leftover = stage.home(organization).join(STAGING).join("leftover");
+    let leftover = stage
+        .home(organization)
+        .join(STAGING)
+        .join(format!("{ATTEMPT_PREFIX}leftover"));
     fs::create_dir_all(&leftover).expect("a directory an earlier attempt left");
     fs::write(leftover.join("file"), b"").expect("a file an earlier attempt left");
     fs::set_permissions(&leftover, fs::Permissions::from_mode(0o500)).expect("the leftover locked");
@@ -3220,6 +3225,10 @@ async fn a_codex_sign_in_zone_cannot_prepare_names_no_server_path() {
         "the server's own failure was kept to show to members"
     );
     assert_eq!(codex.starts(), 0);
+    assert!(
+        leftover.join("file").exists(),
+        "the leftover the sweep could not clear lost its file"
+    );
 }
 
 #[tokio::test]

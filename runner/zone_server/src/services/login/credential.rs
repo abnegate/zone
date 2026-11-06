@@ -204,6 +204,7 @@ mod tests {
     use std::str::FromStr;
     use std::time::Duration;
 
+    use abnegate_agent_cli::login::codex::CREDENTIALS;
     use futures::future::{join_all, try_join_all};
     use serde_json::json;
     use sqlx::PgPool;
@@ -216,7 +217,6 @@ mod tests {
     use crate::config::{AgentConfig, Config};
     use crate::db::agent_logins::Insert;
     use crate::services::chat::session::Settings;
-    use crate::services::login::codex::CREDENTIALS;
 
     const TOKEN_PATH: &str = "/v1/oauth/token";
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";
