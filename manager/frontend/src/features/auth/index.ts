@@ -1,10 +1,9 @@
-// Context & Hooks
-
-// Components
-export { ResendVerificationButton, VerificationPendingBanner } from './components';
+export {
+  ResendVerificationButton,
+  SessionsSection,
+  VerificationPendingBanner,
+} from './components';
 export { AuthProvider, useAuth } from './context';
-
-// Pages
 export {
   EmailVerificationPage,
   ForgotPasswordPage,
@@ -12,9 +11,7 @@ export {
   LoginPage,
   RegisterPage,
   ResetPasswordPage,
-  SessionsPage,
 } from './pages';
-// Schemas
 export {
   AuthResponseSchema,
   ForgotPasswordResponseSchema,
@@ -36,7 +33,6 @@ export {
   VerifyEmailResponseSchema,
   WorkspaceRoleSchema,
 } from './schemas';
-// Types
 export type {
   AuthResponse,
   ForgotPasswordRequest,

@@ -21,6 +21,10 @@ pub struct PullRequestResponse {
     pub writable: bool,
     /// Whether one of the workspace's sources holds a credential for it.
     pub credentialed: bool,
+    /// Whether a failing or conflicted state starts a run that fixes it.
+    pub auto_fix: bool,
+    /// Whether a run auto-fix started is still working.
+    pub auto_fixing: bool,
 }
 
 impl PullRequestResponse {
@@ -43,6 +47,8 @@ impl PullRequestResponse {
                 .or(row.title),
             dismissed: row.dismissed_at.is_some(),
             created_at: row.created_at,
+            auto_fix: row.auto_fix,
+            auto_fixing: row.auto_fixing,
             status,
             writable,
             credentialed,

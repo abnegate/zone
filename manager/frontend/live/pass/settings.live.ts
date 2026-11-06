@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import {
   api,
+  chooseOption,
   enabled,
   expect,
   logLines,
@@ -33,6 +34,14 @@ const REASON = process.env.ZONE_LIVE_AGENT_MODEL ?? 'qwen3.8:27b';
 const EMBED = process.env.OLLAMA_MODEL_EMBED ?? 'qwen3-embedding:0.6b';
 const VIDEO = 'wan2.2_ti2v_5B_fp16.safetensors';
 const AUDIO = 'ace_step_v1_3.5b.safetensors';
+const SELF_HOSTED = 'self_hosted';
+const AUTOMATIC = 'Automatic';
+const ORGANIZATION_AI = '/settings/organization/ai';
+const ORGANIZATION_MEMBERS = '/settings/organization/members';
+const ORGANIZATION_BILLING = '/settings/organization/billing';
+const ORGANIZATION_AUDIT = '/settings/organization/audit';
+const WORKSPACE_GENERAL = '/settings/workspace/general';
+const WORKSPACE_AI = '/settings/workspace/ai';
 
 async function loadedModels(): Promise<string[]> {
   const response = await fetch(`${ollama}/api/ps`);
@@ -93,8 +102,7 @@ test.describe('organization and workspace settings', () => {
     page,
   }) => {
     await signIn(page);
-    await page.goto('/org-settings');
-    await page.getByRole('tab', { name: 'Members' }).click();
+    await page.goto(ORGANIZATION_MEMBERS);
     const table = page.locator('table.members-table');
     await expect(table).toBeVisible({ timeout: 30_000 });
     const memberRows = await table.locator('tbody tr').count();
@@ -103,20 +111,20 @@ test.describe('organization and workspace settings', () => {
     // is the one that offers a role select.
     const row = table
       .locator('tbody tr')
-      .filter({ has: page.locator('select.role-select') })
+      .filter({ has: page.locator('.role-select') })
       .first();
     await expect(
       row,
       `a row for the second tenant among ${memberRows}: ${tableText.slice(0, 200)}`,
     ).toBeVisible();
-    const select = row.locator('select.role-select');
+    const select = row.locator('.role-select');
     await shot(page, '08-members-before');
-    await select.selectOption('admin');
+    await chooseOption(select, 'admin');
     const dialog = page.getByRole('dialog');
     await expect(dialog).toContainText('Confirm Role Change');
     await dialog.getByRole('button', { name: 'Confirm' }).click();
     const saved = await successAlert(page, /Role updated successfully/);
-    await expect(row.locator('select.role-select')).toHaveValue('admin', {
+    await expect(row.locator('.role-select')).toHaveText('Admin', {
       timeout: 30_000,
     });
     await shot(page, '08-role-changed');
@@ -124,7 +132,7 @@ test.describe('organization and workspace settings', () => {
       `select role from organization_members where organization_id = '${state.owner.organization.id}' and user_id = '${state.intruder.user.id}'`,
     ).join(',');
 
-    await page.getByRole('tab', { name: 'Audit Logs' }).click();
+    await page.goto(ORGANIZATION_AUDIT);
     await page.waitForTimeout(2_000);
     const auditText = await page.locator('main, .page').first().innerText();
     const auditRows = await page
@@ -134,13 +142,15 @@ test.describe('organization and workspace settings', () => {
     const auditDb = sql(`select count(*) from audit_logs`).join(',');
 
     // Put the role back so the tenancy rows keep their meaning.
-    await page.getByRole('tab', { name: 'Members' }).click();
-    await table
-      .locator('tbody tr')
-      .filter({ has: page.locator('select.role-select') })
-      .first()
-      .locator('select.role-select')
-      .selectOption('member');
+    await page.goto(ORGANIZATION_MEMBERS);
+    await chooseOption(
+      table
+        .locator('tbody tr')
+        .filter({ has: page.locator('.role-select') })
+        .first()
+        .locator('.role-select'),
+      'member',
+    );
     await successAlert(page, /Role updated successfully/);
 
     const auditShowsChange = auditRows > 0 && /role|member/i.test(auditText);
@@ -165,19 +175,19 @@ test.describe('organization and workspace settings', () => {
     page,
   }) => {
     await signIn(page);
-    await page.goto('/org-settings');
+    await page.goto(ORGANIZATION_AI);
     await expect(page.locator('#ai-provider')).toBeVisible({ timeout: 30_000 });
-    await page.locator('#ai-provider').selectOption('self_hosted');
-    await page.locator('#model-fast').selectOption(FAST);
-    await page.locator('#model-reasoning').selectOption(REASON);
+    await chooseOption(page.locator('#ai-provider'), SELF_HOSTED);
+    await chooseOption(page.locator('#model-fast'), FAST);
+    await chooseOption(page.locator('#model-reasoning'), REASON);
     const embedding = page.locator('#model-embedding');
-    if ((await embedding.evaluate((el) => el.tagName)) === 'SELECT') {
-      await embedding.selectOption(EMBED);
-    } else {
+    if ((await embedding.evaluate((el) => el.tagName)) === 'INPUT') {
       await embedding.fill(EMBED);
+    } else {
+      await chooseOption(embedding, EMBED);
     }
-    await page.locator('#model-video').selectOption(VIDEO);
-    await page.locator('#model-audio').selectOption(AUDIO);
+    await chooseOption(page.locator('#model-video'), VIDEO);
+    await chooseOption(page.locator('#model-audio'), AUDIO);
     await shot(page, '09-ai-settings-filled');
     await page.getByRole('button', { name: 'Save Changes' }).click();
     const saved = await successAlert(page, /Settings saved successfully/);
@@ -190,7 +200,7 @@ test.describe('organization and workspace settings', () => {
     await unload(FAST);
     await unload(REASON);
     const mark = logMark();
-    const chatId = await newChat(page, { model: 'Automatic' });
+    const chatId = await newChat(page, { model: AUTOMATIC });
     await send(page, 'Say hello in five words.');
     await settled(page, 1, 300_000);
     const afterFast = await loadedModels();
@@ -208,15 +218,15 @@ test.describe('organization and workspace settings', () => {
     ).slice(0, 3);
 
     // Row 10: the provider forms for OpenAI and Anthropic, and the LiteLLM section.
-    await page.goto('/org-settings');
+    await page.goto(ORGANIZATION_AI);
     await expect(page.locator('#ai-provider')).toBeVisible({ timeout: 30_000 });
-    await page.locator('#ai-provider').selectOption('openai');
+    await chooseOption(page.locator('#ai-provider'), 'openai');
     await expect(page.locator('#openai-key')).toBeVisible();
     await shot(page, '10-provider-openai-form');
-    await page.locator('#ai-provider').selectOption('anthropic');
+    await chooseOption(page.locator('#ai-provider'), 'anthropic');
     await expect(page.locator('#anthropic-key')).toBeVisible();
     await shot(page, '10-provider-anthropic-form');
-    await page.locator('#ai-provider').selectOption('self_hosted');
+    await chooseOption(page.locator('#ai-provider'), SELF_HOSTED);
     await page
       .locator('#litellm-host')
       .fill(process.env.LITELLM_HOST ?? 'http://127.0.0.1:11434/v1');
@@ -236,7 +246,7 @@ test.describe('organization and workspace settings', () => {
     await shot(page, '09-reset-alert');
     await page.reload();
     await expect(page.locator('#ai-provider')).toBeVisible({ timeout: 30_000 });
-    const fastAfterReset = await page.locator('#model-fast').inputValue();
+    const fastAfterReset = (await page.locator('#model-fast').innerText()).trim();
     const rowsAfterReset = sql(
       `select count(*) from organization_ai_settings where organization_id = '${state.owner.organization.id}'`,
     ).join(',');
@@ -246,7 +256,9 @@ test.describe('organization and workspace settings', () => {
     const reasonUsed = afterReason.includes(REASON);
     record(9, {
       result:
-        fastUsed && reasonUsed && fastAfterReset === '' ? 'WORKS' : 'FAILS',
+        fastUsed && reasonUsed && fastAfterReset === AUTOMATIC
+          ? 'WORKS'
+          : 'FAILS',
       saved_alert: saved,
       db_row_after_save: dbRow,
       chat_id: chatId,
@@ -285,15 +297,14 @@ test.describe('organization and workspace settings', () => {
       reasonUsed,
       `the step-by-step turn loaded ${REASON}: ${afterReason.join(',')}`,
     ).toBe(true);
-    expect(fastAfterReset).toBe('');
+    expect(fastAfterReset).toBe(AUTOMATIC);
   });
 
   test('11: the billing page shows something true about the organization', async ({
     page,
   }) => {
     await signIn(page);
-    await page.goto('/org-settings');
-    await page.getByRole('tab', { name: 'Billing' }).click();
+    await page.goto(ORGANIZATION_BILLING);
     await page.waitForTimeout(3_000);
     const panel = page.locator('main, .page').first();
     const text = await panel.innerText();
@@ -339,8 +350,7 @@ test.describe('organization and workspace settings', () => {
     page,
   }) => {
     await signIn(page);
-    await page.goto('/settings');
-    await page.getByRole('tab', { name: 'Theme' }).click();
+    await page.goto(WORKSPACE_GENERAL);
     await expect(page.locator('#primary-light')).toBeVisible({
       timeout: 30_000,
     });
@@ -357,7 +367,7 @@ test.describe('organization and workspace settings', () => {
       await wrapper.locator('.color-text-input').fill(value);
       await wrapper.locator('.color-text-input').dispatchEvent('change');
     }
-    await page.locator('#font-family').selectOption('roboto');
+    await chooseOption(page.locator('#font-family'), 'roboto');
     await page.locator('#font-size').fill('18');
     await page.getByLabel('Large').check();
     await page.waitForTimeout(500);
@@ -368,7 +378,7 @@ test.describe('organization and workspace settings', () => {
       .evaluate((el) => getComputedStyle(el).backgroundColor);
     await shot(page, '12-theme-form-and-preview');
     await page
-      .getByRole('tabpanel', { name: 'Theme' })
+      .getByRole('region', { name: 'General', exact: true })
       .getByRole('button', { name: 'Save Changes' })
       .click();
     const saved = await successAlert(page, /Settings saved successfully/);
@@ -392,10 +402,9 @@ test.describe('organization and workspace settings', () => {
       await shot(page, `12-theme-on-${path.slice(1)}`);
     }
 
-    await page.goto('/settings');
-    await page.getByRole('tab', { name: 'Theme' }).click();
+    await page.goto(WORKSPACE_GENERAL);
     await page
-      .getByRole('tabpanel', { name: 'Theme' })
+      .getByRole('region', { name: 'General', exact: true })
       .getByRole('button', { name: 'Reset to Defaults' })
       .click();
     const reset = await anyAlert(page);
@@ -441,20 +450,38 @@ test.describe('organization and workspace settings', () => {
   }) => {
     const token = await ownerToken();
     await signIn(page);
-    await page.goto('/settings');
-    await page.getByRole('tab', { name: 'AI Settings' }).click();
-    const panel = page.getByRole('tabpanel', { name: 'AI Settings' });
-    const override = page.getByLabel('Override organization AI settings');
-    await override.check();
-    await page.locator('#ai-provider').selectOption('self_hosted');
+    await page.goto(WORKSPACE_AI);
+    const provider = page.getByRole('group', {
+      name: 'Provider',
+      exact: true,
+    });
+    await provider
+      .getByRole('button', { name: /^(Override|Edit) Provider$/ })
+      .click();
+    await chooseOption(page.locator('#ai-provider'), SELF_HOSTED);
     await page
       .locator('#litellm-host')
       .fill(process.env.LITELLM_HOST ?? 'http://127.0.0.1:11434/v1');
     await page.locator('#litellm-key').fill('live-verify');
-    await page.locator('#model-fast').selectOption(FAST);
     await shot(page, '13-workspace-ai-override-form');
-    await panel.getByRole('button', { name: 'Save Changes' }).click();
-    const saved = await successAlert(page, /Settings saved successfully/);
+    await provider.getByRole('button', { name: 'Save Provider' }).click();
+    const providerSaved = await successAlert(page, /Provider saved/);
+    const fast = page.getByRole('group', {
+      name: 'Fast Model',
+      exact: true,
+    });
+    await fast
+      .getByRole('button', { name: /^(Override|Edit) Fast Model$/ })
+      .click();
+    const fastEditor = page.locator('#override-fast');
+    if ((await fastEditor.evaluate((el) => el.tagName)) === 'INPUT') {
+      await fastEditor.fill(FAST);
+    } else {
+      await chooseOption(fastEditor, FAST);
+    }
+    await fast.getByRole('button', { name: 'Save Fast Model' }).click();
+    const fastSaved = await successAlert(page, /Fast Model saved/);
+    const saved = `${providerSaved}; ${fastSaved}`;
     const dbRow = sql(
       `select provider, model_fast, litellm_host, litellm_key is not null from workspace_ai_settings where workspace_id = '${state.owner.workspace.id}'`,
     ).join(' | ');
@@ -470,20 +497,26 @@ test.describe('organization and workspace settings', () => {
     );
 
     await unload(FAST);
-    const chatId = await newChat(page, { model: 'Automatic' });
+    const chatId = await newChat(page, { model: AUTOMATIC });
     await send(page, 'Say hello in five words.');
     await settled(page, 1, 300_000);
     const loaded = await loadedModels();
     await shot(page, '13-workspace-chat-uses-override');
 
-    await page.goto('/settings');
-    await page.getByRole('tab', { name: 'AI Settings' }).click();
+    await page.goto(WORKSPACE_AI);
     await page
-      .getByRole('tabpanel', { name: 'AI Settings' })
-      .getByRole('button', { name: 'Reset to Defaults' })
+      .getByRole('group', { name: 'Provider', exact: true })
+      .getByRole('button', { name: 'Reset Provider' })
       .click();
     const reset = await anyAlert(page);
     await shot(page, '13-reset-alert');
+    const resetAll = page.getByRole('button', {
+      name: 'Reset all AI settings to the organization',
+    });
+    if (await resetAll.isVisible()) {
+      await resetAll.click();
+      await successAlert(page, /AI settings follow the organization/);
+    }
     const rowsAfter = sql(
       `select count(*) from workspace_ai_settings where workspace_id = '${state.owner.workspace.id}'`,
     ).join(',');

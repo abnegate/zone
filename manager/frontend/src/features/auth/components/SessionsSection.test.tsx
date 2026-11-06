@@ -14,7 +14,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { client } from '../../../api/client';
 import type { SessionsResponse } from '../types';
-import type SessionsPageType from './SessionsPage';
+import type SessionsSectionType from './SessionsSection';
 
 const mockGetSessions = mock();
 const mockRevokeSession = mock();
@@ -33,13 +33,13 @@ mock.module('sonner', () => ({
   },
 }));
 
-let SessionsPage: typeof SessionsPageType;
+let SessionsSection: typeof SessionsSectionType;
 
 beforeAll(async () => {
   client.getSessions = mockGetSessions as typeof client.getSessions;
   client.revokeSession = mockRevokeSession as typeof client.revokeSession;
   client.revokeAllSessions = mockRevokeAllSessions as typeof client.revokeAllSessions;
-  SessionsPage = (await import('./SessionsPage')).default;
+  SessionsSection = (await import('./SessionsSection')).default;
 });
 
 afterAll(() => {
@@ -57,11 +57,11 @@ const createQueryClient = () =>
     },
   });
 
-const renderSessionsPage = () => {
+const renderSessionsSection = () => {
   const queryClient = createQueryClient();
   return render(
     <QueryClientProvider client={queryClient}>
-      <SessionsPage />
+      <SessionsSection />
     </QueryClientProvider>
   );
 };
@@ -109,7 +109,6 @@ const mockSessionsResponse: SessionsResponse = {
   ],
 };
 
-// Extract the helper functions using a test-only approach
 const parseUserAgent = (userAgent: string | null): string => {
   if (!userAgent) return 'Unknown Device';
   if (typeof userAgent !== 'string' || userAgent.trim() === '') {
@@ -157,7 +156,7 @@ const formatRelativeTime = (timestamp: string): string => {
   return time.toLocaleDateString();
 };
 
-describe('SessionsPage', () => {
+describe('SessionsSection', () => {
   beforeEach(() => {
     mockGetSessions.mockReset();
     mockRevokeSession.mockReset();
@@ -167,7 +166,6 @@ describe('SessionsPage', () => {
     mockGetSessions.mockResolvedValue(mockSessionsResponse);
   });
 
-  // Helper to find and click a non-disabled revoke button
   const clickFirstRevokeButton = () => {
     const allButtons = screen.getAllByRole('button');
     const revokeButton = allButtons.find(
@@ -180,12 +178,12 @@ describe('SessionsPage', () => {
   describe('Loading State', () => {
     it('shows loading state initially', () => {
       mockGetSessions.mockImplementation(() => new Promise(() => {}));
-      renderSessionsPage();
+      renderSessionsSection();
       expect(screen.getByText(/loading/i)).toBeInTheDocument();
     });
 
     it('hides loading state after data loads', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.queryByText(/loading/i)).not.toBeInTheDocument();
       });
@@ -195,7 +193,7 @@ describe('SessionsPage', () => {
   describe('Error Handling', () => {
     it('shows error message when loading fails', async () => {
       mockGetSessions.mockRejectedValueOnce(new Error('Failed to load sessions'));
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.getByText(/failed to load sessions/i)).toBeInTheDocument();
       });
@@ -203,7 +201,7 @@ describe('SessionsPage', () => {
 
     it('shows error message when revoke fails', async () => {
       mockRevokeSession.mockRejectedValueOnce(new Error('Failed to revoke'));
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -211,7 +209,6 @@ describe('SessionsPage', () => {
 
       clickFirstRevokeButton();
 
-      // Confirm in modal
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument();
       });
@@ -224,23 +221,25 @@ describe('SessionsPage', () => {
     });
   });
 
-  describe('Page Structure', () => {
-    it('renders page header', async () => {
-      renderSessionsPage();
+  describe('Section Structure', () => {
+    it('renders section header', async () => {
+      renderSessionsSection();
       await waitFor(() => {
-        expect(screen.getByRole('heading', { name: /active sessions/i })).toBeInTheDocument();
+        expect(
+          screen.getByRole('heading', { level: 2, name: /active sessions/i })
+        ).toBeInTheDocument();
       });
     });
 
     it('renders session table', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.getByRole('table')).toBeInTheDocument();
       });
     });
 
     it('renders table headers', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.getByText(/device \/ browser/i)).toBeInTheDocument();
         expect(screen.getByText(/^location$/i)).toBeInTheDocument();
@@ -250,7 +249,7 @@ describe('SessionsPage', () => {
     });
 
     it('renders revoke all button', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(
           screen.getByRole('button', { name: /revoke all other sessions/i })
@@ -261,7 +260,7 @@ describe('SessionsPage', () => {
 
   describe('Session List', () => {
     it('displays all sessions', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.getByText(/chrome on windows/i)).toBeInTheDocument();
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -269,14 +268,14 @@ describe('SessionsPage', () => {
     });
 
     it('shows current session badge', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.getByText(/^current$/i)).toBeInTheDocument();
       });
     });
 
     it('displays IP addresses', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.getByText('192.168.1.1')).toBeInTheDocument();
         expect(screen.getByText('192.168.1.2')).toBeInTheDocument();
@@ -284,7 +283,7 @@ describe('SessionsPage', () => {
     });
 
     it('displays locations when available', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.getByText(/new york, us/i)).toBeInTheDocument();
         expect(screen.getByText(/san francisco, us/i)).toBeInTheDocument();
@@ -292,18 +291,16 @@ describe('SessionsPage', () => {
     });
 
     it('shows placeholder for missing data', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         const rows = screen.getAllByRole('row');
-        // Last row should have unknown/unavailable placeholders
         expect(rows.length).toBeGreaterThan(1);
       });
     });
 
     it('shows relative timestamps', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
-        // Should show "X ago" format
         const table = screen.getByRole('table');
         expect(table).toBeInTheDocument();
       });
@@ -322,7 +319,7 @@ describe('SessionsPage', () => {
 
     it('shows fifty rows at a time and pages through the rest', async () => {
       mockGetSessions.mockResolvedValueOnce(manySessions(120, 5));
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getAllByRole('row')).toHaveLength(51);
@@ -342,7 +339,7 @@ describe('SessionsPage', () => {
 
     it('puts the current session on the first row with its badge and no revoke', async () => {
       mockGetSessions.mockResolvedValueOnce(manySessions(120, 77));
-      renderSessionsPage();
+      renderSessionsSection();
 
       const rows = await waitFor(() => {
         const found = screen.getAllByRole('row');
@@ -359,7 +356,7 @@ describe('SessionsPage', () => {
     });
 
     it('shows no pager when every session fits on one page', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.getAllByRole('row')).toHaveLength(4);
       });
@@ -370,7 +367,7 @@ describe('SessionsPage', () => {
   describe('Empty State', () => {
     it('shows empty state when no sessions exist', async () => {
       mockGetSessions.mockResolvedValueOnce({ sessions: [] });
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.getByText(/no active sessions/i)).toBeInTheDocument();
       });
@@ -379,9 +376,8 @@ describe('SessionsPage', () => {
 
   describe('Revoke Single Session', () => {
     it('shows revoke button for non-current sessions', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
-        // Find revoke buttons that are not disabled (non-current sessions)
         const allButtons = screen.getAllByRole('button');
         const revokeButtons = allButtons.filter(
           (btn) => btn.textContent === 'Revoke' && !(btn as HTMLButtonElement).disabled
@@ -391,7 +387,7 @@ describe('SessionsPage', () => {
     });
 
     it('disables revoke button for current session', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         const currentSessionRow = screen.getByText(/^current$/i).closest('tr');
         const revokeButton = currentSessionRow?.querySelector('button');
@@ -400,7 +396,7 @@ describe('SessionsPage', () => {
     });
 
     it('shows confirmation modal before revoking', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
       });
@@ -408,7 +404,6 @@ describe('SessionsPage', () => {
       clickFirstRevokeButton();
 
       await waitFor(() => {
-        // Modal should show confirm and cancel buttons
         expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
       });
@@ -416,7 +411,7 @@ describe('SessionsPage', () => {
 
     it('revokes session on confirmation', async () => {
       mockRevokeSession.mockResolvedValueOnce();
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -436,7 +431,7 @@ describe('SessionsPage', () => {
     });
 
     it('does not revoke session on cancel', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -455,7 +450,7 @@ describe('SessionsPage', () => {
 
     it('refreshes sessions after successful revoke', async () => {
       mockRevokeSession.mockResolvedValueOnce();
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -478,7 +473,7 @@ describe('SessionsPage', () => {
 
     it('shows success message after revoking session', async () => {
       mockRevokeSession.mockResolvedValueOnce();
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -500,7 +495,7 @@ describe('SessionsPage', () => {
 
   describe('Revoke All Sessions', () => {
     it('shows confirmation modal before revoking all', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         expect(
           screen.getByRole('button', { name: /revoke all other sessions/i })
@@ -510,15 +505,14 @@ describe('SessionsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: /revoke all other sessions/i }));
 
       await waitFor(() => {
-        // Check for modal title which should appear as heading
         const headings = screen.getAllByText(/revoke all other sessions/i);
-        expect(headings.length).toBeGreaterThan(1); // Button + Modal Title
+        expect(headings.length).toBeGreaterThan(1);
       });
     });
 
     it('revokes all sessions on confirmation', async () => {
       mockRevokeAllSessions.mockResolvedValueOnce();
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(
@@ -540,7 +534,7 @@ describe('SessionsPage', () => {
     });
 
     it('does not revoke all sessions on cancel', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(
@@ -561,7 +555,7 @@ describe('SessionsPage', () => {
 
     it('refreshes sessions after successful revoke all', async () => {
       mockRevokeAllSessions.mockResolvedValueOnce();
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(
@@ -586,7 +580,7 @@ describe('SessionsPage', () => {
 
     it('shows success message after revoking all sessions', async () => {
       mockRevokeAllSessions.mockResolvedValueOnce();
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(
@@ -611,7 +605,7 @@ describe('SessionsPage', () => {
       mockGetSessions.mockResolvedValueOnce({
         sessions: [mockSessionsResponse.sessions[0]],
       });
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         const button = screen.getByRole('button', { name: /revoke all other sessions/i });
@@ -621,12 +615,6 @@ describe('SessionsPage', () => {
   });
 
   describe('Button States', () => {
-    // TODO: Fix timing issue with async mock resolution in happy-dom
-    /// The guard against firing a revoke twice lives on the open dialog, not on
-    /// the table: while the request is in flight the dialog stays up with both
-    /// buttons disabled. The table's own buttons cannot be asserted here at all
-    /// -- Radix marks the rest of the document `aria-hidden` while a modal is
-    /// open, so they are not in the accessibility tree.
     it('disables the confirmation while the revoke is in flight', async () => {
       let resolveRevoke: (() => void) | undefined;
       mockRevokeSession.mockReturnValueOnce(
@@ -635,7 +623,7 @@ describe('SessionsPage', () => {
         })
       );
 
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -659,7 +647,6 @@ describe('SessionsPage', () => {
       expect(button('Cancel')).toBeDisabled();
       expect(mockRevokeSession).toHaveBeenCalledTimes(1);
 
-      // A second click while in flight must not start another revoke.
       fireEvent.click(button('Confirm'));
       expect(mockRevokeSession).toHaveBeenCalledTimes(1);
 
@@ -793,7 +780,6 @@ describe('SessionsPage', () => {
     it('returns localized date for timestamps older than 7 days', () => {
       const eightDaysAgo = new Date('2024-01-07T12:00:00Z').toISOString();
       const result = formatRelativeTime(eightDaysAgo);
-      // Different formats based on locale - be flexible
       expect(result).toMatch(/1\/7\/2024|1\/8\/2024|2024-01-0[78]/);
     });
   });
@@ -807,15 +793,12 @@ describe('SessionsPage', () => {
         })
       );
 
-      const { unmount } = renderSessionsPage();
+      const { unmount } = renderSessionsSection();
 
-      // Unmount before the promise resolves
       unmount();
 
-      // Resolve the promise after unmount
       resolveGetSessions!(mockSessionsResponse);
 
-      // No errors should occur
       await waitFor(() => {
         expect(mockGetSessions).toHaveBeenCalled();
       });
@@ -829,7 +812,7 @@ describe('SessionsPage', () => {
         })
       );
 
-      const { unmount } = renderSessionsPage();
+      const { unmount } = renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -843,13 +826,10 @@ describe('SessionsPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
-      // Unmount before revocation completes
       unmount();
 
-      // Resolve the promise after unmount
       resolveRevoke!();
 
-      // No errors should occur
       await waitFor(() => {
         expect(mockRevokeSession).toHaveBeenCalled();
       });
@@ -857,7 +837,7 @@ describe('SessionsPage', () => {
 
     it('clears success timeout on unmount', async () => {
       mockRevokeSession.mockResolvedValueOnce();
-      const { unmount } = renderSessionsPage();
+      const { unmount } = renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -875,16 +855,13 @@ describe('SessionsPage', () => {
         expect(mockToastSuccess).toHaveBeenCalledWith('Session revoked successfully');
       });
 
-      // Unmount should clear the timeout
       unmount();
-
-      // No errors should occur
     });
   });
 
   describe('Accessibility Attributes', () => {
     it('has aria-label on sessions table', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
       await waitFor(() => {
         const table = screen.getByRole('table');
         expect(table).toHaveAttribute('aria-label', 'Active sessions');
@@ -893,7 +870,7 @@ describe('SessionsPage', () => {
 
     it('has role=alert and aria-live=assertive on error messages', async () => {
       mockGetSessions.mockRejectedValueOnce(new Error('Test error'));
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         const errorAlert = screen.getByRole('alert');
@@ -904,7 +881,7 @@ describe('SessionsPage', () => {
 
     it('calls success toast after revoking session', async () => {
       mockRevokeSession.mockResolvedValueOnce();
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -924,13 +901,12 @@ describe('SessionsPage', () => {
     });
 
     it('has descriptive aria-label on revoke buttons', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
       });
 
-      // Find buttons with descriptive aria-labels (non-current sessions)
       const allButtons = screen.getAllByRole('button');
       const revokeButtons = allButtons.filter((btn) =>
         btn.getAttribute('aria-label')?.includes('Revoke session from')
@@ -939,7 +915,7 @@ describe('SessionsPage', () => {
     });
 
     it('has aria-label indicating current session cannot be revoked', async () => {
-      renderSessionsPage();
+      renderSessionsSection();
 
       await waitFor(() => {
         const currentSessionButton = screen.getByRole('button', {

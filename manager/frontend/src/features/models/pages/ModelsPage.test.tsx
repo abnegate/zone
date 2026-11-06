@@ -3,15 +3,14 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import { chooseSelect, openSelect } from '../../../test/select';
+import type { OrgRole } from '../../../types';
 import { MODEL_ACCESS_NOTICE } from '../components/ModelAccessNotice';
 
-// Create mock functions
 const mockUseModels = mock();
 const mockUseBrowse = mock();
 const mockUsePull = mock();
 const mockGetModelInfo = mock();
 
-// Mock the hooks
 mock.module('../hooks/useModels', () => ({
   useModels: mockUseModels,
 }));
@@ -91,7 +90,6 @@ mock.module('../../../api/models', () => ({
   },
 }));
 
-// Mock VirtualBrowseList - pass the full model object to callbacks
 mock.module('../components/VirtualBrowseList', () => ({
   default: function MockVirtualBrowseList({
     models,
@@ -127,7 +125,6 @@ mock.module('../components/VirtualBrowseList', () => ({
   },
 }));
 
-// Mock auth context
 mock.module('../../../features/auth/context', () => ({
   useAuth: () => ({
     isAuthenticated: true,
@@ -143,11 +140,12 @@ mock.module('../../../features/auth/context', () => ({
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-// Mock workspace context
+let currentOrganization: { id: string; name: string; role?: OrgRole } | null;
+
 mock.module('../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: () => ({
     currentWorkspace: { id: 'test-ws', name: 'Test Workspace' },
-    currentOrganization: { id: 'test-org', name: 'Test Org' },
+    currentOrganization,
     workspaces: [],
     organizations: [],
     loading: false,
@@ -256,6 +254,7 @@ describe('ModelsPage', () => {
     localStorage.setItem('user', JSON.stringify({ id: '1', email: 'test@test.com' }));
     localStorage.setItem('roles', JSON.stringify(['user']));
     localStorage.setItem('permissions', JSON.stringify(['models:read', 'models:delete']));
+    currentOrganization = { id: 'test-org', name: 'Test Org' };
     mockUseModels.mockReturnValue(defaultModelsHook);
     mockUseBrowse.mockReturnValue(defaultBrowseHook);
     mockUsePull.mockReturnValue(defaultPullHook);
@@ -461,12 +460,22 @@ describe('ModelsPage', () => {
       expect(screen.getByText('No models installed')).toBeInTheDocument();
     });
 
-    it('sends the empty state to the settings features tab', () => {
+    it('sends the empty state to the server features section', () => {
       mockUseModels.mockReturnValue({ ...defaultModelsHook, models: [] });
       renderModelsPage();
       fireEvent.click(screen.getByRole('button', { name: 'Install features' }));
-      expect(window.location.pathname).toBe('/settings');
-      expect(window.location.search).toBe('?tab=features');
+      expect(window.location.pathname).toBe('/settings/server/features');
+      expect(window.location.search).toBe('');
+    });
+
+    it('offers the features section to an organization member who can open this page', () => {
+      currentOrganization = { id: 'test-org', name: 'Test Org', role: 'member' };
+      mockUseModels.mockReturnValue({ ...defaultModelsHook, models: [] });
+      renderModelsPage();
+      expect(
+        screen.getByText('Pick the product features in Settings, or browse the catalog.')
+      ).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Install features' })).toBeInTheDocument();
     });
 
     it('displays installed models', () => {
@@ -1587,7 +1596,6 @@ describe('ModelsPage', () => {
 
       fireEvent.click(screen.getByText('Details'));
 
-      // Should still show the model details without the model card
       await waitFor(() => {
         expect(screen.getAllByText('hf/model1').length).toBeGreaterThan(0);
       });
@@ -1605,21 +1613,18 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      // Open model details
       fireEvent.click(screen.getByText('llama2'));
 
       await waitFor(() => {
         expect(screen.getByText('Size')).toBeInTheDocument();
       });
 
-      // Trigger delete from details modal
       fireEvent.click(screen.getByRole('button', { name: 'Delete Model' }));
 
       await waitFor(() => {
         expect(screen.getByText('Delete Model')).toBeInTheDocument();
       });
 
-      // Confirm delete
       fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 
       await waitFor(() => {
@@ -1663,7 +1668,6 @@ describe('ModelsPage', () => {
         expect(screen.getByText('Delete Model')).toBeInTheDocument();
       });
 
-      // Press Escape to close modal
       fireEvent.keyDown(document, { key: 'Escape' });
 
       await waitFor(() => {

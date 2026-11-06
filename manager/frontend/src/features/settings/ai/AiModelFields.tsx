@@ -2,8 +2,8 @@ import { Select } from '@zone/ui';
 import type { AiProvider } from '../workspace/types';
 import {
   AUDIO_MODEL_OPTIONS,
-  comfyImageOptions,
   type InstalledModelOption,
+  imageModelOptions,
   isAgentProvider,
   type ModelSelection,
   VIDEO_MODEL_OPTIONS,
@@ -89,15 +89,7 @@ export function AiModelFields({
   inheritedLabel,
   agentHints = ORGANIZATION_AGENT_HINTS,
 }: AiModelFieldsProps) {
-  const imageOptions = comfyImageOptions(installedModels, models.image).map((name) => {
-    const row = installedModels.find((item) => item.name === name);
-    const missing = row?.ready === false;
-    return {
-      value: name,
-      disabled: missing,
-      label: missing ? `${name} (requires ${row?.required_files?.[0] || 'base'})` : name,
-    };
-  });
+  const imageOptions = imageModelOptions(installedModels, models.image);
 
   const agentic = isAgentProvider(provider);
 

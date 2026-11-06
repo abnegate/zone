@@ -16,7 +16,6 @@ const roleOptions: Array<{ value: OrgRole; label: string }> = [
   { value: 'owner', label: 'Owner' },
 ];
 
-// Email validation helper
 const isValidEmail = (email: string): boolean => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
@@ -39,19 +38,16 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
   // Track which member is being modified to prevent race conditions
   const [updatingMemberId, setUpdatingMemberId] = useState<string | null>(null);
 
-  // Add member modal state
   const [showAddModal, setShowAddModal] = useState(false);
   const [addEmail, setAddEmail] = useState('');
   const [addEmailError, setAddEmailError] = useState<string | undefined>(undefined);
   const [addRole, setAddRole] = useState<OrgRole>('member');
   const [adding, setAdding] = useState(false);
 
-  // Remove member modal state
   const [showRemoveModal, setShowRemoveModal] = useState(false);
   const [memberToRemove, setMemberToRemove] = useState<OrganizationMember | null>(null);
   const [removing, setRemoving] = useState(false);
 
-  // Role elevation confirmation modal state
   const [showRoleConfirmModal, setShowRoleConfirmModal] = useState(false);
   const [pendingRoleChange, setPendingRoleChange] = useState<{
     member: OrganizationMember;
@@ -65,7 +61,6 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
       const response = await client.getOrgMembers(orgId);
       setMembers(response.members);
 
-      // Find current user's role
       const currentMember = response.members.find((m) => m.user_id === user?.id);
       if (currentMember) {
         setCurrentUserRole(currentMember.role);
@@ -90,7 +85,6 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
     e.preventDefault();
     setAddEmailError(undefined);
 
-    // Validate email
     if (!addEmail.trim()) {
       setAddEmailError('Email is required');
       return;
@@ -124,7 +118,6 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
   };
 
   const handleRoleChangeRequest = (member: OrganizationMember, newRole: OrgRole) => {
-    // Check if this is an elevation to admin or owner
     if ((newRole === 'admin' || newRole === 'owner') && member.role === 'member') {
       setPendingRoleChange({ member, newRole });
       setShowRoleConfirmModal(true);
@@ -132,13 +125,11 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
       setPendingRoleChange({ member, newRole });
       setShowRoleConfirmModal(true);
     } else {
-      // No confirmation needed for demotions
       handleRoleChange(member.user_id, newRole);
     }
   };
 
   const handleRoleChange = async (userId: string, newRole: OrgRole) => {
-    // Find the member
     const member = members.find((m) => m.user_id === userId);
     if (!member) return;
 
@@ -206,9 +197,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
 
   const canModifyMember = (member: OrganizationMember): boolean => {
     if (!canManageMembers) return false;
-    // Cannot modify yourself
     if (member.user_id === user?.id) return false;
-    // Cannot modify last owner
     if (member.role === 'owner' && countOwners() === 1) return false;
     if (currentUserRole !== 'owner' && (member.role === 'admin' || member.role === 'owner')) {
       return false;
@@ -286,7 +275,7 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                 <th>Member</th>
                 <th>Role</th>
                 <th>Joined</th>
-                <th className="members-actions-head">Actions</th>
+                {canManageMembers && <th className="members-actions-head">Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -328,27 +317,29 @@ export default function OrgMembersSection({ orgId }: OrgMembersSectionProps) {
                       )}
                     </td>
                     <td className="member-joined">{formatDate(member.joined_at)}</td>
-                    <td>
-                      <div className="member-actions">
-                        {isUpdating && (
-                          <span className="member-updating" aria-live="polite">
-                            Updating...
-                          </span>
-                        )}
-                        <Button
-                          className="member-remove"
-                          onClick={() => {
-                            setMemberToRemove(member);
-                            setShowRemoveModal(true);
-                          }}
-                          disabled={!canModify || isUpdating}
-                          variant="ghost"
-                          size="sm"
-                        >
-                          Remove
-                        </Button>
-                      </div>
-                    </td>
+                    {canManageMembers && (
+                      <td>
+                        <div className="member-actions">
+                          {isUpdating && (
+                            <span className="member-updating" aria-live="polite">
+                              Updating...
+                            </span>
+                          )}
+                          <Button
+                            className="member-remove"
+                            onClick={() => {
+                              setMemberToRemove(member);
+                              setShowRemoveModal(true);
+                            }}
+                            disabled={!canModify || isUpdating}
+                            variant="ghost"
+                            size="sm"
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 );
               })}

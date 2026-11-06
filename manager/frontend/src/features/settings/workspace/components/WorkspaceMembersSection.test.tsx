@@ -567,13 +567,11 @@ describe('WorkspaceMembersSection', () => {
       await renderAs('viewer');
 
       expect(screen.queryByRole('button', { name: /Add Member/i })).not.toBeInTheDocument();
-      expect(removeButtonFor('viewer@test.com')).toBeDisabled();
+      expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Remove/i })).not.toBeInTheDocument();
       expect(roleBadgeFor('viewer@test.com')).toHaveTextContent('Viewer');
-      expect(removeButtonFor('member@test.com')).toBeDisabled();
       expect(roleBadgeFor('member@test.com')).toHaveTextContent('Member');
-      expect(removeButtonFor('admin@test.com')).toBeDisabled();
       expect(roleBadgeFor('admin@test.com')).toHaveTextContent('Admin');
-      expect(removeButtonFor('other-owner@test.com')).toBeDisabled();
       expect(roleBadgeFor('other-owner@test.com')).toHaveTextContent('Owner');
     });
 
@@ -581,19 +579,18 @@ describe('WorkspaceMembersSection', () => {
       await renderAs('member');
 
       expect(screen.queryByRole('button', { name: /Add Member/i })).not.toBeInTheDocument();
-      expect(removeButtonFor('viewer@test.com')).toBeDisabled();
+      expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Remove/i })).not.toBeInTheDocument();
       expect(roleBadgeFor('viewer@test.com')).toHaveTextContent('Viewer');
-      expect(removeButtonFor('member@test.com')).toBeDisabled();
       expect(roleBadgeFor('member@test.com')).toHaveTextContent('Member');
-      expect(removeButtonFor('admin@test.com')).toBeDisabled();
       expect(roleBadgeFor('admin@test.com')).toHaveTextContent('Admin');
-      expect(removeButtonFor('other-owner@test.com')).toBeDisabled();
       expect(roleBadgeFor('other-owner@test.com')).toHaveTextContent('Owner');
     });
 
     it('offers an admin control over a member', async () => {
       await renderAs('admin');
 
+      expect(screen.getByRole('columnheader', { name: 'Actions' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /Add Member/i })).toBeInTheDocument();
       expect(removeButtonFor('member@test.com')).toBeEnabled();
       expect(roleSelectFor('member@test.com')).toBeEnabled();

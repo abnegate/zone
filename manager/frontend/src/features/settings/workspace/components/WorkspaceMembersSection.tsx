@@ -44,19 +44,16 @@ export default function WorkspaceMembersSection({
   // Track which member is being modified to prevent race conditions
   const [updatingMemberId, setUpdatingMemberId] = useState<string | null>(null);
 
-  // Add member modal state
   const [showAddModal, setShowAddModal] = useState(false);
   const [addUserId, setAddUserId] = useState('');
   const [addUserIdError, setAddUserIdError] = useState<string | undefined>(undefined);
   const [addRole, setAddRole] = useState<WorkspaceRole>('member');
   const [adding, setAdding] = useState(false);
 
-  // Remove member modal state
   const [showRemoveModal, setShowRemoveModal] = useState(false);
   const [memberToRemove, setMemberToRemove] = useState<WorkspaceMember | null>(null);
   const [removing, setRemoving] = useState(false);
 
-  // Role elevation confirmation modal state
   const [showRoleConfirmModal, setShowRoleConfirmModal] = useState(false);
   const [pendingRoleChange, setPendingRoleChange] = useState<{
     member: WorkspaceMember;
@@ -75,7 +72,6 @@ export default function WorkspaceMembersSection({
       setMembers(workspaceMembersResponse.members);
       setOrgMembers(orgMembersResponse.members);
 
-      // Find current user's role
       const currentMember = workspaceMembersResponse.members.find((m) => m.user_id === user?.id);
       if (currentMember) {
         setCurrentUserRole(currentMember.role);
@@ -96,7 +92,6 @@ export default function WorkspaceMembersSection({
     setTimeout(() => setSuccess(undefined), 3000);
   };
 
-  // Get org members who are NOT already in the workspace
   const getAvailableOrgMembers = (): OrganizationMember[] => {
     const workspaceMemberUserIds = new Set(members.map((m) => m.user_id));
     return orgMembers.filter((orgMember) => !workspaceMemberUserIds.has(orgMember.user_id));
@@ -106,7 +101,6 @@ export default function WorkspaceMembersSection({
     e.preventDefault();
     setAddUserIdError(undefined);
 
-    // Validate user selection
     if (!addUserId.trim()) {
       setAddUserIdError('User is required');
       return;
@@ -135,13 +129,11 @@ export default function WorkspaceMembersSection({
   };
 
   const handleRoleChangeRequest = (member: WorkspaceMember, newRole: WorkspaceRole) => {
-    // Prevent demoting last owner
     if (member.role === 'owner' && countOwners() === 1 && newRole !== 'owner') {
       setError('Cannot change role of the last owner');
       return;
     }
 
-    // Check if this is an elevation to admin or owner
     if ((newRole === 'admin' || newRole === 'owner') && member.role === 'member') {
       setPendingRoleChange({ member, newRole });
       setShowRoleConfirmModal(true);
@@ -152,13 +144,11 @@ export default function WorkspaceMembersSection({
       setPendingRoleChange({ member, newRole });
       setShowRoleConfirmModal(true);
     } else {
-      // No confirmation needed for demotions
       handleRoleChange(member.user_id, newRole);
     }
   };
 
   const handleRoleChange = async (userId: string, newRole: WorkspaceRole) => {
-    // Find the member
     const member = members.find((m) => m.user_id === userId);
     if (!member) return;
 
@@ -228,9 +218,7 @@ export default function WorkspaceMembersSection({
 
   const canModifyMember = (member: WorkspaceMember): boolean => {
     if (!canManageMembers) return false;
-    // Cannot modify yourself
     if (member.user_id === user?.id) return false;
-    // Cannot modify last owner
     if (member.role === 'owner' && countOwners() === 1) return false;
     if (currentUserRole !== 'owner' && (member.role === 'admin' || member.role === 'owner')) {
       return false;
@@ -307,7 +295,7 @@ export default function WorkspaceMembersSection({
                 <th>Member</th>
                 <th>Role</th>
                 <th>Joined</th>
-                <th className="members-actions-head">Actions</th>
+                {canManageMembers && <th className="members-actions-head">Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -351,27 +339,29 @@ export default function WorkspaceMembersSection({
                       )}
                     </td>
                     <td className="member-joined">{formatDate(member.joined_at)}</td>
-                    <td>
-                      <div className="member-actions">
-                        {isUpdating && (
-                          <span className="member-updating" aria-live="polite">
-                            Updating...
-                          </span>
-                        )}
-                        <Button
-                          className="member-remove"
-                          onClick={() => {
-                            setMemberToRemove(member);
-                            setShowRemoveModal(true);
-                          }}
-                          disabled={!canModify || isUpdating}
-                          variant="ghost"
-                          size="sm"
-                        >
-                          Remove
-                        </Button>
-                      </div>
-                    </td>
+                    {canManageMembers && (
+                      <td>
+                        <div className="member-actions">
+                          {isUpdating && (
+                            <span className="member-updating" aria-live="polite">
+                              Updating...
+                            </span>
+                          )}
+                          <Button
+                            className="member-remove"
+                            onClick={() => {
+                              setMemberToRemove(member);
+                              setShowRemoveModal(true);
+                            }}
+                            disabled={!canModify || isUpdating}
+                            variant="ghost"
+                            size="sm"
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 );
               })}

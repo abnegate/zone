@@ -66,7 +66,7 @@ describe('trainProgress', () => {
   });
 
   it('quotes Runpod compute for every train subject', () => {
-    const saveKey = 'Save a Runpod API key in Workspace Settings.';
+    const saveKey = 'Save a Runpod API key in Settings → AI.';
     const gpu24 = 'A 24 GB GPU is enough for this method.';
     expect(
       computeHelp({ subject: 'other', method: 'lora', provider: 'local', hasKey: false })
