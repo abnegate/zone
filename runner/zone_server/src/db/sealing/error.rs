@@ -26,6 +26,8 @@ pub enum SealingError {
     DatabaseMismatch { expected: String, found: String },
     #[error("The backup holds no data for table {table}")]
     TableMissing { table: String },
+    #[error("The backup at {} cannot be read in full: {stderr}", path.display())]
+    Unreadable { path: PathBuf, stderr: String },
     #[error(
         "None of the {unopened} values that look sealed opens under this ENCRYPTION_KEY, so it is not the key they were sealed with; nothing was written"
     )]

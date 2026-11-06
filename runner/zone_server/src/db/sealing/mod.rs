@@ -3,7 +3,7 @@
 //! Every value in a credential column is classified, then sealed, re-sealed,
 //! reported or skipped according to what the column's readers accept. Writes
 //! are per-row compare-and-swaps committed in batches, behind a verified
-//! `pg_dump -Fc` backup of every table written to.
+//! `pg_dump -Fc` backup of the whole database.
 
 mod ai_key;
 mod ai_scope;

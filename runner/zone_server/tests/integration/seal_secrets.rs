@@ -58,6 +58,8 @@ const MISTAKEN_PASSPHRASE: &str = "a-mistaken-sealing-passphrase-of-at-least-32-
 const QUERY_LOG_TARGET: &str = "sqlx::query";
 const REPORT_OPENING: &str = "Database ";
 const BINARY_TIMEOUT: Duration = Duration::from_secs(120);
+/// Enough of an archive's tail to cut into its last table's data and leave its contents whole.
+const TRUNCATED_BYTES: usize = 8;
 
 struct Scratch {
     admin: PgPool,
@@ -766,26 +768,53 @@ async fn an_interrupted_run_resumes() {
     .await
     .unwrap();
     assert_eq!(ids.len(), rows);
-    let (committed, abandoned) = ids.split_at(BATCH_SIZE);
-
-    let mut batch = scratch.pool.begin().await.unwrap();
-    for id in committed {
-        reseal(&scratch, &mut batch, &key, *id).await;
-    }
-    batch.commit().await.unwrap();
-
-    let mut dropped = scratch.pool.begin().await.unwrap();
-    for id in abandoned {
-        reseal(&scratch, &mut dropped, &key, *id).await;
-    }
-    drop(dropped);
-
+    let (committed, unsealed) = ids.split_at(BATCH_SIZE);
+    // Identifiers are a UUID the test generated.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION interrupt() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'interrupted'; END $$; \
+         CREATE TRIGGER interrupt BEFORE UPDATE ON projects FOR EACH ROW \
+         WHEN (OLD.id = '{}') EXECUTE FUNCTION interrupt();",
+        unsealed[1]
+    )))
+    .execute(&scratch.pool)
+    .await
+    .unwrap();
     let backup = scratch.backup(&[]).await;
+
+    let interrupted = scratch.attempt(&key, false, backup.path()).await;
+
+    assert!(
+        matches!(interrupted, Err(SealingError::Database(_))),
+        "the run stops in its second batch: {interrupted:?}"
+    );
+    for id in committed {
+        let stored = scratch
+            .text(Column::ProjectToken, *id)
+            .await
+            .expect("a token");
+        assert!(
+            opened(&stored, &key).starts_with("ghp_"),
+            "the first batch committed"
+        );
+    }
+    for id in unsealed {
+        let stored = scratch
+            .text(Column::ProjectToken, *id)
+            .await
+            .expect("a token");
+        assert!(!is_encrypted(&stored), "the second batch rolled back");
+    }
+
+    sqlx::raw_sql("DROP TRIGGER interrupt ON projects; DROP FUNCTION interrupt();")
+        .execute(&scratch.pool)
+        .await
+        .unwrap();
     let report = scratch.run(&key, false, backup.path()).await;
 
     assert_eq!(
         report.outcome(Column::ProjectToken, Outcome::Resealed),
-        abandoned.len() as u64
+        unsealed.len() as u64
     );
     assert_eq!(
         report.outcome(Column::ProjectToken, Outcome::Skipped),
@@ -801,21 +830,6 @@ async fn an_interrupted_run_resumes() {
     let second = scratch.run(&key, false, backup.path()).await;
     assert_eq!(second.written(), 0);
     scratch.cleanup().await;
-}
-
-async fn reseal(scratch: &Scratch, connection: &mut sqlx::PgConnection, key: &MasterKey, id: Uuid) {
-    let stored = scratch
-        .text(Column::ProjectToken, id)
-        .await
-        .expect("a token");
-    let credential = abnegate_secret::decrypt_legacy_value(&stored, key).expect("a legacy body");
-    let sealed = encrypt_value(&credential, key).expect("a seal");
-    assert!(
-        Column::ProjectToken
-            .replace(connection, id, &stored, &sealed)
-            .await
-            .unwrap()
-    );
 }
 
 #[tokio::test]
@@ -973,6 +987,13 @@ async fn the_backup_gate_refuses_anything_but_a_full_archive_of_this_database() 
     tokio::fs::write(&text, b"not an archive").await.unwrap();
     let foreign = other.backup(&[]).await;
     let partial = scratch.backup(&["agent_logins"]).await;
+    let incomplete = scratch.backup(&["organizations"]).await;
+    let full = scratch.backup(&[]).await;
+    let archived = tokio::fs::read(full.path()).await.unwrap();
+    let truncated = directory.path().join("truncated.dump");
+    tokio::fs::write(&truncated, &archived[..archived.len() - TRUNCATED_BYTES])
+        .await
+        .unwrap();
     let tar = scratch.dump(TAR_FORMAT, &[]).await;
 
     for dry_run in [true, false] {
@@ -1009,6 +1030,19 @@ async fn the_backup_gate_refuses_anything_but_a_full_archive_of_this_database() 
             Err(SealingError::TableMissing { table }) => assert_eq!(table, "agent_logins"),
             result => panic!("an archive without agent_logins rows is refused: {result:?}"),
         }
+        match scratch.attempt(&key, dry_run, incomplete.path()).await {
+            Err(SealingError::TableMissing { table }) => assert_eq!(table, "organizations"),
+            result => panic!(
+                "an archive without the rows of a table sealing never writes is refused: {result:?}"
+            ),
+        }
+        assert!(
+            matches!(
+                scratch.attempt(&key, dry_run, &truncated).await,
+                Err(SealingError::Unreadable { .. })
+            ),
+            "an archive whose contents list but whose data stops short is refused"
+        );
     }
 
     assert_eq!(
@@ -1203,6 +1237,44 @@ async fn legacy_project_tokens_that_open_under_no_key_refuse_the_run() {
             .expect("a token");
         assert_eq!(opened(&stored, &deployment), credential);
     }
+    scratch.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_key_that_opens_only_counted_columns_writes_nothing() {
+    let scratch = Scratch::new().await;
+    let deployment = key();
+    let mistaken = key();
+    let tenant = scratch.tenant().await;
+    let stored = StoredConfiguration::seal(
+        ApplicationId::new(1),
+        InstallationId::new(2),
+        &SecretValue::new("-----BEGIN PRIVATE KEY-----"),
+        &mistaken,
+    )
+    .expect("a sealed configuration");
+    let mut config = json!({"owner": "abnegate"});
+    stored.write(&mut config).expect("a written configuration");
+    scratch.source(&tenant, None, &config).await;
+    scratch
+        .project(&tenant, Some(&legacy("ghp_legacy_project", &deployment)))
+        .await;
+    scratch
+        .project(&tenant, Some("ghp_plaintext_project"))
+        .await;
+    let backup = scratch.backup(&[]).await;
+    let before = scratch.snapshot().await;
+
+    for dry_run in [true, false] {
+        assert!(
+            matches!(
+                scratch.attempt(&mistaken, dry_run, backup.path()).await,
+                Err(SealingError::KeyMismatch { unopened: 1 })
+            ),
+            "a key that opens only a counted column does not seal the columns it writes: {dry_run}"
+        );
+    }
+    assert_eq!(scratch.snapshot().await, before, "nothing was written");
     scratch.cleanup().await;
 }
 

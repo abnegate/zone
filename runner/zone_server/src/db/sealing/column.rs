@@ -70,11 +70,6 @@ impl Column {
         Self::ai(AiScope::Workspace, AiKey::BedrockSecretKey),
     ];
 
-    /// Every table sealing writes to, so every table the backup must hold the data of.
-    pub fn sealed_tables() -> &'static [&'static str] {
-        &[AGENT_LOGINS, PROJECTS, SOURCES, SYNC_CONFIGS]
-    }
-
     const fn ai(scope: AiScope, key: AiKey) -> Self {
         Self::AiSetting { scope, key }
     }
@@ -204,17 +199,6 @@ mod tests {
 
     use super::Column;
     use super::Policy;
-
-    #[test]
-    fn the_sealed_tables_are_exactly_the_tables_sealing_writes_to() {
-        let written: BTreeSet<&str> = Column::ALL
-            .iter()
-            .filter(|column| column.policy().writes())
-            .map(Column::table)
-            .collect();
-        let sealed: BTreeSet<&str> = Column::sealed_tables().iter().copied().collect();
-        assert_eq!(written, sealed);
-    }
 
     #[test]
     fn every_column_is_listed_once() {

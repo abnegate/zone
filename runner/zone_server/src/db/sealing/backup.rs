@@ -1,6 +1,7 @@
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Output;
 
 use tokio::process::Command;
 
@@ -12,11 +13,13 @@ use super::listing::Listing;
 pub const PG_RESTORE: &str = "pg_restore";
 
 const LIST: &str = "--list";
+const FILE: &str = "--file";
+const DISCARDED: &str = "/dev/null";
 const END_OF_OPTIONS: &str = "--";
 const LOCALE: &str = "LC_ALL";
 const UNTRANSLATED: &str = "C";
 
-/// A `pg_dump -Fc` archive that holds the data of every table sealing writes to.
+/// A readable `pg_dump -Fc` archive of one database that holds the data of every one of its tables.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Backup {
     path: PathBuf,
@@ -25,7 +28,7 @@ pub struct Backup {
 
 impl Backup {
     /// The archive at `path`, once it is shown to be a non-empty `pg_dump -Fc` archive of
-    /// `database` holding the rows of every one of `tables`.
+    /// `database` holding the rows of every one of `tables`, all of which `pg_restore` reads.
     pub async fn verify(
         path: &Path,
         database: &str,
@@ -49,18 +52,7 @@ impl Backup {
             });
         }
 
-        let output = Command::new(PG_RESTORE)
-            .arg(LIST)
-            .arg(END_OF_OPTIONS)
-            .arg(path)
-            .env(LOCALE, UNTRANSLATED)
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|error| match error.kind() {
-                io::ErrorKind::NotFound => SealingError::PgRestoreMissing,
-                _ => SealingError::PgRestore(error),
-            })?;
+        let output = restore(&[LIST], path).await?;
         if !output.status.success() {
             return Err(SealingError::NotAnArchive {
                 path: path.to_path_buf(),
@@ -87,6 +79,14 @@ impl Backup {
             });
         }
 
+        let output = restore(&[FILE, DISCARDED], path).await?;
+        if !output.status.success() {
+            return Err(SealingError::Unreadable {
+                path: path.to_path_buf(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+
         Ok(Self {
             path: path.to_path_buf(),
             database: database.to_string(),
@@ -102,4 +102,20 @@ impl Backup {
     pub fn database(&self) -> &str {
         &self.database
     }
+}
+
+/// `pg_restore` run with `options` over the archive at `path`.
+async fn restore(options: &[&str], path: &Path) -> Result<Output, SealingError> {
+    Command::new(PG_RESTORE)
+        .args(options)
+        .arg(END_OF_OPTIONS)
+        .arg(path)
+        .env(LOCALE, UNTRANSLATED)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => SealingError::PgRestoreMissing,
+            _ => SealingError::PgRestore(error),
+        })
 }

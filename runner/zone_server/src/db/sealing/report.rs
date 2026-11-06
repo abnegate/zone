@@ -64,27 +64,42 @@ impl Report {
         self.total(|outcome| outcome == Outcome::Mismatched) == 0
     }
 
-    /// How many values opened under the run's key, as an envelope or a legacy body.
-    pub fn opened(&self) -> u64 {
-        self.classes
-            .iter()
-            .filter(|((_, class), _)| matches!(class, Class::Envelope | Class::Legacy))
-            .map(|(_, count)| count)
-            .sum()
+    /// How many values look sealed and did not open, when the run's key is shown to be the
+    /// wrong one: some look sealed and none opens, across every column or across the columns
+    /// sealing writes to. The second keeps a key that opens only counted columns from sealing
+    /// the columns it writes.
+    pub fn wrong_key(&self) -> Option<u64> {
+        [
+            self.evidence(|_| true),
+            self.evidence(|column| column.policy().writes()),
+        ]
+        .into_iter()
+        .find(|(opened, unopened)| *opened == 0 && *unopened > 0)
+        .map(|(_, unopened)| unopened)
     }
 
-    /// How many values look sealed and did not open: unopenable envelopes anywhere, and
-    /// ambiguous values in every column sealing writes to.
-    pub fn unopened(&self) -> u64 {
+    /// Whether no value looks sealed, so nothing shows the run's key is the one the server
+    /// seals with.
+    pub fn key_untested(&self) -> bool {
+        self.evidence(|_| true) == (0, 0)
+    }
+
+    /// How many values in the columns `scope` keeps opened under the run's key, and how many
+    /// look sealed and did not open: unopenable envelopes anywhere, and ambiguous values in
+    /// every column sealing writes to.
+    fn evidence(&self, scope: impl Fn(Column) -> bool) -> (u64, u64) {
         self.classes
             .iter()
-            .filter(|((column, class), _)| match class {
-                Class::Unopenable => true,
-                Class::Ambiguous => column.policy().writes(),
-                _ => false,
-            })
-            .map(|(_, count)| count)
-            .sum()
+            .filter(|((column, _), _)| scope(*column))
+            .fold(
+                (0, 0),
+                |(opened, unopened), ((column, class), count)| match class {
+                    Class::Envelope | Class::Legacy => (opened + count, unopened),
+                    Class::Unopenable => (opened, unopened + count),
+                    Class::Ambiguous if column.policy().writes() => (opened, unopened + count),
+                    _ => (opened, unopened),
+                },
+            )
     }
 
     fn total(&self, counted: impl Fn(Outcome) -> bool) -> u64 {

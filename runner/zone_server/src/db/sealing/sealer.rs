@@ -22,6 +22,16 @@ pub const BATCH_SIZE: usize = 100;
 
 const CURRENT_DATABASE: &str = "SELECT current_database()";
 
+/// Every table of the public schema whose rows `pg_dump` dumps: ordinary tables, and not those an
+/// extension owns.
+const PUBLIC_TABLES: &str = "SELECT class.relname::text FROM pg_class class \
+     JOIN pg_namespace namespace ON namespace.oid = class.relnamespace \
+     WHERE namespace.nspname = 'public' AND class.relkind = 'r' \
+     AND NOT EXISTS (SELECT 1 FROM pg_depend dependency \
+         WHERE dependency.classid = 'pg_class'::regclass \
+         AND dependency.objid = class.oid AND dependency.deptype = 'e') \
+     ORDER BY class.relname";
+
 /// Seals every credential column of one database under one key.
 pub struct Sealer {
     pool: PgPool,
@@ -35,7 +45,8 @@ impl Sealer {
         Self { pool, key, options }
     }
 
-    /// Verify the backup, count every column, then, unless this is a dry run, seal.
+    /// Verify the backup holds every table of the database, count every column, then, unless
+    /// this is a dry run, seal.
     ///
     /// A run, dry or not, is refused when no value that looks sealed opens under the key,
     /// since that is what the wrong `ENCRYPTION_KEY` looks like. Each batch commits on its
@@ -45,14 +56,20 @@ impl Sealer {
         let database: String = sqlx::query_scalar(CURRENT_DATABASE)
             .fetch_one(&self.pool)
             .await?;
-        let backup =
-            Backup::verify(self.options.backup(), &database, Column::sealed_tables()).await?;
+        let tables: Vec<String> = sqlx::query_scalar(PUBLIC_TABLES)
+            .fetch_all(&self.pool)
+            .await?;
+        let tables: Vec<&str> = tables.iter().map(String::as_str).collect();
+        let backup = Backup::verify(self.options.backup(), &database, &tables).await?;
 
         let survey = self.pass(backup.clone(), false).await?;
-        if survey.opened() == 0 && survey.unopened() > 0 {
-            return Err(SealingError::KeyMismatch {
-                unopened: survey.unopened(),
-            });
+        if let Some(unopened) = survey.wrong_key() {
+            return Err(SealingError::KeyMismatch { unopened });
+        }
+        if survey.key_untested() {
+            tracing::warn!(
+                "No stored value looks sealed, so nothing shows this ENCRYPTION_KEY is the server's"
+            );
         }
         if self.options.dry_run() {
             return Ok(survey);
