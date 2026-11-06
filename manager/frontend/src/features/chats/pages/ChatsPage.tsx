@@ -41,6 +41,7 @@ import {
   ProviderError,
   ProviderPicker,
   SourcesButton,
+  SubagentChips,
 } from '../components';
 import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
@@ -50,10 +51,12 @@ import {
   useChatPullRequests,
   useChatSearch,
   useChatSources,
+  useChatSubagents,
   useChats,
   useChatTasks,
   useWorkspaceChatProviders,
 } from '../hooks';
+import type { SubagentRequest } from '../subagentTypes';
 import {
   type Chat,
   type ChatProviderOffer,
@@ -122,6 +125,7 @@ import {
   writeChatGroupBy,
   writeChatSort,
 } from '../utils';
+import { startedIn } from '../utils/subagents';
 import './ChatsPage.css';
 
 const UNTITLED_CHAT_TITLE = 'Untitled chat';
@@ -279,11 +283,19 @@ export default function ChatsPage() {
   const chatOpen = displayedChat !== null;
   const changes = useChatPullRequests(chatOpen ? selectedChatId : null, streaming);
   const tasks = useChatTasks(chatOpen ? selectedChatId : null, streaming);
+  const subagents = useChatSubagents(chatOpen ? selectedChatId : null, streaming);
   const displayedMessages = displayedChat?.messages;
   const media = useMemo(() => galleryItems(displayedMessages ?? []), [displayedMessages]);
   const sources = useMemo(() => chatSources(displayedMessages ?? []), [displayedMessages]);
   const [shownSources, setShownSources] = useState<SourceRequest | null>(null);
   const clearShownSources = useCallback(() => setShownSources(null), []);
+  const [shownSubagent, setShownSubagent] = useState<SubagentRequest | null>(null);
+  const subagentNonce = useRef(0);
+  const showSubagent = useCallback((id: string) => {
+    subagentNonce.current += 1;
+    setShownSubagent({ id, nonce: subagentNonce.current });
+  }, []);
+  const clearShownSubagent = useCallback(() => setShownSubagent(null), []);
   const wasStreaming = useRef(streaming);
   const latestSelectedChatId = useRef(selectedChatId);
 
@@ -297,6 +309,7 @@ export default function ChatsPage() {
   useEffect(() => {
     latestSelectedChatId.current = selectedChatId;
     setShownSources(null);
+    setShownSubagent(null);
     setChatOperationError(null);
     setOperationError(null);
   }, [selectedChatId]);
@@ -1587,6 +1600,10 @@ export default function ChatsPage() {
                             onDecide={approveTool}
                             onAnswer={handleAnswerQuestions}
                           />
+                          <SubagentChips
+                            subagents={startedIn(subagents.subagents, message.id)}
+                            onShow={showSubagent}
+                          />
                           {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                           {(body || handovers.length > 0) && !awaitingAnswer ? (
                             <div className="message-content">
@@ -1808,6 +1825,9 @@ export default function ChatsPage() {
                 sources={sources}
                 shownSources={shownSources}
                 onSourcesShown={clearShownSources}
+                subagents={subagents}
+                shownSubagent={shownSubagent}
+                onSubagentShown={clearShownSubagent}
                 onShowMessage={(messageId) => selectChat(displayedChat.id, messageId)}
               />
             </div>
