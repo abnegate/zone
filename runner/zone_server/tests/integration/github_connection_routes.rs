@@ -1839,6 +1839,80 @@ async fn installations_delete_unknown_is_not_found() {
 }
 
 #[tokio::test]
+async fn installations_sync_keeps_an_installation_recorded_while_github_lists() {
+    let listing = std::time::Duration::from_millis(750);
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let app = harness.organization_app(&tenant).await;
+    let stale = harness.installation_of(&app).await;
+    routes_listing_app_installations(
+        &harness.github,
+        app.app_id,
+        ResponseTemplate::new(200)
+            .set_body_json(json!([]))
+            .set_delay(listing),
+        1,
+    )
+    .await;
+
+    let sync = sync_path(&tenant);
+    let (synced, recorded) = tokio::join!(harness.post(&sync, Some(&tenant.owner.token)), async {
+        tokio::time::sleep(listing / 3).await;
+        harness.installation_of(&app).await
+    },);
+
+    synced.assert_status(StatusCode::NO_CONTENT);
+    assert!(
+        !harness.active(tenant.organization, stale.id).await,
+        "an installation GitHub no longer lists is revoked"
+    );
+    assert!(
+        harness.active(tenant.organization, recorded.id).await,
+        "an installation recorded after the listing began is not revoked by it"
+    );
+
+    harness.discard().await;
+}
+
+#[tokio::test]
+async fn installations_path_id_that_is_not_a_uuid_is_a_json_not_found_after_the_guard() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let member = harness.member(&tenant).await;
+    let paths = [
+        (
+            Method::POST,
+            format!("{}/not-a-uuid/installations", apps_path(&tenant)),
+        ),
+        (
+            Method::DELETE,
+            format!(
+                "{}/installations/not-a-uuid?uninstall=true",
+                connection_path(&tenant)
+            ),
+        ),
+    ];
+
+    for (method, uri) in paths {
+        assert_refused(
+            &harness
+                .call(method.clone(), &uri, Some(&member.token), Body::empty())
+                .await,
+            StatusCode::FORBIDDEN,
+        );
+        assert_refused(
+            &harness
+                .call(method, &uri, Some(&tenant.owner.token), Body::empty())
+                .await,
+            StatusCode::NOT_FOUND,
+        );
+    }
+    assert_eq!(harness.github_requests().await, 0, "GitHub is never asked");
+
+    harness.discard().await;
+}
+
+#[tokio::test]
 async fn authorization_repositories_without_token_is_unauthorized() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;

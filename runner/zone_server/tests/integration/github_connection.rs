@@ -29,7 +29,7 @@ use zone_server::services::github_app::manifest::{MANIFEST_CALLBACK_PATH, SETUP_
 use crate::common::github_app::{
     self, GITHUB_WEB_URL, Installed, ListedBranch, ListedRepository, Registration, TEST_PRIVATE_KEY,
 };
-use crate::common::{TestClient, TestResponse, test_email, test_password};
+use crate::common::{self, TestClient, TestResponse, test_email, test_password};
 
 const SETTINGS_PATH: &str = "/settings/organization/github";
 const OUTCOME_PARAMETER: &str = "github";
@@ -1481,9 +1481,13 @@ impl<'writer> MakeWriter<'writer> for Captured {
 }
 
 /// The runtime is current-thread so every task the router spawns logs through
-/// the subscriber set as this thread's default.
+/// the subscriber set as this thread's default. A global subscriber is installed
+/// first because, beside a lone scoped one, tracing caches each callsite's
+/// interest from whichever thread first reaches it, so a callsite a parallel
+/// test reached first would never log here.
 #[tokio::test(flavor = "current_thread")]
 async fn security_logs_never_carry_secrets() {
+    common::init_tracing();
     let captured = Captured::default();
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(CAPTURED_TARGETS))

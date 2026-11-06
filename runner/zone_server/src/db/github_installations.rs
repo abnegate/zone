@@ -328,15 +328,28 @@ pub async fn mark_suspended(pool: &PgPool, id: Uuid) -> DbResult<bool> {
     Ok(result.rows_affected() > 0)
 }
 
-/// Revokes every live installation of the app whose GitHub id is not in `present`.
-pub async fn revoke_missing(pool: &PgPool, github_app_id: Uuid, present: &[i64]) -> DbResult<u64> {
+/// The database's transaction clock, the one every write here stamps `updated_at` with.
+pub async fn clock(pool: &PgPool) -> DbResult<DateTime<Utc>> {
+    sqlx::query_scalar("SELECT NOW()").fetch_one(pool).await
+}
+
+/// Revokes every live installation of the app whose GitHub id is not in
+/// `present` and that nothing has written since `since`, so an installation
+/// recorded while GitHub was being listed survives a listing that predates it.
+pub async fn revoke_missing(
+    pool: &PgPool,
+    github_app_id: Uuid,
+    present: &[i64],
+    since: DateTime<Utc>,
+) -> DbResult<u64> {
     let result = sqlx::query(
         "UPDATE github_installations SET revoked_at = NOW(), updated_at = NOW() \
          WHERE github_app_id = $1 AND revoked_at IS NULL \
-           AND NOT (installation_id = ANY($2))",
+           AND NOT (installation_id = ANY($2)) AND updated_at < $3",
     )
     .bind(github_app_id)
     .bind(present)
+    .bind(since)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
@@ -593,15 +606,43 @@ mod tests {
         mark_revoked(&pool, already_revoked.id).await.unwrap();
         let unrelated = seeded(&pool, &neighbour).await;
         let present = [kept.installation_id, also_kept.installation_id];
+        let since = clock(&pool).await.unwrap();
 
-        assert_eq!(revoke_missing(&pool, app.id, &present).await.unwrap(), 1);
+        assert_eq!(
+            revoke_missing(&pool, app.id, &present, since)
+                .await
+                .unwrap(),
+            1
+        );
         assert_eq!(status(&pool, &kept).await, InstallationStatus::Active);
         assert_eq!(status(&pool, &gone).await, InstallationStatus::Revoked);
         assert_eq!(status(&pool, &also_kept).await, InstallationStatus::Active);
         assert_eq!(status(&pool, &unrelated).await, InstallationStatus::Active);
 
-        assert_eq!(revoke_missing(&pool, app.id, &[]).await.unwrap(), 2);
+        assert_eq!(revoke_missing(&pool, app.id, &[], since).await.unwrap(), 2);
         assert_eq!(status(&pool, &kept).await, InstallationStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn revoke_missing_spares_an_installation_written_since_the_listing() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let app = seed_app(&pool, organization, "acme").await;
+        let stale = seeded(&pool, &app).await;
+        let revived = seeded(&pool, &app).await;
+        mark_revoked(&pool, revived.id).await.unwrap();
+        let since = clock(&pool).await.unwrap();
+        let recorded = seeded(&pool, &app).await;
+        let restored = seed_installation(&pool, &app, revived.installation_id).await;
+        assert!(
+            recorded.updated_at >= since,
+            "{recorded:?} predates {since}"
+        );
+
+        assert_eq!(revoke_missing(&pool, app.id, &[], since).await.unwrap(), 1);
+        assert_eq!(status(&pool, &stale).await, InstallationStatus::Revoked);
+        assert_eq!(status(&pool, &recorded).await, InstallationStatus::Active);
+        assert_eq!(status(&pool, &restored).await, InstallationStatus::Active);
     }
 
     #[tokio::test]

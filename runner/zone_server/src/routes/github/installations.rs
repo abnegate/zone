@@ -1,17 +1,16 @@
-//! Installing an organization's GitHub App on accounts, refreshing what GitHub
-//! reports installed, and removing an installation.
-
 use std::num::{NonZeroU8, NonZeroU32};
 
 use abnegate_vcs::pull_request::{ApplicationError, Installation, InstallationId};
 use axum::{
     Json,
-    extract::{Path, Query, State, rejection::QueryRejection},
+    extract::{
+        Path, Query, State,
+        rejection::{PathRejection, QueryRejection},
+    },
     http::StatusCode,
 };
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::OrgAdmin;
@@ -43,7 +42,7 @@ pub struct Removal {
     pub uninstall: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, Serialize)]
 struct Tally {
     listed: usize,
     recorded: usize,
@@ -60,15 +59,33 @@ impl Tally {
     }
 }
 
-/// POST /api/organizations/{org_id}/github/apps/{app_id}/installations
+#[derive(Debug, Serialize)]
+struct Synced {
+    apps: usize,
+    failed: usize,
+    #[serde(flatten)]
+    tally: Tally,
+}
+
+#[derive(Debug, Serialize)]
+struct RemovedInstallation<'a> {
+    account_login: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct Removed {
+    uninstalled: bool,
+}
+
 pub async fn create(
     State(state): State<AppState>,
     admin: OrgAdmin,
-    Path((_, app_id)): Path<(Uuid, Uuid)>,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
 ) -> Result<Json<InstallationUrl>, ServerError> {
+    let Path((_, app_id)) = path.map_err(|_| app_not_found())?;
     let app = github_apps::get(state.db(), admin.org_id, app_id)
         .await?
-        .ok_or_else(|| ServerError::NotFound(APP_NOT_FOUND.to_string()))?;
+        .ok_or_else(app_not_found)?;
     let issued = github_connection_states::issue(
         state.db(),
         admin.org_id,
@@ -83,8 +100,6 @@ pub async fn create(
     }))
 }
 
-/// POST /api/organizations/{org_id}/github/installations/sync
-///
 /// Every App is synced even when another's listing fails; only an App whose
 /// listing finished revokes what GitHub no longer lists.
 pub async fn sync(
@@ -122,14 +137,12 @@ pub async fn sync(
             resource_type: resources::GITHUB_INSTALLATION,
             resource_id: None,
             old_values: None,
-            new_values: Some(json!({
-                "apps": apps.len(),
-                "failed": failures.len(),
-                "listed": tally.listed,
-                "recorded": tally.recorded,
-                "unrecorded": tally.unrecorded,
-                "revoked": tally.revoked,
-            })),
+            new_values: serde_json::to_value(Synced {
+                apps: apps.len(),
+                failed: failures.len(),
+                tally,
+            })
+            .ok(),
         },
     )
     .await;
@@ -143,15 +156,14 @@ pub async fn sync(
     }
 }
 
-/// DELETE /api/organizations/{org_id}/github/installations/{id}?uninstall=true|false
-///
 /// Uninstalling asks GitHub first, so a refusal keeps the installation in Zone.
 pub async fn delete(
     State(state): State<AppState>,
     admin: OrgAdmin,
-    Path((_, id)): Path<(Uuid, Uuid)>,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
     removal: Result<Query<Removal>, QueryRejection>,
 ) -> Result<StatusCode, ServerError> {
+    let Path((_, id)) = path.map_err(|_| installation_not_found())?;
     let Query(removal) =
         removal.map_err(|_| ServerError::BadRequest(INVALID_UNINSTALL.to_string()))?;
     let installation = github_installations::get(state.db(), admin.org_id, id)
@@ -181,8 +193,14 @@ pub async fn delete(
             action: actions::GITHUB_INSTALLATION_REMOVED,
             resource_type: resources::GITHUB_INSTALLATION,
             resource_id: Some(id),
-            old_values: Some(json!({ "account_login": installation.account_login })),
-            new_values: Some(json!({ "uninstalled": removal.uninstall })),
+            old_values: serde_json::to_value(RemovedInstallation {
+                account_login: &installation.account_login,
+            })
+            .ok(),
+            new_values: serde_json::to_value(Removed {
+                uninstalled: removal.uninstall,
+            })
+            .ok(),
         },
     )
     .await;
@@ -192,6 +210,7 @@ pub async fn delete(
 
 async fn synchronize(state: &AppState, app: &AppRow, user_id: Uuid) -> Result<Tally, Error> {
     let provider = state.github();
+    let since = github_installations::clock(state.db()).await?;
     let listed = listed(provider, app).await?;
     let present: Vec<i64> = listed
         .iter()
@@ -214,7 +233,8 @@ async fn synchronize(state: &AppState, app: &AppRow, user_id: Uuid) -> Result<Ta
             }
         }
     }
-    tally.revoked = github_installations::revoke_missing(state.db(), app.id, &present).await?;
+    tally.revoked =
+        github_installations::revoke_missing(state.db(), app.id, &present, since).await?;
 
     Ok(tally)
 }
@@ -288,6 +308,10 @@ fn number(installation: &InstallationRow) -> Option<InstallationId> {
     u64::try_from(installation.installation_id)
         .ok()
         .map(InstallationId::new)
+}
+
+fn app_not_found() -> ServerError {
+    ServerError::NotFound(APP_NOT_FOUND.to_string())
 }
 
 fn installation_not_found() -> ServerError {
@@ -383,6 +407,32 @@ mod tests {
         ] {
             assert_eq!(status(error), StatusCode::INTERNAL_SERVER_ERROR);
         }
+    }
+
+    #[test]
+    fn the_sync_audit_records_every_count_side_by_side() {
+        let synced = Synced {
+            apps: 2,
+            failed: 1,
+            tally: Tally {
+                listed: 5,
+                recorded: 4,
+                unrecorded: 1,
+                revoked: 3,
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(synced).expect("the audit serializes"),
+            serde_json::json!({
+                "apps": 2,
+                "failed": 1,
+                "listed": 5,
+                "recorded": 4,
+                "unrecorded": 1,
+                "revoked": 3,
+            })
+        );
     }
 
     #[test]
