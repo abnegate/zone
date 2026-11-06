@@ -1,0 +1,255 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "author": "XLabs-AI",
+          "capabilities": [
+            "image_generation",
+            "image_input"
+          ],
+          "description": "Text To Image GGUF model by XLabs-AI.",
+          "details": {
+            "format": "lora",
+            "license": "other"
+          },
+          "digest": "0000000000000000000000004670ef961b8ff3fc",
+          "downloads": 18220,
+          "likes": 1103,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "XLabs-AI/flux-RealismLora",
+          "size": 22417000,
+          "sizes": [
+            {
+              "label": "lora.safetensors",
+              "name": "XLabs-AI/flux-RealismLora:lora.safetensors",
+              "size": 22416552
+            },
+            {
+              "label": "lora_comfy.safetensors",
+              "name": "XLabs-AI/flux-RealismLora:lora_comfy.safetensors",
+              "size": 22417000
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "lora",
+            "Stable Diffusion",
+            "image-generation",
+            "Flux",
+            "text-to-image",
+            "en"
+          ],
+          "url": "https://huggingface.co/XLabs-AI/flux-RealismLora",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        },
+        {
+          "author": "Shakker-Labs",
+          "capabilities": [
+            "text",
+            "image_generation"
+          ],
+          "description": "Text To Image GGUF model by Shakker-Labs.",
+          "details": {
+            "format": "lora",
+            "license": "other"
+          },
+          "digest": "00000000000000000000000056855bc0ede7010c",
+          "downloads": 9870,
+          "likes": 412,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur",
+          "size": 685290000,
+          "sizes": [
+            {
+              "label": "FLUX-dev-lora-AntiBlur.safetensors",
+              "name": "Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur:FLUX-dev-lora-AntiBlur.safetensors",
+              "size": 685290000
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "text-to-image",
+            "stable-diffusion",
+            "image-generation",
+            "flux",
+            "safetensors",
+            "en"
+          ],
+          "url": "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        },
+        {
+          "author": "hugovntr",
+          "capabilities": [
+            "image_generation",
+            "image_input"
+          ],
+          "description": "Text To Image GGUF model by hugovntr.",
+          "details": {
+            "format": "lora",
+            "license": "apache-2.0"
+          },
+          "digest": "0000000000000000000000005d79e5a57f81c3b9",
+          "downloads": 2260,
+          "likes": 46,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "hugovntr/flux-schnell-realism",
+          "size": 171969408,
+          "sizes": [
+            {
+              "label": "schnell-realism_v2.3.safetensors",
+              "name": "hugovntr/flux-schnell-realism:schnell-realism_v2.3.safetensors",
+              "size": 171969408
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "flux",
+            "text-to-image",
+            "lora"
+          ],
+          "url": "https://huggingface.co/hugovntr/flux-schnell-realism",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        }
+      ],
+      "next_cursor": null
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "author": "XLabs-AI",
+          "capabilities": [
+            "image_generation",
+            "image_input"
+          ],
+          "description": "Text To Image GGUF model by XLabs-AI.",
+          "details": {
+            "format": "lora",
+            "license": "other"
+          },
+          "digest": "0000000000000000000000004670ef961b8ff3fc",
+          "downloads": 18220,
+          "likes": 1103,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "XLabs-AI/flux-RealismLora",
+          "size": 22417000,
+          "sizes": [
+            {
+              "label": "lora.safetensors",
+              "name": "XLabs-AI/flux-RealismLora:lora.safetensors",
+              "size": 22416552
+            },
+            {
+              "label": "lora_comfy.safetensors",
+              "name": "XLabs-AI/flux-RealismLora:lora_comfy.safetensors",
+              "size": 22417000
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "lora",
+            "Stable Diffusion",
+            "image-generation",
+            "Flux",
+            "text-to-image",
+            "en"
+          ],
+          "url": "https://huggingface.co/XLabs-AI/flux-RealismLora",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        },
+        {
+          "author": "Shakker-Labs",
+          "capabilities": [
+            "text",
+            "image_generation"
+          ],
+          "description": "Text To Image GGUF model by Shakker-Labs.",
+          "details": {
+            "format": "lora",
+            "license": "other"
+          },
+          "digest": "00000000000000000000000056855bc0ede7010c",
+          "downloads": 9870,
+          "likes": 412,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur",
+          "size": 685290000,
+          "sizes": [
+            {
+              "label": "FLUX-dev-lora-AntiBlur.safetensors",
+              "name": "Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur:FLUX-dev-lora-AntiBlur.safetensors",
+              "size": 685290000
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "text-to-image",
+            "stable-diffusion",
+            "image-generation",
+            "flux",
+            "safetensors",
+            "en"
+          ],
+          "url": "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        },
+        {
+          "author": "hugovntr",
+          "capabilities": [
+            "image_generation",
+            "image_input"
+          ],
+          "description": "Text To Image GGUF model by hugovntr.",
+          "details": {
+            "format": "lora",
+            "license": "apache-2.0"
+          },
+          "digest": "0000000000000000000000005d79e5a57f81c3b9",
+          "downloads": 2260,
+          "likes": 46,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "hugovntr/flux-schnell-realism",
+          "size": 171969408,
+          "sizes": [
+            {
+              "label": "schnell-realism_v2.3.safetensors",
+              "name": "hugovntr/flux-schnell-realism:schnell-realism_v2.3.safetensors",
+              "size": 171969408
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "flux",
+            "text-to-image",
+            "lora"
+          ],
+          "url": "https://huggingface.co/hugovntr/flux-schnell-realism",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        }
+      ],
+      "next_cursor": null
+    },
+    "status": 200
+  }
+}

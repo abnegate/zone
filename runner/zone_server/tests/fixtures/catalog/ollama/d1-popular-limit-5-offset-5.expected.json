@@ -1,0 +1,163 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "description": "Qwen2.5 7B — strong multilingual chat, coding, and instruction following.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "7B"
+          },
+          "name": "qwen2.5",
+          "size": 4683086009,
+          "url": "https://ollama.com/library/qwen2.5",
+          "use_cases": [
+            "Chat",
+            "Coding"
+          ]
+        },
+        {
+          "description": "Qwen2.5 72B for demanding reasoning, coding, and long-form generation.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "72B"
+          },
+          "name": "qwen2.5:72b",
+          "size": 47415722905,
+          "url": "https://ollama.com/library/qwen2.5:72b",
+          "use_cases": [
+            "Chat",
+            "Coding",
+            "Reasoning"
+          ]
+        },
+        {
+          "description": "Microsoft Phi-3 Mini — small, efficient model for constrained hardware.",
+          "details": {
+            "family": "phi",
+            "format": "gguf",
+            "parameter_size": "3.8B"
+          },
+          "name": "phi3",
+          "size": 2176178352,
+          "url": "https://ollama.com/library/phi3",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Google Gemma 2 9B for lightweight chat and instruction workloads.",
+          "details": {
+            "family": "gemma",
+            "format": "gguf",
+            "parameter_size": "9B"
+          },
+          "name": "gemma2",
+          "size": 5443161526,
+          "url": "https://ollama.com/library/gemma2",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "DeepSeek-R1 distill focused on step-by-step reasoning and math.",
+          "details": {
+            "family": "deepseek",
+            "format": "gguf",
+            "parameter_size": "7B"
+          },
+          "name": "deepseek-r1",
+          "size": 5225376109,
+          "url": "https://ollama.com/library/deepseek-r1",
+          "use_cases": [
+            "Reasoning"
+          ]
+        }
+      ],
+      "next_cursor": "offset:10"
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "description": "Qwen2.5 7B — strong multilingual chat, coding, and instruction following.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "7B"
+          },
+          "name": "qwen2.5",
+          "size": 4683086009,
+          "url": "https://ollama.com/library/qwen2.5",
+          "use_cases": [
+            "Chat",
+            "Coding"
+          ]
+        },
+        {
+          "description": "Qwen2.5 72B for demanding reasoning, coding, and long-form generation.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "72B"
+          },
+          "name": "qwen2.5:72b",
+          "size": 47415722905,
+          "url": "https://ollama.com/library/qwen2.5:72b",
+          "use_cases": [
+            "Chat",
+            "Coding",
+            "Reasoning"
+          ]
+        },
+        {
+          "description": "Microsoft Phi-3 Mini — small, efficient model for constrained hardware.",
+          "details": {
+            "family": "phi",
+            "format": "gguf",
+            "parameter_size": "3.8B"
+          },
+          "name": "phi3",
+          "size": 2176178352,
+          "url": "https://ollama.com/library/phi3",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Google Gemma 2 9B for lightweight chat and instruction workloads.",
+          "details": {
+            "family": "gemma",
+            "format": "gguf",
+            "parameter_size": "9B"
+          },
+          "name": "gemma2",
+          "size": 5443161526,
+          "url": "https://ollama.com/library/gemma2",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "DeepSeek-R1 distill focused on step-by-step reasoning and math.",
+          "details": {
+            "family": "deepseek",
+            "format": "gguf",
+            "parameter_size": "7B"
+          },
+          "name": "deepseek-r1",
+          "size": 5225376109,
+          "url": "https://ollama.com/library/deepseek-r1",
+          "use_cases": [
+            "Reasoning"
+          ]
+        }
+      ],
+      "next_cursor": "offset:10"
+    },
+    "status": 200
+  }
+}

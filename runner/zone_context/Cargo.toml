@@ -11,7 +11,7 @@ rust-version.workspace = true
 test-utils = []
 # In-process embedding inference (ONNX Runtime via fastembed). Pulls in the
 # onnxruntime native library, so it is opt-in; zone_server enables it.
-local-embeddings = ["dep:fastembed", "dep:dirs"]
+local-embeddings = ["dep:fastembed", "dep:dirs", "abnegate-llm/fastembed"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -76,12 +76,13 @@ encoding_rs = "=0.8.35"
 mime = "=0.3.17"
 
 # In-process embeddings (feature: local-embeddings)
-fastembed = { version = "=6.0.2", optional = true }
+fastembed = { version = "=7.1.0", optional = true }
 dirs = { workspace = true, optional = true }
 
 # Internal
 abnegate-http = { workspace = true }
 abnegate-index = { workspace = true }
+abnegate-llm = { workspace = true, features = ["ollama", "openai-compatible"] }
 zone_core = { path = "../zone_core" }
 
 [dev-dependencies]

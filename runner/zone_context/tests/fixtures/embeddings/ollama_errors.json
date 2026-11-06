@@ -1,0 +1,91 @@
+[
+  {
+    "scenario": "unauthorized",
+    "variant": "Auth",
+    "display": "Authentication failed: Authentication failed (401 Unauthorized): invalid api key",
+    "is_context_length": false,
+    "is_fatal_embedding": true,
+    "prompt_lengths": [
+      5
+    ]
+  },
+  {
+    "scenario": "forbidden",
+    "variant": "Auth",
+    "display": "Authentication failed: Authentication failed (403 Forbidden): forbidden",
+    "is_context_length": false,
+    "is_fatal_embedding": true,
+    "prompt_lengths": [
+      5
+    ]
+  },
+  {
+    "scenario": "rate_limited",
+    "variant": "RateLimited",
+    "display": "Rate limited: retry after 60s",
+    "is_context_length": false,
+    "is_fatal_embedding": true,
+    "prompt_lengths": [
+      5
+    ]
+  },
+  {
+    "scenario": "server_error_long_body",
+    "variant": "Embedding",
+    "display": "Embedding generation failed: API returned error 500 Internal Server Error: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx... (truncated)",
+    "is_context_length": false,
+    "is_fatal_embedding": false,
+    "prompt_lengths": [
+      5
+    ]
+  },
+  {
+    "scenario": "context_length_exhausted",
+    "variant": "Embedding",
+    "display": "Embedding generation failed: API returned error 500 Internal Server Error: the input length exceeds the context length",
+    "is_context_length": true,
+    "is_fatal_embedding": false,
+    "prompt_lengths": [
+      5,
+      2
+    ]
+  },
+  {
+    "scenario": "malformed_json",
+    "variant": "Embedding",
+    "display": "Embedding generation failed: Failed to parse response: error decoding response body for url ({server}/api/embeddings)",
+    "is_context_length": false,
+    "is_fatal_embedding": false,
+    "prompt_lengths": [
+      5
+    ]
+  },
+  {
+    "scenario": "width_mismatch",
+    "variant": "EmbeddingDimensionMismatch",
+    "display": "Unsupported embedding dimension: expected 768, got 512",
+    "is_context_length": false,
+    "is_fatal_embedding": false,
+    "prompt_lengths": [
+      5
+    ]
+  },
+  {
+    "scenario": "empty_vector",
+    "variant": "EmbeddingDimensionMismatch",
+    "display": "Unsupported embedding dimension: expected 768, got 0",
+    "is_context_length": false,
+    "is_fatal_embedding": false,
+    "prompt_lengths": [
+      5
+    ]
+  },
+  {
+    "scenario": "connection_refused",
+    "variant": "Embedding",
+    "display": "Embedding generation failed: Request failed: error sending request for url ({server}/api/embeddings)",
+    "is_context_length": false,
+    "is_fatal_embedding": false,
+    "prompt_lengths": []
+  }
+]

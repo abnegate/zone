@@ -121,10 +121,12 @@ With no model pinned, a chat with an attached image goes to the smallest install
 - **Default**: `ollama`
 - **Description**: How the manager computes embeddings for search and RAG. The model is always `OLLAMA_MODEL_EMBED`; this only chooses where it runs.
 - **Options**:
-  - `ollama` — call Ollama over HTTP. Uses the GPU when Ollama has one.
+  - `ollama` — call Ollama's native `/api/embeddings` at `OLLAMA_BASE_URL`. Uses the GPU when Ollama has one.
   - `local` — run the model in-process via ONNX Runtime on CPU. No network hop and no contention with the chat model for Ollama's loaded-model slots.
+  - `openai_compatible` — call `LITELLM_HOST/v1/embeddings`, sending `LITELLM_KEY` as a bearer token, so any OpenAI-compatible server (LiteLLM, vLLM, Ollama's `/v1`) can embed. The model must be one that server routes. The width is learned from the first answer, and a model that returns more than 1,024 values is refused rather than truncated. Documents are split into chunks sized to the model's input limit, 1.5 characters per token between 512 and 3,000 characters: 3,000 for the models Ollama's table knows at 8,192 tokens (`qwen3-embedding`, `nomic-embed-text`), 768 for any model it does not know (512 tokens). Texts are sent 64 to a request, 10 requests at a time.
 - **When `local` wins**: short texts (chat messages, search queries) and any host where Ollama has no GPU. On a GPU-backed Ollama, long document chunks are still faster over HTTP.
-- **First boot**: downloads ~520MB of weights into the `zone_manager_embed_cache` volume before the server binds. `ZONE_EMBED_CACHE_DIR` overrides the location.
+- **First boot**: downloads ~520MB of weights into the `zone_manager_embed_cache` volume before the server binds. `ZONE_EMBED_CACHE_DIR` overrides the location. When `HF_HOME` is set, the lock that stops two processes downloading the same model at once is taken under `$HF_HOME/.locks`; the weights stay in the cache directory.
+- **Snowflake size tags**: `snowflake-arctic-embed:22m`, `:33m`, `:110m` and `:137m` run their own sized model (384 values for 22m and 33m, 768 for 110m and 137m) on both `ollama` and `local`. Earlier releases ran the 1,024-value large model for every tag on `local`, so a `local` deployment configured with one of these tags must re-embed what it indexed.
 - **Build requirement**: needs a `zone-server` built with the `local-embeddings` Cargo feature, which is on by default. ONNX Runtime publishes no musl builds, so the manager image is Debian-based rather than Alpine.
 
 ---
