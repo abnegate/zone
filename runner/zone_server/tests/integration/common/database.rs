@@ -2,7 +2,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
-/// Every test replays the whole chain into an empty database; more at once
+/// Every test migrates an empty database of its own; more at once
 /// only queue on the same disk writes, and the tests' own time bounds with them.
 static DATABASES: Semaphore = Semaphore::const_new(4);
 

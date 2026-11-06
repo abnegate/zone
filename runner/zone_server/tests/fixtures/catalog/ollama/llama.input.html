@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ollama Search</title>
+  </head>
+  <body>
+    <header>
+      <a href="/">Ollama</a>
+      <a href="/search">Models</a>
+      <a href="/docs">Docs</a>
+      <a href="/pricing">Pricing</a>
+      <a href="/signin">Sign in</a>
+      <a href="/download">Download</a>
+    </header>
+    <main>
+      <ul role="list" class="grid">
+      <li x-test-model class="flex items-baseline border-b py-6">
+        <a href="/library/llama3.1" class="group w-full">
+          <div class="flex flex-col mb-1" title="llama3.1">
+            <h2 class="truncate text-xl font-medium"><span x-test-search-response-title>llama3.1</span></h2>
+            <p class="max-w-lg break-words text-neutral-800 text-md">Llama 3.1 is a new state-of-the-art model from Meta available in 8B, 70B and 405B parameter sizes.</p>
+          </div>
+          <div class="flex flex-wrap space-x-2">
+          <span x-test-capability class="rounded-md bg-indigo-50 px-2">tools</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">8b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">70b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">405b</span>
+          </div>
+          <p class="my-1 flex space-x-5 text-[13px] font-medium text-neutral-500">
+            <span class="flex items-center"><span x-test-pull-count>98.2M</span>&nbsp;<span>Pulls</span></span> <span class="flex items-center"><span x-test-tag-count>93</span>&nbsp;<span>Tags</span></span> <span class="flex items-center">Updated&nbsp;<span x-test-updated>10 months ago</span></span>
+          </p>
+        </a>
+      </li>
+      <li x-test-model class="flex items-baseline border-b py-6">
+        <a href="/library/llama3.2" class="group w-full">
+          <div class="flex flex-col mb-1" title="llama3.2">
+            <h2 class="truncate text-xl font-medium"><span x-test-search-response-title>llama3.2</span></h2>
+            <p class="max-w-lg break-words text-neutral-800 text-md">Meta's Llama 3.2 goes small with 1B and 3B models.</p>
+          </div>
+          <div class="flex flex-wrap space-x-2">
+          <span x-test-capability class="rounded-md bg-indigo-50 px-2">tools</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">1b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">3b</span>
+          </div>
+          <p class="my-1 flex space-x-5 text-[13px] font-medium text-neutral-500">
+            <span class="flex items-center"><span x-test-pull-count>31.4M</span>&nbsp;<span>Pulls</span></span> <span class="flex items-center"><span x-test-tag-count>63</span>&nbsp;<span>Tags</span></span> <span class="flex items-center">Updated&nbsp;<span x-test-updated>1 year ago</span></span>
+          </p>
+        </a>
+      </li>
+      <li x-test-model class="flex items-baseline border-b py-6">
+        <a href="/library/codellama" class="group w-full">
+          <div class="flex flex-col mb-1" title="codellama">
+            <h2 class="truncate text-xl font-medium"><span x-test-search-response-title>codellama</span></h2>
+            <p class="max-w-lg break-words text-neutral-800 text-md">A large language model that can use text prompts to generate and discuss code.</p>
+          </div>
+          <div class="flex flex-wrap space-x-2">
+          <span x-test-size class="rounded-md bg-gray-50 px-2">7b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">13b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">34b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">70b</span>
+          </div>
+          <p class="my-1 flex space-x-5 text-[13px] font-medium text-neutral-500">
+            <span class="flex items-center"><span x-test-pull-count>3.4M</span>&nbsp;<span>Pulls</span></span> <span class="flex items-center"><span x-test-tag-count>199</span>&nbsp;<span>Tags</span></span> <span class="flex items-center">Updated&nbsp;<span x-test-updated>1 year ago</span></span>
+          </p>
+        </a>
+      </li>
+      <li x-test-model class="flex items-baseline border-b py-6">
+        <a href="/library/llava" class="group w-full">
+          <div class="flex flex-col mb-1" title="llava">
+            <h2 class="truncate text-xl font-medium"><span x-test-search-response-title>llava</span></h2>
+            <p class="max-w-lg break-words text-neutral-800 text-md">LLaVA is a novel end-to-end trained large multimodal model that combines a vision encoder and Vicuna for general-purpose visual and language understanding.</p>
+          </div>
+          <div class="flex flex-wrap space-x-2">
+          <span x-test-capability class="rounded-md bg-indigo-50 px-2">vision</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">7b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">13b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">34b</span>
+          </div>
+          <p class="my-1 flex space-x-5 text-[13px] font-medium text-neutral-500">
+            <span class="flex items-center"><span x-test-pull-count>9.6M</span>&nbsp;<span>Pulls</span></span> <span class="flex items-center"><span x-test-tag-count>98</span>&nbsp;<span>Tags</span></span> <span class="flex items-center">Updated&nbsp;<span x-test-updated>1 year ago</span></span>
+          </p>
+        </a>
+      </li>
+      <li x-test-model class="flex items-baseline border-b py-6">
+        <a href="/library/tinyllama" class="group w-full">
+          <div class="flex flex-col mb-1" title="tinyllama">
+            <h2 class="truncate text-xl font-medium"><span x-test-search-response-title>tinyllama</span></h2>
+            <p class="max-w-lg break-words text-neutral-800 text-md">The TinyLlama project is an open endeavor to train a compact 1.1B Llama model on 3 trillion tokens.</p>
+          </div>
+          <div class="flex flex-wrap space-x-2">
+          <span x-test-size class="rounded-md bg-gray-50 px-2">1.1b</span>
+          </div>
+          <p class="my-1 flex space-x-5 text-[13px] font-medium text-neutral-500">
+            <span class="flex items-center"><span x-test-pull-count>2.9M</span>&nbsp;<span>Pulls</span></span> <span class="flex items-center"><span x-test-tag-count>36</span>&nbsp;<span>Tags</span></span> <span class="flex items-center">Updated&nbsp;<span x-test-updated>1 year ago</span></span>
+          </p>
+        </a>
+      </li>
+      </ul>
+    </main>
+    <footer>
+      <a href="/blog">Blog</a>
+      <a href="/library">Library</a>
+      <a href="/privacy">Privacy</a>
+      <a href="https://github.com/ollama/ollama">GitHub</a>
+    </footer>
+  </body>
+</html>

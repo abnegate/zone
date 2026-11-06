@@ -1,0 +1,11 @@
+{
+  "browse": {
+    "error": "Provider unavailable: HuggingFace API returned status: 503 Service Unavailable"
+  },
+  "list": {
+    "body": {
+      "error": "Provider unavailable: HuggingFace API returned status: 503 Service Unavailable"
+    },
+    "status": 502
+  }
+}

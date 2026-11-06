@@ -1,0 +1,169 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "description": "Qwen2.5 72B for demanding reasoning, coding, and long-form generation.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "72B"
+          },
+          "name": "qwen2.5:72b",
+          "size": 47415722905,
+          "url": "https://ollama.com/library/qwen2.5:72b",
+          "use_cases": [
+            "Chat",
+            "Coding",
+            "Reasoning"
+          ]
+        },
+        {
+          "description": "Meta Llama 3.1 70B for higher-quality reasoning, writing, and complex assistants.",
+          "details": {
+            "family": "llama",
+            "format": "gguf",
+            "parameter_size": "70B"
+          },
+          "name": "llama3.1:70b",
+          "size": 42520412220,
+          "url": "https://ollama.com/library/llama3.1:70b",
+          "use_cases": [
+            "Chat",
+            "Reasoning"
+          ]
+        },
+        {
+          "description": "Mixtral 8x7B mixture-of-experts for high-quality chat at a modest active-parameter cost.",
+          "details": {
+            "family": "mixtral",
+            "format": "gguf",
+            "parameter_size": "47B"
+          },
+          "name": "mixtral",
+          "size": 26442483195,
+          "url": "https://ollama.com/library/mixtral",
+          "use_cases": [
+            "Chat",
+            "Reasoning"
+          ]
+        },
+        {
+          "description": "Uncensored Dolphin fine-tune of Mixtral for creative chat and roleplay.",
+          "details": {
+            "family": "mixtral",
+            "format": "gguf",
+            "parameter_size": "47B"
+          },
+          "name": "dolphin-mixtral",
+          "size": 26442506791,
+          "url": "https://ollama.com/library/dolphin-mixtral",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Cohere Command R for retrieval-augmented chat and tool-using agents.",
+          "details": {
+            "family": "command",
+            "format": "gguf",
+            "parameter_size": "35B"
+          },
+          "name": "command-r",
+          "size": 18791017100,
+          "url": "https://ollama.com/library/command-r",
+          "use_cases": [
+            "Chat",
+            "Tool use",
+            "Agents"
+          ]
+        }
+      ],
+      "next_cursor": "offset:5"
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "description": "Qwen2.5 72B for demanding reasoning, coding, and long-form generation.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "72B"
+          },
+          "name": "qwen2.5:72b",
+          "size": 47415722905,
+          "url": "https://ollama.com/library/qwen2.5:72b",
+          "use_cases": [
+            "Chat",
+            "Coding",
+            "Reasoning"
+          ]
+        },
+        {
+          "description": "Meta Llama 3.1 70B for higher-quality reasoning, writing, and complex assistants.",
+          "details": {
+            "family": "llama",
+            "format": "gguf",
+            "parameter_size": "70B"
+          },
+          "name": "llama3.1:70b",
+          "size": 42520412220,
+          "url": "https://ollama.com/library/llama3.1:70b",
+          "use_cases": [
+            "Chat",
+            "Reasoning"
+          ]
+        },
+        {
+          "description": "Mixtral 8x7B mixture-of-experts for high-quality chat at a modest active-parameter cost.",
+          "details": {
+            "family": "mixtral",
+            "format": "gguf",
+            "parameter_size": "47B"
+          },
+          "name": "mixtral",
+          "size": 26442483195,
+          "url": "https://ollama.com/library/mixtral",
+          "use_cases": [
+            "Chat",
+            "Reasoning"
+          ]
+        },
+        {
+          "description": "Uncensored Dolphin fine-tune of Mixtral for creative chat and roleplay.",
+          "details": {
+            "family": "mixtral",
+            "format": "gguf",
+            "parameter_size": "47B"
+          },
+          "name": "dolphin-mixtral",
+          "size": 26442506791,
+          "url": "https://ollama.com/library/dolphin-mixtral",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Cohere Command R for retrieval-augmented chat and tool-using agents.",
+          "details": {
+            "family": "command",
+            "format": "gguf",
+            "parameter_size": "35B"
+          },
+          "name": "command-r",
+          "size": 18791017100,
+          "url": "https://ollama.com/library/command-r",
+          "use_cases": [
+            "Chat",
+            "Tool use",
+            "Agents"
+          ]
+        }
+      ],
+      "next_cursor": "offset:5"
+    },
+    "status": 200
+  }
+}

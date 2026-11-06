@@ -25,6 +25,7 @@ use zone_server::routes;
 use zone_server::services::embedding::create_embedding_service;
 use zone_server::services::embedding::default_embedding_model;
 use zone_server::services::embedding::embedding_engine_from_env;
+use zone_server::services::embedding::embedding_host;
 use zone_server::services::login;
 use zone_server::services::mail;
 use zone_server::services::mail::AccountMail;
@@ -55,7 +56,7 @@ async fn main() {
                 .expect("Failed to connect to database");
             zone_server::db::migrations::run(&pool)
                 .await
-                .expect("Failed to run migrations");
+                .unwrap_or_else(|error| panic!("Failed to run migrations: {error}"));
             pool.close().await;
             tracing::info!("Migrations complete");
             return;
@@ -82,7 +83,7 @@ async fn main() {
 
     zone_server::db::migrations::run(&db)
         .await
-        .expect("Failed to run migrations");
+        .unwrap_or_else(|error| panic!("Failed to run migrations: {error}"));
 
     tracing::info!("Migrations complete");
 
@@ -111,14 +112,15 @@ async fn main() {
     };
 
     // Try to initialize embedding service from config
-    // In production, this would fetch from organization AI settings
     let embedding_service = {
-        use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+        use zone_context::embeddings::providers::{EMBEDDING_ENGINE_OLLAMA, PROVIDER_SELF_HOSTED};
         use zone_server::db::ai_settings::EffectiveAiSettings;
 
+        let engine = embedding_engine_from_env();
+        let host = embedding_host(engine.as_deref(), &config.ollama_host, &config.litellm_host);
         let default_settings = EffectiveAiSettings {
             provider: PROVIDER_SELF_HOSTED.to_string(),
-            litellm_host: Some(config.litellm_host.clone()),
+            litellm_host: Some(host.to_string()),
             litellm_key: Some(abnegate_secret::SecretValue::new(
                 config.litellm_key.clone(),
             )),
@@ -139,27 +141,19 @@ async fn main() {
             model_audio: None,
         };
 
-        let engine = embedding_engine_from_env();
-        // OllamaProvider uses the native /api/embeddings protocol. LiteLLM
-        // only exposes OpenAI /v1/embeddings, so ollama-engine traffic must
-        // go to OLLAMA_HOST or every embed 404s.
-        let mut default_settings = default_settings;
-        if !matches!(engine.as_deref(), Some("local")) {
-            default_settings.litellm_host = Some(config.ollama_host.clone());
-        }
         match create_embedding_service(&default_settings, engine.as_deref()) {
             Ok(service) => {
                 tracing::info!(
                     "Initialized embedding service: engine={}, model={}, dimension={}",
-                    engine.as_deref().unwrap_or("ollama"),
+                    engine.as_deref().unwrap_or(EMBEDDING_ENGINE_OLLAMA),
                     service.model(),
-                    service.dimension()
+                    dimension_label(service.dimension())
                 );
                 Some(service)
             }
             Err(e) => {
-                // SECURITY: Error messages are sanitized by ContextError Display impl
-                // to prevent leaking API keys or other sensitive configuration data
+                // ContextError's Display leaves API keys out, but an invalid base URL
+                // error names the configured URL.
                 tracing::warn!("Failed to initialize embedding service: {}", e);
                 tracing::warn!("Context features will be unavailable");
                 None
@@ -271,6 +265,15 @@ async fn main() {
     result.expect("Server error");
 }
 
+/// An embedding width for the startup log; a width of 0 is one the service
+/// learns from its first embedding.
+fn dimension_label(width: usize) -> String {
+    match width {
+        0 => DIMENSION_LEARNED_ON_FIRST_EMBED.to_string(),
+        width => width.to_string(),
+    }
+}
+
 const USAGE: &str =
     "Usage: zone-server [--migrate-only | --seal-secrets [--dry-run] --backup <path>]";
 const DEFAULT_FILTER: &str =
@@ -285,6 +288,7 @@ const UNKNOWN_ARGUMENTS: &str = "Unknown server arguments";
 const SEALING_CONNECTIONS: u32 = 2;
 const FAILURE: i32 = 1;
 const SUCCESS: i32 = 0;
+const DIMENSION_LEARNED_ON_FIRST_EMBED: &str = "learned on the first embed";
 
 /// What the server was started to do.
 #[derive(Debug, PartialEq)]
@@ -408,7 +412,9 @@ mod tests {
 
     use zone_server::db::sealing::Options;
 
+    use super::DIMENSION_LEARNED_ON_FIRST_EMBED;
     use super::Mode;
+    use super::dimension_label;
     use super::mode;
 
     fn arguments(arguments: &[&str]) -> Vec<String> {
@@ -420,6 +426,12 @@ mod tests {
 
     fn sealing(dry_run: bool) -> Mode {
         Mode::SealSecrets(Options::new(dry_run, PathBuf::from("/backups/zone.dump")))
+    }
+
+    #[test]
+    fn an_unknown_embedding_width_is_logged_as_learned_on_the_first_embed() {
+        assert_eq!(dimension_label(0), DIMENSION_LEARNED_ON_FIRST_EMBED);
+        assert_eq!(dimension_label(1024), "1024");
     }
 
     #[test]

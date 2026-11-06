@@ -96,18 +96,21 @@ dependencies = [
 
 [[package]]
 name = "abnegate-llm"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b196ea095b027c2af9c85c00f8020d8be75d607ac3cce7b1dad6e0ce1cbd897"
+checksum = "3e60c26567c35b3463de321053406660b77c25fdcf4a3d2132da25030ab14540"
 dependencies = [
  "abnegate-http",
  "abnegate-secret",
  "async-stream",
  "async-trait",
  "chrono",
+ "fastembed",
  "futures",
  "rand 0.10.2",
+ "regex",
  "reqwest 0.13.5",
+ "scraper",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1641,6 +1644,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "daachorse"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5614204febbc33cc07a2806aa6440b904ac012b68eecc37f4493ea4a76455a3d"
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2324,9 +2333,9 @@ dependencies = [
 
 [[package]]
 name = "fastembed"
-version = "6.0.2"
+version = "7.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5e6a29ef0fc303e63ce89f2b71d98bee9df51d79cbbedb78dd0d6ba9f3b172f"
+checksum = "3850d724d559da51a4b88f68b0ba111a2627c32279bec6b3c256f073c71a3195"
 dependencies = [
  "hf-hub",
  "image",
@@ -3191,6 +3200,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -5670,6 +5680,8 @@ dependencies = [
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
+ "quinn",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -5677,6 +5689,7 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
+ "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http 0.6.11",
@@ -5686,6 +5699,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -7338,13 +7352,13 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokenizers"
-version = "0.22.2"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b238e22d44a15349529690fb07bd645cf58149a1b1e44d6cb5bd1641ff1a6223"
+checksum = "7afbf6e88718afcc138bad01d6ccc3051dbbc3b2ce9793d8b8a3aeb610969cfc"
 dependencies = [
  "ahash",
- "aho-corasick",
  "compact_str",
+ "daachorse",
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
@@ -9441,6 +9455,7 @@ version = "0.1.0"
 dependencies = [
  "abnegate-http",
  "abnegate-index",
+ "abnegate-llm",
  "async-stream",
  "async-trait",
  "base64 0.23.1",

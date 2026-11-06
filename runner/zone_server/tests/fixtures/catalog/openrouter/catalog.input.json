@@ -1,0 +1,145 @@
+{
+  "data": [
+    {
+      "id": "openai/gpt-4o",
+      "canonical_slug": "openai/gpt-4o",
+      "name": "OpenAI: GPT-4o",
+      "created": 1715558400,
+      "description": "GPT-4o (\"o\" for \"omni\") is OpenAI's latest AI model, supporting both text and image inputs with text outputs.\n\nIt maintains the intelligence level of GPT-4 Turbo while being twice as fast.",
+      "context_length": 128000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "file"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "GPT",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.0000025",
+        "completion": "0.00001"
+      },
+      "supported_parameters": [
+        "max_tokens",
+        "temperature",
+        "tools",
+        "tool_choice",
+        "response_format"
+      ]
+    },
+    {
+      "id": "anthropic/claude-3.5-sonnet",
+      "name": "Anthropic: Claude 3.5 Sonnet",
+      "description": "New Claude 3.5 Sonnet delivers better-than-Opus capabilities, faster-than-Sonnet speeds, at the same Sonnet prices.",
+      "context_length": 200000,
+      "architecture": {
+        "modality": "text+image->text",
+        "tokenizer": "Claude"
+      },
+      "supported_parameters": [
+        "max_tokens",
+        "tools"
+      ]
+    },
+    {
+      "id": "meta-llama/llama-3.1-8b-instruct",
+      "name": "Meta: Llama 3.1 8B Instruct",
+      "description": "Meta's latest class of model (Llama 3.1) launched with a variety of sizes & flavors.",
+      "context_length": 131072,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Llama3"
+      },
+      "supported_parameters": [
+        "max_tokens",
+        "temperature"
+      ]
+    },
+    {
+      "id": "google/gemini-2.5-flash-image",
+      "name": "Google: Gemini 2.5 Flash Image",
+      "description": "Gemini 2.5 Flash Image is a state of the art image generation model with contextual understanding.",
+      "context_length": 32768,
+      "architecture": {
+        "modality": "text+image->text+image",
+        "input_modalities": [
+          "image",
+          "text"
+        ],
+        "output_modalities": [
+          "image",
+          "text"
+        ],
+        "tokenizer": "Gemini"
+      },
+      "supported_parameters": [
+        "max_tokens",
+        "temperature",
+        "structured_outputs"
+      ]
+    },
+    {
+      "id": "deepseek/deepseek-r1",
+      "name": "DeepSeek: R1",
+      "description": "DeepSeek R1 is here: performance on par with OpenAI o1, but open-sourced and with fully open reasoning tokens.  It's 671B parameters in size, with 37B active in an inference pass.",
+      "context_length": 163840,
+      "architecture": {
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "DeepSeek"
+      },
+      "supported_parameters": [
+        "max_tokens",
+        "reasoning",
+        "include_reasoning",
+        "tools"
+      ]
+    },
+    {
+      "id": "mistralai/voxtral-small-24b-2507",
+      "name": "Mistral: Voxtral Small 24B 2507",
+      "description": "Voxtral Small is an enhancement of Mistral Small 3, incorporating state-of-the-art audio input capabilities.",
+      "context_length": 32000,
+      "architecture": {
+        "modality": "text+audio->text",
+        "input_modalities": [
+          "text",
+          "audio"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Mistral"
+      },
+      "supported_parameters": [
+        "max_tokens",
+        "tools"
+      ]
+    },
+    {
+      "id": "openrouter/auto",
+      "name": "openrouter/auto",
+      "description": "Your prompt will be processed by a meta-model and routed to one of dozens of models.",
+      "context_length": 2000000,
+      "architecture": {
+        "modality": "text->text",
+        "tokenizer": "Router"
+      }
+    }
+  ]
+}
