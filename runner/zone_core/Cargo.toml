@@ -13,7 +13,6 @@ sqlx = ["abnegate-secret/sqlx"]
 test-support = []
 
 [dependencies]
-base64 = { workspace = true }
 tempfile = "=3.27.0"
 tokio = { workspace = true }
 serde = { workspace = true }
