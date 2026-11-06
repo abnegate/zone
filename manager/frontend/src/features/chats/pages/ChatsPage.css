@@ -932,6 +932,14 @@
   border-left: 2px solid var(--ui-border);
 }
 
+.message-activity:not(:first-child) {
+  margin-top: var(--ui-space-3);
+}
+
+.message-activity:last-child {
+  margin-bottom: 0;
+}
+
 .message-activity-toggle {
   display: flex;
   align-items: center;

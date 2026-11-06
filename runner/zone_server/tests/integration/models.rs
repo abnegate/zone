@@ -76,6 +76,7 @@ async fn mock_ollama_show(
             "parameters": "temperature 0.7",
             "template": "{{ .Prompt }}",
             "capabilities": ["completion"],
+            "model_info": {"general.architecture": "llama", "llama.context_length": 4096},
             "details": {
                 "format": "gguf",
                 "family": "llama",
@@ -393,6 +394,14 @@ async fn test_list_models_ollama_success() {
     assert_eq!(models[0]["completion"], true);
     assert_eq!(models[0]["tools"], false);
     assert_eq!(models[0]["needs_character"], false);
+    assert_eq!(
+        models[0]["details"]["context_length"], 4096,
+        "the engine's native window is listed with the model"
+    );
+    assert!(
+        models[1]["details"].get("context_length").is_none(),
+        "a model the engine reports no window for lists none"
+    );
 }
 
 #[tokio::test]

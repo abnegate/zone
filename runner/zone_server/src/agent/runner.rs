@@ -68,10 +68,24 @@ impl LoopBudget {
         }
     }
 
+    /// A task runs until it is done. Rounds and tool calls are left unbounded
+    /// because a ceiling here stops the work mid-way and reports success, and
+    /// a half-built feature reads the same as a finished one to everything
+    /// downstream. What ends a runaway attempt is its deadline, which the
+    /// caller already passes, plus the no-progress guard in the loop itself.
     pub const fn task() -> Self {
         Self {
-            max_iterations: 50,
-            max_tool_calls: 100,
+            max_iterations: usize::MAX,
+            max_tool_calls: usize::MAX,
+        }
+    }
+
+    /// A budget with an explicit ceiling, for a caller that wants one and for
+    /// the tests that prove a ceiling still ends a run that will not stop.
+    pub const fn bounded(max_iterations: usize, max_tool_calls: usize) -> Self {
+        Self {
+            max_iterations,
+            max_tool_calls,
         }
     }
 
@@ -854,15 +868,19 @@ fn might_be_tool_text(text: &str) -> bool {
         || after.starts_with('[')
 }
 
-/// Match semantic arguments even when a provider changes JSON key ordering.
 fn signature(call: &LlmToolCall) -> (String, String) {
-    let arguments = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+    call_signature(&call.function.name, &call.function.arguments)
+}
+
+/// Match semantic arguments even when a provider changes JSON key ordering.
+pub(crate) fn call_signature(name: &str, arguments: &str) -> (String, String) {
+    let arguments = serde_json::from_str::<serde_json::Value>(arguments)
         .map(|mut value| {
             value.sort_all_objects();
             value.to_string()
         })
-        .unwrap_or_else(|_| call.function.arguments.clone());
-    (call.function.name.clone(), arguments)
+        .unwrap_or_else(|_| arguments.to_string());
+    (name.to_string(), arguments)
 }
 
 /// Longest tool outcome we show in the UI trace.
