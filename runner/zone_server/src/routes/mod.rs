@@ -29,7 +29,8 @@ pub mod webhooks;
 pub mod workspace_themes;
 pub mod workspaces;
 
-use axum::http::{Method, header};
+use axum::body::Body;
+use axum::http::{Method, Request, header};
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -38,6 +39,7 @@ use axum::{
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
+use tracing::Span;
 
 use crate::auth::require_auth;
 use crate::config::AllowedOrigins;
@@ -493,17 +495,76 @@ pub fn create_router(state: AppState) -> Router {
         .merge(public_routes)
         .merge(protected_routes)
         .layer(middleware::from_fn(crate::metrics::track_http))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(span))
         .layer(cors)
         .with_state(state)
+}
+
+/// The path alone, never the query, which carries a GitHub callback's code
+/// and state.
+fn span(request: &Request<Body>) -> Span {
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        path = %request.uri().path(),
+        version = ?request.version(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::StatusCode;
+    use std::io;
+    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the capture is writable")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_request_span_records_the_path_and_never_the_query() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let request = Request::builder()
+            .uri("/api/github/callbacks/manifest?code=secret-code&state=secret-state")
+            .body(Body::empty())
+            .expect("a request");
+
+        tracing::subscriber::with_default(subscriber, || {
+            span(&request).in_scope(|| tracing::debug!("handled"));
+        });
+
+        let logs = String::from_utf8_lossy(&captured.0.lock().expect("the capture is readable"))
+            .into_owned();
+        assert!(
+            logs.contains("path=/api/github/callbacks/manifest"),
+            "{logs}"
+        );
+        assert!(logs.contains("method=GET"), "{logs}");
+        for secret in ["secret-code", "secret-state", "?"] {
+            assert!(!logs.contains(secret), "{secret} reached the logs: {logs}");
+        }
+    }
 
     fn router(origins: &[&str]) -> Router {
         router_with_credentials(origins, false)
