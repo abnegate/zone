@@ -1118,6 +1118,42 @@ async fn a_choice_belongs_to_one_chat() {
 }
 
 #[tokio::test]
+async fn the_chat_list_says_which_provider_and_model_each_chat_runs_on() {
+    let tenant = Tenant::new().await;
+    tenant
+        .save_organization_settings(json!({ "openai_api_key": OPENAI_KEY }))
+        .await;
+    let chosen_chat = tenant.chat(&tenant.owner.token).await;
+    let following_chat = tenant.chat(&tenant.owner.token).await;
+    let chosen = tenant
+        .choose(
+            &tenant.owner.token,
+            &chosen_chat,
+            json!({ "provider": "openai", "model": "gpt-4o" }),
+        )
+        .await;
+    expect(&chosen, StatusCode::OK, "OpenAI is chosen mid-chat");
+
+    let listed = tenant.chats(&tenant.owner.token).await;
+    let find = |id: &str| {
+        listed
+            .iter()
+            .find(|chat| chat["id"] == id)
+            .unwrap_or_else(|| panic!("chat {id} is listed: {listed:#?}"))
+            .clone()
+    };
+    let chosen = find(&chosen_chat);
+    assert_eq!(chosen["provider"], json!("openai"), "{chosen}");
+    assert_eq!(chosen["provider_model"], json!("gpt-4o"), "{chosen}");
+    let following = find(&following_chat);
+    assert!(
+        following.get("provider") == Some(&Value::Null)
+            && following.get("provider_model") == Some(&Value::Null),
+        "a listed chat following its workspace says so: {following}"
+    );
+}
+
+#[tokio::test]
 async fn the_workspace_lists_chat_providers_before_any_chat_exists() {
     let tenant = Tenant::new().await;
 
@@ -1224,11 +1260,8 @@ async fn create_stores_a_chosen_provider_and_a_refused_one_creates_nothing() {
         1,
         "a refused create left a chat behind: {chats:?}"
     );
-    assert!(
-        chats[0].get("provider").is_none() && chats[0].get("provider_model").is_none(),
-        "the chat list omits the provider fields: {}",
-        chats[0]
-    );
+    assert_eq!(chats[0]["provider"], json!("openai"), "{}", chats[0]);
+    assert_eq!(chats[0]["provider_model"], json!("gpt-4o"), "{}", chats[0]);
 }
 
 #[tokio::test]

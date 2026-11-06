@@ -2352,6 +2352,25 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('lists each chat with the model its chosen provider runs', async () => {
+      mockClient.getChats.mockResolvedValueOnce([
+        { ...mockChats[0], provider: 'codex', provider_model: 'gpt-6-sol' },
+        { ...mockChats[1], provider: 'openai', provider_model: null },
+        { ...mockChats[2], provider: null, provider_model: null },
+      ]);
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      const listed = (title: string) =>
+        screen.getByText(title).closest('.chat-item')?.querySelector('.chat-meta-model');
+      expect(listed('Chat 1')).toHaveTextContent(/^gpt-6-sol$/);
+      expect(listed('Chat 2')).toHaveTextContent(/^Automatic$/);
+      expect(listed('Chat 3')).toHaveTextContent(/^llama2$/);
+    });
+
     it('labels the model badge with the full model id and splits the list meta', async () => {
       mockClient.getChat.mockResolvedValueOnce({
         ...mockChatWithMessages,
@@ -3513,6 +3532,42 @@ describe('ChatsPage', () => {
       });
       await waitFor(() => expect(badge()).toHaveTextContent('Claude Code·Automatic'));
       expect(mockClient.updateChat).not.toHaveBeenCalled();
+    });
+
+    const listedModel = () => document.querySelector('.chat-item.active .chat-meta-model');
+
+    it('lists the chosen model as soon as a provider is chosen mid-chat', async () => {
+      await openChat();
+      await screen.findByTestId('chat-provider');
+      expect(listedModel()).toHaveTextContent(/^llama2$/);
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        provider: 'codex',
+        provider_model: 'gpt-6-sol',
+      });
+      mockClient.getChats.mockResolvedValue([
+        { ...mockChats[0], provider: 'codex', provider_model: 'gpt-6-sol' },
+        ...mockChats.slice(1),
+      ]);
+
+      chooseSelectOption('chat-provider', 'Codex');
+
+      await waitFor(() => expect(listedModel()).toHaveTextContent(/^gpt-6-sol$/));
+    });
+
+    it('lists a model changed mid-chat without waiting for the next message', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: codexOffer }));
+      await openChat({ model_name: 'gpt-6-sol' });
+      await screen.findByTestId('chat-provider-model');
+      mockClient.updateChat.mockResolvedValue({ ...mockChatWithMessages, model_name: 'gpt-5.5' });
+      mockClient.getChats.mockResolvedValue([
+        { ...mockChats[0], model_name: 'gpt-5.5' },
+        ...mockChats.slice(1),
+      ]);
+
+      chooseSelectOption('chat-provider-model', 'gpt-5.5');
+
+      await waitFor(() => expect(listedModel()).toHaveTextContent(/^gpt-5\.5$/));
     });
 
     const openChatById = async () => {
