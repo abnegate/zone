@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { isWebUrl, NOT_WEB_URL_MESSAGE } from './utils/webUrl';
+
+const WebUrlSchema = z.string().refine(isWebUrl, { error: NOT_WEB_URL_MESSAGE });
 
 export const GitHubAppOwnerTypeSchema = z.enum(['User', 'Organization']);
 export const GitHubAccountTypeSchema = z.enum(['User', 'Organization', 'Enterprise']);
@@ -16,8 +19,8 @@ export const GitHubAppSchema = z.object({
   name: z.string(),
   owner_login: z.string(),
   owner_type: GitHubAppOwnerTypeSchema,
-  html_url: z.string(),
-  settings_url: z.string(),
+  html_url: WebUrlSchema,
+  settings_url: WebUrlSchema,
   created_at: z.string(),
 });
 
@@ -28,7 +31,7 @@ export const GitHubInstallationSchema = z.object({
   account_login: z.string(),
   account_type: GitHubAccountTypeSchema,
   repository_selection: GitHubRepositorySelectionSchema,
-  html_url: z.string(),
+  html_url: WebUrlSchema,
   suspended_at: z.string().nullable(),
   revoked_at: z.string().nullable(),
   created_at: z.string(),
@@ -40,13 +43,13 @@ export const GitHubConnectionSchema = z.object({
 });
 
 export const GitHubAppRegistrationSchema = z.object({
-  action: z.string(),
+  action: WebUrlSchema,
   manifest: z.string(),
   state: z.string(),
 });
 
 export const GitHubInstallationUrlSchema = z.object({
-  url: z.string(),
+  url: WebUrlSchema,
 });
 
 export const GitHubRepositorySchema = z.object({
@@ -58,13 +61,13 @@ export const GitHubRepositorySchema = z.object({
   private: z.boolean(),
   archived: z.boolean(),
   default_branch: z.string(),
-  html_url: z.string(),
+  html_url: WebUrlSchema,
 });
 
 export const GitHubRepositoryInstallationSchema = z.object({
   id: z.string(),
   account_login: z.string(),
-  html_url: z.string(),
+  html_url: WebUrlSchema,
   error: GitHubRepositoryInstallationErrorSchema.nullable(),
 });
 

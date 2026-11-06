@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from 'bun:test';
 import { submitManifest } from './submitManifest';
+import { NOT_WEB_URL_MESSAGE } from './webUrl';
 
 const ACTION = 'https://github.com/settings/apps/new?state=signed-state';
 
@@ -71,6 +72,15 @@ describe('submitManifest', () => {
     expect(submitted).toHaveLength(1);
     expect(submitted[0].ownerDocument).toBe(target);
     expect(submitted[0].parentElement).toBe(target.body);
+    expect(document.body.querySelector('form')).toBeNull();
+  });
+
+  it('refuses a javascript: action without building or posting the form', () => {
+    expect(() =>
+      submitManifest({ action: 'javascript:alert(1)', manifest: '{"name":"Zone"}' })
+    ).toThrow(NOT_WEB_URL_MESSAGE);
+
+    expect(submit).not.toHaveBeenCalled();
     expect(document.body.querySelector('form')).toBeNull();
   });
 });
