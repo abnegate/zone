@@ -93,12 +93,9 @@ export function applyOrder(projects: readonly Project[], order: readonly string[
   const current = sortProjects(projects, 'custom');
   const byId = new Map(current.map((project) => [project.id, project]));
   const placed = [...new Set(order)].flatMap((id) => byId.get(id) ?? []);
-  const slots = current.filter((project) => placed.includes(project));
-  const moved = new Map(
-    placed.map((project, index) => [project.id, { ...project, position: slots[index].position }])
-  );
-  return sortProjects(
-    current.map((project) => moved.get(project.id) ?? project),
-    'custom'
-  );
+  const moved = new Set(placed);
+  let next = 0;
+  return current
+    .map((project) => (moved.has(project) ? placed[next++] : project))
+    .map((project, index) => ({ ...project, position: index + 1 }));
 }

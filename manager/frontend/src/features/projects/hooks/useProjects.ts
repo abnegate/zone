@@ -13,7 +13,6 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
   const {
     data: projects = [],
     isLoading,
-    isFetching,
     error,
     refetch,
   } = useQuery({
@@ -28,7 +27,9 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
     enabled: !!workspaceId,
   });
 
-  const loading = workspaceId ? isLoading || isFetching : workspaceLoading;
+  const loading = workspaceId ? isLoading : workspaceLoading;
+  const orderKey = ['project-order', workspaceId];
+  const lastPendingOrder = () => queryClient.isMutating({ mutationKey: orderKey }) <= 1;
 
   const createProjectMutation = useMutation({
     mutationFn: (request: CreateProjectRequest) => projectsApi.createProject(request),
@@ -46,6 +47,7 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
   });
 
   const reorderProjectsMutation = useMutation({
+    mutationKey: orderKey,
     scope: { id: 'project-order' },
     mutationFn: (order: readonly string[]) => {
       if (!workspaceId) {
@@ -63,12 +65,15 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
       return { previous };
     },
     onError: (_error, _order, context) => {
+      if (!lastPendingOrder()) return;
       for (const [key, data] of context?.previous ?? []) {
         queryClient.setQueryData(key, data);
       }
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['projects'], refetchType: 'inactive' });
+      if (lastPendingOrder()) {
+        queryClient.invalidateQueries({ queryKey: ['projects'] });
+      }
     },
   });
 

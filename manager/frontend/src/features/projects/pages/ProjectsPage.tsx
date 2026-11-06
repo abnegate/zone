@@ -95,8 +95,11 @@ export default function ProjectsPage() {
   }, [sortStorageKey]);
 
   const [orderError, setOrderError] = useState<string | null>(null);
+  const shownSort = useRef(sort);
+  shownSort.current = sort;
 
   const chooseSort = (next: ProjectSort) => {
+    shownSort.current = next;
     setSort(next);
     writeSort(sortStorageKey, next);
   };
@@ -111,6 +114,11 @@ export default function ProjectsPage() {
   });
   const canAdministerSync = useCanAdministerWorkspace(workspaceId);
   const canReorder = useCanWriteWorkspace(workspaceId);
+  const shownWorkspace = useRef(workspaceId);
+  shownWorkspace.current = workspaceId;
+  useEffect(() => {
+    if (workspaceId) setOrderError(null);
+  }, [workspaceId]);
 
   // State
   const [searchQuery, setSearchQuery] = useState('');
@@ -455,10 +463,12 @@ export default function ProjectsPage() {
       index
     );
     const previous = sort;
+    const requestedIn = workspaceId;
     chooseSort('custom');
     setOrderError(null);
     reorderProjects(order).catch((error: unknown) => {
-      chooseSort(previous);
+      if (shownWorkspace.current !== requestedIn) return;
+      if (shownSort.current === 'custom') chooseSort(previous);
       setOrderError(error instanceof Error ? error.message : 'Failed to reorder projects');
     });
   };

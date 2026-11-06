@@ -49,11 +49,13 @@ mock.module('../../../api/projects', () => ({
 const mockGetWorkspaceMembers = mock(() =>
   Promise.resolve({ members: [{ user_id: userId, role }] })
 );
+let membersFail = false;
 
 mock.module('../../../api/client', () =>
   clientModule({
     getSources: mock(() => Promise.resolve([])),
-    getWorkspaceMembers: mockGetWorkspaceMembers,
+    getWorkspaceMembers: () =>
+      membersFail ? Promise.reject(new Error('Unavailable')) : mockGetWorkspaceMembers(),
   })
 );
 
@@ -156,6 +158,7 @@ describe('project order', () => {
     localStorage.clear();
     userId = 'user-1';
     role = 'member';
+    membersFail = false;
     stored = PROJECTS.map((item) => ({ ...item }));
     mockGetProjects.mockReset();
     mockGetProjects.mockImplementation(() => Promise.resolve(stored));
@@ -279,6 +282,15 @@ describe('project order', () => {
       expect(screen.queryByRole('button', { name: /^Move / })).toBeNull();
     });
 
+    it('gives no grips when the role cannot be read', async () => {
+      membersFail = true;
+      renderPage();
+      await loaded();
+      await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+
+      expect(screen.queryByRole('button', { name: /^Move / })).toBeNull();
+    });
+
     it('moves a project by keyboard, saves the order and switches to custom', async () => {
       renderPage();
       await ready();
@@ -368,6 +380,79 @@ describe('project order', () => {
       await failingMove();
 
       expect(shownOrder()).toEqual(['cloud', 'jbs', 'zone']);
+    });
+
+    it('keeps a newer move when an earlier one fails', async () => {
+      let refuseFirst: (reason: Error) => void = () => undefined;
+      mockReorderProjects.mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            refuseFirst = reject;
+          })
+      );
+      renderPage();
+      await ready();
+      mockGetProjects.mockImplementation(() => new Promise(() => {}));
+
+      const zone = grip('Zone');
+      zone.focus();
+      await press(zone, 'Space');
+      await press(zone, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(zone, 'Space');
+      await waitFor(() => expect(shownOrder()).toEqual(['cloud', 'zone', 'jbs']));
+
+      const cloud = grip('Cloud');
+      cloud.focus();
+      await press(cloud, 'Space');
+      await press(cloud, 'ArrowDown');
+      await press(cloud, 'ArrowDown');
+      await announced('Cloud would move to position 3 of 3.');
+      await press(cloud, 'Space');
+      await waitFor(() => expect(shownOrder()).toEqual(['zone', 'jbs', 'cloud']));
+
+      await act(async () => {
+        refuseFirst(new Error('Workspace write access required'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await waitFor(() =>
+        expect(mockReorderProjects).toHaveBeenLastCalledWith('workspace-1', [
+          'zone',
+          'jbs',
+          'cloud',
+        ])
+      );
+      await waitFor(() => expect(shownOrder()).toEqual(['zone', 'jbs', 'cloud']));
+    });
+
+    it('keeps a sort chosen while a failing save was pending', async () => {
+      let refuse: (reason: Error) => void = () => undefined;
+      mockReorderProjects.mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            refuse = reject;
+          })
+      );
+      renderPage();
+      await ready();
+      chooseSelect('Sort projects', 'Most recently used');
+      const handle = grip('Zone');
+      handle.focus();
+      await press(handle, 'Space');
+      await press(handle, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(handle, 'Space');
+      chooseSelect('Sort projects', 'Name');
+
+      await act(async () => {
+        refuse(new Error('Workspace write access required'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await screen.findByRole('alert');
+      expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent('Name');
+      expect(localStorage.getItem(sortKey('user-1'))).toBe('name');
     });
 
     it('puts the sort back when saving a move made in another sort fails', async () => {

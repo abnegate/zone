@@ -98,6 +98,15 @@ describe('applyOrder', () => {
     expect(ids(arranged)).toEqual(['zone', 'jbs', 'cloud']);
     expect(arranged.map((item) => item.position)).toEqual([1, 2, 3]);
   });
+
+  it('moves projects that share a position, as an old server lists them', () => {
+    const tied = [project('a', { position: 0 }), project('b', { position: 0 })];
+
+    const arranged = applyOrder(tied, ['b', 'a']);
+
+    expect(ids(arranged)).toEqual(['b', 'a']);
+    expect(ids(sortProjects(arranged, 'custom'))).toEqual(['b', 'a']);
+  });
 });
 
 describe('the saved sort', () => {
