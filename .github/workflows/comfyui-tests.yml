@@ -25,6 +25,10 @@ on:
       - 'scripts/live-verify/comfy-stub.py'
       - '.github/workflows/comfyui-tests.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   tests:
     name: Python tests
