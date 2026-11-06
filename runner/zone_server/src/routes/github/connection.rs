@@ -363,13 +363,13 @@ mod tests {
             "{rendered}"
         );
         let text = rendered.to_string();
-        for secret in [
-            "client-secret",
-            "private-key",
-            "webhook-secret",
-            "Iv1.client",
+        for (case, forbidden) in [
+            ("the client secret", "client-secret"),
+            ("the private key", "private-key"),
+            ("the webhook secret", "webhook-secret"),
+            ("the client id", "Iv1.client"),
         ] {
-            assert!(!text.contains(secret), "{secret} leaked: {text}");
+            assert!(!text.contains(forbidden), "{case} leaked: {text}");
         }
     }
 

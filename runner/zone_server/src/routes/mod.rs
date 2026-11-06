@@ -618,8 +618,12 @@ mod tests {
             "{logs}"
         );
         assert!(logs.contains("method=POST"), "{logs}");
-        for secret in ["secret-code", "secret-state", "?"] {
-            assert!(!logs.contains(secret), "{secret} reached the logs: {logs}");
+        for (case, forbidden) in [
+            ("the code", "secret-code"),
+            ("the state", "secret-state"),
+            ("the query", "?"),
+        ] {
+            assert!(!logs.contains(forbidden), "{case} reached the logs: {logs}");
         }
     }
 
