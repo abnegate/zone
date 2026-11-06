@@ -44,7 +44,9 @@ impl From<github_app::Error> for Error {
             | github_app::Error::NotConnected => Self::Disconnected,
             github_app::Error::Credential => Self::Uncredentialed,
             github_app::Error::Database(_) => Self::Storage,
-            github_app::Error::Application(ApplicationError::Transport(_)) => Self::Unreachable,
+            github_app::Error::Application(
+                ApplicationError::Transport(_) | ApplicationError::Status(500..=599),
+            ) => Self::Unreachable,
             error => Self::Refused(error.to_string()),
         }
     }
@@ -107,9 +109,20 @@ mod tests {
             Error::from(github_app::Error::Credential),
             Error::Uncredentialed
         );
+    }
+
+    #[test]
+    fn github_failing_to_mint_is_unreachable_but_a_refusal_is_not() {
+        for status in [500, 502, 503, 599] {
+            assert_eq!(
+                Error::from(github_app::Error::from(ApplicationError::Status(status))),
+                Error::Unreachable,
+                "{status}"
+            );
+        }
         assert_eq!(
-            Error::from(github_app::Error::from(ApplicationError::Status(500))),
-            Error::Refused("GitHub returned HTTP 500 for the GitHub App request.".to_string())
+            Error::from(github_app::Error::from(ApplicationError::Status(422))),
+            Error::Refused("GitHub returned HTTP 422 for the GitHub App request.".to_string())
         );
     }
 }
