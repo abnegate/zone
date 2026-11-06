@@ -1875,6 +1875,44 @@ async fn installations_sync_keeps_an_installation_recorded_while_github_lists() 
 }
 
 #[tokio::test]
+async fn installations_path_id_that_is_not_a_uuid_is_a_json_not_found_after_the_guard() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let member = harness.member(&tenant).await;
+    let paths = [
+        (
+            Method::POST,
+            format!("{}/not-a-uuid/installations", apps_path(&tenant)),
+        ),
+        (
+            Method::DELETE,
+            format!(
+                "{}/installations/not-a-uuid?uninstall=true",
+                connection_path(&tenant)
+            ),
+        ),
+    ];
+
+    for (method, uri) in paths {
+        assert_refused(
+            &harness
+                .call(method.clone(), &uri, Some(&member.token), Body::empty())
+                .await,
+            StatusCode::FORBIDDEN,
+        );
+        assert_refused(
+            &harness
+                .call(method, &uri, Some(&tenant.owner.token), Body::empty())
+                .await,
+            StatusCode::NOT_FOUND,
+        );
+    }
+    assert_eq!(harness.github_requests().await, 0, "GitHub is never asked");
+
+    harness.discard().await;
+}
+
+#[tokio::test]
 async fn authorization_repositories_without_token_is_unauthorized() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;

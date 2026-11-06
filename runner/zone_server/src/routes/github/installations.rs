@@ -6,7 +6,10 @@ use std::num::{NonZeroU8, NonZeroU32};
 use abnegate_vcs::pull_request::{ApplicationError, Installation, InstallationId};
 use axum::{
     Json,
-    extract::{Path, Query, State, rejection::QueryRejection},
+    extract::{
+        Path, Query, State,
+        rejection::{PathRejection, QueryRejection},
+    },
     http::StatusCode,
 };
 use futures::future::join_all;
@@ -64,11 +67,12 @@ impl Tally {
 pub async fn create(
     State(state): State<AppState>,
     admin: OrgAdmin,
-    Path((_, app_id)): Path<(Uuid, Uuid)>,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
 ) -> Result<Json<InstallationUrl>, ServerError> {
+    let Path((_, app_id)) = path.map_err(|_| app_not_found())?;
     let app = github_apps::get(state.db(), admin.org_id, app_id)
         .await?
-        .ok_or_else(|| ServerError::NotFound(APP_NOT_FOUND.to_string()))?;
+        .ok_or_else(app_not_found)?;
     let issued = github_connection_states::issue(
         state.db(),
         admin.org_id,
@@ -149,9 +153,10 @@ pub async fn sync(
 pub async fn delete(
     State(state): State<AppState>,
     admin: OrgAdmin,
-    Path((_, id)): Path<(Uuid, Uuid)>,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
     removal: Result<Query<Removal>, QueryRejection>,
 ) -> Result<StatusCode, ServerError> {
+    let Path((_, id)) = path.map_err(|_| installation_not_found())?;
     let Query(removal) =
         removal.map_err(|_| ServerError::BadRequest(INVALID_UNINSTALL.to_string()))?;
     let installation = github_installations::get(state.db(), admin.org_id, id)
@@ -289,6 +294,10 @@ fn number(installation: &InstallationRow) -> Option<InstallationId> {
     u64::try_from(installation.installation_id)
         .ok()
         .map(InstallationId::new)
+}
+
+fn app_not_found() -> ServerError {
+    ServerError::NotFound(APP_NOT_FOUND.to_string())
 }
 
 fn installation_not_found() -> ServerError {
