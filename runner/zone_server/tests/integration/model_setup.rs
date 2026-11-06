@@ -212,7 +212,7 @@ async fn post_setup(router: axum::Router, token: &str) -> (StatusCode, Value) {
 #[tokio::test]
 async fn setup_post_is_refused_to_a_user_who_cannot_install_models() {
     let router = router().await;
-    let token = token(&router).await;
+    let token = common::sign_in_with_role(&router, "user").await;
     let (status, body) = post_setup(router, &token).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     let message = body["error"].as_str().unwrap();
@@ -230,7 +230,7 @@ async fn setup_post_is_refused_to_a_read_only_viewer() {
 #[tokio::test]
 async fn setup_plan_stays_readable_to_a_user_who_cannot_install_models() {
     let router = router().await;
-    let token = token(&router).await;
+    let token = common::sign_in_with_role(&router, "user").await;
     let response = router
         .oneshot(
             Request::builder()

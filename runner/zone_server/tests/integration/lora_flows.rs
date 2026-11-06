@@ -2233,6 +2233,52 @@ async fn training_writes_are_refused_to_a_user_who_cannot_install_models() {
 }
 
 #[tokio::test]
+async fn a_refused_caller_never_waits_for_or_takes_a_training_permit() {
+    let models_directory = tempfile::tempdir().unwrap();
+    let mut config = common::test_config_with_ollama_host(common::REFUSED_URL);
+    config.comfyui.models_directory = models_directory.path().to_path_buf();
+    let pool = common::create_test_pool().await;
+    let token = token_with(&pool, config.jwt_secret(), &[Permission::ModelsDelete]).await;
+    let state = common::create_test_state(config, pool);
+    let router = common::create_test_router(state.clone());
+    let train_permits = state.train_semaphore().available_permits() as u32;
+    let frame_permits = state.frame_semaphore().available_permits() as u32;
+    let _train = state
+        .train_semaphore()
+        .clone()
+        .acquire_many_owned(train_permits)
+        .await
+        .unwrap();
+    let _frames = state
+        .frame_semaphore()
+        .clone()
+        .acquire_many_owned(frame_permits)
+        .await
+        .unwrap();
+
+    for (method, uri) in [
+        ("POST", "/api/models/train"),
+        ("DELETE", "/api/models/train"),
+        ("POST", "/api/models/train/frames"),
+    ] {
+        let (status, body) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            send(router.clone(), &token, method, uri),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{method} {uri} waited for a permit before refusing"));
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {body}");
+    }
+
+    let (status, _) = get_json(router, &token, "/api/models/train").await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "reading the job never needs the training permit"
+    );
+}
+
+#[tokio::test]
 async fn removing_a_lora_is_refused_to_a_user_who_cannot_remove_models() {
     let models_directory = tempfile::tempdir().unwrap();
     let mut config = common::test_config_with_ollama_host(common::REFUSED_URL);

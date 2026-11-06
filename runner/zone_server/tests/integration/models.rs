@@ -1047,7 +1047,7 @@ async fn test_delete_model_not_found() {
 async fn test_delete_model_is_refused_to_a_user_who_cannot_remove_models() {
     let ollama_addr = start_mock_ollama_server().await;
     let router = create_test_router_with_ollama(&format!("http://{}", ollama_addr)).await;
-    let token = get_auth_token(&router).await;
+    let token = common::sign_in_with_role(&router, "user").await;
 
     let request = Request::builder()
         .method("DELETE")

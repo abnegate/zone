@@ -6,6 +6,7 @@ const mockDismissTrain = mock(() => Promise.resolve());
 
 let authState = {
   isAuthenticated: true,
+  canInstall: true,
 };
 
 mock.module('../../../api/models', () => ({
@@ -18,6 +19,7 @@ mock.module('../../../api/models', () => ({
 mock.module('../../auth/context', () => ({
   useAuth: () => ({
     isAuthenticated: authState.isAuthenticated,
+    hasPermission: (permission: string) => permission === 'models:create' && authState.canInstall,
   }),
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
@@ -39,7 +41,7 @@ describe('useTrain', () => {
     mockTrainJob.mockImplementation(() => Promise.resolve(null));
     mockDismissTrain.mockReset();
     mockDismissTrain.mockImplementation(() => Promise.resolve());
-    authState = { isAuthenticated: true };
+    authState = { isAuthenticated: true, canInstall: true };
   });
 
   it('starts with no job', async () => {
@@ -98,5 +100,26 @@ describe('useTrain', () => {
       result.current.dismiss();
     });
     await waitFor(() => expect(result.current.job?.error).toBe('cancelled'));
+  });
+
+  it('dismisses only on this device for a user who cannot install models', async () => {
+    authState = { isAuthenticated: true, canInstall: false };
+    mockTrainJob.mockImplementation(() =>
+      Promise.resolve({
+        id: 'job-1',
+        name: 'jerry',
+        status: 'failed',
+        error: 'training loss became NaN',
+      })
+    );
+    const { result } = renderHook(() => useTrainState());
+    await waitFor(() => expect(result.current.job?.status).toBe('failed'));
+    act(() => {
+      result.current.dismiss();
+    });
+    expect(result.current.job).toBeNull();
+    expect(mockDismissTrain).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+    expect(result.current.job).toBeNull();
   });
 });

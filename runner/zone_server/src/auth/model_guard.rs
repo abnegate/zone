@@ -12,11 +12,9 @@ use super::middleware::{AuthError, AuthUser, require_permission};
 use super::permission::Permission;
 use crate::state::AppState;
 
-/// Requires `models:create`: install, cancel an install, or train.
 #[derive(Debug, Clone)]
 pub struct ModelInstaller(pub AuthUser);
 
-/// Requires `models:delete`: remove an installed model.
 #[derive(Debug, Clone)]
 pub struct ModelRemover(pub AuthUser);
 

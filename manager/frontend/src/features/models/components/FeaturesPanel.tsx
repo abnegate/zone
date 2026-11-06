@@ -123,7 +123,6 @@ export default function FeaturesPanel({
   );
 
   const toggle = (id: string, on: boolean) => {
-    if (!canInstall) return;
     const feature = plan?.features.find((item) => item.id === id);
     if (!feature || feature.required || (on && feature.blocked)) return;
     const next = on ? [...selected, id] : selected.filter((item) => item !== id);
@@ -138,7 +137,7 @@ export default function FeaturesPanel({
   };
 
   const install = async () => {
-    if (!canInstall || !plan || plan.gate || installing) return;
+    if (!plan || plan.gate || installing) return;
     setInstalling(true);
     setError(null);
     try {
