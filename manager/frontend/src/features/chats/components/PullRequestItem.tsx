@@ -61,13 +61,11 @@ function menuItems({
       onSelect: () => onViewChanges(pullRequest),
     },
   ];
-  if (status?.state === 'open') {
+  const open = status?.state === 'open';
+  if (open) {
     const autoMerge = status.auto_merge;
     const mergeHint = readOnly ?? uncredentialed ?? autoMerge.unavailable ?? undefined;
     const draftHint = readOnly ?? uncredentialed ?? status.draft_unavailable ?? undefined;
-    // Turning it off stays available while a run is in flight: that run keeps
-    // going, and the switch is about whether the next failure starts another.
-    const fixHint = readOnly ?? uncredentialed ?? undefined;
     items.push(
       {
         label: autoMerge.enabled ? 'Cancel auto-merge' : 'Merge when ready',
@@ -82,15 +80,26 @@ function menuItems({
         disabled: Boolean(draftHint),
         hint: draftHint,
         onSelect: () => onChange(pullRequest, { draft: !status.draft }),
-      },
-      {
-        label: pullRequest.auto_fix ? 'Stop fixing automatically' : 'Fix automatically',
-        icon: <MenuIcon path={FIX_ICON} />,
-        disabled: Boolean(fixHint),
-        hint: fixHint,
-        onSelect: () => onChange(pullRequest, { auto_fix: !pullRequest.auto_fix }),
       }
     );
+  }
+  if (pullRequest.auto_fix) {
+    items.push({
+      label: 'Stop fixing automatically',
+      icon: <MenuIcon path={FIX_ICON} />,
+      disabled: !writable,
+      hint: readOnly,
+      onSelect: () => onChange(pullRequest, { auto_fix: false }),
+    });
+  } else if (open) {
+    const fixHint = readOnly ?? uncredentialed;
+    items.push({
+      label: 'Fix automatically',
+      icon: <MenuIcon path={FIX_ICON} />,
+      disabled: Boolean(fixHint),
+      hint: fixHint,
+      onSelect: () => onChange(pullRequest, { auto_fix: true }),
+    });
   }
   items.push({
     label: 'Dismiss',
