@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use sqlx::{Executor, Postgres};
 use uuid::Uuid;
 
@@ -30,6 +32,27 @@ where
             model,
         })
     }))
+}
+
+/// The chosen provider of each of `ids` that chose one. A chat missing from the
+/// result follows its workspace or does not exist.
+pub async fn of<'e, E>(executor: E, ids: &[Uuid]) -> DbResult<HashMap<Uuid, Choice>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, provider, provider_model FROM chats \
+         WHERE id = ANY($1) AND provider IS NOT NULL",
+    )
+    .bind(ids)
+    .fetch_all(executor)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, provider, model)| {
+            Provider::named(&provider).map(|provider| (id, Choice { provider, model }))
+        })
+        .collect())
 }
 
 /// Records `choice` as the chat's provider, or with `None` returns the chat to
@@ -191,6 +214,39 @@ mod tests {
             "no chat, nothing set"
         );
         assert_eq!(get(pool, Uuid::new_v4()).await.unwrap(), None);
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn the_choices_of_many_chats_are_read_at_once() {
+        let fixture = Fixture::new().await;
+        let pool = &fixture.pool;
+        let chosen = fixture.chat("Chosen").await;
+        let automatic = fixture.chat("Automatic").await;
+        let following = fixture.chat("Following").await;
+        let unlisted = fixture.chat("Unlisted").await;
+        let codex = Choice {
+            provider: Provider::Codex,
+            model: Some("gpt-6-sol".to_string()),
+        };
+        let openai = Choice {
+            provider: Provider::OpenAI,
+            model: None,
+        };
+        set(pool, chosen, Some(&codex)).await.unwrap();
+        set(pool, automatic, Some(&openai)).await.unwrap();
+        set(pool, unlisted, Some(&codex)).await.unwrap();
+
+        let choices = of(pool, &[chosen, automatic, following, Uuid::new_v4()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            choices,
+            HashMap::from([(chosen, codex), (automatic, openai)]),
+            "only the listed chats that chose a provider have a choice"
+        );
+        assert!(of(pool, &[]).await.unwrap().is_empty());
         fixture.cleanup().await;
     }
 
