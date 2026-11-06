@@ -62,12 +62,19 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
       queryClient.setQueriesData<Project[]>(listed, (current) =>
         current ? applyOrder(current, order) : current
       );
-      return { previous };
+      const written = previous.map(([key, data]) => ({
+        key,
+        data,
+        updatedAt: queryClient.getQueryState(key)?.dataUpdatedAt,
+      }));
+      return { written };
     },
     onError: (_error, _order, context) => {
       if (!lastPendingOrder()) return;
-      for (const [key, data] of context?.previous ?? []) {
-        queryClient.setQueryData(key, data);
+      for (const { key, data, updatedAt } of context?.written ?? []) {
+        if (queryClient.getQueryState(key)?.dataUpdatedAt === updatedAt) {
+          queryClient.setQueryData(key, data);
+        }
       }
     },
     onSettled: () => {

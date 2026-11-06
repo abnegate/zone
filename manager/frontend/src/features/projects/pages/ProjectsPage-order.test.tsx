@@ -455,6 +455,71 @@ describe('project order', () => {
       expect(localStorage.getItem(sortKey('user-1'))).toBe('name');
     });
 
+    it('keeps custom when the viewer picked it again while a failing save was pending', async () => {
+      let refuse: (reason: Error) => void = () => undefined;
+      mockReorderProjects.mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            refuse = reject;
+          })
+      );
+      renderPage();
+      await ready();
+      chooseSelect('Sort projects', 'Most recently used');
+      const handle = grip('Zone');
+      handle.focus();
+      await press(handle, 'Space');
+      await press(handle, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(handle, 'Space');
+      chooseSelect('Sort projects', 'Name');
+      chooseSelect('Sort projects', 'Custom');
+
+      await act(async () => {
+        refuse(new Error('Workspace write access required'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await screen.findByRole('alert');
+      expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent('Custom');
+      expect(localStorage.getItem(sortKey('user-1'))).toBe('custom');
+    });
+
+    it('stays on custom when a move made in another sort fails behind a newer move', async () => {
+      let refuseFirst: (reason: Error) => void = () => undefined;
+      mockReorderProjects.mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            refuseFirst = reject;
+          })
+      );
+      renderPage();
+      await ready();
+      chooseSelect('Sort projects', 'Most recently used');
+      const zone = grip('Zone');
+      zone.focus();
+      await press(zone, 'Space');
+      await press(zone, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(zone, 'Space');
+      await waitFor(() => expect(shownOrder()).toEqual(['jbs', 'zone', 'cloud']));
+      const cloud = grip('Cloud');
+      cloud.focus();
+      await press(cloud, 'Space');
+      await press(cloud, 'ArrowUp');
+      await announced('Cloud would move to position 2 of 3.');
+      await press(cloud, 'Space');
+      await announced('Cloud dropped at position 2 of 3.');
+
+      await act(async () => {
+        refuseFirst(new Error('Workspace write access required'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await waitFor(() => expect(mockReorderProjects).toHaveBeenCalledTimes(2));
+      expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent('Custom');
+    });
+
     it('puts the sort back when saving a move made in another sort fails', async () => {
       renderPage();
       await ready();
