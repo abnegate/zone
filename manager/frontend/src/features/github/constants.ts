@@ -1,0 +1,2 @@
+export const REPOSITORY_PAGE_SIZE = 50;
+export const REPOSITORY_SEARCH_DELAY = 250;
