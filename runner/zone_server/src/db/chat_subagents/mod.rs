@@ -383,9 +383,9 @@ where
 }
 
 /// Whether turn `message_id` of `chat_id` is still there to record subagents
-/// for: its turn or its message is. Holds both until the caller's transaction
-/// ends, so deleting the message waits for whatever that transaction writes,
-/// and removes it with the rest.
+/// for: its turn or its message is. Holds the turn, or the message when it
+/// has no turn, until the caller's transaction ends, so deleting the message
+/// waits for whatever that transaction writes, and removes it with the rest.
 pub async fn hold_turn<'e, E>(executor: E, chat_id: Uuid, message_id: Uuid) -> DbResult<bool>
 where
     E: Executor<'e, Database = Postgres>,
@@ -406,8 +406,10 @@ where
 /// holds turn `message_id` or that message through [`hold_turn`] has
 /// committed, locks both against any other until the caller's transaction
 /// ends, so the message's subagents can be removed and the message deleted
-/// with no write landing in between. The turn is locked first, in the order
-/// [`hold_turn`] takes them.
+/// with no write landing in between. Call it before locking any of the
+/// message's subagents: a write holds the turn, or the message when it has
+/// no turn, before it touches a subagent, so seizing both first keeps the
+/// order every write takes its locks in.
 pub async fn seize_turn(
     connection: &mut PgConnection,
     chat_id: Uuid,
