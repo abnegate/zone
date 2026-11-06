@@ -32,6 +32,9 @@ pub const DEFAULT_HUGGINGFACE_MODELS_URL: &str = "https://huggingface.co/api/mod
 /// so pointing it elsewhere does not redirect github.com repositories to it.
 pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 
+/// The fewest bytes an `ENCRYPTION_KEY` may hold.
+pub const MINIMUM_ENCRYPTION_KEY_BYTES: usize = 32;
+
 /// The path GitHub Enterprise serves its REST API under.
 const GITHUB_VERSIONED_REST: [&str; 2] = ["api", "v3"];
 
@@ -1131,6 +1134,19 @@ impl Config {
         reqwest::Url::parse(&format!("{}/", self.github_api_url.trim_end_matches('/'))).ok()
     }
 
+    /// The `ENCRYPTION_KEY` the server seals credentials under, refused when shorter than
+    /// [`MINIMUM_ENCRYPTION_KEY_BYTES`].
+    pub fn encryption_key_from_env() -> Result<String, ConfigError> {
+        let encryption_key =
+            env::var("ENCRYPTION_KEY").map_err(|_| ConfigError::Missing("ENCRYPTION_KEY"))?;
+        if encryption_key.len() < MINIMUM_ENCRYPTION_KEY_BYTES {
+            return Err(ConfigError::Invalid(
+                "ENCRYPTION_KEY must be at least 32 characters",
+            ));
+        }
+        Ok(encryption_key)
+    }
+
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
         let jwt_secret = env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
@@ -1140,13 +1156,7 @@ impl Config {
             ));
         }
 
-        let encryption_key =
-            env::var("ENCRYPTION_KEY").map_err(|_| ConfigError::Missing("ENCRYPTION_KEY"))?;
-        if encryption_key.len() < 32 {
-            return Err(ConfigError::Invalid(
-                "ENCRYPTION_KEY must be at least 32 characters",
-            ));
-        }
+        let encryption_key = Self::encryption_key_from_env()?;
 
         let cors_origins = env::var("CORS_ORIGINS")
             .ok()
