@@ -34,10 +34,6 @@ impl Manifest {
         Self::named(app_base_url, organization_slug, &random_suffix())
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("a manifest of strings and booleans always serializes")
     }
@@ -116,6 +112,14 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
+    fn name_of(manifest: &Manifest) -> String {
+        let snapshot: Value = serde_json::from_str(&manifest.to_json()).unwrap();
+        snapshot["name"]
+            .as_str()
+            .expect("the manifest names the App")
+            .to_string()
+    }
+
     #[test]
     fn the_manifest_registers_a_private_app_with_no_webhook() {
         let manifest = Manifest::named(" http://192.168.1.5:3000/ ", "acme", "x7k2");
@@ -155,8 +159,7 @@ mod tests {
     #[test]
     fn a_long_slug_is_truncated_to_fit_the_name_limit() {
         let slug = "a".repeat(60);
-        let manifest = Manifest::new("https://zone.example.com", &slug);
-        let name = manifest.name();
+        let name = name_of(&Manifest::new("https://zone.example.com", &slug));
         assert_eq!(
             name.len(),
             MAXIMUM_NAME_LENGTH,
@@ -185,11 +188,7 @@ mod tests {
     #[test]
     fn two_manifests_for_one_organization_get_distinct_names() {
         let names: std::collections::HashSet<String> = (0..16)
-            .map(|_| {
-                Manifest::new("https://zone.example.com", "acme")
-                    .name()
-                    .to_string()
-            })
+            .map(|_| name_of(&Manifest::new("https://zone.example.com", "acme")))
             .collect();
         assert!(
             names.len() > 1,
