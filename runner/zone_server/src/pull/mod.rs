@@ -1354,7 +1354,7 @@ mod tests {
         std::fs::write(checkpoints.join(weight), b"weight").unwrap();
         let listed: Vec<String> = crate::routes::models::list_comfy_models(&state)
             .into_iter()
-            .map(|model| model.name)
+            .map(|model| model.entry.name)
             .collect();
         assert_eq!(listed, [weight]);
     }

@@ -493,7 +493,7 @@ async fn installed_capabilities_follow_engine_metadata() {
 #[tokio::test]
 async fn test_list_models_ollama_with_source_param() {
     // When source=ollama is explicitly provided, it enters "browse" mode
-    // which uses the OllamaLibraryProvider and returns a BrowseResponse
+    // which searches the Ollama library and returns a BrowseResponse
     let router = create_test_router_with_ollama("http://localhost:9999").await;
     let token = get_auth_token(&router).await;
 

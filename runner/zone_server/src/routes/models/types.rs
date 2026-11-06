@@ -1,7 +1,17 @@
 //! Shared types for model management
 
-use axum::{Json, http::StatusCode, response::IntoResponse};
-use serde::{Deserialize, Serialize};
+use abnegate_llm::catalog::BrowseQuery;
+use abnegate_llm::catalog::ModelEntry;
+use abnegate_llm::catalog::ModelMediumFilter;
+use abnegate_llm::catalog::ModelPage;
+use abnegate_llm::catalog::ModelSize;
+use abnegate_llm::catalog::ModelSizeFilter;
+use abnegate_llm::catalog::ModelSort;
+use axum::Json;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use serde::Deserialize;
+use serde::Serialize;
 use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
@@ -23,10 +33,12 @@ impl IntoResponse for ErrorResponse {
     }
 }
 
-/// Model info response
+/// A model as `/api/models` lists it: the catalogue's entry plus what Zone
+/// knows of it once installed.
 #[derive(Debug, Serialize, Clone, PartialEq, Default)]
 pub struct ModelResponse {
-    pub name: String,
+    #[serde(flatten)]
+    pub entry: ModelEntry,
     /// Known completion support; absent when engine metadata is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion: Option<bool>,
@@ -36,36 +48,6 @@ pub struct ModelResponse {
     /// Whether chats with this model should offer a character card.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needs_character: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub modified_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub author: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub downloads: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub likes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub use_cases: Option<Vec<String>>,
-    /// Capabilities declared by provider metadata; absent when unavailable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<Vec<ModelCapability>>,
-    /// Distinct downloadable sizes when a catalogue entry ships more than one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sizes: Option<Vec<ModelSize>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<ModelDetails>,
     /// Whether a Comfy adapter's required base files are present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready: Option<bool>,
@@ -75,32 +57,13 @@ pub struct ModelResponse {
     pub required_files: Option<Vec<String>>,
 }
 
-/// Exact capabilities advertised by a catalogue provider.
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelCapability {
-    Text,
-    ImageInput,
-    ImageGeneration,
-    Audio,
-    AudioInput,
-    AudioGeneration,
-    VideoInput,
-    VideoGeneration,
-    Tools,
-    Embeddings,
-    Reasoning,
-}
-
-/// A concrete downloadable size for a browsed model (e.g. `llama3.2:1b`).
-#[derive(Debug, Serialize, Clone, PartialEq, Default)]
-pub struct ModelSize {
-    /// Name passed to `ollama pull`
-    pub name: String,
-    /// Human label, e.g. `1B` or `Q4_0`
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
+impl From<ModelEntry> for ModelResponse {
+    fn from(entry: ModelEntry) -> Self {
+        Self {
+            entry,
+            ..Self::default()
+        }
+    }
 }
 
 /// HuggingFace repository details used when a GGUF repo is not installed locally.
@@ -110,70 +73,6 @@ pub struct HuggingFaceModelInfo {
     pub gguf_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sizes: Option<Vec<ModelSize>>,
-}
-
-#[derive(Debug, Serialize, Clone, PartialEq, Default)]
-pub struct ModelDetails {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub family: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parameter_size: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quantization_level: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_length: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub license: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ram_required_gb: Option<u64>,
-}
-
-/// How to sort browse results
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelSort {
-    #[default]
-    Relevance,
-    DownloadsDesc,
-    DownloadsAsc,
-    NameAsc,
-    NameDesc,
-    SizeAsc,
-    SizeDesc,
-    ParamsAsc,
-    ParamsDesc,
-    UpdatedDesc,
-    UpdatedAsc,
-}
-
-/// Parameter-size buckets for browse filtering
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelSizeFilter {
-    #[default]
-    All,
-    Small,
-    Medium,
-    Large,
-    Xl,
-}
-
-/// High-level mediums for browse filtering
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelMediumFilter {
-    #[default]
-    All,
-    Text,
-    Image,
-    ImageGeneration,
-    Video,
-    Audio,
-    Tools,
-    Embeddings,
-    Reasoning,
 }
 
 /// Query parameters for listing models
@@ -201,18 +100,6 @@ pub struct ListModelsQuery {
     pub workspace_id: Option<Uuid>,
 }
 
-/// Options passed to a model provider search
-#[derive(Debug, Clone, Copy)]
-pub struct BrowseQuery<'a> {
-    pub query: Option<&'a str>,
-    pub cursor: Option<&'a str>,
-    pub limit: usize,
-    pub sort: ModelSort,
-    pub family: Option<&'a str>,
-    pub size: ModelSizeFilter,
-    pub medium: ModelMediumFilter,
-}
-
 impl ListModelsQuery {
     pub fn to_browse_query(&self, limit: usize) -> BrowseQuery<'_> {
         let family = self
@@ -221,15 +108,15 @@ impl ListModelsQuery {
             .map(str::trim)
             .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("all"));
 
-        BrowseQuery {
-            query: self.search.as_deref(),
-            cursor: self.cursor.as_deref(),
-            limit,
-            sort: self.sort.unwrap_or_default(),
-            family,
-            size: self.size.unwrap_or_default(),
-            medium: self.medium.unwrap_or_default(),
-        }
+        let mut browse = BrowseQuery::default();
+        browse.query = self.search.as_deref();
+        browse.cursor = self.cursor.as_deref();
+        browse.limit = limit;
+        browse.sort = self.sort.unwrap_or_default();
+        browse.family = family;
+        browse.size = self.size.unwrap_or_default();
+        browse.medium = self.medium.unwrap_or_default();
+        browse
     }
 }
 
@@ -239,6 +126,15 @@ pub struct BrowseResponse {
     pub models: Vec<ModelResponse>,
     /// Cursor for the next page (if more results available)
     pub next_cursor: Option<String>,
+}
+
+impl From<ModelPage> for BrowseResponse {
+    fn from(page: ModelPage) -> Self {
+        Self {
+            models: page.models.into_iter().map(ModelResponse::from).collect(),
+            next_cursor: page.next_cursor,
+        }
+    }
 }
 
 /// Host filesystem usage for the volume that stores models.
@@ -261,7 +157,7 @@ mod tests {
             search: Some("qwen".into()),
             cursor: None,
             limit: Some(20),
-            sort: Some(ModelSort::NameAsc),
+            sort: Some(ModelSort::NameAscending),
             family: Some("all".into()),
             size: None,
             medium: None,
@@ -291,5 +187,45 @@ mod tests {
         assert_eq!(browse.family, Some("llama"));
         assert_eq!(browse.size, ModelSizeFilter::Small);
         assert_eq!(browse.medium, ModelMediumFilter::Image);
+    }
+
+    #[test]
+    fn the_query_keeps_zones_wire_names_for_sorts_and_sizes() {
+        let uri: axum::http::Uri =
+            "/api/models?source=ollama&q=qwen&sort=params_desc&size=xl&medium=image_generation"
+                .parse()
+                .expect("a request URI");
+        let axum::extract::Query(query) =
+            axum::extract::Query::<ListModelsQuery>::try_from_uri(&uri).expect("a models query");
+        let browse = query.to_browse_query(5);
+        assert_eq!(browse.query, Some("qwen"));
+        assert_eq!(browse.limit, 5);
+        assert_eq!(browse.sort, ModelSort::ParametersDescending);
+        assert_eq!(browse.size, ModelSizeFilter::ExtraLarge);
+        assert_eq!(browse.medium, ModelMediumFilter::ImageGeneration);
+    }
+
+    #[test]
+    fn a_model_lists_its_entry_and_zones_fields_side_by_side() {
+        let mut entry = ModelEntry::default();
+        entry.name = "flux-lora.safetensors".to_string();
+        entry.size = Some(7);
+        let model = ModelResponse {
+            entry,
+            completion: Some(false),
+            ready: Some(true),
+            recipe_id: Some("flux".to_string()),
+            ..ModelResponse::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&model).expect("a model"),
+            serde_json::json!({
+                "name": "flux-lora.safetensors",
+                "size": 7,
+                "completion": false,
+                "ready": true,
+                "recipe_id": "flux",
+            })
+        );
     }
 }

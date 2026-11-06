@@ -32,7 +32,6 @@ extensions:
       - ["zone_server::routes::models::confined_sidecar_path", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::comfy::language::confined", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::comfy::adoption::confined", "ReturnValue", "path-injection", "manual"]
-      - ["zone_server::routes::models::providers::catalog_request_url", "ReturnValue", "request-url", "manual"]
       - ["zone_server::config::agent_home", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::config::agent_work", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::config::agent_login_home", "ReturnValue", "path-injection", "manual"]

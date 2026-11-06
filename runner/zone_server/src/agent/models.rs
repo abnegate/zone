@@ -368,10 +368,14 @@ async fn list(scope: &WorkspaceScope, params: &Value) -> ToolResult {
             if let Some(query) = query {
                 let needle = query.to_ascii_lowercase();
                 models.retain(|model| {
-                    model.name.to_ascii_lowercase().contains(&needle)
-                        || model.description.as_deref().is_some_and(|description| {
-                            description.to_ascii_lowercase().contains(&needle)
-                        })
+                    model.entry.name.to_ascii_lowercase().contains(&needle)
+                        || model
+                            .entry
+                            .description
+                            .as_deref()
+                            .is_some_and(|description| {
+                                description.to_ascii_lowercase().contains(&needle)
+                            })
                 });
             }
             let omitted = trim_models(&mut models, limit);
