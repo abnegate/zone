@@ -15,7 +15,7 @@ use super::common::Timestamps;
 use super::error::ErrorResponse;
 use crate::auth::AuthUser;
 use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
-use crate::db::sources;
+use crate::db::sources::{self, GITHUB, SourceChanges, UpdateError};
 use crate::error::ServerError;
 use crate::services::github_app;
 use crate::state::AppState;
@@ -25,8 +25,6 @@ const MAX_NAME_LENGTH: usize = 256;
 
 /// Maximum config size in bytes
 const MAX_CONFIG_SIZE: usize = 65536;
-
-const GITHUB_SOURCE_TYPE: &str = "github";
 
 const INTERNAL_ERROR: &str = "Internal server error";
 
@@ -44,6 +42,14 @@ const CREDENTIALS_UNREADABLE: &str = "The source's credentials could not be read
 const UNREACHABLE: &str = "Zone can't reach this repository through that GitHub connection.";
 
 const GITHUB_UNAVAILABLE: &str = "GitHub could not be reached.";
+
+const APP_REJECTED: &str = "The GitHub App connection is broken. Reconnect GitHub.";
+
+const NOTION: &str = "notion";
+
+const TOKEN_FIELD: &str = "token";
+
+const API_KEY_FIELD: &str = "api_key";
 
 fn internal() -> ServerError {
     ServerError::Internal(INTERNAL_ERROR.to_string())
@@ -73,7 +79,7 @@ async fn validate_installation(
             CREDENTIALS_AND_INSTALLATION.to_string(),
         ));
     }
-    if source_type != GITHUB_SOURCE_TYPE {
+    if source_type != GITHUB {
         return Err(ServerError::BadRequest(
             INSTALLATION_REQUIRES_GITHUB.to_string(),
         ));
@@ -144,30 +150,77 @@ fn refused_by_github(status: u16) -> bool {
         .is_ok_and(|status| status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS)
 }
 
+/// What a failure to resolve a GitHub credential means to the person who asked for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialFailure {
+    Disconnected,
+    AppRejected,
+    Refused,
+    Unavailable,
+    Unreadable,
+    Internal,
+}
+
+impl CredentialFailure {
+    fn of(error: &github_app::Error) -> Self {
+        match error {
+            github_app::Error::Revoked
+            | github_app::Error::Suspended
+            | github_app::Error::NotConnected => Self::Disconnected,
+            github_app::Error::Application(ApplicationError::Status(status))
+                if *status == StatusCode::UNAUTHORIZED.as_u16() =>
+            {
+                Self::AppRejected
+            }
+            github_app::Error::Application(ApplicationError::Status(status))
+                if refused_by_github(*status) =>
+            {
+                Self::Refused
+            }
+            github_app::Error::Application(
+                ApplicationError::Status(_)
+                | ApplicationError::Transport(_)
+                | ApplicationError::Response,
+            ) => Self::Unavailable,
+            github_app::Error::Credential | github_app::Error::Unsealing => Self::Unreadable,
+            _ => Self::Internal,
+        }
+    }
+}
+
 fn installation_refusal(installation: Uuid, error: github_app::Error) -> ServerError {
-    match error {
-        github_app::Error::Revoked
-        | github_app::Error::Suspended
-        | github_app::Error::NotConnected => {
+    match CredentialFailure::of(&error) {
+        CredentialFailure::Disconnected => {
             ServerError::BadRequest(github_installations::UNATTACHABLE.to_string())
         }
-        github_app::Error::Application(ApplicationError::Status(status))
-            if refused_by_github(status) =>
-        {
-            unreachable()
+        CredentialFailure::AppRejected => {
+            tracing::warn!(installation = %installation, error = %error, "GitHub refused the GitHub App's credentials");
+            ServerError::BadRequest(APP_REJECTED.to_string())
         }
-        github_app::Error::Application(
-            error @ (ApplicationError::Status(_)
-            | ApplicationError::Transport(_)
-            | ApplicationError::Response),
-        ) => {
+        CredentialFailure::Refused => unreachable(),
+        CredentialFailure::Unavailable => {
             tracing::warn!(installation = %installation, error = %error, "GitHub could not mint an installation token");
             unavailable()
         }
-        error => {
+        CredentialFailure::Unreadable | CredentialFailure::Internal => {
             tracing::error!(installation = %installation, error = %error, "An installation token could not be minted");
             internal()
         }
+    }
+}
+
+/// The status and message a verification answers, and records, when the
+/// source's credential cannot be resolved.
+fn verification_refusal(error: &github_app::Error) -> (StatusCode, &'static str) {
+    match CredentialFailure::of(error) {
+        CredentialFailure::Disconnected => (StatusCode::BAD_REQUEST, CONNECTION_LOST),
+        CredentialFailure::AppRejected => (StatusCode::BAD_REQUEST, APP_REJECTED),
+        CredentialFailure::Refused => (StatusCode::BAD_REQUEST, UNREACHABLE),
+        CredentialFailure::Unavailable => (StatusCode::BAD_GATEWAY, GITHUB_UNAVAILABLE),
+        CredentialFailure::Unreadable => {
+            (StatusCode::INTERNAL_SERVER_ERROR, CREDENTIALS_UNREADABLE)
+        }
+        CredentialFailure::Internal => (StatusCode::INTERNAL_SERVER_ERROR, INTERNAL_ERROR),
     }
 }
 
@@ -191,20 +244,20 @@ fn repository_refusal(installation: Uuid, error: PullRequestError) -> ServerErro
 async fn installation_summaries(
     state: &AppState,
     installations: &[Uuid],
-) -> HashMap<Uuid, InstallationSummary> {
+) -> Result<HashMap<Uuid, InstallationSummary>, ServerError> {
     if installations.is_empty() {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
-    match github_installations::summaries(state.db(), installations).await {
-        Ok(summaries) => summaries
-            .into_iter()
-            .map(|summary| (summary.id, summary))
-            .collect(),
-        Err(error) => {
-            tracing::warn!(error = %error, "Failed to load GitHub installation summaries");
-            HashMap::new()
-        }
-    }
+    let summaries = github_installations::summaries(state.db(), installations)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "Failed to load GitHub installation summaries");
+            internal()
+        })?;
+    Ok(summaries
+        .into_iter()
+        .map(|summary| (summary.id, summary))
+        .collect())
 }
 
 /// The kinds this server can verify and fetch, sorted, straight from the
@@ -297,7 +350,7 @@ async fn check_workspace_write_access(
 /// Category for a persisted source_type string
 fn category_for_source_type(source_type: &str) -> &'static str {
     match source_type {
-        "github" | "gitlab" | "filesystem" => "file",
+        GITHUB | "gitlab" | "filesystem" => "file",
         "ical" => "calendar",
         "imap" => "mail",
         "discord" | "slack" => "chat",
@@ -318,7 +371,7 @@ fn derive_source_url(
     }
 
     match source_type {
-        "github" => {
+        GITHUB => {
             let owner = config
                 .get("owner")?
                 .as_str()
@@ -407,26 +460,30 @@ pub struct SourceTypesListResponse {
 }
 
 impl SourceResponse {
-    async fn from_row(state: &AppState, row: sources::SourceRow) -> Self {
-        let summaries = installation_summaries(state, row.github_installation_id.as_slice()).await;
-        Self::build(state, row, &summaries).await
+    async fn from_row(state: &AppState, row: sources::SourceRow) -> Result<Self, ServerError> {
+        let summaries =
+            installation_summaries(state, row.github_installation_id.as_slice()).await?;
+        Ok(Self::build(state, row, &summaries).await)
     }
 
     /// Loads every installation the rows name in one query.
-    async fn from_rows(state: &AppState, rows: Vec<sources::SourceRow>) -> Vec<Self> {
+    async fn from_rows(
+        state: &AppState,
+        rows: Vec<sources::SourceRow>,
+    ) -> Result<Vec<Self>, ServerError> {
         let mut installations: Vec<Uuid> = rows
             .iter()
             .filter_map(|row| row.github_installation_id)
             .collect();
         installations.sort_unstable();
         installations.dedup();
-        let summaries = installation_summaries(state, &installations).await;
+        let summaries = installation_summaries(state, &installations).await?;
 
         let mut responses = Vec::with_capacity(rows.len());
         for row in rows {
             responses.push(Self::build(state, row, &summaries).await);
         }
-        responses
+        Ok(responses)
     }
 
     async fn build(
@@ -436,8 +493,8 @@ impl SourceResponse {
     ) -> Self {
         let index_info = sources::get_source_index_status(state.db(), row.id)
             .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to get index status for source {}: {}", row.id, e);
+            .unwrap_or_else(|error| {
+                tracing::warn!(source_id = %row.id, error = %error, "Failed to get index status for source");
                 sources::SourceIndexStatus {
                     status: sources::IndexStatus::Pending,
                     last_indexed_at: None,
@@ -548,17 +605,13 @@ pub async fn list(
     auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListSourcesQuery>,
-) -> impl IntoResponse {
-    // Check access
-    if let Err(e) = check_workspace_read_access(&state, &auth, workspace_id).await {
-        return e.into_response();
-    }
+) -> Result<Response, ServerError> {
+    check_workspace_read_access(&state, &auth, workspace_id).await?;
 
-    // Apply defaults for pagination
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
 
-    match sources::list_sources(
+    let rows = sources::list_sources(
         state.db(),
         workspace_id,
         query.source_type.as_deref(),
@@ -567,20 +620,12 @@ pub async fn list(
         offset,
     )
     .await
-    {
-        Ok(items) => {
-            let responses = SourceResponse::from_rows(&state, items).await;
-            Json(SourcesListResponse { sources: responses }).into_response()
-        }
-        Err(e) => {
-            tracing::error!(workspace_id = %workspace_id, error = %e, "Database error listing sources");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+    .map_err(|error| {
+        tracing::error!(workspace_id = %workspace_id, error = %error, "Database error listing sources");
+        internal()
+    })?;
+    let responses = SourceResponse::from_rows(&state, rows).await?;
+    Ok(Json(SourcesListResponse { sources: responses }).into_response())
 }
 
 /// POST /api/workspaces/:workspace_id/sources
@@ -673,7 +718,7 @@ pub async fn create(
         );
     }
 
-    let response = SourceResponse::from_row(&state, source).await;
+    let response = SourceResponse::from_row(&state, source).await?;
     Ok((
         StatusCode::CREATED,
         Json(SingleSourceResponse { source: response }),
@@ -686,31 +731,18 @@ pub async fn get(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((workspace_id, id)): Path<(Uuid, Uuid)>,
-) -> impl IntoResponse {
-    // Check access
-    if let Err(e) = check_workspace_read_access(&state, &auth, workspace_id).await {
-        return e.into_response();
-    }
+) -> Result<Response, ServerError> {
+    check_workspace_read_access(&state, &auth, workspace_id).await?;
 
-    match sources::get_source(state.db(), id, workspace_id).await {
-        Ok(Some(source)) => {
-            let response = SourceResponse::from_row(&state, source).await;
-            Json(SingleSourceResponse { source: response }).into_response()
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Source not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %e, "Database error getting source");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+    let source = sources::get_source(state.db(), id, workspace_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error getting source");
+            internal()
+        })?
+        .ok_or_else(not_found)?;
+    let response = SourceResponse::from_row(&state, source).await?;
+    Ok(Json(SingleSourceResponse { source: response }).into_response())
 }
 
 /// PUT /api/workspaces/:workspace_id/sources/:id
@@ -754,42 +786,31 @@ pub async fn update(
         .map(|credentials| encrypt_credentials(&state, credentials))
         .transpose()?;
 
-    let mut current = sources::update_source(
+    let current = sources::update_source(
         state.db(),
         id,
         workspace_id,
-        request.name.as_deref(),
-        request.config.clone(),
-        request.description.as_deref(),
-        request.url.as_deref(),
-        request.is_active,
+        SourceChanges {
+            name: request.name.as_deref(),
+            config: request.config.clone(),
+            description: request.description.as_deref(),
+            url: request.url.as_deref(),
+            is_active: request.is_active,
+            github_installation_id: request.github_installation_id,
+            credentials_encrypted: credentials_encrypted.as_deref(),
+        },
     )
     .await
-    .map_err(|error| {
-        tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating source");
-        internal()
-    })?
-    .ok_or_else(not_found)?;
-
-    if let Some(installation) = request.github_installation_id {
-        current = sources::set_github_installation(state.db(), id, workspace_id, installation)
-            .await
-            .map_err(|error| {
-                tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error setting GitHub installation");
-                internal()
-            })?
-            .ok_or_else(not_found)?;
-    }
-
-    if let Some(encrypted) = &credentials_encrypted {
-        current = sources::update_credentials(state.db(), id, workspace_id, encrypted)
-            .await
-            .map_err(|error| {
-                tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating credentials");
-                internal()
-            })?
-            .ok_or_else(not_found)?;
-    }
+    .map_err(|error| match error {
+        UpdateError::NotFound => not_found(),
+        UpdateError::Unattachable => {
+            ServerError::BadRequest(github_installations::UNATTACHABLE.to_string())
+        }
+        UpdateError::Database(error) => {
+            tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating source");
+            internal()
+        }
+    })?;
 
     let config_changed = request.config.is_some()
         && crate::workers::indexing::config_changed(&previous.config, &current.config);
@@ -806,7 +827,7 @@ pub async fn update(
         );
     }
 
-    let response = SourceResponse::from_row(&state, current).await;
+    let response = SourceResponse::from_row(&state, current).await?;
     Ok(Json(SingleSourceResponse { source: response }).into_response())
 }
 
@@ -907,10 +928,10 @@ pub async fn verify(
     // Convert SourceRow to zone_core::Source
     // We need to parse the source_type string into zone_core::SourceType enum
     let source_type = match source_row.source_type.as_str() {
-        "github" => zone_core::SourceType::GitHub,
+        GITHUB => zone_core::SourceType::GitHub,
         "gitlab" => zone_core::SourceType::GitLab,
         "filesystem" => zone_core::SourceType::Filesystem,
-        "notion" => zone_core::SourceType::Notion,
+        NOTION => zone_core::SourceType::Notion,
         "text" => zone_core::SourceType::Text,
         "web" => zone_core::SourceType::Web,
         _ => {
@@ -933,18 +954,12 @@ pub async fn verify(
     let credential = match state.github().source(state.db(), &source_row).await {
         Ok(credential) => credential,
         Err(error) => {
-            let (status, message) = match error {
-                github_app::Error::Revoked
-                | github_app::Error::Suspended
-                | github_app::Error::NotConnected => {
-                    tracing::warn!(source_id = %id, %error, "Source's GitHub connection is gone");
-                    (StatusCode::BAD_REQUEST, CONNECTION_LOST)
-                }
-                _ => {
-                    tracing::error!(source_id = %id, %error, "Failed to resolve credentials");
-                    (StatusCode::INTERNAL_SERVER_ERROR, CREDENTIALS_UNREADABLE)
-                }
-            };
+            let (status, message) = verification_refusal(&error);
+            if status.is_server_error() {
+                tracing::error!(source_id = %id, %error, "Failed to resolve credentials");
+            } else {
+                tracing::warn!(source_id = %id, %error, "The source's GitHub connection refused verification");
+            }
             if let Err(failure) =
                 sources::update_verification(state.db(), id, workspace_id, Some(message)).await
             {
@@ -956,9 +971,9 @@ pub async fn verify(
     if let Some(credential) = credential
         && let Some(object) = config.as_object_mut()
     {
-        let field = match source_row.source_type.as_str() {
-            "notion" => "api_key",
-            _ => "token",
+        let field = match source_type {
+            zone_core::SourceType::Notion => API_KEY_FIELD,
+            _ => TOKEN_FIELD,
         };
         object.insert(
             field.to_string(),
@@ -1111,7 +1126,7 @@ pub async fn reindex(
 /// Everything known about a kind besides whether an adapter for it is registered.
 fn describe_kind(kind: &str) -> SourceTypeInfo {
     let (name, category, description, config_schema) = match kind {
-        "github" => (
+        GITHUB => (
             "GitHub",
             "file",
             "GitHub repository integration",
@@ -1212,9 +1227,12 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
+    use axum::http::StatusCode;
+
     use super::{
-        GITHUB_UNAVAILABLE, UNREACHABLE, UpdateSourceRequest, configured_repository,
-        installation_refusal, repository_refusal,
+        APP_REJECTED, CONNECTION_LOST, CREDENTIALS_UNREADABLE, GITHUB_UNAVAILABLE, INTERNAL_ERROR,
+        UNREACHABLE, UpdateSourceRequest, configured_repository, installation_refusal,
+        repository_refusal, verification_refusal,
     };
     use crate::db::github_installations::UNATTACHABLE;
     use crate::error::ServerError;
@@ -1329,7 +1347,7 @@ mod tests {
 
     #[test]
     fn github_refusing_the_mint_is_unreachable() {
-        for status in [401, 422] {
+        for status in [400, 422] {
             assert_maps(
                 installation_refusal(
                     Uuid::new_v4(),
@@ -1351,6 +1369,73 @@ mod tests {
             assert_maps(
                 installation_refusal(Uuid::new_v4(), github_app::Error::Application(error)),
                 unavailable(),
+            );
+        }
+    }
+
+    #[test]
+    fn github_refusing_the_apps_credentials_asks_to_reconnect() {
+        assert_maps(
+            installation_refusal(
+                Uuid::new_v4(),
+                github_app::Error::Application(ApplicationError::Status(401)),
+            ),
+            refused(APP_REJECTED),
+        );
+    }
+
+    #[test]
+    fn a_verification_tells_github_failing_apart_from_an_unreadable_credential() {
+        let cases = [
+            (
+                github_app::Error::Revoked,
+                StatusCode::BAD_REQUEST,
+                CONNECTION_LOST,
+            ),
+            (
+                github_app::Error::Application(ApplicationError::Status(401)),
+                StatusCode::BAD_REQUEST,
+                APP_REJECTED,
+            ),
+            (
+                github_app::Error::Application(ApplicationError::Status(422)),
+                StatusCode::BAD_REQUEST,
+                UNREACHABLE,
+            ),
+            (
+                github_app::Error::Application(ApplicationError::Status(502)),
+                StatusCode::BAD_GATEWAY,
+                GITHUB_UNAVAILABLE,
+            ),
+            (
+                github_app::Error::Application(ApplicationError::Transport(
+                    "connection refused".to_string(),
+                )),
+                StatusCode::BAD_GATEWAY,
+                GITHUB_UNAVAILABLE,
+            ),
+            (
+                github_app::Error::Credential,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                CREDENTIALS_UNREADABLE,
+            ),
+            (
+                github_app::Error::Unsealing,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                CREDENTIALS_UNREADABLE,
+            ),
+            (
+                github_app::Error::Database(sqlx::Error::PoolTimedOut),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                INTERNAL_ERROR,
+            ),
+        ];
+        for (error, status, message) in cases {
+            let rendered = error.to_string();
+            assert_eq!(
+                verification_refusal(&error),
+                (status, message),
+                "{rendered}"
             );
         }
     }
