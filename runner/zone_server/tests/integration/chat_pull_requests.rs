@@ -146,13 +146,16 @@ impl Workspace {
             .expect("an encrypted token");
         sources::create_source(
             self.state.db(),
-            self.workspace,
-            &format!("widgets-{}", Uuid::new_v4()),
-            "github",
-            json!({"owner": "acme", "repo": "widgets", "branch": "main"}),
-            None,
-            None,
-            Some(&encrypted),
+            sources::NewSource {
+                workspace_id: self.workspace,
+                name: &format!("widgets-{}", Uuid::new_v4()),
+                source_type: "github",
+                config: json!({"owner": "acme", "repo": "widgets", "branch": "main"}),
+                description: None,
+                url: None,
+                credentials_encrypted: Some(&encrypted),
+                github_installation_id: None,
+            },
         )
         .await
         .expect("a GitHub source")
@@ -1099,13 +1102,16 @@ async fn a_source_without_a_credential_never_stands_in_for_one_that_has_one() {
     let workspace = Workspace::new(config(&github, database), pool).await;
     let bare = sources::create_source(
         workspace.state.db(),
-        workspace.workspace,
-        &format!("widgets-bare-{}", Uuid::new_v4()),
-        "github",
-        json!({"owner": "acme", "repo": "widgets"}),
-        None,
-        None,
-        None,
+        sources::NewSource {
+            workspace_id: workspace.workspace,
+            name: &format!("widgets-bare-{}", Uuid::new_v4()),
+            source_type: "github",
+            config: json!({"owner": "acme", "repo": "widgets"}),
+            description: None,
+            url: None,
+            credentials_encrypted: None,
+            github_installation_id: None,
+        },
     )
     .await
     .expect("a source without a credential")

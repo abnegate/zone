@@ -444,13 +444,16 @@ pub async fn create(
 
     let source_row = match sources::create_source(
         state.db(),
-        workspace_id,
-        &req.name,
-        &req.source_type,
-        req.config,
-        req.description.as_deref(),
-        url.as_deref(),
-        credentials_encrypted.as_deref(),
+        sources::NewSource {
+            workspace_id,
+            name: &req.name,
+            source_type: &req.source_type,
+            config: req.config,
+            description: req.description.as_deref(),
+            url: url.as_deref(),
+            credentials_encrypted: credentials_encrypted.as_deref(),
+            github_installation_id: None,
+        },
     )
     .await
     {

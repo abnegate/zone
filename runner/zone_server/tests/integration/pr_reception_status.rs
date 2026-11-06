@@ -54,6 +54,7 @@ async fn a_merged_pull_request_is_read_back_as_merged_on_its_task() {
         project.id,
         "https://github.com/acme/project",
         Some("ghp_reception"),
+        None,
     )
     .await
     .unwrap();

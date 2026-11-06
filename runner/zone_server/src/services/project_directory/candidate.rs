@@ -228,6 +228,7 @@ mod tests {
             created_at: None,
             updated_at: None,
             workspace_id: None,
+            github_installation_id: None,
         }
     }
 

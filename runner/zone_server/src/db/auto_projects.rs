@@ -959,6 +959,7 @@ pub struct PlannedTask {
 pub struct PlannedRepository<'a> {
     pub url: &'a str,
     pub token: Option<&'a str>,
+    pub github_installation_id: Option<Uuid>,
 }
 
 pub struct ProjectPlan<'a> {
@@ -1025,8 +1026,8 @@ pub async fn finalize(
     }
     let project_id: Uuid = sqlx::query_scalar(
         "INSERT INTO projects (name, description, workspace_id, status, auto, auto_actor_id, brief, \
-           github_repo_url, github_access_token) \
-         VALUES ($1, $2, $3, 'active', TRUE, $4, $5, $6, $7) RETURNING id",
+           github_repo_url, github_access_token, github_installation_id) \
+         VALUES ($1, $2, $3, 'active', TRUE, $4, $5, $6, $7, $8) RETURNING id",
     )
     .bind(plan.name)
     .bind(plan.description)
@@ -1035,6 +1036,11 @@ pub async fn finalize(
     .bind(plan.brief)
     .bind(plan.repository.as_ref().map(|repository| repository.url))
     .bind(plan.repository.as_ref().and_then(|repository| repository.token))
+    .bind(
+        plan.repository
+            .as_ref()
+            .and_then(|repository| repository.github_installation_id),
+    )
     .fetch_one(&mut *transaction)
     .await?;
 
@@ -1289,5 +1295,57 @@ mod tests {
         assert_eq!(Verdict::verdictless(), ["unparseable", "failed"]);
         assert!(!Verdict::Approve.is_verdictless());
         assert!(!Verdict::RequestChanges.is_verdictless());
+    }
+
+    #[tokio::test]
+    async fn finalize_stores_the_repository_installation() {
+        let pool = crate::db::sources::testing::pool().await;
+        let installation = crate::db::sources::testing::installation(&pool).await;
+        let actor: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email, password_hash) VALUES ($1, 'hash') RETURNING id",
+        )
+        .bind(format!("planner-{}@example.test", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .expect("a user");
+        sqlx::query(
+            "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(installation.workspace)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .expect("a membership");
+
+        let finalized = finalize(
+            &pool,
+            installation.workspace,
+            actor,
+            None,
+            &ProjectPlan {
+                name: "Widgets",
+                description: None,
+                repository: Some(PlannedRepository {
+                    url: "https://github.com/acme/widgets",
+                    token: None,
+                    github_installation_id: Some(installation.id),
+                }),
+                brief: &json!({}),
+                tasks: &[],
+            },
+        )
+        .await
+        .expect("the project");
+
+        let project = crate::db::projects::get_project(&pool, finalized.project_id)
+            .await
+            .expect("the read")
+            .expect("the project");
+        assert_eq!(project.github_installation_id, Some(installation.id));
+        assert_eq!(project.github_access_token, None);
+        assert_eq!(
+            project.github_repo_url.as_deref(),
+            Some("https://github.com/acme/widgets")
+        );
     }
 }
