@@ -1003,17 +1003,24 @@ impl WaitForTool {
 mod tests {
     use super::*;
 
-    use crate::agent::integrations::{PENDING_ASSESSMENT, SUCCESS_ASSESSMENT};
-    use crate::state::{AppState, test_config};
+    use crate::agent::integrations::PENDING_ASSESSMENT;
+    use crate::agent::integrations::SUCCESS_ASSESSMENT;
+    use crate::state::AppState;
+    use crate::state::test_config;
     use abnegate_llm::Role;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::HashMap;
+    use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex as Lock;
     use tempfile::TempDir;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
     use zone_core::context;
-    use zone_core::tools::job::{JobCommand, JobStarted};
+    use zone_core::tools::job::JobCommand;
+    use zone_core::tools::job::JobStarted;
 
     const POLL: Duration = Duration::from_millis(20);
     const POLL_LIMIT: usize = 500;
@@ -1150,7 +1157,6 @@ mod tests {
                 json!({"check_runs": [{"id": 21, "name": "test", "head_sha": SHA,
                        "status": "completed", "conclusion": "success"}]}),
             ),
-            (format!("commits/{SHA}/statuses"), json!([])),
             (
                 format!("commits/{SHA}/status"),
                 json!({"statuses": [], "total_count": 0}),

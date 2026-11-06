@@ -11,16 +11,27 @@ use abnegate_vcs::Repository;
 use abnegate_vcs::WebhookSignature;
 use async_trait::async_trait;
 use axum::http::HeaderMap;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::DateTime;
+use chrono::Utc;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-use super::{
-    Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, Provider, StateChange,
-    SyncConfig, SyncError, SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
-};
+use super::Delivery;
+use super::ExternalIssue;
+use super::IgnoredDelivery;
+use super::IssueOrigin;
+use super::IssueState;
+use super::Provider;
+use super::StateChange;
+use super::SyncConfig;
+use super::SyncError;
+use super::SyncProvider;
+use super::SyncResult;
+use super::WebhookEvent;
+use super::WebhookPayload;
 use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
 use crate::secret::Unseal;
@@ -28,6 +39,7 @@ use crate::secret::Unseal;
 const TOKEN_UNOPENABLE: &str =
     "the GitHub token is sealed under a key this deployment does not hold";
 const CLIENT_UNAVAILABLE: &str = "a client for GitHub's own API";
+const GITHUB_API_ERROR: &str = "GitHub API error";
 const GITHUB_REFUSED: &str =
     "GitHub API error: GitHub refused the request or sent an answer that could not be read";
 const ISSUE_NUMBER_INVALID: &str = "the linked GitHub issue ID is not an issue number";
@@ -62,8 +74,8 @@ impl GitHubConfig {
     }
 }
 
-/// GitHub issue response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The issue an `issues` webhook delivery carries
+#[derive(Debug, Clone, Deserialize)]
 struct GitHubIssue {
     number: i64,
     html_url: String,
@@ -224,7 +236,7 @@ impl GitHubSyncProvider {
                 SyncError::ExternalApiError(GITHUB_REFUSED.to_string())
             }
             PullRequestError::Refused { status, .. } => {
-                SyncError::ExternalApiError(format!("GitHub API error {status}"))
+                SyncError::ExternalApiError(format!("{GITHUB_API_ERROR} {status}"))
             }
             other => SyncError::ExternalApiError(other.to_string()),
         }

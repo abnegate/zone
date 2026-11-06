@@ -2,7 +2,9 @@
 
 use abnegate_vcs::PullRequestError;
 use reqwest::StatusCode;
-use std::fmt::{self, Display, Formatter};
+use std::fmt;
+use std::fmt::Display;
+use std::fmt::Formatter;
 
 /// What GitHub said in refusing a request, worded to follow "GitHub refused:".
 /// A status `abnegate-vcs` does not classify reads as the status and its
@@ -50,6 +52,10 @@ mod tests {
         assert_eq!(
             Refusal(&PullRequestError::refused(599, "Odd")).to_string(),
             "599: Odd"
+        );
+        assert_eq!(
+            Refusal(&PullRequestError::refused(599, "")).to_string(),
+            "599"
         );
     }
 

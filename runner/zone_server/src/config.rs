@@ -1325,8 +1325,11 @@ mod tests {
     use abnegate_secret::SecretValue;
     use serde_json::json;
     use std::net::Ipv6Addr;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
     use zone_core::variables::Variables;
 
     fn create_test_config() -> Config {
@@ -1368,7 +1371,16 @@ mod tests {
 
     #[tokio::test]
     async fn github_graphql_answers_beside_rest_or_under_an_enterprise_api() {
-        for (prefix, graphql) in [("", "/graphql"), ("/api/v3", "/api/graphql")] {
+        const DEFAULT_GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
+        const GITHUB_PULL_REQUEST_URL: &str = "https://github.com/owner/repository/pull/7";
+
+        let default = reqwest::Url::parse(DEFAULT_GITHUB_API_URL).unwrap();
+        let mut answered = Vec::new();
+        for (prefix, graphql) in [
+            ("", "/graphql"),
+            (default.path(), "/graphql"),
+            ("/api/v3", "/api/graphql"),
+        ] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path(graphql))
@@ -1395,7 +1407,29 @@ mod tests {
                 .fetch_review_thread_counts(&reference, &SecretValue::new("token"))
                 .await
                 .unwrap_or_else(|error| panic!("{prefix:?}: {error:?}"));
+            if prefix == default.path() {
+                answered = server.received_requests().await.unwrap();
+            }
         }
+
+        let [request] = answered.as_slice() else {
+            panic!("the default origin's path must send one GraphQL request: {answered:?}");
+        };
+        assert_eq!(
+            default.join(request.url.path()).unwrap().as_str(),
+            DEFAULT_GITHUB_GRAPHQL_URL,
+            "GraphQL must answer beside REST on GitHub's own API"
+        );
+        let config = Config {
+            github_api_url: DEFAULT_GITHUB_API_URL.to_string(),
+            github_api_allows_http: false,
+            ..crate::state::test_config()
+        };
+        config
+            .pull_requests()
+            .expect("the default origin is GitHub's own HTTPS API")
+            .pull_request(GITHUB_PULL_REQUEST_URL)
+            .expect("the default origin answers for github.com pull requests");
     }
 
     #[test]
