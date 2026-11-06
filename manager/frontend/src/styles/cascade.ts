@@ -39,6 +39,8 @@ import '../features/knowledge/pages/WikiPage.css';
 import '../features/projects/pages/ProjectsPage.css';
 import '../features/settings/ai/AgentSignIn.css';
 import '../features/settings/workspace/pages/WorkspaceSettingsPage.css';
+import '../features/settings/navigation/SettingsNav.css';
+import '../features/settings/pages/SettingsPage.css';
 import '../features/sources/pages/SourcesPage.css';
 import '../features/tasks/components/QuestionPrompt.css';
 import '../features/tasks/pages/TasksPage.css';

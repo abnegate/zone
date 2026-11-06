@@ -3,17 +3,9 @@ import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../features/auth/context';
 import type { OrgRole } from '../../types';
 import { useWorkspace } from '../context/WorkspaceContext';
+import { meetsOrganizationRole } from '../roles';
 
 export type OrganizationRoleRequirement = Exclude<OrgRole, 'member'>;
-
-const ORGANIZATION_RANK: Record<OrgRole, number> = { member: 0, admin: 1, owner: 2 };
-
-export function meetsOrganizationRole(
-  role: OrgRole,
-  required: OrganizationRoleRequirement
-): boolean {
-  return ORGANIZATION_RANK[role] >= ORGANIZATION_RANK[required];
-}
 
 function Loading() {
   return (

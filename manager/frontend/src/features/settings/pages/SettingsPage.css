@@ -1,0 +1,65 @@
+.settings-shell {
+  --settings-nav-width: 13rem;
+}
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: var(--settings-nav-width) minmax(0, 1fr);
+  gap: var(--ui-space-6);
+  width: 100%;
+  max-width: calc(var(--settings-nav-width) + var(--ui-space-6) + var(--ui-content-width));
+  margin: 0 auto;
+}
+
+.settings-sidebar {
+  min-width: 0;
+}
+
+.settings-shell .settings-nav {
+  position: sticky;
+  top: 0;
+}
+
+.settings-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4);
+  min-width: 0;
+}
+
+.settings-shell .page-body:has(.settings-actions) > .settings-layout,
+.settings-shell .page-body:has(.settings-actions) > .settings-content {
+  flex: 1;
+}
+
+.settings-back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-1);
+  align-self: flex-start;
+  margin-bottom: var(--ui-space-3);
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text-secondary);
+  text-decoration: none;
+}
+
+.settings-back::before {
+  content: '‹';
+  font-size: var(--ui-text-md);
+  line-height: 1;
+}
+
+.settings-back:hover {
+  color: var(--ui-text-primary);
+  text-decoration: none;
+}
+
+@media (max-width: 768px) {
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-shell .settings-nav {
+    position: static;
+  }
+}
