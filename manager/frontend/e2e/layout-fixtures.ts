@@ -55,6 +55,7 @@ const mockAiSettings: AiSettings = {
 const mockWorkspaceAiSettings: WorkspaceAiSettings = {
   ...mockAiSettings,
   overrides: false,
+  inherits_provider: true,
   organization_keys: { litellm: false, openai: false, anthropic: false },
 };
 

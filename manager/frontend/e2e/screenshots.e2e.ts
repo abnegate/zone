@@ -242,15 +242,18 @@ describeScreenshots('Screenshots - Empty States', () => {
     });
   });
 
-  test('Sessions page (empty)', async ({ page }) => {
+  test('Settings sessions (empty)', async ({ page }) => {
     await setupCommonRoutes(page, false);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sessions');
+    await page.goto('/settings/you/sessions');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'Sessions', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -259,15 +262,18 @@ describeScreenshots('Screenshots - Empty States', () => {
     });
   });
 
-  test('Organization settings (empty)', async ({ page }) => {
+  test('Settings organization AI defaults (empty)', async ({ page }) => {
     await setupCommonRoutes(page, false);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/org-settings');
+    await page.goto('/settings/organization/ai');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'AI defaults', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -276,15 +282,18 @@ describeScreenshots('Screenshots - Empty States', () => {
     });
   });
 
-  test('Workspace settings (empty)', async ({ page }) => {
+  test('Settings workspace general (empty)', async ({ page }) => {
     await setupCommonRoutes(page, false);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/settings');
+    await page.goto('/settings/workspace/general');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'General', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -629,15 +638,18 @@ describeScreenshots('Screenshots - Populated States', () => {
     });
   });
 
-  test('Sessions page (populated)', async ({ page }) => {
+  test('Settings sessions (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sessions');
+    await page.goto('/settings/you/sessions');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'Sessions', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -646,15 +658,18 @@ describeScreenshots('Screenshots - Populated States', () => {
     });
   });
 
-  test('Organization settings (populated)', async ({ page }) => {
+  test('Settings organization AI defaults (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/org-settings');
+    await page.goto('/settings/organization/ai');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'AI defaults', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -663,15 +678,18 @@ describeScreenshots('Screenshots - Populated States', () => {
     });
   });
 
-  test('Workspace settings (populated)', async ({ page }) => {
+  test('Settings workspace general (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/settings');
+    await page.goto('/settings/workspace/general');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'General', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
