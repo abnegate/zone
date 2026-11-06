@@ -2,9 +2,10 @@
 //!
 //! Auto-fix is zone's own preference rather than something GitHub holds. What
 //! acts on it is a status read: whenever a fresh status says the pull request
-//! is failing or cannot merge, the row is claimed for a run and that run is
-//! asked to fix it. The claim is what keeps a read that repeats every poll
-//! from starting the same run over and over.
+//! is failing or cannot merge and no run of its own is still working, the row
+//! is claimed for a new run and that run is set going to fix it. The claim is
+//! what keeps a read that repeats every poll from starting the same run over
+//! and over.
 //!
 //! One run is not a promise. A fix that pushes and still fails leaves the
 //! pull request broken, so once the claimed run settles and the complaint is
@@ -18,7 +19,7 @@ use super::checks::Checks;
 use super::mergeable::Mergeable;
 use super::status::Status;
 use crate::db::chat_pull_requests::{self, PullRequestRow};
-use crate::db::tasks;
+use crate::db::tasks::Create;
 use crate::state::AppState;
 
 /// Why a pull request wants fixing, in the words the run is asked to act on.
@@ -38,83 +39,88 @@ fn complaint(status: &Status) -> Option<&'static str> {
     }
 }
 
-/// Starts a run to fix `row` when its fresh `status` asks for one and nothing
-/// is already answering for that state.
+/// Starts a run to fix `row` when its fresh `status` asks for one and no run
+/// of its own is still working, and leaves `row` saying what it claims now.
 ///
 /// Never fails the status read that called it. A pull request that could not
 /// be fixed this time is read again on the next poll, and the complaint is
 /// still there if it was real.
-pub async fn consider(state: &AppState, workspace_id: Uuid, row: &PullRequestRow, status: &Status) {
-    if !row.auto_fix {
+pub async fn consider(
+    state: &AppState,
+    workspace_id: Uuid,
+    row: &mut PullRequestRow,
+    status: &Status,
+) {
+    // A run still working answers for whatever the branch shows now, and a
+    // second run on the same branch would fight it.
+    if !row.auto_fix || row.auto_fixing {
         return;
     }
     let Some(complaint) = complaint(status) else {
-        // Nothing to fix. Release the row so the next thing that goes wrong
-        // is not mistaken for the one this run already answered.
-        if row.auto_fix_run_id.is_some()
-            && let Err(error) =
-                chat_pull_requests::claim_auto_fix(state.db(), row.id, row.auto_fix_run_id, None)
-                    .await
-        {
-            tracing::warn!(pull_request = %row.id, %error, "could not release an auto-fix claim");
-        }
         return;
     };
-    if let Some(claimed) = row.auto_fix_run_id {
-        match tasks::get_task_run(state.db(), claimed).await {
-            // Still working. A second run on the same branch would fight it.
-            Ok(Some(run)) if run.completed_at.is_none() => return,
-            // Settled and the pull request is still broken, so its fix did not
-            // take. Fall through and start another: auto-fix keeps going until
-            // the pull request is green, and the next run sees whatever the
-            // last one left behind. One run at a time means this cannot spin
-            // faster than a run takes to finish.
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(pull_request = %row.id, %error, "could not read the auto-fix run");
-                return;
-            }
+    match start(state, workspace_id, row, status, complaint).await {
+        Ok(Some(run_id)) => {
+            row.auto_fix_run_id = Some(run_id);
+            row.auto_fixing = true;
         }
-    }
-    if let Err(error) = start(state, workspace_id, row, status, complaint).await {
-        tracing::warn!(pull_request = %row.id, %error, "could not start an auto-fix run");
+        Ok(None) => {
+            tracing::info!(
+                pull_request = %row.id,
+                "another reader claimed this pull request first; the run it started stands"
+            );
+            refresh(state, row).await;
+        }
+        Err(error) => {
+            tracing::warn!(pull_request = %row.id, %error, "could not start an auto-fix run");
+        }
     }
 }
 
+async fn refresh(state: &AppState, row: &mut PullRequestRow) {
+    match chat_pull_requests::get(state.db(), row.chat_id, row.id).await {
+        Ok(Some(current)) => *row = current,
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(pull_request = %row.id, %error, "could not reread an auto-fix claim");
+        }
+    }
+}
+
+/// Claims `row` for a new run and sets that run going, answering with its id,
+/// or with nothing when another reader or a toggle got there first.
 async fn start(
     state: &AppState,
     workspace_id: Uuid,
     row: &PullRequestRow,
     status: &Status,
     complaint: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<Option<Uuid>, sqlx::Error> {
     let title = format!("Fix {}/{} #{}", row.owner, row.repo, row.number);
     let description = prompt(row, status, complaint);
-    let task = tasks::create_task(
-        state.db(),
+    let task = Create {
         workspace_id,
-        &[],
-        &title,
-        &description,
-        Some(ACCEPTANCE),
-        None,
-        true,
-        row.source_id,
-    )
-    .await?;
-    let run = tasks::create_task_run(state.db(), task.id).await?;
-    // Claimed only after the run exists, and only while the row still holds
-    // what this caller saw. A reader that lost the race leaves a task nothing
-    // points at rather than a second run on the branch.
-    if !chat_pull_requests::claim_auto_fix(state.db(), row.id, row.auto_fix_run_id, Some(run.id))
-        .await?
-    {
-        tracing::info!(
-            pull_request = %row.id,
-            "another reader claimed this pull request first; the run it started stands"
-        );
-    }
-    Ok(())
+        project_ids: &[],
+        title: Some(&title),
+        description: &description,
+        acceptance_criteria: Some(ACCEPTANCE),
+        priority: None,
+        is_agentic: true,
+        require_plan_approval: false,
+        source_id: row.source_id,
+        created_by: None,
+        chat_id: None,
+    };
+    let Some((task, run)) =
+        chat_pull_requests::start_auto_fix(state.db(), row.id, row.auto_fix_run_id, &task).await?
+    else {
+        return Ok(None);
+    };
+    let dispatched = state.clone();
+    tokio::spawn(async move {
+        crate::workers::task::execute_task_run(&dispatched, run.id, task.id).await;
+    });
+    Ok(Some(run.id))
 }
 
 const ACCEPTANCE: &str = "The pull request's checks pass, it merges without conflicts, and every \
@@ -147,7 +153,11 @@ fn prompt(row: &PullRequestRow, status: &Status, complaint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::chat_pull_requests::NewPullRequest;
+    use crate::db::chats::create_chat;
     use chrono::Utc;
+    use sqlx::PgPool;
+    use std::time::Duration;
 
     fn status(checks: Checks, mergeable: Mergeable) -> Status {
         Status {
@@ -201,5 +211,87 @@ mod tests {
         let mut closed = status(Checks::Failing, Mergeable::Conflicted);
         closed.state = super::super::state::State::Closed;
         assert_eq!(complaint(&closed), None);
+    }
+
+    async fn watched(pool: &PgPool) -> (Uuid, PullRequestRow) {
+        let organization = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Auto-fix', $1::text)")
+            .bind(organization)
+            .execute(pool)
+            .await
+            .expect("an organization");
+        let workspace = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Auto-fix', $1::text)",
+        )
+        .bind(workspace)
+        .bind(organization)
+        .execute(pool)
+        .await
+        .expect("a workspace");
+        let chat = create_chat(pool, None, "Changes", "qwen3:8b", false, true)
+            .await
+            .expect("a chat");
+        let row = chat_pull_requests::record(
+            pool,
+            &NewPullRequest {
+                chat_id: chat.id,
+                owner: "acme",
+                repo: "widgets",
+                number: 7,
+                url: "https://github.com/acme/widgets/pull/7",
+                title: None,
+                source_id: None,
+            },
+        )
+        .await
+        .expect("the pull request");
+        let row = chat_pull_requests::set_auto_fix(pool, chat.id, row.id, true)
+            .await
+            .expect("the update")
+            .expect("the row");
+        (workspace, row)
+    }
+
+    #[tokio::test]
+    async fn a_failing_pull_request_sets_its_fix_run_going_once() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .expect("the test database accepts connections");
+        let (workspace, mut row) = watched(&pool).await;
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+        let failing = status(Checks::Failing, Mergeable::Unstable);
+
+        consider(&state, workspace, &mut row, &failing).await;
+        let run = row
+            .auto_fix_run_id
+            .expect("a failing pull request claims a run");
+        assert!(row.auto_fixing, "the row reports the run it just started");
+
+        consider(&state, workspace, &mut row, &failing).await;
+        assert_eq!(
+            row.auto_fix_run_id,
+            Some(run),
+            "a working run is not joined by a second"
+        );
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let dispatched: bool = sqlx::query_scalar(
+                    "SELECT owner IS NOT NULL OR completed_at IS NOT NULL FROM task_runs WHERE id = $1",
+                )
+                .bind(run)
+                .fetch_one(&pool)
+                .await
+                .expect("the run");
+                if dispatched {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the claimed run is executed rather than left for recovery to fail");
     }
 }

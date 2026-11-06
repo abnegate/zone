@@ -125,6 +125,8 @@ async fn owned(state: &AppState, chat: Uuid, id: Uuid) -> Result<PullRequestRow,
 fn refused(error: Error) -> ServerError {
     match error {
         Error::Uncredentialed | Error::Refused(_) => ServerError::Conflict(error.to_string()),
-        Error::Unreachable | Error::Storage => ServerError::Internal(error.to_string()),
+        Error::Unreachable | Error::Storage | Error::Unsaved => {
+            ServerError::Internal(error.to_string())
+        }
     }
 }

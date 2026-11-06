@@ -66,7 +66,11 @@ pub async fn list(state: &AppState, workspace_id: Uuid, chat_id: Uuid) -> DbResu
 /// `row` with what GitHub last said of it, asking again once that is stale.
 /// A fresh status was read with a credential, so only a stale one costs a
 /// credential lookup.
-pub async fn track(state: &AppState, workspace_id: Uuid, row: PullRequestRow) -> DbResult<Tracked> {
+pub async fn track(
+    state: &AppState,
+    workspace_id: Uuid,
+    mut row: PullRequestRow,
+) -> DbResult<Tracked> {
     if let Some(cached) = state.pull_request_statuses().get(row.id) {
         return Ok(Tracked {
             row,
@@ -84,9 +88,7 @@ pub async fn track(state: &AppState, workspace_id: Uuid, row: PullRequestRow) ->
     let status = match observed(state, &row, &token).await {
         Ok(status) => {
             remember(state, &row, &status).await;
-            // A fresh status is the only thing that knows the pull request is
-            // failing, so it is where a run to fix it starts.
-            auto_fix::consider(state, workspace_id, &row, &status).await;
+            auto_fix::consider(state, workspace_id, &mut row, &status).await;
             Some(status)
         }
         Err(error) => {
@@ -142,8 +144,11 @@ pub async fn set_auto_fix(
 ) -> Result<PullRequestRow, Error> {
     chat_pull_requests::set_auto_fix(state.db(), chat_id, row.id, enabled)
         .await
-        .map_err(|_| Error::Storage)?
-        .ok_or(Error::Storage)
+        .map_err(|error| {
+            tracing::error!(pull_request = %row.id, %error, "could not change auto-fix");
+            Error::Unsaved
+        })?
+        .ok_or(Error::Unsaved)
 }
 
 /// The start of the pull request's unified diff.
