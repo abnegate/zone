@@ -1,4 +1,5 @@
 mod entries;
+mod entry;
 mod manifest_size;
 mod refine;
 
