@@ -39,3 +39,6 @@ extensions:
       - ["zone_server::config::AgentConfig::login_home", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::agent::sessions::locate", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::login::claude::token_endpoint", "ReturnValue", "request-url", "manual"]
+      - ["zone_server::pull::parse_comfy_ref", "ReturnValue", "path-injection", "manual"]
+      - ["zone_server::pull::parse_comfy_ref", "ReturnValue", "request-url", "manual"]
+      - ["zone_server::setup::confined_relative", "ReturnValue", "path-injection", "manual"]

@@ -4,15 +4,28 @@
 //! stream is retried (Ollama resumes incomplete blobs), and subscribers
 //! can attach, detach, and cancel independently of the download.
 
+mod comfy_reference;
+
+use abnegate_llm::download::{self, Checksum, DownloadError, DownloadProgress};
+use comfy_reference::ComfyReference;
 use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
+use tokio::time::MissedTickBehavior;
 
 pub const MISSING_MANIFEST: &str = "pull model manifest: file does not exist";
 
+const CANCELLED: &str = "Installation cancelled";
+const DOWNLOAD_FAILED: &str = "Could not download image weights";
+const STORE_FAILED: &str = "Could not store image weights";
+const CHECKSUM_MISMATCH: &str = "Image weight checksum mismatch";
+const ALREADY_DOWNLOADING: &str = "These image weights are already downloading";
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const JOB_TTL: Duration = Duration::from_secs(60);
 const EVENT_CAPACITY: usize = 128;
 const MAX_RETRIES: usize = 5;
@@ -338,7 +351,7 @@ impl Job {
 fn retryable(message: &str) -> bool {
     message.starts_with("Model download interrupted")
         || message.starts_with("Could not connect to Ollama")
-        || message.starts_with("Could not download image weights")
+        || message.starts_with(DOWNLOAD_FAILED)
 }
 
 fn missing_manifest(model: &str, message: String) -> String {
@@ -361,7 +374,7 @@ async fn run_job(request: PullStart, job: Arc<Job>) {
     for backoff in RETRY_BACKOFF.into_iter().map(Some).chain([None]) {
         if job.is_cancelled() {
             job.publish(Event::Error {
-                message: "Installation cancelled".to_string(),
+                message: CANCELLED.to_string(),
             });
             return;
         }
@@ -369,7 +382,7 @@ async fn run_job(request: PullStart, job: Arc<Job>) {
             (Ok(()), _) => return,
             (Err(_), _) if job.is_cancelled() => {
                 job.publish(Event::Error {
-                    message: "Installation cancelled".to_string(),
+                    message: CANCELLED.to_string(),
                 });
                 return;
             }
@@ -381,7 +394,7 @@ async fn run_job(request: PullStart, job: Arc<Job>) {
                     () = tokio::time::sleep(backoff) => {}
                     () = job.cancelled() => {
                         job.publish(Event::Error {
-                            message: "Installation cancelled".to_string(),
+                            message: CANCELLED.to_string(),
                         });
                         return;
                     }
@@ -397,30 +410,30 @@ async fn run_job(request: PullStart, job: Arc<Job>) {
     }
 }
 
-fn parse_comfy_ref(model: &str) -> Result<(String, String), String> {
+fn parse_comfy_ref(model: &str) -> Result<ComfyReference, String> {
     let trimmed = model.trim();
-    let (repo, filename) = trimmed
+    let (repository, filename) = trimmed
         .rsplit_once(':')
         .ok_or_else(|| "Image weights need owner/repo:filename.safetensors".to_string())?;
-    if repo.is_empty()
+    if repository.is_empty()
         || filename.is_empty()
         || filename.contains('/')
         || filename.contains('\\')
         || filename.contains("..")
-        || repo.contains("..")
-        || repo.contains('\\')
+        || repository.contains("..")
+        || repository.contains('\\')
         || !filename.ends_with(".safetensors")
     {
         return Err("Invalid image weight filename".to_string());
     }
-    if repo.split('/').count() != 2
-        || repo
+    if repository.split('/').count() != 2
+        || repository
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
     {
         return Err("Image weights need an owner/repo HuggingFace id".to_string());
     }
-    Ok((repo.to_string(), filename.to_string()))
+    Ok(ComfyReference::new(repository, filename))
 }
 
 async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
@@ -428,8 +441,8 @@ async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
         download_manifest(&comfy.models_directory, manifest, job).await;
         return;
     }
-    let (repo, filename) = match parse_comfy_ref(model) {
-        Ok(parsed) => parsed,
+    let reference = match parse_comfy_ref(model) {
+        Ok(reference) => reference,
         Err(message) => {
             job.publish(Event::Error { message });
             return;
@@ -445,40 +458,29 @@ async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
         });
         return;
     }
-    let target = directory.join(&filename);
-    let partial = directory.join(format!("{filename}.part"));
-    let origin = comfy.hub_origin.trim_end_matches('/');
-    let url = format!("{origin}/{repo}/resolve/main/{filename}");
-    match download_file(&url, &partial, job).await {
-        Ok(()) => {
-            if let Err(error) = std::fs::rename(&partial, &target) {
-                job.publish(Event::Error {
-                    message: format!("Could not store image weights: {error}"),
-                });
-                return;
-            }
-            if let Some(recipe_id) = comfy.recipe_id.as_deref() {
-                let sidecar = serde_json::json!({
-                    "recipe_id": recipe_id,
-                    "hf_base": comfy.hf_base,
-                });
-                let _ = std::fs::write(
-                    directory.join(format!("{filename}.zone.json")),
-                    sidecar.to_string(),
-                );
-            }
-            job.publish(Event::Complete {
-                success: true,
-                message: "Model installed successfully",
-            });
-        }
-        Err(message) => {
-            job.publish(Event::Error { message });
-        }
+    let target = directory.join(reference.filename());
+    if let Err(message) = fetch_weights(&reference.url(&comfy.hub_origin), &target, None, job).await
+    {
+        job.publish(Event::Error { message });
+        return;
     }
+    if let Some(recipe_id) = comfy.recipe_id.as_deref() {
+        let sidecar = serde_json::json!({
+            "recipe_id": recipe_id,
+            "hf_base": comfy.hf_base,
+        });
+        let _ = std::fs::write(
+            directory.join(format!("{}.zone.json", reference.filename())),
+            sidecar.to_string(),
+        );
+    }
+    job.publish(Event::Complete {
+        success: true,
+        message: "Model installed successfully",
+    });
 }
 
-async fn download_manifest(models_directory: &std::path::Path, manifest: &ManifestFile, job: &Job) {
+async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job: &Job) {
     let Some(target) = crate::setup::confined_relative(models_directory, &manifest.relative_path)
     else {
         job.publish(Event::Error {
@@ -488,7 +490,7 @@ async fn download_manifest(models_directory: &std::path::Path, manifest: &Manife
     };
     if std::fs::metadata(&target)
         .ok()
-        .is_some_and(|meta| meta.is_file() && meta.len() == manifest.size_bytes)
+        .is_some_and(|metadata| metadata.is_file() && metadata.len() == manifest.size_bytes)
     {
         job.publish(Event::Complete {
             success: true,
@@ -496,6 +498,15 @@ async fn download_manifest(models_directory: &std::path::Path, manifest: &Manife
         });
         return;
     }
+    let checksum = match Checksum::from_hexadecimal(&manifest.sha256) {
+        Ok(checksum) => checksum,
+        Err(error) => {
+            job.publish(Event::Error {
+                message: describe(error),
+            });
+            return;
+        }
+    };
     job.publish(Event::Step {
         status: "downloading image weights".to_string(),
     });
@@ -507,147 +518,91 @@ async fn download_manifest(models_directory: &std::path::Path, manifest: &Manife
         });
         return;
     }
-    let partial = target.with_file_name(format!(
-        "{}.part",
-        target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("model")
-    ));
-    match download_file(&manifest.url, &partial, job).await {
-        Ok(()) => {
-            match std::fs::metadata(&partial) {
-                Ok(meta) if meta.len() == manifest.size_bytes => {}
-                Ok(meta) => {
-                    let _ = std::fs::remove_file(&partial);
-                    job.publish(Event::Error {
-                        message: format!(
-                            "Image weight size mismatch: got {} bytes, expected {}",
-                            meta.len(),
-                            manifest.size_bytes
-                        ),
-                    });
-                    return;
-                }
-                Err(error) => {
-                    job.publish(Event::Error {
-                        message: format!("Could not store image weights: {error}"),
-                    });
-                    return;
-                }
-            }
-            if !hash_matches(&partial, &manifest.sha256) {
-                let _ = std::fs::remove_file(&partial);
-                job.publish(Event::Error {
-                    message: "Image weight checksum mismatch".to_string(),
-                });
-                return;
-            }
-            if let Err(error) = std::fs::rename(&partial, &target) {
-                job.publish(Event::Error {
-                    message: format!("Could not store image weights: {error}"),
-                });
-                return;
-            }
-            job.publish(Event::Complete {
-                success: true,
-                message: "Model installed successfully",
+    if let Err(message) = fetch_weights(&manifest.url, &target, Some(checksum), job).await {
+        job.publish(Event::Error { message });
+        return;
+    }
+    match std::fs::metadata(&target) {
+        Ok(metadata) if metadata.len() == manifest.size_bytes => {}
+        Ok(metadata) => {
+            let _ = std::fs::remove_file(&target);
+            job.publish(Event::Error {
+                message: format!(
+                    "Image weight size mismatch: got {} bytes, expected {}",
+                    metadata.len(),
+                    manifest.size_bytes
+                ),
             });
+            return;
         }
-        Err(message) => {
-            job.publish(Event::Error { message });
+        Err(error) => {
+            job.publish(Event::Error {
+                message: format!("{STORE_FAILED}: {error}"),
+            });
+            return;
         }
     }
+    job.publish(Event::Complete {
+        success: true,
+        message: "Model installed successfully",
+    });
 }
 
-fn hash_matches(path: &std::path::Path, expected: &str) -> bool {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 8 * 1024 * 1024];
-    loop {
-        match file.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => hasher.update(&buffer[..read]),
-            Err(_) => return false,
-        }
-    }
-    hex::encode(hasher.finalize()).eq_ignore_ascii_case(expected)
-}
-
-async fn download_file(url: &str, dest: &std::path::Path, job: &Job) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .user_agent("ZoneManager/1.0")
-        .build()
-        .map_err(|error| format!("Could not download image weights: {error}"))?;
-    let mut existing = std::fs::metadata(dest).map(|meta| meta.len()).unwrap_or(0);
-    let mut request = client.get(url);
-    if existing > 0 {
-        request = request.header(reqwest::header::RANGE, format!("bytes={existing}-"));
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("Could not download image weights: {error}"))?;
-    if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-        return Ok(());
-    }
-    if response.status() == reqwest::StatusCode::OK {
-        existing = 0;
-        let _ = std::fs::remove_file(dest);
-    } else if !response.status().is_success()
-        && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-    {
-        return Err(format!(
-            "Could not download image weights: HTTP {}",
-            response.status()
-        ));
-    }
-    let total = response
-        .content_length()
-        .map(|length| length + existing)
-        .unwrap_or(0);
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(existing > 0)
-        .write(true)
-        .truncate(existing == 0)
-        .open(dest)
-        .map_err(|error| format!("Could not store image weights: {error}"))?;
-    let mut stream = response.bytes_stream();
-    let mut completed = existing;
+async fn fetch_weights(
+    url: &str,
+    target: &Path,
+    checksum: Option<Checksum>,
+    job: &Job,
+) -> Result<(), String> {
+    let progress = Arc::new(DownloadProgress::new());
+    let transfer = download::fetch(url, target, checksum, Arc::clone(&progress));
+    tokio::pin!(transfer);
+    let mut pump = tokio::time::interval(PROGRESS_INTERVAL);
+    pump.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut reported = None;
     loop {
         tokio::select! {
-            () = job.cancelled() => return Err("Installation cancelled".to_string()),
-            chunk = stream.next() => {
-                match chunk {
-                    Some(Ok(bytes)) => {
-                        std::io::Write::write_all(&mut file, &bytes)
-                            .map_err(|error| format!("Could not store image weights: {error}"))?;
-                        completed += bytes.len() as u64;
-                        if total > 0 {
-                            job.publish(Event::Progress {
-                                percent: (completed as f64 / total as f64 * 100.0).clamp(0.0, 100.0),
-                                completed: Some(completed),
-                                total: Some(total),
-                                digest: None,
-                            });
-                        }
-                    }
-                    Some(Err(error)) => {
-                        return Err(format!("Could not download image weights: {error}"));
-                    }
-                    None => break,
-                }
+            outcome = &mut transfer => {
+                report_progress(job, &progress, &mut reported);
+                return outcome.map_err(describe);
             }
+            () = job.cancelled() => return Err(CANCELLED.to_string()),
+            _ = pump.tick() => report_progress(job, &progress, &mut reported),
         }
     }
-    Ok(())
+}
+
+fn report_progress(job: &Job, progress: &DownloadProgress, reported: &mut Option<(u64, u64)>) {
+    let total = progress.total_bytes.load(Ordering::Relaxed);
+    let completed = progress.downloaded_bytes.load(Ordering::Relaxed);
+    if total == 0 || *reported == Some((completed, total)) {
+        return;
+    }
+    *reported = Some((completed, total));
+    job.publish(Event::Progress {
+        percent: (completed as f64 / total as f64 * 100.0).clamp(0.0, 100.0),
+        completed: Some(completed),
+        total: Some(total),
+        digest: None,
+    });
+}
+
+fn describe(error: DownloadError) -> String {
+    match error {
+        DownloadError::Http(error) => format!("{DOWNLOAD_FAILED}: {error}"),
+        DownloadError::Status(code) => format!("{DOWNLOAD_FAILED}: HTTP {}", status_text(code)),
+        DownloadError::Io(error) => format!("{STORE_FAILED}: {error}"),
+        DownloadError::Checksum { .. } | DownloadError::InvalidChecksum(_) => {
+            CHECKSUM_MISMATCH.to_string()
+        }
+        DownloadError::InProgress => ALREADY_DOWNLOADING.to_string(),
+        error => format!("{DOWNLOAD_FAILED}: {error}"),
+    }
+}
+
+fn status_text(code: u16) -> String {
+    reqwest::StatusCode::from_u16(code)
+        .map_or_else(|_| code.to_string(), |status| status.to_string())
 }
 
 async fn download_once(host: &str, model: &str, job: &Job) -> Result<(), String> {
@@ -674,7 +629,7 @@ async fn download_once(host: &str, model: &str, job: &Job) -> Result<(), String>
     let mut pending = Vec::new();
     loop {
         tokio::select! {
-            () = job.cancelled() => return Err("Installation cancelled".to_string()),
+            () = job.cancelled() => return Err(CANCELLED.to_string()),
             chunk = stream.next() => {
                 match chunk {
                     Some(Ok(bytes)) => {
@@ -754,23 +709,167 @@ fn process(job: &Job, line: &[u8]) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComfyPull, Event, ManifestFile, PullRegistry, PullStart, retryable};
+    use super::{
+        ALREADY_DOWNLOADING, CANCELLED, CHECKSUM_MISMATCH, ComfyPull, ComfyReference, Event,
+        ManifestFile, PullRegistry, PullStart, describe, retryable,
+    };
+    use abnegate_llm::download::{Checksum, DownloadError};
+    use axum::Router;
+    use axum::body::{Body, Bytes};
+    use axum::http::{HeaderMap, StatusCode, header};
+    use axum::response::Response;
+    use axum::routing::get;
+    use futures::StreamExt;
     use sha2::{Digest, Sha256};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const BODY: &[u8] = b"zone-setup-weight-bytes-for-a-resumable-transfer";
+    const HEAD_LENGTH: usize = 16;
+    const ENTITY_TAG: &str = "\"weight-v1\"";
+    const RELATIVE_PATH: &str = "checkpoints/tiny.safetensors";
+    const POLL: Duration = Duration::from_millis(20);
+    const POLLS: usize = 250;
+
+    fn sha256(body: &[u8]) -> String {
+        Checksum::new(Sha256::digest(body).into()).to_string()
+    }
+
+    fn manifest_pull(directory: &Path, url: String, size_bytes: u64, sha256: String) -> PullStart {
+        PullStart {
+            model: "tiny".into(),
+            ollama_host: String::new(),
+            comfy: Some(ComfyPull {
+                models_directory: directory.to_path_buf(),
+                recipe_id: None,
+                hf_base: None,
+                hub_origin: "http://127.0.0.1:1".into(),
+                manifest: Some(ManifestFile {
+                    url,
+                    relative_path: RELATIVE_PATH.into(),
+                    size_bytes,
+                    sha256,
+                }),
+            }),
+        }
+    }
+
+    fn body_pull(directory: &Path, url: String) -> PullStart {
+        manifest_pull(directory, url, BODY.len() as u64, sha256(BODY))
+    }
+
+    fn part(directory: &Path) -> PathBuf {
+        directory.join(format!("{RELATIVE_PATH}.part"))
+    }
+
+    async fn terminal(registry: &PullRegistry, model: &str) -> Event {
+        for _ in 0..POLLS {
+            if let Some(terminal) = registry.status(model).and_then(|view| view.terminal) {
+                return terminal;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        panic!("pull did not finish");
+    }
+
+    async fn assert_complete(registry: &PullRegistry, model: &str) {
+        match terminal(registry, model).await {
+            Event::Complete { success, .. } => assert!(success),
+            other => panic!("download failed: {other:?}"),
+        }
+    }
+
+    async fn assert_error(registry: &PullRegistry, model: &str) -> String {
+        match terminal(registry, model).await {
+            Event::Error { message } => message,
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    async fn wait_for_progress(registry: &PullRegistry, model: &str, completed: usize) {
+        for _ in 0..POLLS {
+            if registry
+                .status(model)
+                .is_some_and(|view| view.completed == Some(completed as u64))
+            {
+                return;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        panic!("{model} never reported {completed} bytes");
+    }
+
+    async fn wait_for_release(part: &Path) {
+        let lock = PathBuf::from(format!("{}.lock", part.display()));
+        for _ in 0..POLLS {
+            if !lock.exists() {
+                return;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        panic!("{} was never released", lock.display());
+    }
+
+    async fn serve(router: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    fn weight(
+        status: StatusCode,
+        headers: &[(header::HeaderName, String)],
+        body: Body,
+    ) -> Response {
+        let mut response = Response::builder().status(status);
+        for (name, value) in headers {
+            response = response.header(name, value);
+        }
+        response.body(body).unwrap()
+    }
+
+    fn head_then<Tail>(tail: Tail) -> Body
+    where
+        Tail: futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+    {
+        let head = futures::stream::once(async {
+            Ok::<_, std::io::Error>(Bytes::from_static(&BODY[..HEAD_LENGTH]))
+        });
+        Body::from_stream(head.chain(tail))
+    }
+
+    async fn requests_to(server: &MockServer) -> Vec<wiremock::Request> {
+        server.received_requests().await.unwrap_or_default()
+    }
 
     #[test]
     fn parses_owner_repo_safetensors_refs() {
+        let reference = super::parse_comfy_ref(
+            "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora:qwen-image-edit-plus-nsfw-lora.safetensors",
+        )
+        .unwrap();
         assert_eq!(
-            super::parse_comfy_ref(
-                "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora:qwen-image-edit-plus-nsfw-lora.safetensors"
+            reference,
+            ComfyReference::new(
+                "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora",
+                "qwen-image-edit-plus-nsfw-lora.safetensors"
             )
-            .unwrap(),
-            (
-                "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora".into(),
-                "qwen-image-edit-plus-nsfw-lora.safetensors".into()
-            )
+        );
+        assert_eq!(
+            reference.url("https://huggingface.co/"),
+            "https://huggingface.co/ScottzillaSystems/qwen-image-edit-plus-nsfw-lora/resolve/main/qwen-image-edit-plus-nsfw-lora.safetensors"
         );
         assert!(super::parse_comfy_ref("llama3.2:3b").is_err());
         assert!(super::parse_comfy_ref("../evil:model.safetensors").is_err());
+        assert!(super::parse_comfy_ref("owner/repo:../model.safetensors").is_err());
+        assert!(super::parse_comfy_ref("owner/repo/extra:model.safetensors").is_err());
     }
 
     #[test]
@@ -818,93 +917,445 @@ mod tests {
         );
     }
 
+    #[test]
+    fn download_errors_read_as_zone_messages() {
+        assert_eq!(
+            describe(DownloadError::Status(404)),
+            "Could not download image weights: HTTP 404 Not Found"
+        );
+        assert_eq!(
+            describe(DownloadError::Io(std::io::Error::other("disk full"))),
+            "Could not store image weights: disk full"
+        );
+        assert_eq!(
+            describe(DownloadError::InvalidChecksum("deadbeef".into())),
+            CHECKSUM_MISMATCH
+        );
+        assert_eq!(describe(DownloadError::InProgress), ALREADY_DOWNLOADING);
+        assert_eq!(
+            describe(DownloadError::Inconsistent),
+            format!(
+                "Could not download image weights: {}",
+                DownloadError::Inconsistent
+            )
+        );
+    }
+
     #[tokio::test]
     async fn skips_manifest_weight_when_size_matches() {
         let directory = tempfile::tempdir().unwrap();
-        let relative = "checkpoints/tiny.bin";
-        let target = directory.path().join(relative);
+        let target = directory.path().join(RELATIVE_PATH);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&target, b"already-there").unwrap();
         let registry = PullRegistry::new();
-        let _subscription = registry.start(PullStart {
-            model: "tiny".into(),
-            ollama_host: String::new(),
-            comfy: Some(ComfyPull {
-                models_directory: directory.path().to_path_buf(),
-                recipe_id: None,
-                hf_base: None,
-                hub_origin: "http://127.0.0.1:1".into(),
-                manifest: Some(ManifestFile {
-                    url: "http://127.0.0.1:1/missing.bin".into(),
-                    relative_path: relative.into(),
-                    size_bytes: 13,
-                    sha256: "deadbeef".into(),
-                }),
-            }),
-        });
+        let _subscription = registry.start(manifest_pull(
+            directory.path(),
+            "http://127.0.0.1:1/missing.bin".into(),
+            13,
+            "deadbeef".into(),
+        ));
         assert_complete(&registry, "tiny").await;
     }
 
     #[tokio::test]
     async fn downloads_manifest_weight_into_relative_path() {
-        use axum::{Router, routing::get};
-        use tokio::net::TcpListener;
-
-        let body = b"zone-setup-weight";
-        let sha = hex::encode(Sha256::digest(body));
-        let payload = body.to_vec();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let router = Router::new().route(
+        let payload = BODY.to_vec();
+        let origin = serve(Router::new().route(
             "/file.bin",
             get(move || {
                 let payload = payload.clone();
                 async move { payload }
             }),
-        );
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
+        ))
+        .await;
 
         let directory = tempfile::tempdir().unwrap();
         let registry = PullRegistry::new();
+        let _subscription =
+            registry.start(body_pull(directory.path(), format!("{origin}/file.bin")));
+        assert_complete(&registry, "tiny").await;
+        let stored = std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap();
+        assert_eq!(stored, BODY);
+        assert!(!part(directory.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn downloads_a_lora_reference_into_loras_with_its_sidecar() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/owner/style/resolve/main/style.safetensors"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
         let _subscription = registry.start(PullStart {
-            model: "tiny".into(),
+            model: "owner/style:style.safetensors".into(),
             ollama_host: String::new(),
             comfy: Some(ComfyPull {
                 models_directory: directory.path().to_path_buf(),
-                recipe_id: None,
-                hf_base: None,
-                hub_origin: format!("http://{address}"),
-                manifest: Some(ManifestFile {
-                    url: format!("http://{address}/file.bin"),
-                    relative_path: "checkpoints/tiny.bin".into(),
-                    size_bytes: body.len() as u64,
-                    sha256: sha,
-                }),
+                recipe_id: Some("flux-lora".into()),
+                hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                hub_origin: format!("{}/", server.uri()),
+                manifest: None,
             }),
         });
-        assert_complete(&registry, "tiny").await;
-        let stored = std::fs::read(directory.path().join("checkpoints/tiny.bin")).unwrap();
-        assert_eq!(stored, body);
+        assert_complete(&registry, "owner/style:style.safetensors").await;
+        let loras = directory.path().join("loras");
+        assert_eq!(
+            std::fs::read(loras.join("style.safetensors")).unwrap(),
+            BODY
+        );
+        let sidecar: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(loras.join("style.safetensors.zone.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar["recipe_id"], "flux-lora");
+        assert_eq!(sidecar["hf_base"], "black-forest-labs/FLUX.1-schnell");
     }
 
-    async fn assert_complete(registry: &PullRegistry, model: &str) {
-        for _ in 0..100 {
-            if let Some(view) = registry.status(model)
-                && let Some(terminal) = view.terminal
-            {
-                match terminal {
-                    Event::Complete { success, .. } => {
-                        assert!(success);
-                        return;
+    #[tokio::test]
+    async fn resumes_an_interrupted_body_with_if_range() {
+        let seen: Arc<Mutex<Vec<HeaderMap>>> = Arc::default();
+        let recorded = Arc::clone(&seen);
+        let origin = serve(Router::new().route(
+            "/file.bin",
+            get(move |headers: HeaderMap| {
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    let range = headers
+                        .get(header::RANGE)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.strip_prefix("bytes="))
+                        .and_then(|value| value.strip_suffix('-'))
+                        .and_then(|value| value.parse::<usize>().ok());
+                    recorded.lock().unwrap().push(headers);
+                    let length = BODY.len();
+                    match range {
+                        None => weight(
+                            StatusCode::OK,
+                            &[
+                                (header::ETAG, ENTITY_TAG.to_string()),
+                                (header::CONTENT_LENGTH, length.to_string()),
+                            ],
+                            head_then(futures::stream::once(async {
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                Err(std::io::Error::other("connection dropped"))
+                            })),
+                        ),
+                        Some(start) => weight(
+                            StatusCode::PARTIAL_CONTENT,
+                            &[
+                                (header::ETAG, ENTITY_TAG.to_string()),
+                                (
+                                    header::CONTENT_RANGE,
+                                    format!("bytes {start}-{}/{length}", length - 1),
+                                ),
+                            ],
+                            Body::from(BODY[start..].to_vec()),
+                        ),
                     }
-                    Event::Error { message } => panic!("download failed: {message}"),
-                    _ => {}
                 }
+            }),
+        ))
+        .await;
+
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let url = format!("{origin}/file.bin");
+        let _first = registry.start(body_pull(directory.path(), url.clone()));
+        let interrupted = assert_error(&registry, "tiny").await;
+        assert!(
+            interrupted.starts_with("Could not download image weights: "),
+            "{interrupted}"
+        );
+        let kept = std::fs::metadata(part(directory.path())).unwrap().len();
+        assert_eq!(kept, HEAD_LENGTH as u64);
+
+        let _second = registry.start(body_pull(directory.path(), url));
+        assert_complete(&registry, "tiny").await;
+        assert_eq!(
+            std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap(),
+            BODY
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[0].get(header::RANGE).is_none());
+        assert_eq!(seen[1][header::RANGE], format!("bytes={kept}-"));
+        assert_eq!(seen[1][header::IF_RANGE], ENTITY_TAG);
+    }
+
+    #[tokio::test]
+    async fn a_checksum_mismatch_installs_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(manifest_pull(
+            directory.path(),
+            format!("{}/file.bin", server.uri()),
+            BODY.len() as u64,
+            sha256(b"some other weight"),
+        ));
+        assert_eq!(assert_error(&registry, "tiny").await, CHECKSUM_MISMATCH);
+        assert!(!directory.path().join(RELATIVE_PATH).exists());
+        assert!(!part(directory.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_digest_is_refused_before_any_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(manifest_pull(
+            directory.path(),
+            format!("{}/file.bin", server.uri()),
+            BODY.len() as u64,
+            "deadbeef".into(),
+        ));
+        assert_eq!(assert_error(&registry, "tiny").await, CHECKSUM_MISMATCH);
+        assert!(requests_to(&server).await.is_empty());
+        assert!(!directory.path().join(RELATIVE_PATH).exists());
+    }
+
+    #[tokio::test]
+    async fn a_size_mismatch_removes_the_weight() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let expected = BODY.len() as u64 + 1;
+        let _subscription = registry.start(manifest_pull(
+            directory.path(),
+            format!("{}/file.bin", server.uri()),
+            expected,
+            sha256(BODY),
+        ));
+        assert_eq!(
+            assert_error(&registry, "tiny").await,
+            format!(
+                "Image weight size mismatch: got {} bytes, expected {expected}",
+                BODY.len()
+            )
+        );
+        assert!(!directory.path().join(RELATIVE_PATH).exists());
+    }
+
+    #[tokio::test]
+    async fn a_failing_status_is_reported_with_its_reason() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(body_pull(
+            directory.path(),
+            format!("{}/file.bin", server.uri()),
+        ));
+        assert_eq!(
+            assert_error(&registry, "tiny").await,
+            "Could not download image weights: HTTP 404 Not Found"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_mid_body_keeps_the_partial_file() {
+        let origin = serve(Router::new().route(
+            "/file.bin",
+            get(|| async {
+                weight(
+                    StatusCode::OK,
+                    &[
+                        (header::ETAG, ENTITY_TAG.to_string()),
+                        (header::CONTENT_LENGTH, BODY.len().to_string()),
+                    ],
+                    head_then(futures::stream::pending()),
+                )
+            }),
+        ))
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let _subscription =
+            registry.start(body_pull(directory.path(), format!("{origin}/file.bin")));
+        wait_for_progress(&registry, "tiny", HEAD_LENGTH).await;
+
+        assert!(registry.cancel("tiny"));
+
+        assert_eq!(assert_error(&registry, "tiny").await, CANCELLED);
+        wait_for_release(&part(directory.path())).await;
+        assert_eq!(
+            std::fs::metadata(part(directory.path())).unwrap().len(),
+            HEAD_LENGTH as u64
+        );
+        assert!(!directory.path().join(RELATIVE_PATH).exists());
+    }
+
+    #[tokio::test]
+    async fn a_second_transfer_to_the_same_weight_is_refused() {
+        let origin = serve(Router::new().route(
+            "/file.bin",
+            get(|| async {
+                weight(
+                    StatusCode::OK,
+                    &[(header::CONTENT_LENGTH, BODY.len().to_string())],
+                    head_then(futures::stream::pending()),
+                )
+            }),
+        ))
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let url = format!("{origin}/file.bin");
+        let _first = registry.start(body_pull(directory.path(), url.clone()));
+        wait_for_progress(&registry, "tiny", HEAD_LENGTH).await;
+
+        let _second = registry.start(PullStart {
+            model: "tiny-again".into(),
+            ..body_pull(directory.path(), url)
+        });
+
+        assert_eq!(
+            assert_error(&registry, "tiny-again").await,
+            ALREADY_DOWNLOADING
+        );
+        assert!(registry.cancel("tiny"));
+    }
+
+    #[tokio::test]
+    async fn progress_reports_completed_and_total() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let mut subscription = registry.start(body_pull(
+            directory.path(),
+            format!("{}/file.bin", server.uri()),
+        ));
+        let mut events = Vec::new();
+        while let Some(event) = subscription.next().await {
+            let finished = event.is_terminal();
+            events.push(event);
+            if finished {
+                break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        panic!("pull did not finish");
+        let total = BODY.len() as u64;
+        let progress: Vec<(Option<u64>, Option<u64>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Progress {
+                    completed, total, ..
+                } => Some((*completed, *total)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            progress.last(),
+            Some(&(Some(total), Some(total))),
+            "{events:?}"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Event::Complete { success: true, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_followed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/moved.bin"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/file.bin", server.uri()).as_str()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/file.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(body_pull(
+            directory.path(),
+            format!("{}/moved.bin", server.uri()),
+        ));
+        assert_complete(&registry, "tiny").await;
+        assert_eq!(
+            std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap(),
+            BODY
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partial_file_without_a_validator_restarts() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let partial = part(directory.path());
+        std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+        std::fs::write(&partial, b"bytes from before the switch").unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(body_pull(
+            directory.path(),
+            format!("{}/file.bin", server.uri()),
+        ));
+        assert_complete(&registry, "tiny").await;
+        assert_eq!(
+            std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap(),
+            BODY
+        );
+        let requests = requests_to(&server).await;
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].headers.contains_key(header::RANGE));
+    }
+
+    #[tokio::test]
+    async fn listing_ignores_an_unfinished_transfer() {
+        let directory = tempfile::tempdir().unwrap();
+        let checkpoints = directory.path().join("checkpoints");
+        std::fs::create_dir_all(&checkpoints).unwrap();
+        let weight = "flux1-schnell-fp8.safetensors";
+        for suffix in [".part", ".part.validator", ".part.lock"] {
+            std::fs::write(checkpoints.join(format!("{weight}{suffix}")), b"partial").unwrap();
+        }
+        let mut config = crate::state::test_config();
+        config.comfyui.models_directory = directory.path().to_path_buf();
+        let state = crate::state::AppState::new(
+            config,
+            sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap(),
+            None,
+        );
+        state.disable_mcp();
+
+        assert!(crate::routes::models::list_comfy_models(&state).is_empty());
+
+        std::fs::write(checkpoints.join(weight), b"weight").unwrap();
+        let listed: Vec<String> = crate::routes::models::list_comfy_models(&state)
+            .into_iter()
+            .map(|model| model.name)
+            .collect();
+        assert_eq!(listed, [weight]);
     }
 }
