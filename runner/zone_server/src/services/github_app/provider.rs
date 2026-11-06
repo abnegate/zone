@@ -21,7 +21,8 @@ use crate::db::sources::SourceRow;
 use super::catalog::Catalog;
 use super::credential::Credential;
 use super::error::Error;
-use super::flight::Flights;
+use super::flights::Flights;
+use super::mint::Mint;
 use super::scope::Scope;
 use super::tenant::Tenant;
 use super::unauthenticated::Unauthenticated;
@@ -61,7 +62,7 @@ enum Standing {
 pub struct Provider {
     github: Result<GitHub, ApplicationError>,
     cache: TokenCache,
-    flights: Flights,
+    flights: Flights<InstallationId, Mint>,
     catalog: Catalog,
     master_key: MasterKey,
     encryption_key: [u8; 32],
