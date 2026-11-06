@@ -1,26 +1,31 @@
 use std::fmt;
 use std::future::Future;
 use std::num::{NonZeroU8, NonZeroU32};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use abnegate_secret::{MasterKey, SecretValue, decrypt_value, encrypt_value, is_encrypted};
 use abnegate_vcs::pull_request::{
     ApplicationClaims, ApplicationError, ApplicationId, ApplicationService, InstallationId,
-    InstallationIssuer, TokenCache,
+    InstallationIssuer, InstalledRepository, TokenCache,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::Config;
 use crate::crypto;
+use crate::db::github_apps::AppRow;
 use crate::db::github_installations::{self, InstallationCredential, InstallationStatus};
 use crate::db::projects::ProjectRow;
 use crate::db::sources::SourceRow;
 
+use super::catalog::Catalog;
 use super::credential::Credential;
 use super::error::Error;
-use super::flight::Flights;
+use super::flights::Flights;
+use super::mint::Mint;
 use super::scope::Scope;
+use super::tenant::Tenant;
 use super::unauthenticated::Unauthenticated;
 
 const FORBIDDEN: u16 = 403;
@@ -58,7 +63,8 @@ enum Standing {
 pub struct Provider {
     github: Result<GitHub, ApplicationError>,
     cache: TokenCache,
-    flights: Flights,
+    flights: Flights<InstallationId, Mint>,
+    catalog: Catalog,
     master_key: MasterKey,
     encryption_key: [u8; 32],
 }
@@ -77,6 +83,7 @@ impl Provider {
             github,
             cache: TokenCache::new(),
             flights: Flights::default(),
+            catalog: Catalog::default(),
             master_key: MasterKey::new(encryption_key),
             encryption_key,
         }
@@ -89,6 +96,43 @@ impl Provider {
                 _ => ApplicationError::InvalidOrigin,
             })
         })
+    }
+
+    pub fn applications(&self) -> Result<&ApplicationService, Error> {
+        Ok(&self.github()?.applications)
+    }
+
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    pub async fn repositories(
+        &self,
+        db: &PgPool,
+        organization_id: Uuid,
+        installation: Uuid,
+        refresh: bool,
+    ) -> Result<Arc<[InstalledRepository]>, Error> {
+        self.catalog
+            .repositories(organization_id, installation, refresh, || {
+                self.listing(db, organization_id, installation)
+            })
+            .await
+    }
+
+    async fn listing(
+        &self,
+        db: &PgPool,
+        organization_id: Uuid,
+        installation: Uuid,
+    ) -> Result<Vec<InstalledRepository>, Error> {
+        let credential = self
+            .organization_installation(db, organization_id, installation)
+            .await?;
+        let applications = self.applications()?;
+        Ok(self
+            .retrying(db, credential, |token| Catalog::listed(applications, token))
+            .await?)
     }
 
     pub fn seal(&self, secret: &SecretValue) -> Result<String, Error> {
@@ -110,6 +154,12 @@ impl Provider {
     ) -> Result<SecretValue, Error> {
         Ok(ApplicationClaims::issue(application, SystemTime::now())
             .sign(&self.open(sealed_key)?)?)
+    }
+
+    /// Refuses an App whose stored GitHub id is negative with
+    /// [`Error::NotConnected`], since GitHub never numbers one so.
+    pub fn application_jwt_for(&self, app: &AppRow) -> Result<SecretValue, Error> {
+        self.application_jwt(Self::application_of(app.app_id)?, &app.private_key)
     }
 
     pub async fn mint(
@@ -218,10 +268,33 @@ impl Provider {
         workspace_id: Uuid,
         id: Uuid,
     ) -> Result<Credential, Error> {
-        let scope = Scope {
-            workspace_id,
-            installation: id,
-        };
+        self.resolved(
+            db,
+            Scope {
+                tenant: Tenant::Workspace(workspace_id),
+                installation: id,
+            },
+        )
+        .await
+    }
+
+    pub async fn organization_installation(
+        &self,
+        db: &PgPool,
+        organization_id: Uuid,
+        id: Uuid,
+    ) -> Result<Credential, Error> {
+        self.resolved(
+            db,
+            Scope {
+                tenant: Tenant::Organization(organization_id),
+                installation: id,
+            },
+        )
+        .await
+    }
+
+    async fn resolved(&self, db: &PgPool, scope: Scope) -> Result<Credential, Error> {
         let row = Self::connected(db, scope).await?;
         self.minted(db, scope, &row).await
     }
@@ -266,9 +339,20 @@ impl Provider {
     }
 
     async fn connected(db: &PgPool, scope: Scope) -> Result<InstallationCredential, Error> {
-        github_installations::credential(db, scope.workspace_id, scope.installation)
-            .await?
-            .ok_or(Error::NotConnected)
+        let row = match scope.tenant {
+            Tenant::Workspace(workspace_id) => {
+                github_installations::credential(db, workspace_id, scope.installation).await?
+            }
+            Tenant::Organization(organization_id) => {
+                github_installations::organization_credential(
+                    db,
+                    organization_id,
+                    scope.installation,
+                )
+                .await?
+            }
+        };
+        row.ok_or(Error::NotConnected)
     }
 
     async fn minted(
@@ -291,9 +375,7 @@ impl Provider {
             }
         }
 
-        let application = u64::try_from(row.app_id)
-            .map(ApplicationId::new)
-            .map_err(|_| Error::NotConnected)?;
+        let application = Self::application_of(row.app_id)?;
 
         let issuer = &self.github()?.issuer;
         if let Some(secret) = self.cached(installation) {
@@ -375,6 +457,12 @@ impl Provider {
         })
     }
 
+    fn application_of(app_id: i64) -> Result<ApplicationId, Error> {
+        u64::try_from(app_id)
+            .map(ApplicationId::new)
+            .map_err(|_| Error::NotConnected)
+    }
+
     fn installation_of(row: &InstallationCredential) -> Result<InstallationId, Error> {
         u64::try_from(row.installation_id)
             .map(InstallationId::new)
@@ -398,6 +486,7 @@ impl fmt::Debug for Provider {
             .debug_struct("Provider")
             .field("available", &self.github.is_ok())
             .field("cache", &self.cache)
+            .field("catalog", &self.catalog)
             .finish_non_exhaustive()
     }
 }
@@ -409,8 +498,8 @@ mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use serde_json::json;
-    use std::sync::LazyLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{LazyLock, Mutex};
     use std::time::Duration;
     use wiremock::matchers::{header, header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -757,6 +846,7 @@ mod tests {
     struct Connected {
         pool: PgPool,
         provider: Provider,
+        organization: Uuid,
         workspace: Uuid,
         installation: Uuid,
         number: u64,
@@ -773,6 +863,7 @@ mod tests {
             Self {
                 pool,
                 provider,
+                organization,
                 workspace,
                 installation,
                 number,
@@ -782,6 +873,12 @@ mod tests {
         async fn resolve(&self) -> Result<Credential, Error> {
             self.provider
                 .installation(&self.pool, self.workspace, self.installation)
+                .await
+        }
+
+        async fn resolve_for_organization(&self) -> Result<Credential, Error> {
+            self.provider
+                .organization_installation(&self.pool, self.organization, self.installation)
                 .await
         }
 
@@ -803,7 +900,7 @@ mod tests {
 
         fn scope(&self) -> Option<Scope> {
             Some(Scope {
-                workspace_id: self.workspace,
+                tenant: Tenant::Workspace(self.workspace),
                 installation: self.installation,
             })
         }
@@ -1462,5 +1559,153 @@ mod tests {
 
         assert!(matches!(error, PullRequestError::AuthenticationFailed));
         assert_eq!(connected.status().await, InstallationStatus::Revoked);
+    }
+
+    fn app_row(provider: &Provider, app_id: i64) -> AppRow {
+        let now = chrono::Utc::now();
+        AppRow {
+            id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
+            app_id,
+            slug: "zone-app".to_string(),
+            name: "Zone".to_string(),
+            owner_login: "acme".to_string(),
+            owner_type: crate::db::github_apps::OwnerType::Organization,
+            html_url: "https://github.com/apps/zone-app".to_string(),
+            client_id: "Iv1.client".to_string(),
+            client_secret: "ENC[v1:client-secret]".to_string(),
+            private_key: sealed_key(provider),
+            webhook_secret: None,
+            created_by: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn the_application_jwt_for_an_app_names_its_github_id() {
+        let provider = Provider::new(&crate::state::test_config(), key());
+
+        let jwt = provider
+            .application_jwt_for(&app_row(&provider, 12345))
+            .expect("sign");
+
+        let claims = jwt.expose().split('.').nth(1).expect("claims part");
+        let claims: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(claims).expect("base64")).expect("json");
+        assert_eq!(claims["iss"], "12345");
+    }
+
+    #[test]
+    fn the_application_jwt_for_an_app_with_a_negative_id_is_refused() {
+        let provider = Provider::new(&crate::state::test_config(), key());
+
+        let error = provider
+            .application_jwt_for(&app_row(&provider, -1))
+            .expect_err("GitHub never numbers an App below zero");
+
+        assert!(matches!(error, Error::NotConnected), "{error:?}");
+    }
+
+    #[test]
+    fn applications_are_available_only_from_a_usable_origin() {
+        let available = Provider::new(&crate::state::test_config(), key());
+        let unusable = Provider::new(
+            &Config {
+                github_api_url: "http://127.0.0.1:1".to_string(),
+                ..crate::state::test_config()
+            },
+            key(),
+        );
+
+        assert!(available.applications().is_ok());
+        assert!(matches!(
+            unusable.applications(),
+            Err(Error::Application(ApplicationError::InvalidOrigin))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_organizations_own_installation_mints_with_an_organization_scope() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_organizationtoken", 1).await;
+
+        let credential = connected
+            .resolve_for_organization()
+            .await
+            .expect("the organization's own installation mints");
+
+        assert_eq!(credential.secret().expose(), "ghs_organizationtoken");
+        assert_eq!(
+            credential.scope(),
+            Some(Scope {
+                tenant: Tenant::Organization(connected.organization),
+                installation: connected.installation,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn another_organizations_installation_never_mints_for_an_organization() {
+        let server = MockServer::start().await;
+        let theirs = Connected::new(&server).await;
+        issuing(&server, theirs.number, "ghs_theirs", 0).await;
+        let ours = seed_organization(&theirs.pool).await;
+
+        for organization in [ours, Uuid::new_v4()] {
+            let error = theirs
+                .provider
+                .organization_installation(&theirs.pool, organization, theirs.installation)
+                .await
+                .expect_err("an organization must not mint from another's installation");
+            assert!(matches!(error, Error::NotConnected), "{error:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revoked_installation_fails_closed_for_an_organization_without_asking_github() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_unused", 0).await;
+        github_installations::mark_revoked(&connected.pool, connected.installation)
+            .await
+            .expect("revoke");
+
+        let error = connected
+            .resolve_for_organization()
+            .await
+            .expect_err("a revoked installation must not mint");
+
+        assert!(matches!(error, Error::Revoked), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_organization_scoped_token_is_reminted_once_and_retried() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing_once(&server, connected.number, "ghs_first").await;
+        issuing_once(&server, connected.number, "ghs_second").await;
+        let credential = connected.resolve_for_organization().await.expect("mint");
+        let tokens = Mutex::new(Vec::new());
+
+        let answered = connected
+            .provider
+            .retrying(&connected.pool, credential, |token| {
+                let tokens = &tokens;
+                async move {
+                    let mut seen = tokens.lock().expect("tokens");
+                    seen.push(token.expose().to_string());
+                    match seen.len() {
+                        1 => Err(ApplicationError::Status(401)),
+                        _ => Ok(token),
+                    }
+                }
+            })
+            .await
+            .expect("the retry succeeds with the fresh token");
+
+        assert_eq!(answered.expose(), "ghs_second");
+        assert_eq!(*tokens.lock().expect("tokens"), ["ghs_first", "ghs_second"]);
     }
 }

@@ -224,6 +224,22 @@ pub async fn list(pool: &PgPool, organization_id: Uuid) -> DbResult<Vec<Installa
     .await
 }
 
+pub async fn list_for_app(
+    pool: &PgPool,
+    organization_id: Uuid,
+    github_app_id: Uuid,
+) -> DbResult<Vec<InstallationRow>> {
+    sqlx::query_as::<_, InstallationRow>(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM github_installations \
+         WHERE organization_id = $1 AND github_app_id = $2 \
+         ORDER BY lower(account_login), installation_id"
+    )))
+    .bind(organization_id)
+    .bind(github_app_id)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn get(
     pool: &PgPool,
     organization_id: Uuid,
@@ -283,6 +299,27 @@ pub async fn credential(
     .await
 }
 
+/// The installation and its app's key, if it belongs to `organization_id`.
+pub async fn organization_credential(
+    pool: &PgPool,
+    organization_id: Uuid,
+    id: Uuid,
+) -> DbResult<Option<InstallationCredential>> {
+    sqlx::query_as::<_, InstallationCredential>(
+        "SELECT installation.id, installation.organization_id, app.app_id, \
+                installation.installation_id, app.private_key, \
+                installation.suspended_at, installation.revoked_at \
+         FROM github_installations installation \
+         JOIN github_apps app ON app.id = installation.github_app_id \
+           AND app.organization_id = installation.organization_id \
+         WHERE installation.organization_id = $1 AND installation.id = $2",
+    )
+    .bind(organization_id)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn mark_revoked(pool: &PgPool, id: Uuid) -> DbResult<bool> {
     let result = sqlx::query(
         "UPDATE github_installations \
@@ -307,15 +344,28 @@ pub async fn mark_suspended(pool: &PgPool, id: Uuid) -> DbResult<bool> {
     Ok(result.rows_affected() > 0)
 }
 
-/// Revokes every live installation of the app whose GitHub id is not in `present`.
-pub async fn revoke_missing(pool: &PgPool, github_app_id: Uuid, present: &[i64]) -> DbResult<u64> {
+/// The database's transaction clock, the one every write here stamps `updated_at` with.
+pub async fn clock(pool: &PgPool) -> DbResult<DateTime<Utc>> {
+    sqlx::query_scalar("SELECT NOW()").fetch_one(pool).await
+}
+
+/// Revokes every live installation of the app whose GitHub id is not in
+/// `present` and that nothing has written since `since`, so an installation
+/// recorded while GitHub was being listed survives a listing that predates it.
+pub async fn revoke_missing(
+    pool: &PgPool,
+    github_app_id: Uuid,
+    present: &[i64],
+    since: DateTime<Utc>,
+) -> DbResult<u64> {
     let result = sqlx::query(
         "UPDATE github_installations SET revoked_at = NOW(), updated_at = NOW() \
          WHERE github_app_id = $1 AND revoked_at IS NULL \
-           AND NOT (installation_id = ANY($2))",
+           AND NOT (installation_id = ANY($2)) AND updated_at < $3",
     )
     .bind(github_app_id)
     .bind(present)
+    .bind(since)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
@@ -560,6 +610,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_for_app_returns_only_that_apps_installations_in_its_organization() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let stranger = seed_organization(&pool).await;
+        let app = seed_app(&pool, organization, "acme").await;
+        let neighbour = seed_app(&pool, organization, "globex").await;
+        let first = seeded(&pool, &app).await;
+        let second = seeded(&pool, &app).await;
+        mark_revoked(&pool, second.id).await.unwrap();
+        seeded(&pool, &neighbour).await;
+
+        let mut ordered = [first, second];
+        ordered.sort_by_key(|row| row.installation_id);
+        let expected: Vec<Uuid> = ordered.iter().map(|row| row.id).collect();
+        let listed: Vec<Uuid> = list_for_app(&pool, organization, app.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(listed, expected);
+        assert!(
+            list_for_app(&pool, stranger, app.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "another organization never sees the App's installations"
+        );
+    }
+
+    #[tokio::test]
     async fn revoke_missing_revokes_only_the_absent_installations() {
         let pool = pool().await;
         let organization = seed_organization(&pool).await;
@@ -572,15 +653,43 @@ mod tests {
         mark_revoked(&pool, already_revoked.id).await.unwrap();
         let unrelated = seeded(&pool, &neighbour).await;
         let present = [kept.installation_id, also_kept.installation_id];
+        let since = clock(&pool).await.unwrap();
 
-        assert_eq!(revoke_missing(&pool, app.id, &present).await.unwrap(), 1);
+        assert_eq!(
+            revoke_missing(&pool, app.id, &present, since)
+                .await
+                .unwrap(),
+            1
+        );
         assert_eq!(status(&pool, &kept).await, InstallationStatus::Active);
         assert_eq!(status(&pool, &gone).await, InstallationStatus::Revoked);
         assert_eq!(status(&pool, &also_kept).await, InstallationStatus::Active);
         assert_eq!(status(&pool, &unrelated).await, InstallationStatus::Active);
 
-        assert_eq!(revoke_missing(&pool, app.id, &[]).await.unwrap(), 2);
+        assert_eq!(revoke_missing(&pool, app.id, &[], since).await.unwrap(), 2);
         assert_eq!(status(&pool, &kept).await, InstallationStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn revoke_missing_spares_an_installation_written_since_the_listing() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let app = seed_app(&pool, organization, "acme").await;
+        let stale = seeded(&pool, &app).await;
+        let revived = seeded(&pool, &app).await;
+        mark_revoked(&pool, revived.id).await.unwrap();
+        let since = clock(&pool).await.unwrap();
+        let recorded = seeded(&pool, &app).await;
+        let restored = seed_installation(&pool, &app, revived.installation_id).await;
+        assert!(
+            recorded.updated_at >= since,
+            "{recorded:?} predates {since}"
+        );
+
+        assert_eq!(revoke_missing(&pool, app.id, &[], since).await.unwrap(), 1);
+        assert_eq!(status(&pool, &stale).await, InstallationStatus::Revoked);
+        assert_eq!(status(&pool, &recorded).await, InstallationStatus::Active);
+        assert_eq!(status(&pool, &restored).await, InstallationStatus::Active);
     }
 
     #[tokio::test]
@@ -691,6 +800,49 @@ mod tests {
         for workspace in [theirs, Uuid::new_v4()] {
             assert!(
                 credential(&pool, workspace, row.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn organization_credential_carries_the_apps_key() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let app = seed_app(&pool, organization, "acme").await;
+        let row = seeded(&pool, &app).await;
+        mark_revoked(&pool, row.id).await.unwrap();
+
+        let credential = organization_credential(&pool, organization, row.id)
+            .await
+            .unwrap()
+            .expect("the organization's own installation");
+
+        assert_eq!(credential.id, row.id);
+        assert_eq!(credential.organization_id, organization);
+        assert_eq!(credential.app_id, app.app_id);
+        assert_eq!(credential.installation_id, row.installation_id);
+        assert_eq!(credential.private_key, app.private_key);
+        assert_eq!(credential.status(), InstallationStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn organization_credential_is_refused_to_another_organization() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let stranger = seed_organization(&pool).await;
+        let app = seed_app(&pool, organization, "acme").await;
+        let row = seeded(&pool, &app).await;
+
+        for (asking, id) in [
+            (stranger, row.id),
+            (Uuid::new_v4(), row.id),
+            (organization, Uuid::new_v4()),
+        ] {
+            assert!(
+                organization_credential(&pool, asking, id)
                     .await
                     .unwrap()
                     .is_none()

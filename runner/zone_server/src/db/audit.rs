@@ -95,6 +95,12 @@ pub mod actions {
     pub const SYNC_DELETED: &str = "sync.deleted";
     pub const SYNC_WEBHOOK_SECRET_ROTATED: &str = "sync.webhook_secret_rotated";
     pub const SYNC_WEBHOOK_SECRET_SET: &str = "sync.webhook_secret_set";
+
+    pub const GITHUB_APP_REGISTERED: &str = "github_app.registered";
+    pub const GITHUB_APP_REMOVED: &str = "github_app.removed";
+    pub const GITHUB_INSTALLATION_CONNECTED: &str = "github_installation.connected";
+    pub const GITHUB_INSTALLATION_REMOVED: &str = "github_installation.removed";
+    pub const GITHUB_INSTALLATIONS_SYNCED: &str = "github_installation.synced";
 }
 
 pub mod resources {
@@ -107,6 +113,8 @@ pub mod resources {
     pub const SYNC_CONFIG: &str = "sync_config";
     pub const DEVICE: &str = "device";
     pub const DEVICE_POLICY: &str = "device_policy";
+    pub const GITHUB_APP: &str = "github_app";
+    pub const GITHUB_INSTALLATION: &str = "github_installation";
 }
 
 /// Log an action to the audit trail

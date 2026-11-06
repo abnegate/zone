@@ -1,7 +1,9 @@
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use super::tenant::Tenant;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Scope {
-    pub(crate) workspace_id: Uuid,
+    pub(crate) tenant: Tenant,
     pub(crate) installation: Uuid,
 }
