@@ -1,9 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import type { Source } from '../types';
 
-// Create mock functions for the sources API
 const mockGetSources = mock(() => Promise.resolve([] as Source[]));
 const mockCreateSource = mock(() => Promise.resolve({} as Source));
 const mockUpdateSource = mock(() => Promise.resolve({} as Source));
@@ -21,7 +21,6 @@ const mockGetSourceTypes = mock(() =>
   )
 );
 
-// Mock sources API module
 mock.module('../../../api/sources', () => ({
   sourcesApi: {
     getSources: mockGetSources,
@@ -31,6 +30,21 @@ mock.module('../../../api/sources', () => ({
     verifySource: mockVerifySource,
     getSource: mockGetSource,
     getSourceTypes: mockGetSourceTypes,
+  },
+}));
+
+mock.module('../../../api/github', () => ({
+  githubApi: {
+    getConnection: mock(),
+    registerApp: mock(),
+    createInstallation: mock(),
+    syncInstallations: mock(),
+    removeInstallation: mock(),
+    deleteApp: mock(),
+    listRepositories: mock(() =>
+      Promise.resolve({ repositories: [], installations: [], total: 0, next_page: null })
+    ),
+    listBranches: mock(() => Promise.resolve({ branches: [], next_page: null })),
   },
 }));
 
@@ -71,10 +85,15 @@ afterEach(() => {
 
 const renderSourcesPage = (path = '/sources') => {
   window.history.pushState({}, '', path);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
   return render(
-    <BrowserRouter>
-      <SourcesPage />
-    </BrowserRouter>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <SourcesPage />
+      </BrowserRouter>
+    </QueryClientProvider>
   );
 };
 
@@ -534,7 +553,6 @@ describe('SourcesPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
-    // Should show source type selection (first step of wizard)
     expect(screen.getByText('Source Type')).toBeInTheDocument();
   });
 
@@ -562,10 +580,10 @@ describe('SourcesPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
-    // Step 1: Source type is already GitHub (default), click Next
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-    // Step 2: Fill in configuration
+    fireEvent.click(await screen.findByRole('button', { name: 'Use an access token instead' }));
+
     await waitFor(() => {
       expect(screen.getByLabelText(/Owner/)).toBeInTheDocument();
     });
@@ -575,10 +593,8 @@ describe('SourcesPage', () => {
     fireEvent.change(ownerInput, { target: { value: 'new' } });
     fireEvent.change(repoInput, { target: { value: 'repo' } });
 
-    // Click Next to go to details step
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-    // Step 3: Details - click Add Source to complete
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Add Source' })).toBeInTheDocument();
     });
@@ -598,7 +614,6 @@ describe('SourcesPage', () => {
   });
 
   describe('FormFieldRenderer in wizard', () => {
-    // Helper to find source type option by name in wizard
     const findSourceTypeOption = (name: string) => {
       const sourceTypeOptions = document.querySelectorAll('.source-type-option');
       return Array.from(sourceTypeOptions).find(
@@ -614,15 +629,12 @@ describe('SourcesPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
-      // Switch to filesystem source in step 1
       const filesystemOption = findSourceTypeOption('Filesystem');
       expect(filesystemOption).toBeDefined();
       fireEvent.click(filesystemOption!);
 
-      // Go to step 2 (configuration)
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-      // Check toggle field is rendered
       await waitFor(() => {
         expect(screen.getByText('Allow write operations')).toBeInTheDocument();
       });
@@ -630,7 +642,6 @@ describe('SourcesPage', () => {
         screen.getByText('Enable agents to modify files in this directory')
       ).toBeInTheDocument();
 
-      // Toggle is rendered as checkbox
       const toggleCheckbox = screen.getByRole('checkbox');
       expect(toggleCheckbox).toBeChecked(); // default is true
     });
@@ -643,11 +654,9 @@ describe('SourcesPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
-      // Switch to filesystem source
       const filesystemOption = findSourceTypeOption('Filesystem');
       fireEvent.click(filesystemOption!);
 
-      // Go to step 2 (configuration)
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
       await waitFor(() => {
@@ -657,11 +666,9 @@ describe('SourcesPage', () => {
       const toggleCheckbox = screen.getByRole('checkbox');
       expect(toggleCheckbox).toBeChecked();
 
-      // Toggle off
       fireEvent.click(toggleCheckbox);
       expect(toggleCheckbox).not.toBeChecked();
 
-      // Toggle back on
       fireEvent.click(toggleCheckbox);
       expect(toggleCheckbox).toBeChecked();
     });
@@ -674,15 +681,12 @@ describe('SourcesPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
-      // Switch to text source
       const textOption = findSourceTypeOption('Text');
       expect(textOption).toBeDefined();
       fireEvent.click(textOption!);
 
-      // Go to step 2 (configuration)
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-      // Check textarea field is rendered
       await waitFor(() => {
         expect(screen.getByLabelText(/Content/)).toBeInTheDocument();
       });
@@ -698,11 +702,9 @@ describe('SourcesPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
-      // Switch to text source
       const textOption = findSourceTypeOption('Text');
       fireEvent.click(textOption!);
 
-      // Go to step 2 (configuration)
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
       await waitFor(() => {
@@ -722,28 +724,24 @@ describe('SourcesPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
-      // GitHub is selected by default, go to config step
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-      // Should show GitHub fields
+      fireEvent.click(await screen.findByRole('button', { name: 'Use an access token instead' }));
+
       await waitFor(() => {
         expect(screen.getByLabelText(/Owner/)).toBeInTheDocument();
       });
 
-      // Go back to step 1
       fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
 
-      // Switch to GitLab
       await waitFor(() => {
         const gitlabOption = findSourceTypeOption('GitLab');
         expect(gitlabOption).toBeDefined();
         fireEvent.click(gitlabOption!);
       });
 
-      // Go to config step again
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-      // Should now show GitLab fields
       await waitFor(() => {
         expect(screen.getByLabelText(/^Project$/)).toBeInTheDocument();
         expect(screen.getByLabelText(/GitLab Host/)).toBeInTheDocument();
@@ -762,8 +760,9 @@ describe('SourcesPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
-      // Step 1: Next to config
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Use an access token instead' }));
 
       await waitFor(() => {
         expect(screen.getByLabelText(/Owner/)).toBeInTheDocument();
@@ -775,10 +774,8 @@ describe('SourcesPage', () => {
       fireEvent.change(ownerInput, { target: { value: 'new' } });
       fireEvent.change(repoInput, { target: { value: 'repo' } });
 
-      // Step 2: Next to details
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-      // Step 3: Submit
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Add Source' })).toBeInTheDocument();
       });
@@ -799,8 +796,9 @@ describe('SourcesPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
 
-      // Step 1: Next to config
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Use an access token instead' }));
 
       await waitFor(() => {
         expect(screen.getByLabelText(/Owner/)).toBeInTheDocument();
@@ -812,10 +810,8 @@ describe('SourcesPage', () => {
       fireEvent.change(ownerInput, { target: { value: 'new' } });
       fireEvent.change(repoInput, { target: { value: 'repo' } });
 
-      // Step 2: Next to details
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-      // Step 3: Submit
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Add Source' })).toBeInTheDocument();
       });
