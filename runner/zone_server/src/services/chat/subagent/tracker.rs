@@ -1,7 +1,6 @@
 //! Keeping a chat's subagents as one of its turns reports them.
 
-use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
@@ -14,14 +13,14 @@ use crate::state::AppState;
 /// Stores what one chat turn's agent says about its subagents, and announces
 /// each stored change to the chat's readers.
 ///
-/// Nothing happens until the turn's agent names its first subagent: only then
-/// does the tracker stop what earlier turns left running and start writing.
-/// An agent can report many steps in one burst, so the updates already waiting
-/// are folded together: each subagent they touch is written and announced once
-/// per burst, with only the steps that burst changed.
+/// As the turn starts, the tracker stops what earlier turns left running,
+/// whether or not its own agent ever names a subagent. An agent can report
+/// many steps in one burst, so the updates already waiting are folded
+/// together: each subagent they touch is written and announced once per burst,
+/// with only the steps that burst changed.
+#[derive(Debug)]
 pub struct Tracker {
-    keeper: Keeper,
-    updates: OnceLock<UnboundedSender<Subagent>>,
+    updates: UnboundedSender<Subagent>,
 }
 
 impl Tracker {
@@ -33,41 +32,24 @@ impl Tracker {
         message_id: Uuid,
         announcer: Arc<dyn Announcer>,
     ) -> Self {
+        Self::kept(Keeper::new(state, chat_id, message_id, announcer))
+    }
+
+    fn kept(keeper: Keeper) -> Self {
         Self {
-            keeper: Keeper::new(state, chat_id, message_id, announcer),
-            updates: OnceLock::new(),
+            updates: keeper.start(),
         }
     }
 
     pub fn track(&self, subagent: &Subagent) {
-        let updates = self.updates.get_or_init(|| self.keeper.clone().start());
-        let _ = updates.send(subagent.clone());
+        let _ = self.updates.send(subagent.clone());
     }
 
     /// A tracker whose updates go to the returned receiver instead.
     #[cfg(test)]
-    pub(crate) fn listening(
-        state: AppState,
-    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<Subagent>) {
+    pub(crate) fn listening() -> (Self, tokio::sync::mpsc::UnboundedReceiver<Subagent>) {
         let (updates, received) = tokio::sync::mpsc::unbounded_channel();
-        let (unheard, _) = tokio::sync::mpsc::unbounded_channel::<(
-            super::ChatSubagent,
-            Vec<zone_core::llm::SubagentStep>,
-        )>();
-        let tracker = Self {
-            keeper: Keeper::new(state, Uuid::nil(), Uuid::nil(), Arc::new(unheard)),
-            updates: OnceLock::from(updates),
-        };
-        (tracker, received)
-    }
-}
-
-impl fmt::Debug for Tracker {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Tracker")
-            .field("started", &self.updates.get().is_some())
-            .finish_non_exhaustive()
+        (Self { updates }, received)
     }
 }
 
@@ -124,10 +106,16 @@ mod tests {
         /// A tracker that writes nothing until `hold` is notified, so every
         /// update a test sends before that arrives as one burst.
         fn held(&self) -> (Tracker, Announced, Arc<Notify>) {
-            let (mut tracker, announced) = self.track();
+            let (announce, announced) = mpsc::unbounded_channel();
+            let mut keeper = Keeper::new(
+                self.state.clone(),
+                self.chat_id,
+                self.message_id,
+                Arc::new(announce),
+            );
             let hold = Arc::new(Notify::new());
-            tracker.keeper.hold = Some(hold.clone());
-            (tracker, announced, hold)
+            keeper.hold = Some(hold.clone());
+            (Tracker::kept(keeper), announced, hold)
         }
 
         async fn running(&self, chat_id: Uuid, external_id: &str, message_id: Option<Uuid>) {
@@ -439,7 +427,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_turn_that_hears_of_no_subagent_touches_nothing() {
+    async fn a_turn_that_hears_of_no_subagent_still_stops_what_earlier_turns_left_running() {
         let turn = Turn::new().await;
         turn.running(turn.chat_id, "earlier", Some(Uuid::new_v4()))
             .await;
@@ -447,10 +435,15 @@ mod tests {
         let (tracker, announced) = turn.track();
         drop(tracker);
 
-        assert_eq!(rest(announced).await, []);
+        let heard: Vec<(String, SubagentStatus)> = rest(announced)
+            .await
+            .into_iter()
+            .map(|(subagent, _)| (subagent.external_id, subagent.status))
+            .collect();
+        assert_eq!(heard, [("earlier".to_string(), SubagentStatus::Stopped)]);
         assert_eq!(
             turn.status(turn.chat_id, "earlier").await,
-            SubagentStatus::Running.as_str()
+            SubagentStatus::Stopped.as_str()
         );
     }
 }

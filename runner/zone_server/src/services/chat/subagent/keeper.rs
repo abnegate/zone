@@ -12,7 +12,6 @@ use crate::db::chat_subagents::{self, Stopped, SubagentChange, SubagentRow};
 use crate::state::AppState;
 
 /// Writes one turn's subagent updates as they arrive and announces each write.
-#[derive(Clone)]
 pub(super) struct Keeper {
     state: AppState,
     chat_id: Uuid,
