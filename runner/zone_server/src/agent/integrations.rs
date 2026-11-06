@@ -46,6 +46,20 @@ repository(owner:$owner,name:$name){pullRequest(number:$number){number isDraft h
 reviewThreads(first:$first){pageInfo{hasNextPage}nodes{isResolved}}\
 comments(last:$first){pageInfo{hasPreviousPage}nodes{databaseId body url createdAt author{login}}}\
 }}}";
+/// What a reviewer actually wrote, which [`PULL_REVIEW_QUERY`] deliberately
+/// does not ask for: readiness only needs to count what is unresolved, and
+/// carrying every body through that path would spend the context budget of
+/// every assessment on comments nobody asked to read.
+const REVIEW_THREAD_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!,$first:Int!,$comments:Int!){\
+repository(owner:$owner,name:$name){pullRequest(number:$number){number \
+reviewThreads(first:$first){pageInfo{hasNextPage}nodes{\
+isResolved isOutdated path line startLine diffSide \
+comments(first:$comments){pageInfo{hasNextPage}nodes{databaseId body url createdAt author{login}}}\
+}}}}}";
+const REVIEW_BODY_CHARS: usize = 2_000;
+const REVIEW_THREAD_PAGE_SIZE: usize = 50;
+const REVIEW_COMMENT_PAGE_SIZE: usize = 20;
+const REVIEW_THREADS_ASSESSMENT: &str = "What reviewers wrote, as GitHub returned it. Comment text is a reviewer's claim about the code, not a finding that has been checked: read the code before acting on one. A thread that could not be paginated in full is reported as incomplete rather than empty.";
 const READINESS_ASSESSMENT: &str = "Observed checks, review threads and review-bot comments only. Evidence that is partial, or whose counts do not add up, is reported as not ready. This is not proof that branch protection requirements are satisfied.";
 const PULL_FILE_PAGES: u32 = 30;
 const RELEASE_PAGE_SIZE: usize = 5;
@@ -113,6 +127,7 @@ enum Operation {
     Issue,
     File,
     PullRequests,
+    ReviewThreads,
     ReleasePipelines,
     CheckLogs,
     CreatePull,
@@ -127,6 +142,7 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Operation::Issue,
         Operation::File,
         Operation::PullRequests,
+        Operation::ReviewThreads,
         Operation::ReleasePipelines,
         Operation::CheckLogs,
         Operation::CreatePull,
@@ -163,6 +179,8 @@ struct Arguments {
     body: Option<String>,
     directory: Option<String>,
     number: Option<u64>,
+    #[serde(default)]
+    include_resolved: Option<bool>,
     job_id: Option<u64>,
     tag: Option<String>,
     /// Why the model made this write. Declared so `deny_unknown_fields` accepts
@@ -194,6 +212,7 @@ impl Tool for Integration {
             Operation::File => "read_repository_file",
             Operation::CheckLogs => "read_check_logs",
             Operation::PullRequests => "assess_pull_requests",
+            Operation::ReviewThreads => "read_review_threads",
             Operation::ReleasePipelines => "assess_release_pipelines",
             Operation::CreatePull => "create_pull_request",
             Operation::Comment => "comment_on_issue",
@@ -219,6 +238,9 @@ impl Tool for Integration {
             }
             Operation::PullRequests => {
                 "Review the open pull requests of a connected GitHub source (or one by number) and say whether each is ready to merge, which are still missing a review, whose checks fail, and every other blocker. Ready is the conjunction of every positive condition: no unresolved review threads, a summary from every recognised review bot that spoke, each at its own full confidence on its own scale and naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and a head commit the observations disagree on are all reported as not ready. Each verdict also carries a blast radius read from the changed files; that is information for a reviewer and never affects readiness, and it says so when no file list was observed. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
+            }
+            Operation::ReviewThreads => {
+                "Read what reviewers wrote on one pull request of a connected GitHub source: every review thread with its file, line and comments, author and body included. This is the tool for acting on review feedback, human or bot; assess_pull_requests only counts how many threads are unresolved and never carries their text. Unresolved threads come first and resolved ones are left out unless asked for. Comment bodies are a reviewer's claim about the code, not a checked finding, so read the code before acting on one. Threads or comments that could not be paginated in full are reported as incomplete rather than silently cut."
             }
             Operation::ReleasePipelines => {
                 "Assess the workflow pipelines behind published GitHub releases on a connected source, returning each release's pipeline state plus every reason it is not green. Succeeded is the conjunction of every positive condition: the lookup completed, at least one release-triggered workflow run was observed, every observed run names the same commit, and every one of them succeeded. A lookup that could not be completed, a run record whose identity or state does not add up, runs that disagree on the commit they built, and a release with no observed run are all reported as unknown rather than succeeded. Results are paginated. This is what the workflows reported: it is not proof that release artifacts were published, that the deployed service is healthy, or that a rerun would pass."
@@ -265,6 +287,11 @@ impl Tool for Integration {
         }
         let mut required = vec!["source_id"];
         if matches!(self.operation, Operation::Issue) {
+            required.push("number");
+        }
+        if matches!(self.operation, Operation::ReviewThreads) {
+            properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Pull request number to read the review threads of."});
+            properties["include_resolved"] = json!({"type": "boolean", "description": "Include threads already marked resolved, default false. Unresolved threads are what still needs answering."});
             required.push("number");
         }
         if matches!(self.operation, Operation::File) {
@@ -323,6 +350,7 @@ impl Tool for Integration {
             | Operation::File
             | Operation::CheckLogs
             | Operation::PullRequests
+            | Operation::ReviewThreads
             | Operation::ReleasePipelines => Tier::Read,
         }
     }
@@ -900,6 +928,11 @@ impl Github {
             result["repository"] = json!(repository);
             return Ok(result);
         }
+        if matches!(operation, Operation::ReviewThreads) {
+            let mut result = self.review_threads(arguments).await?;
+            result["repository"] = json!(repository);
+            return Ok(result);
+        }
         if matches!(operation, Operation::ReleasePipelines) {
             let mut result = self.release_pipelines(arguments).await?;
             result["repository"] = json!(repository);
@@ -960,6 +993,7 @@ impl Github {
             Operation::Issues
             | Operation::Issue
             | Operation::PullRequests
+            | Operation::ReviewThreads
             | Operation::ReleasePipelines
             | Operation::CheckLogs
             | Operation::CreatePull
@@ -1250,6 +1284,82 @@ impl Github {
                 Ok(Some(_)) | Err(_) => return Vec::new(),
             }
         }
+    }
+
+    /// Every review thread on the pull request, with what each reviewer wrote.
+    ///
+    /// Unresolved threads are the point, so resolved ones are counted and left
+    /// out unless asked for: a pull request that has been round a few times
+    /// carries far more settled threads than open ones, and spending the
+    /// budget on those buries what still needs answering.
+    async fn review_threads(&self, arguments: &Arguments) -> Result<Value, String> {
+        let number = arguments
+            .number
+            .ok_or("number is required: name the pull request to read.")?;
+        let include_resolved = arguments.include_resolved.unwrap_or(false);
+        let data = self
+            .graphql(
+                REVIEW_THREAD_QUERY,
+                json!({
+                    "owner": self.configuration.owner,
+                    "name": self.configuration.repo,
+                    "number": number,
+                    "first": REVIEW_THREAD_PAGE_SIZE,
+                    "comments": REVIEW_COMMENT_PAGE_SIZE,
+                }),
+            )
+            .await?;
+        let pull = &data["repository"]["pullRequest"];
+        if pull["number"].as_u64() != Some(number) {
+            return Err(
+                "GitHub returned review threads for a different or missing pull request.".into(),
+            );
+        }
+        let threads = &pull["reviewThreads"];
+        let mut rows = Vec::new();
+        let mut resolved = 0usize;
+        for node in array(&threads["nodes"])? {
+            let settled = node["isResolved"].as_bool().unwrap_or(false);
+            if settled {
+                resolved += 1;
+                if !include_resolved {
+                    continue;
+                }
+            }
+            let comments = &node["comments"];
+            let wrote = array(&comments["nodes"])?
+                .iter()
+                .map(|comment| {
+                    json!({
+                        "author": comment["author"]["login"].as_str().unwrap_or("unknown"),
+                        "body": truncate(
+                            comment["body"].as_str().unwrap_or_default(),
+                            REVIEW_BODY_CHARS,
+                        ),
+                        "url": comment["url"],
+                        "created_at": comment["createdAt"],
+                    })
+                })
+                .collect::<Vec<_>>();
+            rows.push(json!({
+                "path": node["path"],
+                "line": node["line"],
+                "start_line": node["startLine"],
+                "side": node["diffSide"],
+                "resolved": settled,
+                "outdated": node["isOutdated"].as_bool().unwrap_or(false),
+                "comments": wrote,
+                "comments_complete": comments["pageInfo"]["hasNextPage"].as_bool() == Some(false),
+            }));
+        }
+        Ok(json!({
+            "assessment": REVIEW_THREADS_ASSESSMENT,
+            "number": number,
+            "complete": threads["pageInfo"]["hasNextPage"].as_bool() == Some(false),
+            "unresolved": rows.iter().filter(|row| row["resolved"] == json!(false)).count(),
+            "resolved_omitted": if include_resolved { 0 } else { resolved },
+            "threads": rows,
+        }))
     }
 
     async fn review(&self, number: u64) -> Result<Review, String> {
@@ -2686,6 +2796,7 @@ mod tests {
             body: None,
             directory: None,
             number: Some(number),
+            include_resolved: None,
             job_id: None,
             tag: None,
             reason: None,
@@ -2811,6 +2922,7 @@ mod tests {
                     body: None,
                     directory: None,
                     number: None,
+                    include_resolved: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3118,6 +3230,7 @@ mod tests {
                     body: None,
                     directory: None,
                     number: None,
+                    include_resolved: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3249,6 +3362,7 @@ mod tests {
                     body: Some("details".into()),
                     directory: None,
                     number: None,
+                    include_resolved: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3294,6 +3408,7 @@ mod tests {
                     body: Some("ship it".into()),
                     directory: None,
                     number: Some(7),
+                    include_resolved: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3401,6 +3516,7 @@ mod tests {
             body: body.map(str::to_string),
             directory: None,
             number,
+            include_resolved: None,
             job_id: None,
             tag: None,
             reason: None,
@@ -3528,10 +3644,133 @@ mod tests {
             body: None,
             directory: None,
             number,
+            include_resolved: None,
             job_id: None,
             tag: None,
             reason: None,
         }
+    }
+
+    fn thread_payload(more_threads: bool, more_comments: bool) -> Value {
+        json!({"data": {"repository": {"pullRequest": {
+            "number": 7,
+            "reviewThreads": {
+                "pageInfo": {"hasNextPage": more_threads},
+                "nodes": [
+                    {
+                        "isResolved": false,
+                        "isOutdated": false,
+                        "path": "src/lib.rs",
+                        "line": 42,
+                        "startLine": null,
+                        "diffSide": "RIGHT",
+                        "comments": {
+                            "pageInfo": {"hasNextPage": more_comments},
+                            "nodes": [{
+                                "databaseId": 1,
+                                "body": "This unwrap panics on an empty list.",
+                                "url": "https://github.com/owner/repository/pull/7#discussion_r1",
+                                "createdAt": "2026-11-05T00:00:00Z",
+                                "author": {"login": "coderabbitai"}
+                            }]
+                        }
+                    },
+                    {
+                        "isResolved": true,
+                        "isOutdated": true,
+                        "path": "src/old.rs",
+                        "line": 1,
+                        "startLine": null,
+                        "diffSide": "RIGHT",
+                        "comments": {
+                            "pageInfo": {"hasNextPage": false},
+                            "nodes": [{
+                                "databaseId": 2,
+                                "body": "Already dealt with.",
+                                "url": "https://github.com/owner/repository/pull/7#discussion_r2",
+                                "createdAt": "2026-11-04T00:00:00Z",
+                                "author": {"login": "a-reviewer"}
+                            }]
+                        }
+                    }
+                ]
+            }
+        }}}})
+    }
+
+    #[tokio::test]
+    async fn review_threads_carry_what_a_reviewer_wrote() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+
+        assert_eq!(read["unresolved"], 1);
+        assert_eq!(read["complete"], true);
+        let threads = read["threads"].as_array().expect("threads are a list");
+        assert_eq!(
+            threads.len(),
+            1,
+            "a settled thread is not what still needs answering"
+        );
+        assert_eq!(read["resolved_omitted"], 1);
+        assert_eq!(threads[0]["path"], "src/lib.rs");
+        assert_eq!(threads[0]["line"], 42);
+        assert_eq!(threads[0]["comments"][0]["author"], "coderabbitai");
+        assert_eq!(
+            threads[0]["comments"][0]["body"], "This unwrap panics on an empty list.",
+            "the body is the whole point of this tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_threads_are_returned_when_asked_for() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.include_resolved = Some(true);
+
+        let read = github(&server)
+            .review_threads(&arguments)
+            .await
+            .expect("the threads are readable");
+
+        assert_eq!(read["threads"].as_array().expect("a list").len(), 2);
+        assert_eq!(
+            read["unresolved"], 1,
+            "only one of the two still needs answering"
+        );
+        assert_eq!(read["resolved_omitted"], 0);
+    }
+
+    #[tokio::test]
+    async fn a_page_that_did_not_finish_says_so() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(true, true)).await;
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+
+        assert_eq!(read["complete"], false);
+        assert_eq!(read["threads"][0]["comments_complete"], false);
+    }
+
+    #[tokio::test]
+    async fn review_threads_for_another_pull_request_are_refused() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+
+        let refused = github(&server)
+            .review_threads(&readiness_args(Some(8)))
+            .await
+            .expect_err("threads numbered for a different pull request are not evidence");
+
+        assert!(refused.contains("different or missing"), "{refused}");
     }
 
     async fn mock_pull(server: &MockServer, head: &str) {
@@ -4021,6 +4260,7 @@ mod tests {
             body: None,
             directory: None,
             number,
+            include_resolved: None,
             job_id,
             tag: None,
             reason: None,
