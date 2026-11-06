@@ -29,14 +29,16 @@ if ! apt-get install -y --no-install-recommends $packages; then
     # check below names, rather than an unresolvable package name.
     echo "Some packages did not resolve; retrying without t64 suffixes." >&2
     # shellcheck disable=SC2086
-    apt-get install -y --no-install-recommends $(echo $packages | sed 's/t64//g')
+    renamed=$(printf '%s\n' $packages | sed 's/t64$//' | tr '\n' ' ')
+    # shellcheck disable=SC2086
+    apt-get install -y --no-install-recommends $renamed
 fi
 
 rm -rf /var/lib/apt/lists/*
 
 missing=''
 for library in $libraries; do
-    ldconfig -p | grep -q "$library" || missing="$missing $library"
+    ldconfig -p | grep -qF "	$library (" || missing="$missing $library"
 done
 
 if [ -n "$missing" ]; then

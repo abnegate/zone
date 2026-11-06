@@ -30,6 +30,7 @@ libhyphen0
 libsecret-1-0
 
 # Accessibility. Debian renamed both in the 64-bit time_t transition, so
-# either spelling is accepted; see the fallback in manager/Dockerfile.
+# either spelling is accepted; see the fallback in
+# manager/bin/install-browser-libraries.sh.
 libatk1.0-0t64
 libatk-bridge2.0-0t64

@@ -40,11 +40,9 @@ jobs:
         id: base
         run: |
           set -eu
-          # Taken from the Dockerfile rather than written out again, so this
-          # cannot drift from the image the libraries actually land in.
-          image=$(grep -m 1 -oE 'debian:[^ ]+' manager/Dockerfile)
+          image=$(sed -nE 's/^FROM ([^ ]+) AS runtime-base$/\1/p' manager/Dockerfile)
           if [ -z "$image" ]; then
-            echo "::error::no debian base image found in manager/Dockerfile"
+            echo "::error::no runtime-base stage found in manager/Dockerfile"
             exit 1
           fi
           echo "Checking against $image"
