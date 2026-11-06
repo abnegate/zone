@@ -4,7 +4,7 @@ mod fetch;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
-use std::num::{NonZeroU8, NonZeroU32};
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ use uuid::Uuid;
 use entry::Entry;
 use fetch::Fetch;
 
+use super::PAGE_SIZE;
 use super::address::addressable;
 use super::error::Error;
 use super::flights::Flights;
@@ -22,8 +23,6 @@ use super::scope::Scope;
 use super::tenant::Tenant;
 
 pub const TTL: Duration = Duration::from_secs(60);
-
-const PAGE_SIZE: NonZeroU8 = NonZeroU8::new(100).unwrap();
 
 #[derive(Default)]
 pub struct Catalog {

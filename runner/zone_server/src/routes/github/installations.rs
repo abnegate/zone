@@ -1,4 +1,4 @@
-use std::num::{NonZeroU8, NonZeroU32};
+use std::num::NonZeroU32;
 
 use abnegate_vcs::pull_request::{ApplicationError, Installation, InstallationId};
 use axum::{
@@ -21,10 +21,9 @@ use crate::db::github_installations::{self, InstallationRow};
 use crate::error::ServerError;
 use crate::routes::common::{AuditEvent, audit};
 use crate::services::github_app::manifest::installation_url;
-use crate::services::github_app::{Error, Provider, Unrecorded, installations};
+use crate::services::github_app::{Error, PAGE_SIZE, Provider, Unrecorded, installations};
 use crate::state::AppState;
 
-const PAGE_SIZE: NonZeroU8 = NonZeroU8::new(100).expect("a page holds at least one installation");
 const UNREACHABLE: &str = "GitHub could not be reached.";
 const UNAVAILABLE: &str = "The GitHub connection could not be used.";
 const APP_NOT_FOUND: &str = "GitHub App not found.";

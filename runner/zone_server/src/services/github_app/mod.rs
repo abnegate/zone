@@ -19,6 +19,8 @@ mod tenant;
 pub mod unauthenticated;
 pub mod unrecorded;
 
+use std::num::NonZeroU8;
+
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
@@ -27,3 +29,6 @@ pub use error::Error;
 pub use provider::Provider;
 pub use unauthenticated::Unauthenticated;
 pub use unrecorded::Unrecorded;
+
+pub const PAGE_SIZE: NonZeroU8 =
+    NonZeroU8::new(100).expect("a GitHub page holds at least one item");

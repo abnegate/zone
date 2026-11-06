@@ -20,8 +20,6 @@ const DEFAULT_PER_PAGE: u32 = 50;
 
 const MAXIMUM_PER_PAGE: u8 = 100;
 
-const BRANCH_PAGE_SIZE: NonZeroU8 = NonZeroU8::new(100).unwrap();
-
 const INVALID_PAGE: &str = "page must be 1 or more.";
 
 const INVALID_PER_PAGE: &str = "per_page must be between 1 and 100.";
@@ -321,7 +319,7 @@ pub async fn branches(
     let listed = provider
         .retrying(state.db(), credential, |token| async move {
             service
-                .list_branches(repository, &token, page, BRANCH_PAGE_SIZE)
+                .list_branches(repository, &token, page, github_app::PAGE_SIZE)
                 .await
         })
         .await
