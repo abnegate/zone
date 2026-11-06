@@ -22,6 +22,7 @@ const INSTALLATION_ID: i64 = 51_000_001;
 const STORED_TOKEN: &str = "ghp_throwaway_stored";
 const SENT_TOKEN: &str = "ghp_throwaway_sent";
 const REPOSITORY_URL: &str = "https://github.com/acme/widgets";
+const CONNECTION_LOST: &str = "The GitHub connection was removed or suspended. Reconnect GitHub.";
 const DISCONNECTED: &str = "This GitHub account isn't connected to this organization, or it was disconnected. Reconnect GitHub.";
 
 /// Source names are unique per source type across every workspace.
@@ -863,6 +864,46 @@ async fn a_source_reports_its_installation_suspended_then_revoked() {
         source_connection(&harness.get_source(&tenant, source).await).installation,
         Installation::of(&seeded, Status::Revoked),
         "a revocation outranks a suspension"
+    );
+
+    harness.discard(&[&tenant]).await;
+}
+
+#[tokio::test]
+async fn verifying_a_source_on_a_revoked_installation_asks_to_reconnect() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let revoked = harness.revoked_installation(&tenant).await;
+    let source = harness
+        .installation_source(&tenant, revoked.installation)
+        .await;
+
+    let refused = harness
+        .client
+        .post_json_auth(
+            &format!(
+                "/api/workspaces/{}/sources/{source}/verify",
+                tenant.workspace
+            ),
+            &json!({}),
+            &tenant.token,
+        )
+        .await;
+
+    refused.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        refused.json_value()["error"].as_str(),
+        Some(CONNECTION_LOST),
+        "a source whose installation is gone is refused with the reconnect message"
+    );
+    assert_eq!(
+        harness
+            .stored_source(&tenant, source)
+            .await
+            .last_error
+            .as_deref(),
+        Some(CONNECTION_LOST),
+        "the refusal is recorded as the source's verification error"
     );
 
     harness.discard(&[&tenant]).await;

@@ -20,6 +20,8 @@ const MAX_CONCURRENT_GATHERINGS: usize = 10;
 // Timeout for gathering operations (1 hour)
 const GATHERING_TIMEOUT_SECS: u64 = 3600;
 
+const TOKEN: &str = "token";
+
 // Global semaphore to limit concurrent gatherings
 static GATHERING_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
@@ -193,10 +195,10 @@ pub async fn execute_gathering(
         }
     };
 
-    let sources: Vec<Source> = db_sources
-        .into_iter()
-        .filter_map(|db_source| core_source_from_row(state, db_source))
-        .collect();
+    let mut sources: Vec<Source> = Vec::with_capacity(db_sources.len());
+    for db_source in db_sources {
+        sources.extend(core_source_from_row(state, db_source).await);
+    }
 
     if sources.is_empty() {
         obs.set_status("no_sources");
@@ -358,8 +360,8 @@ pub async fn execute_gathering(
     }
 }
 
-/// Convert a database source row into a core `Source`, decrypting credentials.
-pub(crate) fn core_source_from_row(
+/// Convert a database source row into a core `Source`, with its credential as `token`.
+pub(crate) async fn core_source_from_row(
     state: &AppState,
     db_source: sources::SourceRow,
 ) -> Option<Source> {
@@ -381,21 +383,23 @@ pub(crate) fn core_source_from_row(
 
     let category = source_type.category();
     let mut config = db_source.config.clone();
-    if let Some(encrypted_creds) = &db_source.credentials_encrypted {
-        match crate::crypto::decrypt(state.encryption_key(), encrypted_creds) {
-            Ok(decrypted) => {
-                if let Some(config_obj) = config.as_object_mut() {
-                    config_obj.insert("token".to_string(), serde_json::Value::String(decrypted));
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to decrypt credentials for source {}: {}. Source will be skipped.",
-                    db_source.id,
-                    e
+    match state.github().source(state.db(), &db_source).await {
+        Ok(Some(credential)) => {
+            if let Some(object) = config.as_object_mut() {
+                object.insert(
+                    TOKEN.to_string(),
+                    serde_json::Value::String(credential.secret().expose().to_string()),
                 );
-                return None;
             }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(
+                source_id = %db_source.id,
+                %error,
+                "Could not resolve the source's credential. Source will be skipped."
+            );
+            return None;
         }
     }
 
@@ -419,3 +423,132 @@ pub(crate) fn core_source_from_row(
 }
 
 // Integration tests are in zone_server/tests/integration/gathering_worker.rs
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use wiremock::MockServer;
+
+    use super::*;
+    use crate::db::github_apps::tests::{pool, seed_organization, seed_workspace};
+    use crate::db::github_installations;
+    use crate::db::sources::{GITHUB, NewSource, SourceRow};
+    use crate::services::github_app::testing::{installed, issuing, provider};
+    use crate::state::test_config;
+
+    const INSTALLATION_ID: u64 = 61_000_001;
+    const MINTED_TOKEN: &str = "ghs_throwaway_gathering";
+    const STORED_TOKEN: &str = "ghp_throwaway_gathering";
+
+    struct Harness {
+        state: AppState,
+        github: MockServer,
+        organization: Uuid,
+        workspace: Uuid,
+    }
+
+    impl Harness {
+        async fn new() -> Self {
+            let pool = pool().await;
+            let organization = seed_organization(&pool).await;
+            let workspace = seed_workspace(&pool, organization).await;
+            let github = MockServer::start().await;
+            let state = AppState::new(test_config(), pool, None);
+            state.install_github(provider(&github, *state.encryption_key()));
+            Self {
+                state,
+                github,
+                organization,
+                workspace,
+            }
+        }
+
+        async fn installation(&self) -> Uuid {
+            installed(
+                self.state.db(),
+                self.state.github(),
+                self.organization,
+                INSTALLATION_ID,
+            )
+            .await
+        }
+
+        async fn source(&self, credentials: Option<&str>, installation: Option<Uuid>) -> SourceRow {
+            let sealed = credentials.map(|token| {
+                crate::crypto::encrypt(self.state.encryption_key(), token).expect("seal the token")
+            });
+            sources::create_source(
+                self.state.db(),
+                NewSource {
+                    workspace_id: self.workspace,
+                    name: &format!("Widgets {}", Uuid::new_v4()),
+                    source_type: GITHUB,
+                    config: json!({ "owner": "acme", "repo": "widgets" }),
+                    description: None,
+                    url: None,
+                    credentials_encrypted: sealed.as_deref(),
+                    github_installation_id: installation,
+                },
+            )
+            .await
+            .expect("store the source")
+        }
+    }
+
+    #[tokio::test]
+    async fn an_installation_source_is_gathered_with_a_minted_token() {
+        let harness = Harness::new().await;
+        issuing(&harness.github, INSTALLATION_ID, MINTED_TOKEN, 1).await;
+        let installation = harness.installation().await;
+        let row = harness.source(None, Some(installation)).await;
+
+        let source = core_source_from_row(&harness.state, row)
+            .await
+            .expect("an installation source is gathered");
+
+        assert_eq!(source.config[TOKEN], json!(MINTED_TOKEN));
+        assert_eq!(source.config["owner"], json!("acme"));
+    }
+
+    #[tokio::test]
+    async fn a_token_source_is_gathered_with_its_stored_token() {
+        let harness = Harness::new().await;
+        let row = harness.source(Some(STORED_TOKEN), None).await;
+
+        let source = core_source_from_row(&harness.state, row)
+            .await
+            .expect("a token source is gathered");
+
+        assert_eq!(source.config[TOKEN], json!(STORED_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn a_source_without_a_credential_is_gathered_without_a_token() {
+        let harness = Harness::new().await;
+        let row = harness.source(None, None).await;
+
+        let source = core_source_from_row(&harness.state, row)
+            .await
+            .expect("a public source is gathered");
+
+        assert!(source.config.get(TOKEN).is_none(), "{}", source.config);
+    }
+
+    #[tokio::test]
+    async fn a_source_on_a_revoked_installation_is_skipped() {
+        let harness = Harness::new().await;
+        issuing(&harness.github, INSTALLATION_ID, MINTED_TOKEN, 0).await;
+        let installation = harness.installation().await;
+        let row = harness.source(None, Some(installation)).await;
+        assert!(
+            github_installations::mark_revoked(harness.state.db(), installation)
+                .await
+                .expect("mark the installation revoked")
+        );
+
+        assert!(
+            core_source_from_row(&harness.state, row).await.is_none(),
+            "a revoked installation fails closed"
+        );
+    }
+}

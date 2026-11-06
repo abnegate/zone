@@ -16,6 +16,7 @@ use crate::auth::AuthUser;
 use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
 use crate::db::sources;
 use crate::error::ServerError;
+use crate::services::github_app;
 use crate::state::AppState;
 
 /// Maximum name length
@@ -34,6 +35,10 @@ const CREDENTIALS_AND_INSTALLATION: &str =
     "Send either credentials or github_installation_id, not both.";
 
 const INSTALLATION_REQUIRES_GITHUB: &str = "Only GitHub sources can use a GitHub connection.";
+
+const CONNECTION_LOST: &str = "The GitHub connection was removed or suspended. Reconnect GitHub.";
+
+const CREDENTIALS_UNREADABLE: &str = "The source's credentials could not be read.";
 
 fn internal() -> ServerError {
     ServerError::Internal(INTERNAL_ERROR.to_string())
@@ -815,36 +820,40 @@ pub async fn verify(
 
     let mut config = source_row.config.clone();
 
-    // Decrypt and inject credentials if present
-    if let Some(encrypted_creds) = &source_row.credentials_encrypted {
-        match crate::crypto::decrypt(state.encryption_key(), encrypted_creds) {
-            Ok(decrypted) => {
-                if let Some(config_obj) = config.as_object_mut() {
-                    // Use source-type-specific credential field names
-                    let cred_field = match source_row.source_type.as_str() {
-                        "github" | "gitlab" => "token",
-                        "notion" => "api_key",
-                        _ => "token",
-                    };
-                    config_obj.insert(cred_field.to_string(), serde_json::Value::String(decrypted));
+    let credential = match state.github().source(state.db(), &source_row).await {
+        Ok(credential) => credential,
+        Err(error) => {
+            let (status, message) = match error {
+                github_app::Error::Revoked
+                | github_app::Error::Suspended
+                | github_app::Error::NotConnected => {
+                    tracing::warn!(source_id = %id, %error, "Source's GitHub connection is gone");
+                    (StatusCode::BAD_REQUEST, CONNECTION_LOST)
                 }
-            }
-            Err(e) => {
-                tracing::error!(source_id = %id, error = %e, "Failed to decrypt credentials");
-                let error_msg = "Failed to decrypt credentials";
-                if let Err(db_err) =
-                    sources::update_verification(state.db(), id, workspace_id, Some(error_msg))
-                        .await
-                {
-                    tracing::error!(source_id = %id, error = %db_err, "Failed to update verification status");
+                _ => {
+                    tracing::error!(source_id = %id, %error, "Failed to resolve credentials");
+                    (StatusCode::INTERNAL_SERVER_ERROR, CREDENTIALS_UNREADABLE)
                 }
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new(error_msg)),
-                )
-                    .into_response();
+            };
+            if let Err(failure) =
+                sources::update_verification(state.db(), id, workspace_id, Some(message)).await
+            {
+                tracing::error!(source_id = %id, error = %failure, "Failed to update verification status");
             }
+            return (status, Json(ErrorResponse::new(message))).into_response();
         }
+    };
+    if let Some(credential) = credential
+        && let Some(object) = config.as_object_mut()
+    {
+        let field = match source_row.source_type.as_str() {
+            "notion" => "api_key",
+            _ => "token",
+        };
+        object.insert(
+            field.to_string(),
+            serde_json::Value::String(credential.secret().expose().to_string()),
+        );
     }
 
     let source = zone_core::Source {

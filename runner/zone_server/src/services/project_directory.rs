@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::db::chats;
 use crate::db::projects::{self, ProjectRow};
 use crate::db::sources;
+use crate::services::github_app::Credential;
 use crate::state::AppState;
 use candidate::Candidate;
 use search::Search;
@@ -85,12 +86,21 @@ async fn project(state: &AppState, chat: Uuid, workspace: Uuid) -> Option<Projec
 }
 
 /// What a project names, first to last: its source, then the GitHub repository linked to it.
+/// A credential that cannot be resolved is not presented, and a clone then fails or succeeds on
+/// what the repository allows anyone.
 async fn candidates(state: &AppState, project: &ProjectRow, workspace: Uuid) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     if let Some(id) = project.source_id {
         match sources::get_source(state.db(), id, workspace).await {
             Ok(Some(source)) if source.is_active.unwrap_or(true) => {
-                candidates.extend(Candidate::of_source(state.encryption_key(), &source));
+                let token = match state.github().source(state.db(), &source).await {
+                    Ok(credential) => credential.map(Credential::into_secret),
+                    Err(error) => {
+                        tracing::warn!(source = %source.id, %error, "Could not resolve the source's credential");
+                        None
+                    }
+                };
+                candidates.extend(Candidate::of_source(&source, token));
             }
             Ok(_) => {}
             Err(error) => {
@@ -99,11 +109,14 @@ async fn candidates(state: &AppState, project: &ProjectRow, workspace: Uuid) -> 
         }
     }
     if let Some(url) = &project.github_repo_url {
-        candidates.extend(Candidate::of_project(
-            state.encryption_key(),
-            url,
-            project.github_access_token.as_deref(),
-        ));
+        let token = match state.github().project(state.db(), project).await {
+            Ok(credential) => credential.map(Credential::into_secret),
+            Err(error) => {
+                tracing::warn!(project = %project.id, %error, "Could not resolve the project's credential");
+                None
+            }
+        };
+        candidates.extend(Candidate::of_project(url, token));
     }
     candidates
 }
