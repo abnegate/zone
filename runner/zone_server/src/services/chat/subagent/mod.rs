@@ -2,5 +2,7 @@
 //! readers see them.
 
 mod chat_subagent;
+mod tracker;
 
 pub use chat_subagent::ChatSubagent;
+pub use tracker::Tracker;
