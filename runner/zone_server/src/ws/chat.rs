@@ -31,7 +31,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
-use zone_core::llm::{BuiltinTools, LlmBackend, Observer};
+use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -49,8 +49,10 @@ use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
 use crate::services::chat::driver::Driver;
 use crate::services::chat::handover::{self, Cause, Handover, Notice};
+use crate::services::chat::observers::Observers;
 use crate::services::chat::pull_request::Recorder;
 use crate::services::chat::session::{self, Session};
+use crate::services::chat::subagent::{ChatSubagent, Tracker};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::login::router;
@@ -234,6 +236,7 @@ struct LiveTurn {
 impl LiveTurn {
     fn record(&mut self, message: &ServerMessage) {
         match message {
+            ServerMessage::Subagent { .. } => {}
             ServerMessage::MessageStart { .. } => {
                 self.status = None;
                 self.frames.clear();
@@ -329,6 +332,17 @@ async fn publish(stream: &ChatStream, message: ServerMessage) {
     let mut live = stream.live.lock().await;
     live.record(&message);
     let _ = stream.events.send(message);
+}
+
+/// Publish each change a turn's tracker stores to a chat's subagents.
+async fn announce_subagents(
+    stream: Arc<ChatStream>,
+    chat_id: Uuid,
+    mut announced: mpsc::UnboundedReceiver<ChatSubagent>,
+) {
+    while let Some(subagent) = announced.recv().await {
+        publish(&stream, ServerMessage::Subagent { chat_id, subagent }).await;
+    }
 }
 
 /// Send frames the caller already holds to one connection.
@@ -597,6 +611,12 @@ pub enum ServerMessage {
         message_id: Uuid,
         #[serde(flatten)]
         notice: Notice,
+    },
+    /// One of the chat's subagents changed. Never replayed: a joining client
+    /// reads them over REST.
+    Subagent {
+        chat_id: Uuid,
+        subagent: ChatSubagent,
     },
 }
 
@@ -3257,6 +3277,22 @@ fn builtin_tools(sandboxed: bool) -> BuiltinTools {
     }
 }
 
+/// A turn's coding agent reaches the turn's tools only when it is served them,
+/// but is watched either way. Both belong to the backend they were attached
+/// to, so a turn that moves to another backend equips it again.
+fn equipped(
+    client: LlmClient,
+    served: Option<&crate::mcp::AgentTools>,
+    observer: &Arc<dyn Observer>,
+    sandboxed: bool,
+) -> LlmClient {
+    let client = match served {
+        Some(served) => client.with_toolset(served.lease.toolset(), builtin_tools(sandboxed)),
+        None => client,
+    };
+    client.with_observer(observer.clone())
+}
+
 /// `jobs` collects the background jobs this turn started and has not yet
 /// reported as exited, so the teardown that kills them can say each one is gone.
 async fn handle_chat_generation(
@@ -3314,13 +3350,18 @@ async fn handle_chat_generation(
             )
         })
         .flatten();
-    let recorder: Arc<dyn Observer> = Arc::new(Recorder::new(state.clone(), chat_id, workspace_id));
-    let mut llm_client = match &agent_tools {
-        Some(served) => llm_client
-            .with_toolset(served.lease.toolset(), builtin_tools(sandboxed))
-            .with_observer(recorder.clone()),
-        None => llm_client,
-    };
+    let (announce, announced) = mpsc::unbounded_channel();
+    tokio::spawn(announce_subagents(
+        ChatStream::of(chat_id),
+        chat_id,
+        announced,
+    ));
+    let tracker = Tracker::spawn(state.clone(), chat_id, generation.message_id, announce);
+    let observer: Arc<dyn Observer> = Arc::new(Observers::new(
+        Recorder::new(state.clone(), chat_id, workspace_id),
+        tracker,
+    ));
+    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
     let mut token_filter = TokenFilter::new(stop);
     let assistant_message_id = generation.message_id;
     let stream_deadline = generation_deadline(timeout)?;
@@ -3856,11 +3897,7 @@ async fn handle_chat_generation(
                 switch.backend.clone(),
                 effort,
             ));
-            if let Some(served) = &agent_tools {
-                llm_client = llm_client
-                    .with_toolset(served.lease.toolset(), builtin_tools(sandboxed))
-                    .with_observer(recorder.clone());
-            }
+            llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
             tools = ChatTools::empty();
             continuing = wrote;
             context = match (wrote, switch.carried) {
@@ -6627,6 +6664,115 @@ cat 'DIR/reply.jsonl'
             !CHAT_STREAMS.contains_key(&chat_id),
             "the last holder leaving frees the chat's frames"
         );
+    }
+
+    fn subagent(chat_id: Uuid) -> ChatSubagent {
+        let now = chrono::Utc::now();
+        ChatSubagent {
+            id: Uuid::new_v4(),
+            chat_id,
+            message_id: Some(Uuid::new_v4()),
+            external_id: "toolu_01Agent".to_string(),
+            description: "Ask for a review".to_string(),
+            kind: None,
+            model: None,
+            background: true,
+            status: zone_core::llm::SubagentStatus::Running,
+            tool_uses: None,
+            duration_ms: None,
+            tokens: None,
+            last_tool: None,
+            summary: None,
+            error: None,
+            steps: Vec::new(),
+            started_at: now,
+            finished_at: None,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subagent_reaches_every_connection_but_is_never_replayed() {
+        let chat_id = Uuid::new_v4();
+        let stream = ChatStream::of(chat_id);
+        publish(&stream, started(Uuid::new_v4())).await;
+        let (_, mut connection) = stream.join().await;
+        let (announce, announced) = mpsc::unbounded_channel();
+        let announcer = tokio::spawn(announce_subagents(stream.clone(), chat_id, announced));
+        let changed = subagent(chat_id);
+
+        announce
+            .send(changed.clone())
+            .expect("the announcer listens");
+        drop(announce);
+        announcer.await.expect("the announcer finishes");
+
+        let frame = connection.recv().await.expect("the subagent frame");
+        assert_eq!(
+            serde_json::to_value(&frame).expect("a frame"),
+            serde_json::json!({
+                "type": "subagent",
+                "chat_id": chat_id,
+                "subagent": serde_json::to_value(&changed).expect("a subagent"),
+            })
+        );
+        assert_eq!(
+            frame_kinds(&stream.join().await.0),
+            ["message_start"],
+            "a joining client reads subagents over REST"
+        );
+    }
+
+    #[derive(Debug)]
+    struct Watching;
+
+    impl Observer for Watching {
+        fn observe(&self, _output: &zone_core::llm::Output) {}
+    }
+
+    fn observed(client: &LlmClient) -> Option<Arc<dyn Observer>> {
+        match client.backend() {
+            LlmBackend::Cli { settings, .. } => settings.observer.clone(),
+            LlmBackend::Http => None,
+        }
+    }
+
+    fn cli() -> LlmBackend {
+        LlmBackend::cli(
+            zone_core::llm::AgentKind::Claude,
+            zone_core::llm::CliSettings::default(),
+        )
+    }
+
+    #[test]
+    fn a_coding_agent_is_watched_whether_or_not_it_is_served_tools() {
+        let observer: Arc<dyn Observer> = Arc::new(Watching);
+        let client = LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli());
+
+        let client = equipped(client, None, &observer, true);
+        assert!(
+            observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
+            "a turn the agent tools are off for is still watched"
+        );
+
+        let client = client.with_backend(cli());
+        assert!(
+            observed(&client).is_none(),
+            "a new backend starts unwatched"
+        );
+        let client = equipped(client, None, &observer, true);
+        assert!(
+            observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
+            "a turn handed over to another login is watched again"
+        );
+
+        let endpoint = equipped(
+            LlmClient::new(abnegate_llm::LlmConfig::default()),
+            None,
+            &observer,
+            true,
+        );
+        assert!(matches!(endpoint.backend(), LlmBackend::Http));
     }
 
     /// A user with a live session, and a chat in a workspace it can write to.
