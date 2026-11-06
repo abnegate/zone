@@ -192,6 +192,7 @@ pub async fn delete(
 
 async fn synchronize(state: &AppState, app: &AppRow, user_id: Uuid) -> Result<Tally, Error> {
     let provider = state.github();
+    let since = github_installations::clock(state.db()).await?;
     let listed = listed(provider, app).await?;
     let present: Vec<i64> = listed
         .iter()
@@ -214,7 +215,7 @@ async fn synchronize(state: &AppState, app: &AppRow, user_id: Uuid) -> Result<Ta
             }
         }
     }
-    tally.revoked = github_installations::revoke_missing(state.db(), app.id, &present).await?;
+    tally.revoked = github_installations::revoke_missing(state.db(), app.id, &present, since).await?;
 
     Ok(tally)
 }
