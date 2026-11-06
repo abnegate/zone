@@ -41,6 +41,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::auth::require_auth;
 use crate::config::AllowedOrigins;
+use crate::services::github_app::manifest::{MANIFEST_CALLBACK_PATH, SETUP_CALLBACK_PATH};
 use crate::state::AppState;
 use crate::ws;
 
@@ -122,7 +123,17 @@ pub fn create_router(state: AppState) -> Router {
         .route("/ws/pull", get(ws::handle_pull_ws))
         .route("/ws/chats/{chat_id}", get(ws::handle_chat_ws))
         .route("/ws/tasks/runs/{run_id}", get(ws::handle_task_ws))
-        .route("/ws/context/{gathering_id}", get(ws::handle_context_ws));
+        .route("/ws/context/{gathering_id}", get(ws::handle_context_ws))
+        // GitHub's redirects back after registering or installing an App
+        // (public - the single-use state authenticates them)
+        .route(
+            MANIFEST_CALLBACK_PATH,
+            get(github::callbacks::manifest).head(github::callbacks::refuse),
+        )
+        .route(
+            SETUP_CALLBACK_PATH,
+            get(github::callbacks::setup).head(github::callbacks::refuse),
+        );
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
