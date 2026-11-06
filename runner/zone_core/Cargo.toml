@@ -33,6 +33,7 @@ nix = { workspace = true, features = ["fs"] }
 # Session storage
 dirs = { workspace = true }
 
+abnegate-agent-cli = { workspace = true }
 abnegate-exec = { workspace = true }
 abnegate-llm = { workspace = true }
 abnegate-secret = { workspace = true }

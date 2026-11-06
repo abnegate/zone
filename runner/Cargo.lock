@@ -3,6 +3,36 @@
 version = 4
 
 [[package]]
+name = "abnegate-agent-cli"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d6bd043ff8574c78753c7a2279ef61c3868a921177826253d902fa45dc0506d"
+dependencies = [
+ "abnegate-exec",
+ "abnegate-http",
+ "abnegate-llm",
+ "abnegate-secret",
+ "async-stream",
+ "async-trait",
+ "base64 0.23.1",
+ "chrono",
+ "dirs 7.0.0",
+ "futures",
+ "getrandom 0.4.3",
+ "nix",
+ "regex",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
 name = "abnegate-comfy"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -49,9 +79,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-exec"
-version = "0.1.9"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c29b91e2c1aa36a0c390db61d009d3351806de68c8dbecdc37bde0bba8eea2b"
+checksum = "b9c7243f3be0cdb2db2b1e076128895e85aca7a39a4546f5439a60c51010bc87"
 dependencies = [
  "abnegate-secret",
  "base64 0.23.1",
@@ -9507,6 +9537,7 @@ dependencies = [
 name = "zone_core"
 version = "0.1.0"
 dependencies = [
+ "abnegate-agent-cli",
  "abnegate-exec",
  "abnegate-llm",
  "abnegate-secret",
@@ -9605,6 +9636,7 @@ dependencies = [
 name = "zone_server"
 version = "0.1.0"
 dependencies = [
+ "abnegate-agent-cli",
  "abnegate-comfy",
  "abnegate-exec",
  "abnegate-http",
