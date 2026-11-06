@@ -885,7 +885,7 @@ async fn the_chat_provider_checks_are_added_unvalidated_and_proven_after() {
 
 #[tokio::test]
 async fn chats_start_out_used_when_a_member_last_typed_in_them() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     database.through(15).await;
     let (workspace, _) = database.workspace().await;
     let chat = |days: i32| {
