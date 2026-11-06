@@ -4,14 +4,12 @@
 
 use std::sync::Mutex;
 
-use crate::common::github_app::{self, Seeded, TEST_PRIVATE_KEY};
+use crate::common::github_app::{self, ApplicationJwt, Seeded, TEST_PRIVATE_KEY};
 use crate::common::{self, TestClient, TestResponse, test_email, test_password};
 use abnegate_secret::SecretValue;
 use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Method, Request, StatusCode};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
@@ -19,7 +17,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 use wiremock::matchers::{header, method, path, query_param};
-use wiremock::{Match, Mock, MockServer, ResponseTemplate, Times};
+use wiremock::{Mock, MockServer, ResponseTemplate, Times};
 use zone_server::config::DEFAULT_GITHUB_WEB_URL;
 use zone_server::db::github_apps::{self, AppRow, NewApp, OwnerType};
 use zone_server::db::github_connection_states::{self, ConsumedState, Purpose};
@@ -243,31 +241,6 @@ fn minted_token(installation_id: i64) -> String {
     format!("ghs_routes_{installation_id}")
 }
 
-/// Matches a request whose App JWT was issued by the GitHub App with this
-/// id, so two Apps listing `/app/installations` on one server get their own
-/// answers.
-struct IssuedBy(i64);
-
-#[derive(Deserialize)]
-struct Claims {
-    #[serde(rename = "iss")]
-    issuer: String,
-}
-
-impl Match for IssuedBy {
-    fn matches(&self, request: &wiremock::Request) -> bool {
-        request
-            .headers
-            .get(MOCK_AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .and_then(|jwt| jwt.split('.').nth(1))
-            .and_then(|claims| URL_SAFE_NO_PAD.decode(claims).ok())
-            .and_then(|claims| serde_json::from_slice::<Claims>(&claims).ok())
-            .is_some_and(|claims| claims.issuer == self.0.to_string())
-    }
-}
-
 /// GitHub mints [`minted_token`] for `installation_id`.
 async fn routes_minting(server: &MockServer, installation_id: i64, times: impl Into<Times>) {
     let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -353,7 +326,7 @@ async fn routes_listing_app_installations(
 ) {
     Mock::given(method("GET"))
         .and(path("/app/installations"))
-        .and(IssuedBy(app_id))
+        .and(ApplicationJwt(app_id))
         .respond_with(answer)
         .expect(times)
         .mount(server)
