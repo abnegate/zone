@@ -10,7 +10,6 @@ import {
   useState,
 } from 'react';
 import { useDebouncedValue } from '../../../shared/hooks';
-import { GITHUB_SETTINGS_PATH } from '../callback';
 import { REPOSITORY_SEARCH_DELAY } from '../constants';
 import { useGitHubRepositories } from '../hooks';
 import type {
@@ -18,12 +17,12 @@ import type {
   GitHubRepositoryInstallation,
   GitHubRepositoryInstallationError,
 } from '../types';
+import { ConnectGitHubPrompt } from './ConnectGitHubPrompt';
 import { LockIcon } from './LockIcon';
 import './RepositoryPicker.css';
 
 type RepositoryPickerProps = {
   organizationId: string | null;
-  canManage: boolean;
   value: GitHubRepository | null;
   onChange: (repository: GitHubRepository | null) => void;
 };
@@ -89,16 +88,18 @@ function isSameRepository(
   return first != null && repositoryKey(first) === repositoryKey(second);
 }
 
+function statusMessage(loading: boolean, searching: boolean): string {
+  if (loading) {
+    return 'Loading repositories…';
+  }
+  return searching ? 'Searching…' : '';
+}
+
 function keepInputFocused(event: MouseEvent) {
   event.preventDefault();
 }
 
-export function RepositoryPicker({
-  organizationId,
-  canManage,
-  value,
-  onChange,
-}: RepositoryPickerProps) {
+export function RepositoryPicker({ organizationId, value, onChange }: RepositoryPickerProps) {
   const inputId = useId();
   const listboxId = useId();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -123,6 +124,7 @@ export function RepositoryPicker({
     repositories,
     installations,
     loading,
+    searching,
     error,
     hasMore,
     loadingMore,
@@ -145,7 +147,7 @@ export function RepositoryPicker({
 
   const optionId = (repository: GitHubRepository) => `${listboxId}-${repositoryKey(repository)}`;
   const active = activeIndex >= 0 ? selectable[activeIndex] : undefined;
-  const showNoResults = !loading && error === null && repositories.length === 0;
+  const showNoResults = !loading && !searching && error === null && repositories.length === 0;
   const expanded = open && (repositories.length > 0 || showNoResults || hasMore);
   const activeId = expanded && active ? optionId(active) : undefined;
   const listboxShown = expanded && repositories.length > 0;
@@ -189,13 +191,7 @@ export function RepositoryPicker({
         <span className="form-label">Repository</span>
         <div className="repository-picker-empty">
           <p>No GitHub account is connected.</p>
-          {canManage ? (
-            <a className="repository-picker-link" href={GITHUB_SETTINGS_PATH}>
-              Connect GitHub
-            </a>
-          ) : (
-            <p>Ask an organization admin to connect GitHub.</p>
-          )}
+          <ConnectGitHubPrompt className="repository-picker-link" />
         </div>
       </div>
     );
@@ -364,7 +360,7 @@ export function RepositoryPicker({
         </div>
       )}
       <p role="status" className="form-hint repository-picker-live">
-        {loading ? 'Loading repositories…' : ''}
+        {statusMessage(loading, searching)}
       </p>
       {error !== null && (
         <div className="repository-picker-error">

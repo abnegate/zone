@@ -14,7 +14,7 @@ import InvitationAcceptPage from './features/auth/pages/InvitationAcceptPage';
 import LoginPage from './features/auth/pages/LoginPage';
 import RegisterPage from './features/auth/pages/RegisterPage';
 import ResetPasswordPage from './features/auth/pages/ResetPasswordPage';
-import GitHubCallbackOrganization from './features/github/components/GitHubCallbackOrganization';
+import GitHubCallbackRoute from './features/github/components/GitHubCallbackRoute';
 import SettingsRedirect, { LegacySettings } from './features/settings/navigation/SettingsRedirect';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import { loaders } from './routes';
@@ -197,11 +197,9 @@ function App({
                         <Route
                           path="settings/*"
                           element={
-                            <GitHubCallbackOrganization>
-                              <ProtectedRoute>
-                                <SettingsPage />
-                              </ProtectedRoute>
-                            </GitHubCallbackOrganization>
+                            <GitHubCallbackRoute>
+                              <SettingsPage />
+                            </GitHubCallbackRoute>
                           }
                         />
                         <Route

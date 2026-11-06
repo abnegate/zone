@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentProps, ComponentType, ReactNode } from 'react';
+import { MemoryRouter } from 'react-router-dom';
 import type { GitHubRepositorySearch } from '../../../api/github';
 import type { OrgRole } from '../../../types';
 import type {
@@ -29,6 +30,7 @@ mock.module('../../../api/github', () => ({
 
 interface WorkspaceState {
   currentOrganization: { id: string; name: string; role?: OrgRole } | null;
+  resolvingRole?: boolean;
 }
 
 let workspaceState: WorkspaceState;
@@ -121,13 +123,15 @@ function repositoriesResponse(
 
 function renderDetail(source: Source) {
   return render(
-    <SourceDetail
-      source={source}
-      onClose={onClose}
-      onSaved={onSaved}
-      updateSource={updateSource}
-      verifySource={verifySource}
-    />
+    <MemoryRouter>
+      <SourceDetail
+        source={source}
+        onClose={onClose}
+        onSaved={onSaved}
+        updateSource={updateSource}
+        verifySource={verifySource}
+      />
+    </MemoryRouter>
   );
 }
 
@@ -412,6 +416,19 @@ describe('SourceDetail when no connected account reaches the repository', () => 
     expect(onSaved).not.toHaveBeenCalled();
   });
 
+  it('opens the GitHub settings in place without reloading the page', async () => {
+    listRepositories.mockResolvedValue(unreachableResponse());
+    renderDetail(gitHubSource({ has_credentials: true }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to GitHub App' }));
+
+    const status = await unreachableStatus();
+    const followedNatively = fireEvent.click(
+      within(status).getByRole('link', { name: 'Connect GitHub' })
+    );
+    expect(followedNatively).toBe(false);
+  });
+
   it('announces the message in a status region that was already rendered empty', async () => {
     listRepositories.mockResolvedValue(unreachableResponse());
     renderDetail(gitHubSource({ has_credentials: true }));
@@ -436,20 +453,42 @@ describe('SourceDetail when no connected account reaches the repository', () => 
     expect(updateSource).not.toHaveBeenCalled();
   });
 
-  for (const role of ['member', undefined] as const) {
-    it(`asks a ${role ?? 'roleless'} user to contact an admin instead of linking`, async () => {
-      workspaceState = { currentOrganization: { id: 'org-1', name: 'Acme', role } };
-      listRepositories.mockResolvedValue(unreachableResponse());
-      renderDetail(appSource({ github_installation_status: 'revoked' }));
+  it('links the owner of a just-created organization, whose role is still unset', async () => {
+    workspaceState = { currentOrganization: { id: 'org-1', name: 'Acme' } };
+    listRepositories.mockResolvedValue(unreachableResponse());
+    renderDetail(appSource({ github_installation_status: 'revoked' }));
 
-      fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
 
-      const status = await unreachableStatus();
-      expect(within(status).getByText('Ask an organization admin to connect GitHub.')).toBeTruthy();
-      expect(within(status).queryByRole('link')).toBeNull();
-      expect(updateSource).not.toHaveBeenCalled();
-    });
-  }
+    const status = await unreachableStatus();
+    expect(within(status).getByRole('link', { name: 'Connect GitHub' })).toBeTruthy();
+    expect(within(status).queryByText('Ask an organization admin to connect GitHub.')).toBeNull();
+  });
+
+  it('asks a member to contact an admin instead of linking', async () => {
+    workspaceState = { currentOrganization: { id: 'org-1', name: 'Acme', role: 'member' } };
+    listRepositories.mockResolvedValue(unreachableResponse());
+    renderDetail(appSource({ github_installation_status: 'revoked' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
+
+    const status = await unreachableStatus();
+    expect(within(status).getByText('Ask an organization admin to connect GitHub.')).toBeTruthy();
+    expect(within(status).queryByRole('link')).toBeNull();
+    expect(updateSource).not.toHaveBeenCalled();
+  });
+
+  it('offers neither the link nor the member hint while the role is resolving', async () => {
+    workspaceState = { currentOrganization: { id: 'org-1', name: 'Acme' }, resolvingRole: true };
+    listRepositories.mockResolvedValue(unreachableResponse());
+    renderDetail(appSource({ github_installation_status: 'revoked' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
+
+    const status = await unreachableStatus();
+    expect(within(status).queryByRole('link')).toBeNull();
+    expect(within(status).queryByText('Ask an organization admin to connect GitHub.')).toBeNull();
+  });
 
   it('shows the message for an empty search result', async () => {
     listRepositories.mockResolvedValue(repositoriesResponse([], []));

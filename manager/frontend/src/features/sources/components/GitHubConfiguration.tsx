@@ -1,7 +1,6 @@
 import { Button } from '@zone/ui';
 import { type ReactNode, useId } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import { canManageOrganization } from '../../../shared/roles';
 import { BranchSelect, type GitHubRepository, RepositoryPicker } from '../../github';
 import { GitHubConnectionMode } from './GitHubConnectionMode';
 
@@ -27,7 +26,6 @@ export function GitHubConfiguration({
   const tokenFieldsId = useId();
   const { currentOrganization } = useWorkspace();
   const organizationId = currentOrganization?.id ?? null;
-  const canManage = canManageOrganization(currentOrganization?.role);
   const tokenMode = mode === GitHubConnectionMode.Token;
 
   return (
@@ -36,7 +34,6 @@ export function GitHubConfiguration({
         <>
           <RepositoryPicker
             organizationId={organizationId}
-            canManage={canManage}
             value={repository}
             onChange={onRepositoryChange}
           />

@@ -12,13 +12,9 @@ import { githubQueryKeys } from './githubQueryKeys';
 
 const NO_INSTALLATIONS: GitHubRepositoryInstallation[] = [];
 
-export function useGitHubRepositories(
-  organizationId: string | null,
-  query: string,
-  installationId: string | null = null
-) {
+export function useGitHubRepositories(organizationId: string | null, query: string) {
   const queryClient = useQueryClient();
-  const queryKey = githubQueryKeys.repositories(organizationId, query, installationId);
+  const queryKey = githubQueryKeys.repositories(organizationId, query);
 
   const search = useCallback(
     (page: number, refresh = false): GitHubRepositorySearch => ({
@@ -26,14 +22,14 @@ export function useGitHubRepositories(
       page,
       perPage: REPOSITORY_PAGE_SIZE,
       ...(refresh ? { refresh } : {}),
-      ...(installationId ? { installationId } : {}),
     }),
-    [query, installationId]
+    [query]
   );
 
   const {
     data,
     isPending,
+    isPlaceholderData,
     error,
     hasNextPage,
     isFetchingNextPage,
@@ -75,21 +71,21 @@ export function useGitHubRepositories(
       return;
     }
     const result = await githubApi.listRepositories(organizationId, search(1, true));
-    const key = githubQueryKeys.repositories(organizationId, query, installationId);
+    const key = githubQueryKeys.repositories(organizationId, query);
     await queryClient.cancelQueries({ queryKey: key, exact: true });
     queryClient.setQueryData<InfiniteData<GitHubRepositoriesResponse, number>>(key, {
       pages: [result],
       pageParams: [1],
     });
-  }, [organizationId, query, installationId, search, queryClient]);
+  }, [organizationId, query, search, queryClient]);
 
   return {
     repositories,
     installations: data?.pages[0]?.installations ?? NO_INSTALLATIONS,
-    total: data?.pages[0]?.total ?? 0,
     loading: organizationId !== null && isPending,
+    searching: organizationId !== null && isPlaceholderData,
     error: error ? error.message : null,
-    hasMore: hasNextPage,
+    hasMore: hasNextPage && !isPlaceholderData,
     loadingMore: isFetchingNextPage,
     loadMore,
     refetch,

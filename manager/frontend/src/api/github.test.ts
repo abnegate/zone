@@ -253,19 +253,18 @@ describe('githubApi.listRepositories', () => {
     expect(sent(request).url).toBe(`${base}/repositories?query=zone&page=1&per_page=50`);
   });
 
-  it('orders every parameter as query, installation, page, page size, refresh', async () => {
+  it('orders every parameter as query, page, page size, refresh', async () => {
     const request = respond(repositories);
 
     await githubApi.listRepositories('org-1', {
       refresh: true,
       perPage: 20,
       page: 3,
-      installationId: 'inst-1',
       query: 'zone',
     });
 
     expect(sent(request).url).toBe(
-      `${base}/repositories?query=zone&installation_id=inst-1&page=3&per_page=20&refresh=true`
+      `${base}/repositories?query=zone&page=3&per_page=20&refresh=true`
     );
   });
 

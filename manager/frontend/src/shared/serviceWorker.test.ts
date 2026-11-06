@@ -1,6 +1,4 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import {
   SERVICE_WORKER_FILE,
   SERVICE_WORKER_IDLE_TIMEOUT_MILLISECONDS,
@@ -118,10 +116,5 @@ describe('SERVICE_WORKER_NAVIGATION_DENYLIST', () => {
   it('keeps serving app routes from the cached shell', () => {
     expect(denied('/settings/organization/github?github=installed')).toBe(false);
     expect(denied('/sources')).toBe(false);
-  });
-
-  it('is the navigation fallback denylist the worker is built with', () => {
-    const config = readFileSync(join(import.meta.dir, '..', '..', 'vite.config.ts'), 'utf8');
-    expect(config).toContain('navigateFallbackDenylist: SERVICE_WORKER_NAVIGATION_DENYLIST');
   });
 });

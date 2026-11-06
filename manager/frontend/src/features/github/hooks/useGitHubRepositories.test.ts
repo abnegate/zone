@@ -103,27 +103,9 @@ describe('useGitHubRepositories', () => {
     expect(listRepositories).toHaveBeenCalledTimes(1);
     expect(listRepositories).toHaveBeenCalledWith('org-1', { query: '', page: 1, perPage: 50 });
     expect(result.current.installations).toEqual(installations);
-    expect(result.current.total).toBe(3);
     expect(result.current.loading).toBe(false);
+    expect(result.current.searching).toBe(false);
     expect(result.current.error).toBeNull();
-  });
-
-  it('narrows the search to one installation when given one', async () => {
-    listRepositories.mockResolvedValue(first);
-
-    const { result } = renderHook(() => useGitHubRepositories('org-1', 'zone', 'inst-1'), {
-      wrapper: createWrapper(),
-    });
-
-    await waitFor(() => {
-      expect(result.current.loading).toBe(false);
-    });
-    expect(listRepositories).toHaveBeenCalledWith('org-1', {
-      query: 'zone',
-      page: 1,
-      perPage: 50,
-      installationId: 'inst-1',
-    });
   });
 
   it('appends the next page on loadMore until the server reports no more', async () => {
@@ -159,7 +141,7 @@ describe('useGitHubRepositories', () => {
     expect(result.current.hasMore).toBe(false);
   });
 
-  it('keeps the previous repositories visible while a new query loads', async () => {
+  it('keeps the previous repositories visible and reports searching while a new query loads', async () => {
     const pending = deferred<typeof second>();
     listRepositories.mockResolvedValueOnce(first).mockReturnValueOnce(pending.promise);
 
@@ -183,12 +165,44 @@ describe('useGitHubRepositories', () => {
     });
     expect(result.current.repositories).toEqual(first.repositories);
     expect(result.current.loading).toBe(false);
+    expect(result.current.searching).toBe(true);
+    expect(result.current.hasMore).toBe(false);
 
     pending.resolve(second);
 
     await waitFor(() => {
       expect(result.current.repositories).toEqual(second.repositories);
     });
+    expect(result.current.searching).toBe(false);
+  });
+
+  it('shows the newest search when an older response arrives after it', async () => {
+    const older = deferred<typeof first>();
+    const newer = deferred<typeof second>();
+    listRepositories.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+
+    const { result, rerender } = renderHook(
+      ({ query }: { query: string }) => useGitHubRepositories('org-1', query),
+      { wrapper: createWrapper(), initialProps: { query: 'zone' } }
+    );
+    await waitFor(() => {
+      expect(listRepositories).toHaveBeenCalledTimes(1);
+    });
+
+    rerender({ query: 'website' });
+    await waitFor(() => {
+      expect(listRepositories).toHaveBeenCalledTimes(2);
+    });
+
+    newer.resolve(second);
+    await waitFor(() => {
+      expect(result.current.repositories).toEqual(second.repositories);
+    });
+
+    older.resolve(first);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(result.current.repositories).toEqual(second.repositories);
+    expect(result.current.searching).toBe(false);
   });
 
   it('refreshes from GitHub and replaces every loaded page with the fresh first page', async () => {
@@ -226,32 +240,10 @@ describe('useGitHubRepositories', () => {
     await waitFor(() => {
       expect(result.current.repositories).toEqual(refreshed.repositories);
     });
-    expect(result.current.total).toBe(2);
     expect(result.current.hasMore).toBe(false);
-    expect(queryClient.getQueryData(githubQueryKeys.repositories('org-1', '', null))).toEqual({
+    expect(queryClient.getQueryData(githubQueryKeys.repositories('org-1', ''))).toEqual({
       pages: [refreshed],
       pageParams: [1],
-    });
-  });
-
-  it('refreshes within the chosen installation', async () => {
-    listRepositories.mockResolvedValue(first);
-
-    const { result } = renderHook(() => useGitHubRepositories('org-1', 'zone', 'inst-1'), {
-      wrapper: createWrapper(),
-    });
-    await waitFor(() => {
-      expect(result.current.loading).toBe(false);
-    });
-
-    await result.current.refresh();
-
-    expect(listRepositories).toHaveBeenLastCalledWith('org-1', {
-      query: 'zone',
-      page: 1,
-      perPage: 50,
-      refresh: true,
-      installationId: 'inst-1',
     });
   });
 

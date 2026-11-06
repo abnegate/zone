@@ -1,9 +1,11 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { type ComponentType, useState } from 'react';
+import { type ComponentType, type ReactNode, useState } from 'react';
+import { MemoryRouter } from 'react-router-dom';
 import type { GitHubRepositorySearch } from '../../../api/github';
+import type { OrgRole } from '../../../types';
 import type {
   GitHubRepositoriesResponse,
   GitHubRepository,
@@ -26,9 +28,21 @@ mock.module('../../../api/github', () => ({
   },
 }));
 
+interface WorkspaceState {
+  currentOrganization: { id: string; name: string; role?: OrgRole } | null;
+  loading: boolean;
+  resolvingRole: boolean;
+}
+
+let workspaceState: WorkspaceState;
+
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => workspaceState,
+  WorkspaceProvider: ({ children }: { children: ReactNode }) => children,
+}));
+
 interface RepositoryPickerProps {
   organizationId: string | null;
-  canManage: boolean;
   value: GitHubRepository | null;
   onChange: (repository: GitHubRepository | null) => void;
 }
@@ -117,10 +131,9 @@ const firstPage = page([api, web, legacy, zone]);
 
 interface RenderOptions {
   organizationId?: string | null;
-  canManage?: boolean;
 }
 
-function renderPicker({ organizationId = 'org-1', canManage = true }: RenderOptions = {}) {
+function renderPicker({ organizationId = 'org-1' }: RenderOptions = {}) {
   const onChange = mock<(repository: GitHubRepository | null) => void>();
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
@@ -131,7 +144,6 @@ function renderPicker({ organizationId = 'org-1', canManage = true }: RenderOpti
     return (
       <RepositoryPicker
         organizationId={organizationId}
-        canManage={canManage}
         value={value}
         onChange={(repository) => {
           setValue(repository);
@@ -144,7 +156,9 @@ function renderPicker({ organizationId = 'org-1', canManage = true }: RenderOpti
   const user = userEvent.setup();
   render(
     <QueryClientProvider client={queryClient}>
-      <Harness />
+      <MemoryRouter>
+        <Harness />
+      </MemoryRouter>
     </QueryClientProvider>
   );
   return { user, onChange };
@@ -179,6 +193,11 @@ function option(name: RegExp): HTMLElement {
 }
 
 beforeEach(() => {
+  workspaceState = {
+    currentOrganization: { id: 'org-1', name: 'Acme', role: 'admin' },
+    loading: false,
+    resolvingRole: false,
+  };
   listRepositories.mockReset();
   listRepositories.mockImplementation(async () => firstPage);
 });
@@ -248,6 +267,61 @@ describe('RepositoryPicker fetching and debounce', () => {
 
     expect(await screen.findByText('No repositories match “nothing”.')).toBeInTheDocument();
     expect(screen.queryByRole('option')).not.toBeInTheDocument();
+  });
+
+  it('announces a search in flight instead of saying nothing matched', async () => {
+    const search = deferred<GitHubRepositoriesResponse>();
+    listRepositories.mockImplementation(async (_organizationId, parameters) => {
+      if (parameters?.query === 'nothing') {
+        return page([]);
+      }
+      return parameters?.query === 'nothing-else' ? search.promise : firstPage;
+    });
+    const { user } = renderPicker();
+    await waitForOptions(user);
+    await user.type(combobox(), 'nothing');
+    await screen.findByText('No repositories match “nothing”.');
+    const status = screen.getByRole('status');
+
+    await user.type(combobox(), '-else');
+    await waitFor(() => expect(queries()).toContain('nothing-else'));
+
+    await waitFor(() => expect(status).toHaveTextContent('Searching…'));
+    expect(screen.queryByText(/^No repositories match/)).not.toBeInTheDocument();
+
+    search.resolve(page([]));
+
+    expect(await screen.findByText('No repositories match “nothing-else”.')).toBeInTheDocument();
+    expect(status.textContent).toBe('');
+  });
+
+  it('shows the newer search when an older response arrives after it', async () => {
+    const older = deferred<GitHubRepositoriesResponse>();
+    const newer = deferred<GitHubRepositoriesResponse>();
+    listRepositories.mockImplementation(async (_organizationId, parameters) => {
+      if (parameters?.query === 'acme') {
+        return older.promise;
+      }
+      return parameters?.query === 'abnegate' ? newer.promise : firstPage;
+    });
+    const { user } = renderPicker();
+    await waitForOptions(user);
+    await user.type(combobox(), 'acme');
+    await waitFor(() => expect(queries()).toContain('acme'));
+
+    await user.clear(combobox());
+    await user.type(combobox(), 'abnegate');
+    await waitFor(() => expect(queries()).toContain('abnegate'));
+
+    newer.resolve(page([zone]));
+    await waitFor(() =>
+      expect(screen.queryByRole('option', { name: /^acme\/api/ })).not.toBeInTheDocument()
+    );
+    older.resolve(page([api, web]));
+    await new Promise((settle) => setTimeout(settle, 50));
+
+    expect(option(/^abnegate\/zone/)).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /^acme\// })).not.toBeInTheDocument();
   });
 });
 
@@ -423,27 +497,24 @@ describe('RepositoryPicker listbox and selection', () => {
     expect(combobox()).not.toHaveAttribute('aria-controls');
   });
 
-  it('scrolls the opened popup and then the active option into view', async () => {
-    const scrolled: [Element, ScrollIntoViewOptions | boolean | undefined][] = [];
-    function record(this: Element, options?: ScrollIntoViewOptions | boolean) {
-      scrolled.push([this, options]);
-    }
-    const scrollIntoView = spyOn(Element.prototype, 'scrollIntoView').mockImplementation(record);
-    try {
-      const { user } = renderPicker();
-      await waitForOptions(user);
-      const popup = screen.getByRole('listbox', { name: 'Repositories' }).parentElement;
-      expect(scrolled).toContainEqual([popup, { block: 'nearest' }]);
+  it('points aria-activedescendant at the option the arrow keys reach, wrapping at the ends', async () => {
+    const { user } = renderPicker();
+    await waitForOptions(user);
+    const listbox = screen.getByRole('listbox', { name: 'Repositories' });
 
-      await user.keyboard('{ArrowUp}');
+    await user.keyboard('{ArrowUp}');
 
-      const activeId = combobox().getAttribute('aria-activedescendant') ?? '';
-      const active = document.getElementById(activeId);
-      expect(active).toHaveTextContent('abnegate/zone');
-      expect(scrolled.at(-1)).toEqual([active, { block: 'nearest' }]);
-    } finally {
-      scrollIntoView.mockRestore();
-    }
+    const last = option(/^abnegate\/zone/);
+    expect(combobox()).toHaveAttribute('aria-activedescendant', last.id);
+    expect(listbox.contains(last)).toBe(true);
+    expect(last).toHaveClass('active');
+
+    await user.keyboard('{ArrowDown}');
+
+    const first = option(/^acme\/api/);
+    expect(combobox()).toHaveAttribute('aria-activedescendant', first.id);
+    expect(first).toHaveClass('active');
+    expect(last).not.toHaveClass('active');
   });
 
   it('clears the selection when the user types after selecting', async () => {
@@ -636,24 +707,55 @@ describe('RepositoryPicker empty and error states', () => {
     expect(listRepositories).not.toHaveBeenCalled();
   });
 
-  it('links admins to the GitHub settings from the empty state', async () => {
-    listRepositories.mockImplementation(async () => page([], { installations: [] }));
-    renderPicker({ canManage: true });
+  for (const role of ['owner', 'admin', undefined] as const) {
+    it(`links ${role ?? 'a just-created organization’s owner, whose role is unset,'} to the GitHub settings`, async () => {
+      workspaceState.currentOrganization = { id: 'org-1', name: 'Acme', role };
+      listRepositories.mockImplementation(async () => page([], { installations: [] }));
+      renderPicker();
 
-    const link = await screen.findByRole('link', { name: 'Connect GitHub' });
-    expect(link).toHaveAttribute('href', '/settings/organization/github');
-    expect(
-      screen.queryByText('Ask an organization admin to connect GitHub.')
-    ).not.toBeInTheDocument();
-  });
+      const link = await screen.findByRole('link', { name: 'Connect GitHub' });
+      expect(link).toHaveAttribute('href', '/settings/organization/github');
+      expect(
+        screen.queryByText('Ask an organization admin to connect GitHub.')
+      ).not.toBeInTheDocument();
+    });
+  }
 
   it('tells members to ask an admin instead of linking', async () => {
-    renderPicker({ organizationId: null, canManage: false });
+    workspaceState.currentOrganization = { id: 'org-1', name: 'Acme', role: 'member' };
+    listRepositories.mockImplementation(async () => page([], { installations: [] }));
+    renderPicker();
 
     expect(
       await screen.findByText('Ask an organization admin to connect GitHub.')
     ).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Connect GitHub' })).not.toBeInTheDocument();
+  });
+
+  it('offers neither the link nor the member hint while the role is resolving', async () => {
+    workspaceState = {
+      currentOrganization: { id: 'org-1', name: 'Acme' },
+      loading: false,
+      resolvingRole: true,
+    };
+    listRepositories.mockImplementation(async () => page([], { installations: [] }));
+    renderPicker();
+
+    expect(await screen.findByText('No GitHub account is connected.')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Connect GitHub' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Ask an organization admin to connect GitHub.')
+    ).not.toBeInTheDocument();
+  });
+
+  it('opens the GitHub settings in place without reloading the page', async () => {
+    listRepositories.mockImplementation(async () => page([], { installations: [] }));
+    renderPicker();
+    const link = await screen.findByRole('link', { name: 'Connect GitHub' });
+
+    const followedNatively = fireEvent.click(link);
+
+    expect(followedNatively).toBe(false);
   });
 
   it('shows the combobox and a loading status instead of the empty state while loading', async () => {

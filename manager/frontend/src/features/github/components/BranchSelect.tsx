@@ -14,7 +14,8 @@ type BranchSelectProps = {
 export function BranchSelect({ organizationId, repository, value, onChange }: BranchSelectProps) {
   const inputId = useId();
   const datalistId = useId();
-  const { branches } = useGitHubBranches(organizationId, repository);
+  const errorId = useId();
+  const { branches, loading, failed } = useGitHubBranches(organizationId, repository);
 
   const names = useMemo(() => {
     const defaultBranch = repository?.default_branch;
@@ -35,12 +36,19 @@ export function BranchSelect({ organizationId, repository, value, onChange }: Br
         disabled={repository === null}
         autoComplete="off"
         spellCheck={false}
+        aria-busy={loading}
+        aria-describedby={failed ? errorId : undefined}
       />
       <datalist id={datalistId}>
         {names.map((name) => (
           <option key={name} value={name} />
         ))}
       </datalist>
+      {failed && (
+        <p id={errorId} role="alert" className="field-error">
+          Couldn't load branches. Type the branch name instead.
+        </p>
+      )}
     </div>
   );
 }

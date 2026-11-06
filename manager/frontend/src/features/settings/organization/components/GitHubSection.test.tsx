@@ -5,6 +5,7 @@ import type { ComponentType } from 'react';
 import { StrictMode } from 'react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { ApiError } from '../../../../api/ApiError';
+import { githubQueryKeys } from '../../../github/hooks/githubQueryKeys';
 import type { GitHubApp, GitHubConnection, GitHubInstallation } from '../../../github/types';
 
 const githubApi = {
@@ -92,13 +93,18 @@ function LocationProbe() {
 function renderSection({
   entry = SETTINGS_ENTRY,
   canManage = true,
+  cached,
 }: {
   entry?: string;
   canManage?: boolean;
+  cached?: GitHubConnection;
 } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   });
+  if (cached !== undefined) {
+    queryClient.setQueryData(githubQueryKeys.connection(ORGANIZATION_ID), cached);
+  }
   return render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
@@ -844,6 +850,21 @@ describe('GitHubSection', () => {
         });
         expect(githubApi.syncInstallations).not.toHaveBeenCalled();
       });
+
+      it(`refetches a cached connection only once for github=${outcome}`, async () => {
+        connection = {
+          apps: [acme],
+          installations: [installation('inst-acme', acme.id, '2026-10-02T00:00:00Z')],
+        };
+        renderSection({
+          entry: `${SETTINGS_ENTRY}?github=${outcome}`,
+          cached: { apps: [], installations: [] },
+        });
+
+        await findRow('acme');
+        await findByRoleContaining('status', text);
+        expect(githubApi.getConnection).toHaveBeenCalledTimes(1);
+      });
     }
 
     it('refreshes GitHub accounts once for an admin returning with github=sync', async () => {
@@ -873,13 +894,18 @@ describe('GitHubSection', () => {
         apps: [acme],
         installations: [installation('inst-acme', acme.id, '2026-10-02T00:00:00Z')],
       };
-      renderSection({ entry: `${SETTINGS_ENTRY}?github=sync`, canManage: false });
+      renderSection({
+        entry: `${SETTINGS_ENTRY}?github=sync`,
+        canManage: false,
+        cached: { apps: [], installations: [] },
+      });
 
       await findRow('acme');
       await waitFor(() => {
         expect(location()).toBe(SETTINGS_ENTRY);
       });
       expect(githubApi.syncInstallations).not.toHaveBeenCalled();
+      expect(githubApi.getConnection).toHaveBeenCalledTimes(1);
       expect(screen.queryByText('GitHub accounts refreshed.')).toBeNull();
     });
 
