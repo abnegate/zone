@@ -166,6 +166,21 @@ describe('SettingsNav', () => {
     ).toBeInTheDocument();
   });
 
+  it('names the workspace once, in the switch, when there is more than one', () => {
+    workspaceContext.workspaces = [alpha, beta];
+
+    renderNav(ownerAccess);
+
+    const group = within(screen.getByRole('group', { name: 'Workspace' }));
+    expect(group.queryByText('Alpha', { selector: 'p' })).not.toBeInTheDocument();
+    expect(group.getByRole('combobox', { name: 'Switch workspace' })).toHaveTextContent('Alpha');
+    expect(
+      within(screen.getByRole('group', { name: 'Organization' })).getByText('Acme', {
+        selector: 'p',
+      })
+    ).toBeInTheDocument();
+  });
+
   it('offers no workspace switch with a single workspace', () => {
     renderNav(ownerAccess);
 

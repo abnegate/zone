@@ -62,6 +62,12 @@ describe('SettingsRedirect', () => {
     expect(screen.getByTestId('location').textContent).toBe('/settings/you/sessions');
   });
 
+  it('keeps the query and hash when sending the sessions page on', () => {
+    renderAt('/sessions?x=1#y');
+
+    expect(screen.getByTestId('location').textContent).toBe('/settings/you/sessions?x=1#y');
+  });
+
   it('replaces the legacy entry instead of pushing a new one', () => {
     const router = createMemoryRouter(
       [

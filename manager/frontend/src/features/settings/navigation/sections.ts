@@ -54,7 +54,9 @@ const inWorkspace = (access: SettingsAccess): boolean => access.workspace;
 
 const inOrganization = (access: SettingsAccess): boolean => access.organization;
 
-const administersOrganization = (access: SettingsAccess): boolean =>
+export const administersOrganization = (
+  access: Pick<SettingsAccess, 'organization' | 'organizationRole'>
+): boolean =>
   access.organization && allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE);
 
 const always = (): boolean => true;
@@ -118,7 +120,7 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Server,
     section: SettingsSection.Features,
     label: 'Features',
-    visible: always,
+    visible: administersOrganization,
   },
   {
     group: SettingsGroup.Server,

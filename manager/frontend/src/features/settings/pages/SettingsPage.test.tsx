@@ -184,7 +184,7 @@ describe('SettingsPage', () => {
 
       expect(linkLabels('Workspace')).toEqual(['General', 'AI', 'Folders', 'Members']);
       expect(linkLabels('Organization')).toEqual(['Members']);
-      expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
+      expect(linkLabels('This server')).toEqual(['Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
     });
 
@@ -203,6 +203,24 @@ describe('SettingsPage', () => {
       ]);
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
+    });
+
+    it('sends an organization member deep-linking to Features to the first visible section', () => {
+      signInAs('member', 'member');
+
+      renderAt('/settings/server/features');
+
+      expect(location()).toBe('/settings/workspace/general');
+      expect(screen.getByTestId('settings-content').textContent).toBe('workspace/general');
+    });
+
+    it('shows Features when the server never says the organization role', () => {
+      signInAs(undefined, 'member');
+
+      renderAt('/settings/server/features');
+
+      expect(location()).toBe('/settings/server/features');
+      expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
     });
 
     it('shows an organization owner and workspace admin all twelve sections', () => {
@@ -254,6 +272,12 @@ describe('SettingsPage', () => {
       expect(screen.getByTestId('settings-content').textContent).toBe('workspace/general');
     });
 
+    it('keeps the query and hash when sending a hidden deep link on', () => {
+      renderAt('/settings/organization/billing?x=1#y');
+
+      expect(location()).toBe('/settings/workspace/general?x=1#y');
+    });
+
     it('sends an unknown section to the first visible section', () => {
       renderAt('/settings/organization/nonsense');
 
@@ -278,6 +302,12 @@ describe('SettingsPage', () => {
       expect(location()).toBe('/settings/workspace/general');
     });
 
+    it('keeps the query and hash when sending the bare path on', () => {
+      renderAt('/settings?x=1#y');
+
+      expect(location()).toBe('/settings/workspace/general?x=1#y');
+    });
+
     it('sends the bare path to organization AI defaults for an organization admin with no workspace', () => {
       signInAs('admin', null);
 
@@ -297,16 +327,14 @@ describe('SettingsPage', () => {
       expect(contentMounts).toEqual(['workspace/general', 'workspace/general']);
     });
 
-    it('names the current workspace and switches it from the navigation', () => {
+    it('names the current workspace in the switch and switches it from the navigation', () => {
       workspaceContext.workspaces = [alpha, beta];
 
       renderAt('/settings/workspace/general');
 
-      expect(
-        within(screen.getByRole('group', { name: 'Workspace' })).getByText('Alpha', {
-          selector: 'p',
-        })
-      ).toBeInTheDocument();
+      const group = within(screen.getByRole('group', { name: 'Workspace' }));
+      expect(group.queryByText('Alpha', { selector: 'p' })).not.toBeInTheDocument();
+      expect(group.getByRole('combobox', { name: 'Switch workspace' })).toHaveTextContent('Alpha');
       chooseSelect('Switch workspace', 'Beta');
       expect(mockSetCurrentWorkspace.mock.calls).toEqual([[beta]]);
     });
@@ -319,6 +347,10 @@ describe('SettingsPage', () => {
   });
 
   describe('legacy workspace tabs', () => {
+    beforeEach(() => {
+      signInAs('owner', 'admin');
+    });
+
     const cases: readonly [string, string][] = [
       ['theme', '/settings/workspace/general'],
       ['ai', '/settings/workspace/ai'],
@@ -366,6 +398,14 @@ describe('SettingsPage', () => {
 
       expect(location()).toBe('/settings/workspace/general');
     });
+
+    it('sends an organization member on the old features tab to the first visible section', () => {
+      signInAs('member', 'viewer');
+
+      renderAt('/settings?tab=features&x=1#y');
+
+      expect(location()).toBe('/settings/workspace/general?x=1#y');
+    });
   });
 
   describe('compact', () => {
@@ -398,7 +438,7 @@ describe('SettingsPage', () => {
     });
 
     it('returns to the list from the back link', () => {
-      renderAt('/settings/server/features');
+      renderAt('/settings/server/connect');
 
       fireEvent.click(screen.getByRole('link', { name: 'Back to settings' }));
 

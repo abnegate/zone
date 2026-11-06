@@ -8,6 +8,7 @@ import {
   WORKSPACE_EDIT_ROLE,
 } from '../navigation/access';
 import {
+  findSection,
   type SettingsAccess,
   SettingsGroup,
   SettingsSection,
@@ -38,7 +39,7 @@ function workspaceContent(
   section: SettingsSection,
   access: SettingsAccess,
   workspaceId: string | null,
-  orgId: string | null
+  organizationId: string | null
 ): ReactNode {
   switch (section) {
     case SettingsSection.General:
@@ -62,13 +63,13 @@ function workspaceContent(
       return (
         <HostFoldersPanel
           workspaceId={workspaceId}
-          orgId={orgId}
+          orgId={organizationId}
           readOnly={!allowsWorkspace(access.workspaceRole, WORKSPACE_EDIT_ROLE.folders)}
         />
       );
     case SettingsSection.Members:
-      return workspaceId !== null && orgId !== null ? (
-        <WorkspaceMembersSection workspaceId={workspaceId} orgId={orgId} />
+      return workspaceId !== null && organizationId !== null ? (
+        <WorkspaceMembersSection workspaceId={workspaceId} orgId={organizationId} />
       ) : null;
     default:
       return null;
@@ -78,7 +79,7 @@ function workspaceContent(
 function organizationContent(
   section: SettingsSection,
   access: SettingsAccess,
-  orgId: string
+  organizationId: string
 ): ReactNode {
   switch (section) {
     case SettingsSection.Ai:
@@ -90,11 +91,11 @@ function organizationContent(
         />
       );
     case SettingsSection.Devices:
-      return <DevicesSection orgId={orgId} />;
+      return <DevicesSection orgId={organizationId} />;
     case SettingsSection.Billing:
-      return <BillingSection orgId={orgId} />;
+      return <BillingSection orgId={organizationId} />;
     case SettingsSection.Audit:
-      return <AuditLogsSection orgId={orgId} />;
+      return <AuditLogsSection orgId={organizationId} />;
     default:
       return null;
   }
@@ -117,14 +118,18 @@ function youContent(section: SettingsSection): ReactNode {
 
 export default function SettingsContent({ group, section, access }: SettingsContentProps) {
   const { currentOrganization, currentWorkspace } = useWorkspace();
-  const orgId = currentOrganization?.id ?? null;
+  const organizationId = currentOrganization?.id ?? null;
   const workspaceId = currentWorkspace?.id ?? null;
+
+  if (!findSection(group, section)?.visible(access)) {
+    return null;
+  }
 
   switch (group) {
     case SettingsGroup.Workspace:
-      return workspaceContent(section, access, workspaceId, orgId);
+      return workspaceContent(section, access, workspaceId, organizationId);
     case SettingsGroup.Organization:
-      return orgId === null ? null : organizationContent(section, access, orgId);
+      return organizationId === null ? null : organizationContent(section, access, organizationId);
     case SettingsGroup.Server:
       return serverContent(section);
     case SettingsGroup.You:

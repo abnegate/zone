@@ -4,7 +4,13 @@ import { type FormEvent, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { modelsApi } from '../../../api/models';
 import PageBar from '../../../shared/components/PageBar/PageBar';
-import { SettingsGroup, SettingsSection, settingsPath } from '../../settings/navigation/sections';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import {
+  administersOrganization,
+  SettingsGroup,
+  SettingsSection,
+  settingsPath,
+} from '../../settings/navigation/sections';
 import Capabilities from '../components/Capabilities';
 import DownloadOptions from '../components/DownloadOptions';
 import PullJobs from '../components/PullJobs';
@@ -59,6 +65,11 @@ export default function ModelsPage() {
   const browse = useBrowse();
   const pull = usePull();
   const navigate = useNavigate();
+  const { currentOrganization } = useWorkspace();
+  const managesFeatures = administersOrganization({
+    organization: currentOrganization !== null,
+    organizationRole: currentOrganization?.role,
+  });
 
   const [activeTab, setActiveTab] = useState<Tab>('installed');
   const [modelInput, setModelInput] = useState('');
@@ -72,7 +83,6 @@ export default function ModelsPage() {
   const [selectedSize, setSelectedSize] = useState('');
   const [browseInitialized, setBrowseInitialized] = useState(false);
 
-  // Initial browse load - when switching to browse tab
   useEffect(() => {
     if (activeTab === 'browse' && !browseInitialized) {
       browse.search();
@@ -138,8 +148,6 @@ export default function ModelsPage() {
     setModelSize(null);
     setSelectedSize(isInstalledModel(model) ? '' : defaultDownloadName(model));
 
-    // Load model info for remote sources (HuggingFace only - has README content)
-    // Check the model's source when in "all" mode, otherwise check browse.source
     const modelSource = !isInstalledModel(model) && model.source ? model.source : browse.source;
     if (!isInstalledModel(model) && modelSource === 'huggingface') {
       setModelCardLoading(true);
@@ -328,15 +336,21 @@ export default function ModelsPage() {
                     </svg>
                   }
                   title="No models installed"
-                  description="Pick the product features in Settings, or browse the catalog."
+                  description={
+                    managesFeatures
+                      ? 'Pick the product features in Settings, or browse the catalog.'
+                      : 'Browse the catalog, or ask an organization admin to install features.'
+                  }
                   action={
-                    <Button
-                      onClick={() =>
-                        navigate(settingsPath(SettingsGroup.Server, SettingsSection.Features))
-                      }
-                    >
-                      Install features
-                    </Button>
+                    managesFeatures ? (
+                      <Button
+                        onClick={() =>
+                          navigate(settingsPath(SettingsGroup.Server, SettingsSection.Features))
+                        }
+                      >
+                        Install features
+                      </Button>
+                    ) : undefined
                   }
                 />
               ) : (

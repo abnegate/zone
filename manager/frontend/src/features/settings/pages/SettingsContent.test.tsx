@@ -155,6 +155,40 @@ describe('SettingsContent', () => {
     }
   });
 
+  describe('server features', () => {
+    const cases: { role: OrgRole | undefined; shown: boolean }[] = [
+      { role: 'member', shown: false },
+      { role: 'admin', shown: true },
+      { role: 'owner', shown: true },
+      { role: undefined, shown: true },
+    ];
+
+    for (const { role, shown } of cases) {
+      it(`${shown ? 'shows' : 'hides'} server-wide features for an organization ${role ?? 'role the server never says'}`, () => {
+        renderSection(SettingsGroup.Server, SettingsSection.Features, {
+          ...access('member'),
+          organizationRole: role,
+        });
+        expect(screen.queryByTestId('features-section') !== null).toBe(shown);
+      });
+    }
+
+    it('hides server-wide features outside an organization', () => {
+      renderSection(SettingsGroup.Server, SettingsSection.Features, {
+        organization: false,
+        organizationRole: undefined,
+        workspace: false,
+        workspaceRole: undefined,
+      });
+      expect(screen.queryByTestId('features-section')).not.toBeInTheDocument();
+    });
+
+    it('lets an organization member connect a device', () => {
+      renderSection(SettingsGroup.Server, SettingsSection.Connect, access('viewer', 'member'));
+      expect(propsOf('connect-devices-section')).toEqual({});
+    });
+  });
+
   describe('section routing', () => {
     const cases: {
       group: SettingsGroup;

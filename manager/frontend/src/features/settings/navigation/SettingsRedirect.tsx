@@ -1,5 +1,5 @@
 import { Navigate, useLocation } from 'react-router-dom';
-import { legacyOrganizationPath, SESSIONS_PATH } from './legacy';
+import { legacyOrganizationPath, relocate, SESSIONS_PATH } from './legacy';
 
 export const LegacySettings = {
   Organization: 'organization',
@@ -13,6 +13,6 @@ export default function SettingsRedirect({ from }: { from: LegacySettings }) {
   const target =
     from === LegacySettings.Organization
       ? legacyOrganizationPath(location.search, location.hash)
-      : SESSIONS_PATH;
+      : relocate(SESSIONS_PATH, location.search, location.hash);
   return <Navigate to={target} replace />;
 }

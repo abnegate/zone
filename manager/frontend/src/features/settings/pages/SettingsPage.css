@@ -112,6 +112,16 @@
   width: 100%;
 }
 
+.settings-fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 .settings-section {
   display: flex;
   flex-direction: column;
@@ -373,6 +383,21 @@
   cursor: default;
 }
 
+.settings-form .form-slider:disabled,
+.settings-form fieldset:disabled .radio-option {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-form .form-slider:disabled::-webkit-slider-thumb,
+.settings-form fieldset:disabled .radio-option input {
+  cursor: not-allowed;
+}
+
+.settings-form .form-slider:disabled::-moz-range-thumb {
+  cursor: not-allowed;
+}
+
 .radio-label {
   position: relative;
   pointer-events: none;
@@ -458,7 +483,6 @@
   gap: var(--ui-space-6);
   width: 100%;
   max-width: calc(var(--settings-nav-width) + var(--ui-space-6) + var(--ui-content-width));
-  margin: 0 auto;
 }
 
 .settings-sidebar {
@@ -518,6 +542,7 @@
 
   .settings-page .section-description {
     max-width: 100%;
+    white-space: normal;
   }
 
   .settings-page .section-description::before {

@@ -3,7 +3,7 @@ import { Link, Navigate, useLocation, useParams } from 'react-router-dom';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useMediaQuery } from '../../../shared/hooks';
-import { legacyWorkspacePath } from '../navigation/legacy';
+import { legacyWorkspacePath, relocate } from '../navigation/legacy';
 import SettingsNav from '../navigation/SettingsNav';
 import {
   COMPACT_QUERY,
@@ -45,16 +45,17 @@ export default function SettingsPage() {
     const reachable = definition !== undefined && sections.includes(definition);
 
     if (!resolvingWorkspaceRole) {
+      const fallback = relocate(firstPath(sections), location.search, location.hash);
       if (bare) {
         const legacy = legacyWorkspacePath(location.search, location.hash);
         if (legacy !== null) {
           return <Navigate to={legacy} replace />;
         }
         if (!compact) {
-          return <Navigate to={firstPath(sections)} replace />;
+          return <Navigate to={fallback} replace />;
         }
       } else if (!reachable) {
-        return <Navigate to={firstPath(sections)} replace />;
+        return <Navigate to={fallback} replace />;
       }
     }
 

@@ -9,7 +9,11 @@ import {
   useState,
 } from 'react';
 import { client } from '../../../../api/client';
-import { useTheme, workspaceThemeProperties } from '../../../../shared/context/ThemeContext';
+import {
+  FONT_SIZE_PROPERTY,
+  useTheme,
+  workspaceThemeProperties,
+} from '../../../../shared/context/ThemeContext';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
 import { UpdateWorkspaceThemeRequestSchema } from '../schemas';
@@ -56,15 +60,16 @@ export default function GeneralSection({ editable }: { editable: boolean }) {
     previewWorkspaceTheme,
   } = useTheme();
   const { currentOrganization, currentWorkspace } = useWorkspace();
-  const orgId = currentOrganization?.id ?? null;
+  const organizationId = currentOrganization?.id ?? null;
   const workspaceId = currentWorkspace?.id ?? null;
 
   const [dirty, setDirty] = useState(false);
   const edited = useRef(false);
   const touched = useRef(new Set<keyof UpdateWorkspaceThemeRequest>());
-  const scope = `${orgId}/${workspaceId}`;
+  const scope = `${organizationId}/${workspaceId}`;
   const currentScope = useRef<string | null>(scope);
   currentScope.current = scope;
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -100,6 +105,13 @@ export default function GeneralSection({ editable }: { editable: boolean }) {
   }, [workspaceTheme, workspaceId, applyThemeToForm, clearDraft]);
 
   useEffect(() => () => previewWorkspaceTheme(null), [previewWorkspaceTheme]);
+
+  useEffect(
+    () => () => {
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+    },
+    []
+  );
 
   useEffect(() => {
     currentScope.current = scope;
@@ -170,7 +182,7 @@ export default function GeneralSection({ editable }: { editable: boolean }) {
       updated_at: '',
     };
     for (const [name, value] of workspaceThemeProperties(draft, theme)) {
-      style[name === 'font-size' ? 'fontSize' : name] = value;
+      style[name === FONT_SIZE_PROPERTY ? 'fontSize' : name] = value;
     }
     return style as CSSProperties;
   }, [
@@ -200,14 +212,15 @@ export default function GeneralSection({ editable }: { editable: boolean }) {
 
   const flash = (message: string) => {
     setSuccess(message);
-    setTimeout(() => {
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => {
       if (currentScope.current === scope) setSuccess(null);
     }, FLASH_DURATION);
   };
 
   const handleSave = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
-    if (!editable || !isAuthenticated || !orgId || !workspaceId) return;
+    if (!editable || !isAuthenticated || !organizationId || !workspaceId) return;
 
     setSaving(true);
     setError(null);
@@ -215,7 +228,7 @@ export default function GeneralSection({ editable }: { editable: boolean }) {
 
     try {
       const saved = await client.updateWorkspaceTheme(
-        orgId,
+        organizationId,
         workspaceId,
         UpdateWorkspaceThemeRequestSchema.parse(createThemeRequest())
       );
@@ -233,14 +246,14 @@ export default function GeneralSection({ editable }: { editable: boolean }) {
   };
 
   const handleReset = async (): Promise<void> => {
-    if (!editable || !isAuthenticated || !orgId || !workspaceId) return;
+    if (!editable || !isAuthenticated || !organizationId || !workspaceId) return;
 
     setSaving(true);
     setError(null);
     setSuccess(null);
 
     try {
-      await client.resetWorkspaceTheme(orgId, workspaceId);
+      await client.resetWorkspaceTheme(organizationId, workspaceId);
       if (currentScope.current !== scope) return;
       setWorkspaceTheme(null);
       applyThemeToForm(null);
@@ -268,7 +281,7 @@ export default function GeneralSection({ editable }: { editable: boolean }) {
     return <div className="loading-state">Loading theme settings...</div>;
   }
 
-  if (!orgId || !workspaceId) {
+  if (!organizationId || !workspaceId) {
     return (
       <div className="alert alert-error">
         No workspace selected. Please select or create a workspace first.
@@ -302,7 +315,7 @@ export default function GeneralSection({ editable }: { editable: boolean }) {
 
         {!editable && <p className="form-hint">Viewers can't change the workspace theme.</p>}
 
-        <fieldset disabled={!editable} className="settings-form">
+        <fieldset disabled={!editable} className="settings-fieldset">
           <div className="settings-card">
             <h3 className="card-title">Colors</h3>
             <div className="theme-groups">

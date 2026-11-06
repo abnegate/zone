@@ -1,5 +1,15 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  vi,
+} from 'bun:test';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { clientModule } from '../../../../test/client';
 import { chooseSelect, openSelect } from '../../../../test/select';
 import type { WorkspaceTheme } from '../types';
@@ -26,6 +36,7 @@ let themeLoading = false;
 let themeError: string | null = null;
 
 mock.module('../../../../shared/context/ThemeContext', () => ({
+  FONT_SIZE_PROPERTY: 'font-size',
   useTheme: () => ({
     theme: 'light',
     workspaceTheme: savedTheme,
@@ -425,6 +436,64 @@ describe('GeneralSection', () => {
     resolveReset(mockTheme);
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeEnabled();
+    });
+  });
+
+  describe('success message', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const save = async () => {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+      });
+    };
+
+    const advance = async (milliseconds: number) => {
+      await act(async () => {
+        vi.advanceTimersByTime(milliseconds);
+      });
+    };
+
+    it('hides the message three seconds after it shows', async () => {
+      vi.useFakeTimers();
+      renderSection();
+
+      await save();
+      expect(screen.getByText('Settings saved successfully')).toBeInTheDocument();
+
+      await advance(2999);
+      expect(screen.getByText('Settings saved successfully')).toBeInTheDocument();
+
+      await advance(1);
+      expect(screen.queryByText('Settings saved successfully')).toBeNull();
+    });
+
+    it('keeps a second message for its full three seconds', async () => {
+      vi.useFakeTimers();
+      renderSection();
+
+      await save();
+      await advance(2000);
+      await save();
+      await advance(1500);
+      expect(screen.getByText('Settings saved successfully')).toBeInTheDocument();
+
+      await advance(1500);
+      expect(screen.queryByText('Settings saved successfully')).toBeNull();
+    });
+
+    it('cancels the pending hide when it unmounts', async () => {
+      vi.useFakeTimers();
+      const { unmount } = renderSection();
+
+      await save();
+      const clear = vi.spyOn(globalThis, 'clearTimeout');
+      unmount();
+
+      expect(clear).toHaveBeenCalled();
+      clear.mockRestore();
     });
   });
 

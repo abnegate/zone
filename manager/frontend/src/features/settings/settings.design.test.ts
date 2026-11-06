@@ -11,7 +11,7 @@ const styles = join(import.meta.dir, '..', '..', 'styles');
 describe('settings surfaces', () => {
   const shell = read(join(settings, 'pages', 'SettingsPage.css'));
 
-  it('paints a flat page and a body that centres at the content width', () => {
+  it('paints a flat page', () => {
     expect(shell).not.toContain('radial-gradient');
     expect(shell).not.toContain('.settings-page-header');
     expect(shell).not.toContain('.settings-page-body');
@@ -45,6 +45,37 @@ describe('settings surfaces', () => {
     expect(rule(phone, '.section-row-copy')).toContain('align-self: stretch');
     expect(rule(phone, '.settings-page .section-description')).toContain('max-width: 100%');
     expect(rule(shell, '.settings-page .section-description')).toContain('text-overflow: ellipsis');
+  });
+
+  it('wraps a section description on a phone instead of cutting it off', () => {
+    const phone = media(shell, '(max-width: 768px)');
+    expect(rule(phone, '.settings-page .section-description')).toContain('white-space: normal');
+  });
+
+  it('renders the read-only theme fieldset invisibly and lets it shrink below its content', () => {
+    const fieldset = rule(shell, '.settings-fieldset');
+    expect(fieldset).toContain('min-width: 0');
+    expect(fieldset).toContain('margin: 0');
+    expect(fieldset).toContain('padding: 0');
+    expect(fieldset).toContain('border: 0');
+    expect(fieldset).toContain('gap: var(--ui-space-4)');
+  });
+
+  it('fades the disabled font-size slider and radius pills with a not-allowed cursor', () => {
+    const locked = rule(
+      shell,
+      '.settings-form .form-slider:disabled, .settings-form fieldset:disabled .radio-option'
+    );
+    expect(locked).toContain('opacity: 0.5');
+    expect(locked).toContain('cursor: not-allowed');
+  });
+
+  it('starts the shell at the left edge of the page body like every other page', () => {
+    const layout = rule(shell, '.settings-layout');
+    expect(layout).not.toContain('margin');
+    expect(layout).toContain(
+      'max-width: calc(var(--settings-nav-width) + var(--ui-space-6) + var(--ui-content-width))'
+    );
   });
 
   it('lays the shell out as a sticky nav column beside the content', () => {

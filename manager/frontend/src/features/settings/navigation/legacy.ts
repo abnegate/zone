@@ -28,6 +28,10 @@ function withoutTab(path: string, parameters: URLSearchParams, hash: string): st
   return `${path}${remaining ? `?${remaining}` : ''}${hash}`;
 }
 
+export function relocate(path: string, search: string, hash: string): string {
+  return withoutTab(path, new URLSearchParams(search), hash);
+}
+
 export function legacyOrganizationPath(search: string, hash: string): string {
   const parameters = new URLSearchParams(search);
   const section = ORGANIZATION_TABS.get(parameters.get(TAB_PARAMETER) ?? '') ?? SettingsSection.Ai;

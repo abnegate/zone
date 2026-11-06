@@ -36,6 +36,9 @@ const pathsOf = (...groups: SettingsGroup[]): string[] =>
   );
 
 const ORGANIZATION_MEMBERS = settingsPath(SettingsGroup.Organization, SettingsSection.Members);
+const FEATURES = settingsPath(SettingsGroup.Server, SettingsSection.Features);
+const CONNECT = settingsPath(SettingsGroup.Server, SettingsSection.Connect);
+const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
 
 describe('settings constants', () => {
   it('roots settings at /settings and switches to the compact layout at the app breakpoint', () => {
@@ -141,11 +144,7 @@ describe('visibleSections', () => {
         workspace: true,
         workspaceRole: 'viewer',
       })
-    ).toEqual([
-      ...pathsOf(SettingsGroup.Workspace),
-      ORGANIZATION_MEMBERS,
-      ...pathsOf(SettingsGroup.Server, SettingsGroup.You),
-    ]);
+    ).toEqual([...pathsOf(SettingsGroup.Workspace), ORGANIZATION_MEMBERS, CONNECT, SESSIONS]);
   });
 
   it('hides the workspace group from an organization admin who belongs to no workspace', () => {
@@ -182,7 +181,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
-  it('keeps the server and personal sections without an organization or workspace', () => {
+  it('keeps connecting a device and sessions without an organization or workspace', () => {
     expect(
       paths({
         organization: false,
@@ -190,7 +189,32 @@ describe('visibleSections', () => {
         workspace: false,
         workspaceRole: undefined,
       })
-    ).toEqual(pathsOf(SettingsGroup.Server, SettingsGroup.You));
+    ).toEqual([CONNECT, SESSIONS]);
+  });
+
+  it('shows the server-wide Features section only to organization admins', () => {
+    const features = (
+      organization: boolean,
+      organizationRole: SettingsAccess['organizationRole']
+    ) =>
+      paths({ organization, organizationRole, workspace: true, workspaceRole: 'member' }).includes(
+        FEATURES
+      );
+
+    expect(features(true, 'owner')).toBe(true);
+    expect(features(true, 'admin')).toBe(true);
+    expect(features(true, undefined)).toBe(true);
+    expect(features(true, 'member')).toBe(false);
+    expect(features(false, undefined)).toBe(false);
+  });
+
+  it('lets everyone connect a device', () => {
+    for (const organizationRole of ['owner', 'admin', 'member', undefined] as const) {
+      expect(
+        paths({ organization: true, organizationRole, workspace: false, workspaceRole: undefined }),
+        String(organizationRole)
+      ).toContain(CONNECT);
+    }
   });
 
   it('does not let a workspace role hide a workspace section', () => {

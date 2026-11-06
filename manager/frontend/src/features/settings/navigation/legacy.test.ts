@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { legacyOrganizationPath, legacyWorkspacePath, SESSIONS_PATH } from './legacy';
+import { legacyOrganizationPath, legacyWorkspacePath, relocate, SESSIONS_PATH } from './legacy';
 
 const ORGANIZATION_TABS = [
   ['ai', '/settings/organization/ai'],
@@ -76,5 +76,24 @@ describe('legacyWorkspacePath', () => {
 describe('sessions path', () => {
   it('points the old sessions page at You › Sessions', () => {
     expect(SESSIONS_PATH).toBe('/settings/you/sessions');
+  });
+});
+
+describe('relocate', () => {
+  it('moves to the path keeping the query and the hash', () => {
+    expect(relocate('/settings/you/sessions', '?x=1&y=2', '#z')).toBe(
+      '/settings/you/sessions?x=1&y=2#z'
+    );
+    expect(relocate('/settings/you/sessions', '', '#z')).toBe('/settings/you/sessions#z');
+    expect(relocate('/settings/you/sessions', '', '')).toBe('/settings/you/sessions');
+  });
+
+  it('drops the legacy tab', () => {
+    expect(relocate('/settings/workspace/general', '?tab=nothing&x=1', '#y')).toBe(
+      '/settings/workspace/general?x=1#y'
+    );
+    expect(relocate('/settings/workspace/general', '?tab=nothing', '')).toBe(
+      '/settings/workspace/general'
+    );
   });
 });

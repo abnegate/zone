@@ -19,6 +19,8 @@ export default function SettingsNav({ sections }: { sections: SectionDefinition[
     [SettingsGroup.Organization]: currentOrganization?.name,
   };
 
+  const switchable = workspaces.length > 1;
+
   const switchWorkspace = (workspaceId: string) => {
     const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
     if (workspace) {
@@ -39,8 +41,7 @@ export default function SettingsNav({ sections }: { sections: SectionDefinition[
             <h2 id={headingId} className="settings-nav-heading">
               {GROUP_LABELS[group]}
             </h2>
-            {context[group] && <p className="settings-nav-context">{context[group]}</p>}
-            {group === SettingsGroup.Workspace && workspaces.length > 1 && (
+            {group === SettingsGroup.Workspace && switchable ? (
               <Select
                 compact
                 aria-label="Switch workspace"
@@ -52,6 +53,8 @@ export default function SettingsNav({ sections }: { sections: SectionDefinition[
                 onValueChange={switchWorkspace}
                 wrapperClassName="settings-nav-switcher"
               />
+            ) : (
+              context[group] && <p className="settings-nav-context">{context[group]}</p>
             )}
             <ul className="settings-nav-list">
               {items.map((definition) => (
