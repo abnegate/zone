@@ -423,6 +423,7 @@ async fn an_auto_project_goes_first_in_its_workspaces_order() {
         fixture.workspace,
         fixture.user,
         None,
+        Origin::Member,
         &crate::db::auto_projects::ProjectPlan {
             name: "Planned",
             description: None,

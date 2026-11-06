@@ -592,6 +592,7 @@ impl Tool for FinalizeProjectTool {
             self.0.workspace_id,
             self.0.user_id,
             self.0.chat_id,
+            self.0.origin,
             &plan,
         )
         .await

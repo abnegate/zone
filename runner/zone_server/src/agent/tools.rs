@@ -499,6 +499,7 @@ impl ChatTools {
     }
 
     /// Sandboxed tools and workspace tools authorized as the initiating task actor.
+    /// A task the run creates is the run's doing, not a member's, so it is automation.
     pub async fn for_task(
         state: &AppState,
         cwd: std::path::PathBuf,
@@ -513,7 +514,7 @@ impl ChatTools {
                     user_id,
                     chat_id: None,
                     offline: false,
-                    origin: crate::db::tasks::Origin::Member,
+                    origin: Origin::Automation,
                 })
             }
             _ => None,

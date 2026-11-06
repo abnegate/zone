@@ -996,6 +996,7 @@ pub async fn finalize(
     workspace_id: Uuid,
     actor: Uuid,
     chat_id: Option<Uuid>,
+    origin: Origin,
     plan: &ProjectPlan<'_>,
 ) -> DbResult<Finalized> {
     for (index, task) in plan.tasks.iter().enumerate() {
@@ -1057,7 +1058,7 @@ pub async fn finalize(
                 source_id: None,
                 created_by: Some(actor),
                 chat_id: None,
-                origin: Origin::Member,
+                origin,
             },
         )
         .await

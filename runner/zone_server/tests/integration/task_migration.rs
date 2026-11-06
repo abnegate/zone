@@ -997,6 +997,129 @@ async fn chats_start_out_used_when_a_member_last_typed_in_them() {
     database.cleanup().await;
 }
 
+#[tokio::test]
+async fn tasks_nobody_typed_for_are_backfilled_with_their_origin() {
+    let database = Database::new().await;
+    database.through(19).await;
+    let (workspace, owner) = database.workspace().await;
+    let project: Uuid = sqlx::query_scalar(
+        "INSERT INTO projects(workspace_id,name) VALUES($1,'Migration') RETURNING id",
+    )
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    let chat: Uuid = sqlx::query_scalar(
+        "INSERT INTO chats(workspace_id,title,model_name,reasoning_effort) \
+         VALUES($1,'Migration','auto','auto') RETURNING id",
+    )
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    let message = |metadata: Option<serde_json::Value>, minutes: i32| {
+        sqlx::query(
+            "INSERT INTO messages(chat_id,role,content,metadata,created_at) \
+             VALUES($1,'user','Migration',$2,NOW() - make_interval(mins => $3))",
+        )
+        .bind(chat)
+        .bind(metadata)
+        .bind(minutes)
+        .execute(&database.pool)
+    };
+    let task = |chat: Option<Uuid>, minutes: i32| {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO tasks(workspace_id,title,description,created_by,chat_id,created_at) \
+             VALUES($1,'Migration','Backfill',$2,$3,NOW() - make_interval(mins => $4)) RETURNING id",
+        )
+        .bind(workspace)
+        .bind(owner)
+        .bind(chat)
+        .bind(minutes)
+        .fetch_one(&database.pool)
+    };
+    let typed = task(None, 0).await.unwrap();
+    let planned = task(None, 0).await.unwrap();
+    sqlx::query("INSERT INTO task_automation(task_id,project_id,auto_created) VALUES($1,$2,TRUE)")
+        .bind(planned)
+        .bind(project)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let synced = task(None, 0).await.unwrap();
+    let config: Uuid = sqlx::query_scalar(
+        "INSERT INTO sync_configs(project_id,provider) VALUES($1,'github') RETURNING id",
+    )
+    .bind(project)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO synced_items(sync_config_id,task_id,external_id) VALUES($1,$2,'1')")
+        .bind(config)
+        .bind(synced)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    message(None, 40).await.unwrap();
+    let asked = task(Some(chat), 35).await.unwrap();
+    message(Some(serde_json::json!({"source": "reminder"})), 30)
+        .await
+        .unwrap();
+    let reminded = task(Some(chat), 25).await.unwrap();
+    message(Some(serde_json::json!({"source": "auto_project"})), 20)
+        .await
+        .unwrap();
+    let automated = task(Some(chat), 15).await.unwrap();
+    database.through(23).await;
+
+    let origin = |task: Uuid| {
+        sqlx::query_scalar::<_, String>("SELECT origin FROM tasks WHERE id=$1")
+            .bind(task)
+            .fetch_one(&database.pool)
+    };
+    for (task, expected, why) in [
+        (typed, "member", "a task a member added stays theirs"),
+        (
+            planned,
+            "automation",
+            "a task automation planned is automation",
+        ),
+        (
+            synced,
+            "automation",
+            "a task an issue sync imported is automation",
+        ),
+        (
+            asked,
+            "member",
+            "a task filed in a turn a member typed is theirs",
+        ),
+        (
+            reminded,
+            "reminder",
+            "a task filed in a reminder's turn is the reminder's",
+        ),
+        (
+            automated,
+            "automation",
+            "a task filed in any other sourced turn is automation",
+        ),
+    ] {
+        assert_eq!(origin(task).await.unwrap(), expected, "{why}");
+    }
+    let validated: bool = sqlx::query_scalar(
+        "SELECT convalidated FROM pg_constraint WHERE conname='tasks_origin_check'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(
+        validated,
+        "the origin check is proven once the backfill has run"
+    );
+    database.cleanup().await;
+}
+
 /// Every lock a later migration takes on a live table is one ordinary traffic
 /// already holds, and the boot holds sqlx's advisory lock while it queues for
 /// them: an unbounded wait wedges every other instance instead of failing with
@@ -1062,7 +1185,7 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             "017_chat_used_at.sql",
             "018_project_position.sql",
             "022_task_origin.sql",
-            "023_task_origin_validation.sql",
+            "023_task_origin_backfill.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );
