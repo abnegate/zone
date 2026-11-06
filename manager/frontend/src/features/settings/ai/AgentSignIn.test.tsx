@@ -806,7 +806,7 @@ describe('AgentSignIn', () => {
 
   describe('from a console on another machine', () => {
     beforeEach(() => {
-      openAt('https://zone.example.com/org-settings');
+      openAt('https://zone.example.com/settings/organization/ai');
     });
 
     afterEach(() => {

@@ -526,9 +526,10 @@ describe('models page layout', () => {
     expect(rule(pulls, '.pull-job-row')).toContain('height: var(--ui-space-5)');
   });
 
-  it('sends the empty state to the settings features tab', () => {
+  it('sends the empty state to the server features section', () => {
     expect(page).not.toContain('<FeaturesPanel');
-    expect(page).toContain("navigate('/settings?tab=features')");
+    expect(page).toContain('SettingsSection.Features');
+    expect(page).not.toContain("'/settings?tab=features'");
   });
 });
 

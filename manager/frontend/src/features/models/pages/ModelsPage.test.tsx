@@ -357,12 +357,12 @@ describe('ModelsPage', () => {
       expect(screen.getByText('No models installed')).toBeInTheDocument();
     });
 
-    it('sends the empty state to the settings features tab', () => {
+    it('sends the empty state to the server features section', () => {
       mockUseModels.mockReturnValue({ ...defaultModelsHook, models: [] });
       renderModelsPage();
       fireEvent.click(screen.getByRole('button', { name: 'Install features' }));
-      expect(window.location.pathname).toBe('/settings');
-      expect(window.location.search).toBe('?tab=features');
+      expect(window.location.pathname).toBe('/settings/server/features');
+      expect(window.location.search).toBe('');
     });
 
     it('displays installed models', () => {

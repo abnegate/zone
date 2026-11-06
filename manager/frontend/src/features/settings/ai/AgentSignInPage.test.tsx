@@ -59,7 +59,7 @@ function open(address: string) {
               </>
             }
           />
-          <Route path="/org-settings" element={<h1>Organization settings</h1>} />
+          <Route path="/settings/organization/ai" element={<h1>Organization settings</h1>} />
         </Routes>
       </MemoryRouter>
     </StrictMode>

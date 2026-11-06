@@ -4,6 +4,7 @@ import { type FormEvent, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { modelsApi } from '../../../api/models';
 import PageBar from '../../../shared/components/PageBar/PageBar';
+import { SettingsGroup, SettingsSection, settingsPath } from '../../settings/navigation/sections';
 import Capabilities from '../components/Capabilities';
 import DownloadOptions from '../components/DownloadOptions';
 import PullJobs from '../components/PullJobs';
@@ -327,9 +328,13 @@ export default function ModelsPage() {
                     </svg>
                   }
                   title="No models installed"
-                  description="Pick the product features in workspace settings, or browse the catalog."
+                  description="Pick the product features in Settings, or browse the catalog."
                   action={
-                    <Button onClick={() => navigate('/settings?tab=features')}>
+                    <Button
+                      onClick={() =>
+                        navigate(settingsPath(SettingsGroup.Server, SettingsSection.Features))
+                      }
+                    >
                       Install features
                     </Button>
                   }
