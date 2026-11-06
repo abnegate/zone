@@ -1,6 +1,7 @@
 //! What an agent is handed for a turn: what goes to its stdin, and the image
 //! files its command line names.
 
+mod limits;
 mod undeliverable;
 
 use std::path::PathBuf;
@@ -14,16 +15,12 @@ use super::agent::AgentKind;
 use super::image::{Image, Rejection};
 use super::transcript::{Part, SEPARATOR, Transcript};
 
+pub use limits::Limits;
 pub use undeliverable::Undeliverable;
 
 /// Stands in for an earlier image the agent cannot be shown, so the transcript
 /// still says one was there.
 const OMITTED: &str = "[An image was attached here, but it cannot be shown to you.]";
-
-/// The Claude API's limits: base64 bytes in one image, and images in one
-/// request on its smallest context window.
-const CLAUDE_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-const CLAUDE_IMAGES: usize = 100;
 
 #[derive(Debug)]
 pub struct Input {
@@ -39,7 +36,7 @@ impl Input {
     pub fn new(agent: AgentKind, transcript: &Transcript) -> Result<Self, Undeliverable> {
         match agent {
             AgentKind::Claude => Ok(Self {
-                stdin: claude(transcript)?,
+                stdin: claude(transcript, Limits::CLAUDE)?,
                 images: Vec::new(),
                 directory: None,
             }),
@@ -50,38 +47,54 @@ impl Input {
 
 /// An earlier image the agent cannot take is noted rather than sent: one the
 /// API would refuse fails every turn that resends the history, and a link may
-/// have died since it was attached.
-fn claude(transcript: &Transcript) -> Result<String, Undeliverable> {
-    let refused = |rejection| Undeliverable::Refused {
-        agent: AgentKind::Claude,
-        rejection,
-    };
-    let count = transcript
-        .parts()
+/// have died since it was attached. The newest images are the ones kept within
+/// a request's limits.
+fn claude(transcript: &Transcript, limits: Limits) -> Result<String, Undeliverable> {
+    let parts = transcript.parts();
+    let text: usize = parts
         .iter()
-        .filter(|part| matches!(part, Part::Image { .. }))
-        .count();
-    let mut excess = count.saturating_sub(CLAUDE_IMAGES);
-    let mut content = Vec::new();
+        .map(|part| match part {
+            Part::Text(text) => text.len(),
+            Part::Image { .. } => 0,
+        })
+        .sum();
+    let mut room = limits.request_bytes.saturating_sub(text);
+    let mut allowed = limits.images;
+    let mut images: Vec<Option<Result<Value, Rejection>>> = vec![None; parts.len()];
 
-    for part in transcript.parts() {
-        let (url, current) = match part {
-            Part::Text(text) => {
-                content.push(text_block(text));
-                continue;
+    for (index, part) in parts.iter().enumerate().rev() {
+        let Part::Image { url, current } = part else {
+            continue;
+        };
+        images[index] = Some(
+            Image::parse(url)
+                .and_then(|image| claude_block(image, *current, limits.image_bytes))
+                .and_then(|(block, size)| {
+                    if allowed == 0 {
+                        return Err(Rejection::Excess);
+                    }
+                    if size > room {
+                        return Err(Rejection::Crowded);
+                    }
+                    allowed -= 1;
+                    room -= size;
+                    Ok(block)
+                }),
+        );
+    }
+
+    let mut content = Vec::with_capacity(parts.len());
+    for (part, image) in parts.iter().zip(images) {
+        match (part, image) {
+            (Part::Text(text), _) => content.push(text_block(text)),
+            (_, Some(Ok(block))) => content.push(block),
+            (Part::Image { current: true, .. }, Some(Err(rejection))) => {
+                return Err(Undeliverable::Refused {
+                    agent: AgentKind::Claude,
+                    rejection,
+                });
             }
-            Part::Image { url, current } => (url, *current),
-        };
-        let block = if excess > 0 {
-            excess -= 1;
-            Err(Rejection::Excess)
-        } else {
-            Image::parse(url).and_then(|image| claude_block(image, current))
-        };
-        match block {
-            Ok(block) => content.push(block),
-            Err(rejection) if current => return Err(refused(rejection)),
-            Err(_) => content.push(text_block(OMITTED)),
+            (Part::Image { .. }, _) => content.push(text_block(OMITTED)),
         }
     }
 
@@ -92,24 +105,36 @@ fn claude(transcript: &Transcript) -> Result<String, Undeliverable> {
     Ok(format!("{message}\n"))
 }
 
-fn claude_block(image: Image<'_>, current: bool) -> Result<Value, Rejection> {
+/// The content block showing `image`, with the bytes it adds to a request.
+fn claude_block(
+    image: Image<'_>,
+    current: bool,
+    image_bytes: usize,
+) -> Result<(Value, usize), Rejection> {
     match image {
         Image::Inline {
             media_type, bytes, ..
         } => {
             let data = BASE64.encode(bytes);
-            if data.len() > CLAUDE_IMAGE_BYTES {
+            if data.len() > image_bytes {
                 return Err(Rejection::Oversized);
             }
-            Ok(json!({
-                "type": "image",
-                "source": {"type": "base64", "media_type": media_type, "data": data},
-            }))
+            let size = data.len();
+            Ok((
+                json!({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": media_type, "data": data},
+                }),
+                size,
+            ))
         }
-        Image::Linked(url) if current => Ok(json!({
-            "type": "image",
-            "source": {"type": "url", "url": url},
-        })),
+        Image::Linked(url) if current => Ok((
+            json!({
+                "type": "image",
+                "source": {"type": "url", "url": url},
+            }),
+            url.len(),
+        )),
         Image::Linked(_) => Err(Rejection::Linked),
     }
 }
@@ -176,6 +201,7 @@ mod tests {
     use crate::llm::provider::transcript::render;
     use abnegate_llm::Message;
 
+    const PNG_DATA: &str = "iVBORw0KGgo=";
     const PNG: &str = "data:image/png;base64,iVBORw0KGgo=";
     const ARTIFACT: &str = "/api/artifacts/w/c/m/generated.png";
     const LINK: &str = "https://example.test/review.webp";
@@ -287,41 +313,109 @@ mod tests {
         );
     }
 
+    fn claude_within(transcript: &Transcript, limits: Limits) -> Result<Value, Rejection> {
+        match claude(transcript, limits) {
+            Ok(stdin) => {
+                let message: Value = serde_json::from_str(stdin.trim_end()).expect("json");
+                Ok(message["message"]["content"].clone())
+            }
+            Err(Undeliverable::Refused { rejection, .. }) => Err(rejection),
+            Err(error) => panic!("unexpected: {error}"),
+        }
+    }
+
+    fn three_turns_of_images() -> Transcript {
+        render(&[
+            with_images(Message::user("First."), &[PNG]),
+            Message::assistant("Seen."),
+            with_images(Message::user("Second."), &[PNG]),
+            Message::assistant("Seen."),
+            with_images(Message::user("Third."), &[PNG]),
+        ])
+    }
+
+    /// For each image in `content`, in order, whether it was sent rather than
+    /// noted.
+    fn sent_images(content: &Value) -> Vec<bool> {
+        content
+            .as_array()
+            .expect("blocks")
+            .iter()
+            .filter(|block| block["type"] == "image" || block["text"] == OMITTED)
+            .map(|block| block["type"] == "image")
+            .collect()
+    }
+
     #[test]
     fn claude_is_sent_no_more_images_than_a_request_may_carry_keeping_the_newest() {
-        let earlier = vec![PNG; CLAUDE_IMAGES];
-        let transcript = render(&[
-            with_images(Message::user("Many."), &earlier),
-            Message::assistant("Seen."),
-            with_images(Message::user("One more."), &[PNG]),
-        ]);
+        let limits = Limits {
+            images: 2,
+            ..Limits::CLAUDE
+        };
 
-        let content = claude_content(&transcript);
-        let blocks = content.as_array().expect("blocks");
-        let images = blocks
-            .iter()
-            .filter(|block| block["type"] == "image")
-            .count();
-        assert_eq!(images, CLAUDE_IMAGES);
-        assert_eq!(blocks[1], json!({"type": "text", "text": OMITTED}));
-        assert_eq!(
-            blocks.last(),
-            Some(&png_block()),
-            "the current image is kept"
-        );
+        let content = claude_within(&three_turns_of_images(), limits).expect("deliverable");
+
+        assert_eq!(sent_images(&content), [false, true, true]);
+    }
+
+    #[test]
+    fn claude_is_sent_no_more_image_bytes_than_a_request_may_carry_keeping_the_newest() {
+        let text = three_turns_of_images().text().len();
+        let limits = Limits {
+            request_bytes: text + 2 * PNG_DATA.len(),
+            ..Limits::CLAUDE
+        };
+
+        let content = claude_within(&three_turns_of_images(), limits).expect("deliverable");
+
+        assert_eq!(sent_images(&content), [false, true, true]);
+    }
+
+    #[test]
+    fn images_this_turn_was_sent_with_that_overflow_the_request_fail_it() {
+        let transcript = render(&[with_images(Message::user("Look."), &[PNG, PNG])]);
+
+        let fewer = Limits {
+            images: 1,
+            ..Limits::CLAUDE
+        };
+        assert_eq!(claude_within(&transcript, fewer), Err(Rejection::Excess));
+
+        let smaller = Limits {
+            request_bytes: transcript.text().len() + PNG_DATA.len(),
+            ..Limits::CLAUDE
+        };
+        assert_eq!(claude_within(&transcript, smaller), Err(Rejection::Crowded));
     }
 
     #[test]
     fn an_image_larger_than_claude_takes_fails_the_turn_that_sent_it() {
-        let large = format!(
-            "data:image/png;base64,{}",
-            BASE64.encode(vec![0_u8; CLAUDE_IMAGE_BYTES])
-        );
-        let transcript = render(&[with_images(Message::user("Look."), &[&large])]);
+        let transcript = render(&[with_images(Message::user("Look."), &[PNG])]);
+        let limits = Limits {
+            image_bytes: PNG_DATA.len() - 1,
+            ..Limits::CLAUDE
+        };
 
         assert_eq!(
-            rejection(Input::new(AgentKind::Claude, &transcript)),
-            Rejection::Oversized
+            claude_within(&transcript, limits),
+            Err(Rejection::Oversized)
+        );
+    }
+
+    #[test]
+    fn an_earlier_file_that_is_not_the_image_it_claims_is_noted() {
+        let transcript = render(&[
+            with_images(Message::user("Old."), &["data:image/png;base64,aGVsbG8="]),
+            Message::user("New."),
+        ]);
+
+        assert_eq!(
+            claude_content(&transcript),
+            json!([
+                {"type": "text", "text": "User:\nOld."},
+                {"type": "text", "text": OMITTED},
+                {"type": "text", "text": "User:\nNew."},
+            ])
         );
     }
 

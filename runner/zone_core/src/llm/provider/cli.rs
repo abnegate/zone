@@ -810,6 +810,50 @@ done
     }
 
     #[tokio::test]
+    #[ignore = "requires the host's signed-in codex CLI"]
+    async fn a_resumed_codex_session_is_shown_the_image_it_was_sent() {
+        let directory = TempDir::new().expect("a working directory");
+        let settings = CliSettings::default()
+            .with_working_directory(directory.path())
+            .with_timeout(Duration::from_secs(300));
+        let opening = CliProvider::agent(AgentKind::Codex, settings.clone());
+        let mut events = opening
+            .stream(request(&[Message::user("Reply with the word ready.")]))
+            .expect("codex runs");
+        let mut thread = None;
+        while let Some(event) = events.next().await {
+            if let AgentEvent::Session(id) = event.expect("the opening turn succeeds") {
+                thread = Some(id);
+            }
+        }
+        let thread = thread.expect("codex announces its thread");
+        let resumed = CliProvider::agent(
+            AgentKind::Codex,
+            settings.with_session(crate::llm::provider::Session {
+                id: thread,
+                resume: true,
+            }),
+        );
+        let image = format!(
+            "data:image/png;base64,{}",
+            BASE64.encode(include_bytes!("fixtures/zebra.png"))
+        );
+
+        let completion = run(
+            &resumed,
+            &[with_images(
+                "What word and number are written in the attached image?",
+                &[&image],
+            )],
+        )
+        .await
+        .expect("the resumed turn succeeds");
+
+        let answer = completion.message.content.unwrap_or_default();
+        assert!(answer.to_uppercase().contains("ZEBRA"), "{answer}");
+    }
+
+    #[tokio::test]
     async fn an_image_the_agent_cannot_be_shown_fails_the_turn_before_it_starts() {
         for agent in AgentKind::ALL {
             let directory = TempDir::new().expect("a temporary directory");

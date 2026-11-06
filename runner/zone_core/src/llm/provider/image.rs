@@ -1,6 +1,8 @@
 //! An image a message carries, read from the URL it was attached by.
 
+mod media_type;
 mod rejection;
+mod signature;
 
 use std::borrow::Cow;
 
@@ -9,18 +11,29 @@ use base64::alphabet::STANDARD;
 use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
 
+use media_type::MediaType;
+use signature::Signature;
+
 pub use rejection::Rejection;
 
 const DATA_SCHEME: &str = "data:";
 const BASE64_SUFFIX: &str = ";base64";
 
 /// The media types every agent here opens, with the extension each is saved
-/// under.
-const MEDIA_TYPES: [(&str, &str); 4] = [
-    ("image/png", "png"),
-    ("image/jpeg", "jpg"),
-    ("image/gif", "gif"),
-    ("image/webp", "webp"),
+/// under and the bytes every such file starts with.
+const MEDIA_TYPES: [MediaType; 4] = [
+    MediaType::new(
+        "image/png",
+        "png",
+        &[Signature::Prefix(b"\x89PNG\r\n\x1a\n")],
+    ),
+    MediaType::new("image/jpeg", "jpg", &[Signature::Prefix(b"\xff\xd8\xff")]),
+    MediaType::new(
+        "image/gif",
+        "gif",
+        &[Signature::Prefix(b"GIF87a"), Signature::Prefix(b"GIF89a")],
+    ),
+    MediaType::new("image/webp", "webp", &[Signature::Riff(b"WEBP")]),
 ];
 
 /// Browsers pad base64 and other encoders do not, so either is read.
@@ -46,19 +59,22 @@ impl<'a> Image<'a> {
             let declared = header
                 .strip_suffix(BASE64_SUFFIX)
                 .ok_or(Rejection::Malformed)?;
-            let (media_type, extension) = MEDIA_TYPES
+            if !MEDIA_TYPES
                 .iter()
-                .find(|(known, _)| known.eq_ignore_ascii_case(declared))
-                .ok_or(Rejection::Unsupported)?;
+                .any(|known| known.name.eq_ignore_ascii_case(declared))
+            {
+                return Err(Rejection::Unsupported);
+            }
             let bytes = LENIENT
                 .decode(compact(data).as_bytes())
                 .map_err(|_| Rejection::Malformed)?;
-            if bytes.is_empty() {
-                return Err(Rejection::Malformed);
-            }
+            let actual = MEDIA_TYPES
+                .iter()
+                .find(|known| known.holds(&bytes))
+                .ok_or(Rejection::Malformed)?;
             return Ok(Self::Inline {
-                media_type,
-                extension,
+                media_type: actual.name,
+                extension: actual.extension,
                 bytes,
             });
         }
@@ -118,6 +134,26 @@ mod tests {
     }
 
     #[test]
+    fn an_image_is_read_as_the_type_its_bytes_are_whatever_it_was_labelled() {
+        assert_eq!(
+            Image::parse("data:image/png;base64,/9j/4AAQ"),
+            Ok(Image::Inline {
+                media_type: "image/jpeg",
+                extension: "jpg",
+                bytes: vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10],
+            })
+        );
+        assert_eq!(
+            Image::parse("data:image/png;base64,UklGRiQAAABXRUJQVlA4"),
+            Ok(Image::Inline {
+                media_type: "image/webp",
+                extension: "webp",
+                bytes: b"RIFF$\0\0\0WEBPVP8".to_vec(),
+            })
+        );
+    }
+
+    #[test]
     fn a_public_address_is_a_linked_image() {
         assert_eq!(
             Image::parse("https://example.test/shot.png"),
@@ -138,6 +174,7 @@ mod tests {
             ("data:image/png,not-base64", Rejection::Malformed),
             ("data:image/png;base64,", Rejection::Malformed),
             ("data:image/png;base64,!!!!", Rejection::Malformed),
+            ("data:image/png;base64,aGVsbG8=", Rejection::Malformed),
         ] {
             assert_eq!(Image::parse(url), Err(rejection), "{url}");
         }

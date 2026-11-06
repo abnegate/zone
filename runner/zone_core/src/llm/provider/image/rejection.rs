@@ -3,7 +3,7 @@
 pub enum Rejection {
     #[error("it is not a PNG, JPEG, GIF or WebP image")]
     Unsupported,
-    #[error("its data could not be decoded")]
+    #[error("its data could not be decoded as the image it says it is")]
     Malformed,
     #[error("it is stored where only Zone can read it")]
     Unreachable,
@@ -13,4 +13,6 @@ pub enum Rejection {
     Oversized,
     #[error("the conversation already carries the 100 images a turn may hold")]
     Excess,
+    #[error("the conversation's images together pass the 128 MB a turn may carry")]
+    Crowded,
 }
