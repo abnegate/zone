@@ -54,7 +54,6 @@ pub struct AccessClaims {
 
 impl Claims {
     /// Check if the user has a specific permission
-    #[allow(dead_code)]
     pub fn has_permission(&self, permission: &str) -> bool {
         self.is_admin || self.permissions.contains(&permission.to_string())
     }

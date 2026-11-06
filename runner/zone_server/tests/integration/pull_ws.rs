@@ -11,7 +11,7 @@ use std::sync::{
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
-use zone_server::auth::{create_refresh_token, create_session_access_token};
+use zone_server::auth::{Permission, create_refresh_token, create_session_access_token};
 use zone_server::db::{sessions, users};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -22,6 +22,8 @@ struct Fixture {
     model: &'static str,
     url: String,
     token: String,
+    reader: String,
+    admin: String,
     refresh: String,
     calls: Arc<AtomicUsize>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -88,17 +90,25 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let token = create_session_access_token(
-            user.id,
-            "user@example.com",
-            vec![],
-            vec![],
-            false,
-            session.id,
-            config.jwt_secret(),
-            chrono::Duration::hours(1),
-        )
-        .unwrap();
+        let mint = |permissions: &[Permission], is_admin: bool| {
+            create_session_access_token(
+                user.id,
+                "user@example.com",
+                vec![],
+                permissions
+                    .iter()
+                    .map(|permission| permission.name().to_string())
+                    .collect(),
+                is_admin,
+                session.id,
+                config.jwt_secret(),
+                chrono::Duration::hours(1),
+            )
+            .unwrap()
+        };
+        let token = mint(&[Permission::ModelsCreate], false);
+        let reader = mint(&[Permission::ModelsDelete], false);
+        let admin = mint(&[], true);
         let refresh = create_refresh_token(
             uuid::Uuid::new_v4(),
             config.jwt_secret(),
@@ -115,6 +125,8 @@ impl Fixture {
             model,
             url: format!("ws://{address}/ws/pull"),
             token,
+            reader,
+            admin,
             refresh,
             calls,
             tasks: vec![provider, server],
@@ -176,6 +188,55 @@ async fn rejects_missing_invalid_and_refresh_authentication_without_contacting_p
         );
     }
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+}
+
+async fn assert_closed(socket: &mut Socket) {
+    match tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("a refused socket must close")
+    {
+        None | Some(Ok(Message::Close(_))) | Some(Err(_)) => {}
+        Some(Ok(other)) => panic!("a refused socket must close, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn refuses_a_caller_who_cannot_install_models_without_contacting_provider() {
+    let fixture = Fixture::new(MODEL, StatusCode::OK, vec!["{\"status\":\"success\"}"]).await;
+    for request in [
+        json!({"model": MODEL}),
+        json!({"model": MODEL, "cancel": true}),
+    ] {
+        let mut socket = fixture.connect().await;
+        send(
+            &mut socket,
+            json!({"type": "auth", "token": fixture.reader}),
+        )
+        .await;
+        let refusal = receive(&mut socket).await;
+        assert_eq!(refusal["type"], "error", "{refusal}");
+        assert_eq!(
+            refusal["message"],
+            Permission::ModelsCreate.refusal(),
+            "{refusal}"
+        );
+        let _ = socket.send(Message::Text(request.to_string().into())).await;
+        assert_closed(&mut socket).await;
+    }
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_instance_admin_installs_without_an_explicit_grant() {
+    let fixture = Fixture::new(MODEL, StatusCode::OK, vec!["{\"status\":\"success\"}"]).await;
+    let mut socket = fixture.connect().await;
+    send(&mut socket, json!({"type": "auth", "token": fixture.admin})).await;
+    assert_eq!(receive(&mut socket).await, json!({"type": "authenticated"}));
+    send(&mut socket, json!({"model": MODEL})).await;
+    let complete = receive(&mut socket).await;
+    assert_eq!(complete["type"], "complete", "{complete}");
+    assert_eq!(complete["success"], true, "{complete}");
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

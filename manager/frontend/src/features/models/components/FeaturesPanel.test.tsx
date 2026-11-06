@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { SetupPlan } from '../../../api/models';
+import { MODEL_ACCESS_NOTICE } from './ModelAccessNotice';
 
 const mockGetSetup = mock();
 const mockStartSetup = mock();
@@ -19,6 +20,12 @@ mock.module('../../../api/models', () => ({
       this.plan = refusal.plan;
     }
   },
+}));
+
+const access = { canInstall: true, canRemove: true };
+
+mock.module('../hooks/useModelAccess', () => ({
+  useModelAccess: () => access,
 }));
 
 function plan(overrides: Partial<SetupPlan> = {}): SetupPlan {
@@ -157,6 +164,8 @@ describe('FeaturesPanel', () => {
     pull.pull.mockReset();
     pull.pull.mockImplementation(() => Promise.resolve(true));
     mockGetSetup.mockResolvedValue(plan());
+    access.canInstall = true;
+    access.canRemove = true;
   });
 
   it('lists features with sizes and disk totals', async () => {
@@ -330,5 +339,26 @@ describe('FeaturesPanel', () => {
     await waitFor(() => expect(pull.pull).toHaveBeenCalledTimes(2));
     expect(pull.pull).toHaveBeenCalledWith('llama3.1:8b', { runtime: undefined });
     expect(pull.pull).toHaveBeenCalledWith('lustify-sdxl-ggwp-v7', { runtime: 'comfy' });
+  });
+
+  it('shows a read-only plan to a user who cannot install models', async () => {
+    access.canInstall = false;
+    render(<FeaturesPanel pull={pull} onInstalled={mock()} />);
+    expect(await screen.findByRole('heading', { name: 'Features' })).toBeInTheDocument();
+    expect(screen.getByText('26 GB')).toBeInTheDocument();
+    for (const checkbox of screen.getAllByRole('checkbox')) {
+      expect(checkbox).toBeDisabled();
+    }
+    expect(screen.queryByRole('button', { name: 'Install selected' })).not.toBeInTheDocument();
+    expect(screen.getByText(MODEL_ACCESS_NOTICE)).toHaveAttribute('role', 'note');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Vision' }));
+    expect(mockGetSetup).toHaveBeenCalledTimes(1);
+    expect(mockStartSetup).not.toHaveBeenCalled();
+  });
+
+  it('shows no read-only notice to a user who can install models', async () => {
+    render(<FeaturesPanel pull={pull} onInstalled={mock()} />);
+    await screen.findByRole('button', { name: 'Install selected' });
+    expect(screen.queryByText(MODEL_ACCESS_NOTICE)).not.toBeInTheDocument();
   });
 });

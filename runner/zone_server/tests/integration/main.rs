@@ -75,6 +75,7 @@ mod message_authorship;
 mod message_embedding;
 mod migration_atomicity;
 mod model_namespaces;
+mod model_permissions;
 mod model_setup;
 mod models;
 mod organization_console_contract;

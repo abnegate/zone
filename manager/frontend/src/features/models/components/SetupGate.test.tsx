@@ -92,7 +92,8 @@ describe('SetupGate', () => {
     mockGetSetup.mockReset();
     authState = {
       user: { id: 'user-1' },
-      hasPermission: (permission: string) => permission === PERMISSIONS.MODELS.READ,
+      hasPermission: (permission: string) =>
+        permission === PERMISSIONS.MODELS.READ || permission === PERMISSIONS.MODELS.CREATE,
     };
   });
 
@@ -107,6 +108,15 @@ describe('SetupGate', () => {
     authState.hasPermission = () => false;
     renderGate();
     expect(screen.getByText('app')).toBeInTheDocument();
+    expect(mockGetSetup).not.toHaveBeenCalled();
+  });
+
+  it('never sends a user who cannot install models to setup', () => {
+    authState.hasPermission = (permission: string) => permission === PERMISSIONS.MODELS.READ;
+    mockGetSetup.mockResolvedValue(plan({ pulls: [{ model: 'llama3.1:8b', runtime: 'ollama' }] }));
+    renderGate();
+    expect(screen.getByText('app')).toBeInTheDocument();
+    expect(screen.queryByText('setup')).not.toBeInTheDocument();
     expect(mockGetSetup).not.toHaveBeenCalled();
   });
 
