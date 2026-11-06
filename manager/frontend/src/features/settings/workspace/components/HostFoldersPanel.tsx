@@ -28,12 +28,14 @@ export default function HostFoldersPanel({
   workspaceId,
   orgId,
   variant = 'settings',
+  readOnly = false,
   onSaved,
   onSkip,
 }: {
   workspaceId: string | null;
   orgId: string | null;
   variant?: 'settings' | 'setup';
+  readOnly?: boolean;
   onSaved?: () => void;
   onSkip?: () => void;
 }) {
@@ -132,6 +134,8 @@ export default function HostFoldersPanel({
         </p>
       )}
 
+      {readOnly && <p className="host-folders-hint">Viewers can't change host folders.</p>}
+
       {error && <div className="alert alert-error">{error}</div>}
       {success && variant === 'settings' && <div className="alert alert-success">{success}</div>}
 
@@ -148,6 +152,7 @@ export default function HostFoldersPanel({
                   placeholder={placeholder}
                   spellCheck={false}
                   autoComplete="off"
+                  disabled={readOnly}
                   onChange={(event) => {
                     const path = event.target.value;
                     setRows((current) =>
@@ -161,45 +166,53 @@ export default function HostFoldersPanel({
                   {mapped.exists ? 'Visible as' : 'Not visible yet:'} <code>{mapped.mapped}</code>
                 </p>
               )}
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setRows((current) => {
-                    const next = current.filter((item) => item.id !== row.id);
-                    return next.length ? next : [folderRow('')];
-                  });
-                }}
-              >
-                Remove
-              </Button>
+              {!readOnly && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setRows((current) => {
+                      const next = current.filter((item) => item.id !== row.id);
+                      return next.length ? next : [folderRow('')];
+                    });
+                  }}
+                >
+                  Remove
+                </Button>
+              )}
             </li>
           );
         })}
       </ul>
 
-      <div className="host-folders-toolbar">
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          onClick={() => setRows((current) => [...current, folderRow('')])}
-        >
-          Add folder
-        </Button>
-      </div>
-
-      <div className="host-folders-actions">
-        {onSkip && (
-          <Button type="button" variant="link" onClick={onSkip} disabled={saving}>
-            Skip for now
+      {!readOnly && (
+        <div className="host-folders-toolbar">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => setRows((current) => [...current, folderRow('')])}
+          >
+            Add folder
           </Button>
-        )}
-        <Button type="button" variant="primary" onClick={() => void save()} loading={saving}>
-          {saving ? 'Saving...' : variant === 'setup' ? 'Save and continue' : 'Save Changes'}
-        </Button>
-      </div>
+        </div>
+      )}
+
+      {(onSkip || !readOnly) && (
+        <div className="host-folders-actions">
+          {onSkip && (
+            <Button type="button" variant="link" onClick={onSkip} disabled={saving}>
+              Skip for now
+            </Button>
+          )}
+          {!readOnly && (
+            <Button type="button" variant="primary" onClick={() => void save()} loading={saving}>
+              {saving ? 'Saving...' : variant === 'setup' ? 'Save and continue' : 'Save Changes'}
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
