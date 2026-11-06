@@ -16,7 +16,7 @@ pub const PEOPLE_FINETUNE: &str = "sdxl";
 pub const PEOPLE_CHECKPOINT: &str = "checkpoints/lustifySDXLNSFW_ggwpV7.safetensors";
 pub const LORAS: &str = "loras";
 pub const CHECKPOINTS: &str = "checkpoints";
-pub const MISSING_RUNPOD_KEY: &str = "Save a Runpod API key in Workspace Settings.";
+pub const MISSING_RUNPOD_KEY: &str = "Save a Runpod API key in Settings → AI.";
 pub const VIDEO_REFUSAL: &str = "video identity training is off: it trains Wan 2.2 TI2V 5B adapters, and video generation runs Wan 2.2 A14B, which cannot load them";
 /// The crate's refusal of a pivotal weight whose name its embedding could
 /// not be prompted by, which the train route and the train tool both return.
@@ -259,7 +259,7 @@ mod tests {
         }
         assert_eq!(
             MISSING_RUNPOD_KEY,
-            "Save a Runpod API key in Workspace Settings."
+            "Save a Runpod API key in Settings → AI."
         );
     }
 

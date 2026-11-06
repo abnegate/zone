@@ -1015,10 +1015,7 @@ mod tests {
         let error = start_job(&state, request, None)
             .await
             .expect_err("Runpod needs a saved key");
-        assert_eq!(
-            error.message(),
-            "Save a Runpod API key in Workspace Settings."
-        );
+        assert_eq!(error.message(), "Save a Runpod API key in Settings → AI.");
         assert!(state.train_jobs().current().is_none());
     }
 
