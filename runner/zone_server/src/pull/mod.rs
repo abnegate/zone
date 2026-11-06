@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::task::Poll;
 use std::time::Duration;
@@ -28,6 +28,7 @@ const CHECKSUM_MISMATCH: &str = "Image weight checksum mismatch";
 const INVALID_DIGEST: &str = "Image weight manifest has an invalid SHA-256 digest";
 const WAITING_FOR_RELEASE: &str = "waiting for another download of these image weights";
 const ALREADY_DOWNLOADING: &str = "These image weights are already downloading";
+const STAGING_SUFFIX: &str = ".download";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const RELEASE_WAITS: [Duration; 4] = [
     Duration::from_millis(100),
@@ -508,38 +509,49 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
         });
         return;
     }
-    if let Err(message) = fetch_weights(
+    let staged = staging(&target);
+    let installed = match fetch_weights(
         &manifest.url,
-        &target,
+        &staged,
         Some(checksum),
         Some(manifest.size_bytes),
         job,
     )
     .await
     {
-        job.publish(Event::Error { message });
-        return;
+        Ok(()) => install(&staged, &target, manifest.size_bytes),
+        Err(message) => Err(message),
+    };
+    match installed {
+        Ok(()) => job.publish(Event::Complete {
+            success: true,
+            message: "Model installed successfully",
+        }),
+        Err(message) => job.publish(Event::Error { message }),
     }
-    match std::fs::metadata(&target) {
-        Ok(metadata) if metadata.len() == manifest.size_bytes => {}
-        Ok(metadata) => {
-            let _ = std::fs::remove_file(&target);
-            job.publish(Event::Error {
-                message: size_mismatch(metadata.len(), manifest.size_bytes),
-            });
-            return;
-        }
-        Err(error) => {
-            job.publish(Event::Error {
-                message: format!("{STORE_FAILED}: {error}"),
-            });
-            return;
-        }
+}
+
+/// Where a manifest weight downloads to, so a file of the wrong length is
+/// caught before it replaces the weight installed at `target`.
+fn staging(target: &Path) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(STAGING_SUFFIX);
+    PathBuf::from(name)
+}
+
+fn install(staged: &Path, target: &Path, size: u64) -> Result<(), String> {
+    let installed = std::fs::metadata(staged)
+        .map_err(|error| format!("{STORE_FAILED}: {error}"))
+        .and_then(|metadata| match metadata.len() {
+            length if length == size => {
+                std::fs::rename(staged, target).map_err(|error| format!("{STORE_FAILED}: {error}"))
+            }
+            length => Err(size_mismatch(length, size)),
+        });
+    if installed.is_err() {
+        let _ = std::fs::remove_file(staged);
     }
-    job.publish(Event::Complete {
-        success: true,
-        message: "Model installed successfully",
-    });
+    installed
 }
 
 /// Transfer `url` to `target`, waiting a while for another transfer of the
@@ -761,7 +773,8 @@ fn process(job: &Job, line: &[u8]) -> Result<bool, String> {
 mod tests {
     use super::{
         ALREADY_DOWNLOADING, CANCELLED, CHECKSUM_MISMATCH, ComfyPull, Event, INVALID_DIGEST,
-        ManifestFile, PullRegistry, PullStart, WAITING_FOR_RELEASE, describe, retryable,
+        ManifestFile, PullRegistry, PullStart, STAGING_SUFFIX, WAITING_FOR_RELEASE, describe,
+        retryable,
     };
     use abnegate_llm::download::{Checksum, DownloadError};
     use axum::{
@@ -821,7 +834,7 @@ mod tests {
     }
 
     fn part(directory: &Path) -> PathBuf {
-        directory.join(format!("{RELATIVE_PATH}.part"))
+        directory.join(format!("{RELATIVE_PATH}{STAGING_SUFFIX}.part"))
     }
 
     async fn terminal(registry: &PullRegistry, model: &str) -> Event {
@@ -1231,7 +1244,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unannounced_size_mismatch_removes_the_weight() {
+    async fn an_unannounced_size_mismatch_keeps_the_installed_weight() {
+        const INSTALLED: &[u8] = b"the weight installed before the manifest changed";
         let origin = serve(Router::new().route(
             "/file.bin",
             get(|| async {
@@ -1242,6 +1256,9 @@ mod tests {
         ))
         .await;
         let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join(RELATIVE_PATH);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, INSTALLED).unwrap();
         let registry = PullRegistry::new();
         let expected = BODY.len() as u64 + 1;
         let _subscription = registry.start(manifest_pull(
@@ -1257,7 +1274,13 @@ mod tests {
                 BODY.len()
             )
         );
-        assert!(!directory.path().join(RELATIVE_PATH).exists());
+        assert_eq!(std::fs::read(&target).unwrap(), INSTALLED);
+        assert!(
+            !directory
+                .path()
+                .join(format!("{RELATIVE_PATH}{STAGING_SUFFIX}"))
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -1552,6 +1575,10 @@ mod tests {
             ".part".to_string(),
             ".part.validator".to_string(),
             format!(".part{TRANSFER_LOCK_SUFFIX}"),
+            STAGING_SUFFIX.to_string(),
+            format!("{STAGING_SUFFIX}.part"),
+            format!("{STAGING_SUFFIX}.part.validator"),
+            format!("{STAGING_SUFFIX}.part{TRANSFER_LOCK_SUFFIX}"),
         ] {
             std::fs::write(checkpoints.join(format!("{weight}{suffix}")), b"partial").unwrap();
         }
