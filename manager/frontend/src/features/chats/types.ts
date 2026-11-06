@@ -504,6 +504,14 @@ export const PULL_REQUEST_MERGEABILITY = [
 ] as const;
 export type PullRequestMergeability = (typeof PULL_REQUEST_MERGEABILITY)[number];
 
+export const PULL_REQUEST_CONNECTIONS = [
+  'credentialed',
+  'uncredentialed',
+  'disconnected',
+  'unavailable',
+] as const;
+export type PullRequestConnection = (typeof PULL_REQUEST_CONNECTIONS)[number];
+
 export interface PullRequestAutoMerge {
   enabled: boolean;
   unavailable: string | null;
@@ -542,6 +550,8 @@ export interface ChatPullRequest {
   status: PullRequestStatus | null;
   writable: boolean;
   credentialed: boolean;
+  /** How the workspace reaches GitHub for it, and so why it cannot when it cannot. */
+  connection: PullRequestConnection;
   /** Whether a failing or conflicted state starts a run that fixes it. */
   auto_fix: boolean;
   /** Whether such a run is already answering for its current state. */

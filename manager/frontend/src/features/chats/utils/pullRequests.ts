@@ -1,6 +1,14 @@
-import type { ChatPullRequest, PullRequestStatus, PullRequestThreads } from '../types';
+import type {
+  ChatPullRequest,
+  PullRequestConnection,
+  PullRequestStatus,
+  PullRequestThreads,
+} from '../types';
 
 export const UNCREDENTIALED_HINT = 'No connected GitHub source holds a credential for it.';
+export const DISCONNECTED_HINT =
+  'The GitHub connection it was reached through was removed or suspended. Reconnect GitHub.';
+export const UNAVAILABLE_HINT = 'GitHub is temporarily unreachable. Try again in a moment.';
 export const READ_ONLY_HINT = 'Needs write access to this workspace.';
 export const AUTO_MERGE_HINT = 'GitHub merges it once its checks and reviews pass.';
 
@@ -74,4 +82,18 @@ export function pullRequestTitle(pullRequest: ChatPullRequest): string {
 
 export function pullRequestName(pullRequest: ChatPullRequest): string {
   return `${pullRequest.repo} #${pullRequest.number}`;
+}
+
+const CONNECTION_HINTS: Record<Exclude<PullRequestConnection, 'credentialed'>, string> = {
+  uncredentialed: UNCREDENTIALED_HINT,
+  disconnected: DISCONNECTED_HINT,
+  unavailable: UNAVAILABLE_HINT,
+};
+
+/** Why GitHub cannot be asked about the pull request, or nothing when it can. */
+export function connectionHint({ credentialed, connection }: ChatPullRequest): string | undefined {
+  if (credentialed) {
+    return undefined;
+  }
+  return connection === 'credentialed' ? UNCREDENTIALED_HINT : CONNECTION_HINTS[connection];
 }
