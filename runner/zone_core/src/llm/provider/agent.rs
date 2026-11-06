@@ -1,6 +1,7 @@
 //! The coding agent CLIs this crate knows how to drive.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use abnegate_llm::ReasoningEffort;
@@ -122,6 +123,18 @@ const CLAUDE_DEFAULTS: &[(&str, &str)] = &[
 const SESSION_ID: &str = "--session-id";
 const RESUME: &str = "--resume";
 const CLAUDE_PROMPT: &str = "--print";
+
+/// Claude reads its turn as one stream-json user message, the only input that
+/// carries images, and answers in stream-json.
+const CLAUDE_STREAMING: &[&str] = &[
+    "--verbose",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+];
+const CODEX_STREAMING: &[&str] = &["exec", "--json", "--skip-git-repo-check"];
+const CODEX_IMAGE: &str = "--image";
 
 const CODEX_RESUME: &str = "resume";
 const CODEX_PROMPT: &str = "-";
@@ -355,8 +368,8 @@ impl AgentKind {
         session: Option<&Session>,
     ) -> Vec<String> {
         let mut arguments: Vec<String> = match self {
-            Self::Claude => ["--verbose", "--output-format", "stream-json"],
-            Self::Codex => ["exec", "--json", "--skip-git-repo-check"],
+            Self::Claude => CLAUDE_STREAMING,
+            Self::Codex => CODEX_STREAMING,
         }
         .iter()
         .map(|argument| (*argument).to_string())
@@ -419,6 +432,21 @@ impl AgentKind {
         );
 
         arguments
+    }
+
+    /// The flags naming the image files a turn attaches, to go before the
+    /// prompt argument. Claude reads its images from stdin, so needs none.
+    ///
+    /// Codex's `--image` takes any number of values, so each is joined to its
+    /// flag with `=`: a bare path would swallow the `-` that follows it.
+    pub fn image_arguments(self, images: &[PathBuf]) -> Vec<String> {
+        match self {
+            Self::Claude => Vec::new(),
+            Self::Codex => images
+                .iter()
+                .map(|path| format!("{CODEX_IMAGE}={}", path.display()))
+                .collect(),
+        }
     }
 
     /// The flag setting `effort`, or nothing when `model` does not take it.
@@ -749,6 +777,8 @@ mod tests {
             arguments,
             [
                 "--verbose",
+                "--input-format",
+                "stream-json",
                 "--output-format",
                 "stream-json",
                 "--model",

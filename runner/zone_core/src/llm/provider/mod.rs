@@ -26,6 +26,8 @@
 mod agent;
 mod cli;
 mod event;
+mod image;
+mod input;
 mod lines;
 mod observer;
 mod occupancy;
@@ -49,4 +51,4 @@ pub use settings::{
     BuiltinTools, CliSettings, CodexSandbox, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT,
     DEFAULT_TIMEOUT, SignIn, Toolset,
 };
-pub use transcript::{render, render_tail};
+pub use transcript::{Part, Transcript, render, render_tail};
