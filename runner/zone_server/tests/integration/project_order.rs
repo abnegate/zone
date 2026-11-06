@@ -8,16 +8,28 @@ use uuid::Uuid;
 use crate::common::{TestClient, test_email, test_password};
 
 async fn register(client: &TestClient) -> String {
-    let response = client
+    registered(client).await.0
+}
+
+/// A new member's access token and user id.
+async fn registered(client: &TestClient) -> (String, String) {
+    let body = client
         .post_json(
             "/api/auth/register",
             &json!({ "email": test_email(), "password": test_password() }),
         )
-        .await;
-    response.json_value()["access_token"]
-        .as_str()
-        .expect("registration must return an access token")
-        .to_string()
+        .await
+        .json_value();
+    let field = |value: &Value, name: &str| {
+        value
+            .as_str()
+            .unwrap_or_else(|| panic!("registration must return {name}"))
+            .to_string()
+    };
+    (
+        field(&body["access_token"], "an access token"),
+        field(&body["user"]["id"], "the user's id"),
+    )
 }
 
 fn slug() -> String {
@@ -165,12 +177,43 @@ async fn an_order_cannot_move_another_workspaces_projects() {
         "a stranger to the workspace is told it does not exist"
     );
     assert_eq!(
-        reorder(&client, &outsider, &other_workspace, &[&foreign, &alpha]).await,
-        StatusCode::BAD_REQUEST,
-        "a project of another workspace cannot be pulled into this one's order"
+        reorder(&client, &outsider, &other_workspace, &[&alpha, &foreign]).await,
+        StatusCode::NO_CONTENT,
+        "another workspace's project in the order is skipped"
     );
     assert_eq!(
         names(&listed(&client, &owner, &workspace_id).await),
+        ["Beta", "Alpha"]
+    );
+    assert_eq!(
+        names(&listed(&client, &outsider, &other_workspace).await),
+        ["Foreign"]
+    );
+}
+
+#[tokio::test]
+async fn a_viewer_cannot_reorder_projects() {
+    let client = TestClient::with_db().await;
+    let owner = register(&client).await;
+    let (viewer, viewer_id) = registered(&client).await;
+    let workspace_id = workspace(&client, &owner).await;
+    let alpha = project(&client, &owner, &workspace_id, "Alpha").await;
+    let beta = project(&client, &owner, &workspace_id, "Beta").await;
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1::uuid, $2::uuid, 'viewer')",
+    )
+    .bind(&workspace_id)
+    .bind(&viewer_id)
+    .execute(client.state().db())
+    .await
+    .expect("a viewer");
+
+    assert_eq!(
+        reorder(&client, &viewer, &workspace_id, &[&alpha, &beta]).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        names(&listed(&client, &viewer, &workspace_id).await),
         ["Beta", "Alpha"]
     );
 }

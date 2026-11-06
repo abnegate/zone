@@ -8,25 +8,30 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reorder {
     Reordered,
-    /// The order named a project twice, or one the workspace does not hold.
-    Unknown,
+    /// The order named a project twice, so it says two things about one place.
+    Duplicated,
 }
 
-/// The workspace's projects once `requested` takes the places its projects
-/// hold in `current`, or none when `requested` names a project twice or one
-/// `current` lacks.
+/// The workspace's projects once the ones `requested` names take, in that
+/// order, the places they hold in `current`. Ids `current` lacks are skipped;
+/// an id named twice makes the order unusable.
 pub fn arrange(current: &[Uuid], requested: &[Uuid]) -> Option<Vec<Uuid>> {
-    let named: HashSet<Uuid> = requested.iter().copied().collect();
-    if named.len() != requested.len() || !named.iter().all(|id| current.contains(id)) {
+    let mut seen = HashSet::with_capacity(requested.len());
+    if !requested.iter().all(|id| seen.insert(*id)) {
         return None;
     }
-    let mut placed = requested.iter();
+    let placed: Vec<Uuid> = requested
+        .iter()
+        .copied()
+        .filter(|id| current.contains(id))
+        .collect();
+    let mut next = placed.iter();
     Some(
         current
             .iter()
             .map(|id| {
-                if named.contains(id) {
-                    *placed.next().unwrap_or(id)
+                if placed.contains(id) {
+                    *next.next().unwrap_or(id)
                 } else {
                     *id
                 }
@@ -78,9 +83,13 @@ mod tests {
     }
 
     #[test]
-    fn an_order_naming_another_workspaces_project_is_refused() {
-        let current = ids(2);
+    fn a_project_the_workspace_no_longer_holds_is_skipped() {
+        let current = ids(3);
+        let gone = Uuid::new_v4();
 
-        assert_eq!(arrange(&current, &[current[0], Uuid::new_v4()]), None);
+        assert_eq!(
+            arrange(&current, &[current[2], gone, current[0]]),
+            Some(vec![current[2], current[1], current[0]])
+        );
     }
 }

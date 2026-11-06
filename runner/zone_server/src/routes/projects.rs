@@ -153,9 +153,9 @@ pub struct ProjectData {
     description: Option<String>,
     status: String,
     github_repo_url: Option<String>,
-    /// Where the workspace placed the project in its own order, lowest first.
     position: i32,
-    /// When a member last typed in the project's chats or added it a task.
+    /// Listed only, and only once a member has typed in or added to the project.
+    #[serde(skip_serializing_if = "Option::is_none")]
     last_used_at: Option<String>,
     /// Whether the project runs itself, and why it stopped or when it finished.
     auto: bool,
@@ -202,7 +202,7 @@ impl From<ProjectRow> for ProjectData {
             status: row.status,
             github_repo_url: row.github_repo_url,
             position: row.position,
-            last_used_at: row.last_used_at.map(|at| at.and_utc().to_rfc3339()),
+            last_used_at: None,
             auto: false,
             auto_paused_reason: None,
             auto_completed_at: None,
@@ -239,7 +239,6 @@ pub struct UpdateProjectRequest {
     auto: Option<bool>,
 }
 
-/// The workspace's projects, or some of them, in the order they should take
 #[derive(Debug, Deserialize)]
 pub struct ReorderProjectsRequest {
     project_ids: Vec<Uuid>,
@@ -367,12 +366,17 @@ pub async fn list(
     let automation = auto_projects::automation_for_workspace(state.db(), query.workspace_id)
         .await
         .unwrap_or_default();
+    let used = projects::last_used(state.db(), query.workspace_id).await?;
     Ok(Json(ProjectsListResponse {
         projects: rows
             .into_iter()
             .map(|row| {
                 let known = automation.iter().find(|entry| entry.project_id == row.id);
-                ProjectData::from(row).with_automation(known)
+                let last_used_at = used.get(&row.id).map(|at| at.and_utc().to_rfc3339());
+                ProjectData {
+                    last_used_at,
+                    ..ProjectData::from(row).with_automation(known)
+                }
             })
             .collect(),
     })
@@ -380,14 +384,11 @@ pub async fn list(
 }
 
 /// PUT /api/workspaces/{workspace_id}/projects/order
-///
-/// The projects named take the places they held between them, in the order
-/// given; the rest stay where they are.
 pub async fn reorder(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
-    Json(req): Json<ReorderProjectsRequest>,
+    Json(request): Json<ReorderProjectsRequest>,
 ) -> Result<Response, ServerError> {
     let user_id = user_id(&auth)?;
     if !workspace_members::is_member(state.db(), user_id, workspace_id).await? {
@@ -398,10 +399,10 @@ pub async fn reorder(
             "Workspace write access required".to_string(),
         ));
     }
-    match projects::reorder(state.db(), workspace_id, &req.project_ids).await? {
+    match projects::reorder(state.db(), workspace_id, &request.project_ids).await? {
         Reorder::Reordered => Ok(StatusCode::NO_CONTENT.into_response()),
-        Reorder::Unknown => Err(ServerError::BadRequest(
-            "The order must name each of the workspace's projects at most once".to_string(),
+        Reorder::Duplicated => Err(ServerError::BadRequest(
+            "The order must name each project at most once".to_string(),
         )),
     }
 }

@@ -66,11 +66,11 @@ impl Fixture {
     }
 
     async fn last_used(&self, project: Uuid) -> Option<NaiveDateTime> {
-        get_project(&self.pool, project)
+        last_used(&self.pool, self.workspace)
             .await
-            .expect("the project")
-            .expect("a stored project")
-            .last_used_at
+            .expect("when the projects were used")
+            .get(&project)
+            .copied()
     }
 
     async fn chat(&self, project: Uuid) -> Uuid {
@@ -166,19 +166,77 @@ async fn a_reorder_of_some_projects_leaves_the_rest_in_place() {
 }
 
 #[tokio::test]
-async fn a_reorder_naming_another_workspaces_project_changes_nothing() {
+async fn a_reorder_cannot_pull_in_another_workspaces_project() {
     let other = fixture().await;
     let fixture = fixture().await;
     let alpha = fixture.project("Alpha").await;
-    fixture.project("Beta").await;
+    let beta = fixture.project("Beta").await;
     let outsider = other.project("Outsider").await;
 
-    let outcome = reorder(&fixture.pool, fixture.workspace, &[alpha, outsider])
+    let outcome = reorder(&fixture.pool, fixture.workspace, &[alpha, outsider, beta])
         .await
         .expect("the reorder");
 
-    assert_eq!(outcome, Reorder::Unknown);
+    assert_eq!(outcome, Reorder::Reordered);
+    assert_eq!(fixture.names().await, ["Alpha", "Beta"]);
+    assert_eq!(other.names().await, ["Outsider"]);
+}
+
+#[tokio::test]
+async fn a_reorder_naming_a_project_twice_changes_nothing() {
+    let fixture = fixture().await;
+    let alpha = fixture.project("Alpha").await;
+    fixture.project("Beta").await;
+
+    let outcome = reorder(&fixture.pool, fixture.workspace, &[alpha, alpha])
+        .await
+        .expect("the reorder");
+
+    assert_eq!(outcome, Reorder::Duplicated);
     assert_eq!(fixture.names().await, ["Beta", "Alpha"]);
+}
+
+#[tokio::test]
+async fn concurrent_reorders_each_keep_what_they_moved() {
+    let fixture = fixture().await;
+    let alpha = fixture.project("Alpha").await;
+    let beta = fixture.project("Beta").await;
+    let gamma = fixture.project("Gamma").await;
+    let delta = fixture.project("Delta").await;
+    reorder(
+        &fixture.pool,
+        fixture.workspace,
+        &[alpha, beta, gamma, delta],
+    )
+    .await
+    .expect("a known order");
+
+    let mut holder = fixture.pool.begin().await.expect("a transaction");
+    lock_order(&mut holder, fixture.workspace)
+        .await
+        .expect("the order lock");
+    sqlx::query(r#"UPDATE projects SET "position" = 5 - "position" WHERE workspace_id = $1"#)
+        .bind(fixture.workspace)
+        .execute(&mut *holder)
+        .await
+        .expect("the first reorder reverses the list");
+    let second = tokio::spawn({
+        let pool = fixture.pool.clone();
+        let workspace = fixture.workspace;
+        async move { reorder(&pool, workspace, &[alpha, beta]).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    holder.commit().await.expect("the first reorder lands");
+
+    second
+        .await
+        .expect("the second reorder ran")
+        .expect("the second reorder");
+    assert_eq!(
+        fixture.names().await,
+        ["Delta", "Gamma", "Alpha", "Beta"],
+        "the second reorder swaps Alpha and Beta within the order the first one left"
+    );
 }
 
 #[tokio::test]
