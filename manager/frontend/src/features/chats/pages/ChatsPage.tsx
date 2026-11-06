@@ -1293,7 +1293,7 @@ export default function ChatsPage() {
             variant="ghost"
             size="sm"
             className="chat-back chat-back-state"
-            onClick={() => setSelectedChatId(null)}
+            onClick={clearSelectedChat}
           >
             Back to chats
           </Button>
@@ -1301,12 +1301,7 @@ export default function ChatsPage() {
         {displayedChat ? (
           <>
             <div className="chat-header">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="chat-back"
-                onClick={() => setSelectedChatId(null)}
-              >
+              <Button variant="ghost" size="sm" className="chat-back" onClick={clearSelectedChat}>
                 Back to chats
               </Button>
               <div className="chat-header-info">

@@ -761,6 +761,30 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('drops the chat from the address when going back from it', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByText('Hi there!');
+      await waitFor(() => expect(selectedChatParam()).toBe('chat-1'));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Back to chats' }));
+
+      await waitFor(() => expect(selectedChatParam()).toBeNull());
+      expect(screen.queryByText('Hi there!')).not.toBeInTheDocument();
+    });
+
+    it('drops a chat that is still loading from the address when going back from it', async () => {
+      mockClient.getChat.mockReturnValueOnce(new Promise(() => {}));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await waitFor(() => expect(selectedChatParam()).toBe('chat-1'));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Back to chats' }));
+
+      await waitFor(() => expect(selectedChatParam()).toBeNull());
+      expect(screen.queryByRole('button', { name: 'Back to chats' })).not.toBeInTheDocument();
+    });
+
     it('displays chat messages when selected', async () => {
       renderChatsPage();
 
