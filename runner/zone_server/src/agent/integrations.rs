@@ -14,6 +14,7 @@ use abnegate_vcs::JobLogError;
 use abnegate_vcs::Label;
 use abnegate_vcs::ListedPullRequest;
 use abnegate_vcs::ObjectId;
+use abnegate_vcs::Page;
 use abnegate_vcs::ParseError;
 use abnegate_vcs::PullRequestDetail;
 use abnegate_vcs::PullRequestError;
@@ -34,35 +35,62 @@ use abnegate_vcs::WorkflowRunFilter;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
+use serde_json::json;
 use std::num::NonZeroU8;
 use std::num::NonZeroU32;
 use std::num::NonZeroU64;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 use uuid::Uuid;
-use zone_core::tools::{
-    MAX_TOOL_MESSAGE_CHARS, REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolRegistry,
-    ToolResult, excerpt, reason_property,
-};
+use zone_core::tools::MAX_TOOL_MESSAGE_CHARS;
+use zone_core::tools::REASON_PARAM;
+use zone_core::tools::Tier;
+use zone_core::tools::Tool;
+use zone_core::tools::ToolContext;
+use zone_core::tools::ToolError;
+use zone_core::tools::ToolRegistry;
+use zone_core::tools::ToolResult;
+use zone_core::tools::excerpt;
+use zone_core::tools::reason_property;
 
-use super::{PREVIEW_BODY_CHARS, PREVIEW_TITLE_CHARS};
+use super::PREVIEW_BODY_CHARS;
+use super::PREVIEW_TITLE_CHARS;
 
-use super::readiness::{
-    self, CheckEvidence, CommentEvidence, CommitSha, PullEvidence, ReviewComment, ReviewSignals,
-    ReviewThread, ThreadEvidence,
-};
-use super::releases::{self, Lookup, ReleaseIdentity, ReleasePipeline, RunEvidence};
-use super::tools::{WorkspaceScope, apply_record_cap, json_chars, take_array, truncate};
+use super::readiness;
+use super::readiness::CheckEvidence;
+use super::readiness::CommentEvidence;
+use super::readiness::CommitSha;
+use super::readiness::PullEvidence;
+use super::readiness::ReviewComment;
+use super::readiness::ReviewSignals;
+use super::readiness::ReviewThread;
+use super::readiness::ThreadEvidence;
+use super::releases;
+use super::releases::Lookup;
+use super::releases::ReleaseIdentity;
+use super::releases::ReleasePipeline;
+use super::releases::RunEvidence;
+use super::tools::WorkspaceScope;
+use super::tools::apply_record_cap;
+use super::tools::json_chars;
+use super::tools::take_array;
+use super::tools::truncate;
 use crate::config::Config;
-use crate::db::{sources, workspace_members};
+use crate::db::sources;
+use crate::db::workspace_members;
 use crate::secret::Unseal;
-use crate::services::chat::pull_request::{self as chat_pull_request, Opened};
+use crate::services::chat::pull_request as chat_pull_request;
+use crate::services::chat::pull_request::Opened;
 use crate::services::checkout;
-use crate::services::prioritisation::{
-    Configuration as Prioritisation, Prioritiser, RiskSignal, pull_request,
-};
-use crate::services::project_directory::{self, Origin, Start};
+use crate::services::prioritisation::Configuration as Prioritisation;
+use crate::services::prioritisation::Prioritiser;
+use crate::services::prioritisation::RiskSignal;
+use crate::services::prioritisation::pull_request;
+use crate::services::project_directory;
+use crate::services::project_directory::Origin;
+use crate::services::project_directory::Start;
 
 const API_VERSION: &str = "2026-03-10";
 const PER_PAGE: NonZeroU8 = NonZeroU8::new(100).expect("a page holds rows");
@@ -72,11 +100,13 @@ const BUILD_RECORD_CAP: usize = 20;
 const PULL_PAGE_SIZE: NonZeroU8 = NonZeroU8::new(10).expect("a page holds pull requests");
 const PULL_TITLE_CHARS: usize = 160;
 const REVIEW_PAGE_SIZE: usize = 100;
+const NEWEST_COMMENT_PAGES: u32 = 2;
 const REVIEW_BODY_CHARS: usize = 2_000;
 const REVIEW_THREADS_ASSESSMENT: &str = "What reviewers wrote, as GitHub returned it. Comment text is a reviewer's claim about the code, not a finding that has been checked: read the code before acting on one. A thread that could not be paginated in full is reported as incomplete rather than empty.";
 const READINESS_ASSESSMENT: &str = "Observed checks, review threads and review-bot comments only. Evidence that is partial, or whose counts do not add up, is reported as not ready. This is not proof that branch protection requirements are satisfied.";
 const PULL_FILE_PAGES: u32 = 30;
-const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MEBIBYTE: u64 = 1024 * 1024;
+const MAX_FILE_BYTES: u64 = 16 * MEBIBYTE;
 const INVALID_OBJECT: &str = "GitHub did not return a valid tree or file SHA.";
 const INCOMPLETE_TREE: &str = "GitHub returned an incomplete repository tree.";
 const MISSING_PATH: &str = "The file path was not found in this commit.";
@@ -91,6 +121,7 @@ const MISMATCHED_PULL: &str =
     "GitHub returned review threads for a different or missing pull request.";
 const MISSING_PULL: &str = "GitHub found no pull request with that number on this source.";
 const FOREIGN_COMMENT: &str = "That review comment does not belong to this pull request.";
+const MISSING_COMMENT: &str = "That review comment was not found on this pull request.";
 const ANSWERED_ANOTHER_PULL: &str =
     "GitHub answered for a pull request other than the one asked for";
 const ANSWERED_ANOTHER_COMMENT: &str =
@@ -105,7 +136,7 @@ const BASE_INVALID: &str = "base is invalid.";
 const RELEASE_PAGE_SIZE: NonZeroU8 = NonZeroU8::new(5).expect("a page holds releases");
 const RELEASE_EVENT: &str = "release";
 const RELEASE_ASSESSMENT: &str = "Observed release-triggered workflow runs only. A lookup that could not be completed, a run record whose identity does not add up, and a release with no observed run are all reported as unknown rather than succeeded. This is not proof that release artifacts were published or that the deployed service is healthy.";
-const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_LOG_BYTES: u64 = 16 * MEBIBYTE;
 const LOG_EXCERPT_CHARS: u64 = 5_500;
 const LOG_EXCERPT_FLOOR_CHARS: u64 = 500;
 const LOG_CONTEXT_LINES: usize = 40;
@@ -165,14 +196,16 @@ const BUILD_ASSESSMENT: &str =
 const COMPLETED_STATUS: &str = "completed";
 const UNIDENTIFIED_CI: &str = "GitHub returned CI records without their identities.";
 const FOREIGN_CHECKS: &str = "GitHub returned checks for a different or missing commit SHA.";
-const WORKFLOW_SEARCH_LIMIT: &str =
-    "GitHub's 1,000-result workflow search limit prevents a complete build assessment.";
+const PARTIAL_WORKFLOW_RUNS: &str = "GitHub's workflow runs could not be read in full (the 1,000-result search limit, or runs shifting between pages), so the build cannot be assessed completely.";
 const INVALID_TAG: &str = "tag is invalid.";
 const UNUSABLE_RELEASE: &str = "GitHub returned a release without a usable identity.";
 const FOREIGN_DEPLOYMENT: &str =
     "GitHub returned a deployment for a different or missing commit SHA.";
 const DIFFERENT_PULL: &str = "GitHub returned a different pull request.";
 const MISSING_PULL_HEAD: &str = "GitHub did not return an immutable pull request head SHA.";
+const INVALID_PULL_BRANCH: &str =
+    "GitHub returned a pull request without a usable head or base branch name.";
+const NO_PUSH_CREDENTIAL: &str = "The source has no credential to push with.";
 const JOB_WITHOUT_COMMIT: &str = "GitHub returned a job without a commit SHA.";
 const FOREIGN_JOB: &str =
     "That job does not belong to the pull request or commit being asked about.";
@@ -307,10 +340,10 @@ impl Tool for Integration {
                 "Read one GitHub issue in full by number from a connected workspace source: its title, state, labels, assignees, complete body and first page of comments. Use it for the details of a specific issue; list_issues only carries a body snippet. Pull requests are refused here: assess_pull_requests reviews those."
             }
             Operation::File => {
-                "Read one file from a connected GitHub repository at an immutable commit, which is how to review what a pull request or branch changed. Returns UTF-8 content as a character page that fits the context budget, with a source URL; follow next to continue. Does not read host files. GitHub files over 100 MB are unsupported."
+                "Read one file from a connected GitHub repository at an immutable commit, which is how to review what a pull request or branch changed. Returns UTF-8 content as a character page that fits the context budget, with a source URL; follow next to continue. Does not read host files. GitHub files over 16 MiB are unsupported."
             }
             Operation::PullRequests => {
-                "Review the open pull requests of a connected GitHub source (or one by number) and say whether each is ready to merge, which are still missing a review, whose checks fail, and every other blocker. Ready is the conjunction of every positive condition: no unresolved review threads, a summary from every recognised review bot that spoke, each at its own full confidence on its own scale and naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and a head commit the observations disagree on are all reported as not ready. Each verdict also carries a blast radius read from the changed files; that is information for a reviewer and never affects readiness, and it says so when no file list was observed. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
+                "Review the open pull requests of a connected GitHub source (or one by number) and say whether each is ready to merge, which are still missing a review, whose checks fail, and every other blocker. Ready is the conjunction of every positive condition: no unresolved review threads, a summary from every recognised review bot that spoke, each at its own full confidence on its own scale and naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and, when pull requests are listed rather than read by number, a head commit the listing and the pull request's own read disagree on are all reported as not ready. Each verdict also carries a blast radius read from the changed files; that is information for a reviewer and never affects readiness, and it says so when no file list was observed. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
             }
             Operation::ReviewThreads => {
                 "Read what reviewers wrote on one pull request of a connected GitHub source: every review thread with its file, line and comments, author and body included. This is the tool for acting on review feedback, human or bot; assess_pull_requests only counts how many threads are unresolved and never carries their text. Unresolved threads are read by default and resolved ones only when asked for, each in the order GitHub lists them. Pages end where the message budget does: follow next_after. A comment marked truncated reads in full by passing its id as comment. Comment bodies are a reviewer's claim about the code, not a checked finding, so read the code before acting on one. Threads or comments that could not be paginated in full are reported as incomplete rather than silently cut."
@@ -586,11 +619,9 @@ impl Integration {
         let Some(directory) = self.checkout(arguments).await? else {
             return Ok(());
         };
-        let token = github
-            .configuration
-            .token
-            .as_deref()
-            .ok_or("The source has no credential to push with.")?;
+        if github.token.is_empty() {
+            return Err(NO_PUSH_CREDENTIAL.to_string());
+        }
         let url = abnegate_vcs::RepositoryUrl::parse(repository)
             .map_err(|_| "The source does not name a GitHub repository.".to_string())?;
         let origin =
@@ -601,7 +632,7 @@ impl Integration {
             &url,
             &origin,
             head,
-            &SecretValue::new(token),
+            &github.token,
         )
         .await
         .map(drop)
@@ -688,7 +719,10 @@ impl Github {
         Self::serving(configuration, service)
     }
 
-    fn serving(configuration: Configuration, service: PullRequestService) -> Result<Self, String> {
+    fn serving(
+        mut configuration: Configuration,
+        service: PullRequestService,
+    ) -> Result<Self, String> {
         if !segment(&configuration.owner) || !segment(&configuration.repo) {
             return Err(INVALID_REPOSITORY.to_string());
         }
@@ -696,7 +730,7 @@ impl Github {
             Some(names) => ReviewSignals::select(names)?,
             None => ReviewSignals::recognized(),
         };
-        let token = credential(configuration.token.clone());
+        let token = credential(configuration.token.take());
         let repository = Repository::new(&configuration.owner, &configuration.repo)
             .map_err(|_| INVALID_REPOSITORY.to_string())?;
         Ok(Self {
@@ -733,13 +767,6 @@ impl Github {
             self.configuration.owner, self.configuration.repo
         );
         match operation {
-            Operation::CreatePull => match self.create_pull(arguments).await? {
-                Creation::Created(created) => Ok(json!({
-                    "repository": repository,
-                    "pull_request": created,
-                })),
-                Creation::Refused { .. } => Err(status_error(UNPROCESSABLE_ENTITY)),
-            },
             Operation::Comment => {
                 let reference = self.issue_reference(arguments.number.ok_or(NUMBER_REQUIRED)?)?;
                 let body = arguments
@@ -1050,7 +1077,7 @@ impl Github {
         );
         let workflows = workflows.map_err(ci_described)?;
         if !workflows.complete {
-            return Err(WORKFLOW_SEARCH_LIMIT.to_string());
+            return Err(PARTIAL_WORKFLOW_RUNS.to_string());
         }
         let checks = checks.map_err(ci_described)?;
         let statuses = statuses.map_err(ci_described)?;
@@ -1389,38 +1416,63 @@ impl Github {
     }
 
     /// The newest of a pull request's conversation comments, where review
-    /// bots post their summaries, read no further than one page past the
-    /// most a readiness verdict weighs, so a conversation longer than that
-    /// reads as incomplete rather than as all of it.
+    /// bots post their summaries, so a conversation longer than a readiness
+    /// verdict weighs reads as incomplete rather than as all of it.
+    ///
+    /// GitHub lists them oldest first, so the second page says whether the
+    /// first held all of them, and past two full pages the conversation's
+    /// own count says which pages hold the newest.
     async fn review_comments(&self, reference: &IssueReference) -> Result<CommentEvidence, String> {
-        let first = self
-            .service
-            .list_comments(reference, &self.token, NonZeroU32::MIN, PER_PAGE)
-            .await
-            .map_err(described)?;
-        let mut comments = first.items;
-        let complete = match first.next {
-            None => true,
-            Some(next) => {
-                let rest = self
-                    .service
-                    .list_comments(reference, &self.token, next, PER_PAGE)
-                    .await
-                    .map_err(described)?;
-                let complete = rest.items.is_empty();
-                comments.extend(rest.items);
-                complete
-            }
+        let first = self.comment_page(reference, NonZeroU32::MIN).await?;
+        let Some(second) = first.next else {
+            return Ok(comment_evidence(first.items, true));
         };
-        let excess = comments.len().saturating_sub(REVIEW_PAGE_SIZE);
-        Ok(CommentEvidence {
-            complete,
-            comments: comments
-                .into_iter()
-                .skip(excess)
-                .map(issue_comment)
-                .collect(),
-        })
+        let rest = self.comment_page(reference, second).await?;
+        if rest.items.is_empty() {
+            return Ok(comment_evidence(first.items, true));
+        }
+        let comments = match rest.next {
+            None => {
+                let mut comments = first.items;
+                comments.extend(rest.items);
+                comments
+            }
+            Some(_) => self.newest_comments(reference).await?,
+        };
+        Ok(comment_evidence(comments, false))
+    }
+
+    /// The last pages of a conversation, found from how many comments GitHub
+    /// counts on it.
+    async fn newest_comments(
+        &self,
+        reference: &IssueReference,
+    ) -> Result<Vec<IssueComment>, String> {
+        let counted = self
+            .service
+            .fetch_issue(reference, &self.token)
+            .await
+            .map_err(described)?
+            .comments;
+        let pages = u32::try_from(counted.div_ceil(u64::from(PER_PAGE.get())))
+            .map_err(|_| INVALID_RESPONSE.to_string())?
+            .max(NEWEST_COMMENT_PAGES);
+        let mut comments = Vec::new();
+        for page in (pages - NEWEST_COMMENT_PAGES + 1..=pages).filter_map(NonZeroU32::new) {
+            comments.extend(self.comment_page(reference, page).await?.items);
+        }
+        Ok(comments)
+    }
+
+    async fn comment_page(
+        &self,
+        reference: &IssueReference,
+        page: NonZeroU32,
+    ) -> Result<Page<IssueComment>, String> {
+        self.service
+            .list_comments(reference, &self.token, page, PER_PAGE)
+            .await
+            .map_err(described)
     }
 
     async fn release_pipelines(&self, arguments: &Arguments) -> Result<Value, String> {
@@ -1545,7 +1597,7 @@ impl Github {
             .await
             .map_err(described)?;
         if !runs.complete {
-            return Err(WORKFLOW_SEARCH_LIMIT.to_string());
+            return Err(PARTIAL_WORKFLOW_RUNS.to_string());
         }
         Ok(runs.items.iter().map(run_evidence).collect())
     }
@@ -1615,7 +1667,9 @@ impl Github {
             )
             .await
             .map_err(|error| match error {
-                PullRequestError::Http(_) => UNREADABLE_FILE.to_string(),
+                PullRequestError::Http(failure) if failure.is_body() || failure.is_decode() => {
+                    UNREADABLE_FILE.to_string()
+                }
                 PullRequestError::Parse(_) => INVALID_OBJECT.to_string(),
                 error => described(error),
             })?;
@@ -1640,7 +1694,7 @@ impl Github {
             .fetch_workflow_job(&self.repository, &self.token, job_id)
             .await
             .map_err(|error| match error {
-                PullRequestError::Parse(_) => JOB_WITHOUT_COMMIT.to_string(),
+                PullRequestError::Parse(ParseError::CommitSha(_)) => JOB_WITHOUT_COMMIT.to_string(),
                 error => described(error),
             })?;
         let run_id = self.verify_job(&job, job_id.get(), &sha)?;
@@ -1693,7 +1747,10 @@ impl Github {
             .fetch_pull(&reference, &self.token)
             .await
             .map_err(|error| match error {
-                PullRequestError::Parse(_) => MISSING_PULL_HEAD.to_string(),
+                PullRequestError::Parse(ParseError::CommitSha(_)) => MISSING_PULL_HEAD.to_string(),
+                PullRequestError::Parse(ParseError::BranchName(_)) => {
+                    INVALID_PULL_BRANCH.to_string()
+                }
                 error => described(error),
             })?;
         if pull.number != reference.number() {
@@ -2173,6 +2230,19 @@ fn thread_evidence(counts: ReviewThreadCount) -> ThreadEvidence {
     }
 }
 
+/// The newest of `comments`, as many as a readiness verdict weighs.
+fn comment_evidence(comments: Vec<IssueComment>, complete: bool) -> CommentEvidence {
+    let excess = comments.len().saturating_sub(REVIEW_PAGE_SIZE);
+    CommentEvidence {
+        complete,
+        comments: comments
+            .into_iter()
+            .skip(excess)
+            .map(issue_comment)
+            .collect(),
+    }
+}
+
 fn issue_comment(comment: IssueComment) -> ReviewComment {
     ReviewComment {
         id: comment.id,
@@ -2229,9 +2299,7 @@ fn described(error: PullRequestError) -> String {
             JobLogError::Undirected => LOG_UNDIRECTED.to_string(),
             JobLogError::UnexpectedHost => LOG_UNEXPECTED_HOST.to_string(),
             JobLogError::Unreachable => LOG_UNREACHABLE.to_string(),
-            JobLogError::Refused(status) => {
-                format!("The job log download returned HTTP {status}.")
-            }
+            JobLogError::Refused(status) => log_status_error(status),
             JobLogError::Interrupted => LOG_INTERRUPTED.to_string(),
             _ => UNEXPECTED_RESPONSE.to_string(),
         },
@@ -2251,24 +2319,26 @@ fn status_error(status: u16) -> String {
     )
 }
 
+fn log_status_error(status: u16) -> String {
+    format!("The job log download returned HTTP {status}.")
+}
+
 fn thread_described(error: PullRequestError) -> String {
     match error {
         PullRequestError::PullRequestNotFound => MISSING_PULL.to_string(),
         PullRequestError::GitHubApi(message) if message == ANSWERED_ANOTHER_PULL => {
             MISMATCHED_PULL.to_string()
         }
-        PullRequestError::GitHubApi(_)
-        | PullRequestError::Forbidden
-        | PullRequestError::RateLimited
-        | PullRequestError::NotFound
-        | PullRequestError::RepositoryNotFound => REVIEW_QUERY_REJECTED.to_string(),
+        PullRequestError::GitHubApi(_) | PullRequestError::RepositoryNotFound => {
+            REVIEW_QUERY_REJECTED.to_string()
+        }
         error => described(error),
     }
 }
 
 fn comment_described(error: PullRequestError) -> String {
     match error {
-        PullRequestError::NotFound => FOREIGN_COMMENT.to_string(),
+        PullRequestError::NotFound => MISSING_COMMENT.to_string(),
         PullRequestError::GitHubApi(message) if message == ANSWERED_ANOTHER_COMMENT => {
             FOREIGN_COMMENT.to_string()
         }
@@ -2703,8 +2773,14 @@ mod tests {
     use abnegate_vcs::RateLimit;
     use chrono::DateTime;
     use std::time::Instant;
-    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::body_partial_json;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+    use wiremock::matchers::query_param;
     use zone_core::tools::REASON_DESCRIPTION;
 
     const PAGE_SIZE: usize = PER_PAGE.get() as usize;
@@ -3887,9 +3963,9 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let result = github(&server)
-            .write(
-                Operation::CreatePull,
+        let result = tool(Operation::CreatePull)
+            .open_pull(
+                &github(&server),
                 &Arguments {
                     source_id: Uuid::new_v4(),
                     reference: None,
@@ -4045,9 +4121,9 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let created = github(&server)
-            .write(
-                Operation::CreatePull,
+        let created = tool(Operation::CreatePull)
+            .open_pull(
+                &github(&server),
                 &pull_args("contributor:feature", Some("main"), None),
             )
             .await
@@ -4234,19 +4310,16 @@ mod tests {
         let server = MockServer::start().await;
         let github = github(&server);
         assert!(
-            github
-                .write(
-                    Operation::CreatePull,
-                    &write_args(None, Some("feature"), None, None)
-                )
+            tool(Operation::CreatePull)
+                .open_pull(&github, &write_args(None, Some("feature"), None, None))
                 .await
                 .unwrap_err()
                 .contains("title")
         );
         assert!(
-            github
-                .write(
-                    Operation::CreatePull,
+            tool(Operation::CreatePull)
+                .open_pull(
+                    &github,
                     &write_args(Some("Fix"), Some("has space"), None, None)
                 )
                 .await
@@ -4254,11 +4327,8 @@ mod tests {
                 .contains("head")
         );
         assert!(
-            github
-                .write(
-                    Operation::CreatePull,
-                    &write_args(Some("Fix"), Some(".."), None, None)
-                )
+            tool(Operation::CreatePull)
+                .open_pull(&github, &write_args(Some("Fix"), Some(".."), None, None))
                 .await
                 .unwrap_err()
                 .contains("head")
@@ -5243,7 +5313,7 @@ mod tests {
             .await
             .expect_err("a comment on pull request 70 is not feedback on 7");
 
-        assert!(refused.contains("does not belong"), "{refused}");
+        assert_eq!(refused, MISSING_COMMENT);
     }
 
     #[tokio::test]
@@ -5326,30 +5396,34 @@ mod tests {
                 .await
                 .expect_err("a comment on another pull request is refused");
             assert_eq!(
-                refused, FOREIGN_COMMENT,
+                refused, MISSING_COMMENT,
                 "{owner}#{number} at {pull_request_url}"
             );
         }
     }
 
     #[tokio::test]
-    async fn a_comment_github_cannot_find_or_answers_for_under_another_id_is_refused() {
+    async fn a_comment_github_cannot_find_is_missing_and_one_under_another_id_is_foreign() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/repos/owner/repository/pulls/comments/1"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(json!({"message": "Not Found for test-secret"})),
+            )
             .mount(&server)
             .await;
         let mut arguments = readiness_args(Some(182));
         arguments.comment = Some(1);
+        let refused = github(&server)
+            .review_threads(&arguments)
+            .await
+            .unwrap_err();
         assert_eq!(
-            github(&server)
-                .review_threads(&arguments)
-                .await
-                .unwrap_err(),
-            FOREIGN_COMMENT,
-            "a comment GitHub cannot find is not a comment on this pull request"
+            refused, MISSING_COMMENT,
+            "a deleted comment, or one the token cannot see, is not said to belong elsewhere"
         );
+        assert!(!refused.contains("test-secret"), "{refused}");
 
         let mut other = comment_on("https://api.github.com/repos/owner/repository/pulls/182");
         other["id"] = json!(2);
@@ -6278,6 +6352,11 @@ mod tests {
         for (metadata, expected) in [
             (
                 json!({"id": JOB_ID, "head_sha": COMMIT}),
+                UNEXPECTED_RESPONSE,
+            ),
+            (
+                json!({"id": JOB_ID, "name": "build", "status": "completed",
+                       "head_sha": COMMIT}),
                 UNEXPECTED_RESPONSE,
             ),
             (
@@ -7287,6 +7366,19 @@ mod tests {
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
+    #[tokio::test]
+    async fn a_forbidden_response_asking_for_too_long_a_wait_reads_as_rate_limited() {
+        let server = MockServer::start().await;
+        rate_limited(
+            &server,
+            ResponseTemplate::new(FORBIDDEN).insert_header(RETRY_AFTER_HEADER, "120"),
+        )
+        .await;
+        let error = github(&server).resolve(None).await.unwrap_err();
+        assert_eq!(error, status_error(TOO_MANY_REQUESTS));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
     async fn retried(retry_after: &str) -> (Result<(String, String), String>, usize) {
         let server = MockServer::start().await;
         rate_limited(
@@ -7343,5 +7435,337 @@ mod tests {
             assert_eq!(resolved.unwrap().1, COMMIT, "{value:?}");
             assert_eq!(requests, 2, "{value:?} was not retried exactly once");
         }
+    }
+
+    async fn review_query_failure(response: ResponseTemplate, readiness: bool) -> (String, usize) {
+        let server = MockServer::start().await;
+        mock_pull(&server, COMMIT).await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let github = github(&server);
+        let failed = if readiness {
+            github
+                .observe(Operation::PullRequests, &readiness_args(Some(7)))
+                .await
+        } else {
+            github.review_threads(&readiness_args(Some(7))).await
+        };
+        let queries = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/graphql")
+            .count();
+        (failed.unwrap_err(), queries)
+    }
+
+    #[tokio::test]
+    async fn a_review_query_github_refuses_over_http_names_the_status() {
+        let cases = [
+            (
+                ResponseTemplate::new(FORBIDDEN).set_body_json(
+                    json!({"message": "Resource not accessible by integration test-secret"}),
+                ),
+                status_error(FORBIDDEN),
+                1,
+            ),
+            (
+                ResponseTemplate::new(NOT_FOUND).set_body_json(json!({"message": "Not Found"})),
+                status_error(NOT_FOUND),
+                1,
+            ),
+            (
+                ResponseTemplate::new(TOO_MANY_REQUESTS),
+                status_error(TOO_MANY_REQUESTS),
+                1,
+            ),
+            (
+                ResponseTemplate::new(TOO_MANY_REQUESTS).insert_header(RETRY_AFTER_HEADER, "1"),
+                status_error(TOO_MANY_REQUESTS),
+                2,
+            ),
+            (
+                ResponseTemplate::new(TOO_MANY_REQUESTS)
+                    .insert_header(RATE_LIMIT_REMAINING_HEADER, "0"),
+                RATE_LIMIT_EXHAUSTED.to_string(),
+                1,
+            ),
+        ];
+        for (response, expected, sent) in cases {
+            for readiness in [false, true] {
+                let (error, queries) = review_query_failure(response.clone(), readiness).await;
+                assert_eq!(error, expected, "readiness={readiness}");
+                assert!(!error.contains("test-secret"), "{error}");
+                assert_eq!(queries, sent, "readiness={readiness}: {expected}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn review_query_errors_github_names_the_kind_of_read_as_that_status() {
+        for (kind, status) in [
+            ("FORBIDDEN", FORBIDDEN),
+            ("NOT_FOUND", NOT_FOUND),
+            ("RATE_LIMITED", TOO_MANY_REQUESTS),
+        ] {
+            let response = ResponseTemplate::new(200).set_body_json(json!({
+                "data": Value::Null,
+                "errors": [{"type": kind, "path": ["node"], "message": "test-secret"}]
+            }));
+            for readiness in [false, true] {
+                let (error, queries) = review_query_failure(response.clone(), readiness).await;
+                assert_eq!(error, status_error(status), "{kind} readiness={readiness}");
+                assert_eq!(queries, 1, "{kind} readiness={readiness}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_workflow_run_listed_on_two_pages_never_assesses_the_build() {
+        let server = MockServer::start().await;
+        mock(&server, "commits/main", json!({"sha": COMMIT})).await;
+        mock_statuses(&server, json!([])).await;
+        check_runs(&server, json!([])).await;
+        let first: Vec<Value> = (1..=PAGE_SIZE as u64)
+            .map(|id| workflow_run(id, id, "success"))
+            .collect();
+        let repeated = vec![workflow_run(PAGE_SIZE as u64, PAGE_SIZE as u64, "success")];
+        for (page, rows) in [("1", first), ("2", repeated)] {
+            Mock::given(method("GET"))
+                .and(path("/repos/owner/repository/actions/runs"))
+                .and(query_param("page", page))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(
+                        json!({"workflow_runs": rows, "total_count": PAGE_SIZE + 1}),
+                    ),
+                )
+                .mount(&server)
+                .await;
+        }
+        let github = github(&server);
+
+        let build = github.build(COMMIT).await.unwrap_err();
+        assert_eq!(build, PARTIAL_WORKFLOW_RUNS);
+        assert!(
+            build.contains("1,000") && build.contains("shifting"),
+            "{build}"
+        );
+        assert_eq!(
+            github.settled(None).await.unwrap_err(),
+            PARTIAL_WORKFLOW_RUNS,
+            "a run GitHub listed twice may have pushed another past the pages read"
+        );
+    }
+
+    #[tokio::test]
+    async fn past_two_pages_of_comments_the_newest_are_read() {
+        const COUNT: u64 = 250;
+        let server = MockServer::start().await;
+        mock_pull(&server, COMMIT).await;
+        mock_graphql(&server, thread_counts(true, false)).await;
+        mock_green_ci(&server).await;
+        let mut comments: Vec<Value> = (1..COUNT)
+            .map(|id| conversation_comment(id, "reviewer", "Looks reasonable."))
+            .collect();
+        comments.push(conversation_comment(
+            COUNT,
+            "greptile-apps",
+            &summary(5, COMMIT),
+        ));
+        for (index, rows) in comments.chunks(PAGE_SIZE).enumerate() {
+            Mock::given(method("GET"))
+                .and(path("/repos/owner/repository/issues/7/comments"))
+                .and(query_param("per_page", "100"))
+                .and(query_param("page", (index + 1).to_string()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!(rows)))
+                .mount(&server)
+                .await;
+        }
+        mock(
+            &server,
+            "issues/7",
+            json!({
+                "number": 7,
+                "title": "Ship the billing export",
+                "state": "open",
+                "html_url": "https://github.com/owner/repository/pull/7",
+                "labels": [],
+                "comments": COUNT,
+                "created_at": "2026-09-01T00:00:00Z",
+                "updated_at": "2026-09-05T00:00:00Z",
+                "pull_request": {"url": "https://api.github.com/repos/owner/repository/pulls/7"}
+            }),
+        )
+        .await;
+
+        let result = github(&server)
+            .observe(Operation::PullRequests, &readiness_args(Some(7)))
+            .await
+            .unwrap();
+
+        let pull = &result["pull_requests"][0];
+        assert_eq!(pull["comments_complete"], false, "{result}");
+        assert_eq!(pull["ready"], false, "{result}");
+        assert_eq!(
+            pull["reviews"][0]["confidence"]["score"], 5,
+            "the newest comment, the review bot's summary, is among those read: {result}"
+        );
+        let pages: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/repos/owner/repository/issues/7/comments")
+            .filter_map(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .find(|(key, _)| key == "page")
+                    .map(|(_, page)| page.into_owned())
+            })
+            .collect();
+        assert_eq!(pages, ["1", "2", "2", "3"]);
+    }
+
+    #[tokio::test]
+    async fn descriptions_state_the_file_cap_and_when_heads_are_cross_checked() {
+        assert!(
+            tool(Operation::File)
+                .description()
+                .contains(&format!("over {} MiB", MAX_FILE_BYTES / MEBIBYTE))
+        );
+        assert!(
+            tool(Operation::PullRequests)
+                .description()
+                .contains("when pull requests are listed rather than read by number")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_token_is_kept_only_as_a_secret() {
+        let server = MockServer::start().await;
+        let github = github(&server);
+        assert_eq!(github.configuration.token, None);
+        assert_eq!(github.token.expose(), "test-secret");
+    }
+
+    #[tokio::test]
+    async fn a_source_without_a_credential_is_refused_before_pushing() {
+        let server = MockServer::start().await;
+        let tool = tool(Operation::CreatePull);
+        let clone = tool
+            .scope
+            .state
+            .config()
+            .clones
+            .join(tool.scope.workspace_id.as_hyphenated().to_string())
+            .join("repository");
+        for token in [None, Some("")] {
+            let refused = tool
+                .push_head(
+                    &github_with_token(&server, token),
+                    &pull_args("feature", None, clone.to_str()),
+                    "feature",
+                    "https://github.com/owner/repository",
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(refused, NO_PUSH_CREDENTIAL, "{token:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_head_that_cannot_be_read_names_what_is_wrong() {
+        for (head, expected) in [
+            (
+                json!({"sha": "abc123", "ref": "feature"}),
+                MISSING_PULL_HEAD,
+            ),
+            (
+                json!({"sha": COMMIT, "ref": "bad..ref"}),
+                INVALID_PULL_BRANCH,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let mut detail = pull_detail(COMMIT);
+            detail["head"] = head.clone();
+            mock(&server, "pulls/7", detail).await;
+            let refused = github(&server)
+                .observe(
+                    Operation::CheckLogs,
+                    &check_args(Some(JOB_ID), Some(7), None),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(refused, expected, "{head}");
+        }
+    }
+
+    /// A stand-in for GitHub that lists README.md in the commit's tree and
+    /// answers the request for its blob with `blob`, raw, then hangs up.
+    async fn hanging_up(blob: &'static str) -> Github {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let tree = json!({"sha": COMMIT, "truncated": false, "tree": [
+            {"path": "README.md", "type": "blob", "mode": "100644", "sha": BLOB, "size": 14}
+        ]})
+        .to_string();
+        let tree = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{tree}",
+            tree.len()
+        );
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|end| end == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).await.unwrap_or_default();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let answer = if request.starts_with(b"GET /repos/owner/repository/git/trees/") {
+                    tree.as_str()
+                } else {
+                    blob
+                };
+                let _ = stream.write_all(answer.as_bytes()).await;
+            }
+        });
+        Github::serving(
+            configured("owner", "repository"),
+            PullRequestService::standing_in_for("github.com", &format!("http://{address}"))
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_blob_never_answered_failed_and_one_cut_short_is_unreadable() {
+        let unanswered = hanging_up("").await;
+        assert_eq!(
+            unanswered
+                .file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
+                .await
+                .unwrap_err(),
+            REQUEST_FAILED
+        );
+        let cut =
+            hanging_up("HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nShort")
+                .await;
+        assert_eq!(
+            cut.file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
+                .await
+                .unwrap_err(),
+            UNREADABLE_FILE
+        );
     }
 }
