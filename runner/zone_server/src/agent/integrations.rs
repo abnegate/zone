@@ -3,13 +3,24 @@
 use abnegate_secret::SecretValue;
 use abnegate_vcs::BranchName;
 use abnegate_vcs::CommitSha as Revision;
+use abnegate_vcs::Issue;
+use abnegate_vcs::IssueComment;
 use abnegate_vcs::IssueReference;
 use abnegate_vcs::JobLogError;
+use abnegate_vcs::Label;
+use abnegate_vcs::ListedPullRequest;
+use abnegate_vcs::ObjectId;
 use abnegate_vcs::ParseError;
+use abnegate_vcs::PullRequestDetail;
 use abnegate_vcs::PullRequestError;
 use abnegate_vcs::PullRequestReference;
 use abnegate_vcs::PullRequestService;
+use abnegate_vcs::PullRequestState;
 use abnegate_vcs::Repository;
+use abnegate_vcs::ReviewThreadCount;
+use abnegate_vcs::StateFilter;
+use abnegate_vcs::TreeEntry;
+use abnegate_vcs::TreeEntryKind;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode, Url};
@@ -45,21 +56,15 @@ use crate::services::prioritisation::{
 use crate::services::project_directory::{self, Origin, Start};
 
 const ORIGIN: &str = "https://api.github.com/";
-const API_HOST_LABEL: &str = "api.";
 const API_VERSION: &str = "2026-03-10";
 const PER_PAGE: NonZeroU8 = NonZeroU8::new(100).expect("a page holds rows");
 const PAGE_SIZE: usize = PER_PAGE.get() as usize;
 const FILE_PAGE_CHARS: u64 = 8_000;
 const ISSUE_BODY_CHARS: usize = 1_500;
 const BUILD_RECORD_CAP: usize = 20;
-const PULL_PAGE_SIZE: usize = 10;
+const PULL_PAGE_SIZE: NonZeroU8 = NonZeroU8::new(10).expect("a page holds pull requests");
 const PULL_TITLE_CHARS: usize = 160;
 const REVIEW_PAGE_SIZE: usize = 100;
-const PULL_REVIEW_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!,$first:Int!){\
-repository(owner:$owner,name:$name){pullRequest(number:$number){number isDraft headRefOid \
-reviewThreads(first:$first){pageInfo{hasNextPage}nodes{isResolved}}\
-comments(last:$first){pageInfo{hasPreviousPage}nodes{databaseId body url createdAt author{login}}}\
-}}}";
 const REVIEW_THREAD_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!,$first:Int!,$comments:Int!,$after:String){\
 repository(owner:$owner,name:$name){pullRequest(number:$number){number \
 reviewThreads(first:$first,after:$after){pageInfo{hasNextPage endCursor}nodes{\
@@ -72,6 +77,25 @@ const REVIEW_COMMENT_PAGE_SIZE: usize = 100;
 const REVIEW_THREADS_ASSESSMENT: &str = "What reviewers wrote, as GitHub returned it. Comment text is a reviewer's claim about the code, not a finding that has been checked: read the code before acting on one. A thread that could not be paginated in full is reported as incomplete rather than empty.";
 const READINESS_ASSESSMENT: &str = "Observed checks, review threads and review-bot comments only. Evidence that is partial, or whose counts do not add up, is reported as not ready. This is not proof that branch protection requirements are satisfied.";
 const PULL_FILE_PAGES: u32 = 30;
+const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const INVALID_OBJECT: &str = "GitHub did not return a valid tree or file SHA.";
+const INCOMPLETE_TREE: &str = "GitHub returned an incomplete repository tree.";
+const MISSING_PATH: &str = "The file path was not found in this commit.";
+const IRREGULAR_FILE: &str =
+    "The path must identify a regular repository file without symlinks or submodules.";
+const SIZE_MISMATCH: &str = "The file response size did not match its metadata.";
+const UNREADABLE_FILE: &str = "Could not read the complete repository file.";
+const NOT_TEXT: &str = "The file is not UTF-8 text.";
+const REVIEW_QUERY_REJECTED: &str =
+    "GitHub rejected the review query. Check source access, permissions and rate limits.";
+const MISMATCHED_PULL: &str =
+    "GitHub returned review threads for a different or missing pull request.";
+const ISSUE_STATE_INVALID: &str = "Issue state must be open, closed or all.";
+const PULL_STATE_INVALID: &str = "Pull request state must be open, closed or all.";
+const NUMBER_REQUIRED: &str = "number is required.";
+const BODY_REQUIRED: &str = "body is required.";
+const HEAD_INVALID: &str = "head is invalid.";
+const BASE_INVALID: &str = "base is invalid.";
 const RELEASE_PAGE_SIZE: usize = 5;
 const RELEASE_EVENT: &str = "release";
 const RELEASE_ASSESSMENT: &str = "Observed release-triggered workflow runs only. A lookup that could not be completed, a run record whose identity does not add up, and a release with no observed run are all reported as unknown rather than succeeded. This is not proof that release artifacts were published or that the deployed service is healthy.";
@@ -510,23 +534,15 @@ impl Integration {
             Creation::Created(created) => {
                 return Ok(json!({
                     "repository": repository,
-                    "pull_request": project(&created, &["number", "html_url", "title", "state"]),
+                    "pull_request": created,
                 }));
             }
             Creation::Refused { head, base } => (head, base),
         };
-        let refused = || status_error(StatusCode::UNPROCESSABLE_ENTITY);
-        let token = github.configuration.token.as_deref().ok_or_else(refused)?;
-        let existing = existing_pull(
-            self.scope.state.config(),
-            &SecretValue::new(token),
-            &github.configuration.owner,
-            &github.configuration.repo,
-            &head,
-            &base,
-        )
-        .await
-        .ok_or_else(refused)?;
+        let existing = github
+            .already_open(&head, &base)
+            .await
+            .ok_or_else(|| status_error(StatusCode::UNPROCESSABLE_ENTITY))?;
         Ok(json!({
             "repository": repository,
             "pull_request": existing,
@@ -799,14 +815,6 @@ impl Github {
             .map_err(|_| INVALID_RESPONSE.to_string())
     }
 
-    async fn post(&self, parts: &[&str], body: &Value) -> Result<Value, String> {
-        self.response(reqwest::Method::POST, parts, &[], false, Some(body))
-            .await?
-            .json()
-            .await
-            .map_err(|_| INVALID_RESPONSE.to_string())
-    }
-
     async fn graphql(&self, query: &str, variables: Value) -> Result<Value, String> {
         let url = github_graphql_url(&self.origin)
             .ok_or_else(|| "Could not build the GitHub GraphQL URL.".to_string())?;
@@ -849,27 +857,30 @@ impl Github {
             Operation::CreatePull => match self.create_pull(arguments).await? {
                 Creation::Created(created) => Ok(json!({
                     "repository": repository,
-                    "pull_request": project(&created, &["number", "html_url", "title", "state"]),
+                    "pull_request": created,
                 })),
                 Creation::Refused { .. } => Err(status_error(StatusCode::UNPROCESSABLE_ENTITY)),
             },
             Operation::Comment => {
-                let reference =
-                    self.issue_reference(arguments.number.ok_or("number is required.")?)?;
+                let reference = self.issue_reference(arguments.number.ok_or(NUMBER_REQUIRED)?)?;
                 let body = arguments
                     .body
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())
-                    .ok_or("body is required.")?;
+                    .ok_or(BODY_REQUIRED)?;
                 let created = self
-                    .post(
-                        &["issues", &reference.number().to_string(), "comments"],
-                        &json!({ "body": body }),
-                    )
-                    .await?;
+                    .service
+                    .post_comment(&reference, &self.token, body)
+                    .await
+                    .map_err(described)?;
                 Ok(json!({
                     "repository": repository,
-                    "comment": project(&created, &["id", "html_url", "body", "created_at"]),
+                    "comment": {
+                        "id": created.id,
+                        "html_url": created.url,
+                        "body": created.body,
+                        "created_at": created.created_at,
+                    },
                 }))
             }
             _ => Err("This operation is read-only.".to_string()),
@@ -893,7 +904,7 @@ impl Github {
             .filter(|value| !value.trim().is_empty())
             .ok_or("head is required.")?;
         if !git_ref(head) {
-            return Err("head is invalid.".to_string());
+            return Err(HEAD_INVALID.to_string());
         }
         let base = arguments
             .base
@@ -902,47 +913,83 @@ impl Github {
             .or_else(|| self.configuration.branch.clone())
             .ok_or("base is required (or set the source branch).")?;
         if !git_ref(&base) {
-            return Err("base is invalid.".to_string());
+            return Err(BASE_INVALID.to_string());
         }
         Ok((title, head, base))
     }
 
-    /// Opens the pull request, or reports that GitHub refused it as invalid,
-    /// which it also does when one is already open from the same head.
+    /// Opens the pull request, or reports that GitHub refused it because one
+    /// is already open from the same head.
     async fn create_pull(&self, arguments: &Arguments) -> Result<Creation, String> {
         let (title, head, base) = self.pull_fields(arguments)?;
-        let body = json!({
-            "title": title,
-            "head": head,
-            "base": base,
-            "body": arguments.body.clone().unwrap_or_default(),
-        });
-        let response = self
-            .send(
-                &reqwest::Method::POST,
-                &self.url(&["pulls"]),
-                false,
-                Some(&body),
-            )
-            .await?;
-        if matches!(
-            rate_limit(&response, Utc::now()),
-            Some(RateLimit::Exhausted)
-        ) {
-            return Err(RATE_LIMIT_EXHAUSTED.to_string());
-        }
-        match response.status() {
-            StatusCode::UNPROCESSABLE_ENTITY => Ok(Creation::Refused {
+        let body = arguments.body.as_deref().unwrap_or_default();
+        let (fork, branch) = forked(head);
+        let branch = BranchName::parse(branch).map_err(|_| HEAD_INVALID.to_string())?;
+        let target = BranchName::parse(&base).map_err(|_| BASE_INVALID.to_string())?;
+        let created = match fork {
+            Some(fork) => {
+                self.service
+                    .create_pull_request_from(
+                        &self.repository,
+                        &self.token,
+                        fork,
+                        &branch,
+                        &target,
+                        title,
+                        body,
+                        false,
+                    )
+                    .await
+            }
+            None => {
+                self.service
+                    .create_pull_request(
+                        &self.repository,
+                        &self.token,
+                        &branch,
+                        &target,
+                        title,
+                        body,
+                        false,
+                    )
+                    .await
+            }
+        };
+        match created {
+            Ok(created) => Ok(Creation::Created(json!({
+                "number": created.number.get(),
+                "html_url": created.url,
+                "title": title,
+                "state": created.state,
+            }))),
+            Err(PullRequestError::PullRequestAlreadyExists(_)) => Ok(Creation::Refused {
                 head: head.to_string(),
                 base,
             }),
-            status if status.is_success() => response
-                .json()
-                .await
-                .map(Creation::Created)
-                .map_err(|_| INVALID_RESPONSE.to_string()),
-            status => Err(status_error(status)),
+            Err(error) => Err(described(error)),
         }
+    }
+
+    /// The open pull request from `head` into `base`, which GitHub refusing
+    /// a duplicate says exists. A closed or merged one from the same head is
+    /// not an answer to a request to open one.
+    async fn already_open(&self, head: &str, base: &str) -> Option<Value> {
+        let (fork, branch) = forked(head);
+        let branch = BranchName::parse(branch).ok()?;
+        let base = BranchName::parse(base).ok()?;
+        let found = self
+            .service
+            .find_pull_request(&self.repository, &self.token, &branch, &base, fork)
+            .await
+            .ok()??;
+        (found.state == PullRequestState::Open).then(|| {
+            json!({
+                "number": found.reference.number().get(),
+                "html_url": found.url,
+                "title": found.title,
+                "state": found.state,
+            })
+        })
     }
 
     async fn resolve(&self, reference: Option<&str>) -> Result<(String, String), String> {
@@ -1013,35 +1060,15 @@ impl Github {
             return Ok(result);
         }
         if matches!(operation, Operation::Issues) {
-            let state = arguments.state.as_deref().unwrap_or("open");
-            if !matches!(state, "open" | "closed" | "all") {
-                return Err("Issue state must be open, closed or all.".to_string());
-            }
-            let page = arguments.page.unwrap_or(1);
-            let records = self
-                .get(
-                    &["issues"],
-                    &[
-                        ("state", state.into()),
-                        ("per_page", PAGE_SIZE.to_string()),
-                        ("page", page.to_string()),
-                    ],
-                )
-                .await?;
-            let records = array(&records)?;
-            let next = next_page(records.len(), page)?;
-            let issues: Vec<Value> = records
-                .iter()
-                .filter(|row| row.get("pull_request").is_none())
-                .map(issue_record)
-                .collect();
-            return Ok(json!({"repository": repository, "issues": issues, "next_page": next}));
+            let mut result = self.issues(arguments).await?;
+            result["repository"] = json!(repository);
+            return Ok(result);
         }
         if matches!(operation, Operation::Issue) {
             let number = arguments
                 .number
                 .filter(|number| *number > 0)
-                .ok_or("number is required.")?;
+                .ok_or(NUMBER_REQUIRED)?;
             let mut result = self.issue(number).await?;
             result["repository"] = json!(repository);
             return Ok(result);
@@ -1079,55 +1106,52 @@ impl Github {
         Ok(result)
     }
 
+    async fn issues(&self, arguments: &Arguments) -> Result<Value, String> {
+        let state = state_filter(arguments.state.as_deref()).ok_or(ISSUE_STATE_INVALID)?;
+        let page = page(arguments.page.unwrap_or(1))?;
+        let listed = self
+            .service
+            .list_issues(&self.repository, &self.token, state, page, PER_PAGE)
+            .await
+            .map_err(described)?;
+        let issues: Vec<Value> = listed.items.iter().map(issue_record).collect();
+        Ok(json!({"issues": issues, "next_page": listed.next.map(NonZeroU32::get)}))
+    }
+
     /// One issue with its whole body and first page of comments. The list
     /// endpoint bounds bodies so a page of issues fits the context; a single
     /// issue is what a person asks for when they want the full text.
     async fn issue(&self, number: u64) -> Result<Value, String> {
-        let number = number.to_string();
-        let record = self.get(&["issues", &number], &[]).await?;
-        if record.get("pull_request").is_some() {
+        let reference = self.issue_reference(number)?;
+        let issue = self
+            .service
+            .fetch_issue(&reference, &self.token)
+            .await
+            .map_err(described)?;
+        if issue.pull_request {
             return Err(format!(
                 "#{number} is a pull request, not an issue; assess_pull_requests reviews it."
             ));
         }
         let comments = self
-            .get(
-                &["issues", &number, "comments"],
-                &[
-                    ("per_page", PAGE_SIZE.to_string()),
-                    ("page", "1".to_string()),
-                ],
-            )
-            .await?;
-        let comments: Vec<Value> = array(&comments)?
-            .iter()
-            .map(|comment| {
-                let mut projected = project(comment, &["id", "body", "html_url", "created_at"]);
-                projected["author"] = comment["user"]["login"].clone();
-                projected
-            })
-            .collect();
-        let mut issue = project(
-            &record,
-            &[
-                "number",
-                "title",
-                "body",
-                "state",
-                "html_url",
-                "created_at",
-                "updated_at",
-                "closed_at",
-                "labels",
-                "assignees",
-                "comments",
-            ],
-        );
-        issue["author"] = record["user"]["login"].clone();
+            .service
+            .list_comments(&reference, &self.token, NonZeroU32::MIN, PER_PAGE)
+            .await
+            .map_err(described)?;
+        let mut record = issue_record(&issue);
+        record["body"] = json!(issue.body);
+        record["comments"] = json!(issue.comments);
+        record["author"] = json!(issue.author);
         Ok(json!({
-            "issue": issue,
-            "comments": comments,
-            "comments_complete": comments.len() < PAGE_SIZE,
+            "issue": record,
+            "comments": comments.items.iter().map(|comment| json!({
+                "id": comment.id,
+                "body": comment.body,
+                "html_url": comment.url,
+                "created_at": comment.created_at,
+                "author": comment.author,
+            })).collect::<Vec<_>>(),
+            "comments_complete": comments.next.is_none(),
         }))
     }
 
@@ -1233,40 +1257,26 @@ impl Github {
         let (rows, next) = match arguments.number {
             Some(number) => {
                 let reference = self.reference(number)?;
-                (
-                    vec![
-                        self.get(&["pulls", &reference.number().to_string()], &[])
-                            .await?,
-                    ],
-                    None,
-                )
+                let detail = self.pull(&reference).await?;
+                (vec![(listed(reference, &detail), Some(detail))], None)
             }
             None => {
-                let state = arguments.state.as_deref().unwrap_or("open");
-                if !matches!(state, "open" | "closed" | "all") {
-                    return Err("Pull request state must be open, closed or all.".to_string());
-                }
-                let page = arguments.page.unwrap_or(1);
-                let response = self
-                    .get(
-                        &["pulls"],
-                        &[
-                            ("state", state.into()),
-                            ("sort", "updated".into()),
-                            ("direction", "desc".into()),
-                            ("per_page", PULL_PAGE_SIZE.to_string()),
-                            ("page", page.to_string()),
-                        ],
-                    )
-                    .await?;
-                let records = array(&response)?.clone();
-                let next = next_page_of(records.len(), page, PULL_PAGE_SIZE)?;
-                (records, next)
+                let state = state_filter(arguments.state.as_deref()).ok_or(PULL_STATE_INVALID)?;
+                let page = page(arguments.page.unwrap_or(1))?;
+                let listed = self
+                    .service
+                    .list_pull_requests(&self.repository, &self.token, state, page, PULL_PAGE_SIZE)
+                    .await
+                    .map_err(described)?;
+                (
+                    listed.items.into_iter().map(|row| (row, None)).collect(),
+                    listed.next.map(NonZeroU32::get),
+                )
             }
         };
         let mut assessed = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let (assessment, risk) = self.assess(row).await?;
+        for (row, detail) in rows {
+            let (assessment, risk) = self.assess(&row, detail).await?;
             assessed.push(assessment_record(&assessment, &risk));
         }
         Ok(bound_readiness(
@@ -1282,32 +1292,37 @@ impl Github {
         ))
     }
 
-    async fn assess(&self, row: &Value) -> Result<(readiness::Assessment, RiskSignal), String> {
-        let number = row["number"]
-            .as_u64()
-            .filter(|number| *number > 0)
-            .ok_or("GitHub returned a pull request without a number.")?;
-        let draft = row["draft"]
-            .as_bool()
-            .ok_or("GitHub returned a pull request without its draft state.")?;
-        let review = self.review(number).await?;
-        let head = row["head"]["sha"]
-            .as_str()
-            .and_then(CommitSha::parse)
+    /// One pull request's readiness. `detail` is the pull request as read by
+    /// number, when it already was; a listed row is read again by number, and
+    /// a head the two reads disagree on is never verified.
+    async fn assess(
+        &self,
+        row: &ListedPullRequest,
+        detail: Option<PullRequestDetail>,
+    ) -> Result<(readiness::Assessment, RiskSignal), String> {
+        let detail = match detail {
+            Some(detail) => detail,
+            None => self.pull(&row.reference).await?,
+        };
+        let review = self.review(&detail).await?;
+        let head = row
+            .head_sha
+            .as_ref()
+            .and_then(|listed| CommitSha::parse(listed.as_str()))
             .filter(|listed| review.head.as_ref() == Some(listed));
         let checks = match &head {
             Some(head) => self.check_evidence(head.as_str()).await?,
             None => CheckEvidence::default(),
         };
-        let risk = pull_request::risk(&PRIORITISER, &self.changed_paths(number).await);
+        let risk = pull_request::risk(&PRIORITISER, &self.changed_paths(&row.reference).await);
         Ok((
             readiness::assess(
                 PullEvidence {
-                    number,
-                    title: truncate(row["title"].as_str().unwrap_or_default(), PULL_TITLE_CHARS),
-                    url: text(row, "html_url"),
-                    updated_at: text(row, "updated_at"),
-                    draft: draft || review.draft,
+                    number: row.reference.number().get(),
+                    title: truncate(&row.title, PULL_TITLE_CHARS),
+                    url: row.url.clone(),
+                    updated_at: row.updated_at.clone().unwrap_or_default(),
+                    draft: row.draft || review.draft,
                     head,
                     threads: review.threads,
                     comments: review.comments,
@@ -1325,38 +1340,27 @@ impl Github {
     /// all. The blast radius that follows then reads as assumed rather than
     /// measured, which is the honest answer: a partial diff would produce a
     /// confident tier from evidence that was never complete.
-    async fn changed_paths(&self, number: u64) -> Vec<String> {
-        let number = number.to_string();
+    async fn changed_paths(&self, reference: &PullRequestReference) -> Vec<String> {
         let mut paths = Vec::new();
-        let mut page = 1;
+        let mut page = NonZeroU32::MIN;
         loop {
-            let Ok(response) = self
-                .get(
-                    &["pulls", &number, "files"],
-                    &[
-                        ("per_page", PAGE_SIZE.to_string()),
-                        ("page", page.to_string()),
-                    ],
-                )
+            let Ok(listed) = self
+                .service
+                .list_files(reference, &self.token, page, PER_PAGE)
                 .await
             else {
                 return Vec::new();
             };
-            let Ok(rows) = array(&response) else {
-                return Vec::new();
-            };
-            for row in rows {
-                match row["filename"].as_str() {
-                    Some(filename) if !filename.trim().is_empty() => {
-                        paths.push(filename.to_string());
-                    }
-                    _ => return Vec::new(),
+            for file in listed.items {
+                if file.filename.trim().is_empty() {
+                    return Vec::new();
                 }
+                paths.push(file.filename);
             }
-            match next_page(rows.len(), page) {
-                Ok(None) => return paths,
-                Ok(Some(next)) if next <= PULL_FILE_PAGES => page = next,
-                Ok(Some(_)) | Err(_) => return Vec::new(),
+            match listed.next {
+                None => return paths,
+                Some(next) if next.get() <= PULL_FILE_PAGES => page = next,
+                Some(_) => return Vec::new(),
             }
         }
     }
@@ -1523,45 +1527,108 @@ impl Github {
         Ok(page)
     }
 
-    async fn review(&self, number: u64) -> Result<Review, String> {
-        let data = self
-            .graphql(
-                PULL_REVIEW_QUERY,
-                json!({
-                    "owner": self.configuration.owner,
-                    "name": self.configuration.repo,
-                    "number": number,
-                    "first": REVIEW_PAGE_SIZE,
-                }),
-            )
-            .await?;
-        let pull = &data["repository"]["pullRequest"];
-        if pull["number"].as_u64() != Some(number) {
-            return Err(
-                "GitHub returned review threads for a different or missing pull request.".into(),
-            );
+    async fn pull(&self, reference: &PullRequestReference) -> Result<PullRequestDetail, String> {
+        let detail = self
+            .service
+            .fetch_pull(reference, &self.token)
+            .await
+            .map_err(described)?;
+        if detail.number != reference.number() {
+            return Err(MISMATCHED_PULL.to_string());
         }
-        let threads = &pull["reviewThreads"];
-        let comments = &pull["comments"];
+        Ok(detail)
+    }
+
+    /// The tree entry `path` names at `commit`, walked one tree at a time so
+    /// every entry passed on the way is checked: a symbolic link or a
+    /// submodule anywhere along it refuses the read.
+    async fn entry(&self, commit: &Revision, path: &str) -> Result<TreeEntry, String> {
+        let mut tree = ObjectId::from(commit);
+        let mut components = path.split('/').peekable();
+        while let Some(component) = components.next() {
+            let listed = self
+                .service
+                .fetch_tree(&self.repository, &self.token, &tree, false)
+                .await
+                .map_err(|error| match error {
+                    PullRequestError::Parse(_) => INVALID_OBJECT.to_string(),
+                    error => described(error),
+                })?;
+            if listed.truncated {
+                return Err(INCOMPLETE_TREE.to_string());
+            }
+            let entry = listed
+                .entries
+                .into_iter()
+                .find(|entry| entry.path == component)
+                .ok_or(MISSING_PATH)?;
+            let last = components.peek().is_none();
+            if (last && !entry.regular_file()) || (!last && entry.kind != TreeEntryKind::Tree) {
+                return Err(IRREGULAR_FILE.to_string());
+            }
+            if last {
+                return Ok(entry);
+            }
+            tree = entry.sha;
+        }
+        Err(MISSING_PATH.to_string())
+    }
+
+    async fn review(&self, detail: &PullRequestDetail) -> Result<Review, String> {
+        let reference = self.reference(detail.number.get())?;
+        let counts = self
+            .service
+            .fetch_review_thread_counts(&reference, &self.token)
+            .await
+            .map_err(|error| match error {
+                PullRequestError::GitHubApi(_)
+                | PullRequestError::Forbidden
+                | PullRequestError::RateLimited
+                | PullRequestError::NotFound => REVIEW_QUERY_REJECTED.to_string(),
+                error => described(error),
+            })?;
         Ok(Review {
-            draft: pull["isDraft"].as_bool().unwrap_or(true),
-            head: pull["headRefOid"].as_str().and_then(CommitSha::parse),
-            threads: ThreadEvidence {
-                complete: threads["pageInfo"]["hasNextPage"].as_bool() == Some(false),
-                threads: array(&threads["nodes"])?
-                    .iter()
-                    .map(|node| ReviewThread {
-                        resolved: node["isResolved"].as_bool().unwrap_or(false),
-                    })
-                    .collect(),
-            },
-            comments: CommentEvidence {
-                complete: comments["pageInfo"]["hasPreviousPage"].as_bool() == Some(false),
-                comments: array(&comments["nodes"])?
-                    .iter()
-                    .map(review_comment)
-                    .collect(),
-            },
+            draft: detail.draft,
+            head: CommitSha::parse(detail.head_sha.as_str()),
+            threads: thread_evidence(counts),
+            comments: self
+                .review_comments(&IssueReference::from(&reference))
+                .await?,
+        })
+    }
+
+    /// The newest of a pull request's conversation comments, where review
+    /// bots post their summaries, read no further than one page past the
+    /// most a readiness verdict weighs, so a conversation longer than that
+    /// reads as incomplete rather than as all of it.
+    async fn review_comments(&self, reference: &IssueReference) -> Result<CommentEvidence, String> {
+        let first = self
+            .service
+            .list_comments(reference, &self.token, NonZeroU32::MIN, PER_PAGE)
+            .await
+            .map_err(described)?;
+        let mut comments = first.items;
+        let complete = match first.next {
+            None => true,
+            Some(next) => {
+                let rest = self
+                    .service
+                    .list_comments(reference, &self.token, next, PER_PAGE)
+                    .await
+                    .map_err(described)?;
+                let complete = rest.items.is_empty();
+                comments.extend(rest.items);
+                complete
+            }
+        };
+        let excess = comments.len().saturating_sub(REVIEW_PAGE_SIZE);
+        Ok(CommentEvidence {
+            complete,
+            comments: comments
+                .into_iter()
+                .skip(excess)
+                .map(issue_comment)
+                .collect(),
         })
     }
 
@@ -1755,54 +1822,33 @@ impl Github {
 
     async fn file(&self, sha: &str, path: &str, offset: u64, limit: u64) -> Result<Value, String> {
         validate_path(path, self.configuration.path.as_deref())?;
-        let mut tree = revision(sha)?.to_string();
-        let mut metadata = Value::Null;
-        let components: Vec<&str> = path.split('/').collect();
-        for (index, component) in components.iter().enumerate() {
-            let response = self.get(&["git", "trees", &tree], &[]).await?;
-            if response["truncated"] != false {
-                return Err("GitHub returned an incomplete repository tree.".into());
-            }
-            metadata = array(&response["tree"])?
-                .iter()
-                .find(|entry| entry["path"].as_str() == Some(component))
-                .cloned()
-                .ok_or("The file path was not found in this commit.")?;
-            let last = index + 1 == components.len();
-            if (last
-                && (metadata["type"] != "blob"
-                    || !matches!(metadata["mode"].as_str(), Some("100644" | "100755"))))
-                || (!last && metadata["type"] != "tree")
-            {
-                return Err("The path must identify a regular repository file without symlinks or submodules.".into());
-            }
-            tree = metadata["sha"]
-                .as_str()
-                .filter(|value| valid_sha(value))
-                .ok_or("GitHub did not return a valid tree or file SHA.")?
-                .to_string();
+        let entry = self.entry(&revision(sha)?, path).await?;
+        let size = entry.size.ok_or(SIZE_MISMATCH)?;
+        if size > MAX_FILE_BYTES {
+            return Err(FILE_TOO_LARGE.to_string());
         }
-        let blob = tree;
-        let bytes = self
-            .response(
-                reqwest::Method::GET,
-                &["git", "blobs", &blob],
-                &[],
-                true,
-                None,
+        let blob = self
+            .service
+            .fetch_blob(
+                &self.repository,
+                &self.token,
+                &entry.sha,
+                MAX_FILE_BYTES as usize,
             )
-            .await?
-            .bytes()
             .await
-            .map_err(|_| "Could not read the complete repository file.".to_string())?;
-        if metadata["size"].as_u64() != Some(bytes.len() as u64) {
-            return Err("The file response size did not match its metadata.".into());
+            .map_err(|error| match error {
+                PullRequestError::Http(_) => UNREADABLE_FILE.to_string(),
+                PullRequestError::Parse(_) => INVALID_OBJECT.to_string(),
+                error => described(error),
+            })?;
+        let bytes = blob.content;
+        if bytes.len() as u64 != size {
+            return Err(SIZE_MISMATCH.to_string());
         }
-        let content =
-            std::str::from_utf8(&bytes).map_err(|_| "The file is not UTF-8 text.".to_string())?;
+        let content = std::str::from_utf8(&bytes).map_err(|_| NOT_TEXT.to_string())?;
         let (page, total, next) = text_page(content, offset, limit)?;
         Ok(
-            json!({"path": path, "content": page, "bytes": bytes.len(), "blob_sha": blob,
+            json!({"path": path, "content": page, "bytes": bytes.len(), "blob_sha": entry.sha.as_str(),
             "offset": offset, "next": next, "total": total, "complete": next.is_none(),
             "url": format!("https://github.com/{}/{}/blob/{}/{}", self.configuration.owner, self.configuration.repo, sha, path.split('/').map(|part| urlencoding::encode(part).into_owned()).collect::<Vec<_>>().join("/"))}),
         )
@@ -2467,51 +2513,70 @@ fn retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
     Some(delay)
 }
 
-// Provider response bodies and request errors can contain secrets.
-/// The open pull request from `head` into `base`, found through abnegate-vcs.
-/// A head on a fork (`owner:branch`) is not one the crate can look up.
-async fn existing_pull(
-    config: &Config,
-    token: &SecretValue,
-    owner: &str,
-    repo: &str,
-    head: &str,
-    base: &str,
-) -> Option<Value> {
-    if head.contains(':') {
-        return None;
+fn forked(head: &str) -> (Option<&str>, &str) {
+    match head.split_once(':') {
+        Some((owner, branch)) => (Some(owner), branch),
+        None => (None, head),
     }
-    let service = config.pull_requests().ok()?;
-    let repository = service
-        .parse_github_url(&format!("{}/{owner}/{repo}", github_web_origin(config)?))
-        .ok()?;
-    let branch = BranchName::parse(head).ok()?;
-    let url = service
-        .pull_request_exists_for_branch(&repository, token, &branch)
-        .await
-        .ok()??;
-    let reference = service.pull_request(&url).ok()?;
-    let detail = service.fetch_pull(&reference, token).await.ok()?;
-    (detail.base.as_str() == base).then(|| {
-        json!({
-            "number": detail.number.get(),
-            "html_url": detail.url,
-            "title": detail.title,
-            "state": "open",
-        })
-    })
 }
 
-/// Where the configured GitHub serves repositories to a browser: its API host
-/// without the `api.` label, as abnegate-vcs reads it.
-fn github_web_origin(config: &Config) -> Option<String> {
-    let origin = config.github_rest_origin()?;
-    let host = origin.host_str()?;
-    let host = host.strip_prefix(API_HOST_LABEL).unwrap_or(host);
-    Some(match origin.port() {
-        Some(port) => format!("{}://{host}:{port}", origin.scheme()),
-        None => format!("{}://{host}", origin.scheme()),
-    })
+fn state_filter(state: Option<&str>) -> Option<StateFilter> {
+    match state.unwrap_or("open") {
+        "open" => Some(StateFilter::Open),
+        "closed" => Some(StateFilter::Closed),
+        "all" => Some(StateFilter::All),
+        _ => None,
+    }
+}
+
+fn listed(reference: PullRequestReference, detail: &PullRequestDetail) -> ListedPullRequest {
+    let row = ListedPullRequest::new(
+        reference,
+        detail.node_id.clone(),
+        detail.url.clone(),
+        detail.head.clone(),
+        detail.base.clone(),
+    )
+    .with_title(detail.title.clone())
+    .with_state(detail.state)
+    .with_draft(detail.draft)
+    .with_head_sha(detail.head_sha.clone());
+    match &detail.updated_at {
+        Some(updated_at) => row.with_updated_at(updated_at.clone()),
+        None => row,
+    }
+}
+
+fn thread_evidence(counts: ReviewThreadCount) -> ThreadEvidence {
+    let open = std::iter::repeat_n(ReviewThread { resolved: false }, counts.open as usize);
+    let resolved = std::iter::repeat_n(ReviewThread { resolved: true }, counts.resolved as usize);
+    ThreadEvidence {
+        complete: counts.complete,
+        threads: open.chain(resolved).collect(),
+    }
+}
+
+fn issue_comment(comment: IssueComment) -> ReviewComment {
+    ReviewComment {
+        id: comment.id,
+        author: comment.author,
+        body: comment.body,
+        url: comment.url,
+        created_at: comment.created_at,
+    }
+}
+
+fn labels(labels: &[Label]) -> Vec<Value> {
+    labels
+        .iter()
+        .map(|label| {
+            json!({
+                "name": label.name,
+                "color": label.color,
+                "description": label.description,
+            })
+        })
+        .collect()
 }
 
 fn credential(token: Option<String>) -> SecretValue {
@@ -2670,30 +2735,19 @@ fn assessment(conclusions: &[&str]) -> &'static str {
         .unwrap_or(SUCCESS_ASSESSMENT)
 }
 
-fn issue_record(row: &Value) -> Value {
-    let mut issue = project(
-        row,
-        &[
-            "number",
-            "title",
-            "body",
-            "state",
-            "html_url",
-            "created_at",
-            "updated_at",
-            "closed_at",
-            "labels",
-            "assignees",
-        ],
-    );
-    if let Some(body) = issue
-        .get("body")
-        .and_then(Value::as_str)
-        .map(|body| truncate(body, ISSUE_BODY_CHARS))
-    {
-        issue["body"] = json!(body);
-    }
-    issue
+fn issue_record(issue: &Issue) -> Value {
+    json!({
+        "number": issue.reference.number().get(),
+        "title": issue.title,
+        "body": issue.body.as_deref().map(|body| truncate(body, ISSUE_BODY_CHARS)),
+        "state": issue.state,
+        "html_url": issue.url,
+        "created_at": issue.created_at,
+        "updated_at": issue.updated_at,
+        "closed_at": issue.closed_at,
+        "labels": labels(&issue.labels),
+        "assignees": issue.assignees,
+    })
 }
 
 fn bound_build(mut result: Value) -> Value {
@@ -3109,8 +3163,8 @@ mod tests {
                 "state": "open",
                 "html_url": "https://github.com/owner/repository/issues/5",
                 "user": {"login": "abnegate"},
-                "labels": [{"name": "docs"}],
-                "assignees": [],
+                "labels": [{"name": "docs", "color": "0075ca", "description": "Documentation"}],
+                "assignees": [{"login": "octocat"}],
                 "comments": 1,
                 "created_at": "2026-09-01T00:00:00Z",
                 "updated_at": "2026-09-02T00:00:00Z",
@@ -3133,7 +3187,17 @@ mod tests {
         mock(
             &server,
             "issues/8",
-            json!({"number": 8, "pull_request": {}}),
+            json!({
+                "number": 8,
+                "title": "Ship the billing export",
+                "state": "open",
+                "html_url": "https://github.com/owner/repository/pull/8",
+                "labels": [],
+                "comments": 0,
+                "created_at": "2026-09-01T00:00:00Z",
+                "updated_at": "2026-09-02T00:00:00Z",
+                "pull_request": {}
+            }),
         )
         .await;
 
@@ -3177,7 +3241,13 @@ mod tests {
         assert_eq!(result["issue"]["number"], 5);
         assert_eq!(result["issue"]["body"], body, "the body is not a snippet");
         assert_eq!(result["issue"]["author"], "abnegate");
-        assert_eq!(result["issue"]["labels"][0]["name"], "docs");
+        assert_eq!(
+            result["issue"]["labels"],
+            json!([{"name": "docs", "color": "0075ca", "description": "Documentation"}])
+        );
+        assert_eq!(result["issue"]["assignees"], json!(["octocat"]));
+        assert_eq!(result["issue"]["comments"], 1);
+        assert_eq!(result["issue"]["state"], "open");
         assert_eq!(result["comments"][0]["author"], "reviewer");
         assert_eq!(
             result["comments"][0]["body"],
@@ -3725,7 +3795,7 @@ mod tests {
     async fn file_is_complete_and_symlinks_are_rejected() {
         let server = MockServer::start().await;
         let content = "Short file 🦀\n";
-        mock(&server, &format!("git/trees/{COMMIT}"), json!({"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","sha":BLOB,"size":content.len()}]})).await;
+        mock(&server, &format!("git/trees/{COMMIT}"), json!({"sha":COMMIT,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","sha":BLOB,"size":content.len()}]})).await;
         Mock::given(path(format!("/repos/owner/repository/git/blobs/{BLOB}")))
             .and(header("Accept", "application/vnd.github.raw+json"))
             .respond_with(ResponseTemplate::new(200).set_body_string(content))
@@ -3740,7 +3810,7 @@ mod tests {
         assert_eq!(result["complete"], true);
         assert_eq!(result["next"], Value::Null);
         server.reset().await;
-        mock(&server, &format!("git/trees/{COMMIT}"), json!({"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"120000","sha":BLOB,"size":9}]})).await;
+        mock(&server, &format!("git/trees/{COMMIT}"), json!({"sha":COMMIT,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"120000","sha":BLOB,"size":9}]})).await;
         assert!(
             github(&server)
                 .file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
@@ -3755,7 +3825,7 @@ mod tests {
     async fn large_file_returns_a_budgeted_page_instead_of_the_whole_blob() {
         let server = MockServer::start().await;
         let content = "Long document 🦀\n".repeat(2000);
-        mock(&server, &format!("git/trees/{COMMIT}"), json!({"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","sha":BLOB,"size":content.len()}]})).await;
+        mock(&server, &format!("git/trees/{COMMIT}"), json!({"sha":COMMIT,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","sha":BLOB,"size":content.len()}]})).await;
         Mock::given(path(format!("/repos/owner/repository/git/blobs/{BLOB}")))
             .and(header("Accept", "application/vnd.github.raw+json"))
             .respond_with(ResponseTemplate::new(200).set_body_string(content.clone()))
@@ -3788,6 +3858,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_file_larger_than_the_cap_is_refused_before_its_blob_is_read() {
+        let server = MockServer::start().await;
+        mock(&server, &format!("git/trees/{COMMIT}"), json!({"sha":COMMIT,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","sha":BLOB,"size":MAX_FILE_BYTES + 1}]})).await;
+        let refused = github(&server)
+            .file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
+            .await
+            .unwrap_err();
+        assert_eq!(refused, FILE_TOO_LARGE);
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "only the tree is read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tree_entry_without_a_size_is_refused_before_its_blob_is_read() {
+        let server = MockServer::start().await;
+        mock(&server, &format!("git/trees/{COMMIT}"), json!({"sha":COMMIT,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","sha":BLOB}]})).await;
+        let refused = github(&server)
+            .file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
+            .await
+            .unwrap_err();
+        assert_eq!(refused, SIZE_MISMATCH);
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "only the tree is read"
+        );
+    }
+
+    #[tokio::test]
     async fn deployments_include_latest_provider_status() {
         let server = MockServer::start().await;
         mock(
@@ -3815,8 +3917,21 @@ mod tests {
         let server = MockServer::start().await;
         let mut issues = vec![json!({"number":1,"pull_request":{}}); 98];
         let body = "full issue ".repeat(2000);
-        issues.push(json!({"number":99,"title":"Tiny","body":"ok"}));
-        issues.push(json!({"number":100,"title":"Bug","body":body}));
+        let issue = |number: u64, title: &str, body: &str| {
+            json!({
+                "number": number,
+                "title": title,
+                "body": body,
+                "state": "open",
+                "html_url": format!("https://github.com/owner/repository/issues/{number}"),
+                "labels": [],
+                "comments": 0,
+                "created_at": "2026-09-01T00:00:00Z",
+                "updated_at": "2026-09-02T00:00:00Z"
+            })
+        };
+        issues.push(issue(99, "Tiny", "ok"));
+        issues.push(issue(100, "Bug", &body));
         mock(&server, "issues", json!(issues)).await;
         let result = github(&server)
             .observe(
@@ -3862,13 +3977,19 @@ mod tests {
 
     #[test]
     fn issue_body_truncates_long_text_and_keeps_short_text() {
-        let long = issue_record(&json!({
-            "number": 7,
-            "title": "Bug",
-            "body": "x".repeat(2_000),
-            "state": "open",
-            "html_url": "https://github.com/owner/repository/issues/7"
-        }));
+        let issue = |number: u64| {
+            Issue::new(
+                IssueReference::new(
+                    Repository::new("owner", "repository").unwrap(),
+                    NonZeroU64::new(number).unwrap(),
+                ),
+                "Bug",
+                format!("https://github.com/owner/repository/issues/{number}"),
+                "2026-09-01T00:00:00Z",
+                "2026-09-02T00:00:00Z",
+            )
+        };
+        let long = issue_record(&issue(7).with_body("x".repeat(2_000)));
         assert_eq!(long["number"], 7);
         assert_eq!(long["title"], "Bug");
         assert_eq!(long["state"], "open");
@@ -3879,14 +4000,12 @@ mod tests {
         let body = long["body"].as_str().unwrap();
         assert!(body.ends_with('…'));
         assert_eq!(body.chars().count(), ISSUE_BODY_CHARS + 1);
+        assert_eq!(issue_record(&issue(1).with_body("ok"))["body"], "ok");
         assert_eq!(
-            issue_record(&json!({"number": 1, "title": "Tiny", "body": "ok"}))["body"],
-            "ok"
-        );
-        assert_eq!(
-            issue_record(&json!({"number": 2, "body": "a".repeat(ISSUE_BODY_CHARS)}))["body"],
+            issue_record(&issue(2).with_body("a".repeat(ISSUE_BODY_CHARS)))["body"],
             "a".repeat(ISSUE_BODY_CHARS)
         );
+        assert_eq!(issue_record(&issue(3))["body"], Value::Null);
     }
 
     #[test]
@@ -3944,12 +4063,14 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/repos/owner/repository/pulls"))
             .and(header("Authorization", "Bearer test-secret"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                "number": 12,
-                "html_url": "https://github.com/owner/repository/pull/12",
+            .and(body_partial_json(json!({
                 "title": "Fix",
-                "state": "open"
+                "head": "feature",
+                "base": "main",
+                "body": "details"
             })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(created_pull(12, "feature")))
+            .expect(1)
             .mount(&server)
             .await;
         let result = github(&server)
@@ -3984,6 +4105,157 @@ mod tests {
             result["pull_request"]["html_url"],
             "https://github.com/owner/repository/pull/12"
         );
+        assert_eq!(result["pull_request"]["title"], "Fix");
+        assert_eq!(result["pull_request"]["state"], "open");
+    }
+
+    fn created_pull(number: u64, head: &str) -> Value {
+        json!({
+            "id": number,
+            "number": number,
+            "html_url": format!("https://github.com/owner/repository/pull/{number}"),
+            "title": "Fix",
+            "state": "open",
+            "head": {"ref": head, "sha": COMMIT},
+            "base": {"ref": "main", "sha": COMMIT}
+        })
+    }
+
+    fn found_pull(number: u64, owner: &str, state: &str) -> Value {
+        json!({
+            "node_id": format!("PR_{number}"),
+            "number": number,
+            "html_url": format!("https://github.com/owner/repository/pull/{number}"),
+            "state": state,
+            "title": format!("Fix, take {number}"),
+            "draft": false,
+            "head": {"ref": "feature", "label": format!("{owner}:feature"), "sha": COMMIT},
+            "base": {"ref": "main", "label": "owner:main", "sha": COMMIT}
+        })
+    }
+
+    async fn refuse_duplicate(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repository/pulls"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+                "message": "Validation Failed",
+                "errors": [{"message": "A pull request already exists for owner:feature."}]
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    async fn mock_found(server: &MockServer, owner: &str, rows: Value) {
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repository/pulls"))
+            .and(query_param("head", format!("{owner}:feature")))
+            .and(query_param("base", "main"))
+            .and(query_param("state", "all"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rows))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_create_answers_only_with_an_open_pull_request() {
+        let server = MockServer::start().await;
+        refuse_duplicate(&server).await;
+        mock_found(&server, "owner", json!([found_pull(12, "owner", "closed")])).await;
+        let refused = tool(Operation::CreatePull)
+            .open_pull(&github(&server), &pull_args("feature", Some("main"), None))
+            .await
+            .expect_err("a closed pull request is not the one GitHub says is open");
+        assert_eq!(refused, status_error(StatusCode::UNPROCESSABLE_ENTITY));
+
+        server.reset().await;
+        refuse_duplicate(&server).await;
+        mock_found(
+            &server,
+            "owner",
+            json!([
+                found_pull(12, "owner", "closed"),
+                found_pull(13, "owner", "open")
+            ]),
+        )
+        .await;
+        let answer = tool(Operation::CreatePull)
+            .open_pull(&github(&server), &pull_args("feature", Some("main"), None))
+            .await
+            .expect("the open pull request answers a duplicate create");
+        assert_eq!(answer["already_open"], true, "{answer}");
+        assert_eq!(answer["pull_request"]["number"], 13, "{answer}");
+        assert_eq!(answer["pull_request"]["title"], "Fix, take 13", "{answer}");
+        assert_eq!(answer["pull_request"]["state"], "open", "{answer}");
+        assert_eq!(
+            answer["pull_request"]["html_url"],
+            "https://github.com/owner/repository/pull/13"
+        );
+
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repository/pulls"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+                "message": "Validation Failed",
+                "errors": [{"message": "No commits between main and feature"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let refused = tool(Operation::CreatePull)
+            .open_pull(&github(&server), &pull_args("feature", Some("main"), None))
+            .await
+            .expect_err("a refusal that is not a duplicate is an error");
+        assert_eq!(refused, UNEXPECTED_RESPONSE);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method.as_str() == "POST"),
+            "only a duplicate is looked up"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fork_head_is_opened_from_its_owner() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repository/pulls"))
+            .and(body_partial_json(
+                json!({"head": "contributor:feature", "base": "main"}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(created_pull(14, "feature")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let created = github(&server)
+            .write(
+                Operation::CreatePull,
+                &pull_args("contributor:feature", Some("main"), None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["pull_request"]["number"], 14, "{created}");
+
+        server.reset().await;
+        refuse_duplicate(&server).await;
+        mock_found(
+            &server,
+            "contributor",
+            json!([found_pull(14, "contributor", "open")]),
+        )
+        .await;
+        let answer = tool(Operation::CreatePull)
+            .open_pull(
+                &github(&server),
+                &pull_args("contributor:feature", Some("main"), None),
+            )
+            .await
+            .expect("the fork's open pull request answers a duplicate create");
+        assert_eq!(answer["already_open"], true, "{answer}");
+        assert_eq!(answer["pull_request"]["number"], 14, "{answer}");
     }
 
     #[tokio::test]
@@ -3992,6 +4264,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/repos/owner/repository/issues/7/comments"))
             .and(header("Authorization", "Bearer test-secret"))
+            .and(body_partial_json(json!({"body": "ship it"})))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "id": 99,
                 "html_url": "https://github.com/owner/repository/issues/7#issuecomment-99",
@@ -4029,6 +4302,11 @@ mod tests {
             .unwrap();
         assert_eq!(result["comment"]["id"], 99);
         assert_eq!(result["comment"]["body"], "ship it");
+        assert_eq!(
+            result["comment"]["html_url"],
+            "https://github.com/owner/repository/issues/7#issuecomment-99"
+        );
+        assert_eq!(result["comment"]["created_at"], "2026-09-05T00:00:00Z");
     }
 
     fn pull_args(head: &str, base: Option<&str>, directory: Option<&str>) -> Arguments {
@@ -4220,26 +4498,36 @@ mod tests {
         format!("**Confidence Score:** {score}/5\n_Last reviewed commit: {sha}_")
     }
 
-    fn review_payload(head: &str, resolved: bool, body: &str, more_threads: bool) -> Value {
+    fn thread_counts(resolved: bool, more_threads: bool) -> Value {
         json!({"data": {"repository": {"pullRequest": {
-            "number": 7,
-            "isDraft": false,
-            "headRefOid": head,
             "reviewThreads": {
-                "pageInfo": {"hasNextPage": more_threads},
-                "nodes": [{"isResolved": resolved}]
-            },
-            "comments": {
-                "pageInfo": {"hasPreviousPage": false},
-                "nodes": [{
-                    "databaseId": 11,
-                    "body": body,
-                    "url": "https://github.com/owner/repository/pull/7#issuecomment-11",
-                    "createdAt": "2026-09-05T00:00:00Z",
-                    "author": {"login": "greptile-apps"}
-                }]
+                "pageInfo": {"hasNextPage": more_threads, "endCursor": null},
+                "nodes": [{"id": "PRRT_1", "isResolved": resolved}]
             }
         }}}})
+    }
+
+    fn conversation_comment(id: u64, author: &str, body: &str) -> Value {
+        json!({
+            "id": id,
+            "body": body,
+            "html_url": format!("https://github.com/owner/repository/pull/7#issuecomment-{id}"),
+            "created_at": "2026-09-05T00:00:00Z",
+            "user": {"login": author}
+        })
+    }
+
+    /// Pull request 7's review: one thread, resolved or not, more of them
+    /// GitHub would not page to when `more_threads`, and the conversation
+    /// comment a review bot summarised the change in.
+    async fn mock_review(server: &MockServer, resolved: bool, body: &str, more_threads: bool) {
+        mock_graphql(server, thread_counts(resolved, more_threads)).await;
+        mock(
+            server,
+            "issues/7/comments",
+            json!([conversation_comment(11, "greptile-apps", body)]),
+        )
+        .await;
     }
 
     fn readiness_args(number: Option<u64>) -> Arguments {
@@ -5064,15 +5352,26 @@ mod tests {
         assert!(refused.contains("different or missing"), "{refused}");
     }
 
+    fn pull_detail(head: &str) -> Value {
+        json!({"node_id": "PR_7", "number": 7, "draft": false, "state": "open",
+               "title": "Ship the billing export",
+               "html_url": "https://github.com/owner/repository/pull/7",
+               "updated_at": "2026-09-05T00:00:00Z",
+               "head": {"ref": "feature", "sha": head},
+               "base": {"ref": "main", "sha": COMMIT}})
+    }
+
     async fn mock_pull(server: &MockServer, head: &str) {
-        mock(
-            server,
-            "pulls/7",
-            json!({"number": 7, "draft": false, "title": "Ship the billing export",
-                   "html_url": "https://github.com/owner/repository/pull/7",
-                   "updated_at": "2026-09-05T00:00:00Z", "head": {"sha": head}}),
-        )
-        .await;
+        mock(server, "pulls/7", pull_detail(head)).await;
+    }
+
+    fn listed_pull(draft: bool) -> Value {
+        json!({"node_id": "PR_7", "number": 7, "draft": draft, "state": "open",
+               "title": "Ship the billing export",
+               "html_url": "https://github.com/owner/repository/pull/7",
+               "updated_at": "2026-09-05T00:00:00Z",
+               "head": {"ref": "feature", "label": "owner:feature", "sha": COMMIT},
+               "base": {"ref": "main", "label": "owner:main"}})
     }
 
     async fn mock_green_ci(server: &MockServer) {
@@ -5106,11 +5405,7 @@ mod tests {
     async fn coherent_green_evidence_is_ready_and_cites_the_head_commit() {
         let server = MockServer::start().await;
         mock_pull(&server, COMMIT).await;
-        mock_graphql(
-            &server,
-            review_payload(COMMIT, true, &summary(5, COMMIT), false),
-        )
-        .await;
+        mock_review(&server, true, &summary(5, COMMIT), false).await;
         mock_green_ci(&server).await;
         let result = github(&server)
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
@@ -5142,15 +5437,12 @@ mod tests {
     #[tokio::test]
     async fn a_head_commit_the_observations_disagree_on_is_never_ready() {
         let server = MockServer::start().await;
-        mock_pull(&server, COMMIT).await;
-        mock_graphql(
-            &server,
-            review_payload(BLOB, true, &summary(5, BLOB), false),
-        )
-        .await;
+        mock(&server, "pulls", json!([listed_pull(false)])).await;
+        mock_pull(&server, BLOB).await;
+        mock_review(&server, true, &summary(5, BLOB), false).await;
         mock_green_ci(&server).await;
         let result = github(&server)
-            .observe(Operation::PullRequests, &readiness_args(Some(7)))
+            .observe(Operation::PullRequests, &readiness_args(None))
             .await
             .unwrap();
         let pull = &result["pull_requests"][0];
@@ -5181,11 +5473,7 @@ mod tests {
     async fn threads_that_could_not_be_paginated_block_otherwise_green_evidence() {
         let server = MockServer::start().await;
         mock_pull(&server, COMMIT).await;
-        mock_graphql(
-            &server,
-            review_payload(COMMIT, true, &summary(5, COMMIT), true),
-        )
-        .await;
+        mock_review(&server, true, &summary(5, COMMIT), true).await;
         mock_green_ci(&server).await;
         let result = github(&server)
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
@@ -5215,46 +5503,60 @@ mod tests {
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
             .await
             .unwrap_err();
-        assert!(error.contains("rejected the review query"));
+        assert_eq!(error, REVIEW_QUERY_REJECTED);
         assert!(!error.contains("test-secret"));
         server.reset().await;
         mock_pull(&server, COMMIT).await;
-        let mut payload = review_payload(COMMIT, true, &summary(5, COMMIT), false);
-        payload["data"]["repository"]["pullRequest"]["number"] = json!(8);
-        mock_graphql(&server, payload).await;
-        assert!(
+        mock_graphql(
+            &server,
+            json!({"data": {"repository": {"pullRequest": Value::Null}}}),
+        )
+        .await;
+        assert_eq!(
             github(&server)
                 .observe(Operation::PullRequests, &readiness_args(Some(7)))
                 .await
-                .unwrap_err()
-                .contains("different or missing pull request")
+                .unwrap_err(),
+            REVIEW_QUERY_REJECTED,
+            "a pull request GitHub's review query cannot find reads as a rejected query"
+        );
+        server.reset().await;
+        let mut other = pull_detail(COMMIT);
+        other["number"] = json!(8);
+        mock(&server, "pulls/7", other).await;
+        mock_review(&server, true, &summary(5, COMMIT), false).await;
+        assert_eq!(
+            github(&server)
+                .observe(Operation::PullRequests, &readiness_args(Some(7)))
+                .await
+                .unwrap_err(),
+            MISMATCHED_PULL
         );
     }
 
     #[tokio::test]
     async fn pull_requests_without_a_number_or_draft_state_fail_closed() {
         let server = MockServer::start().await;
-        mock(
-            &server,
-            "pulls/7",
-            json!({"number": 7, "head": {"sha": COMMIT}}),
-        )
-        .await;
-        assert!(
+        let mut thin = listed_pull(false);
+        thin.as_object_mut().unwrap().remove("draft");
+        mock(&server, "pulls", json!([thin])).await;
+        assert_eq!(
             github(&server)
-                .observe(Operation::PullRequests, &readiness_args(Some(7)))
+                .observe(Operation::PullRequests, &readiness_args(None))
                 .await
-                .unwrap_err()
-                .contains("draft state")
+                .unwrap_err(),
+            UNEXPECTED_RESPONSE,
+            "a listed pull request that does not say whether it is a draft is unreadable"
         );
         server.reset().await;
         mock(&server, "pulls/7", json!({"draft": false})).await;
-        assert!(
+        assert_eq!(
             github(&server)
                 .observe(Operation::PullRequests, &readiness_args(Some(7)))
                 .await
-                .unwrap_err()
-                .contains("without a number")
+                .unwrap_err(),
+            UNEXPECTED_RESPONSE,
+            "a pull request without a number is unreadable"
         );
         assert!(
             github(&server)
@@ -5266,6 +5568,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pull_request_read_by_number_without_its_draft_state_reads_as_not_a_draft() {
+        let server = MockServer::start().await;
+        let mut detail = pull_detail(COMMIT);
+        detail.as_object_mut().unwrap().remove("draft");
+        mock(&server, "pulls/7", detail).await;
+        mock_review(&server, true, &summary(5, COMMIT), false).await;
+        mock_green_ci(&server).await;
+        let result = github(&server)
+            .observe(Operation::PullRequests, &readiness_args(Some(7)))
+            .await
+            .unwrap();
+        let pull = &result["pull_requests"][0];
+        assert_eq!(pull["draft"], false, "{result}");
+        assert_eq!(pull["ready"], true, "{result}");
+    }
+
+    #[tokio::test]
+    async fn a_hundred_review_comments_are_complete_and_a_hundred_and_one_are_not() {
+        for (count, complete) in [(100, true), (101, false)] {
+            let server = MockServer::start().await;
+            mock_pull(&server, COMMIT).await;
+            mock_graphql(&server, thread_counts(true, false)).await;
+            mock_green_ci(&server).await;
+            let mut comments: Vec<Value> = (1..count)
+                .map(|id| conversation_comment(id, "reviewer", "Looks reasonable."))
+                .collect();
+            comments.push(conversation_comment(
+                count,
+                "greptile-apps",
+                &summary(5, COMMIT),
+            ));
+            let rest = comments.split_off(PAGE_SIZE.min(comments.len()));
+            for (page, rows) in [("1", comments), ("2", rest)] {
+                Mock::given(method("GET"))
+                    .and(path("/repos/owner/repository/issues/7/comments"))
+                    .and(query_param("per_page", "100"))
+                    .and(query_param("page", page))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!(rows)))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let result = github(&server)
+                .observe(Operation::PullRequests, &readiness_args(Some(7)))
+                .await
+                .unwrap();
+            let pull = &result["pull_requests"][0];
+            assert_eq!(pull["comments_complete"], complete, "{count}: {result}");
+            assert_eq!(
+                take_array(pull, "blockers")
+                    .iter()
+                    .any(|blocker| blocker["code"] == "comments_incomplete"),
+                !complete,
+                "{count}: {result}"
+            );
+            assert_eq!(pull["ready"], complete, "{count}: {result}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_listed_page_requests_the_most_recently_updated_pull_requests() {
         let server = MockServer::start().await;
         Mock::given(path("/repos/owner/repository/pulls"))
@@ -5274,19 +5636,12 @@ mod tests {
             .and(query_param("direction", "desc"))
             .and(query_param("per_page", "10"))
             .and(query_param("page", "1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
-                "number": 7, "draft": true, "title": "Ship the billing export",
-                "html_url": "https://github.com/owner/repository/pull/7",
-                "updated_at": "2026-09-05T00:00:00Z", "head": {"sha": COMMIT}
-            }])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([listed_pull(true)])))
             .expect(1)
             .mount(&server)
             .await;
-        mock_graphql(
-            &server,
-            review_payload(COMMIT, true, &summary(5, COMMIT), false),
-        )
-        .await;
+        mock_pull(&server, COMMIT).await;
+        mock_review(&server, true, &summary(5, COMMIT), false).await;
         mock_green_ci(&server).await;
         let result = github(&server)
             .observe(Operation::PullRequests, &readiness_args(None))
@@ -5376,12 +5731,10 @@ mod tests {
 
     #[test]
     fn short_pages_end_pagination_and_full_pages_continue() {
-        assert_eq!(next_page_of(9, 1, PULL_PAGE_SIZE).unwrap(), None);
-        assert_eq!(
-            next_page_of(PULL_PAGE_SIZE, 1, PULL_PAGE_SIZE).unwrap(),
-            Some(2)
-        );
-        assert!(next_page_of(PULL_PAGE_SIZE, u32::MAX, PULL_PAGE_SIZE).is_err());
+        let size = usize::from(PULL_PAGE_SIZE.get());
+        assert_eq!(next_page_of(9, 1, size).unwrap(), None);
+        assert_eq!(next_page_of(size, 1, size).unwrap(), Some(2));
+        assert!(next_page_of(size, u32::MAX, size).is_err());
         assert_eq!(next_page(PAGE_SIZE - 1, 1).unwrap(), None);
         assert_eq!(next_page(PAGE_SIZE, 1).unwrap(), Some(2));
     }
@@ -5862,7 +6215,7 @@ mod tests {
             json!(
                 filenames
                     .iter()
-                    .map(|filename| json!({"filename": filename, "status": "modified"}))
+                    .map(|filename| json!({"filename": filename, "status": "modified", "additions": 1, "deletions": 0}))
                     .collect::<Vec<_>>()
             ),
         )
@@ -5871,11 +6224,7 @@ mod tests {
 
     async fn assess_green_pull(server: &MockServer) -> Value {
         mock_pull(server, COMMIT).await;
-        mock_graphql(
-            server,
-            review_payload(COMMIT, true, &summary(5, COMMIT), false),
-        )
-        .await;
+        mock_review(server, true, &summary(5, COMMIT), false).await;
         mock_green_ci(server).await;
         github(server)
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
@@ -5935,7 +6284,10 @@ mod tests {
         mock(
             &server,
             "pulls/7/files",
-            json!([{"filename": "src/auth/token.rs"}, {"status": "modified"}]),
+            json!([
+                {"filename": "src/auth/token.rs", "additions": 1, "deletions": 0},
+                {"status": "modified", "additions": 1, "deletions": 0}
+            ]),
         )
         .await;
         let result = assess_green_pull(&server).await;
@@ -5965,14 +6317,11 @@ mod tests {
                     mock_changed_files(&server, &files).await;
                 }
                 mock_pull(&server, COMMIT).await;
-                mock_graphql(
+                mock_review(
                     &server,
-                    review_payload(
-                        COMMIT,
-                        true,
-                        &summary(if green { 5 } else { 3 }, COMMIT),
-                        false,
-                    ),
+                    true,
+                    &summary(if green { 5 } else { 3 }, COMMIT),
+                    false,
                 )
                 .await;
                 mock_green_ci(&server).await;
@@ -6001,11 +6350,7 @@ mod tests {
         let server = MockServer::start().await;
         mock_changed_files(&server, &["README.md"]).await;
         mock_pull(&server, COMMIT).await;
-        mock_graphql(
-            &server,
-            review_payload(COMMIT, true, &summary(5, COMMIT), false),
-        )
-        .await;
+        mock_review(&server, true, &summary(5, COMMIT), false).await;
         mock_green_ci(&server).await;
         let mut github = github(&server);
         github.signals = ReviewSignals::select(&["coderabbit"]).unwrap();
