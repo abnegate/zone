@@ -7075,7 +7075,10 @@ mod cli_tests {
         }
 
         fn prompt(&self) -> String {
-            std::fs::read_to_string(self.path(PROMPT)).expect("the prompt the agent was handed")
+            zone_core::llm::provider::prompt(
+                &std::fs::read_to_string(self.path(PROMPT))
+                    .expect("the prompt the agent was handed"),
+            )
         }
 
         /// What the agent has written to `name` so far, a line at a time.
