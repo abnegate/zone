@@ -37,7 +37,7 @@ mod tests {
     fn an_application_failure_renders_as_the_crate_worded_it() {
         assert_eq!(
             Error::from(ApplicationError::Status(404)).to_string(),
-            "GitHub returned HTTP 404 for the installation token request."
+            "GitHub returned HTTP 404 for the GitHub App request."
         );
     }
 
