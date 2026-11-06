@@ -16,6 +16,8 @@ local-embeddings = ["zone_context/local-embeddings"]
 # Subject detection for LoRA training crops, through abnegate-vision. Links the
 # same ONNX Runtime, and is inert until ZONE_VISION_MODEL points at a U2-Net model.
 saliency = ["abnegate-comfy/saliency"]
+# Test hooks for this crate's own integration tests, enabled by its dev-dependency on itself.
+testing = []
 
 [lib]
 name = "zone_server"
@@ -113,6 +115,7 @@ zone_core = { path = "../zone_core", features = ["sqlx"] }
 zone_context = { path = "../zone_context" }
 
 [dev-dependencies]
+zone_server = { path = ".", features = ["testing"] }
 abnegate-notify = { workspace = true, features = ["testing"] }
 abnegate-vcs = { workspace = true, features = ["github", "github-app", "testing"] }
 zone_chat = { path = "../zone_chat" }

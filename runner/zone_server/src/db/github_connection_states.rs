@@ -94,7 +94,7 @@ pub async fn consume(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::github_apps::tests::{pool, seed_app, seed_organization, seed_user};
+    use crate::db::github_apps::testing::{pool, seed_app, seed_organization, seed_user};
 
     async fn stored(pool: &PgPool, state: &str) -> i64 {
         sqlx::query_scalar("SELECT count(*) FROM github_connection_states WHERE nonce_hash = $1")

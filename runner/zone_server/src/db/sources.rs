@@ -598,12 +598,13 @@ pub(crate) mod testing {
         let id: Uuid = sqlx::query_scalar(
             "INSERT INTO github_installations (organization_id, github_app_id, installation_id, \
                account_login, account_type, repository_selection, html_url) \
-             VALUES ($1, $2, 7, 'acme', 'Organization', 'all', \
+             VALUES ($1, $2, $3, 'acme', 'Organization', 'all', \
                'https://github.com/organizations/acme/settings/installations/7') \
              RETURNING id",
         )
         .bind(organization)
         .bind(application)
+        .bind(rand::random_range(1..i64::MAX))
         .fetch_one(pool)
         .await
         .expect("a GitHub installation");

@@ -1,39 +1,34 @@
-//! What a caller receives when it asks for a source's or project's credential.
-
 use std::fmt;
 
 use abnegate_secret::SecretValue;
-use uuid::Uuid;
 
-/// A bearer credential, whatever minted it.
-///
-/// A personal access token read from the database and an installation token
-/// minted seconds ago are the same thing to the caller: a secret to put in an
-/// `Authorization` header. Nothing a caller can read says which one it holds,
-/// so no caller can grow a branch on the answer.
+use super::scope::Scope;
+
+/// Nothing a caller can read says whether a stored token or a minted one is
+/// held, so no caller can grow a branch on the answer.
 #[derive(Clone)]
 pub struct Credential {
     secret: SecretValue,
-    installation: Option<Uuid>,
+    scope: Option<Scope>,
 }
 
 impl Credential {
     pub(crate) fn stored(secret: SecretValue) -> Self {
         Self {
             secret,
-            installation: None,
+            scope: None,
         }
     }
 
-    pub(crate) fn installed(secret: SecretValue, installation: Uuid) -> Self {
+    pub(crate) fn installed(secret: SecretValue, scope: Scope) -> Self {
         Self {
             secret,
-            installation: Some(installation),
+            scope: Some(scope),
         }
     }
 
-    pub(super) fn installation(&self) -> Option<Uuid> {
-        self.installation
+    pub(super) fn scope(&self) -> Option<Scope> {
+        self.scope
     }
 
     pub fn secret(&self) -> &SecretValue {
@@ -56,13 +51,22 @@ impl fmt::Debug for Credential {
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
     use super::*;
+
+    fn scope() -> Scope {
+        Scope {
+            workspace_id: Uuid::new_v4(),
+            installation: Uuid::new_v4(),
+        }
+    }
 
     #[test]
     fn two_credentials_render_identically() {
         let personal = Credential::stored(SecretValue::new("ghp_personalaccesstoken"));
         let installation =
-            Credential::installed(SecretValue::new("ghs_installationtoken"), Uuid::new_v4());
+            Credential::installed(SecretValue::new("ghs_installationtoken"), scope());
 
         assert_eq!(
             format!("{personal:?}"),
@@ -82,15 +86,14 @@ mod tests {
 
     #[test]
     fn only_a_minted_credential_names_its_installation() {
-        let installation = Uuid::new_v4();
+        let scope = scope();
 
         assert_eq!(
-            Credential::installed(SecretValue::new("ghs_installationtoken"), installation)
-                .installation(),
-            Some(installation)
+            Credential::installed(SecretValue::new("ghs_installationtoken"), scope).scope(),
+            Some(scope)
         );
         assert_eq!(
-            Credential::stored(SecretValue::new("ghp_personalaccesstoken")).installation(),
+            Credential::stored(SecretValue::new("ghp_personalaccesstoken")).scope(),
             None
         );
     }

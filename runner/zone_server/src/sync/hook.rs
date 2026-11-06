@@ -316,16 +316,16 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
-    use crate::db::github_apps::tests::{pool, seed_organization, seed_workspace};
-    use crate::services::github_app::testing::{installed, issuing, provider};
+    use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
+    use crate::services::github_app::testing::{installation_number, installed, issuing, provider};
 
-    const GITHUB_INSTALLATION: u64 = 27_182_818;
     const WEBHOOK: u64 = 7;
 
     #[tokio::test]
     async fn an_installation_project_signs_its_webhook_with_a_minted_token() {
         let github = MockServer::start().await;
-        issuing(&github, GITHUB_INSTALLATION, "ghs_hooktoken", 1).await;
+        let number = installation_number();
+        issuing(&github, number, "ghs_hooktoken", 1).await;
         Mock::given(method("PATCH"))
             .and(path(format!("/repos/acme/project/hooks/{WEBHOOK}/config")))
             .and(header("authorization", "Bearer ghs_hooktoken"))
@@ -347,8 +347,7 @@ mod tests {
         state.install_github(provider(&github, *state.encryption_key()));
         let organization = seed_organization(&pool).await;
         let workspace = seed_workspace(&pool, organization).await;
-        let installation =
-            installed(&pool, state.github(), organization, GITHUB_INSTALLATION).await;
+        let installation = installed(&pool, state.github(), organization, number).await;
         let project = projects::create_project(&pool, "Hooked", None, Some(workspace))
             .await
             .unwrap();

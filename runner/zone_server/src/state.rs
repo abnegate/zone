@@ -392,8 +392,8 @@ impl AppState {
             .get_or_init(|| Provider::new(&self.inner.config, self.inner.encryption_key))
     }
 
-    /// Install a provider in place of the one built from the config, for a
-    /// test whose GitHub is a stand-in. Panics if a provider is already in place.
+    /// Panics if a provider is already in place.
+    #[cfg(any(test, feature = "testing"))]
     pub fn install_github(&self, provider: Provider) {
         assert!(
             self.inner.github.set(provider).is_ok(),

@@ -1,10 +1,13 @@
 //! A GitHub App and its installation, seeded straight into the database, for
 //! tests of the routes that attach sources and projects to an installation.
 
+pub use zone_server::services::github_app::testing::TEST_PRIVATE_KEY;
+
 use abnegate_secret::{MasterKey, SecretValue, encrypt_value};
-use abnegate_vcs::pull_request::InstallationIssuer;
+use serde_json::json;
 use uuid::Uuid;
-use wiremock::MockServer;
+use wiremock::matchers::{header_exists, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_server::config::Config;
 use zone_server::db::github_apps::{self, NewApp, OwnerType};
 use zone_server::db::github_installations::{
@@ -15,37 +18,13 @@ use zone_server::state::AppState;
 
 use super::test_config;
 
-/// A throwaway RSA key, generated for these tests and used nowhere else.
-/// The same key as `services::github_app::testing::TEST_PRIVATE_KEY`.
-pub const TEST_PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
-MIIEogIBAAKCAQEAu5dqhjvoHZtbdSz9bGJAMp3r+1bqzy/9lhjVz5crI2yWhz7I
-z3M0H74MQPCHhlOn8nyeOs1cclBLRt7iX7/wgkaP9mGGpvCzLXYdLH4JrrMZj7r5
-Pjt0KHrrouTvYXjuCTu2F6QnBcIe+Esz5Vs/+V2fa73I+M1C0sHdX22YNIazcAcB
-I9gnaEeS+gINe8LUZDf72lJQc4z+gmVb7dd2R9YEAc90NPpkoeGl7pFwrVHRFlsY
-AbJAz6pKc1dVkfTU/yFuw/0d0117InbS1RxTVFEunMWqDJLFwl01THIuVzLDtX93
-8cmeMZMcys+n74ZNoA9W6Pv9P2GVQsbnnZV43QIDAQABAoIBAAj9cOq1cMKIeTnU
-meGJlNuII3DEYdTjjyLUFl0QOM5GDDG3kc6VTgxuYm5zSH9ov234yGl3gYRt8imX
-kWA21dsccBZF5rrV4rRdSnkhIiwn46P2eS7hEQhGmcfQ8mLotXmmTav03zTgsHTE
-P9ywQpDcCoGSkxDPX3IzvbzuxuJPdBIIZLraG07haKpemdvNR4UoeMl8blAic3df
-NjcFPVD8t4my7EZTgHJtWDqYTW/g/EPwIeMZ/DOEqHDNey9RrKTi4tAr9Uzsszg0
-YK2mEFr2B2NG/G5/1X5fh/QV7tPvbKXxFMCiL7RBv9LW3qD8LTs/ovQUxEgOBspV
-qyAuCwECgYEA+5Y5Xr0/uedzoGpMLhg86aHdt80cX+Ssi5HkKXwJa5taYCz0gbgU
-r7s/9hlGVLiXEjwnXmhWXETq/56b4ebO0u8fcM4ptLrnr+KKWs3AXdjtSvTskOkH
-S4QCx6VuZpetyVD6yLZucVes07S6bfIIcRNQto3DPcBCYm+YsNHSdd0CgYEAvuHQ
-gazZaxRSTap8IAiRZ2mHUxK3FkVqWrR1aXG/V7OsZprDRVzHz662f+5a27ZCTc4q
-2tC8B04tUA0AFWYpk7wh4vnb2VffziarFnCRXhOeOK9/82vxsMwOEX8qgRHs0GK0
-1zHTFqUA/lsA6bcqQZYmOn4r0dSPJMahp5i+XwECgYB/7/nGqrhwYjnTdpq8ygiX
-yn+Ei2KFhTUVWKBNVE06EmtYAyRnnuOuJau2C05PoPr6A+sFQEvCai2SxeaBbyz3
-6S/03nIo/O7661nuKTlMwBaTio+OdWIHTd9YBVFqDHIMsQiG7vak3q/9jKdNZ8pR
-LkBaRSbnDRD1G8jrChhbZQKBgFkaD7p4dQUG92RJsKdDWJxtJj4g/lXnET5F/oi6
-EBdgR5mdpIk8RgksBQSyvrbQ3SJ0moyJ4zuFwqEbcG6Mwdu0dhz9hSJvYolYg4R2
-B2Viwviy84ctXCSrG+YO9khJlcGwUboiB+cKHuycjlCKr67t5+pl+w53qloAXnVd
-V4ABAoGAJQaRxv9kpn6TMTCDtTPtWpVyxymF0A58t8/Yy3lcC3HS3V5hDRZlBGyL
-snLljJnOKrZGf+JfNkPul+la0f9cJo9Ka/oCy6X243y8VmzRG6/BX6eEfnWEJ+NB
-+ehfHUDVhe3oJRr15Rw1gt7CrSORoe46YkbnxO3H80of1gn9Vyw=
------END RSA PRIVATE KEY-----";
-
 pub const APP_ID: i64 = 424_242;
+
+/// A GitHub installation number no other test uses, since the database holds
+/// each of GitHub's installations once.
+pub fn installation_id() -> i64 {
+    rand::random_range(1..i64::MAX)
+}
 
 pub struct Seeded {
     pub app: Uuid,
@@ -118,12 +97,28 @@ pub async fn seed_installation(
     }
 }
 
+/// `server` confirms, once, that installation `installation_id` no longer
+/// exists while the App itself is still answered for.
+pub async fn uninstalled(server: &MockServer, installation_id: i64) {
+    Mock::given(method("GET"))
+        .and(path(format!("/app/installations/{installation_id}")))
+        .and(header_exists("authorization"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/app/installations"))
+        .and(header_exists("authorization"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
 /// A provider that mints installation tokens from `server` instead of GitHub.
 pub fn issuer_provider(server: &MockServer, state: &AppState) -> Provider {
-    Provider::with_issuer(
-        InstallationIssuer::standing_in_for(&server.uri()).expect("a stand-in issuer"),
-        *state.encryption_key(),
-    )
+    Provider::new(&config_for(server), *state.encryption_key())
 }
 
 /// The test config with every GitHub API call sent to `server`.

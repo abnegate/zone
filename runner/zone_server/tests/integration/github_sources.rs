@@ -20,7 +20,6 @@ use zone_server::db::sources::{self, GITHUB, NewSource, SourceRow};
 use zone_server::state::AppState;
 
 const GITLAB: &str = "gitlab";
-const INSTALLATION_ID: i64 = 51_000_001;
 const STORED_TOKEN: &str = "ghp_throwaway_stored";
 const SENT_TOKEN: &str = "ghp_throwaway_sent";
 const REPOSITORY_URL: &str = "https://github.com/acme/widgets";
@@ -172,8 +171,8 @@ async fn reading_repository(server: &MockServer, answer: ResponseTemplate) {
         .await;
 }
 
-async fn reachable(server: &MockServer) {
-    issuing(server, INSTALLATION_ID, 1).await;
+async fn reachable(server: &MockServer, installation_id: i64) {
+    issuing(server, installation_id, 1).await;
     reading_repository(
         server,
         ResponseTemplate::new(200).set_body_json(json!({ "default_branch": "main" })),
@@ -283,7 +282,12 @@ impl Harness {
     }
 
     async fn installation(&self, tenant: &Tenant) -> Seeded {
-        github_app::seed_installation(self.state(), tenant.organization, INSTALLATION_ID).await
+        github_app::seed_installation(
+            self.state(),
+            tenant.organization,
+            github_app::installation_id(),
+        )
+        .await
     }
 
     async fn revoked_installation(&self, tenant: &Tenant) -> Seeded {
@@ -491,10 +495,11 @@ async fn a_seeded_installation_is_attachable_and_its_key_signs() {
     assert_eq!(attachable.installation_id, seeded.installation_id);
     assert_eq!(attachable.github_app_id, seeded.app);
 
-    let credential = github_installations::credential(harness.pool(), seeded.installation)
-        .await
-        .expect("the credential is readable")
-        .expect("the installation has a credential");
+    let credential =
+        github_installations::credential(harness.pool(), tenant.workspace, seeded.installation)
+            .await
+            .expect("the credential is readable")
+            .expect("the installation has a credential");
     let provider = github_app::issuer_provider(&harness.github, harness.state());
     assert_eq!(
         provider
@@ -642,7 +647,7 @@ async fn attaching_an_installation_to_a_token_source_clears_the_token() {
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
     let source = harness.token_source(&tenant).await;
-    reachable(&harness.github).await;
+    reachable(&harness.github, seeded.installation_id).await;
 
     let attached = harness
         .update_source(
@@ -675,7 +680,7 @@ async fn attaching_an_installation_alongside_a_rename_returns_the_final_row() {
     let source = harness.token_source(&tenant).await;
 
     let renamed = source_name("Renamed widgets");
-    reachable(&harness.github).await;
+    reachable(&harness.github, seeded.installation_id).await;
 
     let attached = harness
         .update_source(
@@ -705,7 +710,7 @@ async fn attaching_an_installation_reads_the_repository_the_request_names() {
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
     let source = harness.token_source(&tenant).await;
-    issuing(&harness.github, INSTALLATION_ID, 1).await;
+    issuing(&harness.github, seeded.installation_id, 1).await;
     Mock::given(method("GET"))
         .and(path("/repos/acme/gadgets"))
         .and(header("authorization", format!("Bearer {MINTED_TOKEN}")))
@@ -738,7 +743,7 @@ async fn attaching_an_unreachable_repository_is_refused() {
     let seeded = harness.installation(&tenant).await;
     let source = harness.token_source(&tenant).await;
     let before = harness.stored_source(&tenant, source).await;
-    issuing(&harness.github, INSTALLATION_ID, 1).await;
+    issuing(&harness.github, seeded.installation_id, 1).await;
     reading_repository(
         &harness.github,
         ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })),
@@ -775,7 +780,7 @@ async fn attaching_while_github_fails_is_a_bad_gateway() {
     let seeded = harness.installation(&tenant).await;
     let source = harness.token_source(&tenant).await;
     let before = harness.stored_source(&tenant, source).await;
-    issuing(&harness.github, INSTALLATION_ID, 1).await;
+    issuing(&harness.github, seeded.installation_id, 1).await;
     reading_repository(&harness.github, ResponseTemplate::new(503)).await;
 
     let failed = harness
@@ -809,12 +814,14 @@ async fn attaching_an_installation_github_uninstalled_is_refused_and_marks_it_re
     let source = harness.token_source(&tenant).await;
     Mock::given(method("POST"))
         .and(path(format!(
-            "/app/installations/{INSTALLATION_ID}/access_tokens"
+            "/app/installations/{}/access_tokens",
+            seeded.installation_id
         )))
         .respond_with(ResponseTemplate::new(404))
         .expect(1)
         .mount(&harness.github)
         .await;
+    github_app::uninstalled(&harness.github, seeded.installation_id).await;
 
     let refused = harness
         .update_source(
@@ -833,10 +840,11 @@ async fn attaching_an_installation_github_uninstalled_is_refused_and_marks_it_re
         None,
         "nothing is attached"
     );
-    let credential = github_installations::credential(harness.pool(), seeded.installation)
-        .await
-        .expect("the installation is readable")
-        .expect("the installation is kept");
+    let credential =
+        github_installations::credential(harness.pool(), tenant.workspace, seeded.installation)
+            .await
+            .expect("the installation is readable")
+            .expect("the installation is kept");
     assert_eq!(credential.status(), InstallationStatus::Revoked);
 
     harness.discard(&[&tenant]).await;

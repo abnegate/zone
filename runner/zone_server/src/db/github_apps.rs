@@ -172,13 +172,18 @@ pub async fn delete(pool: &PgPool, organization_id: Uuid, id: Uuid) -> DbResult<
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
+pub(crate) mod testing {
+    use sqlx::PgPool;
+    use uuid::Uuid;
 
-    pub(crate) async fn pool() -> PgPool {
-        PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
-            .await
-            .expect("connect to the test database")
+    use super::{AppRow, NewApp, OwnerType, insert};
+
+    pub(crate) use crate::db::sources::testing::pool;
+
+    /// A GitHub installation number no other test uses, since GitHub numbers
+    /// installations uniquely per host and the database holds each once.
+    pub(crate) fn installation_id() -> i64 {
+        rand::random_range(1..i64::MAX)
     }
 
     pub(crate) async fn seed_organization(pool: &PgPool) -> Uuid {
@@ -239,6 +244,12 @@ pub(crate) mod tests {
         .await
         .expect("seed app")
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{pool, seed_app, seed_organization, seed_user};
+    use super::*;
 
     #[test]
     fn owner_type_round_trips_and_refuses_unknown_values() {

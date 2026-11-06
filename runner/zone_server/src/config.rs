@@ -38,8 +38,6 @@ pub const DEFAULT_GITHUB_WEB_URL: &str = "https://github.com";
 
 const GITHUB_API_HOST: &str = "api.github.com";
 
-const GITHUB_ENTERPRISE_REST_PATH: &str = "/api/v3";
-
 /// The path GitHub Enterprise serves its REST API under.
 const GITHUB_VERSIONED_REST: [&str; 2] = ["api", "v3"];
 
@@ -1145,12 +1143,10 @@ fn github_web_default(api: &str) -> String {
                 .map(|host| host.eq_ignore_ascii_case(GITHUB_API_HOST))
         })
         .unwrap_or(false);
+    let versioned = format!("/{}", GITHUB_VERSIONED_REST.join("/"));
     match hosted {
         true => DEFAULT_GITHUB_WEB_URL.to_string(),
-        false => api
-            .strip_suffix(GITHUB_ENTERPRISE_REST_PATH)
-            .unwrap_or(api)
-            .to_string(),
+        false => api.strip_suffix(&versioned).unwrap_or(api).to_string(),
     }
 }
 
