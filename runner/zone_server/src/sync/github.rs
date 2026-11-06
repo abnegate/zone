@@ -223,6 +223,9 @@ impl GitHubSyncProvider {
             PullRequestError::GitHubApi(_) => {
                 SyncError::ExternalApiError(GITHUB_REFUSED.to_string())
             }
+            PullRequestError::Refused { status, .. } => {
+                SyncError::ExternalApiError(format!("GitHub API error {status}"))
+            }
             other => SyncError::ExternalApiError(other.to_string()),
         }
     }
@@ -1108,7 +1111,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unclassified_refusal_reads_as_one_fixed_text() {
+    async fn an_unclassified_refusal_names_its_status_and_never_github_s_words() {
         for status in [409, 422, 500, 503] {
             let server = MockServer::start().await;
             Mock::given(method("PATCH"))
@@ -1123,10 +1126,24 @@ mod tests {
                 .await;
 
             assert!(
-                matches!(&result, Err(SyncError::ExternalApiError(message)) if message == GITHUB_REFUSED),
+                matches!(
+                    &result,
+                    Err(SyncError::ExternalApiError(message))
+                        if *message == format!("GitHub API error {status}")
+                ),
                 "{status}: {result:?}"
             );
+            assert!(!format!("{result:?}").contains(LEAKED), "{status}");
         }
+    }
+
+    #[test]
+    fn an_unreadable_answer_reads_as_one_fixed_text() {
+        let error = GitHubSyncProvider::refused(PullRequestError::GitHubApi(LEAKED.to_string()));
+        assert!(
+            matches!(&error, SyncError::ExternalApiError(message) if message == GITHUB_REFUSED),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]
