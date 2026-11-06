@@ -9,7 +9,7 @@ mod stopped;
 mod tests;
 
 use sqlx::types::Json;
-use sqlx::{Executor, Postgres};
+use sqlx::{Executor, PgConnection, Postgres};
 use uuid::Uuid;
 use zone_core::llm::{StepStatus, SubagentStatus, SubagentStep};
 
@@ -400,6 +400,30 @@ where
     .bind(message_id)
     .fetch_one(executor)
     .await
+}
+
+/// Whether message `message_id` of `chat_id` exists. Once every write that
+/// holds turn `message_id` or that message through [`hold_turn`] has
+/// committed, locks both against any other until the caller's transaction
+/// ends, so the message's subagents can be removed and the message deleted
+/// with no write landing in between. The turn is locked first, in the order
+/// [`hold_turn`] takes them.
+pub async fn seize_turn(
+    connection: &mut PgConnection,
+    chat_id: Uuid,
+    message_id: Uuid,
+) -> DbResult<bool> {
+    sqlx::query("SELECT 1 FROM chat_turns WHERE chat_id = $1 AND id = $2 FOR UPDATE")
+        .bind(chat_id)
+        .bind(message_id)
+        .fetch_optional(&mut *connection)
+        .await?;
+    let message = sqlx::query("SELECT 1 FROM messages WHERE chat_id = $1 AND id = $2 FOR UPDATE")
+        .bind(chat_id)
+        .bind(message_id)
+        .fetch_optional(&mut *connection)
+        .await?;
+    Ok(message.is_some())
 }
 
 /// Every subagent `chat_id` started, oldest first.

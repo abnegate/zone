@@ -494,6 +494,118 @@ async fn deleting_a_message_directly_removes_its_subagents_too() {
     );
 }
 
+/// A message of `chat` with no turn of its own.
+async fn answered(pool: &PgPool, chat: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO messages (chat_id, role, content) VALUES ($1, 'assistant', 'Done')
+         RETURNING id",
+    )
+    .bind(chat)
+    .fetch_one(pool)
+    .await
+    .expect("a message")
+}
+
+/// Runs `deletion` of `message` while a keeper's write that holds the message
+/// records a subagent for it, and returns what the deletion said it removed,
+/// the subagent the write recorded, and the subagents the chat still has.
+async fn delete_during_a_write<D>(
+    pool: &PgPool,
+    chat: Uuid,
+    message: Uuid,
+    deletion: D,
+) -> (Option<Vec<Uuid>>, Uuid, Vec<Uuid>)
+where
+    D: Future<Output = Option<Vec<Uuid>>> + Send + 'static,
+{
+    let (mut keeper, pid) = session(pool).await;
+    assert!(
+        chat_subagents::hold_turn(&mut *keeper, chat, message)
+            .await
+            .expect("the hold"),
+        "the message holds its turn"
+    );
+    let deleting = tokio::spawn(deletion);
+    blocking(pool, pid).await;
+
+    let written = chat_subagents::record(
+        &mut *keeper,
+        &SubagentChange {
+            chat_id: chat,
+            message_id: Some(message),
+            external_id: "toolu_01Agent",
+            ..SubagentChange::default()
+        },
+    )
+    .await
+    .expect("the keeper's write")
+    .id;
+    keeper.commit().await.expect("the keeper's commit");
+    let removed = deleting.await.expect("the deletion ran");
+
+    let left = chat_subagents::list(pool, chat)
+        .await
+        .expect("the chat's subagents")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    (removed, written, left)
+}
+
+#[tokio::test]
+async fn deleting_a_message_directly_removes_a_subagent_written_while_it_waited() {
+    let workspace = Workspace::new().await;
+    let pool = workspace.state.db().clone();
+    let message = answered(&pool, workspace.chat).await;
+
+    let (removed, written, left) = delete_during_a_write(&pool, workspace.chat, message, {
+        let pool = pool.clone();
+        let chat = workspace.chat;
+        async move {
+            chats::delete_message(&pool, chat, message)
+                .await
+                .expect("the deletion")
+        }
+    })
+    .await;
+
+    assert_eq!(removed, Some(vec![written]));
+    assert_eq!(left, Vec::<Uuid>::new(), "no subagent outlives its message");
+}
+
+#[tokio::test]
+async fn deleting_a_message_through_its_chats_store_removes_a_subagent_written_while_it_waited() {
+    let pool = PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("a test database"))
+        .await
+        .expect("the test database");
+    let chat = create_chat(&pool, None, "Subagents", "sonnet", false, true)
+        .await
+        .expect("a chat")
+        .id;
+    let message = answered(&pool, chat).await;
+    let store = Store::new(pool.clone(), chat, None);
+    let lease = store
+        .acquire(Uuid::new_v4(), Duration::from_secs(30))
+        .await
+        .expect("the chat's lease");
+
+    let (removed, written, left) = delete_during_a_write(&pool, chat, message, {
+        let store = store.clone();
+        let lease = lease.clone();
+        async move {
+            store
+                .delete_message(&lease, message)
+                .await
+                .expect("the deletion")
+        }
+    })
+    .await;
+
+    assert_eq!(removed, Some(vec![written]));
+    assert_eq!(left, Vec::<Uuid>::new(), "no subagent outlives its message");
+    store.release(&lease).await.expect("the lease's release");
+}
+
 #[tokio::test]
 async fn another_workspaces_member_cannot_see_a_chats_subagents() {
     let workspace = Workspace::new().await;

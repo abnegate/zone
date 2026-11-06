@@ -659,17 +659,16 @@ pub async fn delete_message(
     message_id: Uuid,
 ) -> DbResult<Option<Vec<Uuid>>> {
     let mut transaction = pool.begin().await?;
+    if !crate::db::chat_subagents::seize_turn(&mut transaction, chat_id, message_id).await? {
+        return Ok(None);
+    }
     let subagents =
         crate::db::chat_subagents::remove(&mut *transaction, chat_id, message_id).await?;
-    let deleted = sqlx::query("DELETE FROM messages WHERE id = $1 AND chat_id = $2")
+    sqlx::query("DELETE FROM messages WHERE id = $1 AND chat_id = $2")
         .bind(message_id)
         .bind(chat_id)
         .execute(&mut *transaction)
-        .await?
-        .rows_affected();
-    if deleted == 0 {
-        return Ok(None);
-    }
+        .await?;
     transaction.commit().await?;
     Ok(Some(subagents))
 }

@@ -287,13 +287,7 @@ impl Store {
         self.lock(&mut transaction, lease).await?;
         self.materialize(&mut transaction).await?;
         self.recover_in(&mut transaction).await?;
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id=$1 AND id=$2)")
-                .bind(self.chat_id)
-                .bind(id)
-                .fetch_one(&mut *transaction)
-                .await?;
-        if !exists {
+        if !crate::db::chat_subagents::seize_turn(&mut transaction, self.chat_id, id).await? {
             return Ok(None);
         }
         let turn=sqlx::query("SELECT id,user_message_id FROM chat_turns WHERE chat_id=$1 AND (id=$2 OR user_message_id=$2)").bind(self.chat_id).bind(id).fetch_optional(&mut *transaction).await?;
