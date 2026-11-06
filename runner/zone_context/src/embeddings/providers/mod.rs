@@ -14,6 +14,10 @@ mod mock;
 
 use std::sync::Arc;
 
+#[cfg(feature = "local-embeddings")]
+use abnegate_llm::EmbeddingProvider;
+#[cfg(feature = "local-embeddings")]
+use abnegate_llm::modality::vendor::{FastembedConfig, FastembedProvider};
 use abnegate_llm::modality::vendor::{
     OllamaEmbeddingConfig, OllamaEmbeddingProvider, OpenAiCompatibleEmbeddingConfig,
     OpenAiCompatibleEmbeddingProvider,
@@ -50,6 +54,8 @@ pub const DEFAULT_OLLAMA_EMBEDDING_MODEL: &str = "qwen3-embedding:0.6b";
 pub const DEFAULT_LOCAL_EMBEDDING_MODEL: &str = "nomic-embed-text";
 
 const REQUEST_CONCURRENCY: usize = 10;
+#[cfg(feature = "local-embeddings")]
+const BATCH_SIZE: usize = 32;
 const OPENAI_COMPATIBLE_PATH: &str = "/v1";
 const PATH_SEPARATOR: char = '/';
 
@@ -158,11 +164,6 @@ impl EmbeddingProviderFactory {
 
     #[cfg(feature = "local-embeddings")]
     fn create_local(settings: &AiSettings) -> Result<Arc<dyn EmbeddingService>> {
-        use abnegate_llm::EmbeddingProvider;
-        use abnegate_llm::modality::vendor::{FastembedConfig, FastembedProvider};
-
-        const BATCH_SIZE: usize = 32;
-
         let model = settings
             .model_embedding
             .as_deref()

@@ -28,8 +28,9 @@ fn operating_system_directory() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use zone_core::variables::Variables;
+
+    use super::*;
 
     const OVERRIDE: &str = "/tmp/zone-embed-test";
     const BLANK: &str = "  ";
