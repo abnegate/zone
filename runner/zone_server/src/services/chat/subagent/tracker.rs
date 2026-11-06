@@ -610,7 +610,6 @@ mod tests {
             step("toolu_second", StepStatus::Running),
         ));
         let (subagent, steps) = next(&mut announced).await;
-        drop(tracker);
 
         let both = [
             step("toolu_first", StepStatus::Running),
@@ -620,6 +619,7 @@ mod tests {
         assert_eq!(subagent.description, "Survey");
         assert_eq!(subagent.step_count, 2);
         assert_eq!(turn.steps(&subagent).await, both);
+        drop(tracker);
         rest(announced).await;
     }
 
