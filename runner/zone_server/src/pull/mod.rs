@@ -11,8 +11,10 @@ use comfy_reference::ComfyReference;
 use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, Mutex, atomic::Ordering};
+use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 use tokio::time::MissedTickBehavior;
@@ -23,6 +25,8 @@ const CANCELLED: &str = "Installation cancelled";
 const DOWNLOAD_FAILED: &str = "Could not download image weights";
 const STORE_FAILED: &str = "Could not store image weights";
 const CHECKSUM_MISMATCH: &str = "Image weight checksum mismatch";
+const INVALID_DIGEST: &str = "Image weight manifest has an invalid SHA-256 digest";
+const WAITING_FOR_RELEASE: &str = "waiting for another download of these image weights";
 const ALREADY_DOWNLOADING: &str = "These image weights are already downloading";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const RELEASE_WAITS: [Duration; 4] = [
@@ -356,7 +360,6 @@ impl Job {
 fn retryable(message: &str) -> bool {
     message.starts_with("Model download interrupted")
         || message.starts_with("Could not connect to Ollama")
-        || message.starts_with(DOWNLOAD_FAILED)
 }
 
 fn missing_manifest(model: &str, message: String) -> String {
@@ -447,7 +450,7 @@ async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
         return;
     }
     let target = directory.join(reference.filename());
-    if let Err(message) = fetch_weights(url.as_str(), &target, None, job).await {
+    if let Err(message) = fetch_weights(url.as_str(), &target, None, None, job).await {
         job.publish(Event::Error { message });
         return;
     }
@@ -505,7 +508,15 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
         });
         return;
     }
-    if let Err(message) = fetch_weights(&manifest.url, &target, Some(checksum), job).await {
+    if let Err(message) = fetch_weights(
+        &manifest.url,
+        &target,
+        Some(checksum),
+        Some(manifest.size_bytes),
+        job,
+    )
+    .await
+    {
         job.publish(Event::Error { message });
         return;
     }
@@ -514,11 +525,7 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
         Ok(metadata) => {
             let _ = std::fs::remove_file(&target);
             job.publish(Event::Error {
-                message: format!(
-                    "Image weight size mismatch: got {} bytes, expected {}",
-                    metadata.len(),
-                    manifest.size_bytes
-                ),
+                message: size_mismatch(metadata.len(), manifest.size_bytes),
             });
             return;
         }
@@ -535,53 +542,85 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
     });
 }
 
+/// Transfer `url` to `target`, waiting a while for another transfer of the
+/// same weight to let go of it. A known `size` ends the transfer, before
+/// anything is installed, as soon as the server announces a different one.
 async fn fetch_weights(
     url: &str,
     target: &Path,
     checksum: Option<Checksum>,
+    size: Option<u64>,
     job: &Job,
 ) -> Result<(), String> {
     for wait in RELEASE_WAITS {
-        match transfer_weights(url, target, checksum, job).await {
-            None => return Err(CANCELLED.to_string()),
-            Some(Err(DownloadError::InProgress)) => {
+        match transfer_weights(url, target, checksum, size, job).await? {
+            Err(DownloadError::InProgress) => {
+                job.publish(Event::Step {
+                    status: WAITING_FOR_RELEASE.to_string(),
+                });
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {}
                     () = job.cancelled() => return Err(CANCELLED.to_string()),
                 }
             }
-            Some(outcome) => return outcome.map_err(describe),
+            outcome => return outcome.map_err(describe),
         }
     }
-    match transfer_weights(url, target, checksum, job).await {
-        None => Err(CANCELLED.to_string()),
-        Some(outcome) => outcome.map_err(describe),
-    }
+    transfer_weights(url, target, checksum, size, job)
+        .await?
+        .map_err(describe)
 }
 
-/// One transfer of `url` to `target`, or `None` once the job is cancelled.
+/// One transfer of `url` to `target`, or the message that ended it early:
+/// the job was cancelled, or the server announced a length other than `size`.
 async fn transfer_weights(
     url: &str,
     target: &Path,
     checksum: Option<Checksum>,
+    size: Option<u64>,
     job: &Job,
-) -> Option<Result<(), DownloadError>> {
+) -> Result<Result<(), DownloadError>, String> {
     let progress = Arc::new(DownloadProgress::new());
-    let transfer = download::fetch(url, target, checksum, Arc::clone(&progress));
-    tokio::pin!(transfer);
+    let mut transfer = std::pin::pin!(download::fetch(
+        url,
+        target,
+        checksum,
+        Arc::clone(&progress)
+    ));
+    let mut guarded = std::pin::pin!(std::future::poll_fn(|context| {
+        match transfer.as_mut().poll(context) {
+            Poll::Ready(outcome) => Poll::Ready(Ok(outcome)),
+            Poll::Pending => match announced_mismatch(&progress, size) {
+                Some(message) => Poll::Ready(Err(message)),
+                None => Poll::Pending,
+            },
+        }
+    }));
     let mut pump = tokio::time::interval(PROGRESS_INTERVAL);
     pump.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut reported = None;
     loop {
         tokio::select! {
-            outcome = &mut transfer => {
+            outcome = &mut guarded => {
                 report_progress(job, &progress, &mut reported);
-                return Some(outcome);
+                return outcome;
             }
-            () = job.cancelled() => return None,
+            () = job.cancelled() => return Err(CANCELLED.to_string()),
             _ = pump.tick() => report_progress(job, &progress, &mut reported),
         }
     }
+}
+
+/// Zone's size-mismatch message once the server has announced a length
+/// other than the `expected` one.
+fn announced_mismatch(progress: &DownloadProgress, expected: Option<u64>) -> Option<String> {
+    let expected = expected?;
+    let announced = progress.total_bytes.load(Ordering::Relaxed);
+    (announced != 0 && announced != expected).then(|| size_mismatch(announced, expected))
+}
+
+fn size_mismatch(actual: u64, expected: u64) -> String {
+    format!("Image weight size mismatch: got {actual} bytes, expected {expected}")
 }
 
 fn report_progress(job: &Job, progress: &DownloadProgress, reported: &mut Option<(u64, u64)>) {
@@ -604,9 +643,8 @@ fn describe(error: DownloadError) -> String {
         DownloadError::Http(error) => format!("{DOWNLOAD_FAILED}: {error}"),
         DownloadError::Status(code) => format!("{DOWNLOAD_FAILED}: HTTP {}", status_text(code)),
         DownloadError::Io(error) => format!("{STORE_FAILED}: {error}"),
-        DownloadError::Checksum { .. } | DownloadError::InvalidChecksum(_) => {
-            CHECKSUM_MISMATCH.to_string()
-        }
+        DownloadError::Checksum { .. } => CHECKSUM_MISMATCH.to_string(),
+        DownloadError::InvalidChecksum(_) => INVALID_DIGEST.to_string(),
         DownloadError::InProgress => ALREADY_DOWNLOADING.to_string(),
         error => format!("{DOWNLOAD_FAILED}: {error}"),
     }
@@ -722,8 +760,8 @@ fn process(job: &Job, line: &[u8]) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALREADY_DOWNLOADING, CANCELLED, CHECKSUM_MISMATCH, ComfyPull, Event, ManifestFile,
-        PullRegistry, PullStart, describe, retryable,
+        ALREADY_DOWNLOADING, CANCELLED, CHECKSUM_MISMATCH, ComfyPull, Event, INVALID_DIGEST,
+        ManifestFile, PullRegistry, PullStart, WAITING_FOR_RELEASE, describe, retryable,
     };
     use abnegate_llm::download::{Checksum, DownloadError};
     use axum::{
@@ -751,6 +789,9 @@ mod tests {
     const RELATIVE_PATH: &str = "checkpoints/tiny.safetensors";
     const POLL: Duration = Duration::from_millis(20);
     const POLLS: usize = 250;
+    /// abnegate-llm locks a transfer through this sibling of its `.part`
+    /// file, and does not export the name.
+    const TRANSFER_LOCK_SUFFIX: &str = ".lock";
 
     fn sha256(body: &[u8]) -> String {
         Checksum::new(Sha256::digest(body).into()).to_string()
@@ -820,8 +861,33 @@ mod tests {
         panic!("{model} never reported {completed} bytes");
     }
 
+    fn transfer_lock(part: &Path) -> PathBuf {
+        PathBuf::from(format!("{}{TRANSFER_LOCK_SUFFIX}", part.display()))
+    }
+
+    fn hold_transfer_lock(directory: &Path) -> File {
+        let partial = part(directory);
+        std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+        let held = File::create(transfer_lock(&partial)).unwrap();
+        held.lock().unwrap();
+        held
+    }
+
+    async fn wait_for_step(registry: &PullRegistry, model: &str, step: &str) {
+        for _ in 0..POLLS {
+            if registry
+                .status(model)
+                .is_some_and(|view| view.steps.iter().any(|seen| seen == step))
+            {
+                return;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        panic!("{model} never reported {step:?}");
+    }
+
     async fn wait_for_release(part: &Path) {
-        let lock = PathBuf::from(format!("{}.lock", part.display()));
+        let lock = transfer_lock(part);
         for _ in 0..POLLS {
             if !lock.exists() {
                 return;
@@ -876,6 +942,11 @@ mod tests {
         assert!(!retryable("pull model manifest: file does not exist"));
     }
 
+    #[test]
+    fn a_failed_image_weight_download_is_not_an_ollama_retry() {
+        assert!(!retryable(&describe(DownloadError::Status(503))));
+    }
+
     #[tokio::test]
     async fn status_reads_the_live_snapshot() {
         let registry = super::PullRegistry::new();
@@ -923,7 +994,7 @@ mod tests {
         );
         assert_eq!(
             describe(DownloadError::InvalidChecksum("deadbeef".into())),
-            CHECKSUM_MISMATCH
+            INVALID_DIGEST
         );
         assert_eq!(describe(DownloadError::InProgress), ALREADY_DOWNLOADING);
         assert_eq!(
@@ -1154,13 +1225,43 @@ mod tests {
             BODY.len() as u64,
             "deadbeef".into(),
         ));
-        assert_eq!(assert_error(&registry, "tiny").await, CHECKSUM_MISMATCH);
+        assert_eq!(assert_error(&registry, "tiny").await, INVALID_DIGEST);
         assert!(requests_to(&server).await.is_empty());
         assert!(!directory.path().join(RELATIVE_PATH).exists());
     }
 
     #[tokio::test]
-    async fn a_size_mismatch_removes_the_weight() {
+    async fn an_unannounced_size_mismatch_removes_the_weight() {
+        let origin = serve(Router::new().route(
+            "/file.bin",
+            get(|| async {
+                Body::from_stream(futures::stream::once(async {
+                    Ok::<_, std::io::Error>(Bytes::from_static(BODY))
+                }))
+            }),
+        ))
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let expected = BODY.len() as u64 + 1;
+        let _subscription = registry.start(manifest_pull(
+            directory.path(),
+            format!("{origin}/file.bin"),
+            expected,
+            sha256(BODY),
+        ));
+        assert_eq!(
+            assert_error(&registry, "tiny").await,
+            format!(
+                "Image weight size mismatch: got {} bytes, expected {expected}",
+                BODY.len()
+            )
+        );
+        assert!(!directory.path().join(RELATIVE_PATH).exists());
+    }
+
+    #[tokio::test]
+    async fn an_announced_length_other_than_the_manifests_installs_nothing() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
@@ -1168,7 +1269,7 @@ mod tests {
             .await;
         let directory = tempfile::tempdir().unwrap();
         let registry = PullRegistry::new();
-        let expected = BODY.len() as u64 + 1;
+        let expected = BODY.len() as u64 * 2;
         let _subscription = registry.start(manifest_pull(
             directory.path(),
             format!("{}/file.bin", server.uri()),
@@ -1182,7 +1283,36 @@ mod tests {
                 BODY.len()
             )
         );
+        wait_for_release(&part(directory.path())).await;
         assert!(!directory.path().join(RELATIVE_PATH).exists());
+    }
+
+    #[tokio::test]
+    async fn an_announced_length_mismatch_keeps_the_installed_weight() {
+        const INSTALLED: &[u8] = b"the weight installed before the manifest changed";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join(RELATIVE_PATH);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, INSTALLED).unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(manifest_pull(
+            directory.path(),
+            format!("{}/file.bin", server.uri()),
+            BODY.len() as u64 + 1,
+            sha256(BODY),
+        ));
+        assert!(
+            assert_error(&registry, "tiny")
+                .await
+                .starts_with("Image weight size mismatch: ")
+        );
+        wait_for_release(&part(directory.path())).await;
+        assert_eq!(std::fs::read(&target).unwrap(), INSTALLED);
     }
 
     #[tokio::test]
@@ -1276,16 +1406,13 @@ mod tests {
             .mount(&server)
             .await;
         let directory = tempfile::tempdir().unwrap();
-        let partial = part(directory.path());
-        std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
-        let draining = File::create(format!("{}.lock", partial.display())).unwrap();
-        draining.lock().unwrap();
+        let draining = hold_transfer_lock(directory.path());
         let registry = PullRegistry::new();
         let _subscription = registry.start(body_pull(
             directory.path(),
             format!("{}/file.bin", server.uri()),
         ));
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        wait_for_step(&registry, "tiny", WAITING_FOR_RELEASE).await;
         assert!(
             registry
                 .status("tiny")
@@ -1305,16 +1432,13 @@ mod tests {
     #[tokio::test]
     async fn cancelling_while_waiting_for_a_held_weight_ends_the_pull() {
         let directory = tempfile::tempdir().unwrap();
-        let partial = part(directory.path());
-        std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
-        let held = File::create(format!("{}.lock", partial.display())).unwrap();
-        held.lock().unwrap();
+        let _held = hold_transfer_lock(directory.path());
         let registry = PullRegistry::new();
         let _subscription = registry.start(body_pull(
             directory.path(),
             "http://127.0.0.1:1/file.bin".into(),
         ));
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        wait_for_step(&registry, "tiny", WAITING_FOR_RELEASE).await;
 
         assert!(registry.cancel("tiny"));
 
@@ -1424,7 +1548,11 @@ mod tests {
         let checkpoints = directory.path().join("checkpoints");
         std::fs::create_dir_all(&checkpoints).unwrap();
         let weight = "flux1-schnell-fp8.safetensors";
-        for suffix in [".part", ".part.validator", ".part.lock"] {
+        for suffix in [
+            ".part".to_string(),
+            ".part.validator".to_string(),
+            format!(".part{TRANSFER_LOCK_SUFFIX}"),
+        ] {
             std::fs::write(checkpoints.join(format!("{weight}{suffix}")), b"partial").unwrap();
         }
         let mut config = crate::state::test_config();
