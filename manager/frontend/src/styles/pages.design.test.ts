@@ -568,3 +568,15 @@ describe('setup license list', () => {
     expect(rule(panel, '.models-setup-licenses li')).toContain('overflow-wrap: anywhere');
   });
 });
+
+describe('github repository picker', () => {
+  const css = read(join(features, 'github', 'components', 'RepositoryPicker.css'));
+
+  it('lays the popup out in flow so a scrolling wizard or modal body grows instead of clipping it', () => {
+    const popup = rule(css, '.repository-picker-popup');
+    expect(popup).not.toContain('position');
+    expect(popup).toContain('max-height: min(16rem, 40dvh)');
+    expect(popup).toContain('overflow-y: auto');
+    expect(css).not.toContain('ui-fade-down');
+  });
+});

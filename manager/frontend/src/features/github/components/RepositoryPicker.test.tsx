@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -421,6 +421,29 @@ describe('RepositoryPicker listbox and selection', () => {
     await user.keyboard('{Escape}');
 
     expect(combobox()).not.toHaveAttribute('aria-controls');
+  });
+
+  it('scrolls the opened popup and then the active option into view', async () => {
+    const scrolled: [Element, ScrollIntoViewOptions | boolean | undefined][] = [];
+    function record(this: Element, options?: ScrollIntoViewOptions | boolean) {
+      scrolled.push([this, options]);
+    }
+    const scrollIntoView = spyOn(Element.prototype, 'scrollIntoView').mockImplementation(record);
+    try {
+      const { user } = renderPicker();
+      await waitForOptions(user);
+      const popup = screen.getByRole('listbox', { name: 'Repositories' }).parentElement;
+      expect(scrolled).toContainEqual([popup, { block: 'nearest' }]);
+
+      await user.keyboard('{ArrowUp}');
+
+      const activeId = combobox().getAttribute('aria-activedescendant') ?? '';
+      const active = document.getElementById(activeId);
+      expect(active).toHaveTextContent('abnegate/zone');
+      expect(scrolled.at(-1)).toEqual([active, { block: 'nearest' }]);
+    } finally {
+      scrollIntoView.mockRestore();
+    }
   });
 
   it('clears the selection when the user types after selecting', async () => {

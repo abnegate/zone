@@ -102,6 +102,7 @@ export function RepositoryPicker({
   const inputId = useId();
   const listboxId = useId();
   const containerRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
   const [text, setText] = useState(value?.full_name ?? '');
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
@@ -148,6 +149,12 @@ export function RepositoryPicker({
   const expanded = open && (repositories.length > 0 || showNoResults || hasMore);
   const activeId = expanded && active ? optionId(active) : undefined;
   const listboxShown = expanded && repositories.length > 0;
+
+  useEffect(() => {
+    if (expanded) {
+      popupRef.current?.scrollIntoView?.({ block: 'nearest' });
+    }
+  }, [expanded]);
 
   useEffect(() => {
     if (activeId !== undefined) {
@@ -278,86 +285,84 @@ export function RepositoryPicker({
   return (
     <div className="form-group repository-picker" ref={containerRef}>
       <label htmlFor={inputId}>Repository</label>
-      <div className="repository-picker-field">
-        <input
-          id={inputId}
-          type="text"
-          role="combobox"
-          aria-autocomplete="list"
-          aria-expanded={expanded}
-          aria-controls={listboxShown ? listboxId : undefined}
-          aria-activedescendant={activeId}
-          placeholder="Search repositories"
-          autoComplete="off"
-          spellCheck={false}
-          value={text}
-          onChange={handleInput}
-          onFocus={() => setOpen(true)}
-          onClick={() => setOpen(true)}
-          onKeyDown={handleKeyDown}
-        />
-        {expanded && (
-          <div className="repository-picker-popup">
-            {listboxShown && (
-              <div
-                id={listboxId}
-                role="listbox"
-                aria-label="Repositories"
-                onMouseDown={keepInputFocused}
-              >
-                {groups.map((group) => (
-                  <div key={group.login} role="group" aria-label={group.login}>
-                    <div className="repository-picker-group-label" aria-hidden="true">
-                      {group.login}
-                    </div>
-                    {group.repositories.map((repository) => (
-                      // biome-ignore lint/a11y/useKeyWithClickEvents: the combobox input owns keyboard selection through aria-activedescendant
-                      <div
-                        key={repositoryKey(repository)}
-                        id={optionId(repository)}
-                        role="option"
-                        aria-selected={isSameRepository(value, repository)}
-                        aria-disabled={repository.archived ? true : undefined}
-                        className={`repository-picker-option${isSameRepository(active, repository) ? ' active' : ''}`}
-                        onClick={() => select(repository)}
-                        onMouseEnter={() => {
-                          if (!repository.archived) {
-                            setActiveIndex(selectable.indexOf(repository));
-                          }
-                        }}
-                      >
-                        <span className="repository-picker-name">{repository.full_name}</span>
-                        {repository.private && <LockIcon />}
-                        {repository.archived && <Badge variant="neutral">Archived</Badge>}
-                      </div>
-                    ))}
+      <input
+        id={inputId}
+        type="text"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={expanded}
+        aria-controls={listboxShown ? listboxId : undefined}
+        aria-activedescendant={activeId}
+        placeholder="Search repositories"
+        autoComplete="off"
+        spellCheck={false}
+        value={text}
+        onChange={handleInput}
+        onFocus={() => setOpen(true)}
+        onClick={() => setOpen(true)}
+        onKeyDown={handleKeyDown}
+      />
+      {expanded && (
+        <div className="repository-picker-popup" ref={popupRef}>
+          {listboxShown && (
+            <div
+              id={listboxId}
+              role="listbox"
+              aria-label="Repositories"
+              onMouseDown={keepInputFocused}
+            >
+              {groups.map((group) => (
+                <div key={group.login} role="group" aria-label={group.login}>
+                  <div className="repository-picker-group-label" aria-hidden="true">
+                    {group.login}
                   </div>
-                ))}
-              </div>
-            )}
-            {showNoResults && (
-              <p className="repository-picker-message">
-                {search === ''
-                  ? 'No repositories are available.'
-                  : `No repositories match “${search}”.`}
-              </p>
-            )}
-            {hasMore && (
-              <div className="repository-picker-more">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  loading={loadingMore}
-                  onMouseDown={keepInputFocused}
-                  onClick={() => void loadMore()}
-                >
-                  Load more
-                </Button>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+                  {group.repositories.map((repository) => (
+                    // biome-ignore lint/a11y/useKeyWithClickEvents: the combobox input owns keyboard selection through aria-activedescendant
+                    <div
+                      key={repositoryKey(repository)}
+                      id={optionId(repository)}
+                      role="option"
+                      aria-selected={isSameRepository(value, repository)}
+                      aria-disabled={repository.archived ? true : undefined}
+                      className={`repository-picker-option${isSameRepository(active, repository) ? ' active' : ''}`}
+                      onClick={() => select(repository)}
+                      onMouseEnter={() => {
+                        if (!repository.archived) {
+                          setActiveIndex(selectable.indexOf(repository));
+                        }
+                      }}
+                    >
+                      <span className="repository-picker-name">{repository.full_name}</span>
+                      {repository.private && <LockIcon />}
+                      {repository.archived && <Badge variant="neutral">Archived</Badge>}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+          {showNoResults && (
+            <p className="repository-picker-message">
+              {search === ''
+                ? 'No repositories are available.'
+                : `No repositories match “${search}”.`}
+            </p>
+          )}
+          {hasMore && (
+            <div className="repository-picker-more">
+              <Button
+                variant="ghost"
+                size="sm"
+                loading={loadingMore}
+                onMouseDown={keepInputFocused}
+                onClick={() => void loadMore()}
+              >
+                Load more
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
       <p role="status" className="form-hint repository-picker-live">
         {loading ? 'Loading repositories…' : ''}
       </p>

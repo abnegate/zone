@@ -1,21 +1,12 @@
-.repository-picker-field {
-  position: relative;
-}
-
 .repository-picker-popup {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  z-index: var(--ui-layer-popover);
   margin-top: var(--ui-space-1);
-  max-height: 20rem;
+  max-height: min(16rem, 40dvh);
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--ui-bg-elevated);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-lg);
-  box-shadow: var(--ui-shadow-lg);
-  animation: ui-fade-down var(--ui-duration-fast) var(--ui-ease-out);
+  animation: ui-fade-in var(--ui-duration-fast) var(--ui-ease-out);
 }
 
 .repository-picker-popup > [role='listbox'] > [role='group'] {
