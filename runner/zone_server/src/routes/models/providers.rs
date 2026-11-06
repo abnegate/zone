@@ -4,8 +4,8 @@
 use abnegate_comfy::recipe::RecipeCatalog;
 use abnegate_llm::catalog::{
     BrowseQuery, CatalogError, DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider,
-    MAXIMUM_PAGE_SIZE, ModelPage, ModelProvider, OllamaProvider, OpenRouterProvider,
-    huggingface_repository_downloads, huggingface_repository_id,
+    MAXIMUM_PAGE_SIZE, ModelMediumFilter, ModelPage, ModelProvider, OllamaProvider,
+    OpenRouterProvider, huggingface_repository_downloads, huggingface_repository_id,
 };
 
 use super::catalog_endpoints;
@@ -52,9 +52,15 @@ async fn search(
             popular::search(&provider, &endpoints.ollama_registry, proxy, options).await
         }
         CatalogSource::HuggingFace => {
-            HuggingFaceProvider::with_proxy(config.huggingface_models_url.as_str(), proxy)?
-                .search_with_adapters(options, &adapter_bases(state))
-                .await
+            let provider =
+                HuggingFaceProvider::with_proxy(config.huggingface_models_url.as_str(), proxy)?;
+            if lists_adapters(&options) {
+                provider
+                    .search_with_adapters(options, &adapter_bases(state))
+                    .await
+            } else {
+                provider.search(options).await
+            }
         }
         CatalogSource::Gpt4All => {
             Gpt4AllProvider::with_proxy(config.gpt4all_models_url.as_str(), proxy)?
@@ -66,6 +72,23 @@ async fn search(
                 .search(options)
                 .await
         }
+    }
+}
+
+/// Whether HuggingFace's `search_with_adapters` lists adapters for
+/// `options`: an image-generation browse, or the first page of a search
+/// across every medium.
+fn lists_adapters(options: &BrowseQuery<'_>) -> bool {
+    match options.medium {
+        ModelMediumFilter::ImageGeneration => true,
+        ModelMediumFilter::All => {
+            options.cursor.is_none()
+                && options
+                    .query
+                    .map(str::trim)
+                    .is_some_and(|query| !query.is_empty())
+        }
+        _ => false,
     }
 }
 
@@ -97,4 +120,26 @@ pub(super) async fn huggingface_details(
         gguf_size: entry.size,
         sizes: entry.sizes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapters_are_listed_only_where_the_crate_would_list_them() {
+        let mut options = BrowseQuery::default();
+        assert!(!lists_adapters(&options));
+        options.query = Some("  ");
+        assert!(!lists_adapters(&options));
+        options.query = Some("flux");
+        assert!(lists_adapters(&options));
+        options.cursor = Some("next");
+        assert!(!lists_adapters(&options));
+        options.medium = ModelMediumFilter::ImageGeneration;
+        assert!(lists_adapters(&options));
+        options.medium = ModelMediumFilter::Image;
+        options.cursor = None;
+        assert!(!lists_adapters(&options));
+    }
 }
