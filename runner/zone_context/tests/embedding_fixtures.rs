@@ -701,7 +701,7 @@ mod local {
         resolutions
     }
 
-    fn check_local_models(provider: Provider) {
+    fn check_local_model_resolutions(provider: Provider) {
         let expected = departed_resolutions(read_fixture(LOCAL_MODELS_FIXTURE));
         for resolution in expected {
             let name = resolution.name.as_str();
@@ -719,12 +719,16 @@ mod local {
                         Some(maximum_input_tokens as usize),
                         "{name}"
                     );
-                    let variant: EmbeddingModel = resolution
-                        .model
-                        .as_deref()
-                        .expect("a resolved model")
-                        .parse()
-                        .expect("a fastembed model");
+                    let model = resolution.model.as_deref().expect("a resolved model");
+                    assert_eq!(
+                        FastembedConfig::new()
+                            .with_model(model)
+                            .model_maximum_input_tokens()
+                            .ok(),
+                        Some(maximum_input_tokens),
+                        "{name}: the crate reads {model} at another length"
+                    );
+                    let variant: EmbeddingModel = model.parse().expect("a fastembed model");
                     assert_eq!(
                         resolution.dimension,
                         Some(TextEmbedding::get_model_info(&variant).unwrap().dim),
@@ -854,8 +858,8 @@ mod local {
     }
 
     #[test]
-    fn local_models_match_fixture() {
-        check_local_models(PROVIDER);
+    fn local_model_refusals_input_limits_and_recorded_widths_match_fixture() {
+        check_local_model_resolutions(PROVIDER);
     }
 
     #[tokio::test]
