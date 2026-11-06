@@ -741,16 +741,7 @@ impl Park {
     }
 }
 
-/// Whether the configured backend is a coding agent CLI, which runs its own
-/// tool loop.
-///
-/// Zone's loop then runs a single round and offers no definitions over the
-/// completions API -- [`LlmClient`] refuses a request that carries them rather
-/// than dropping them, so offering them would fail every agentic turn.
-///
-/// Whether the agent can call zone's tools at all is decided before the turn
-/// runs, by whether a [`zone_core::llm::Toolset`] was attached for it to reach
-/// them through.
+/// [`LlmClient`] refuses tool definitions for a CLI backend, which runs its own loop.
 fn runs_own_loop(llm: &LlmClient) -> bool {
     matches!(llm.backend(), LlmBackend::Cli { .. })
 }
@@ -2050,6 +2041,11 @@ mod tests {
 
             assert!(failures(&events).is_empty(), "{:?}", failures(&events));
             assert_eq!(spoken(&events), ANSWER);
+            assert!(
+                announcements(&events).is_empty(),
+                "{:?}",
+                announcements(&events)
+            );
             assert_eq!(
                 rounds(&calls),
                 1,
@@ -2115,28 +2111,6 @@ mod tests {
                 .iter()
                 .position(|event| matches!(event, AgentEvent::Chunk(_)));
             assert!(session < chunk, "{events:?}");
-        }
-
-        /// A turn whose agent was offered none of zone's tools streams only its
-        /// answer: the spinner says it is working, and nothing more.
-        #[tokio::test]
-        async fn a_turn_not_served_zone_tools_announces_nothing() {
-            let directory = TempDir::new().expect("a temporary directory");
-            let calls = directory.path().join("calls");
-
-            let events = turn(
-                cli(agent(&directory, &calls)),
-                ChatTools::empty().with_plan_approval(),
-            )
-            .await;
-
-            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
-            assert_eq!(spoken(&events), ANSWER);
-            assert!(
-                announcements(&events).is_empty(),
-                "{:?}",
-                announcements(&events)
-            );
         }
 
         /// A chat that was never going to call anything has nothing to explain.
