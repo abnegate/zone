@@ -7,6 +7,9 @@ ALTER TABLE public.chat_pull_requests
     ADD COLUMN auto_fix_run_id uuid,
     -- Who turned auto-fix on: its runs act, and push, as them.
     ADD COLUMN auto_fix_by uuid,
+    -- The head commit that run started from. A run that settles without
+    -- moving the head changed nothing, so the next one waits for a new head.
+    ADD COLUMN auto_fix_head text,
     ADD CONSTRAINT chat_pull_requests_auto_fix_run_id_fkey
         FOREIGN KEY (auto_fix_run_id) REFERENCES public.task_runs(id) ON DELETE SET NULL NOT VALID,
     ADD CONSTRAINT chat_pull_requests_auto_fix_by_fkey

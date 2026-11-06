@@ -86,9 +86,14 @@ pub async fn track(
         });
     };
     let status = match observed(state, &row, &token).await {
-        Ok(Observation { status, branch, .. }) => {
+        Ok(Observation {
+            status,
+            branch,
+            head,
+            ..
+        }) => {
             remember(state, &row, &status).await;
-            auto_fix::consider(state, workspace_id, &mut row, &status, &branch).await;
+            auto_fix::consider(state, workspace_id, &mut row, &status, &branch, &head).await;
             Some(status)
         }
         Err(error) => {

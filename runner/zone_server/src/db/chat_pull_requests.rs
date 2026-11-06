@@ -11,7 +11,7 @@ pub const GITHUB: &str = "github";
 
 macro_rules! columns {
     () => {
-        "id, chat_id, provider, owner, repo, number, url, title, source_id, dismissed_at, created_at, auto_fix, auto_fix_run_id, auto_fix_by,
+        "id, chat_id, provider, owner, repo, number, url, title, source_id, dismissed_at, created_at, auto_fix, auto_fix_run_id, auto_fix_by, auto_fix_head,
          EXISTS (
              SELECT 1 FROM task_runs
              WHERE task_runs.id = chat_pull_requests.auto_fix_run_id AND task_runs.completed_at IS NULL
@@ -38,8 +38,23 @@ pub struct PullRequestRow {
     pub auto_fix_run_id: Option<Uuid>,
     /// Who turned auto-fix on, and so whom its runs act as.
     pub auto_fix_by: Option<Uuid>,
+    /// The head commit the newest run started from.
+    pub auto_fix_head: Option<String>,
     /// Whether that run is still working.
     pub auto_fixing: bool,
+}
+
+/// What a run claiming a pull request for auto-fix starts from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Claim<'a> {
+    pub id: Uuid,
+    /// The run the reader saw holding the pull request.
+    pub previous: Option<Uuid>,
+    /// The pull request's head branch, which the run works on.
+    pub branch: &'a str,
+    /// The commit at its tip.
+    pub head: &'a str,
+    pub url: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,28 +182,28 @@ where
     .await
 }
 
-/// Creates `task` with a run on the pull request's own `branch`, and claims
+/// Creates `task` with a run on the pull request's own branch, and claims
 /// the pull request for that run, all or nothing.
 ///
 /// Nothing is created unless auto-fix is still on for the task's creator, the
-/// row still holds `previous` and that run has settled, and the task's source is still an active one
+/// row still holds `claim.previous` and that run has settled, the head has
+/// moved since that run started, and the task's source is still an active one
 /// of its workspace. So two readers observing the same failure start one run
-/// between them rather than one each, and the run acts only as whoever turned
-/// auto-fix on, with their write access checked as it is admitted.
+/// between them rather than one each, a run that changed nothing is not
+/// repeated, and the run acts only as whoever turned auto-fix on, with their
+/// write access checked as it is admitted.
 pub async fn start_auto_fix(
     pool: &PgPool,
-    id: Uuid,
-    previous: Option<Uuid>,
+    claim: &Claim<'_>,
     task: &Create<'_>,
-    branch: &str,
-    url: &str,
 ) -> DbResult<Option<(TaskRow, TaskRunRow)>> {
     let Some(actor) = task.created_by else {
         return Ok(None);
     };
     let mut transaction = pool.begin().await?;
-    // The source is held before the pull request, the order deleting a source
-    // takes them in as it clears the pull request's reference to it.
+    // Everything the new rows reference is held before the pull request row,
+    // the order deleting any of them takes, since each deletion clears the
+    // pull request's reference to it.
     if let Some(source_id) = task.source_id {
         let active: Option<Option<bool>> = sqlx::query_scalar(
             "SELECT is_active FROM sources WHERE id = $1 AND workspace_id = $2 FOR SHARE",
@@ -201,10 +216,28 @@ pub async fn start_auto_fix(
             return Ok(None);
         }
     }
+    if let Some(chat_id) = task.chat_id {
+        let chat: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM chats WHERE id = $1 FOR KEY SHARE")
+                .bind(chat_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if chat.is_none() {
+            return Ok(None);
+        }
+    }
+    let user: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE id = $1 FOR KEY SHARE")
+        .bind(actor)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    if user.is_none() {
+        return Ok(None);
+    }
     let claimable: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM chat_pull_requests
          WHERE id = $1 AND auto_fix AND auto_fix_by = $3
            AND auto_fix_run_id IS NOT DISTINCT FROM $2
+           AND auto_fix_head IS DISTINCT FROM $4
            AND NOT EXISTS (
                SELECT 1 FROM task_runs
                WHERE task_runs.id = chat_pull_requests.auto_fix_run_id
@@ -212,9 +245,10 @@ pub async fn start_auto_fix(
            )
          FOR UPDATE OF chat_pull_requests",
     )
-    .bind(id)
-    .bind(previous)
+    .bind(claim.id)
+    .bind(claim.previous)
     .bind(actor)
+    .bind(claim.head)
     .fetch_optional(&mut *transaction)
     .await?;
     if claimable.is_none() {
@@ -223,16 +257,19 @@ pub async fn start_auto_fix(
     let created = tasks::create_in(&mut transaction, task).await?;
     sqlx::query("UPDATE tasks SET branch_name = $2, pr_url = $3 WHERE id = $1")
         .bind(created.id)
-        .bind(branch)
-        .bind(url)
+        .bind(claim.branch)
+        .bind(claim.url)
         .execute(&mut *transaction)
         .await?;
     let run = tasks::create_task_run_in(&mut transaction, created.id, Some(actor)).await?;
-    sqlx::query("UPDATE chat_pull_requests SET auto_fix_run_id = $2 WHERE id = $1")
-        .bind(id)
-        .bind(run.id)
-        .execute(&mut *transaction)
-        .await?;
+    sqlx::query(
+        "UPDATE chat_pull_requests SET auto_fix_run_id = $2, auto_fix_head = $3 WHERE id = $1",
+    )
+    .bind(claim.id)
+    .bind(run.id)
+    .bind(claim.head)
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(Some((created, run)))
 }
@@ -346,6 +383,8 @@ mod tests {
     }
 
     const BRANCH: &str = "fix/widgets";
+    const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+    const NEXT: &str = "fedcba9876543210fedcba9876543210fedcba98";
 
     struct Watched {
         workspace: Uuid,
@@ -404,18 +443,27 @@ mod tests {
         }
     }
 
-    async fn start(pool: &PgPool, watched: &Watched, previous: Option<Uuid>) -> Option<TaskRunRow> {
-        start_auto_fix(
-            pool,
-            watched.row.id,
+    async fn start_at(
+        pool: &PgPool,
+        watched: &Watched,
+        previous: Option<Uuid>,
+        head: &str,
+    ) -> Option<TaskRunRow> {
+        let claim = Claim {
+            id: watched.row.id,
             previous,
-            &fix(watched),
-            BRANCH,
-            &watched.row.url,
-        )
-        .await
-        .expect("the start")
-        .map(|(_, run)| run)
+            branch: BRANCH,
+            head,
+            url: &watched.row.url,
+        };
+        start_auto_fix(pool, &claim, &fix(watched))
+            .await
+            .expect("the start")
+            .map(|(_, run)| run)
+    }
+
+    async fn start(pool: &PgPool, watched: &Watched, previous: Option<Uuid>) -> Option<TaskRunRow> {
+        start_at(pool, watched, previous, HEAD).await
     }
 
     async fn tasks_in(pool: &PgPool, workspace_id: Uuid) -> i64 {
@@ -506,6 +554,26 @@ mod tests {
             !settled.auto_fixing,
             "a settled run no longer reads as working"
         );
+    }
+
+    #[tokio::test]
+    async fn a_settled_run_is_followed_only_once_the_head_moves() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+        let run = start(&pool, &watched, None).await.expect("the first run");
+        tasks::complete_task_run(&pool, run.id, "failed", Some("could not push"), None)
+            .await
+            .expect("the run settles");
+
+        let unchanged = start(&pool, &watched, Some(run.id)).await;
+        assert!(
+            unchanged.is_none(),
+            "a run that left the head where it was is not repeated"
+        );
+
+        let next = start_at(&pool, &watched, Some(run.id), NEXT).await;
+        assert!(next.is_some(), "a new head is worth another run");
+        assert_eq!(tasks_in(&pool, watched.workspace).await, 2);
     }
 
     #[tokio::test]

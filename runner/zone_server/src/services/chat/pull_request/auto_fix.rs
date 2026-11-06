@@ -13,13 +13,13 @@
 //! and only one run is ever in flight, so it cannot spin faster than a run
 //! takes to finish.
 
-use abnegate_vcs::{BranchName, GitService};
+use abnegate_vcs::{BranchName, CommitSha, GitService};
 use uuid::Uuid;
 
 use super::checks::Checks;
 use super::mergeable::Mergeable;
 use super::status::Status;
-use crate::db::chat_pull_requests::{self, PullRequestRow};
+use crate::db::chat_pull_requests::{self, Claim, PullRequestRow};
 use crate::db::projects;
 use crate::db::tasks::Create;
 use crate::state::AppState;
@@ -54,10 +54,16 @@ pub async fn consider(
     row: &mut PullRequestRow,
     status: &Status,
     branch: &BranchName,
+    head: &CommitSha,
 ) {
     // A run still working answers for whatever the branch shows now, and a
     // second run on the same branch would fight it.
     if !row.auto_fix || row.auto_fixing {
+        return;
+    }
+    // A run that settled without moving the head changed nothing, and another
+    // started from the same commit would only do the same.
+    if row.auto_fix_head.as_deref() == Some(head.as_str()) {
         return;
     }
     let Some(complaint) = complaint(status) else {
@@ -85,6 +91,7 @@ pub async fn consider(
         actor,
         project,
         branch,
+        head,
         complaint,
     };
     match start(state, workspace_id, row, status, &fix).await {
@@ -145,6 +152,7 @@ struct Fix<'a> {
     actor: Uuid,
     project: Uuid,
     branch: &'a BranchName,
+    head: &'a CommitSha,
     complaint: &'a str,
 }
 
@@ -173,15 +181,14 @@ async fn start(
         created_by: Some(fix.actor),
         chat_id: Some(row.chat_id),
     };
-    let Some((task, run)) = chat_pull_requests::start_auto_fix(
-        state.db(),
-        row.id,
-        row.auto_fix_run_id,
-        &task,
-        fix.branch.as_str(),
-        &row.url,
-    )
-    .await?
+    let claim = Claim {
+        id: row.id,
+        previous: row.auto_fix_run_id,
+        branch: fix.branch.as_str(),
+        head: fix.head.as_str(),
+        url: &row.url,
+    };
+    let Some((task, run)) = chat_pull_requests::start_auto_fix(state.db(), &claim, &task).await?
     else {
         return Ok(None);
     };
@@ -359,14 +366,15 @@ mod tests {
         let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
         let failing = status(Checks::Failing, Mergeable::Unstable);
         let branch = BranchName::parse("fix/widgets").expect("a branch");
+        let head = CommitSha::parse("0123456789abcdef0123456789abcdef01234567").expect("a head");
 
-        consider(&state, workspace, &mut row, &failing, &branch).await;
+        consider(&state, workspace, &mut row, &failing, &branch, &head).await;
         let run = row
             .auto_fix_run_id
             .expect("a failing pull request claims a run");
         assert!(row.auto_fixing, "the row reports the run it just started");
 
-        consider(&state, workspace, &mut row, &failing, &branch).await;
+        consider(&state, workspace, &mut row, &failing, &branch, &head).await;
         assert_eq!(
             row.auto_fix_run_id,
             Some(run),
@@ -401,6 +409,7 @@ mod tests {
         let (workspace, mut row) = watched(&pool, Some("https://github.com/acme/gadgets")).await;
         let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
         let branch = BranchName::parse("fix/widgets").expect("a branch");
+        let head = CommitSha::parse("0123456789abcdef0123456789abcdef01234567").expect("a head");
 
         consider(
             &state,
@@ -408,6 +417,7 @@ mod tests {
             &mut row,
             &status(Checks::Failing, Mergeable::Unstable),
             &branch,
+            &head,
         )
         .await;
 
