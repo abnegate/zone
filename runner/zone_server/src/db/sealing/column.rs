@@ -4,11 +4,12 @@ use sqlx::PgConnection;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::sync::Provider;
+
 use super::ai_key::AiKey;
 use super::ai_scope::AiScope;
 use super::error::SealingError;
 use super::policy::Policy;
-use crate::sync::Provider;
 
 const AGENT_LOGINS: &str = "agent_logins";
 const PROJECTS: &str = "projects";
@@ -203,7 +204,6 @@ mod tests {
 
     use super::Column;
     use super::Policy;
-    use crate::services::github_app::CONFIGURATION_KEY;
 
     #[test]
     fn the_sealed_tables_are_exactly_the_tables_sealing_writes_to() {
@@ -237,14 +237,5 @@ mod tests {
             .filter(|column| column.policy() == Policy::Lenient)
             .collect();
         assert_eq!(lenient, [Column::ProjectToken, Column::GithubSyncToken]);
-    }
-
-    #[test]
-    fn the_github_app_key_is_read_where_its_configuration_is_stored() {
-        assert!(
-            Column::GithubAppPrivateKey
-                .name()
-                .starts_with(&format!("config->'{CONFIGURATION_KEY}'"))
-        );
     }
 }

@@ -9,7 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 use super::class::Class;
 
 /// The text every envelope, of any version, starts with.
-pub const ENVELOPE_PREFIX: &str = "ENC[v";
+pub const ANY_ENVELOPE_PREFIX: &str = "ENC[v";
 
 /// The fewest bytes a sealed body decodes to: a 12-byte nonce and a 16-byte tag.
 pub const LEGACY_MINIMUM_BYTES: usize = 28;
@@ -38,7 +38,7 @@ impl Classified {
                 credential: Some(credential),
             };
         }
-        if stored.starts_with(ENVELOPE_PREFIX) || legacy_shaped(stored) {
+        if stored.starts_with(ANY_ENVELOPE_PREFIX) || legacy_shaped(stored) {
             return Self::bare(Class::Ambiguous);
         }
         Self {
@@ -77,9 +77,11 @@ pub fn legacy_shaped(stored: &str) -> bool {
 mod tests {
     use abnegate_secret::MasterKey;
     use abnegate_secret::SecretValue;
-    use abnegate_secret::encrypt_value;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
+
+    use crate::secret::fixture::seal;
+    use crate::secret::fixture::seal_legacy;
 
     use super::Class;
     use super::Classified;
@@ -88,15 +90,6 @@ mod tests {
 
     fn key() -> MasterKey {
         MasterKey::generate().expect("a key")
-    }
-
-    fn legacy(credential: &str, key: &MasterKey) -> String {
-        let sealed = encrypt_value(&SecretValue::new(credential), key).expect("a seal");
-        sealed
-            .strip_prefix("ENC[v1:")
-            .and_then(|body| body.strip_suffix(']'))
-            .expect("an envelope")
-            .to_string()
     }
 
     #[test]
@@ -116,19 +109,17 @@ mod tests {
     #[test]
     fn every_class_is_told_apart() {
         let key = key();
-        let envelope = encrypt_value(&SecretValue::new("ghp_token"), &key).expect("a seal");
         let other = self::key();
-        let foreign = encrypt_value(&SecretValue::new("ghp_token"), &other).expect("a seal");
 
         let cases = [
             (String::new(), Class::Empty),
-            (envelope, Class::Envelope),
-            (foreign, Class::Unopenable),
+            (seal("ghp_token", &key), Class::Envelope),
+            (seal("ghp_token", &other), Class::Unopenable),
             ("ENC[v2:AAAA]".to_string(), Class::Unopenable),
-            (legacy("ghp_token", &key), Class::Legacy),
+            (seal_legacy("ghp_token", &key), Class::Legacy),
             ("ghp_plaintext_token".to_string(), Class::Plaintext),
             ("ENC[v1:abc".to_string(), Class::Ambiguous),
-            (legacy("ghp_token", &other), Class::Ambiguous),
+            (seal_legacy("ghp_token", &other), Class::Ambiguous),
         ];
         for (stored, expected) in cases {
             assert_eq!(Classified::of(&stored, &key).class(), expected, "{stored}");
@@ -138,7 +129,7 @@ mod tests {
     #[test]
     fn legacy_and_plaintext_carry_the_credential_to_seal() {
         let key = key();
-        let opened = Classified::of(&legacy("ghp_legacy", &key), &key);
+        let opened = Classified::of(&seal_legacy("ghp_legacy", &key), &key);
         assert_eq!(
             opened.credential().map(SecretValue::expose),
             Some("ghp_legacy")
@@ -148,7 +139,10 @@ mod tests {
             plaintext.credential().map(SecretValue::expose),
             Some("ghp_plaintext")
         );
-        let envelope = encrypt_value(&SecretValue::new("ghp_token"), &key).expect("a seal");
-        assert!(Classified::of(&envelope, &key).credential().is_none());
+        assert!(
+            Classified::of(&seal("ghp_token", &key), &key)
+                .credential()
+                .is_none()
+        );
     }
 }

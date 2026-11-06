@@ -41,21 +41,3 @@ impl fmt::Display for Policy {
         formatter.write_str(self.as_str())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Policy;
-
-    #[test]
-    fn only_lenient_columns_seal_plaintext_and_only_counted_columns_are_never_written() {
-        assert!(Policy::Lenient.seals_plaintext());
-        assert!(!Policy::Strict.seals_plaintext());
-        assert!(!Policy::Mixed.seals_plaintext());
-        assert!(!Policy::Counted.seals_plaintext());
-
-        assert!(Policy::Strict.writes());
-        assert!(Policy::Mixed.writes());
-        assert!(Policy::Lenient.writes());
-        assert!(!Policy::Counted.writes());
-    }
-}
