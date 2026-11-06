@@ -7,4 +7,4 @@ ALTER TABLE public.chat_pull_requests
     -- and lets a finished run be followed by a new one when the state moves.
     ADD COLUMN auto_fix_run_id uuid,
     ADD CONSTRAINT chat_pull_requests_auto_fix_run_id_fkey
-        FOREIGN KEY (auto_fix_run_id) REFERENCES public.task_runs(id) ON DELETE SET NULL;
+        FOREIGN KEY (auto_fix_run_id) REFERENCES public.task_runs(id) ON DELETE SET NULL NOT VALID;
