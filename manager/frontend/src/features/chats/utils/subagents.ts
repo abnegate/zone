@@ -84,6 +84,14 @@ export function withoutSubagents(list: ChatSubagent[], ids: ReadonlySet<string>)
   return kept.length === list.length ? list : kept;
 }
 
+/** The ids of the listed agents that are not among those kept. */
+export function absentSubagents(
+  list: readonly ChatSubagent[],
+  kept: ReadonlySet<string>
+): Set<string> {
+  return new Set(list.filter((subagent) => !kept.has(subagent.id)).map((subagent) => subagent.id));
+}
+
 /** Each message's subagents, in start order, keyed by the message whose turn started them. */
 export function groupByMessage(list: readonly ChatSubagent[]): Map<string, ChatSubagent[]> {
   const grouped = new Map<string, ChatSubagent[]>();
