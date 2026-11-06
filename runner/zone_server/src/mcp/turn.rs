@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
-use zone_core::llm::Toolset;
+use zone_core::llm::{BuiltinTools, Toolset};
 use zone_core::tools::ToolResult;
 
 use super::progress::Progress;
@@ -33,10 +33,13 @@ const SPENT: &str =
 /// loop uses for the same thing.
 const EXHAUSTED: &str = "The configured tool-call budget was reached.";
 
-/// What a call is told once the turn has repeated a failure with nothing
-/// changed since, instead of being run.
-const STALLED: &str = "This call already failed and nothing has changed since. Finish with what \
-                       you already have.";
+/// What a call that already failed, with nothing changed since, is told
+/// instead of being run.
+const REPEATED_CALL: &str = "This call already failed and nothing has changed since, so it was not run. Try something \
+     else.";
+
+/// What every call is told once the turn has stopped making progress.
+const STALLED: &str = "Repeated failed calls made no progress. Finish with what you already have.";
 
 /// What the console is told when the turn stalls, in the words zone's own loop
 /// uses for the same thing.
@@ -134,10 +137,22 @@ impl Turn {
         if made >= self.scope.calls {
             return self.refuse(made);
         }
-        let signature = call_signature(name, arguments);
-        if self.stalled.load(Ordering::Relaxed) || self.progress().repeats(&signature) {
+        if self.stalled.load(Ordering::Relaxed) {
             return self.stall();
         }
+        let signature = call_signature(name, arguments);
+        let generation = {
+            let mut progress = self.progress();
+            if self.sees_every_change() && progress.repeats(&signature) {
+                let warned = progress.warn();
+                drop(progress);
+                return match warned {
+                    true => self.stall(),
+                    false => CallToolResult::error(vec![ContentBlock::text(REPEATED_CALL)]),
+                };
+            }
+            progress.generation()
+        };
         let id = format!("{CALL_PREFIX}{}", Uuid::new_v4().simple());
         self.publish(AgentEvent::ToolCallStarted {
             id: id.clone(),
@@ -158,6 +173,7 @@ impl Turn {
         let message = result.to_message();
         self.progress().record(
             signature,
+            generation,
             self.tools.mutating(name),
             result.success,
             &message,
@@ -225,6 +241,13 @@ impl Turn {
             self.publish(AgentEvent::Finalizing(REPEATED.to_string()));
         }
         CallToolResult::error(vec![ContentBlock::text(STALLED)])
+    }
+
+    /// Whether every change the agent can make goes through zone. Its own file
+    /// and shell tools change things zone never sees, so a call that failed
+    /// may succeed when made again with nothing zone could call progress.
+    fn sees_every_change(&self) -> bool {
+        self.scope.builtin == BuiltinTools::Withheld
     }
 
     fn progress(&self) -> MutexGuard<'_, Progress> {
@@ -400,7 +423,7 @@ mod tests {
     /// A task's budget is unlimited, so without this a coding agent repeating
     /// a call that keeps failing would run until the attempt's deadline.
     #[tokio::test]
-    async fn a_repeated_failure_stops_the_turn_without_running_anything_more() {
+    async fn a_repeated_failure_is_refused_and_a_second_stops_the_turn() {
         let directory = tempfile::tempdir().expect("tempdir");
         let chat = Uuid::new_v4();
         let (sender, mut events) = unbounded_channel();
@@ -414,11 +437,19 @@ mod tests {
         assert_eq!(failed.is_error, Some(true), "{failed:?}");
         assert_eq!(drain(&mut events), ["started", "completed"]);
 
-        let repeated = turn.run("read_file", &missing).await;
+        let warned = turn.run("read_file", &missing).await;
         assert!(
-            format!("{:?}", repeated.content).contains(STALLED),
+            format!("{:?}", warned.content).contains(REPEATED_CALL),
             "{:?}",
-            repeated.content
+            warned.content
+        );
+        assert!(drain(&mut events).is_empty(), "a refused repeat ran");
+
+        let stopped = turn.run("read_file", &missing).await;
+        assert!(
+            format!("{:?}", stopped.content).contains(STALLED),
+            "{:?}",
+            stopped.content
         );
         let after = directory.path().join("after.txt");
         let refused = turn.run("write_file", &write(&after).to_string()).await;
@@ -434,6 +465,34 @@ mod tests {
             "the console is told once that the turn stalled, and shown no call that never \
              ran: {told:?}"
         );
+    }
+
+    /// An agent that keeps its own shell can create what a failed call was
+    /// missing without zone seeing it, so the retry must run.
+    #[tokio::test]
+    async fn a_turn_whose_agent_keeps_its_own_tools_retries_a_failed_call() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let chat = Uuid::new_v4();
+        let (sender, _events) = unbounded_channel();
+        let lease = Turn::new(
+            Scope {
+                builtin: BuiltinTools::Granted,
+                ..scope(chat)
+            },
+            tools(chat).await,
+            sender,
+        )
+        .open("http://127.0.0.1:8080/mcp");
+        let turn = Turn::find(lease.toolset().token.expose()).expect("the turn");
+        let path = directory.path().join("made-elsewhere.txt");
+        let read = json!({ "path": path.to_string_lossy() }).to_string();
+
+        let failed = turn.run("read_file", &read).await;
+        assert_eq!(failed.is_error, Some(true), "{failed:?}");
+        std::fs::write(&path, "made by the agent's own shell").expect("write");
+
+        let retried = turn.run("read_file", &read).await;
+        assert_eq!(retried.is_error, Some(false), "{retried:?}");
     }
 
     #[tokio::test]

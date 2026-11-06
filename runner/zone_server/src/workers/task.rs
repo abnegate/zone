@@ -60,12 +60,6 @@ const MAX_CONCURRENT_TASKS: usize = 5;
 const TASK_TIMEOUT_SECS: u64 = 3600;
 const TASK_TIMEOUT: Duration = Duration::from_secs(TASK_TIMEOUT_SECS);
 
-/// An explicit ceiling for the tests that need a budget which runs out. A
-/// task's own budget is unlimited, so behaviour that depends on exhausting one
-/// is unobservable without this; these are the numbers a task carried before
-/// it was unbounded.
-#[cfg(test)]
-const PARKING_CEILING: LoopBudget = LoopBudget::bounded(50, 100);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -2333,6 +2327,7 @@ async fn attempt_run(
             user: actor,
             approval: ApprovalPolicy::auto(),
             calls: budget.max_tool_calls,
+            builtin: BuiltinTools::Withheld,
         },
         &crate::mcp::local_endpoint(state.config()),
     );
@@ -5073,6 +5068,10 @@ mod watchdog_tests {
     use abnegate_llm::Role as LlmRole;
     use std::sync::Mutex;
 
+    /// The ceiling a task carried before it was unbounded, for the tests of
+    /// behaviour only a budget that runs out can show.
+    pub(super) const PARKING_CEILING: LoopBudget = LoopBudget::bounded(50, 100);
+
     /// A run that is working announces nothing: the watchdog is there for the
     /// silence, and firing on a busy run would bury the log it writes to.
     #[tokio::test(start_paused = true)]
@@ -5747,10 +5746,10 @@ mod watchdog_tests {
     }
 
     /// A park is not a new run. A budget minted per turn makes every ceiling a
-    /// per-question allowance: a model that keeps calling `ask_user` is handed
-    /// a fresh 50 rounds and 100 calls after each card, so the only thing that
-    /// ends it is [`TASK_TIMEOUT`] -- thousands of tool executions later, under
-    /// a ceiling of 100.
+    /// per-question allowance: a model that keeps calling `ask_user` would be
+    /// handed a fresh allowance after each card. A task's own budget is
+    /// unlimited, so this holds an attempt to an explicit ceiling and proves
+    /// that ceiling spans every park.
     #[tokio::test]
     async fn a_park_carries_its_budget_into_the_turn_that_resumes_it() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6027,8 +6026,6 @@ mod watchdog_tests {
 
     #[test]
     fn a_spent_budget_never_goes_below_nothing_left() {
-        // An explicit ceiling: overspending an unlimited one cannot be
-        // expressed, since there is no number above `usize::MAX` to spend.
         let ceiling = PARKING_CEILING;
         assert_eq!(
             ceiling.less(Spend {
@@ -6839,6 +6836,7 @@ mod watchdog_tests {
 
 #[cfg(test)]
 mod cli_tests {
+    use super::watchdog_tests::PARKING_CEILING;
     use super::*;
     use crate::config::{AgentConfig, Config, ModelBackend};
     use crate::db::agent_logins::{self, Insert};
@@ -8104,10 +8102,6 @@ mod cli_tests {
             "content": "written",
             "reason": "The task asked for this file.",
         }});
-        // Comfortably past the ceiling a task used to carry, which is as far
-        // as an unlimited budget can be demonstrated in finite time. Derived
-        // from that ceiling rather than written out, so it stays past it if
-        // the ceiling ever moves.
         const PAST_THE_OLD_CEILING: usize = PARKING_CEILING.max_tool_calls + 50;
 
         for attempt in 0..PAST_THE_OLD_CEILING {
