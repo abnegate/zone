@@ -631,27 +631,34 @@ pub async fn create_message_with_embedding(
     Ok(message)
 }
 
-/// Delete a message
-pub async fn delete_message(pool: &PgPool, chat_id: Uuid, message_id: Uuid) -> DbResult<bool> {
-    let result = sqlx::query!(
-        "DELETE FROM messages WHERE id = $1 AND chat_id = $2",
-        message_id,
-        chat_id
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected() > 0)
+/// Deletes a message with the subagents it started, and returns their ids, or
+/// `None` when the chat has no such message.
+pub async fn delete_message(
+    pool: &PgPool,
+    chat_id: Uuid,
+    message_id: Uuid,
+) -> DbResult<Option<Vec<Uuid>>> {
+    let mut transaction = pool.begin().await?;
+    let subagents =
+        crate::db::chat_subagents::remove(&mut *transaction, chat_id, message_id).await?;
+    let deleted = sqlx::query("DELETE FROM messages WHERE id = $1 AND chat_id = $2")
+        .bind(message_id)
+        .bind(chat_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        return Ok(None);
+    }
+    transaction.commit().await?;
+    Ok(Some(subagents))
 }
 
-// ---------------------------------------------------------------------------
-// What a chat is for. An ordinary chat is an assistant; a planner chat is the
-// interview an auto project comes out of; an updates chat is where every
-// notice about a project lands. The purpose and the project are read through
-// a query of their own rather than widened onto `ChatRow`, which the compile
-// time queries above produce.
-// ---------------------------------------------------------------------------
-
+/// What a chat is for. An ordinary chat is an assistant; a planner chat is the
+/// interview an auto project comes out of; an updates chat is where every
+/// notice about a project lands. The purpose and the project are read through
+/// a query of their own rather than widened onto `ChatRow`, which the compile
+/// time queries above produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatPurpose {
     Assistant,

@@ -52,7 +52,7 @@ impl From<Error> for store::Error {
 }
 
 const PAGE_CHARS: u64 = 8_000;
-const RUNNING: &str = "running";
+pub(crate) const RUNNING: &str = "running";
 const INTERRUPTED: &str = "interrupted";
 
 #[derive(Clone)]
@@ -262,8 +262,15 @@ impl Store {
 
     /// Explicit deletion removes private evidence with its visible owner and invalidates
     /// checkpoints and the agent session that saw it. The remaining visible companion is
-    /// retained at its original position.
-    pub async fn delete_message(&self, lease: &Lease, id: Uuid) -> Result<bool, Error> {
+    /// retained at its original position. The subagents the message started go with it.
+    ///
+    /// Returns the ids of the subagents it removed, or `None` when the chat has no such
+    /// message.
+    pub async fn delete_message(
+        &self,
+        lease: &Lease,
+        id: Uuid,
+    ) -> Result<Option<Vec<Uuid>>, Error> {
         let mut transaction = self.pool.begin().await?;
         self.lock(&mut transaction, lease).await?;
         self.materialize(&mut transaction).await?;
@@ -275,7 +282,7 @@ impl Store {
                 .fetch_one(&mut *transaction)
                 .await?;
         if !exists {
-            return Ok(false);
+            return Ok(None);
         }
         let turn=sqlx::query("SELECT id,user_message_id FROM chat_turns WHERE chat_id=$1 AND (id=$2 OR user_message_id=$2)").bind(self.chat_id).bind(id).fetch_optional(&mut *transaction).await?;
         if let Some(turn) = turn {
@@ -319,6 +326,8 @@ impl Store {
             .bind(id.to_string())
             .execute(&mut *transaction)
             .await?;
+        let subagents =
+            crate::db::chat_subagents::remove(&mut *transaction, self.chat_id, id).await?;
         sqlx::query("DELETE FROM messages WHERE chat_id=$1 AND id=$2")
             .bind(self.chat_id)
             .bind(id)
@@ -326,7 +335,7 @@ impl Store {
             .await?;
         self.lock(&mut transaction, lease).await?;
         transaction.commit().await?;
-        Ok(true)
+        Ok(Some(subagents))
     }
 
     pub async fn consumed(&self, lease: &Lease, ids: &[String]) -> Result<(), Error> {
@@ -1219,6 +1228,7 @@ impl store::ContextStore for Store {
     async fn delete_message(&self, lease: &Lease, id: Uuid) -> Result<bool, store::Error> {
         Store::delete_message(self, lease, id)
             .await
+            .map(|removed| removed.is_some())
             .map_err(Into::into)
     }
 

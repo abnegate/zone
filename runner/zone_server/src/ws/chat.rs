@@ -31,7 +31,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
-use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer};
+use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer, SubagentStep};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -44,6 +44,7 @@ use crate::auth::validate_access_token;
 use crate::db::{
     self, chat_attached_sources, chat_sources, chats, knowledge, sessions, workspace_members,
 };
+use crate::mcp::AgentTools;
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
@@ -52,7 +53,7 @@ use crate::services::chat::handover::{self, Cause, Handover, Notice};
 use crate::services::chat::observers::Observers;
 use crate::services::chat::pull_request::Recorder;
 use crate::services::chat::session::{self, Session};
-use crate::services::chat::subagent::{ChatSubagent, Tracker};
+use crate::services::chat::subagent::{Announcer, ChatSubagent, Tracker};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::login::router;
@@ -236,7 +237,7 @@ struct LiveTurn {
 impl LiveTurn {
     fn record(&mut self, message: &ServerMessage) {
         match message {
-            ServerMessage::Subagent { .. } => {}
+            ServerMessage::Subagent { .. } | ServerMessage::SubagentsRemoved { .. } => {}
             ServerMessage::MessageStart { .. } => {
                 self.status = None;
                 self.frames.clear();
@@ -334,15 +335,38 @@ async fn publish(stream: &ChatStream, message: ServerMessage) {
     let _ = stream.events.send(message);
 }
 
-/// Publish each change a turn's tracker stores to a chat's subagents.
-async fn announce_subagents(
+/// Publishes each change a turn's tracker stores to a chat's subagents.
+struct SubagentFrames {
     stream: Arc<ChatStream>,
-    chat_id: Uuid,
-    mut announced: mpsc::UnboundedReceiver<ChatSubagent>,
-) {
-    while let Some(subagent) = announced.recv().await {
-        publish(&stream, ServerMessage::Subagent { chat_id, subagent }).await;
+}
+
+#[async_trait::async_trait]
+impl Announcer for SubagentFrames {
+    async fn announce(&self, subagent: ChatSubagent, steps: Vec<SubagentStep>) {
+        let chat_id = self.stream.chat_id;
+        publish(
+            &self.stream,
+            ServerMessage::Subagent {
+                chat_id,
+                subagent,
+                steps,
+            },
+        )
+        .await;
     }
+}
+
+/// Tells every connection to `chat_id` that deleting a message removed these
+/// subagents.
+pub(crate) async fn announce_removed_subagents(chat_id: Uuid, ids: Vec<Uuid>) {
+    if ids.is_empty() {
+        return;
+    }
+    publish(
+        &ChatStream::of(chat_id),
+        ServerMessage::SubagentsRemoved { chat_id, ids },
+    )
+    .await;
 }
 
 /// Send frames the caller already holds to one connection.
@@ -612,12 +636,15 @@ pub enum ServerMessage {
         #[serde(flatten)]
         notice: Notice,
     },
-    /// One of the chat's subagents changed. Never replayed: a joining client
-    /// reads them over REST.
+    /// One of the chat's subagents changed. `steps` holds only the steps this
+    /// change touched. Never replayed: a joining client reads them over REST.
     Subagent {
         chat_id: Uuid,
         subagent: ChatSubagent,
+        steps: Vec<SubagentStep>,
     },
+    /// Deleting a message removed the subagents it started. Never replayed.
+    SubagentsRemoved { chat_id: Uuid, ids: Vec<Uuid> },
 }
 
 fn is_not_resumed(resumed: &bool) -> bool {
@@ -3282,7 +3309,7 @@ fn builtin_tools(sandboxed: bool) -> BuiltinTools {
 /// to, so a turn that moves to another backend equips it again.
 fn equipped(
     client: LlmClient,
-    served: Option<&crate::mcp::AgentTools>,
+    served: Option<&AgentTools>,
     observer: &Arc<dyn Observer>,
     sandboxed: bool,
 ) -> LlmClient {
@@ -3336,7 +3363,7 @@ async fn handle_chat_generation(
     // returned.
     let mut agent_tools = agentic
         .then(|| {
-            crate::mcp::AgentTools::serve(
+            AgentTools::serve(
                 llm_client.backend(),
                 &mut tools,
                 crate::mcp::Scope {
@@ -3350,18 +3377,6 @@ async fn handle_chat_generation(
             )
         })
         .flatten();
-    let (announce, announced) = mpsc::unbounded_channel();
-    tokio::spawn(announce_subagents(
-        ChatStream::of(chat_id),
-        chat_id,
-        announced,
-    ));
-    let tracker = Tracker::spawn(state.clone(), chat_id, generation.message_id, announce);
-    let observer: Arc<dyn Observer> = Arc::new(Observers::new(
-        Recorder::new(state.clone(), chat_id, workspace_id),
-        tracker,
-    ));
-    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
     let mut token_filter = TokenFilter::new(stop);
     let assistant_message_id = generation.message_id;
     let stream_deadline = generation_deadline(timeout)?;
@@ -3370,6 +3385,19 @@ async fn handle_chat_generation(
         generation.cancelled(stream).await;
         return Ok(());
     }
+    let tracker = Tracker::new(
+        state.clone(),
+        chat_id,
+        assistant_message_id,
+        Arc::new(SubagentFrames {
+            stream: ChatStream::of(chat_id),
+        }),
+    );
+    let observer: Arc<dyn Observer> = Arc::new(Observers::new(
+        Recorder::new(state.clone(), chat_id, workspace_id),
+        tracker,
+    ));
+    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
 
     publish(
         stream,
@@ -6153,6 +6181,142 @@ cat 'DIR/reply.jsonl'
                 assert_eq!(second.id, fresh);
                 assert_eq!(second.prompt, first.prompt);
             }
+
+            /// Claude's subagents fixture up to the turn's first result, which
+            /// leaves its background review still running when the turn ends.
+            fn subagents_until_the_first_result() -> String {
+                const FIXTURE: &str = include_str!(
+                    "../../../zone_core/src/llm/provider/parser/fixtures/claude/subagents.jsonl"
+                );
+                let mut reply = String::new();
+                for line in FIXTURE
+                    .lines()
+                    .filter(|line| !line.contains(r#""subtype":"init""#))
+                {
+                    reply.push_str(line);
+                    reply.push('\n');
+                    if line.starts_with(r#"{"type":"result""#) {
+                        return reply;
+                    }
+                }
+                panic!("the fixture has no result");
+            }
+
+            #[tokio::test]
+            async fn a_turns_subagents_reach_its_readers_and_its_store_and_are_swept_when_it_ends()
+            {
+                use zone_core::llm::{StepStatus, SubagentStatus};
+
+                const SURVEY: &str = "toolu_01Survey";
+                const REVIEW: &str = "toolu_04Review";
+                let chat = Chat::on_claude().await;
+                std::fs::write(
+                    chat.agent.directory.path().join("reply.jsonl"),
+                    subagents_until_the_first_result(),
+                )
+                .expect("the stand-in's reply");
+                let stream = ChatStream::of(chat.organization.chat);
+                let (_, mut frames) = stream.join().await;
+
+                chat.ask(FIRST).await;
+                let mut started = None;
+                let mut announced = Vec::new();
+                let mut replayed = Vec::new();
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        match frames.recv().await.expect("the chat's frames") {
+                            ServerMessage::MessageStart { message_id, .. } => {
+                                started = Some(message_id);
+                            }
+                            ServerMessage::Subagent {
+                                subagent, steps, ..
+                            } => {
+                                replayed.extend(stream.join().await.0);
+                                let swept = subagent.external_id == REVIEW
+                                    && subagent.status == SubagentStatus::Stopped;
+                                announced.push((subagent, steps));
+                                if swept {
+                                    return;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect("the review is swept once the turn ends");
+                let answer: Uuid = sqlx::query_scalar(
+                    "SELECT id FROM messages WHERE chat_id = $1 AND role = 'assistant'",
+                )
+                .bind(chat.organization.chat)
+                .fetch_one(&chat.organization.pool)
+                .await
+                .expect("the chat's answer");
+                let stored =
+                    db::chat_subagents::list(&chat.organization.pool, chat.organization.chat)
+                        .await
+                        .expect("the chat's subagents");
+                let survey = stored
+                    .iter()
+                    .find(|row| row.external_id == SURVEY)
+                    .expect("the survey")
+                    .clone();
+                let steps = db::chat_subagents::steps(
+                    &chat.organization.pool,
+                    chat.organization.chat,
+                    survey.id,
+                )
+                .await
+                .expect("the survey's steps")
+                .expect("the survey");
+                chat.remove().await;
+
+                assert_eq!(
+                    started,
+                    Some(answer),
+                    "the console's answer is the stored one"
+                );
+                assert!(
+                    announced
+                        .iter()
+                        .all(|(subagent, _)| subagent.message_id == Some(answer)),
+                    "{announced:?}"
+                );
+                let named: std::collections::BTreeSet<&str> = announced
+                    .iter()
+                    .map(|(subagent, _)| subagent.external_id.as_str())
+                    .collect();
+                assert_eq!(named, std::collections::BTreeSet::from([SURVEY, REVIEW]));
+                assert!(
+                    !replayed
+                        .iter()
+                        .any(|frame| matches!(frame, ServerMessage::Subagent { .. })),
+                    "a joining client reads subagents over REST: {replayed:?}"
+                );
+                let statuses: Vec<(&str, &str)> = stored
+                    .iter()
+                    .map(|row| (row.external_id.as_str(), row.status.as_str()))
+                    .collect();
+                assert_eq!(
+                    statuses,
+                    [
+                        (SURVEY, SubagentStatus::Completed.as_str()),
+                        (REVIEW, SubagentStatus::Stopped.as_str()),
+                    ]
+                );
+                let taken: Vec<(&str, Option<&str>, StepStatus)> = steps
+                    .iter()
+                    .map(|step| (step.name.as_str(), step.subject.as_deref(), step.status))
+                    .collect();
+                assert_eq!(
+                    taken,
+                    [
+                        ("Grep", Some("pub mod"), StepStatus::Succeeded),
+                        ("Read", Some("/w/src/missing.rs"), StepStatus::Failed),
+                    ]
+                );
+                assert_eq!(survey.step_count, 2);
+            }
         }
 
         #[tokio::test]
@@ -6684,7 +6848,8 @@ cat 'DIR/reply.jsonl'
             last_tool: None,
             summary: None,
             error: None,
-            steps: Vec::new(),
+            step_count: 1,
+            revision: 2,
             started_at: now,
             finished_at: None,
             updated_at: now,
@@ -6697,15 +6862,18 @@ cat 'DIR/reply.jsonl'
         let stream = ChatStream::of(chat_id);
         publish(&stream, started(Uuid::new_v4())).await;
         let (_, mut connection) = stream.join().await;
-        let (announce, announced) = mpsc::unbounded_channel();
-        let announcer = tokio::spawn(announce_subagents(stream.clone(), chat_id, announced));
+        let frames = SubagentFrames {
+            stream: stream.clone(),
+        };
         let changed = subagent(chat_id);
+        let step = SubagentStep {
+            id: "toolu_x".to_string(),
+            name: "Bash".to_string(),
+            subject: None,
+            status: zone_core::llm::StepStatus::Running,
+        };
 
-        announce
-            .send(changed.clone())
-            .expect("the announcer listens");
-        drop(announce);
-        announcer.await.expect("the announcer finishes");
+        frames.announce(changed.clone(), vec![step]).await;
 
         let frame = connection.recv().await.expect("the subagent frame");
         assert_eq!(
@@ -6714,7 +6882,36 @@ cat 'DIR/reply.jsonl'
                 "type": "subagent",
                 "chat_id": chat_id,
                 "subagent": serde_json::to_value(&changed).expect("a subagent"),
+                "steps": [{"id": "toolu_x", "name": "Bash", "subject": null, "status": "running"}],
             })
+        );
+        assert_eq!(
+            frame_kinds(&stream.join().await.0),
+            ["message_start"],
+            "a joining client reads subagents over REST"
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_subagents_reach_every_connection_but_are_never_replayed() {
+        let chat_id = Uuid::new_v4();
+        let stream = ChatStream::of(chat_id);
+        publish(&stream, started(Uuid::new_v4())).await;
+        let (_, mut connection) = stream.join().await;
+        let removed = vec![Uuid::new_v4(), Uuid::new_v4()];
+
+        announce_removed_subagents(chat_id, Vec::new()).await;
+        announce_removed_subagents(chat_id, removed.clone()).await;
+
+        let frame = connection.recv().await.expect("the removal frame");
+        assert_eq!(
+            serde_json::to_value(&frame).expect("a frame"),
+            serde_json::json!({
+                "type": "subagents_removed",
+                "chat_id": chat_id,
+                "ids": removed,
+            }),
+            "a removal of nothing is not sent"
         );
         assert_eq!(
             frame_kinds(&stream.join().await.0),

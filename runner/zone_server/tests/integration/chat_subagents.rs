@@ -1,19 +1,25 @@
 //! The subagents a chat's coding agent started: listed in the order they
-//! started, out of reach of anyone outside the chat's workspace, and stopped
-//! at boot once the turn that started them is gone.
+//! started, their steps read one subagent at a time, out of reach of anyone
+//! outside the chat's workspace, removed with the message that started them,
+//! and stopped at boot once the turn that started them is gone.
 
 use crate::common::{
     Database, TestClient, create_test_router, create_test_state, test_config, test_email,
     test_password,
 };
 
+use std::time::Duration;
+
 use axum::http::StatusCode;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use tokio::net::TcpListener;
+use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 use uuid::Uuid;
 use zone_core::llm::{StepStatus, SubagentStatus, SubagentStep};
 use zone_server::db::chat_subagents::{self, SubagentChange};
-use zone_server::db::chats::create_chat;
+use zone_server::db::chats::{self, create_chat};
 use zone_server::state::AppState;
 
 const TURN_RUNNING: &str = "running";
@@ -65,6 +71,34 @@ impl Workspace {
     fn subagents(&self) -> String {
         format!("/api/chats/{}/subagents", self.chat)
     }
+
+    fn steps(&self, subagent: Uuid) -> String {
+        format!("/api/chats/{}/subagents/{subagent}/steps", self.chat)
+    }
+
+    async fn subagent(&self, external_id: &str, message_id: Option<Uuid>) -> Uuid {
+        chat_subagents::record(
+            self.state.db(),
+            &SubagentChange {
+                chat_id: self.chat,
+                message_id,
+                external_id,
+                ..SubagentChange::default()
+            },
+        )
+        .await
+        .expect("a subagent")
+        .id
+    }
+}
+
+fn step(id: &str, status: StepStatus) -> SubagentStep {
+    SubagentStep {
+        id: id.to_string(),
+        name: "Bash".to_string(),
+        subject: Some("cargo test".to_string()),
+        status,
+    }
 }
 
 async fn register(client: &TestClient) -> String {
@@ -115,12 +149,6 @@ async fn member(client: &TestClient) -> (String, Uuid) {
 async fn the_chats_reader_gets_its_subagents_in_the_order_they_started() {
     let workspace = Workspace::new().await;
     let turn = Uuid::new_v4();
-    let steps = [SubagentStep {
-        id: "toolu_x".to_string(),
-        name: "Bash".to_string(),
-        subject: Some("cargo test".to_string()),
-        status: StepStatus::Succeeded,
-    }];
     let later = chat_subagents::record(
         workspace.state.db(),
         &SubagentChange {
@@ -147,12 +175,18 @@ async fn the_chats_reader_gets_its_subagents_in_the_order_they_started() {
             tokens: Some(18_000),
             last_tool: Some("Bash"),
             summary: Some("Looks good"),
-            steps: Some(&steps),
             ..SubagentChange::default()
         },
     )
     .await
     .expect("a finished subagent");
+    chat_subagents::record_steps(
+        workspace.state.db(),
+        first.id,
+        &[step("toolu_x", StepStatus::Succeeded)],
+    )
+    .await
+    .expect("its step");
     sqlx::query(
         "UPDATE chat_subagents SET started_at = started_at - INTERVAL '1 minute' WHERE id = $1",
     )
@@ -191,9 +225,10 @@ async fn the_chats_reader_gets_its_subagents_in_the_order_they_started() {
             "last_tool",
             "message_id",
             "model",
+            "revision",
             "started_at",
             "status",
-            "steps",
+            "step_count",
             "summary",
             "tokens",
             "tool_uses",
@@ -214,10 +249,8 @@ async fn the_chats_reader_gets_its_subagents_in_the_order_they_started() {
     assert_eq!(finished["last_tool"], "Bash");
     assert_eq!(finished["summary"], "Looks good");
     assert_eq!(finished["error"], Value::Null);
-    assert_eq!(
-        finished["steps"],
-        json!([{"id": "toolu_x", "name": "Bash", "subject": "cargo test", "status": "succeeded"}])
-    );
+    assert_eq!(finished["step_count"], 1);
+    assert_eq!(finished["revision"], 0);
     for time in ["started_at", "finished_at", "updated_at"] {
         let sent = finished[time].as_str().expect("a time");
         assert!(
@@ -231,7 +264,231 @@ async fn the_chats_reader_gets_its_subagents_in_the_order_they_started() {
     assert_eq!(running["description"], "");
     assert_eq!(running["background"], false);
     assert_eq!(running["finished_at"], Value::Null);
-    assert_eq!(running["steps"], json!([]));
+    assert_eq!(running["step_count"], 0);
+}
+
+#[tokio::test]
+async fn the_chats_reader_gets_a_subagents_steps_in_the_order_it_took_them() {
+    let workspace = Workspace::new().await;
+    let subagent = workspace.subagent("toolu_01Agent", None).await;
+    let idle = workspace.subagent("toolu_02Agent", None).await;
+    for steps in [
+        vec![
+            step("toolu_a", StepStatus::Running),
+            step("toolu_b", StepStatus::Running),
+        ],
+        vec![
+            step("toolu_c", StepStatus::Running),
+            step("toolu_a", StepStatus::Succeeded),
+        ],
+    ] {
+        chat_subagents::record_steps(workspace.state.db(), subagent, &steps)
+            .await
+            .expect("its steps");
+    }
+
+    let response = workspace
+        .client
+        .get_auth(&workspace.steps(subagent), &workspace.token)
+        .await;
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(
+        response.json_value(),
+        json!({"steps": [
+            {"id": "toolu_a", "name": "Bash", "subject": "cargo test", "status": "succeeded"},
+            {"id": "toolu_b", "name": "Bash", "subject": "cargo test", "status": "running"},
+            {"id": "toolu_c", "name": "Bash", "subject": "cargo test", "status": "running"},
+        ]})
+    );
+    let empty = workspace
+        .client
+        .get_auth(&workspace.steps(idle), &workspace.token)
+        .await;
+    empty.assert_status(StatusCode::OK);
+    assert_eq!(empty.json_value(), json!({"steps": []}));
+}
+
+#[tokio::test]
+async fn a_subagent_of_another_chat_or_none_at_all_has_no_steps_to_read() {
+    let workspace = Workspace::new().await;
+    let elsewhere = Workspace::new().await;
+    let foreign = elsewhere.subagent("toolu_01Agent", None).await;
+
+    for subagent in [foreign, Uuid::new_v4()] {
+        let read = workspace
+            .client
+            .get_auth(&workspace.steps(subagent), &workspace.token)
+            .await;
+        assert_eq!(read.status, StatusCode::NOT_FOUND, "{}", read.text());
+    }
+}
+
+#[tokio::test]
+async fn another_workspaces_member_cannot_see_a_subagents_steps() {
+    let workspace = Workspace::new().await;
+    let subagent = workspace.subagent("toolu_01Agent", None).await;
+    chat_subagents::record_steps(
+        workspace.state.db(),
+        subagent,
+        &[SubagentStep {
+            subject: Some("Private".to_string()),
+            ..step("toolu_a", StepStatus::Running)
+        }],
+    )
+    .await
+    .expect("a step");
+    let (stranger, _) = member(&workspace.client).await;
+
+    let read = workspace
+        .client
+        .get_auth(&workspace.steps(subagent), &stranger)
+        .await;
+    let signed_out = workspace.client.get(&workspace.steps(subagent)).await;
+
+    assert_eq!(read.status, StatusCode::FORBIDDEN, "{}", read.text());
+    assert!(!read.text().contains("Private"), "{}", read.text());
+    assert_eq!(signed_out.status, StatusCode::UNAUTHORIZED);
+}
+
+async fn serve(state: AppState) -> String {
+    let router = create_test_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a free port");
+    let address = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    address.to_string()
+}
+
+/// The next frame of `kind` the socket is sent, skipping any other.
+async fn frame<S>(socket: &mut S, kind: &str) -> Value
+where
+    S: StreamExt<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(WsMessage::Text(text))) => {
+                    let frame: Value = serde_json::from_str(&text).expect("a json frame");
+                    if frame["type"] == kind {
+                        return frame;
+                    }
+                }
+                Some(Ok(_)) => {}
+                other => panic!("the socket ended before a {kind} frame: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {kind} frame in time"))
+}
+
+#[tokio::test]
+async fn deleting_a_message_removes_its_subagents_and_tells_the_chats_readers() {
+    let workspace = Workspace::new().await;
+    let created = workspace
+        .client
+        .post_json_auth(
+            &format!("/api/chats/{}/messages", workspace.chat),
+            &json!({"role": "assistant", "content": "Asked for a review"}),
+            &workspace.token,
+        )
+        .await
+        .json_value();
+    let message: Uuid = created["message"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("message creation failed: {created}"))
+        .parse()
+        .expect("a message id");
+    let started = workspace.subagent("toolu_01Agent", Some(message)).await;
+    let kept = workspace
+        .subagent("toolu_02Agent", Some(Uuid::new_v4()))
+        .await;
+    chat_subagents::record_steps(
+        workspace.state.db(),
+        started,
+        &[step("toolu_a", StepStatus::Running)],
+    )
+    .await
+    .expect("its step");
+    let address = serve(workspace.state.clone()).await;
+    let (mut socket, _) = connect_async(format!("ws://{address}/ws/chats/{}", workspace.chat))
+        .await
+        .expect("a socket");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": workspace.token})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("the authentication");
+    frame(&mut socket, "init").await;
+
+    let deleted = workspace
+        .client
+        .delete_auth(
+            &format!("/api/chats/{}/messages/{message}", workspace.chat),
+            &workspace.token,
+        )
+        .await;
+
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.text());
+    assert_eq!(
+        frame(&mut socket, "subagents_removed").await,
+        json!({"type": "subagents_removed", "chat_id": workspace.chat, "ids": [started]})
+    );
+    let left: Vec<Uuid> = chat_subagents::list(workspace.state.db(), workspace.chat)
+        .await
+        .expect("the chat's subagents")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(left, [kept]);
+    assert_eq!(
+        chat_subagents::steps(workspace.state.db(), workspace.chat, started)
+            .await
+            .expect("a read"),
+        None
+    );
+    let orphans: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM chat_subagent_steps WHERE subagent_id = $1")
+            .bind(started)
+            .fetch_one(workspace.state.db())
+            .await
+            .expect("the count");
+    assert_eq!(orphans, 0);
+}
+
+#[tokio::test]
+async fn deleting_a_message_directly_removes_its_subagents_too() {
+    let workspace = Workspace::new().await;
+    let message: Uuid = sqlx::query_scalar(
+        "INSERT INTO messages (chat_id, role, content) VALUES ($1, 'assistant', 'Done')
+         RETURNING id",
+    )
+    .bind(workspace.chat)
+    .fetch_one(workspace.state.db())
+    .await
+    .expect("a message");
+    let started = workspace.subagent("toolu_01Agent", Some(message)).await;
+
+    let removed = chats::delete_message(workspace.state.db(), workspace.chat, message)
+        .await
+        .expect("the deletion");
+    let missing = chats::delete_message(workspace.state.db(), workspace.chat, message)
+        .await
+        .expect("a second deletion");
+
+    assert_eq!(removed, Some(vec![started]));
+    assert_eq!(missing, None);
+    assert_eq!(
+        chat_subagents::list(workspace.state.db(), workspace.chat)
+            .await
+            .expect("the chat's subagents"),
+        []
+    );
 }
 
 #[tokio::test]
@@ -340,6 +597,23 @@ async fn boot_stops_the_subagents_of_every_turn_that_is_not_still_running() {
     started(pool, chat, "missing", Some(Uuid::new_v4())).await;
     started(pool, chat, "unnamed", None).await;
     started(pool, chat, "running", Some(running)).await;
+    let interrupted_subagent = chat_subagents::list(pool, chat)
+        .await
+        .expect("the list")
+        .into_iter()
+        .find(|row| row.external_id == "interrupted")
+        .expect("the interrupted turn's subagent")
+        .id;
+    chat_subagents::record_steps(
+        pool,
+        interrupted_subagent,
+        &[
+            step("toolu_done", StepStatus::Succeeded),
+            step("toolu_open", StepStatus::Running),
+        ],
+    )
+    .await
+    .expect("its steps");
     chat_subagents::record(
         pool,
         &SubagentChange {
@@ -373,6 +647,16 @@ async fn boot_stops_the_subagents_of_every_turn_that_is_not_still_running() {
     ]
     .map(|(name, status, finished)| (name.to_string(), status.to_string(), finished));
     assert_eq!(statuses, expected);
+    assert_eq!(
+        chat_subagents::steps(pool, chat, interrupted_subagent)
+            .await
+            .expect("a read")
+            .expect("the subagent"),
+        [
+            step("toolu_done", StepStatus::Succeeded),
+            step("toolu_open", StepStatus::Failed),
+        ]
+    );
     assert_eq!(
         chat_subagents::abandon(pool).await.expect("a second sweep"),
         0

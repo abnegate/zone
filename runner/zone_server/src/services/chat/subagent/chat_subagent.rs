@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
-use zone_core::llm::{SubagentStatus, SubagentStep};
+use zone_core::llm::SubagentStatus;
 
 use crate::db::chat_subagents::SubagentRow;
 
@@ -25,7 +25,10 @@ pub struct ChatSubagent {
     pub last_tool: Option<String>,
     pub summary: Option<String>,
     pub error: Option<String>,
-    pub steps: Vec<SubagentStep>,
+    /// How many steps it has taken; the steps themselves are read on their own.
+    pub step_count: i64,
+    /// Counts the row's writes: of two copies, the higher is the later.
+    pub revision: i64,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
@@ -49,7 +52,8 @@ impl From<SubagentRow> for ChatSubagent {
             last_tool: row.last_tool,
             summary: row.summary,
             error: row.error,
-            steps: row.steps.0,
+            step_count: row.step_count,
+            revision: row.revision,
             started_at: row.started_at,
             finished_at: row.finished_at,
             updated_at: row.updated_at,
@@ -60,8 +64,6 @@ impl From<SubagentRow> for ChatSubagent {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use sqlx::types::Json;
-    use zone_core::llm::StepStatus;
 
     use super::*;
 
@@ -85,12 +87,8 @@ mod tests {
             last_tool: None,
             summary: None,
             error: None,
-            steps: Json(vec![SubagentStep {
-                id: "toolu_x".to_string(),
-                name: "Bash".to_string(),
-                subject: None,
-                status: StepStatus::Succeeded,
-            }]),
+            step_count: 3,
+            revision: 7,
             started_at: started,
             finished_at: None,
             updated_at: started,
@@ -119,7 +117,8 @@ mod tests {
                 "last_tool": null,
                 "summary": null,
                 "error": null,
-                "steps": [{"id": "toolu_x", "name": "Bash", "subject": null, "status": "succeeded"}],
+                "step_count": 3,
+                "revision": 7,
                 "started_at": "2026-11-06T09:00:00Z",
                 "finished_at": null,
                 "updated_at": "2026-11-06T09:00:00Z",

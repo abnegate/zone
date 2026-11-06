@@ -16,14 +16,13 @@ CREATE TABLE public.chat_subagents (
     last_tool text,
     summary text,
     error text,
-    steps jsonb DEFAULT '[]'::jsonb NOT NULL,
+    revision bigint DEFAULT 0 NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     finished_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT chat_subagents_pkey PRIMARY KEY (id),
     CONSTRAINT chat_subagents_chat_id_fkey FOREIGN KEY (chat_id) REFERENCES public.chats(id) ON DELETE CASCADE,
-    CONSTRAINT chat_subagents_status_check CHECK (status = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'stopped'::text])),
-    CONSTRAINT chat_subagents_steps_check CHECK (jsonb_typeof(steps) = 'array')
+    CONSTRAINT chat_subagents_status_check CHECK (status = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text, 'stopped'::text]))
 );
 
 CREATE UNIQUE INDEX chat_subagents_chat_external_key
@@ -31,3 +30,22 @@ CREATE UNIQUE INDEX chat_subagents_chat_external_key
 
 CREATE INDEX chat_subagents_chat_started_idx
     ON public.chat_subagents USING btree (chat_id, started_at);
+
+CREATE INDEX chat_subagents_running_idx
+    ON public.chat_subagents USING btree (chat_id, message_id)
+    WHERE status = 'running';
+
+CREATE TABLE public.chat_subagent_steps (
+    subagent_id uuid NOT NULL,
+    step_id text NOT NULL,
+    "position" bigint NOT NULL,
+    name text NOT NULL,
+    subject text,
+    status text DEFAULT 'running'::text NOT NULL,
+    CONSTRAINT chat_subagent_steps_pkey PRIMARY KEY (subagent_id, step_id),
+    CONSTRAINT chat_subagent_steps_subagent_id_fkey FOREIGN KEY (subagent_id) REFERENCES public.chat_subagents(id) ON DELETE CASCADE,
+    CONSTRAINT chat_subagent_steps_status_check CHECK (status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text]))
+);
+
+CREATE INDEX chat_subagent_steps_order_idx
+    ON public.chat_subagent_steps USING btree (subagent_id, "position");
