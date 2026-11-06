@@ -118,8 +118,11 @@ mod tests {
     use chrono::SecondsFormat;
     use chrono::Utc;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     use crate::secret::fixture::seal;
     use crate::secret::fixture::seal_legacy;

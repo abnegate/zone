@@ -28,8 +28,11 @@ pub enum GithubAppError {
 impl From<ApplicationError> for GithubAppError {
     fn from(error: ApplicationError) -> Self {
         match error {
+            ApplicationError::InvalidOrigin
+            | ApplicationError::Client
+            | ApplicationError::InvalidCode => Self::Configuration,
             ApplicationError::PrivateKey => Self::PrivateKey,
-            ApplicationError::Signing => Self::Signing,
+            ApplicationError::Signing | ApplicationError::AuthenticationRequired => Self::Signing,
             ApplicationError::Transport(cause) => Self::Transport(cause),
             ApplicationError::Status(status) => Self::Status(status),
             ApplicationError::Response => Self::Response,
@@ -85,6 +88,14 @@ mod tests {
             GithubAppError::from(ApplicationError::Client),
             GithubAppError::Configuration
         ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::InvalidCode),
+            GithubAppError::Configuration
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::AuthenticationRequired),
+            GithubAppError::Signing
+        ));
 
         for (error, expected) in [
             (
@@ -94,6 +105,22 @@ mod tests {
             (
                 ApplicationError::Signing,
                 "The GitHub App JWT could not be signed.".to_string(),
+            ),
+            (
+                ApplicationError::AuthenticationRequired,
+                "The GitHub App JWT could not be signed.".to_string(),
+            ),
+            (
+                ApplicationError::InvalidOrigin,
+                "The GitHub App configuration is missing or invalid.".to_string(),
+            ),
+            (
+                ApplicationError::Client,
+                "The GitHub App configuration is missing or invalid.".to_string(),
+            ),
+            (
+                ApplicationError::InvalidCode,
+                "The GitHub App configuration is missing or invalid.".to_string(),
             ),
             (
                 ApplicationError::Transport(CAUSE.to_string()),

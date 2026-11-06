@@ -27,12 +27,8 @@ pub mod provider;
 #[cfg(test)]
 mod testing;
 
-pub use abnegate_vcs::ApplicationClaims;
 pub use abnegate_vcs::ApplicationId;
 pub use abnegate_vcs::InstallationId;
-pub use abnegate_vcs::InstallationIssuer;
-pub use abnegate_vcs::InstallationToken;
-pub use abnegate_vcs::TokenCache;
 pub use configuration::AppConfiguration;
 pub use configuration::CONFIGURATION_KEY;
 pub use configuration::StoredConfiguration;
