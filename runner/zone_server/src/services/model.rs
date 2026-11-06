@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::sync::LazyLock;
 use std::time::Duration;
+use zone_chat::capacity::native_window;
 
 use crate::services::endpoint::Origin;
 
@@ -39,7 +40,7 @@ pub struct Model {
     #[serde(default)]
     modelfile: Option<String>,
     #[serde(default)]
-    model_info: Option<serde_json::Map<String, serde_json::Value>>,
+    model_info: Option<serde_json::Value>,
 }
 
 impl Model {
@@ -111,18 +112,9 @@ impl Model {
             tools,
             reasoning: self.supports_reasoning(),
             needs_character: needs_character(name, tools, self.expects_persona()),
-            context_length: self.native_context(),
+            context_length: self.model_info.as_ref().and_then(native_window),
             capabilities: self.capabilities,
         }
-    }
-
-    fn native_context(&self) -> Option<u64> {
-        let metadata = self.model_info.as_ref()?;
-        let architecture = metadata.get("general.architecture")?.as_str()?;
-        metadata
-            .get(&format!("{architecture}.context_length"))?
-            .as_u64()
-            .filter(|length| *length > 0)
     }
 
     fn supports_completion(&self) -> Option<bool> {
@@ -308,6 +300,19 @@ mod tests {
             None
         );
         assert_eq!(window(json!({"qwen3.context_length": 40960})), None);
+        assert_eq!(
+            model_with(json!({"capabilities": ["completion", "tools"], "model_info": "opaque"}))
+                .into_profile("qwen3:8b"),
+            ModelProfile {
+                capabilities: Some(vec!["completion".to_string(), "tools".to_string()]),
+                completion: Some(true),
+                tools: Some(true),
+                reasoning: Some(false),
+                needs_character: false,
+                context_length: None,
+            },
+            "metadata of another shape costs only the window"
+        );
         assert_eq!(
             model(Some(vec!["completion"]))
                 .into_profile("qwen3:8b")

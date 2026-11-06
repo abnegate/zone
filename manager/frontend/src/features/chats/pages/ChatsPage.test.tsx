@@ -3998,8 +3998,11 @@ describe('ChatsPage', () => {
     });
 
     it('offers agent models and efforts on an agent default and saves a model change', async () => {
+      listedModels = [
+        { name: 'sonnet', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
       mockGetChatProviders.mockResolvedValue(chatProviders({ default: claudeOffer }));
-      await openChat({ model_name: 'auto', reasoning_effort: 'auto' });
+      await openChat({ model_name: 'auto', reasoning_effort: 'auto', context_tokens: 32768 });
       await screen.findByTestId('chat-provider-model');
       expect(optionNames('chat-provider-model')).toEqual(['Automatic', 'Sonnet', 'Haiku']);
       expect(optionNames('reasoning-effort')).toEqual([
@@ -4063,6 +4066,62 @@ describe('ChatsPage', () => {
       expect(mockClient.updateChat).toHaveBeenCalledTimes(2);
       await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('4K'));
       expect(screen.queryByTestId('chat-operation-error')).not.toBeInTheDocument();
+    });
+
+    it('shows a saved context larger than the model window as the window', async () => {
+      listedModels = [
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const served = providerOffer({
+        models: [{ name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS }],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+
+      await openChat({ model_name: 'tinyllama', context_tokens: 32768 });
+
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('4K'));
+    });
+
+    it('fits the context to the model a chat returns to on its self-hosted default', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const local = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ default: local, selected: selection(local, 'llama2') })
+      );
+      await openChat({
+        model_name: 'tinyllama',
+        provider: 'self_hosted',
+        provider_model: 'llama2',
+        context_tokens: 32768,
+      });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        context_tokens: 32768,
+      });
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        context_tokens: 4096,
+      });
+
+      chooseSelectOption('chat-provider', 'Default (Self-Hosted)');
+
+      await waitFor(() =>
+        expect(mockSetChatProvider).toHaveBeenCalledWith('chat-1', { provider: null, model: null })
+      );
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 4096 })
+      );
     });
 
     it('fits the context to a smaller model chosen on a Self-Hosted provider', async () => {

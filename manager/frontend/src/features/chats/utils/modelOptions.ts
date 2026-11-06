@@ -44,8 +44,9 @@ export function selectedContextTokens(
   chosen: number | null | undefined,
   native?: number | null
 ): number {
-  if (chosen && chosen > 0) return chosen;
-  if (native && native > 0) return native;
+  const window = native && native > 0 ? native : null;
+  if (chosen && chosen > 0) return window ? Math.min(chosen, window) : chosen;
+  if (window) return window;
   return DEFAULT_CONTEXT_TOKENS;
 }
 

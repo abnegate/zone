@@ -9,6 +9,7 @@ import {
   DEFAULT_PROVIDER_LABEL,
   MODEL_PLACEHOLDER,
   modelSelectOptions,
+  offersDefaultModels,
   providerChoices,
 } from '../utils';
 import { HeaderSelect } from './HeaderSelect';
@@ -106,7 +107,7 @@ export function ProviderPicker({
         onValueChange: (value) => onChoose(selected.provider, value === AUTO_MODEL ? null : value),
       };
     }
-    if (providers.default.models.length === 0) return null;
+    if (!offersDefaultModels(providers.default)) return null;
     return {
       value: modelName || AUTO_MODEL,
       options: modelSelectOptions(providers.default, modelName),

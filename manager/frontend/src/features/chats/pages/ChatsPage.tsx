@@ -705,9 +705,8 @@ export default function ChatsPage() {
       problems.push(failure(PROVIDER_EFFORT_RESET_FAILED, error));
     }
     try {
-      if (model && offersContextOn(provider, chatDefaultProvider, models, model)) {
-        await fitContext(contextTokens, model);
-      }
+      const runs = provider === null ? modelName : (model ?? AUTO_MODEL);
+      await fitContext(provider ?? chatDefaultProvider, contextTokens, runs);
     } catch (error) {
       problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
@@ -718,11 +717,14 @@ export default function ChatsPage() {
     return true;
   };
 
-  const fitContext = async (tokens: number | null | undefined, model: string) => {
+  const fitContext = async (
+    provider: AiProvider | null,
+    tokens: number | null | undefined,
+    model: string
+  ) => {
+    if (!offersContextOn(provider, chatDefaultProvider, models, model)) return;
     const native = findInstalledModel(models, model)?.details?.context_length;
-    if (tokens && native && tokens > native) {
-      await setContextTokensFn(defaultContextTokens(native));
-    }
+    if (tokens && native && tokens > native) await setContextTokensFn(native);
   };
 
   const handleProviderModel = async (name: string) => {
@@ -745,7 +747,7 @@ export default function ChatsPage() {
       problems.push(failure(MODEL_EFFORT_RESET_FAILED, error));
     }
     try {
-      await fitContext(contextTokens, name);
+      await fitContext(chatDefaultProvider, contextTokens, name);
     } catch (error) {
       problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {

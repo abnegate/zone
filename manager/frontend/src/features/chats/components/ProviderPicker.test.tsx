@@ -443,6 +443,14 @@ describe('ProviderPicker', () => {
     expect(onChoose).not.toHaveBeenCalled();
   });
 
+  it('shows no model select on a Default chat on a hosted default with saved models', () => {
+    renderPicker({
+      default: { ...openai, models: [{ name: 'gpt-4o', label: 'gpt-4o', efforts: HTTP }] },
+    });
+
+    expect(screen.queryByTestId('chat-provider-model')).toBeNull();
+  });
+
   it('shows no model select on a Default chat whose default lists no models', () => {
     renderPicker({ default: { ...openai, requires_model: false } });
 
