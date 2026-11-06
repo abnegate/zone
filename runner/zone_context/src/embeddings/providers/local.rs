@@ -274,6 +274,7 @@ impl EmbeddingService for LocalEmbeddingProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
     use zone_core::variables::Variables;
 
     #[test]
@@ -345,5 +346,73 @@ mod tests {
             LocalEmbeddingProvider::default_cache_dir(),
             PathBuf::from("/tmp/zone-embed-test")
         );
+    }
+
+    const RECORD_ENVIRONMENT: &str = "ZONE_RECORD_EMBEDDING_FIXTURES";
+    const RECORD_ENABLED: &str = "1";
+    const LOCAL_MODELS_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/embeddings/local_models.json"
+    );
+    const LOCAL_MODEL_NAMES: [&str; 15] = [
+        "qwen3-embedding:0.6b",
+        "qwen3-embedding",
+        "nomic-embed-text",
+        "nomic-embed-text:latest",
+        "mxbai-embed-large",
+        "snowflake-arctic-embed",
+        "snowflake-arctic-embed:22m",
+        "snowflake-arctic-embed:33m",
+        "snowflake-arctic-embed:110m",
+        "snowflake-arctic-embed:137m",
+        "snowflake-arctic-embed:335m",
+        "bge-small-en-v1.5",
+        "all-minilm",
+        "unknown-model",
+        "nomic-ai/nomic-embed-text-v1.5",
+    ];
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct ResolvedModel {
+        name: String,
+        model: Option<String>,
+        dimension: Option<usize>,
+        max_tokens: Option<usize>,
+        error: Option<String>,
+    }
+
+    fn resolved(name: &str) -> ResolvedModel {
+        match resolve_model(name) {
+            Ok(model) => ResolvedModel {
+                name: name.to_string(),
+                model: Some(format!("{model:?}")),
+                dimension: Some(TextEmbedding::get_model_info(&model).unwrap().dim),
+                max_tokens: Some(model_max_tokens(&model)),
+                error: None,
+            },
+            Err(error) => ResolvedModel {
+                name: name.to_string(),
+                model: None,
+                dimension: None,
+                max_tokens: None,
+                error: Some(error.to_string()),
+            },
+        }
+    }
+
+    #[test]
+    fn resolution_matches_recorded_fixture() {
+        let actual: Vec<ResolvedModel> = LOCAL_MODEL_NAMES
+            .iter()
+            .map(|name| resolved(name))
+            .collect();
+        if std::env::var(RECORD_ENVIRONMENT).is_ok_and(|value| value == RECORD_ENABLED) {
+            let mut contents = serde_json::to_string_pretty(&actual).unwrap();
+            contents.push('\n');
+            std::fs::write(LOCAL_MODELS_FIXTURE, contents).unwrap();
+        }
+        let contents = std::fs::read_to_string(LOCAL_MODELS_FIXTURE).unwrap();
+        let expected: Vec<ResolvedModel> = serde_json::from_str(&contents).unwrap();
+        assert_eq!(expected, actual);
     }
 }

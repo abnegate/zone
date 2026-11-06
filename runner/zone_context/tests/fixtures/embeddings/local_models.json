@@ -1,0 +1,107 @@
+[
+  {
+    "name": "qwen3-embedding:0.6b",
+    "model": null,
+    "dimension": null,
+    "max_tokens": null,
+    "error": "Invalid source configuration: Unknown embedding model 'qwen3-embedding:0.6b' for local engine"
+  },
+  {
+    "name": "qwen3-embedding",
+    "model": null,
+    "dimension": null,
+    "max_tokens": null,
+    "error": "Invalid source configuration: Unknown embedding model 'qwen3-embedding' for local engine"
+  },
+  {
+    "name": "nomic-embed-text",
+    "model": "NomicEmbedTextV15",
+    "dimension": 768,
+    "max_tokens": 2048,
+    "error": null
+  },
+  {
+    "name": "nomic-embed-text:latest",
+    "model": "NomicEmbedTextV15",
+    "dimension": 768,
+    "max_tokens": 2048,
+    "error": null
+  },
+  {
+    "name": "mxbai-embed-large",
+    "model": "MxbaiEmbedLargeV1",
+    "dimension": 1024,
+    "max_tokens": 512,
+    "error": null
+  },
+  {
+    "name": "snowflake-arctic-embed",
+    "model": "SnowflakeArcticEmbedL",
+    "dimension": 1024,
+    "max_tokens": 512,
+    "error": null
+  },
+  {
+    "name": "snowflake-arctic-embed:22m",
+    "model": "SnowflakeArcticEmbedL",
+    "dimension": 1024,
+    "max_tokens": 512,
+    "error": null
+  },
+  {
+    "name": "snowflake-arctic-embed:33m",
+    "model": "SnowflakeArcticEmbedL",
+    "dimension": 1024,
+    "max_tokens": 512,
+    "error": null
+  },
+  {
+    "name": "snowflake-arctic-embed:110m",
+    "model": "SnowflakeArcticEmbedL",
+    "dimension": 1024,
+    "max_tokens": 512,
+    "error": null
+  },
+  {
+    "name": "snowflake-arctic-embed:137m",
+    "model": "SnowflakeArcticEmbedL",
+    "dimension": 1024,
+    "max_tokens": 512,
+    "error": null
+  },
+  {
+    "name": "snowflake-arctic-embed:335m",
+    "model": "SnowflakeArcticEmbedL",
+    "dimension": 1024,
+    "max_tokens": 512,
+    "error": null
+  },
+  {
+    "name": "bge-small-en-v1.5",
+    "model": "BGESmallENV15",
+    "dimension": 384,
+    "max_tokens": 512,
+    "error": null
+  },
+  {
+    "name": "all-minilm",
+    "model": "AllMiniLML6V2",
+    "dimension": 384,
+    "max_tokens": 256,
+    "error": null
+  },
+  {
+    "name": "unknown-model",
+    "model": null,
+    "dimension": null,
+    "max_tokens": null,
+    "error": "Invalid source configuration: Unknown embedding model 'unknown-model' for local engine"
+  },
+  {
+    "name": "nomic-ai/nomic-embed-text-v1.5",
+    "model": "NomicEmbedTextV15",
+    "dimension": 768,
+    "max_tokens": 2048,
+    "error": null
+  }
+]
