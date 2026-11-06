@@ -651,28 +651,6 @@ pub async fn create_message_with_embedding(
     Ok(message)
 }
 
-/// Deletes a message with the subagents it started, and returns their ids, or
-/// `None` when the chat has no such message.
-pub async fn delete_message(
-    pool: &PgPool,
-    chat_id: Uuid,
-    message_id: Uuid,
-) -> DbResult<Option<Vec<Uuid>>> {
-    let mut transaction = pool.begin().await?;
-    if !crate::db::chat_subagents::seize_turn(&mut transaction, chat_id, message_id).await? {
-        return Ok(None);
-    }
-    let subagents =
-        crate::db::chat_subagents::remove(&mut *transaction, chat_id, message_id).await?;
-    sqlx::query("DELETE FROM messages WHERE id = $1 AND chat_id = $2")
-        .bind(message_id)
-        .bind(chat_id)
-        .execute(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
-    Ok(Some(subagents))
-}
-
 /// What a chat is for. An ordinary chat is an assistant; a planner chat is the
 /// interview an auto project comes out of; an updates chat is where every
 /// notice about a project lands. The purpose and the project are read through

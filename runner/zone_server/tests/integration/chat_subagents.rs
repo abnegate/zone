@@ -21,7 +21,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 use uuid::Uuid;
 use zone_core::llm::{StepStatus, SubagentStatus, SubagentStep};
 use zone_server::db::chat_subagents::{self, SubagentChange};
-use zone_server::db::chats::{self, create_chat};
+use zone_server::db::chats::create_chat;
 use zone_server::db::context::Store;
 use zone_server::state::AppState;
 
@@ -464,36 +464,6 @@ async fn deleting_a_message_removes_its_subagents_and_tells_the_chats_readers() 
     assert_eq!(orphans, 0);
 }
 
-#[tokio::test]
-async fn deleting_a_message_directly_removes_its_subagents_too() {
-    let workspace = Workspace::new().await;
-    let message: Uuid = sqlx::query_scalar(
-        "INSERT INTO messages (chat_id, role, content) VALUES ($1, 'assistant', 'Done')
-         RETURNING id",
-    )
-    .bind(workspace.chat)
-    .fetch_one(workspace.state.db())
-    .await
-    .expect("a message");
-    let started = workspace.subagent("toolu_01Agent", Some(message)).await;
-
-    let removed = chats::delete_message(workspace.state.db(), workspace.chat, message)
-        .await
-        .expect("the deletion");
-    let missing = chats::delete_message(workspace.state.db(), workspace.chat, message)
-        .await
-        .expect("a second deletion");
-
-    assert_eq!(removed, Some(vec![started]));
-    assert_eq!(missing, None);
-    assert_eq!(
-        chat_subagents::list(workspace.state.db(), workspace.chat)
-            .await
-            .expect("the chat's subagents"),
-        []
-    );
-}
-
 /// A message of `chat` with no turn of its own.
 async fn answered(pool: &PgPool, chat: Uuid) -> Uuid {
     sqlx::query_scalar(
@@ -550,27 +520,6 @@ where
         .map(|row| row.id)
         .collect();
     (removed, written, left)
-}
-
-#[tokio::test]
-async fn deleting_a_message_directly_removes_a_subagent_written_while_it_waited() {
-    let workspace = Workspace::new().await;
-    let pool = workspace.state.db().clone();
-    let message = answered(&pool, workspace.chat).await;
-
-    let (removed, written, left) = delete_during_a_write(&pool, workspace.chat, message, {
-        let pool = pool.clone();
-        let chat = workspace.chat;
-        async move {
-            chats::delete_message(&pool, chat, message)
-                .await
-                .expect("the deletion")
-        }
-    })
-    .await;
-
-    assert_eq!(removed, Some(vec![written]));
-    assert_eq!(left, Vec::<Uuid>::new(), "no subagent outlives its message");
 }
 
 #[tokio::test]
