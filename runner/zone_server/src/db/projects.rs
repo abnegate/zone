@@ -72,7 +72,10 @@ pub async fn last_used(
                 FROM messages message
                 WHERE message.chat_id = chat.id
                   AND message.role = 'user'
-                  AND NOT COALESCE(message.metadata ? 'source', FALSE)
+                  AND NOT COALESCE(
+                      jsonb_typeof(message.metadata) = 'object' AND message.metadata ? 'source',
+                      FALSE
+                  )
                 ORDER BY message.created_at DESC
                 LIMIT 1
             ) latest
@@ -151,7 +154,7 @@ pub struct NewProject<'a> {
 
 /// Hold a workspace's project order until the transaction ends, so a create
 /// or reorder reads positions no other one is about to change.
-async fn lock_order(connection: &mut PgConnection, workspace_id: Uuid) -> DbResult<()> {
+pub(crate) async fn lock_order(connection: &mut PgConnection, workspace_id: Uuid) -> DbResult<()> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('project-order:' || $1::text, 0))")
         .bind(workspace_id)
         .execute(connection)

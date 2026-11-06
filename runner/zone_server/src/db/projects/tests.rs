@@ -305,3 +305,74 @@ async fn a_task_a_member_added_marks_the_project_used_but_a_planned_one_does_not
 
     assert_eq!(fixture.last_used(project).await, at("2026-11-02 09:00:00"));
 }
+
+#[tokio::test]
+async fn the_latest_typed_message_in_any_project_chat_wins() {
+    let fixture = fixture().await;
+    let project = fixture.project("Busy").await;
+    let first = fixture.chat(project).await;
+    let second = fixture.chat(project).await;
+    for (chat, at) in [
+        (first, "2026-11-01 09:00:00"),
+        (first, "2026-11-03 09:00:00"),
+        (second, "2026-11-02 09:00:00"),
+        (second, "2026-11-04 09:00:00"),
+        (first, "2026-11-02 12:00:00"),
+    ] {
+        fixture
+            .message(chat, "user", serde_json::json!({}), at)
+            .await;
+    }
+
+    assert_eq!(fixture.last_used(project).await, at("2026-11-04 09:00:00"));
+}
+
+#[tokio::test]
+async fn metadata_that_is_not_an_object_does_not_hide_a_typed_message() {
+    let fixture = fixture().await;
+    let project = fixture.project("Listed").await;
+    let chat = fixture.chat(project).await;
+    fixture
+        .message(
+            chat,
+            "user",
+            serde_json::json!(["source"]),
+            "2026-11-05 09:00:00",
+        )
+        .await;
+
+    assert_eq!(fixture.last_used(project).await, at("2026-11-05 09:00:00"));
+}
+
+#[tokio::test]
+async fn an_auto_project_goes_first_in_its_workspaces_order() {
+    let fixture = fixture().await;
+    fixture.project("Manual").await;
+    fixture.project("Other").await;
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(fixture.workspace)
+    .bind(fixture.user)
+    .execute(&fixture.pool)
+    .await
+    .expect("an owner");
+
+    crate::db::auto_projects::finalize(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.user,
+        None,
+        &crate::db::auto_projects::ProjectPlan {
+            name: "Planned",
+            description: None,
+            repository: None,
+            brief: &serde_json::json!({}),
+            tasks: &[],
+        },
+    )
+    .await
+    .expect("an auto project");
+
+    assert_eq!(fixture.names().await, ["Planned", "Other", "Manual"]);
+}

@@ -16,21 +16,22 @@ pub enum Reorder {
 /// order, the places they hold in `current`. Ids `current` lacks are skipped;
 /// an id named twice makes the order unusable.
 pub fn arrange(current: &[Uuid], requested: &[Uuid]) -> Option<Vec<Uuid>> {
-    let mut seen = HashSet::with_capacity(requested.len());
-    if !requested.iter().all(|id| seen.insert(*id)) {
+    let mut named = HashSet::with_capacity(requested.len());
+    if !requested.iter().all(|id| named.insert(*id)) {
         return None;
     }
+    let held: HashSet<Uuid> = current.iter().copied().collect();
     let placed: Vec<Uuid> = requested
         .iter()
         .copied()
-        .filter(|id| current.contains(id))
+        .filter(|id| held.contains(id))
         .collect();
     let mut next = placed.iter();
     Some(
         current
             .iter()
             .map(|id| {
-                if placed.contains(id) {
+                if named.contains(id) {
                     *next.next().unwrap_or(id)
                 } else {
                     *id

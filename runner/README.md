@@ -115,7 +115,11 @@ SQLX_OFFLINE=true cargo run -p zone_server --bin zone-server --no-default-featur
 # Build all crates
 cargo build
 
-# Run tests
+# Run tests. Database tests need a disposable, migrated Postgres with pgvector of their own;
+# they refuse to fall back to DATABASE_URL.
+docker run -d --rm --name zone-test-pg -e POSTGRES_PASSWORD=postgres -p 55432:5432 pgvector/pgvector:pg17
+export TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:55432/postgres'
+DATABASE_URL=$TEST_DATABASE_URL sqlx migrate run --source zone_server/migrations
 cargo test
 
 # Start the server
