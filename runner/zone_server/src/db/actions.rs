@@ -26,7 +26,7 @@ use super::{
     workspace_members::{self, WorkspaceRole},
 };
 
-fn patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,

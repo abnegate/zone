@@ -4,14 +4,16 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::common::Timestamps;
 use super::error::ErrorResponse;
 use crate::auth::AuthUser;
+use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
 use crate::db::sources;
 use crate::error::ServerError;
 use crate::state::AppState;
@@ -21,6 +23,83 @@ const MAX_NAME_LENGTH: usize = 256;
 
 /// Maximum config size in bytes
 const MAX_CONFIG_SIZE: usize = 65536;
+
+const GITHUB_SOURCE_TYPE: &str = "github";
+
+const INTERNAL_ERROR: &str = "Internal server error";
+
+const SOURCE_NOT_FOUND: &str = "Source not found";
+
+const CREDENTIALS_AND_INSTALLATION: &str =
+    "Send either credentials or github_installation_id, not both.";
+
+const INSTALLATION_REQUIRES_GITHUB: &str = "Only GitHub sources can use a GitHub connection.";
+
+const INSTALLATION_UNAVAILABLE: &str = "This GitHub account isn't connected to this organization, or it was disconnected. Reconnect GitHub.";
+
+fn internal() -> ServerError {
+    ServerError::Internal(INTERNAL_ERROR.to_string())
+}
+
+fn not_found() -> ServerError {
+    ServerError::NotFound(SOURCE_NOT_FOUND.to_string())
+}
+
+fn encrypt_credentials(state: &AppState, credentials: &str) -> Result<String, ServerError> {
+    crate::crypto::encrypt(state.encryption_key(), credentials).map_err(|error| {
+        tracing::error!("Encryption failed: {}", error);
+        internal()
+    })
+}
+
+/// Refuses an installation a source in `workspace_id` may not be backed by.
+async fn validate_installation(
+    state: &AppState,
+    workspace_id: Uuid,
+    source_type: &str,
+    installation: Uuid,
+    with_credentials: bool,
+) -> Result<(), ServerError> {
+    if with_credentials {
+        return Err(ServerError::BadRequest(
+            CREDENTIALS_AND_INSTALLATION.to_string(),
+        ));
+    }
+    if source_type != GITHUB_SOURCE_TYPE {
+        return Err(ServerError::BadRequest(
+            INSTALLATION_REQUIRES_GITHUB.to_string(),
+        ));
+    }
+    match github_installations::attachable(state.db(), workspace_id, installation).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(ServerError::BadRequest(
+            INSTALLATION_UNAVAILABLE.to_string(),
+        )),
+        Err(error) => {
+            tracing::error!(workspace_id = %workspace_id, installation = %installation, error = %error, "Database error checking GitHub installation");
+            Err(internal())
+        }
+    }
+}
+
+async fn installation_summaries(
+    state: &AppState,
+    installations: &[Uuid],
+) -> HashMap<Uuid, InstallationSummary> {
+    if installations.is_empty() {
+        return HashMap::new();
+    }
+    match github_installations::summaries(state.db(), installations).await {
+        Ok(summaries) => summaries
+            .into_iter()
+            .map(|summary| (summary.id, summary))
+            .collect(),
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to load GitHub installation summaries");
+            HashMap::new()
+        }
+    }
+}
 
 /// The kinds this server can verify and fetch, sorted, straight from the
 /// adapter registry so nothing offers a kind that would never verify.
@@ -186,6 +265,10 @@ pub struct SourceResponse {
     last_indexed_at: Option<chrono::NaiveDateTime>,
     /// Number of indexed items
     indexed_items_count: Option<i64>,
+    has_credentials: bool,
+    github_installation_id: Option<Uuid>,
+    github_installation_status: Option<InstallationStatus>,
+    github_account_login: Option<String>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -218,9 +301,33 @@ pub struct SourceTypesListResponse {
 }
 
 impl SourceResponse {
-    /// Create a SourceResponse from a SourceRow with index status
     async fn from_row(state: &AppState, row: sources::SourceRow) -> Self {
-        // Fetch index status
+        let summaries = installation_summaries(state, row.github_installation_id.as_slice()).await;
+        Self::build(state, row, &summaries).await
+    }
+
+    /// Loads every installation the rows name in one query.
+    async fn from_rows(state: &AppState, rows: Vec<sources::SourceRow>) -> Vec<Self> {
+        let mut installations: Vec<Uuid> = rows
+            .iter()
+            .filter_map(|row| row.github_installation_id)
+            .collect();
+        installations.sort_unstable();
+        installations.dedup();
+        let summaries = installation_summaries(state, &installations).await;
+
+        let mut responses = Vec::with_capacity(rows.len());
+        for row in rows {
+            responses.push(Self::build(state, row, &summaries).await);
+        }
+        responses
+    }
+
+    async fn build(
+        state: &AppState,
+        row: sources::SourceRow,
+        summaries: &HashMap<Uuid, InstallationSummary>,
+    ) -> Self {
         let index_info = sources::get_source_index_status(state.db(), row.id)
             .await
             .unwrap_or_else(|e| {
@@ -234,6 +341,7 @@ impl SourceResponse {
 
         let url = derive_source_url(&row.source_type, &row.config, row.url.as_deref());
         let category = category_for_source_type(&row.source_type).to_string();
+        let installation = row.github_installation_id.and_then(|id| summaries.get(&id));
 
         Self {
             id: row.id,
@@ -250,17 +358,12 @@ impl SourceResponse {
             index_status: index_info.status,
             last_indexed_at: index_info.last_indexed_at,
             indexed_items_count: index_info.indexed_items_count,
+            has_credentials: row.credentials_encrypted.is_some(),
+            github_installation_id: row.github_installation_id,
+            github_installation_status: installation.map(InstallationSummary::status),
+            github_account_login: installation.map(|summary| summary.account_login.clone()),
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
-    }
-
-    /// Create multiple SourceResponses from SourceRows with index status
-    async fn from_rows(state: &AppState, rows: Vec<sources::SourceRow>) -> Vec<Self> {
-        let mut responses = Vec::with_capacity(rows.len());
-        for row in rows {
-            responses.push(Self::from_row(state, row).await);
-        }
-        responses
     }
 }
 
@@ -282,6 +385,7 @@ pub struct CreateSourceRequest {
     description: Option<String>,
     url: Option<String>,
     credentials: Option<String>,
+    github_installation_id: Option<Uuid>,
 }
 
 impl std::fmt::Debug for CreateSourceRequest {
@@ -296,11 +400,13 @@ impl std::fmt::Debug for CreateSourceRequest {
                 "credentials",
                 &self.credentials.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("github_installation_id", &self.github_installation_id)
             .finish()
     }
 }
 
-/// Update source request
+/// Update source request. `github_installation_id` is absent to leave the
+/// source as it is, `null` to detach the installation, or an id to attach it.
 #[derive(Deserialize)]
 pub struct UpdateSourceRequest {
     name: Option<String>,
@@ -309,6 +415,8 @@ pub struct UpdateSourceRequest {
     url: Option<String>,
     is_active: Option<bool>,
     credentials: Option<String>,
+    #[serde(default, deserialize_with = "crate::db::actions::patch")]
+    github_installation_id: Option<Option<Uuid>>,
 }
 
 impl std::fmt::Debug for UpdateSourceRequest {
@@ -323,6 +431,7 @@ impl std::fmt::Debug for UpdateSourceRequest {
                 "credentials",
                 &self.credentials.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("github_installation_id", &self.github_installation_id)
             .finish()
     }
 }
@@ -373,118 +482,97 @@ pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
-    Json(req): Json<CreateSourceRequest>,
-) -> impl IntoResponse {
-    // Check access
-    let user_id = match check_workspace_write_access(&state, &auth, workspace_id).await {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
+    Json(request): Json<CreateSourceRequest>,
+) -> Result<Response, ServerError> {
+    let user_id = check_workspace_write_access(&state, &auth, workspace_id).await?;
 
-    // Validate name length
-    if req.name.is_empty() || req.name.len() > MAX_NAME_LENGTH {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!(
-                "Name must be between 1 and {} characters",
-                MAX_NAME_LENGTH
-            ))),
-        )
-            .into_response();
+    if request.name.is_empty() || request.name.len() > MAX_NAME_LENGTH {
+        return Err(ServerError::BadRequest(format!(
+            "Name must be between 1 and {} characters",
+            MAX_NAME_LENGTH
+        )));
     }
 
     let Some(kinds) = source_kinds(&state) else {
-        return (
+        return Ok((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse::new("Source kinds unavailable")),
         )
-            .into_response();
+            .into_response());
     };
-    if !kinds.contains(&req.source_type) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(unknown_kind_message(
-                &req.source_type,
-                &kinds,
-            ))),
-        )
-            .into_response();
+    if !kinds.contains(&request.source_type) {
+        return Err(ServerError::BadRequest(unknown_kind_message(
+            &request.source_type,
+            &kinds,
+        )));
     }
 
-    // Validate config size
-    let config_bytes = serde_json::to_vec(&req.config).unwrap_or_default();
+    let config_bytes = serde_json::to_vec(&request.config).unwrap_or_default();
     if config_bytes.len() > MAX_CONFIG_SIZE {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!(
-                "Config size exceeds maximum of {} bytes",
-                MAX_CONFIG_SIZE
-            ))),
-        )
-            .into_response();
+        return Err(ServerError::BadRequest(format!(
+            "Config size exceeds maximum of {} bytes",
+            MAX_CONFIG_SIZE
+        )));
     }
 
-    // Encrypt credentials before storing
-    let credentials_encrypted = match req.credentials.as_ref() {
-        Some(creds) => match crate::crypto::encrypt(state.encryption_key(), creds) {
-            Ok(encrypted) => Some(encrypted),
-            Err(e) => {
-                tracing::error!("Encryption failed: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        },
-        None => None,
-    };
+    if let Some(installation) = request.github_installation_id {
+        validate_installation(
+            &state,
+            workspace_id,
+            &request.source_type,
+            installation,
+            request.credentials.is_some(),
+        )
+        .await?;
+    }
 
-    let url = derive_source_url(&req.source_type, &req.config, req.url.as_deref());
+    let credentials_encrypted = request
+        .credentials
+        .as_deref()
+        .map(|credentials| encrypt_credentials(&state, credentials))
+        .transpose()?;
 
-    let source_row = match sources::create_source(
+    let url = derive_source_url(
+        &request.source_type,
+        &request.config,
+        request.url.as_deref(),
+    );
+
+    let source = sources::create_source(
         state.db(),
         sources::NewSource {
             workspace_id,
-            name: &req.name,
-            source_type: &req.source_type,
-            config: req.config,
-            description: req.description.as_deref(),
+            name: &request.name,
+            source_type: &request.source_type,
+            config: request.config,
+            description: request.description.as_deref(),
             url: url.as_deref(),
             credentials_encrypted: credentials_encrypted.as_deref(),
-            github_installation_id: None,
+            github_installation_id: request.github_installation_id,
         },
     )
     .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(workspace_id = %workspace_id, name = %req.name, source_type = %req.source_type, error = %e, "Database error creating source");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
+    .map_err(|error| {
+        tracing::error!(workspace_id = %workspace_id, name = %request.name, source_type = %request.source_type, error = %error, "Database error creating source");
+        internal()
+    })?;
 
-    // Spawn background indexing if source is active
-    if source_row.is_active.unwrap_or(true) {
+    if source.is_active.unwrap_or(true) {
         crate::workers::indexing::spawn_index_source(
             state.clone(),
-            source_row.id,
+            source.id,
             workspace_id,
             user_id,
             false, // is_update = false (initial index)
         );
     }
 
-    let response = SourceResponse::from_row(&state, source_row).await;
-    (
+    let response = SourceResponse::from_row(&state, source).await;
+    Ok((
         StatusCode::CREATED,
         Json(SingleSourceResponse { source: response }),
     )
-        .into_response()
+        .into_response())
 }
 
 /// GET /api/workspaces/:workspace_id/sources/:id
@@ -524,103 +612,78 @@ pub async fn update(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((workspace_id, id)): Path<(Uuid, Uuid)>,
-    Json(req): Json<UpdateSourceRequest>,
-) -> impl IntoResponse {
-    // Check access
-    let user_id = match check_workspace_write_access(&state, &auth, workspace_id).await {
-        Ok(id) => id,
-        Err(e) => return e.into_response(),
-    };
+    Json(request): Json<UpdateSourceRequest>,
+) -> Result<Response, ServerError> {
+    let user_id = check_workspace_write_access(&state, &auth, workspace_id).await?;
 
-    // Get old source for comparison
-    let old_source = match sources::get_source(state.db(), id, workspace_id).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Source not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %e, "Database error getting source for update");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
+    let previous = sources::get_source(state.db(), id, workspace_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error getting source for update");
+            internal()
+        })?
+        .ok_or_else(not_found)?;
 
-    // Update the source metadata
-    let updated_source = match sources::update_source(
+    if let Some(Some(installation)) = request.github_installation_id {
+        validate_installation(
+            &state,
+            workspace_id,
+            &previous.source_type,
+            installation,
+            request.credentials.is_some(),
+        )
+        .await?;
+    }
+
+    let credentials_encrypted = request
+        .credentials
+        .as_deref()
+        .map(|credentials| encrypt_credentials(&state, credentials))
+        .transpose()?;
+
+    let mut current = sources::update_source(
         state.db(),
         id,
         workspace_id,
-        req.name.as_deref(),
-        req.config.clone(),
-        req.description.as_deref(),
-        req.url.as_deref(),
-        req.is_active,
+        request.name.as_deref(),
+        request.config.clone(),
+        request.description.as_deref(),
+        request.url.as_deref(),
+        request.is_active,
     )
     .await
-    {
-        Ok(Some(source)) => source,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("Source not found")),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %e, "Database error updating source");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-    };
+    .map_err(|error| {
+        tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating source");
+        internal()
+    })?
+    .ok_or_else(not_found)?;
 
-    // Track if credentials changed
-    let mut credentials_changed = false;
-
-    // If credentials provided, encrypt and update them
-    if let Some(creds) = &req.credentials {
-        let encrypted = match crate::crypto::encrypt(state.encryption_key(), creds) {
-            Ok(encrypted) => encrypted,
-            Err(e) => {
-                tracing::error!("Encryption failed: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        };
-
-        if let Err(e) = sources::update_credentials(state.db(), id, workspace_id, &encrypted).await
-        {
-            tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %e, "Database error updating credentials");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response();
-        }
-
-        credentials_changed = true;
+    if let Some(installation) = request.github_installation_id {
+        current = sources::set_github_installation(state.db(), id, workspace_id, installation)
+            .await
+            .map_err(|error| {
+                tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error setting GitHub installation");
+                internal()
+            })?
+            .ok_or_else(not_found)?;
     }
 
-    // Check if re-index needed
-    let config_changed = req.config.is_some()
-        && crate::workers::indexing::config_changed(&old_source.config, &updated_source.config);
+    if let Some(encrypted) = &credentials_encrypted {
+        current = sources::update_credentials(state.db(), id, workspace_id, encrypted)
+            .await
+            .map_err(|error| {
+                tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating credentials");
+                internal()
+            })?
+            .ok_or_else(not_found)?;
+    }
 
-    let needs_reindex =
-        (config_changed || credentials_changed) && updated_source.is_active.unwrap_or(true);
+    let config_changed = request.config.is_some()
+        && crate::workers::indexing::config_changed(&previous.config, &current.config);
+    let credentials_changed = current.credentials_encrypted != previous.credentials_encrypted
+        || current.github_installation_id != previous.github_installation_id;
 
-    if needs_reindex {
+    if (config_changed || credentials_changed) && current.is_active.unwrap_or(true) {
         crate::workers::indexing::spawn_index_source(
             state.clone(),
             id,
@@ -630,8 +693,8 @@ pub async fn update(
         );
     }
 
-    let response = SourceResponse::from_row(&state, updated_source).await;
-    Json(SingleSourceResponse { source: response }).into_response()
+    let response = SourceResponse::from_row(&state, current).await;
+    Ok(Json(SingleSourceResponse { source: response }).into_response())
 }
 
 /// DELETE /api/workspaces/:workspace_id/sources/:id
@@ -1025,4 +1088,67 @@ pub async fn list_types(State(state): State<AppState>, _auth: AuthUser) -> impl 
         .map(|kind| describe_kind(kind))
         .collect();
     Json(SourceTypesListResponse { types })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::UpdateSourceRequest;
+
+    fn installation_of(body: serde_json::Value) -> Option<Option<Uuid>> {
+        serde_json::from_value::<UpdateSourceRequest>(body)
+            .expect("the update request deserializes")
+            .github_installation_id
+    }
+
+    #[test]
+    fn an_absent_installation_leaves_the_source_as_it_is() {
+        assert_eq!(installation_of(json!({ "name": "renamed" })), None);
+    }
+
+    #[test]
+    fn a_null_installation_detaches_it() {
+        assert_eq!(
+            installation_of(json!({ "github_installation_id": null })),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn an_installation_id_attaches_it() {
+        let installation = Uuid::new_v4();
+        assert_eq!(
+            installation_of(json!({ "github_installation_id": installation })),
+            Some(Some(installation))
+        );
+    }
+
+    #[test]
+    fn a_malformed_installation_id_is_refused() {
+        let parsed = serde_json::from_value::<UpdateSourceRequest>(
+            json!({ "github_installation_id": "not-a-uuid" }),
+        );
+        assert!(parsed.is_err(), "a non-uuid installation must not parse");
+    }
+
+    #[test]
+    fn debug_redacts_credentials_but_names_the_installation() {
+        let installation = Uuid::new_v4();
+        let request = serde_json::from_value::<UpdateSourceRequest>(json!({
+            "credentials": "ghp_secret",
+            "github_installation_id": installation,
+        }))
+        .expect("the update request deserializes");
+        let rendered = format!("{request:?}");
+        assert!(
+            !rendered.contains("ghp_secret"),
+            "credentials leaked: {rendered}"
+        );
+        assert!(
+            rendered.contains(&installation.to_string()),
+            "installation missing: {rendered}"
+        );
+    }
 }
