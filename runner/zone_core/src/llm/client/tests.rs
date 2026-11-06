@@ -18,6 +18,7 @@ use crate::llm::cli::{SignIn, settings};
 use crate::llm::window::FIVE_HOURS;
 use stand_in::StandIn;
 
+mod buffered;
 mod environment;
 mod images;
 mod isolation;

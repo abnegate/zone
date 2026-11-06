@@ -1,9 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use abnegate_agent_cli::{AgentEvent, AgentKind, AgentStream, activity};
+use abnegate_agent_cli::{AgentEvent, AgentKind, AgentStream, StdoutParseResult, activity};
 use abnegate_llm::finish_reason::STOP;
-use abnegate_llm::{ChatStreamChunk, Error, ProviderError, StreamChoice, StreamDelta};
+use abnegate_llm::{
+    ChatStreamChunk, Completion, Error, Message, ProviderError, StreamChoice, StreamDelta,
+};
 use futures::{Stream, StreamExt};
 
 use super::reported::Reported;
@@ -42,6 +44,43 @@ impl Turn {
         }
     }
 
+    /// Hand `event` to whoever it is for besides the reader: a tool's output
+    /// and a subagent to the observer, a turn on usage credits to the log,
+    /// and the context the agent reports to the client. Returns whether that
+    /// is all the event was for.
+    fn notice(&self, event: &AgentEvent) -> bool {
+        match event {
+            AgentEvent::Output(output) => {
+                if let Some(observer) = &self.observer {
+                    observer.observe(output);
+                }
+                true
+            }
+            AgentEvent::Subagent(subagent) => match &self.observer {
+                Some(observer) => {
+                    observer.track(subagent);
+                    true
+                }
+                None => false,
+            },
+            AgentEvent::Credits(window) => {
+                tracing::info!(
+                    provider = %self.agent,
+                    sign_in = ?self.sign_in,
+                    directory = ?self.directory,
+                    %window,
+                    "the turn runs on usage credits past the plan's limit"
+                );
+                true
+            }
+            AgentEvent::Occupancy(occupancy) => {
+                self.reported.record(self.agent, *occupancy);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// One agent event in the shape the agent loop already consumes, or
     /// `None` for one that is no chunk at all.
     ///
@@ -57,6 +96,10 @@ impl Turn {
     /// A failure is never an event: the crate ends the stream in the run's
     /// error instead, carrying the end of the agent's stderr.
     fn chunk(&mut self, event: AgentEvent) -> Option<ChatStreamChunk> {
+        if self.notice(&event) {
+            return None;
+        }
+
         let mut delta = StreamDelta::default();
         let mut finished = false;
         let mut usage = None;
@@ -78,36 +121,12 @@ impl Turn {
             AgentEvent::Tool(call) => {
                 delta.reasoning_content = activity(&call, &[&self.hidden]);
             }
-            AgentEvent::Output(output) => {
-                if let Some(observer) = &self.observer {
-                    observer.observe(&output);
-                }
-                return None;
-            }
             AgentEvent::Subagent(subagent) => {
-                if let Some(observer) = &self.observer {
-                    observer.track(&subagent);
-                    return None;
-                }
                 delta.reasoning_content = Some(subagent.activity(&[&self.hidden])?);
             }
             AgentEvent::Usage(counts) => usage = Some(counts),
             AgentEvent::Window(window) => reported_window = Some(window::renamed(window)),
             AgentEvent::Session(announced) => session = Some(announced),
-            AgentEvent::Credits(window) => {
-                tracing::info!(
-                    provider = %self.agent,
-                    sign_in = ?self.sign_in,
-                    directory = ?self.directory,
-                    %window,
-                    "the turn runs on usage credits past the plan's limit"
-                );
-                return None;
-            }
-            AgentEvent::Occupancy(occupancy) => {
-                self.reported.record(self.agent, occupancy);
-                return None;
-            }
             AgentEvent::Finished { finish_reason, .. } => {
                 tracing::debug!(
                     provider = %self.agent,
@@ -154,6 +173,23 @@ impl Turn {
                 }
             }
         }
+    }
+
+    /// What `events` amount to once the run has ended, read as the crate's
+    /// own `complete` reads them, with each event noticed on the way as a
+    /// streamed turn notices it.
+    pub(super) async fn completion(self, mut events: AgentStream) -> Result<Completion, Error> {
+        let mut stdout = StdoutParseResult::default();
+        while let Some(event) = events.next().await {
+            let event = event.map_err(failed)?;
+            self.notice(&event);
+            stdout.record(event);
+        }
+        Ok(
+            Completion::new(self.agent.as_str(), Message::assistant(stdout.reply()))
+                .with_usage(stdout.usage)
+                .with_finish_reason(stdout.finish_reason),
+        )
     }
 }
 

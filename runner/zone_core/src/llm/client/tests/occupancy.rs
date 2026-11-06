@@ -19,6 +19,24 @@ echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","tex
 echo '{"type":"turn.completed","usage":{"input_tokens":24633,"output_tokens":5}}'
 "#;
 
+/// What [`ROLLOUT`] says of the window and how much of it the turn filled.
+fn rolled_out() -> Option<Occupancy> {
+    Occupancy::reported(475_000, Some(24_638))
+}
+
+/// A Claude turn that reports its window in its result.
+const CLAUDE_REPORTED: &str = r#"
+echo '{"type":"system","subtype":"init","session_id":"6f1"}'
+echo '{"type":"assistant","message":{"model":"claude-sonnet-4-6","role":"assistant","content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":3,"cache_creation_input_tokens":120,"cache_read_input_tokens":16500,"output_tokens":9}},"parent_tool_use_id":null}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","modelUsage":{"claude-sonnet-4-6":{"contextWindow":200000}}}'
+"#;
+
+/// What [`CLAUDE_REPORTED`] says of the window and how much of it the turn
+/// filled.
+fn claude_reported() -> Option<Occupancy> {
+    Occupancy::reported(200_000, Some(3 + 120 + 16_500 + 9))
+}
+
 /// A Codex stand-in that writes `rollout` as [`THREAD`]'s, and `catalogue`
 /// as its models cache when given, under its `CODEX_HOME`, as Codex does
 /// while it runs, then replies with `reply`.
@@ -73,20 +91,14 @@ async fn at_the_finish(client: &LlmClient, agent: AgentKind) -> (Option<Occupanc
 
 #[tokio::test]
 async fn claude_occupancy_is_recorded_for_the_turn() {
-    let stand_in = StandIn::new(
-        r#"
-echo '{"type":"system","subtype":"init","session_id":"6f1"}'
-echo '{"type":"assistant","message":{"model":"claude-sonnet-4-6","role":"assistant","content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":3,"cache_creation_input_tokens":120,"cache_read_input_tokens":16500,"output_tokens":9}},"parent_tool_use_id":null}'
-echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","modelUsage":{"claude-sonnet-4-6":{"contextWindow":200000}}}'
-"#,
-    );
+    let stand_in = StandIn::new(CLAUDE_REPORTED);
     let client = running(AgentKind::Claude, standing_in(&stand_in));
     assert_eq!(client.occupancy(), None);
 
     let (finished, failure) = at_the_finish(&client, AgentKind::Claude).await;
 
     assert!(failure.is_none(), "{failure:?}");
-    let reported = Occupancy::reported(200_000, Some(3 + 120 + 16_500 + 9));
+    let reported = claude_reported();
     assert_eq!(
         finished, reported,
         "claude reports its window before it finishes"
@@ -107,10 +119,7 @@ async fn codex_occupancy_after_its_finish_is_recorded_once_the_stream_is_drained
         finished, None,
         "codex reports its window only after it exits"
     );
-    assert_eq!(
-        client.occupancy(),
-        Occupancy::reported(475_000, Some(24_638))
-    );
+    assert_eq!(client.occupancy(), rolled_out());
 }
 
 #[tokio::test]
@@ -155,4 +164,32 @@ async fn codex_falls_back_to_the_published_window_from_models_cache() {
         Occupancy::reported(500_000 * 95 / 100, None),
         "the published window, cut to its effective share, with its fill unknown"
     );
+}
+
+#[tokio::test]
+async fn a_buffered_turn_records_the_occupancy_each_agent_reports() {
+    let home = TempDir::new().expect("a codex home");
+    let claude = StandIn::new(CLAUDE_REPORTED);
+    let codex = codex(ROLLOUT, None, ANSWERED);
+
+    for (agent, client, reported) in [
+        (
+            AgentKind::Claude,
+            running(AgentKind::Claude, standing_in(&claude)),
+            claude_reported(),
+        ),
+        (AgentKind::Codex, homed(&codex, &home), rolled_out()),
+    ] {
+        client
+            .chat_with_options(
+                model(agent),
+                &[Message::user("What does a.rs do?")],
+                None,
+                RequestOptions::new(512),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{agent}: {error:?}"));
+
+        assert_eq!(client.occupancy(), reported, "{agent}");
+    }
 }
