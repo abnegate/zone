@@ -1,9 +1,6 @@
-//! An organization's GitHub connection: the Apps it registered, their
-//! installations, registering another App, and removing one.
-
 use abnegate_vcs::pull_request::InstallationId;
 use axum::Json;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
@@ -100,7 +97,6 @@ pub struct Connection {
 
 #[derive(Debug, Deserialize)]
 pub struct RegistrationRequest {
-    #[serde(default)]
     owner: Option<String>,
 }
 
@@ -112,9 +108,18 @@ pub struct Registration {
 }
 
 #[derive(Debug, Serialize)]
-struct RemovedApp<'a> {
+pub(super) struct AuditedApp<'a> {
     owner_login: &'a str,
     slug: &'a str,
+}
+
+impl<'a> From<&'a AppRow> for AuditedApp<'a> {
+    fn from(app: &'a AppRow) -> Self {
+        Self {
+            owner_login: &app.owner_login,
+            slug: &app.slug,
+        }
+    }
 }
 
 /// An organization App's settings live under the organization, so a stored
@@ -126,7 +131,7 @@ fn settings_url(app: &AppRow, github_web_url: &str) -> String {
         OwnerType::Organization => {
             let login = Login::parse(&app.owner_login);
             if login.is_none() {
-                tracing::warn!(
+                tracing::debug!(
                     app = %app.id,
                     organization = %app.organization_id,
                     "A GitHub App's stored owner is not a valid login, so its settings link uses the user path"
@@ -214,17 +219,14 @@ pub async fn register(
 pub async fn delete_app(
     admin: OrgAdmin,
     State(state): State<AppState>,
-    Path((_, app_id)): Path<(Uuid, Uuid)>,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
 ) -> Result<StatusCode, ServerError> {
+    let Path((_, app_id)) = path.map_err(|_| app_not_found())?;
     let db = state.db();
     let app = github_apps::get(db, admin.org_id, app_id)
         .await?
         .ok_or_else(app_not_found)?;
-    let installations: Vec<InstallationRow> = github_installations::list(db, admin.org_id)
-        .await?
-        .into_iter()
-        .filter(|installation| installation.github_app_id == app.id)
-        .collect();
+    let installations = github_installations::list_for_app(db, admin.org_id, app.id).await?;
 
     if !github_apps::delete(db, admin.org_id, app.id).await? {
         return Err(app_not_found());
@@ -248,11 +250,7 @@ pub async fn delete_app(
             action: actions::GITHUB_APP_REMOVED,
             resource_type: resources::GITHUB_APP,
             resource_id: Some(app.id),
-            old_values: serde_json::to_value(RemovedApp {
-                owner_login: &app.owner_login,
-                slug: &app.slug,
-            })
-            .ok(),
+            old_values: serde_json::to_value(AuditedApp::from(&app)).ok(),
             new_values: None,
         },
     )

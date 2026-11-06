@@ -1,6 +1,3 @@
-//! Where the GitHub callbacks send the browser back to in Zone, and what they
-//! tell the settings page happened.
-
 use uuid::Uuid;
 
 pub const SETTINGS_PATH: &str = "/settings/organization/github";

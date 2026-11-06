@@ -33,7 +33,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, header};
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, MatchedPath},
     middleware,
     routing::{delete, get, patch, post, put},
 };
@@ -46,6 +46,8 @@ use crate::config::AllowedOrigins;
 use crate::services::github_app::manifest::{MANIFEST_CALLBACK_PATH, SETUP_CALLBACK_PATH};
 use crate::state::AppState;
 use crate::ws;
+
+const UNMATCHED_PATH: &str = "unmatched";
 
 /// Create the main API router
 pub fn create_router(state: AppState) -> Router {
@@ -520,13 +522,17 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// The path alone, never the query, which carries a GitHub callback's code
-/// and state.
+/// The matched route template, never the raw path or query, which can carry
+/// a token or a GitHub callback's code and state.
 fn span(request: &Request<Body>) -> Span {
+    let path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or(UNMATCHED_PATH, MatchedPath::as_str);
     tracing::debug_span!(
         "request",
         method = %request.method(),
-        path = %request.uri().path(),
+        path = %path,
         version = ?request.version(),
     )
 }
@@ -556,8 +562,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_request_span_records_the_path_and_never_the_query() {
+    async fn spanned(route: &str, uri: &str) -> String {
         let captured = Captured::default();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -565,25 +570,74 @@ mod tests {
             .with_writer(move || writer.clone())
             .with_ansi(false)
             .finish();
-        let request = Request::builder()
-            .uri("/api/github/callbacks/manifest?code=secret-code&state=secret-state")
-            .body(Body::empty())
-            .expect("a request");
+        let _capturing = tracing::subscriber::set_default(subscriber);
+        let router = Router::new()
+            .route(route, get(|| async {}).post(|| async {}))
+            .layer(TraceLayer::new_for_http().make_span_with(span));
 
-        tracing::subscriber::with_default(subscriber, || {
-            span(&request).in_scope(|| tracing::debug!("handled"));
-        });
+        router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the router answers");
 
-        let logs = String::from_utf8_lossy(&captured.0.lock().expect("the capture is readable"))
-            .into_owned();
+        String::from_utf8_lossy(&captured.0.lock().expect("the capture is readable")).into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_request_span_records_the_path_and_never_the_query() {
+        let logs = spanned(
+            MANIFEST_CALLBACK_PATH,
+            &format!("{MANIFEST_CALLBACK_PATH}?code=secret-code&state=secret-state"),
+        )
+        .await;
+
         assert!(
-            logs.contains("path=/api/github/callbacks/manifest"),
+            logs.contains(&format!("path={MANIFEST_CALLBACK_PATH}")),
             "{logs}"
         );
-        assert!(logs.contains("method=GET"), "{logs}");
+        assert!(logs.contains("method=POST"), "{logs}");
         for secret in ["secret-code", "secret-state", "?"] {
             assert!(!logs.contains(secret), "{secret} reached the logs: {logs}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_request_span_records_the_route_template_and_never_the_raw_path() {
+        let logs = spanned(
+            "/api/invitations/{token}/accept",
+            "/api/invitations/secret-invitation-token/accept",
+        )
+        .await;
+
+        assert!(
+            logs.contains("path=/api/invitations/{token}/accept"),
+            "{logs}"
+        );
+        assert!(
+            !logs.contains("secret-invitation-token"),
+            "the raw path reached the logs: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrouted_request_span_records_a_placeholder_and_never_the_raw_path() {
+        let logs = spanned(
+            "/api/invitations/{token}/accept",
+            "/api/unrouted/secret-path-token",
+        )
+        .await;
+
+        assert!(logs.contains(&format!("path={UNMATCHED_PATH}")), "{logs}");
+        assert!(
+            !logs.contains("secret-path-token"),
+            "the raw path reached the logs: {logs}"
+        );
     }
 
     fn router(origins: &[&str]) -> Router {

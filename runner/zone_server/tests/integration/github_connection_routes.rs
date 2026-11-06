@@ -1,10 +1,6 @@
-//! The organization's GitHub connection routes, from the outside: who may call
-//! each one, what each refuses, and what each does when GitHub fails part of
-//! the way through.
-
 use std::sync::Mutex;
 
-use crate::common::github_app::{self, ApplicationJwt, Seeded, TEST_PRIVATE_KEY};
+use crate::common::github_app::{self, APP_ID, ApplicationJwt, Seeded, TEST_PRIVATE_KEY};
 use crate::common::{self, TestClient, TestResponse, test_email, test_password};
 use abnegate_secret::SecretValue;
 use axum::body::Body;
@@ -237,13 +233,19 @@ fn minted_token(installation_id: i64) -> String {
     format!("ghs_routes_{installation_id}")
 }
 
-/// GitHub mints [`minted_token`] for `installation_id`.
-async fn routes_minting(server: &MockServer, installation_id: i64, times: impl Into<Times>) {
+/// GitHub mints [`minted_token`] for App `app_id`'s installation `installation_id`.
+async fn routes_minting(
+    server: &MockServer,
+    app_id: i64,
+    installation_id: i64,
+    times: impl Into<Times>,
+) {
     let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
     Mock::given(method("POST"))
         .and(path(format!(
             "/app/installations/{installation_id}/access_tokens"
         )))
+        .and(ApplicationJwt(app_id))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "token": minted_token(installation_id),
             "expires_at": expires_at,
@@ -253,11 +255,12 @@ async fn routes_minting(server: &MockServer, installation_id: i64, times: impl I
         .await;
 }
 
-async fn routes_refusing_mint(server: &MockServer, installation_id: i64, status: u16) {
+async fn routes_refusing_mint(server: &MockServer, app_id: i64, installation_id: i64, status: u16) {
     Mock::given(method("POST"))
         .and(path(format!(
             "/app/installations/{installation_id}/access_tokens"
         )))
+        .and(ApplicationJwt(app_id))
         .respond_with(ResponseTemplate::new(status))
         .expect(1)
         .mount(server)
@@ -357,15 +360,17 @@ fn routes_listed_installation_at(
     })
 }
 
-/// GitHub answers an uninstall of `installation_id` with `status`.
+/// GitHub answers App `app_id`'s uninstall of `installation_id` with `status`.
 async fn routes_deleting_installation(
     server: &MockServer,
+    app_id: i64,
     installation_id: i64,
     status: u16,
     times: impl Into<Times>,
 ) {
     Mock::given(method("DELETE"))
         .and(path(format!("/app/installations/{installation_id}")))
+        .and(ApplicationJwt(app_id))
         .respond_with(ResponseTemplate::new(status))
         .expect(times)
         .mount(server)
@@ -1265,6 +1270,33 @@ async fn connection_delete_unknown_app_is_not_found() {
 }
 
 #[tokio::test]
+async fn connection_delete_malformed_app_id_is_a_json_not_found_after_the_guard() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let member = harness.member(&tenant).await;
+    let seeded = harness.installation(&tenant).await;
+    let malformed = format!("{}/not-a-uuid", apps_path(&tenant));
+
+    assert_refused(
+        &harness.delete(&malformed, Some(&member.token)).await,
+        StatusCode::FORBIDDEN,
+    );
+    assert_refused(
+        &harness.delete(&malformed, Some(&tenant.owner.token)).await,
+        StatusCode::NOT_FOUND,
+    );
+    assert!(
+        harness
+            .stored_app(tenant.organization, seeded.app)
+            .await
+            .is_some(),
+        "the App is kept"
+    );
+
+    harness.discard().await;
+}
+
+#[tokio::test]
 async fn connection_delete_app_cascades_without_asking_github() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
@@ -1308,7 +1340,7 @@ async fn authorization_installations_without_token_is_unauthorized() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_deleting_installation(&harness.github, seeded.installation_id, 204, 0).await;
+    routes_deleting_installation(&harness.github, APP_ID, seeded.installation_id, 204, 0).await;
 
     assert_each(
         vec![
@@ -1349,7 +1381,7 @@ async fn authorization_installations_another_organizations_admin_is_forbidden() 
     let stranger = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
     let token = Some(stranger.owner.token.as_str());
-    routes_deleting_installation(&harness.github, seeded.installation_id, 204, 0).await;
+    routes_deleting_installation(&harness.github, APP_ID, seeded.installation_id, 204, 0).await;
 
     assert_each(
         vec![
@@ -1390,7 +1422,7 @@ async fn authorization_installations_member_is_forbidden() {
     let member = harness.member(&tenant).await;
     let seeded = harness.installation(&tenant).await;
     let token = Some(member.token.as_str());
-    routes_deleting_installation(&harness.github, seeded.installation_id, 204, 0).await;
+    routes_deleting_installation(&harness.github, APP_ID, seeded.installation_id, 204, 0).await;
 
     assert_each(
         vec![
@@ -1430,7 +1462,7 @@ async fn authorization_installations_foreign_app_or_installation_is_not_found_an
     let tenant = harness.tenant().await;
     let stranger = harness.tenant().await;
     let foreign = harness.installation(&stranger).await;
-    routes_deleting_installation(&harness.github, foreign.installation_id, 204, 0).await;
+    routes_deleting_installation(&harness.github, APP_ID, foreign.installation_id, 204, 0).await;
     let token = Some(tenant.owner.token.as_str());
 
     harness
@@ -1695,8 +1727,8 @@ async fn installations_delete_without_uninstall_skips_github() {
     let tenant = harness.tenant().await;
     let explicit = harness.installation(&tenant).await;
     let implicit = harness.installation(&tenant).await;
-    routes_deleting_installation(&harness.github, explicit.installation_id, 204, 0).await;
-    routes_deleting_installation(&harness.github, implicit.installation_id, 204, 0).await;
+    routes_deleting_installation(&harness.github, APP_ID, explicit.installation_id, 204, 0).await;
+    routes_deleting_installation(&harness.github, APP_ID, implicit.installation_id, 204, 0).await;
 
     for (seeded, query) in [(&explicit, "?uninstall=false"), (&implicit, "")] {
         harness
@@ -1723,7 +1755,7 @@ async fn installations_delete_with_uninstall_removes_it_on_github() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_deleting_installation(&harness.github, seeded.installation_id, 204, 1).await;
+    routes_deleting_installation(&harness.github, APP_ID, seeded.installation_id, 204, 1).await;
 
     harness
         .delete(
@@ -1748,7 +1780,7 @@ async fn installations_delete_already_gone_on_github_removes_the_row() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_deleting_installation(&harness.github, seeded.installation_id, 404, 1).await;
+    routes_deleting_installation(&harness.github, APP_ID, seeded.installation_id, 404, 1).await;
 
     harness
         .delete(
@@ -1773,7 +1805,7 @@ async fn installations_delete_github_failure_is_bad_gateway_and_keeps_the_row() 
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_deleting_installation(&harness.github, seeded.installation_id, 500, 1..).await;
+    routes_deleting_installation(&harness.github, APP_ID, seeded.installation_id, 500, 1..).await;
 
     assert_refused(
         &harness
@@ -1800,7 +1832,7 @@ async fn installations_delete_with_invalid_uninstall_is_bad_request() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_deleting_installation(&harness.github, seeded.installation_id, 204, 0).await;
+    routes_deleting_installation(&harness.github, APP_ID, seeded.installation_id, 204, 0).await;
 
     assert_refused(
         &harness
@@ -1917,7 +1949,7 @@ async fn authorization_repositories_without_token_is_unauthorized() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 0).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 0).await;
 
     assert_each(
         vec![
@@ -1948,7 +1980,7 @@ async fn authorization_repositories_another_organizations_admin_is_forbidden() {
     let tenant = harness.tenant().await;
     let stranger = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 0).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 0).await;
     let token = Some(stranger.owner.token.as_str());
 
     assert_each(
@@ -1980,7 +2012,7 @@ async fn authorization_repositories_member_lists_repositories_and_branches() {
     let tenant = harness.tenant().await;
     let member = harness.member(&tenant).await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 1..).await;
     routes_listing_repositories(
         &harness.github,
         seeded.installation_id,
@@ -2024,7 +2056,7 @@ async fn authorization_repositories_foreign_installation_is_not_found() {
     let tenant = harness.tenant().await;
     let stranger = harness.tenant().await;
     let foreign = harness.installation(&stranger).await;
-    routes_minting(&harness.github, foreign.installation_id, 0).await;
+    routes_minting(&harness.github, APP_ID, foreign.installation_id, 0).await;
 
     harness
         .get(
@@ -2056,7 +2088,7 @@ async fn repositories_carry_the_contract_shape() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 1..).await;
     let mut row = routes_listed_repository(77, "acme", "widgets");
     row["private"] = json!(true);
     row["archived"] = json!(true);
@@ -2114,7 +2146,7 @@ async fn repositories_without_installations_are_empty() {
 
 async fn widgets_catalog(harness: &Harness, tenant: &Tenant) -> Seeded {
     let seeded = harness.installation(tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 1..).await;
     routes_listing_repositories(
         &harness.github,
         seeded.installation_id,
@@ -2181,7 +2213,7 @@ async fn repositories_sort_by_account_then_name_across_accounts() {
         (second, [(1, "Beta"), (2, "aardvark")]),
         (first, [(3, "Zeta"), (4, "alpha")]),
     ] {
-        routes_minting(&harness.github, installation.installation_id, 1..).await;
+        routes_minting(&harness.github, APP_ID, installation.installation_id, 1..).await;
         let rows: Vec<Value> = rows
             .iter()
             .map(|(id, name)| routes_listed_repository(*id, &installation.account_login, name))
@@ -2216,7 +2248,7 @@ async fn repositories_page_with_total_and_next_page() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 1..).await;
     let rows: Vec<Value> = ["a-widget", "b-widget", "c-gadget", "d-widget", "e-gadget"]
         .iter()
         .zip(1..)
@@ -2260,7 +2292,7 @@ async fn repositories_refuse_invalid_paging_with_a_json_error() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 0).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 0).await;
     routes_listing_repositories(
         &harness.github,
         seeded.installation_id,
@@ -2307,7 +2339,7 @@ async fn repositories_report_a_revoked_installation_without_asking_github() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let revoked = harness.revoked_installation(&tenant).await;
-    routes_minting(&harness.github, revoked.installation_id, 0).await;
+    routes_minting(&harness.github, APP_ID, revoked.installation_id, 0).await;
     routes_listing_repositories(
         &harness.github,
         revoked.installation_id,
@@ -2331,7 +2363,7 @@ async fn repositories_report_a_suspended_installation_without_asking_github() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let suspended = harness.suspended_installation(&tenant).await;
-    routes_minting(&harness.github, suspended.installation_id, 0).await;
+    routes_minting(&harness.github, APP_ID, suspended.installation_id, 0).await;
     routes_listing_repositories(
         &harness.github,
         suspended.installation_id,
@@ -2357,8 +2389,8 @@ async fn repositories_github_failure_marks_only_that_installation_unavailable() 
     let tenant = harness.tenant().await;
     let failing = harness.installation(&tenant).await;
     let healthy = harness.installation(&tenant).await;
-    routes_minting(&harness.github, failing.installation_id, 1..).await;
-    routes_minting(&harness.github, healthy.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, failing.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, healthy.installation_id, 1..).await;
     routes_listing_repositories(
         &harness.github,
         failing.installation_id,
@@ -2404,7 +2436,7 @@ async fn repositories_report_an_installation_github_uninstalled_as_revoked() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_refusing_mint(&harness.github, seeded.installation_id, 404).await;
+    routes_refusing_mint(&harness.github, APP_ID, seeded.installation_id, 404).await;
     github_app::uninstalled(&harness.github, seeded.installation_id).await;
 
     let catalog = harness.catalog(&tenant, "").await;
@@ -2430,7 +2462,7 @@ async fn repositories_are_cached_until_refreshed() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 1..).await;
     routes_listing_repositories(
         &harness.github,
         seeded.installation_id,
@@ -2446,7 +2478,7 @@ async fn repositories_are_cached_until_refreshed() {
     harness.github.verify().await;
     harness.github.reset().await;
 
-    routes_minting(&harness.github, seeded.installation_id, 0..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 0..).await;
     routes_listing_repositories(
         &harness.github,
         seeded.installation_id,
@@ -2488,7 +2520,7 @@ async fn repositories_filter_by_installation() {
     let chosen = harness.installation(&tenant).await;
     let other = harness.installation(&tenant).await;
     for (installation, id, name) in [(&chosen, 1, "chosen"), (&other, 2, "other")] {
-        routes_minting(&harness.github, installation.installation_id, 0..).await;
+        routes_minting(&harness.github, APP_ID, installation.installation_id, 0..).await;
         routes_listing_repositories(
             &harness.github,
             installation.installation_id,
@@ -2528,7 +2560,7 @@ async fn repositories_drop_a_repository_without_an_absolute_web_address() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 1..).await;
     routes_listing_repositories(
         &harness.github,
         seeded.installation_id,
@@ -2556,7 +2588,7 @@ async fn branches_list_names_as_github_spells_them_with_next_page() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 1..).await;
     let mut rows = vec![
         routes_listed_branch("main", true),
         routes_listed_branch("+release", false),
@@ -2595,7 +2627,7 @@ async fn branches_last_page_has_no_next_page() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 1..).await;
     routes_listing_branches(
         &harness.github,
         seeded.installation_id,
@@ -2639,8 +2671,8 @@ async fn branches_of_a_revoked_or_suspended_installation_are_not_found() {
     let tenant = harness.tenant().await;
     let revoked = harness.revoked_installation(&tenant).await;
     let suspended = harness.suspended_installation(&tenant).await;
-    routes_minting(&harness.github, revoked.installation_id, 0).await;
-    routes_minting(&harness.github, suspended.installation_id, 0).await;
+    routes_minting(&harness.github, APP_ID, revoked.installation_id, 0).await;
+    routes_minting(&harness.github, APP_ID, suspended.installation_id, 0).await;
 
     for seeded in [&revoked, &suspended] {
         harness
@@ -2657,7 +2689,7 @@ async fn branches_of_a_repository_github_does_not_find_are_not_found() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 1..).await;
     routes_listing_branches(
         &harness.github,
         seeded.installation_id,
@@ -2679,7 +2711,7 @@ async fn branches_github_failure_is_bad_gateway() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 1..).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 1..).await;
     Mock::given(method("GET"))
         .and(path("/repos/acme/widgets/branches"))
         .respond_with(ResponseTemplate::new(500))
@@ -2702,7 +2734,7 @@ async fn branches_page_zero_is_bad_request() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
-    routes_minting(&harness.github, seeded.installation_id, 0).await;
+    routes_minting(&harness.github, APP_ID, seeded.installation_id, 0).await;
 
     assert_refused(
         &harness

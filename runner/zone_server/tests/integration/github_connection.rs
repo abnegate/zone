@@ -1,9 +1,3 @@
-//! Connecting GitHub end to end against a stand-in GitHub: registering an App
-//! from its manifest, installing it, syncing, picking repositories and
-//! branches, and uninstalling. Then the two public callbacks GitHub redirects
-//! the browser back to, on every outcome, and what must never leave Zone in a
-//! redirect or a log line.
-
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -14,6 +8,7 @@ use chrono::DateTime;
 use reqwest::Url;
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use tracing::subscriber::DefaultGuard;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
@@ -47,6 +42,7 @@ const MINTED_TOKEN_PREFIX: &str = "ghs_";
 const JWT_PREFIX: &str = "eyJ";
 const PEM_MARKER: &str = "PRIVATE KEY";
 const CAPTURED_TARGETS: &str = "zone_server=trace,tower_http=trace";
+const BEARER_PREFIX: &str = "Bearer ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
@@ -864,6 +860,45 @@ async fn callback_manifest_duplicate_owner_fails() {
     );
 }
 
+/// The runtime is current-thread so every task the router spawns logs through
+/// the subscriber set as this thread's default.
+#[tokio::test(flavor = "current_thread")]
+async fn callback_manifest_orphaned_app_is_logged_for_deletion() {
+    let (captured, _capturing) = capturing();
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let existing = harness.seed_app(&tenant).await;
+    let state = harness.registration_state(&tenant).await;
+    let registration = Registration::new(&existing.owner_login, AccountType::Organization);
+    let code = github_app::opaque();
+    github_app::converting(&harness.github, &code, registration.answer(), 1).await;
+
+    let response = harness
+        .manifest_callback(&[(CODE_PARAMETER, &code), (STATE_PARAMETER, &state)])
+        .await;
+
+    harness.assert_lands(&response, Outcome::Failed, Some(tenant.organization));
+    let logs = captured.text();
+    for (label, identity) in [
+        ("slug", registration.slug.clone()),
+        ("address", registration.html_url()),
+    ] {
+        assert!(
+            logs.contains(&identity),
+            "the orphaned App's {label} is logged so an operator can delete it: {logs}"
+        );
+    }
+    for (label, secret) in [
+        ("the manifest code", code.as_str()),
+        ("the registration state", state.as_str()),
+        ("the client secret", registration.client_secret.as_str()),
+        ("the webhook secret", registration.webhook_secret.as_str()),
+        ("the private key's body", pem_body()),
+    ] {
+        assert!(!logs.contains(secret), "{label} reached the logs");
+    }
+}
+
 #[tokio::test]
 async fn callback_manifest_enterprise_owner_fails() {
     let harness = Harness::new().await;
@@ -1480,13 +1515,11 @@ impl<'writer> MakeWriter<'writer> for Captured {
     }
 }
 
-/// The runtime is current-thread so every task the router spawns logs through
-/// the subscriber set as this thread's default. A global subscriber is installed
-/// first because, beside a lone scoped one, tracing caches each callsite's
-/// interest from whichever thread first reaches it, so a callsite a parallel
-/// test reached first would never log here.
-#[tokio::test(flavor = "current_thread")]
-async fn security_logs_never_carry_secrets() {
+/// Every log line the server writes on this thread while the guard lives. A
+/// global subscriber is installed first because, beside a lone scoped one,
+/// tracing caches each callsite's interest from whichever thread first reaches
+/// it, so a callsite a parallel test reached first would never log here.
+fn capturing() -> (Captured, DefaultGuard) {
     common::init_tracing();
     let captured = Captured::default();
     let subscriber = tracing_subscriber::fmt()
@@ -1494,7 +1527,29 @@ async fn security_logs_never_carry_secrets() {
         .with_writer(captured.clone())
         .with_ansi(false)
         .finish();
-    let _capturing = tracing::subscriber::set_default(subscriber);
+    (captured, tracing::subscriber::set_default(subscriber))
+}
+
+/// Every JWT Zone signed and sent to `github`.
+async fn sent_jwts(github: &MockServer) -> Vec<String> {
+    github
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|request| request.headers.get(header::AUTHORIZATION))
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.strip_prefix(BEARER_PREFIX))
+        .filter(|credential| credential.starts_with(JWT_PREFIX))
+        .map(String::from)
+        .collect()
+}
+
+/// The runtime is current-thread so every task the router spawns logs through
+/// the subscriber set as this thread's default.
+#[tokio::test(flavor = "current_thread")]
+async fn security_logs_never_carry_secrets() {
+    let (captured, _capturing) = capturing();
 
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
@@ -1603,9 +1658,23 @@ async fn security_logs_never_carry_secrets() {
 
     let logs = captured.text();
     assert!(
-        logs.contains("zone_server") || logs.contains("tower_http"),
-        "the capture saw the server's own logs, or this test proves nothing"
+        logs.contains(&format!("path={MANIFEST_CALLBACK_PATH}")),
+        "the capture saw the manifest callback's request span, or this test proves nothing"
     );
+    for query in [format!("{MANIFEST_CALLBACK_PATH}?"), "?code=".to_string()] {
+        assert!(
+            !logs.contains(&query),
+            "a callback's query reached the logs"
+        );
+    }
+    let jwts = sent_jwts(&harness.github).await;
+    assert!(
+        !jwts.is_empty(),
+        "Zone sent GitHub an App JWT, or the JWT check proves nothing"
+    );
+    for jwt in &jwts {
+        assert!(!logs.contains(jwt.as_str()), "an App JWT reached the logs");
+    }
     for (label, secret) in [
         ("the manifest code", code.as_str()),
         ("the refused manifest code", refused_code.as_str()),
