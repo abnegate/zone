@@ -495,6 +495,75 @@ async fn a_step_named_twice_in_one_write_keeps_the_later() {
 }
 
 #[tokio::test]
+async fn a_step_that_arrives_after_its_subagent_stopped_is_failed() {
+    let pool = pool().await;
+    let chat_id = chat(&pool).await;
+    for status in [
+        SubagentStatus::Stopped,
+        SubagentStatus::Completed,
+        SubagentStatus::Failed,
+    ] {
+        let external_id = status.as_str();
+        let subagent = running(&pool, chat_id, external_id, None).await;
+        record_steps(
+            &pool,
+            subagent,
+            &[
+                step("finished", StepStatus::Succeeded),
+                step("open", StepStatus::Running),
+            ],
+        )
+        .await
+        .expect("its steps");
+        record(
+            &pool,
+            &SubagentChange {
+                status: Some(status),
+                ..named(chat_id, external_id)
+            },
+        )
+        .await
+        .expect("its end");
+
+        let late = record_steps(
+            &pool,
+            subagent,
+            &[
+                step("finished", StepStatus::Running),
+                step("open", StepStatus::Running),
+                step("late", StepStatus::Running),
+                step("landed", StepStatus::Succeeded),
+            ],
+        )
+        .await
+        .expect("the late steps");
+
+        assert_eq!(
+            late,
+            RecordedSteps {
+                changed: vec![
+                    step("open", StepStatus::Failed),
+                    step("late", StepStatus::Failed),
+                    step("landed", StepStatus::Succeeded),
+                ],
+                added: 2,
+            },
+            "{status:?}"
+        );
+        assert_eq!(
+            stored(&pool, chat_id, subagent).await,
+            [
+                step("finished", StepStatus::Succeeded),
+                step("open", StepStatus::Failed),
+                step("late", StepStatus::Failed),
+                step("landed", StepStatus::Succeeded),
+            ],
+            "{status:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_subagents_steps_are_read_only_through_its_own_chat() {
     let pool = pool().await;
     let chat_id = chat(&pool).await;

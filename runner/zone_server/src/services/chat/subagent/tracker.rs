@@ -329,7 +329,11 @@ mod tests {
             "in the order first heard of"
         );
         assert_eq!(announcements[0].1, [step("call-1", StepStatus::Succeeded)]);
-        assert_eq!(announcements[1].1, [step("call-2", StepStatus::Running)]);
+        assert_eq!(
+            announcements[1].1,
+            [step("call-2", StepStatus::Failed)],
+            "a step still running when its subagent finished never runs"
+        );
     }
 
     #[tokio::test]

@@ -183,8 +183,9 @@ where
 ///
 /// A new step goes after every step the subagent already has. A known step
 /// keeps its place, and one that has settled never runs again: an update that
-/// says it is running is ignored. When `steps` names one step twice, the later
-/// is kept.
+/// says it is running is ignored. A step that would run under a subagent that
+/// is no longer running is failed instead. When `steps` names one step twice,
+/// the later is kept.
 pub async fn record_steps<'e, E>(
     executor: E,
     subagent_id: Uuid,
@@ -211,8 +212,18 @@ where
              SELECT COALESCE(MAX(position), -1) AS position
                FROM chat_subagent_steps WHERE subagent_id = $1
          ),
+         agent AS (
+             SELECT status FROM chat_subagents WHERE id = $1
+         ),
          placed AS (
-             SELECT i.step_id, i.name, i.subject, i.status,
+             SELECT i.step_id, i.name, i.subject,
+                    CASE
+                        WHEN i.status = $6::text
+                         AND a.status <> $7::text
+                         AND COALESCE(known.status, $6::text) = $6::text
+                        THEN $8::text
+                        ELSE i.status
+                    END AS status,
                     COALESCE(
                         known.position,
                         l.position + ROW_NUMBER() OVER (
@@ -220,6 +231,7 @@ where
                     ) AS position
                FROM incoming i
               CROSS JOIN last l
+               LEFT JOIN agent a ON true
                LEFT JOIN chat_subagent_steps known
                  ON known.subagent_id = $1 AND known.step_id = i.step_id
          ),
@@ -245,6 +257,8 @@ where
     .bind(subjects)
     .bind(statuses)
     .bind(StepStatus::Running.as_str())
+    .bind(SubagentStatus::Running.as_str())
+    .bind(StepStatus::Failed.as_str())
     .fetch_all(executor)
     .await?;
     let added = rows.iter().filter(|row| row.4).count();
