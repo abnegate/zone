@@ -16,6 +16,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
+use abnegate_agent_cli::login::codex::{
+    self, Account, CREDENTIALS, Device, DeviceLogin, Prompt, Staging,
+};
+use abnegate_agent_cli::login::{Cli, LoginError, Status};
 use abnegate_secret::redact;
 use chrono::{DateTime, SubsecRound, Utc};
 use dashmap::DashMap;
@@ -26,10 +30,9 @@ use uuid::Uuid;
 use zone_core::environment;
 use zone_core::llm::AgentKind;
 
-use super::codex::{self, Account, CREDENTIALS, Device, Prompt, Staging};
 use super::error::Error;
 use super::locks::{Guard, Locks};
-use super::{audit, homes, oauth, probe};
+use super::{audit, homes, oauth};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow, Insert};
 use crate::db::organizations;
@@ -37,6 +40,8 @@ use crate::state::AppState;
 
 const STOPPED: &str = "The codex sign-in stopped before it finished";
 const UNSAVED: &str = "Codex signed in, but Zone could not record the sign-in. Start again.";
+const CANCELLED: &str = "The sign-in was cancelled. Start again.";
+const EXPIRED: &str = "The sign-in code expired before anyone entered it. Start again.";
 
 static DEVICES: LazyLock<Devices> = LazyLock::new(Devices::default);
 
@@ -233,14 +238,12 @@ impl Devices {
             })?;
         let executable = config.agent_executable(AgentKind::Codex);
         let id = Uuid::new_v4();
-        let device = codex::device(&executable, &root, id, &variables(AgentKind::Codex)).await;
-        let Device {
-            prompt,
-            outcome,
-            cancel,
-        } = match device {
+        let login = DeviceLogin::new(executable).with_environment(variables(AgentKind::Codex));
+        let device = match login.start(&root).await {
             Ok(device) => device,
-            Err(codex::Error::Filesystem(message)) => return Err(Error::Internal(message)),
+            Err(error @ LoginError::Filesystem { .. }) => {
+                return Err(Error::Internal(error.to_string()));
+            }
             Err(error) => {
                 let error = refusal(error);
                 self.failures.insert(organization, error.to_string());
@@ -248,11 +251,14 @@ impl Devices {
             }
         };
 
-        let outcome = ending(organization, outcome);
-        let prompt = Prompt {
-            expires_at: prompt.expires_at.trunc_subsecs(0),
-            ..prompt
-        };
+        let printed = device.prompt();
+        let prompt = Prompt::new(
+            printed.verification_url.clone(),
+            printed.user_code.clone(),
+            printed.expires_at.trunc_subsecs(0),
+        );
+        let (cancel, cancelled) = oneshot::channel();
+        let outcome = ending(organization, watch(device, cancelled));
         let completion =
             tokio::spawn(self.complete(state.clone(), organization, id, outcome.clone()))
                 .map(|_| ())
@@ -281,7 +287,7 @@ impl Devices {
     async fn complete(&self, state: AppState, organization: Uuid, id: Uuid, outcome: Outcome) {
         let ended = match outcome.await {
             Ok(staging) => {
-                let account = codex::signed_in_as(staging.path());
+                let account = staging.account();
                 let described = describe(state.config(), organization, staging.path()).await;
                 Ok((staging, account, described))
             }
@@ -570,7 +576,7 @@ fn unnamed<'a>(
     held.iter()
         .filter(|login| login.account.is_none())
         .find(|login| {
-            codex::signed_in_as(
+            Account::read(
                 &config
                     .agents
                     .login_home(organization, AgentKind::Codex, login.id),
@@ -671,8 +677,9 @@ async fn log_out(config: &Config, home: &Path) -> Result<(), Error> {
     if !codex::signed_in(home) {
         return Ok(());
     }
-    let executable = config.agent_executable(AgentKind::Codex);
-    let Err(error) = codex::logout(&executable, home, &variables(AgentKind::Codex)).await else {
+    let login = DeviceLogin::new(config.agent_executable(AgentKind::Codex))
+        .with_environment(variables(AgentKind::Codex));
+    let Err(error) = login.logout(home).await else {
         return Ok(());
     };
     tracing::warn!(
@@ -696,9 +703,9 @@ async fn describe(config: &Config, organization: Uuid, home: &Path) -> Option<St
         AgentKind::Codex.home().to_string(),
         home.to_str()?.to_string(),
     );
-    let executable = config.agent_executable(AgentKind::Codex);
-    match probe::check(AgentKind::Codex, &executable, &variables).await {
-        Ok(probe) => probe.label,
+    let cli = Cli::new(config.agent_executable(AgentKind::Codex)).with_environment(variables);
+    match Status::check(abnegate_agent_cli::AgentKind::Codex, &cli).await {
+        Ok(status) => status.label,
         Err(error) => {
             tracing::warn!(%organization, error = %said(&error), "could not ask codex how it signed in");
             None
@@ -706,30 +713,60 @@ async fn describe(config: &Config, organization: Uuid, home: &Path) -> Option<St
     }
 }
 
-/// How the organization's attempt ends, as its status shows it. Zone's own failure to save the
-/// login is logged, and shows as [`UNSAVED`].
-fn ending(organization: Uuid, outcome: JoinHandle<Result<Staging, codex::Error>>) -> Outcome {
+/// Sees `device` through in a task of Zone's own, which stops codex and discards the attempt once
+/// `cancelled` fires or its sender is dropped.
+fn watch(
+    mut device: Device,
+    cancelled: oneshot::Receiver<()>,
+) -> JoinHandle<Result<Staging, LoginError>> {
+    tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            _ = cancelled => {
+                device.cancel().await;
+                Err(LoginError::Cancelled)
+            }
+            outcome = device.outcome() => outcome,
+        }
+    })
+}
+
+/// How the organization's attempt ends, as its status shows it.
+fn ending(organization: Uuid, outcome: JoinHandle<Result<Staging, LoginError>>) -> Outcome {
     outcome
         .map(move |finished| match finished {
             Ok(Ok(staging)) => Ok(Arc::new(staging)),
-            Ok(Err(codex::Error::Filesystem(message))) => {
-                tracing::error!(%organization, %message, "could not save codex's new login");
-                Err(UNSAVED.to_string())
-            }
-            Ok(Err(error)) => Err(said(&error)),
+            Ok(Err(error)) => Err(reason(organization, &error)),
             Err(_) => Err(STOPPED.to_string()),
         })
         .boxed()
         .shared()
 }
 
-fn refusal(error: codex::Error) -> Error {
+/// Why an attempt failed, as its status shows it. Zone's own failure to save the login is logged,
+/// and shows as [`UNSAVED`].
+fn reason(organization: Uuid, error: &LoginError) -> String {
     match error {
-        codex::Error::Unavailable {
-            executable,
-            message,
+        LoginError::Cancelled => CANCELLED.to_string(),
+        LoginError::Expired { .. } => EXPIRED.to_string(),
+        LoginError::Filesystem { .. } => {
+            tracing::error!(%organization, %error, "could not save codex's new login");
+            UNSAVED.to_string()
+        }
+        error => said(error),
+    }
+}
+
+fn refusal(error: LoginError) -> Error {
+    match error {
+        LoginError::Unavailable {
+            executable, reason, ..
         } => {
-            tracing::warn!(%executable, %message, "codex could not be started");
+            tracing::warn!(
+                executable = %executable.display(),
+                %reason,
+                "codex could not be started"
+            );
             Error::Unavailable(AgentKind::Codex)
         }
         error => Error::Refused(said(&error)),
@@ -738,13 +775,13 @@ fn refusal(error: codex::Error) -> Error {
 
 /// What codex said, with anything that looks like a credential blanked: its stderr reaches the
 /// sign-in panel as it is.
-fn said(error: &codex::Error) -> String {
+fn said(error: &LoginError) -> String {
     redact(&error.to_string()).into_owned()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -758,7 +795,7 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
     use crate::services::login::caller::Caller;
-    use crate::services::login::codex::testing::{PROMPT, capture, script};
+    use crate::services::login::codex::testing::{PROMPT, capture, environment, fake, script};
     use crate::services::login::console::Console;
     use crate::services::login::credential;
 
@@ -779,6 +816,11 @@ mod tests {
     const TWO: &str = "00000000-0000-4000-8000-000000000002";
     const LASTING: &str = "expires in 15 minutes";
     const LAPSED: &str = "expires in 0 minutes";
+    const STAGING: &str = ".login";
+    const ATTEMPT_PREFIX: &str = "attempt-";
+    const PRIVATE: u32 = 0o700;
+    const PERMISSIONS: u32 = 0o777;
+    const GRACE: Duration = Duration::from_millis(200);
 
     /// Codex as far as a sign-in needs it. `login --device-auth` counts itself in `started`,
     /// prints the recorded prompt and saves a login once `approve` appears, consuming it: the
@@ -916,6 +958,26 @@ esac"#
                 .config()
                 .agents
                 .home(self.organization, AgentKind::Codex)
+        }
+
+        /// The directory codex runs the organization's sign-in in: the one attempt under `.login`.
+        fn staging(&self) -> PathBuf {
+            let attempts: Vec<PathBuf> = fs::read_dir(self.home().join(STAGING))
+                .expect("codex's staging directories")
+                .map(|entry| entry.expect("a staging directory").path())
+                .collect();
+            let [attempt] = attempts.as_slice() else {
+                panic!("one attempt staged, got {attempts:?}");
+            };
+            assert!(
+                attempt
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(ATTEMPT_PREFIX)),
+                "{} is not an attempt directory",
+                attempt.display()
+            );
+            attempt.clone()
         }
 
         fn login_home(&self, login: Uuid) -> PathBuf {
@@ -1152,10 +1214,7 @@ esac"#
     async fn a_finished_sign_in_that_cannot_be_recorded_is_logged_out() {
         let scene = Scene::new(PROMPT).await;
         let (_, completion) = scene.start().await;
-        let staging = scene
-            .home()
-            .join(".login")
-            .join(scene.attempt().expect("a sign-in in flight").to_string());
+        let staging = scene.staging();
 
         scene.delete_organization().await;
         scene.touch(APPROVE);
@@ -1189,10 +1248,7 @@ esac"#
     async fn a_sign_in_no_longer_pending_has_its_login_and_no_staging() {
         let scene = Scene::new(PROMPT).await;
         let (_, completion) = scene.start().await;
-        let staging = scene
-            .home()
-            .join(".login")
-            .join(scene.attempt().expect("a sign-in in flight").to_string());
+        let staging = scene.staging();
 
         scene.touch(APPROVE);
         ended(scene.organization).await;
@@ -1211,10 +1267,7 @@ esac"#
     async fn a_sign_in_no_longer_pending_that_was_not_recorded_says_why() {
         let scene = Scene::new(PROMPT).await;
         let (_, completion) = scene.start().await;
-        let staging = scene
-            .home()
-            .join(".login")
-            .join(scene.attempt().expect("a sign-in in flight").to_string());
+        let staging = scene.staging();
 
         scene.delete_organization().await;
         scene.touch(APPROVE);
@@ -1755,5 +1808,119 @@ esac"#
         assert_eq!(scene.lines(LOGOUTS), [legacy_home.display().to_string()]);
         scene.sign_out().await;
         scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_device_login_stages_under_an_attempt_directory() {
+        let scene = Scene::new(PROMPT).await;
+        let (_, completion) = scene.start().await;
+        let staging = scene.staging();
+        let mode = fs::metadata(&staging)
+            .expect("the staging directory")
+            .permissions()
+            .mode();
+
+        scene.touch(APPROVE);
+        finished(completion).await;
+
+        assert_eq!(
+            mode & PERMISSIONS,
+            PRIVATE,
+            "codex staged in a shared directory"
+        );
+        let login = scene.login().await.expect("the sign-in was recorded");
+        assert!(
+            saved(&scene.login_home(login.id)).is_some(),
+            "the staged login never reached its home"
+        );
+        assert!(!staging.exists(), "the attempt directory was left");
+        assert!(
+            !scene.home().join(STAGING).exists(),
+            "the staging directory was left"
+        );
+        scene.sign_out().await;
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_clears_what_an_earlier_attempt_left() {
+        let scene = Scene::new(PROMPT).await;
+        let leftover = scene
+            .home()
+            .join(STAGING)
+            .join(format!("{ATTEMPT_PREFIX}leftover"));
+        fs::create_dir_all(&leftover).expect("an attempt a crash left");
+        fs::write(leftover.join(CREDENTIALS), auth(ONE, "stale")).expect("a stale login");
+
+        let (_, completion) = scene.start().await;
+
+        assert!(
+            !leftover.exists(),
+            "an earlier attempt's directory was left"
+        );
+        assert_ne!(scene.staging(), leftover);
+        scene.sign_out().await;
+        finished(completion).await;
+        assert!(
+            scene.logins().await.is_empty(),
+            "a stale login was recorded"
+        );
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_device_login_ends_cancelled() {
+        let scene = Scene::new(PROMPT).await;
+        let (_, completion) = scene.start().await;
+        let staging = scene.staging();
+        let cancel = DEVICES
+            .attempts
+            .get_mut(&scene.organization)
+            .and_then(|mut attempt| attempt.cancel.take())
+            .expect("a sign-in in flight");
+
+        cancel.send(()).expect("the sign-in to be running");
+        finished(completion).await;
+
+        assert_eq!(failure(scene.organization).as_deref(), Some(CANCELLED));
+        assert!(pending(scene.organization).is_none());
+        assert!(!staging.exists(), "the attempt directory was left");
+        assert!(scene.logins().await.is_empty());
+        assert!(
+            scene.lines(LOGOUTS).is_empty(),
+            "codex logged out of a sign-in that never finished"
+        );
+        scene.remove().await;
+    }
+
+    #[tokio::test]
+    async fn an_expired_device_code_ends_expired() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let root = directory.path().join("codex");
+        fs::create_dir(&root).expect("the organization's codex root");
+        let lapsed = String::from_utf8_lossy(PROMPT).replace(LASTING, LAPSED);
+        let prompt = capture(&directory, "prompt", lapsed.as_bytes());
+        let codex = fake(
+            &directory,
+            "login --device-auth",
+            &format!("cat '{prompt}'\nexec sleep 60"),
+        );
+        let device = DeviceLogin::new(codex)
+            .with_environment(environment())
+            .with_limits(codex::Limits::default().with_grace(GRACE))
+            .start(&root)
+            .await
+            .expect("a prompt");
+        let (_cancel, cancelled) = oneshot::channel();
+
+        let outcome = timeout(WAIT, ending(Uuid::new_v4(), watch(device, cancelled)))
+            .await
+            .expect("the code to expire");
+
+        assert_eq!(outcome.err().as_deref(), Some(EXPIRED));
+        assert!(
+            !root.join(STAGING).exists(),
+            "the staging directory was left"
+        );
     }
 }

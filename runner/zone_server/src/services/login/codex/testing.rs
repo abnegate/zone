@@ -1,5 +1,4 @@
-//! Stand-in CLIs that replay what codex and claude printed when they were recorded, and the checks
-//! the sign-in tests share.
+//! Stand-in CLIs that replay what codex and claude printed when they were recorded.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
@@ -8,8 +7,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use nix::errno::Errno;
-use nix::sys::signal::kill;
-use nix::unistd::Pid;
 use tempfile::TempDir;
 
 macro_rules! fixture {
@@ -25,26 +22,6 @@ macro_rules! fixture {
 pub(crate) use fixture;
 
 pub const PROMPT: &[u8] = fixture!("codex-login-device-auth.stdout");
-pub const SUCCESS_PROMPT: &[u8] = fixture!("fake-issuer/codex-login-device-auth-success.stdout");
-pub const SUCCESS: &[u8] = fixture!("fake-issuer/codex-login-device-auth-success.stderr");
-pub const REFUSED: &[u8] = fixture!("fake-issuer/codex-login-device-auth-refused-403.stderr");
-pub const UNSUPPORTED: &[u8] = fixture!("fake-issuer/codex-login-device-auth-refused-404.stderr");
-pub const THROTTLED: &[u8] = fixture!("fake-issuer/codex-login-device-auth-refused-429.stderr");
-pub const POLL_FAILED_PROMPT: &[u8] =
-    fixture!("fake-issuer/codex-login-device-auth-poll-failed-500.stdout");
-pub const POLL_FAILED: &[u8] =
-    fixture!("fake-issuer/codex-login-device-auth-poll-failed-500.stderr");
-pub const EXCHANGE_FAILED_PROMPT: &[u8] =
-    fixture!("fake-issuer/codex-login-device-auth-exchange-failed-400.stdout");
-pub const EXCHANGE_FAILED: &[u8] =
-    fixture!("fake-issuer/codex-login-device-auth-exchange-failed-400.stderr");
-pub const RELOGIN_REFUSED: &[u8] =
-    fixture!("fake-issuer/codex-login-device-auth-relogin-refused.stderr");
-pub const RELOGIN_ABANDONED_PROMPT: &[u8] =
-    fixture!("fake-issuer/codex-login-device-auth-relogin-abandoned.stdout");
-pub const NO_COLOR_PROMPT: &[u8] = fixture!("fake-issuer/codex-login-device-auth-no-color.stdout");
-pub const TERM_DUMB_PROMPT: &[u8] =
-    fixture!("fake-issuer/codex-login-device-auth-term-dumb.stdout");
 
 const PATH: &str = "/usr/bin:/bin";
 const SHELL_MAINTAINED: [&str; 4] = ["PWD", "OLDPWD", "SHLVL", "_"];
@@ -120,22 +97,4 @@ pub fn recorded(path: &Path) -> BTreeMap<String, String> {
         .filter(|(name, _)| !SHELL_MAINTAINED.contains(name))
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect()
-}
-
-/// The process id a fake saved with `echo $$` or `echo $!`.
-pub fn process(path: &Path) -> Pid {
-    let text = std::fs::read_to_string(path).expect("the fake to have recorded a process id");
-    Pid::from_raw(text.trim().parse().expect("a process id"))
-}
-
-/// Whether `process` is gone within a few seconds. A killed grandchild lingers as a zombie until
-/// init reaps it, so one look is not enough.
-pub async fn ended(process: Pid) -> bool {
-    for _ in 0..ATTEMPTS {
-        if kill(process, None) == Err(Errno::ESRCH) {
-            return true;
-        }
-        tokio::time::sleep(PAUSE).await;
-    }
-    false
 }

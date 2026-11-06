@@ -212,6 +212,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use abnegate_agent_cli::login::claude::Refusal;
+    use abnegate_agent_cli::login::codex::CREDENTIALS;
     use chrono::TimeDelta;
     use futures::future::{join_all, try_join_all};
     use serde_json::json;
@@ -226,7 +227,6 @@ mod tests {
     use crate::db::agent_logins::Insert;
     use crate::services::chat::session::Settings;
     use crate::services::login::claude::Explained;
-    use crate::services::login::codex::CREDENTIALS;
 
     const TOKEN_PATH: &str = "/v1/oauth/token";
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";

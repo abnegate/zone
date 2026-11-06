@@ -15,6 +15,8 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use abnegate_agent_cli::login::claude::Tokens;
+use abnegate_agent_cli::login::codex::{self, Account};
+use abnegate_agent_cli::login::{Cli, LoginError, Status};
 use abnegate_secret::MasterKey;
 use abnegate_secret::redact;
 use chrono::{DateTime, SubsecRound, Utc};
@@ -31,10 +33,10 @@ pub use usage::UsageStatus;
 pub use viewer::Viewer;
 
 use super::claude::Sealed;
-use super::probe::{self, Probe};
+use super::error::Error;
 use super::router::Chosen;
 use super::usage::{Availability, Snapshot, refresh};
-use super::{codex, credential, devices, oauth};
+use super::{credential, devices, oauth};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::db::ai_settings;
@@ -305,16 +307,15 @@ fn saved(config: &Config, login: &AgentLoginRow, held: usize) -> (State, Option<
     } else {
         return (State::Expired, None);
     };
-    let plan = codex::signed_in_as(&home)
-        .and_then(|account| account.plan)
-        .and_then(|plan| codex::plan::label(&plan))
-        .map(str::to_string);
+    let plan = Account::read(&home)
+        .and_then(|account| account.plan())
+        .map(|plan| plan.label().to_string());
     (State::SignedIn, plan)
 }
 
 /// The host's own sign-in, when the server may fall back on it and the host's CLI says it is
 /// signed in.
-async fn host(config: &Config, agent: AgentKind) -> Option<Probe> {
+async fn host(config: &Config, agent: AgentKind) -> Option<Status> {
     if !config.agents.host_login {
         return None;
     }
@@ -323,14 +324,34 @@ async fn host(config: &Config, agent: AgentKind) -> Option<Probe> {
         .await
 }
 
-async fn ask(agent: AgentKind, executable: PathBuf) -> Option<Probe> {
-    match probe::check(agent, &executable, &devices::variables(agent)).await {
-        Ok(probe) => probe.signed_in.then_some(probe),
-        Err(codex::Error::Unavailable {
-            executable,
-            message,
+async fn ask(agent: AgentKind, executable: PathBuf) -> Option<Status> {
+    signed_in(
+        agent,
+        &Cli::new(executable).with_environment(devices::variables(agent)),
+    )
+    .await
+}
+
+/// What `cli` says of its sign-in, when it says it is signed in.
+async fn signed_in(agent: AgentKind, cli: &Cli) -> Option<Status> {
+    let kind = match kind(agent) {
+        Ok(kind) => kind,
+        Err(error) => {
+            tracing::warn!(%agent, %error, "could not ask the host's CLI whether it is signed in");
+            return None;
+        }
+    };
+    match Status::check(kind, cli).await {
+        Ok(status) => status.signed_in.then_some(status),
+        Err(LoginError::Unavailable {
+            executable, reason, ..
         }) => {
-            tracing::debug!(%agent, %executable, %message, "no CLI on the host to fall back on");
+            tracing::debug!(
+                %agent,
+                executable = %executable.display(),
+                %reason,
+                "no CLI on the host to fall back on"
+            );
             None
         }
         Err(error) => {
@@ -342,6 +363,13 @@ async fn ask(agent: AgentKind, executable: PathBuf) -> Option<Probe> {
             None
         }
     }
+}
+
+/// `agent` as abnegate-agent-cli names it.
+fn kind(agent: AgentKind) -> Result<abnegate_agent_cli::AgentKind, Error> {
+    abnegate_agent_cli::AgentKind::named(agent.as_str()).ok_or_else(|| {
+        Error::Internal(format!("{agent} is not an agent abnegate-agent-cli drives"))
+    })
 }
 
 /// An agent travels as its CLI's name.
@@ -382,9 +410,15 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
     use crate::db::agent_logins::Insert;
-    use crate::services::login::codex::testing::fake;
+    use crate::services::login::codex::testing::{capture, environment, fake, fixture, recorded};
 
     const STATUSES: usize = 5;
+    const CLAUDE_SIGNED_IN: &[u8] = fixture!("claude-auth-status-signed-in.json");
+    const CLAUDE_SIGNED_OUT: &[u8] = fixture!("claude-auth-status-signed-out.json");
+    const CODEX_SIGNED_OUT: &[u8] = fixture!("codex-login-status-signed-out.stderr");
+    const CODEX_CHATGPT: &[u8] = fixture!("fake-issuer/codex-login-status-chatgpt.stderr");
+    const CODEX_CORRUPT: &[u8] = fixture!("fake-issuer/codex-login-status-corrupt-auth.stderr");
+    const MISSING_CLI: &str = "/nonexistent/zone/cli";
     const JAKE: &str = "jake@example.com";
     const ADA: &str = "ada@example.com";
     const OLD: &str = "old@example.com";
@@ -667,10 +701,7 @@ mod tests {
         let answers = join_all((0..STATUSES).map(|_| host(&config, AgentKind::Codex))).await;
         let later = host(&config, AgentKind::Codex).await;
 
-        let expected = Some(Probe {
-            signed_in: true,
-            label: Some("ChatGPT".to_string()),
-        });
+        let expected = Some(Status::new(true).with_label("ChatGPT"));
         for answer in answers.into_iter().chain([later]) {
             assert_eq!(answer, expected);
         }
@@ -680,6 +711,85 @@ mod tests {
             1,
             "every status asked the host's codex for itself"
         );
+    }
+
+    #[tokio::test]
+    async fn status_asks_the_cli_through_the_crate() {
+        for (agent, arguments, stdout, stderr, code, expected) in [
+            (
+                AgentKind::Claude,
+                "auth status",
+                CLAUDE_SIGNED_IN,
+                &b""[..],
+                0,
+                Some(Status::new(true).with_label("Claude Team")),
+            ),
+            (
+                AgentKind::Codex,
+                "login status",
+                &b""[..],
+                CODEX_CHATGPT,
+                0,
+                Some(Status::new(true).with_label("ChatGPT")),
+            ),
+            (
+                AgentKind::Claude,
+                "auth status",
+                CLAUDE_SIGNED_OUT,
+                &b""[..],
+                1,
+                None,
+            ),
+            (
+                AgentKind::Codex,
+                "login status",
+                &b""[..],
+                CODEX_SIGNED_OUT,
+                1,
+                None,
+            ),
+            (
+                AgentKind::Codex,
+                "login status",
+                &b""[..],
+                CODEX_CORRUPT,
+                1,
+                None,
+            ),
+        ] {
+            let directory = TempDir::new().expect("a temporary directory");
+            let record = directory.path().join("environment");
+            let printed = capture(&directory, "stdout", stdout);
+            let said = capture(&directory, "stderr", stderr);
+            let executable = fake(
+                &directory,
+                arguments,
+                &format!(
+                    "env > '{}'\ncat '{printed}'\ncat '{said}' >&2\nexit {code}",
+                    record.display()
+                ),
+            );
+            let mut given = environment();
+            given.insert("ZONE_STATUS_TEST".to_string(), "kept".to_string());
+
+            let answer = signed_in(
+                agent,
+                &Cli::new(&executable).with_environment(given.clone()),
+            )
+            .await;
+
+            assert_eq!(answer, expected, "{agent} {arguments} exiting {code}");
+            assert!(
+                std::env::var_os("CARGO_MANIFEST_DIR").is_some(),
+                "the test runner no longer sets CARGO_MANIFEST_DIR, so its absence below proves nothing"
+            );
+            assert_eq!(recorded(&record), given);
+        }
+        for agent in AgentKind::ALL {
+            let missing = Cli::new(MISSING_CLI).with_environment(environment());
+
+            assert_eq!(signed_in(agent, &missing).await, None, "{agent}");
+        }
     }
 
     #[tokio::test]
