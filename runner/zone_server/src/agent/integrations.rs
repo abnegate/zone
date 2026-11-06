@@ -2,11 +2,22 @@
 
 use abnegate_secret::SecretValue;
 use abnegate_vcs::BranchName;
+use abnegate_vcs::CommitSha as Revision;
+use abnegate_vcs::IssueReference;
+use abnegate_vcs::JobLogError;
+use abnegate_vcs::ParseError;
+use abnegate_vcs::PullRequestError;
+use abnegate_vcs::PullRequestReference;
+use abnegate_vcs::PullRequestService;
+use abnegate_vcs::Repository;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::num::NonZeroU8;
+use std::num::NonZeroU32;
+use std::num::NonZeroU64;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use uuid::Uuid;
@@ -35,7 +46,9 @@ use crate::services::project_directory::{self, Origin, Start};
 
 const ORIGIN: &str = "https://api.github.com/";
 const API_HOST_LABEL: &str = "api.";
-const PAGE_SIZE: usize = 100;
+const API_VERSION: &str = "2026-03-10";
+const PER_PAGE: NonZeroU8 = NonZeroU8::new(100).expect("a page holds rows");
+const PAGE_SIZE: usize = PER_PAGE.get() as usize;
 const FILE_PAGE_CHARS: u64 = 8_000;
 const ISSUE_BODY_CHARS: usize = 1_500;
 const BUILD_RECORD_CAP: usize = 20;
@@ -107,6 +120,22 @@ pub const SETTLED_ASSESSMENTS: [&str; 4] = [
     TERMINAL_ASSESSMENTS[1],
 ];
 const RATE_LIMIT_EXHAUSTED: &str = "GitHub's API rate limit is exhausted for this source's credential. Retrying now will not help; wait for the limit to reset.";
+const REQUEST_FAILED: &str = "GitHub request failed or timed out.";
+const INVALID_RESPONSE: &str = "GitHub returned an invalid response.";
+const UNEXPECTED_RESPONSE: &str = "GitHub returned an unexpected response. Check source access, permissions, rate limits and the requested resource.";
+const INVALID_REFERENCE: &str = "ref is invalid.";
+const FILE_TOO_LARGE: &str = "The file is too large to read.";
+const INVALID_ORIGIN: &str = "The configured GitHub API origin is invalid.";
+const INVALID_REPOSITORY: &str = "The source owner or repository name is invalid.";
+const CLIENT_UNAVAILABLE: &str = "Could not initialize the GitHub client.";
+const MISSING_DEFAULT_BRANCH: &str = "GitHub did not return a default branch.";
+const MISSING_COMMIT: &str = "GitHub did not return an immutable commit SHA.";
+const NUMBER_NOT_POSITIVE: &str = "number must be positive.";
+const PAGE_NOT_POSITIVE: &str = "page must be positive.";
+const LOG_UNDIRECTED: &str = "GitHub redirected the job log without a destination.";
+const LOG_UNEXPECTED_HOST: &str = "GitHub redirected the job log to an unexpected host.";
+const LOG_UNREACHABLE: &str = "The job log download failed or timed out.";
+const LOG_INTERRUPTED: &str = "The job log download failed part way through.";
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 const RETRY_AFTER_HEADER: &str = "Retry-After";
 const RATE_LIMIT_REMAINING_HEADER: &str = "X-RateLimit-Remaining";
@@ -388,8 +417,8 @@ impl Integration {
     async fn run(&self, params: Value) -> Result<Value, String> {
         let arguments: Arguments = serde_json::from_value(params)
             .map_err(|_| "Invalid integration arguments.".to_string())?;
-        if arguments.page == Some(0) {
-            return Err("page must be positive.".to_string());
+        if let Some(number) = arguments.page {
+            page(number)?;
         }
         if arguments.limit == Some(0) {
             return Err("limit must be positive.".to_string());
@@ -444,7 +473,7 @@ impl Integration {
                     .map_err(|_| "The source credentials could not be decrypted.".to_string())?,
             );
         }
-        let github = Github::new(configuration)?.at(self.scope.state.config())?;
+        let github = Github::new(configuration, self.scope.state.config())?;
         let mut result = if matches!(self.operation, Operation::CreatePull) {
             self.open_pull(&github, &arguments).await?
         } else if write {
@@ -607,41 +636,66 @@ enum Creation {
 pub struct Github {
     client: Client,
     origin: Url,
+    service: PullRequestService,
+    repository: Repository,
+    token: SecretValue,
     log_bytes: u64,
     signals: ReviewSignals,
     configuration: Configuration,
 }
 
 impl Github {
-    pub(crate) fn new(configuration: Configuration) -> Result<Self, String> {
+    /// This source's client against the GitHub origin the server is
+    /// configured for.
+    pub(crate) fn new(configuration: Configuration, config: &Config) -> Result<Self, String> {
+        let service = config.pull_requests().map_err(|error| match error {
+            PullRequestError::InvalidOrigin => INVALID_ORIGIN.to_string(),
+            _ => CLIENT_UNAVAILABLE.to_string(),
+        })?;
+        let mut github = Self::serving(configuration, service)?;
+        github.origin = config.github_rest_origin().ok_or(INVALID_ORIGIN)?;
+        Ok(github)
+    }
+
+    fn serving(configuration: Configuration, service: PullRequestService) -> Result<Self, String> {
         if !segment(&configuration.owner) || !segment(&configuration.repo) {
-            return Err("The source owner or repository name is invalid.".to_string());
+            return Err(INVALID_REPOSITORY.to_string());
         }
         let signals = match &configuration.review_signals {
             Some(names) => ReviewSignals::select(names)?,
             None => ReviewSignals::recognized(),
         };
+        let token = credential(configuration.token.clone());
+        let repository = Repository::new(&configuration.owner, &configuration.repo)
+            .map_err(|_| INVALID_REPOSITORY.to_string())?;
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
             .user_agent("Zone-workspace-tools")
             .build()
-            .map_err(|_| "Could not initialize the GitHub client.".to_string())?;
+            .map_err(|_| CLIENT_UNAVAILABLE.to_string())?;
         Ok(Self {
             client,
             origin: Url::parse(ORIGIN).expect("constant GitHub origin"),
+            service: service
+                .with_retry_after(MAX_RETRY_AFTER)
+                .with_api_version(API_VERSION),
+            repository,
+            token,
             log_bytes: MAX_LOG_BYTES,
             signals,
             configuration,
         })
     }
 
-    /// This client against the GitHub origin the server is configured for.
-    pub(crate) fn at(mut self, config: &Config) -> Result<Self, String> {
-        self.origin = config
-            .github_rest_origin()
-            .ok_or("The configured GitHub API origin is invalid.")?;
-        Ok(self)
+    fn reference(&self, number: u64) -> Result<PullRequestReference, String> {
+        let number = NonZeroU64::new(number).ok_or(NUMBER_NOT_POSITIVE)?;
+        Ok(PullRequestReference::new(self.repository.clone(), number))
+    }
+
+    fn issue_reference(&self, number: u64) -> Result<IssueReference, String> {
+        let number = NonZeroU64::new(number).ok_or(NUMBER_NOT_POSITIVE)?;
+        Ok(IssueReference::new(self.repository.clone(), number))
     }
 
     /// The `owner/repo` name GitHub reports records under.
@@ -727,17 +781,14 @@ impl Github {
                     "application/vnd.github+json"
                 },
             )
-            .header("X-GitHub-Api-Version", "2026-03-10");
+            .header("X-GitHub-Api-Version", API_VERSION);
         if let Some(token) = &self.configuration.token {
             request = request.bearer_auth(token);
         }
         if let Some(body) = body {
             request = request.json(body);
         }
-        request
-            .send()
-            .await
-            .map_err(|_| "GitHub request failed or timed out.".to_string())
+        request.send().await.map_err(|_| REQUEST_FAILED.to_string())
     }
 
     async fn get(&self, parts: &[&str], query: &[(&str, String)]) -> Result<Value, String> {
@@ -745,7 +796,7 @@ impl Github {
             .await?
             .json()
             .await
-            .map_err(|_| "GitHub returned an invalid response.".to_string())
+            .map_err(|_| INVALID_RESPONSE.to_string())
     }
 
     async fn post(&self, parts: &[&str], body: &Value) -> Result<Value, String> {
@@ -753,7 +804,7 @@ impl Github {
             .await?
             .json()
             .await
-            .map_err(|_| "GitHub returned an invalid response.".to_string())
+            .map_err(|_| INVALID_RESPONSE.to_string())
     }
 
     async fn graphql(&self, query: &str, variables: Value) -> Result<Value, String> {
@@ -769,7 +820,7 @@ impl Github {
             .await?
             .json()
             .await
-            .map_err(|_| "GitHub returned an invalid response.".to_string())?;
+            .map_err(|_| INVALID_RESPONSE.to_string())?;
         if let Some(errors) = response.get("errors")
             && errors.as_array().is_none_or(|rows| !rows.is_empty())
         {
@@ -803,10 +854,8 @@ impl Github {
                 Creation::Refused { .. } => Err(status_error(StatusCode::UNPROCESSABLE_ENTITY)),
             },
             Operation::Comment => {
-                let number = arguments.number.ok_or("number is required.")?;
-                if number == 0 {
-                    return Err("number must be positive.".to_string());
-                }
+                let reference =
+                    self.issue_reference(arguments.number.ok_or("number is required.")?)?;
                 let body = arguments
                     .body
                     .as_deref()
@@ -814,7 +863,7 @@ impl Github {
                     .ok_or("body is required.")?;
                 let created = self
                     .post(
-                        &["issues", &number.to_string(), "comments"],
+                        &["issues", &reference.number().to_string(), "comments"],
                         &json!({ "body": body }),
                     )
                     .await?;
@@ -891,7 +940,7 @@ impl Github {
                 .json()
                 .await
                 .map(Creation::Created)
-                .map_err(|_| "GitHub returned an invalid response.".to_string()),
+                .map_err(|_| INVALID_RESPONSE.to_string()),
             status => Err(status_error(status)),
         }
     }
@@ -900,18 +949,27 @@ impl Github {
         let reference = match reference.or(self.configuration.branch.as_deref()) {
             Some(value) if !value.trim().is_empty() => value.to_string(),
             Some(_) => return Err("ref must not be empty.".to_string()),
-            None => self.get(&[], &[]).await?["default_branch"]
-                .as_str()
-                .ok_or("GitHub did not return a default branch.")?
+            None => self
+                .service
+                .get_default_branch(&self.repository, &self.token)
+                .await
+                .map_err(|error| match error {
+                    PullRequestError::Parse(_) => MISSING_DEFAULT_BRANCH.to_string(),
+                    error => described(error),
+                })?
                 .to_string(),
         };
-        let commit = self.get(&["commits", &reference], &[]).await?;
-        let sha = commit["sha"]
-            .as_str()
-            .filter(|value| valid_sha(value))
-            .ok_or("GitHub did not return an immutable commit SHA.")?
-            .to_string();
-        Ok((reference, sha))
+        let sha = self
+            .service
+            .resolve_commit(&self.repository, &self.token, &reference)
+            .await
+            .map_err(|error| match error {
+                PullRequestError::Parse(ParseError::CommitSha(_)) => MISSING_COMMIT.to_string(),
+                PullRequestError::Parse(ParseError::BranchName(_))
+                | PullRequestError::InvalidRepositoryUrl => INVALID_REFERENCE.to_string(),
+                error => described(error),
+            })?;
+        Ok((reference, sha.to_string()))
     }
 
     /// The one call a wait on GitHub checks polls: resolve the reference once,
@@ -1174,11 +1232,12 @@ impl Github {
     async fn readiness(&self, arguments: &Arguments) -> Result<Value, String> {
         let (rows, next) = match arguments.number {
             Some(number) => {
-                if number == 0 {
-                    return Err("number must be positive.".to_string());
-                }
+                let reference = self.reference(number)?;
                 (
-                    vec![self.get(&["pulls", &number.to_string()], &[]).await?],
+                    vec![
+                        self.get(&["pulls", &reference.number().to_string()], &[])
+                            .await?,
+                    ],
                     None,
                 )
             }
@@ -1696,7 +1755,7 @@ impl Github {
 
     async fn file(&self, sha: &str, path: &str, offset: u64, limit: u64) -> Result<Value, String> {
         validate_path(path, self.configuration.path.as_deref())?;
-        let mut tree = sha.to_string();
+        let mut tree = revision(sha)?.to_string();
         let mut metadata = Value::Null;
         let components: Vec<&str> = path.split('/').collect();
         for (index, component) in components.iter().enumerate() {
@@ -1792,10 +1851,10 @@ impl Github {
             let (reference, sha) = self.resolve(arguments.reference.as_deref()).await?;
             return Ok((reference, sha, None));
         };
-        if number == 0 {
-            return Err("number must be positive.".to_string());
-        }
-        let pull = self.get(&["pulls", &number.to_string()], &[]).await?;
+        let reference = self.reference(number)?;
+        let pull = self
+            .get(&["pulls", &reference.number().to_string()], &[])
+            .await?;
         if pull["number"].as_u64() != Some(number) {
             return Err("GitHub returned a different pull request.".to_string());
         }
@@ -1851,14 +1910,14 @@ impl Github {
             .client
             .get(self.url(&["actions", "jobs", &job_id.to_string(), "logs"]))
             .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2026-03-10");
+            .header("X-GitHub-Api-Version", API_VERSION);
         if let Some(token) = &self.configuration.token {
             request = request.bearer_auth(token);
         }
         let response = request
             .send()
             .await
-            .map_err(|_| "GitHub request failed or timed out.".to_string())?;
+            .map_err(|_| REQUEST_FAILED.to_string())?;
         if response.status().is_success() {
             return Ok(response);
         }
@@ -1872,7 +1931,7 @@ impl Github {
             .headers()
             .get(reqwest::header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .ok_or("GitHub redirected the job log without a destination.")?;
+            .ok_or(LOG_UNDIRECTED)?;
         let target = self.log_redirect(location)?;
         // The signed destination carries its own authorization; forwarding the
         // source token off the API origin would hand it to storage.
@@ -1881,7 +1940,7 @@ impl Github {
             .get(target)
             .send()
             .await
-            .map_err(|_| "The job log download failed or timed out.".to_string())?;
+            .map_err(|_| LOG_UNREACHABLE.to_string())?;
         if !redirected.status().is_success() {
             return Err(format!(
                 "The job log download returned HTTP {}.",
@@ -1892,7 +1951,7 @@ impl Github {
     }
 
     fn log_redirect(&self, location: &str) -> Result<Url, String> {
-        let unexpected = "GitHub redirected the job log to an unexpected host.";
+        let unexpected = LOG_UNEXPECTED_HOST;
         let target = self
             .origin
             .join(location)
@@ -1925,7 +1984,7 @@ impl Github {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|_| "The job log download failed part way through.".to_string())?
+            .map_err(|_| LOG_INTERRUPTED.to_string())?
         {
             let room = (self.log_bytes as usize).saturating_sub(collected.len());
             if chunk.len() > room {
@@ -2455,6 +2514,51 @@ fn github_web_origin(config: &Config) -> Option<String> {
     })
 }
 
+fn credential(token: Option<String>) -> SecretValue {
+    SecretValue::new(token.unwrap_or_default())
+}
+
+fn page(number: u32) -> Result<NonZeroU32, String> {
+    NonZeroU32::new(number).ok_or_else(|| PAGE_NOT_POSITIVE.to_string())
+}
+
+fn revision(sha: &str) -> Result<Revision, String> {
+    Revision::parse(sha).map_err(|_| MISSING_COMMIT.to_string())
+}
+
+/// What a crate error says in Zone's words. GitHub's own words in
+/// `GitHubApi` can quote the request, so they are never repeated.
+fn described(error: PullRequestError) -> String {
+    match error {
+        PullRequestError::QuotaExhausted { .. } => RATE_LIMIT_EXHAUSTED.to_string(),
+        PullRequestError::AuthenticationFailed => status_error(StatusCode::UNAUTHORIZED),
+        PullRequestError::Forbidden => status_error(StatusCode::FORBIDDEN),
+        PullRequestError::NotFound => status_error(StatusCode::NOT_FOUND),
+        PullRequestError::RateLimited => status_error(StatusCode::TOO_MANY_REQUESTS),
+        PullRequestError::PullRequestAlreadyExists(_) => {
+            status_error(StatusCode::UNPROCESSABLE_ENTITY)
+        }
+        PullRequestError::Http(_) => REQUEST_FAILED.to_string(),
+        PullRequestError::JobLog(failure) => match failure {
+            JobLogError::Undirected => LOG_UNDIRECTED.to_string(),
+            JobLogError::UnexpectedHost => LOG_UNEXPECTED_HOST.to_string(),
+            JobLogError::Unreachable => LOG_UNREACHABLE.to_string(),
+            JobLogError::Refused(status) => {
+                format!("The job log download returned HTTP {status}.")
+            }
+            JobLogError::Interrupted => LOG_INTERRUPTED.to_string(),
+            _ => UNEXPECTED_RESPONSE.to_string(),
+        },
+        PullRequestError::TooLarge => FILE_TOO_LARGE.to_string(),
+        PullRequestError::InvalidOrigin => INVALID_ORIGIN.to_string(),
+        PullRequestError::InvalidRepositoryName | PullRequestError::InvalidRepositoryUrl => {
+            INVALID_REPOSITORY.to_string()
+        }
+        PullRequestError::Parse(_) => INVALID_RESPONSE.to_string(),
+        _ => UNEXPECTED_RESPONSE.to_string(),
+    }
+}
+
 fn status_error(status: StatusCode) -> String {
     format!(
         "GitHub returned HTTP {}. Check source access, permissions, rate limits and the requested resource.",
@@ -2895,15 +2999,22 @@ mod tests {
         github_named(server, "owner", "repository")
     }
 
-    fn github_named(server: &MockServer, owner: &str, repo: &str) -> Github {
-        let mut github = Github::new(Configuration {
+    fn configured(owner: &str, repo: &str) -> Configuration {
+        Configuration {
             owner: owner.into(),
             repo: repo.into(),
             branch: Some("main".into()),
             path: None,
             token: Some("test-secret".into()),
             review_signals: None,
-        })
+        }
+    }
+
+    fn github_named(server: &MockServer, owner: &str, repo: &str) -> Github {
+        let mut github = Github::serving(
+            configured(owner, repo),
+            PullRequestService::standing_in_for("github.com", &server.uri()).unwrap(),
+        )
         .unwrap();
         github.origin = Url::parse(&format!("{}/", server.uri())).unwrap();
         github
@@ -3336,6 +3447,11 @@ mod tests {
     async fn provider_errors_never_echo_secret_or_follow_redirects() {
         let server = MockServer::start().await;
         let external = MockServer::start().await;
+        let unbranched = |server: &MockServer| {
+            let mut github = github(server);
+            github.configuration.branch = None;
+            github
+        };
         Mock::given(method("GET"))
             .respond_with(
                 ResponseTemplate::new(302)
@@ -3344,8 +3460,8 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let error = github(&server).get(&[], &[]).await.unwrap_err();
-        assert!(error.contains("302"));
+        let error = unbranched(&server).resolve(None).await.unwrap_err();
+        assert_eq!(error, UNEXPECTED_RESPONSE);
         assert!(!error.contains("test-secret"));
         assert!(external.received_requests().await.unwrap().is_empty());
         server.reset().await;
@@ -3353,13 +3469,242 @@ mod tests {
             .respond_with(ResponseTemplate::new(403).set_body_string("test-secret"))
             .mount(&server)
             .await;
+        let error = unbranched(&server).resolve(None).await.unwrap_err();
+        assert_eq!(error, status_error(StatusCode::FORBIDDEN));
+        assert!(!error.contains("test-secret"));
+    }
+
+    #[tokio::test]
+    async fn every_request_names_the_api_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repository"))
+            .and(header("X-GitHub-Api-Version", API_VERSION))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"default_branch": "main"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repository/commits/main"))
+            .and(header("X-GitHub-Api-Version", API_VERSION))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"sha": COMMIT})))
+            .mount(&server)
+            .await;
+        let mut github = github(&server);
+        github.configuration.branch = None;
+        let resolved = github.resolve(None).await.unwrap();
+        assert_eq!(resolved, ("main".to_string(), COMMIT.to_string()));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
         assert!(
-            !github(&server)
-                .get(&[], &[])
-                .await
-                .unwrap_err()
-                .contains("test-secret")
+            requests.iter().all(|request| request
+                .headers
+                .get("x-github-api-version")
+                .is_some_and(|version| version == API_VERSION)),
+            "every request names the API version"
         );
+    }
+
+    #[test]
+    fn crate_errors_keep_zones_words() {
+        let cases = [
+            (
+                PullRequestError::quota_exhausted(
+                    abnegate_vcs::RateLimit::default()
+                        .with_limit(5000)
+                        .with_remaining(0)
+                        .with_resource("core"),
+                ),
+                RATE_LIMIT_EXHAUSTED.to_string(),
+            ),
+            (
+                PullRequestError::quota_exhausted(abnegate_vcs::RateLimit::default()),
+                RATE_LIMIT_EXHAUSTED.to_string(),
+            ),
+            (
+                PullRequestError::AuthenticationFailed,
+                status_error(StatusCode::UNAUTHORIZED),
+            ),
+            (
+                PullRequestError::Forbidden,
+                status_error(StatusCode::FORBIDDEN),
+            ),
+            (
+                PullRequestError::NotFound,
+                status_error(StatusCode::NOT_FOUND),
+            ),
+            (
+                PullRequestError::RateLimited,
+                status_error(StatusCode::TOO_MANY_REQUESTS),
+            ),
+            (
+                PullRequestError::PullRequestAlreadyExists(BranchName::parse("feature").unwrap()),
+                status_error(StatusCode::UNPROCESSABLE_ENTITY),
+            ),
+            (
+                PullRequestError::JobLog(JobLogError::Undirected),
+                LOG_UNDIRECTED.to_string(),
+            ),
+            (
+                PullRequestError::JobLog(JobLogError::UnexpectedHost),
+                LOG_UNEXPECTED_HOST.to_string(),
+            ),
+            (
+                PullRequestError::JobLog(JobLogError::Unreachable),
+                LOG_UNREACHABLE.to_string(),
+            ),
+            (
+                PullRequestError::JobLog(JobLogError::Refused(503)),
+                "The job log download returned HTTP 503.".to_string(),
+            ),
+            (
+                PullRequestError::JobLog(JobLogError::Interrupted),
+                LOG_INTERRUPTED.to_string(),
+            ),
+            (PullRequestError::TooLarge, FILE_TOO_LARGE.to_string()),
+            (PullRequestError::InvalidOrigin, INVALID_ORIGIN.to_string()),
+            (
+                PullRequestError::InvalidRepositoryName,
+                INVALID_REPOSITORY.to_string(),
+            ),
+            (
+                PullRequestError::InvalidRepositoryUrl,
+                INVALID_REPOSITORY.to_string(),
+            ),
+            (
+                PullRequestError::Parse(ParseError::BranchName("test-secret".into())),
+                INVALID_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::Parse(ParseError::CommitSha("test-secret".into())),
+                INVALID_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::Parse(ParseError::ObjectId("test-secret".into())),
+                INVALID_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::Parse(ParseError::RepositoryPath("test-secret".into())),
+                INVALID_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::Parse(ParseError::RepositoryUrl),
+                INVALID_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::Parse(ParseError::Tag("test-secret".into())),
+                INVALID_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::GitHubApi(
+                    "GitHub API returned 500 Internal Server Error: test-secret".into(),
+                ),
+                UNEXPECTED_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::GitHubApi("GitHub API returned 302 Found".into()),
+                UNEXPECTED_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::RepositoryExists("test-secret".into()),
+                UNEXPECTED_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::NotMergeable("test-secret".into()),
+                UNEXPECTED_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::Protected("test-secret".into()),
+                UNEXPECTED_RESPONSE.to_string(),
+            ),
+            (PullRequestError::HeadMoved, UNEXPECTED_RESPONSE.to_string()),
+            (
+                PullRequestError::AutoMergeNotAllowed,
+                UNEXPECTED_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::MergeMethodNotAllowed("test-secret".into()),
+                UNEXPECTED_RESPONSE.to_string(),
+            ),
+            (
+                PullRequestError::AlreadyMergeable,
+                UNEXPECTED_RESPONSE.to_string(),
+            ),
+        ];
+        for (error, expected) in cases {
+            let shown = format!("{error:?}");
+            let said = described(error);
+            assert_eq!(said, expected, "{shown}");
+            assert!(!said.contains("test-secret"), "{shown} echoed its payload");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_github_reads_as_failed_or_timed_out() {
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let github = Github::serving(
+            configured("owner", "repository"),
+            PullRequestService::standing_in_for("github.com", &format!("http://{address}"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(github.resolve(None).await.unwrap_err(), REQUEST_FAILED);
+    }
+
+    #[tokio::test]
+    async fn default_branch_and_commit_answers_keep_their_site_words() {
+        let server = MockServer::start().await;
+        let mut github = github(&server);
+        github.configuration.branch = None;
+        for (repository, commit, expected) in [
+            (
+                json!({"default_branch": "bad..name"}),
+                json!({"sha": COMMIT}),
+                MISSING_DEFAULT_BRANCH,
+            ),
+            (json!({}), json!({"sha": COMMIT}), UNEXPECTED_RESPONSE),
+            (
+                json!({"default_branch": "main"}),
+                json!({"sha": "abc123"}),
+                MISSING_COMMIT,
+            ),
+            (
+                json!({"default_branch": "main"}),
+                json!({}),
+                UNEXPECTED_RESPONSE,
+            ),
+        ] {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/owner/repository"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(repository.clone()))
+                .mount(&server)
+                .await;
+            mock(&server, "commits/main", commit.clone()).await;
+            assert_eq!(
+                github.resolve(None).await.unwrap_err(),
+                expected,
+                "{repository} then {commit}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revision_expression_is_refused_before_anything_is_sent() {
+        let server = MockServer::start().await;
+        mock(&server, "commits/main", json!({"sha": COMMIT})).await;
+        for expression in ["main~1", "main^", "HEAD@{1}"] {
+            assert_eq!(
+                github(&server).resolve(Some(expression)).await.unwrap_err(),
+                INVALID_REFERENCE,
+                "{expression}"
+            );
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[test]
@@ -4734,16 +5079,27 @@ mod tests {
         mock(
             server,
             "actions/runs",
-            json!({"workflow_runs": [{"workflow_id": 1, "head_sha": COMMIT, "status": "completed", "conclusion": "success"}], "total_count": 1}),
+            json!({"workflow_runs": [{"id": 11, "workflow_id": 1, "name": "CI",
+                   "path": ".github/workflows/ci.yml", "event": "pull_request",
+                   "head_sha": COMMIT, "status": "completed", "conclusion": "success",
+                   "created_at": "2026-09-05T00:00:00Z", "updated_at": "2026-09-05T00:05:00Z",
+                   "html_url": "https://github.com/owner/repository/actions/runs/11",
+                   "repository": {"full_name": "owner/repository"}}], "total_count": 1}),
         )
         .await;
         mock(
             server,
             &format!("commits/{COMMIT}/check-runs"),
-            json!({"check_runs": [{"head_sha": COMMIT, "status": "completed", "conclusion": "success"}]}),
+            json!({"check_runs": [{"id": 21, "name": "test", "head_sha": COMMIT, "status": "completed", "conclusion": "success"}]}),
         )
         .await;
         mock(server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
+        mock(
+            server,
+            &format!("commits/{COMMIT}/status"),
+            json!({"statuses": [], "total_count": 0}),
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -5676,21 +6032,22 @@ mod tests {
             token: None,
             review_signals: signals,
         };
+        let config = crate::state::test_config();
         assert_eq!(
-            Github::new(configuration(None))
+            Github::new(configuration(None), &config)
                 .unwrap()
                 .signals
                 .reviewers(),
             ReviewSignals::recognized().reviewers()
         );
         assert_eq!(
-            Github::new(configuration(Some(vec!["greptile".into()])))
+            Github::new(configuration(Some(vec!["greptile".into()])), &config)
                 .unwrap()
                 .signals
                 .reviewers(),
             vec!["greptile-apps".to_string()]
         );
-        let error = Github::new(configuration(Some(vec!["sonarcloud".into()])))
+        let error = Github::new(configuration(Some(vec!["sonarcloud".into()])), &config)
             .err()
             .expect("an unrecognised review signal is rejected");
         assert!(error.contains("sonarcloud"), "{error}");
@@ -6239,6 +6596,64 @@ mod tests {
         let error = github(&server).resolve(None).await.unwrap_err();
         assert!(error.contains("HTTP 403"), "{error}");
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    async fn retried(retry_after: &str) -> (Result<(String, String), String>, usize) {
+        let server = MockServer::start().await;
+        rate_limited(
+            &server,
+            ResponseTemplate::new(429).insert_header(RETRY_AFTER_HEADER, retry_after),
+        )
+        .await;
+        let resolved = github(&server).resolve(None).await;
+        (resolved, server.received_requests().await.unwrap().len())
+    }
+
+    fn soon(format: &str) -> String {
+        (Utc::now() + chrono::Duration::seconds(2))
+            .format(format)
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn retry_after_values_the_crate_will_not_wait_on_fail_at_once() {
+        const IMF_FIXDATE: &str = "%a, %d %b %Y %H:%M:%S GMT";
+        let distant = (Utc::now() + chrono::Duration::seconds(120))
+            .format(IMF_FIXDATE)
+            .to_string();
+        for value in [
+            soon("%a, %d %b %Y %H:%M:%S +0000"),
+            "61".to_string(),
+            "18446744073709551616".to_string(),
+            "Thu, 01 Jan 1969 00:00:00 GMT".to_string(),
+            soon(IMF_FIXDATE).to_lowercase().replace("gmt", "GMT"),
+            soon("%d %b %Y %H:%M:%S GMT"),
+            String::new(),
+            "soon".to_string(),
+            distant,
+        ] {
+            let (resolved, requests) = retried(&value).await;
+            assert_eq!(
+                resolved.unwrap_err(),
+                status_error(StatusCode::TOO_MANY_REQUESTS),
+                "{value:?}"
+            );
+            assert_eq!(requests, 1, "{value:?} was waited on");
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_after_dates_in_every_rfc_9110_form_are_waited_on_once() {
+        for value in [
+            "Sun, 06 Nov 1994 08:48:00 GMT".to_string(),
+            " 1 ".to_string(),
+            soon("%A, %d-%b-%y %H:%M:%S GMT"),
+            soon("%a %b %e %H:%M:%S %Y"),
+        ] {
+            let (resolved, requests) = retried(&value).await;
+            assert_eq!(resolved.unwrap().1, COMMIT, "{value:?}");
+            assert_eq!(requests, 2, "{value:?} was not retried exactly once");
+        }
     }
 
     #[test]
