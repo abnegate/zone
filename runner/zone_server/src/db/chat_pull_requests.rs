@@ -156,6 +156,8 @@ where
 /// Turns the auto-fix preference on for `user`, whose runs then act as them,
 /// or off. The newest run stays claimed either way, so turning it back on
 /// while that run works cannot start a second one on the same branch.
+/// Turning it on forgets the head that run started from, so it is also how
+/// to retry a head a settled run could do nothing with.
 pub async fn set_auto_fix<'e, E>(
     executor: E,
     chat_id: Uuid,
@@ -169,7 +171,8 @@ where
     sqlx::query_as(concat!(
         "UPDATE chat_pull_requests
          SET auto_fix = $3,
-             auto_fix_by = CASE WHEN $3 THEN $4 END
+             auto_fix_by = CASE WHEN $3 THEN $4 END,
+             auto_fix_head = CASE WHEN $3 THEN NULL ELSE auto_fix_head END
          WHERE chat_id = $1 AND id = $2
          RETURNING ",
         columns!()
@@ -574,6 +577,31 @@ mod tests {
         let next = start_at(&pool, &watched, Some(run.id), NEXT).await;
         assert!(next.is_some(), "a new head is worth another run");
         assert_eq!(tasks_in(&pool, watched.workspace).await, 2);
+    }
+
+    #[tokio::test]
+    async fn turning_auto_fix_on_again_retries_the_same_head() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+        let run = start(&pool, &watched, None).await.expect("the first run");
+        tasks::complete_task_run(&pool, run.id, "failed", Some("no project could push"), None)
+            .await
+            .expect("the run settles");
+
+        let retried = set_auto_fix(
+            &pool,
+            watched.row.chat_id,
+            watched.row.id,
+            true,
+            watched.user,
+        )
+        .await
+        .expect("the update")
+        .expect("the row");
+        assert_eq!(retried.auto_fix_head, None);
+
+        let again = start(&pool, &watched, Some(run.id)).await;
+        assert!(again.is_some(), "turning it on again is an explicit retry");
     }
 
     #[tokio::test]
