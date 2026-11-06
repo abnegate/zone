@@ -249,14 +249,50 @@ async fn a_passed_through_base_url_is_set_as_a_variable() {
     }
 
     for (agent, environment) in handed().await {
-        let (name, value) = match agent {
-            AgentKind::Codex => GATEWAYS[1],
-            _ => GATEWAYS[0],
-        };
+        for (name, value) in GATEWAYS {
+            assert_eq!(
+                environment.get(name).map(String::as_str),
+                Some(value),
+                "{agent} was not handed the operator's {name}"
+            );
+        }
+    }
+}
+
+/// The passthrough names each base URL on its own: one the operator left
+/// out reaches neither agent, even beside one they named.
+#[tokio::test]
+async fn a_base_url_left_out_of_the_passthrough_reaches_no_agent() {
+    const NAMED: (&str, &str) = ("ANTHROPIC_BASE_URL", "https://gateway.internal/anthropic");
+    const LEFT_OUT: (&str, &str) = ("OPENAI_BASE_URL", "https://notreal-host-openai.internal");
+    if delegated(
+        module_path!(),
+        "a_base_url_left_out_of_the_passthrough_reaches_no_agent",
+        &[(PASSTHROUGH, NAMED.0), NAMED, LEFT_OUT],
+    )
+    .await
+    {
+        return;
+    }
+
+    for (agent, environment) in handed().await {
         assert_eq!(
-            environment.get(name).map(String::as_str),
-            Some(value),
-            "{agent} was not pointed at the operator's gateway"
+            environment.get(NAMED.0).map(String::as_str),
+            Some(NAMED.1),
+            "{agent} was not handed the operator's {}",
+            NAMED.0
+        );
+        assert!(
+            !environment.contains_key(LEFT_OUT.0),
+            "{agent} was handed the host's {}",
+            LEFT_OUT.0
+        );
+        assert!(
+            environment
+                .values()
+                .all(|value| !value.contains(LEFT_OUT.1)),
+            "{agent} was handed the host's {} under another name",
+            LEFT_OUT.0
         );
     }
 }

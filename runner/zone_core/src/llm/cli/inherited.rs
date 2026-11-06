@@ -158,11 +158,45 @@ mod tests {
 
     #[test]
     fn every_inheritable_name_is_the_allowlist_and_its_extras() {
-        let expected: BTreeSet<String> = DEFAULT_ENVIRONMENT
-            .iter()
-            .chain(EXTRAS)
-            .map(|name| (*name).to_string())
-            .collect();
+        let expected: BTreeSet<String> = [
+            "PATH",
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "TMPDIR",
+            "LANG",
+            "TERM",
+            "TZ",
+            "SSL_CERT_FILE",
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "SHELL",
+            "XDG_RUNTIME_DIR",
+            "SSL_CERT_DIR",
+            "NODE_EXTRA_CA_CERTS",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LC_COLLATE",
+            "LC_MESSAGES",
+            "LC_MONETARY",
+            "LC_NUMERIC",
+            "LC_TIME",
+            "LC_ADDRESS",
+            "LC_IDENTIFICATION",
+            "LC_MEASUREMENT",
+            "LC_NAME",
+            "LC_PAPER",
+            "LC_TELEPHONE",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
 
         assert_eq!(inheritable(&none()), expected);
     }

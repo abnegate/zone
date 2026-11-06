@@ -143,6 +143,33 @@ mod tests {
     }
 
     #[test]
+    fn a_base_url_left_out_of_the_passthrough_is_not_set_on_the_run() {
+        for agent in AgentKind::ALL.iter().copied() {
+            let settings = confined_with(
+                agent,
+                zone(),
+                None,
+                BuiltinTools::Granted,
+                &["ANTHROPIC_BASE_URL"],
+            );
+
+            assert_eq!(
+                settings
+                    .variables
+                    .get("ANTHROPIC_BASE_URL")
+                    .map(String::as_str),
+                Some(GATEWAY),
+                "{agent}"
+            );
+            assert!(
+                !settings.variables.contains_key("OPENAI_BASE_URL"),
+                "{agent}"
+            );
+            assert!(!settings.allowed.contains("OPENAI_BASE_URL"), "{agent}");
+        }
+    }
+
+    #[test]
     fn a_withheld_run_drops_the_sandbox_and_asks_no_permission() {
         for agent in AgentKind::ALL.iter().copied() {
             let settings = confined_with(

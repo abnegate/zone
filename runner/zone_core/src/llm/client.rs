@@ -5,16 +5,16 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use abnegate_agent_cli::{AgentKind, CliProvider, CliSettings, Occupancy};
+use abnegate_agent_cli::{AgentKind, AgentStream, CliProvider, CliSettings, Occupancy};
 use abnegate_llm::finish_reason::STOP;
 use abnegate_llm::{
-    ChatResponse, ChatStreamChunk, Choice, Completion, CompletionProvider, CompletionRequest,
-    Effort, Error, LlmConfig, Message, RequestOptions, ToolDefinition,
+    ChatResponse, ChatStreamChunk, Choice, Completion, CompletionRequest, Effort, Error, LlmConfig,
+    Message, RequestOptions, ToolDefinition,
 };
 use futures::Stream;
 
 use super::backend::LlmBackend;
-use super::cli::{BuiltinTools, Observer, Toolset, confined};
+use super::cli::{BuiltinTools, Observer, SignIn, Toolset, confined};
 use reported::Reported;
 use turn::{Turn, failed};
 
@@ -253,7 +253,9 @@ impl LlmClient {
         options: RequestOptions,
     ) -> Result<ChatResponse, Error> {
         let LlmBackend::Cli {
-            agent, settings, ..
+            agent,
+            settings,
+            sign_in,
         } = &self.backend
         else {
             return self
@@ -263,16 +265,10 @@ impl LlmClient {
         };
 
         refuse_tools(tools, *agent)?;
-        let completion = self
-            .provider(*agent, settings)
-            .complete(CompletionRequest::new(
-                known(*agent, model),
-                messages,
-                options,
-            ))
-            .await
-            .map_err(failed)?;
-        Ok(response(completion, model))
+        let (turn, events) = self
+            .start(*agent, settings, *sign_in, model, messages, options)
+            .await?;
+        Ok(response(turn.completion(events).await?, model))
     }
 
     /// Stream a chat completion from the configured model.
@@ -319,23 +315,40 @@ impl LlmClient {
         };
 
         refuse_tools(tools, *agent)?;
+        let (turn, events) = self
+            .start(*agent, settings, *sign_in, model, messages, options)
+            .await?;
+        Ok(Box::pin(turn.chunks(events)))
+    }
+
+    /// Start `agent` on `model` under `settings` and `sign_in`, returning
+    /// the turn its events are read through and the events themselves.
+    async fn start(
+        &self,
+        agent: AgentKind,
+        settings: &CliSettings,
+        sign_in: SignIn,
+        model: &str,
+        messages: &[Message],
+        options: RequestOptions,
+    ) -> Result<(Turn, AgentStream), Error> {
         let events = self
-            .provider(*agent, settings)
+            .provider(agent, settings)
             .stream(CompletionRequest::new(
-                known(*agent, model),
+                known(agent, model),
                 messages,
                 options,
             ))
             .await
             .map_err(failed)?;
         let turn = Turn::new(
-            *agent,
-            *sign_in,
+            agent,
+            sign_in,
             settings.working_directory.as_deref(),
             self.observer.clone(),
             self.reported.clone(),
         );
-        Ok(Box::pin(turn.chunks(events)))
+        Ok((turn, events))
     }
 
     /// The provider that runs this turn's `agent`, under `settings` confined

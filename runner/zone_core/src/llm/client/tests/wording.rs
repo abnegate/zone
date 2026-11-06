@@ -17,7 +17,10 @@ const REQUIRES_CREDITS: &str =
 const LIMIT_HIT: &str = "You have hit your session limit. It resets at 5pm.";
 
 /// An output limit small enough for a test's prose to pass it.
-const OUTPUT_LIMIT: usize = 64;
+const SMALL_OUTPUT_LIMIT: usize = 64;
+
+/// How much of an overlong line is looked for in what the reader was told.
+const PROSE_SAMPLE: usize = 64;
 
 /// A Claude stand-in that reports `window` refusing the turn, then fails it.
 fn refused_on(window: &str) -> StandIn {
@@ -146,14 +149,20 @@ async fn an_overlong_line_fails_the_turn() {
 
     let (delivered, failure) = asked(&claude(&stand_in), AgentKind::Claude).await;
 
-    assert!(failure.is_some(), "an overlong line was skipped");
+    let failure = failure.expect("an overlong line to fail the turn");
+    assert!(matches!(failure, Error::Agent(_)), "{failure:?}");
+    let rendered = failure.to_string();
+    assert!(
+        rendered.contains(&format!("one event exceeded {DEFAULT_LINE_LIMIT} bytes")),
+        "{rendered}"
+    );
     assert!(reasons(&delivered).is_empty(), "the turn still finished");
-    assert!(!spoken(&delivered).contains(&prose[..OUTPUT_LIMIT]));
+    assert!(!spoken(&delivered).contains(&prose[..PROSE_SAMPLE]));
 }
 
 #[tokio::test]
 async fn tool_output_does_not_count_toward_the_output_limit() {
-    let printed = "y".repeat(OUTPUT_LIMIT * 4);
+    let printed = "y".repeat(SMALL_OUTPUT_LIMIT * 4);
     let stand_in = StandIn::new(&format!(
         r#"echo '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"toolu_01","name":"Bash","input":{{"command":"cat big"}}}}]}},"parent_tool_use_id":null}}'
 echo '{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_01","content":"{printed}"}}]}},"parent_tool_use_id":null}}'
@@ -161,7 +170,7 @@ echo '{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result
     ));
     let client = running(
         AgentKind::Claude,
-        standing_in(&stand_in).with_output_limit(OUTPUT_LIMIT),
+        standing_in(&stand_in).with_output_limit(SMALL_OUTPUT_LIMIT),
     );
 
     let (delivered, failure) = asked(&client, AgentKind::Claude).await;
@@ -173,14 +182,14 @@ echo '{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result
 
 #[tokio::test]
 async fn prose_past_the_limit_fails_with_prose_exceeded() {
-    let prose = "z".repeat(OUTPUT_LIMIT * 2);
+    let prose = "z".repeat(SMALL_OUTPUT_LIMIT * 2);
     let stand_in = StandIn::new(&format!(
         r#"echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{prose}"}}]}},"parent_tool_use_id":null}}'
 echo '{{"type":"result","subtype":"success","is_error":false}}'"#
     ));
     let client = running(
         AgentKind::Claude,
-        standing_in(&stand_in).with_output_limit(OUTPUT_LIMIT),
+        standing_in(&stand_in).with_output_limit(SMALL_OUTPUT_LIMIT),
     );
 
     let (delivered, failure) = asked(&client, AgentKind::Claude).await;

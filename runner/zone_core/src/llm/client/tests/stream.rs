@@ -125,10 +125,17 @@ async fn a_subagents_calls_are_reasoning_only_when_nothing_observes() {
 
     let subagents_call = "- Grep `pub mod`\n";
     let main_agents_call = "- Bash `cargo build`\n";
-    assert!(
-        reasoned(&unwatched).contains(subagents_call),
-        "{}",
-        reasoned(&unwatched)
+    assert_eq!(
+        reasoned(&unwatched),
+        [
+            "- Agent `Survey the crate`\n",
+            subagents_call,
+            "- Read `/w/src/missing.rs`\n",
+            "- Agent `Review the change`\n",
+            main_agents_call,
+            "- Bash `cargo test -p zone_core`\n",
+        ]
+        .concat()
     );
     assert!(
         !reasoned(&watched).contains(subagents_call),
