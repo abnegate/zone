@@ -27,6 +27,10 @@ on:
       - 'comfyui/model-manifest.json'
       - '.github/workflows/setup-tests.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   tests:
     name: Setup and model-init tests

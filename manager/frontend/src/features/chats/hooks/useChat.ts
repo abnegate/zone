@@ -149,7 +149,9 @@ type ServerMessage =
       tool_call_id: string;
       name: string;
       arguments: string;
+      at?: number;
       reasoning?: string;
+      reasoning_at?: number;
       reason?: string;
     }
   | {
@@ -182,6 +184,8 @@ type ServerMessage =
       resets_at: string | null;
       carried: boolean;
       at: number;
+      calls?: number;
+      reasoning?: string;
     }
   | {
       type: 'tool_result';
@@ -686,13 +690,34 @@ export function useChat(
                 : call
             );
             const hasMedia = Boolean(message.metadata?.attachments?.length);
-            const content =
-              message.content.trim() ||
-              (stopped?.length || hasMedia ? '[Stopped before answering]' : message.content);
+            const replaced = !message.content.trim() && Boolean(stopped?.length || hasMedia);
+            const content = replaced ? '[Stopped before answering]' : message.content;
+            const calls = replaced
+              ? stopped?.map((call) => ({
+                  ...call,
+                  at: call.at === undefined ? undefined : 0,
+                  reasoning_at: call.reasoning_at === undefined ? undefined : 0,
+                }))
+              : stopped;
+            const handovers = replaced
+              ? message.metadata?.handovers?.map((handover) => ({ ...handover, at: 0 }))
+              : message.metadata?.handovers;
+            const reasoningAt =
+              replaced && message.metadata?.reasoning_at !== undefined
+                ? 0
+                : message.metadata?.reasoning_at;
             return {
               ...message,
               content,
-              metadata: stopped ? { ...message.metadata, tool_calls: stopped } : message.metadata,
+              metadata:
+                calls || handovers || reasoningAt !== undefined
+                  ? {
+                      ...message.metadata,
+                      tool_calls: calls,
+                      handovers,
+                      reasoning_at: reasoningAt,
+                    }
+                  : message.metadata,
             };
           }),
         };
@@ -777,21 +802,31 @@ export function useChat(
             assistantMetadata = {
               ...assistantMetadata,
               reasoning: `${assistantMetadata?.reasoning ?? ''}${payload.content}`,
+              reasoning_at: assistantMetadata?.reasoning
+                ? assistantMetadata.reasoning_at
+                : Array.from(assistantContent).length,
             };
             upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
           }
           break;
         case 'tool_call': {
           const preceding = payload.reasoning ?? assistantMetadata?.reasoning;
+          const precedingAt = payload.reasoning_at ?? assistantMetadata?.reasoning_at;
           if (preceding) {
-            assistantMetadata = { ...assistantMetadata, reasoning: undefined };
+            assistantMetadata = {
+              ...assistantMetadata,
+              reasoning: undefined,
+              reasoning_at: undefined,
+            };
           }
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
             arguments: payload.arguments,
+            at: payload.at ?? Array.from(assistantContent).length,
             detail: 'Running…',
             pending: true,
             reasoning: preceding,
+            reasoning_at: preceding ? precedingAt : undefined,
             reason: payload.reason,
           });
           if (assistantId === payload.message_id) {
@@ -884,6 +919,8 @@ export function useChat(
           if (!handover.success) break;
           assistantMetadata = {
             ...assistantMetadata,
+            reasoning: handover.data.reasoning ? undefined : assistantMetadata?.reasoning,
+            reasoning_at: handover.data.reasoning ? undefined : assistantMetadata?.reasoning_at,
             handovers: appendHandover(assistantMetadata?.handovers ?? [], handover.data),
           };
           upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);

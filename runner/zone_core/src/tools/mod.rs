@@ -28,6 +28,14 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
+/// The tool an agent asks before running one of its own.
+///
+/// Served by zone over the same MCP endpoint as every other tool, and named
+/// to the agent on its command line. It is not a workspace tool: nothing in a
+/// prompt teaches it, and it spends none of a turn's call budget, because the
+/// agent asking whether a call may run is not the call.
+pub const PERMISSION_TOOL: &str = "approve_tool_call";
+
 /// Budget a tool spends on output it pages or trims for itself: a `read_file`
 /// page, a captured command log.
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
