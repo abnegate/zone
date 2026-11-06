@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use super::routing;
 use super::{Session, WaitFor};
-use crate::environment;
+use crate::llm::cli;
 
 pub const TAIL_JOB: &str = "tail_job";
 
@@ -525,7 +525,7 @@ async fn exclude(checkout: &Path) {
         .arg(EXCLUDE_PATH)
         .current_dir(checkout)
         .env_clear()
-        .envs(environment::inherited())
+        .envs(cli::inherited())
         .stdin(Stdio::null())
         .output()
         .await

@@ -17,7 +17,7 @@ use super::beneath::{self, Access};
 use super::denied::Denied;
 use super::identity::Identity;
 use super::{REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolResult, reason_property};
-use crate::environment;
+use crate::llm::cli;
 
 // Prompt budget; matches `read_repository_file` paging in zone_server.
 const FILE_PAGE_CHARS: usize = super::MAX_TOOL_OUTPUT_CHARS;
@@ -1105,7 +1105,7 @@ async fn search_ripgrep(
     // keep the shape read below, which a config file could change.
     command
         .env_clear()
-        .envs(environment::inherited())
+        .envs(cli::inherited())
         .arg("--no-config")
         .arg("--null")
         .arg("--with-filename")
@@ -1192,7 +1192,7 @@ fn ripgrep_available() -> bool {
         std::process::Command::new("rg")
             .arg("--version")
             .env_clear()
-            .envs(environment::inherited())
+            .envs(cli::inherited())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
