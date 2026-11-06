@@ -37,7 +37,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pull_request_without_threads_counts_none() {
+    fn a_pull_request_without_threads_counts_zero() {
         assert_eq!(
             Threads::counted(ReviewThreadCount::new(0, 0, true)),
             Some(Threads::default())

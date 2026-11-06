@@ -1158,6 +1158,7 @@ async fn review_threads_read_as_unknown_when_github_will_not_list_them() {
     automate(&github, Automation::default()).await;
     threads_read()
         .respond_with(ResponseTemplate::new(502))
+        .expect(1..)
         .mount(&github)
         .await;
     let database = context_database_url();
@@ -1186,6 +1187,7 @@ async fn review_threads_read_as_unknown_when_github_stops_short_of_every_thread(
                 }},
             }}})),
         )
+        .expect(1..)
         .mount(&github)
         .await;
     let database = context_database_url();
