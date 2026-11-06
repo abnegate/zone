@@ -1162,6 +1162,34 @@ async fn review_threads_read_as_unknown_when_github_will_not_list_them() {
 }
 
 #[tokio::test]
+async fn review_threads_read_as_unknown_when_github_stops_short_of_every_thread() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    threads_read()
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
+                "pullRequest": {"reviewThreads": {
+                    "pageInfo": {"hasNextPage": true, "endCursor": null},
+                    "nodes": [{"id": "PRRT_0", "isResolved": true}],
+                }},
+            }}})),
+        )
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    workspace.record(&link(&github, 12)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
+    assert_eq!(listed[0]["status"]["threads"], Value::Null, "{listed}");
+}
+
+#[tokio::test]
 async fn a_merged_pull_request_is_listed_without_reading_its_review_threads() {
     let github = MockServer::start().await;
     Mock::given(method("GET"))
