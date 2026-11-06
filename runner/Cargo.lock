@@ -177,9 +177,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-vcs"
-version = "0.1.9"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ade9e1a44d81a55014f7fc82278b0f0a709e11220647200711405145f691632c"
+checksum = "c4e62029475a1c7ab7ffe8a940efc824d51cbb2b92c07777885d6c88ebe4161e"
 dependencies = [
  "abnegate-http",
  "abnegate-secret",
@@ -187,6 +187,7 @@ dependencies = [
  "chrono",
  "hex",
  "hmac",
+ "jsonwebtoken",
  "nix",
  "reqwest 0.13.5",
  "serde",
