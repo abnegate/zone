@@ -2298,6 +2298,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_check_wait_whose_refused_token_finds_the_installation_removed_is_refused_as_disconnected()
+     {
+        const REFUSED_TOKEN: &str = "ghs_refusedinstallationtoken";
+        let connected = Connected::new().await;
+        let number = number();
+        minting_once(&connected, number, REFUSED_TOKEN).await;
+        Mock::given(method("POST"))
+            .and(path(format!("/app/installations/{number}/access_tokens")))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        uninstalled(&connected.github, number).await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPOSITORY}/commits/main")))
+            .and(header("Authorization", format!("Bearer {REFUSED_TOKEN}")))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let scope = tool.scope.as_ref().expect("a workspace scope");
+
+        let refusal = tool
+            .authenticated(scope, source.id, |github| async move {
+                github.settled(None).await
+            })
+            .await
+            .err();
+
+        assert_eq!(refusal.as_deref(), Some(SOURCE_DISCONNECTED));
+    }
+
+    #[tokio::test]
     async fn a_check_wait_on_an_installation_github_removed_is_refused_without_the_stored_token() {
         let connected = Connected::new().await;
         let number = number();

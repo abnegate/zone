@@ -283,6 +283,12 @@ impl Unauthenticated for Refusal {
     }
 }
 
+impl From<GitHubError> for Refusal {
+    fn from(error: GitHubError) -> Self {
+        Self(refusal(&error).to_string())
+    }
+}
+
 fn refusal(error: &GitHubError) -> &'static str {
     match error {
         GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected => {

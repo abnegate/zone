@@ -10,8 +10,9 @@ use abnegate_secret::SecretValue;
 use abnegate_vcs::Checkout as GitCheckout;
 use abnegate_vcs::git::GitResult;
 use abnegate_vcs::{
-    BranchName, CommitSha, Description, GitError, GitService, PullRequestReception,
-    PullRequestReference, PullRequestService, PullRequestState, RepositoryUrl, Subject,
+    BranchName, CommitSha, Description, GitError, GitService, PullRequestError,
+    PullRequestReception, PullRequestReference, PullRequestService, PullRequestState,
+    RepositoryUrl, Subject,
 };
 use uuid::Uuid;
 
@@ -22,7 +23,7 @@ use crate::db::{projects, tasks};
 use crate::services::backend;
 use crate::services::checkout::{self, Baseline, Repository};
 use crate::services::endpoint::{Endpoint, Error as EndpointError};
-use crate::services::github_app::{Credential, Error as GitHubError};
+use crate::services::github_app::{Credential, Error as GitHubError, Failure};
 use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
@@ -325,10 +326,13 @@ impl Publication<'_> {
             .state
             .github()
             .retrying(self.state.db(), credential.clone(), |token| async move {
-                service.get_default_branch(target, &token).await
+                service
+                    .get_default_branch(target, &token)
+                    .await
+                    .map_err(Failure::Call)
             })
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(publication_failure)?;
         self.authorized().await?;
         let existing = self
             .state
@@ -337,9 +341,10 @@ impl Publication<'_> {
                 service
                     .pull_request_exists_for_branch(target, &token, branch)
                     .await
+                    .map_err(Failure::Call)
             })
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(publication_failure)?;
         self.identity(baseline).await?;
         let subject = subject(self.state, &task, self.report).await;
         if dirty {
@@ -422,9 +427,10 @@ impl Publication<'_> {
                 service
                     .create_pull_request(target, &token, branch, base, title, body, false)
                     .await
+                    .map_err(Failure::Call)
             })
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(publication_failure)?;
         self.identity(baseline).await?;
         self.record(&created.url, branch, status(created.state))
             .await?;
@@ -577,12 +583,18 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
     let reception = match state
         .github()
         .retrying(state.db(), credential, |token| async move {
-            service.fetch_reception(reference, &token).await
+            service
+                .fetch_reception(reference, &token)
+                .await
+                .map_err(Failure::Call)
         })
         .await
     {
         Ok(reception) => reception,
-        Err(error) => {
+        Err(Failure::Connection(_)) => {
+            return ReceptionSyncResult::Error(DISCONNECTED.to_string());
+        }
+        Err(Failure::Call(error)) => {
             return ReceptionSyncResult::Error(format!("Failed to read reception: {}", error));
         }
     };
@@ -746,6 +758,15 @@ async fn report_repair(state: &AppState, task_id: Uuid) {
         RepairOutcome::Failed(reason) => {
             tracing::warn!("Conflict repair for task {} failed: {}", task_id, reason)
         }
+    }
+}
+
+/// A publication call GitHub refused, or whose connection was lost while a
+/// refused token was being minted again.
+fn publication_failure(failure: Failure<PullRequestError>) -> String {
+    match failure {
+        Failure::Call(error) => error.to_string(),
+        Failure::Connection(_) => DISCONNECTED.to_string(),
     }
 }
 
@@ -2155,6 +2176,58 @@ mod publication_tests {
             .await
             .unwrap()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_reception_whose_refused_token_finds_the_installation_removed_reports_it_disconnected()
+     {
+        use crate::services::github_app::testing::{installation_number, installed, uninstalled};
+
+        const REFUSED_TOKEN: &str = "ghs_refusedreceptiontoken";
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let state = reading_from(&fixture, &server, "owner/repository").await;
+        let number = installation_number();
+        let minting = format!("/app/installations/{number}/access_tokens");
+        Mock::given(method("POST"))
+            .and(path(minting.clone()))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "token": REFUSED_TOKEN,
+                "expires_at": (chrono::Utc::now() + chrono::Duration::hours(1))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            })))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(minting))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        uninstalled(&server, number).await;
+        Mock::given(header("authorization", format!("Bearer {REFUSED_TOKEN}")))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1..)
+            .mount(&server)
+            .await;
+        let installation =
+            installed(state.db(), state.github(), fixture.organization, number).await;
+        sqlx::query(
+            "UPDATE projects SET github_access_token=NULL, github_installation_id=$2 WHERE workspace_id=$1",
+        )
+        .bind(fixture.workspace)
+        .bind(installation)
+        .execute(state.db())
+        .await
+        .unwrap();
+
+        let synced = sync_reception(&state, fixture.execution.run, fixture.execution.task).await;
+
+        fixture.cleanup().await;
+        assert_eq!(synced, ReceptionSyncResult::Error(DISCONNECTED.to_string()));
+        server.verify().await;
     }
 
     #[tokio::test]
