@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import type { Source } from '../types';
 
@@ -95,6 +95,12 @@ const renderSourcesPage = (path = '/sources') => {
       </BrowserRouter>
     </QueryClientProvider>
   );
+};
+
+const openCreateWizard = async () => {
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
+  });
 };
 
 const mockSources: Source[] = [
@@ -289,7 +295,7 @@ describe('SourcesPage', () => {
       expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
+    await openCreateWizard();
     expect(screen.getByRole('heading', { name: 'Add Source' })).toBeInTheDocument();
   });
 
@@ -551,7 +557,7 @@ describe('SourcesPage', () => {
       expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add source' }));
+    await openCreateWizard();
 
     expect(screen.getByText('Source Type')).toBeInTheDocument();
   });
