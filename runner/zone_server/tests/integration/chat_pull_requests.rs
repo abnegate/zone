@@ -40,6 +40,7 @@ const TITLE: &str = "Add widgets";
 const NODE: &str = "PR_kwDOchat";
 const MINTED_TOKEN: &str = "ghs_minted";
 const DIFF: &str = "diff --git a/src/widgets.rs b/src/widgets.rs\n+pub struct Widget;\n";
+const NUMBER: u64 = 12;
 
 /// A stand-in for the host's `claude`, held open until the test has done what
 /// it needs to during the turn, then replaying the lines the test gave it.
@@ -396,6 +397,12 @@ fn threads_read() -> wiremock::MockBuilder {
 /// GitHub's page of pull request 12's review threads, one resolved for each
 /// `true` in `resolved`, read without their comments.
 fn threads_answer(resolved: &[bool]) -> ResponseTemplate {
+    threads_answer_for(NUMBER, resolved)
+}
+
+/// GitHub's page of review threads answered for pull request `number`, one
+/// resolved for each `true` in `resolved`, read without their comments.
+fn threads_answer_for(number: u64, resolved: &[bool]) -> ResponseTemplate {
     let nodes: Vec<Value> = resolved
         .iter()
         .enumerate()
@@ -407,11 +414,24 @@ fn threads_answer(resolved: &[bool]) -> ResponseTemplate {
         })
         .collect();
     ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
-        "pullRequest": {"reviewThreads": {
+        "pullRequest": {"number": number, "reviewThreads": {
             "pageInfo": {"hasNextPage": false, "endCursor": null},
             "nodes": nodes,
         }},
     }}}))
+}
+
+/// GitHub's answer to a review thread read that found nothing at `path` in
+/// the query.
+fn threads_missing_at(path: &[&str]) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "data": {"repository": null},
+        "errors": [{
+            "type": "NOT_FOUND",
+            "path": path,
+            "message": "Could not resolve to a node.",
+        }],
+    }))
 }
 
 async fn discuss(github: &MockServer, resolved: &[bool]) {
@@ -668,10 +688,13 @@ async fn zones_own_tool_records_the_pull_request_it_opens_with_its_status() {
         .and(path("/repos/acme/widgets/pulls"))
         .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": 1,
             "number": 12,
             "html_url": link(&github, 12),
             "title": TITLE,
             "state": "open",
+            "head": {"ref": "feature", "sha": HEAD},
+            "base": {"ref": "main", "sha": HEAD},
         })))
         .expect(1)
         .mount(&github)
@@ -744,16 +767,17 @@ async fn a_create_github_refuses_as_already_open_answers_with_the_open_pull_requ
     Mock::given(method("GET"))
         .and(path("/repos/acme/widgets/pulls"))
         .and(wiremock::matchers::query_param("head", "acme:feature"))
-        .and(wiremock::matchers::query_param("state", "open"))
+        .and(wiremock::matchers::query_param("base", "main"))
+        .and(wiremock::matchers::query_param("state", "all"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
-            "id": 1,
+            "node_id": NODE,
             "number": 12,
             "html_url": link(&github, 12),
             "state": "open",
             "title": TITLE,
-            "body": null,
-            "head": {"ref": "feature", "sha": HEAD},
-            "base": {"ref": "main", "sha": HEAD},
+            "draft": false,
+            "head": {"ref": "feature", "label": "acme:feature", "sha": HEAD},
+            "base": {"ref": "main", "label": "acme:main", "sha": HEAD},
         }])))
         .mount(&github)
         .await;
@@ -784,9 +808,65 @@ async fn a_create_github_refuses_as_already_open_answers_with_the_open_pull_requ
     let answer: Value = serde_json::from_str(text).expect("a JSON answer");
     assert_eq!(answer["already_open"], true, "{answer}");
     assert_eq!(answer["pull_request"]["number"], 12, "{answer}");
+    assert_eq!(answer["pull_request"]["title"], TITLE, "{answer}");
     let listed = served.recorded(1).await;
     assert_eq!(listed[0]["number"], 12, "{listed}");
     assert_eq!(listed[0]["url"], link(&github, 12), "{listed}");
+}
+
+#[tokio::test]
+async fn a_pull_requests_checks_whose_rows_shift_between_pages_read_as_pending() {
+    const PAGE_ROWS: u64 = 100;
+    let github = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/12"))
+        .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(detail(&github, false)))
+        .mount(&github)
+        .await;
+    let run = |id: u64| json!({"id": id, "name": format!("ci-{id}"), "status": "completed", "conclusion": "success"});
+    for (page, runs) in [
+        ("1", (1..=PAGE_ROWS).map(run).collect::<Vec<_>>()),
+        ("2", vec![run(PAGE_ROWS)]),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/acme/widgets/commits/{HEAD}/check-runs"
+            )))
+            .and(wiremock::matchers::query_param("page", page))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": PAGE_ROWS + 1,
+                "check_runs": runs,
+            })))
+            .expect(1..)
+            .mount(&github)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path(format!("/repos/acme/widgets/commits/{HEAD}/status")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "state": "success",
+            "total_count": 0,
+            "statuses": [],
+        })))
+        .mount(&github)
+        .await;
+    automate(&github, Automation::default()).await;
+    discuss(&github, &[]).await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    workspace.record(&link(&github, 12)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
+    assert_eq!(
+        listed[0]["status"]["checks"], "pending",
+        "every run passed, but a run listed on both pages means runs moved between them, so \
+         one could have been missed: {listed}"
+    );
 }
 
 #[tokio::test]
@@ -1274,7 +1354,7 @@ async fn review_threads_read_as_unknown_when_github_stops_short_of_every_thread(
     threads_read()
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
-                "pullRequest": {"reviewThreads": {
+                "pullRequest": {"number": NUMBER, "reviewThreads": {
                     "pageInfo": {"hasNextPage": true, "endCursor": null},
                     "nodes": [{"id": "PRRT_0", "isResolved": true}],
                 }},
@@ -1293,6 +1373,59 @@ async fn review_threads_read_as_unknown_when_github_stops_short_of_every_thread(
 
     assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
     assert_eq!(listed[0]["status"]["threads"], Value::Null, "{listed}");
+}
+
+#[tokio::test]
+async fn review_threads_read_as_unknown_when_github_answers_for_another_pull_request() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    threads_read()
+        .respond_with(threads_answer_for(NUMBER + 1, &[false]))
+        .expect(1..)
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    workspace.record(&link(&github, NUMBER)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
+    assert_eq!(listed[0]["status"]["threads"], Value::Null, "{listed}");
+}
+
+#[tokio::test]
+async fn review_threads_read_as_unknown_when_github_finds_no_repository_or_pull_request() {
+    for missing in [&["repository"][..], &["repository", "pullRequest"][..]] {
+        let github = MockServer::start().await;
+        describe(&github, false).await;
+        automate(&github, Automation::default()).await;
+        threads_read()
+            .respond_with(threads_missing_at(missing))
+            .expect(1..)
+            .mount(&github)
+            .await;
+        let database = context_database_url();
+        let pool = PgPool::connect(&database).await.expect("the test database");
+        let workspace = Workspace::new(config(&github, database), pool).await;
+        workspace.connect_github().await;
+        workspace.record(&link(&github, NUMBER)).await;
+
+        let listed = workspace.listed(&workspace.token).await;
+
+        assert_eq!(
+            listed[0]["status"]["state"], "open",
+            "{missing:?}: {listed}"
+        );
+        assert_eq!(
+            listed[0]["status"]["threads"],
+            Value::Null,
+            "{missing:?}: {listed}"
+        );
+    }
 }
 
 #[tokio::test]

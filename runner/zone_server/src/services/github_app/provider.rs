@@ -989,6 +989,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_installation_token_answer_without_a_token_is_unreadable() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "", 1).await;
+
+        let error = connected
+            .resolve()
+            .await
+            .expect_err("an empty token is no credential");
+
+        assert!(
+            matches!(error, Error::Application(ApplicationError::Response)),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_issuer_fails_without_the_credentialed_url() {
+        const UNREACHABLE_ORIGIN: &str = "http://127.0.0.1:1";
+        let config = Config {
+            github_api_url: UNREACHABLE_ORIGIN.to_string(),
+            github_api_allows_http: true,
+            ..crate::state::test_config()
+        };
+        let connected = Connected::serving(Provider::new(&config, key())).await;
+
+        let error = connected
+            .resolve()
+            .await
+            .expect_err("a closed port is a failure");
+
+        let rendered = error.to_string();
+        assert!(
+            matches!(error, Error::Application(ApplicationError::Transport(_))),
+            "{error:?}"
+        );
+        assert!(
+            !rendered.contains("127.0.0.1") && !rendered.contains("access_tokens"),
+            "the request URL survived into the error: {rendered}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_plain_http_origin_cannot_mint_unless_the_operator_allowed_it() {
         let server = MockServer::start().await;
         let config = Config {

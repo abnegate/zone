@@ -43,6 +43,7 @@ mod tests {
             PullRequestError::Forbidden,
             PullRequestError::NotFound,
             PullRequestError::RateLimited,
+            PullRequestError::AuthenticationRequired,
             PullRequestError::GitHubApi("server error".to_string()),
         ] {
             assert!(!error.unauthenticated(), "{error}");
@@ -64,6 +65,7 @@ mod tests {
             ApplicationError::Transport("connection refused".to_string()),
             ApplicationError::Response,
             ApplicationError::InvalidCode,
+            ApplicationError::AuthenticationRequired,
         ] {
             assert!(!error.unauthenticated(), "{error}");
         }

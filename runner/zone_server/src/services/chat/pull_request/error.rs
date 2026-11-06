@@ -1,7 +1,9 @@
 use abnegate_vcs::PullRequestError;
 use abnegate_vcs::pull_request::ApplicationError;
 
-use crate::services::github_app::{self, Unauthenticated};
+use crate::services::github::Refusal;
+use crate::services::github_app;
+use crate::services::github_app::Unauthenticated;
 
 const TOO_MANY_REQUESTS: u16 = 429;
 
@@ -35,7 +37,7 @@ impl From<PullRequestError> for Error {
                 Self::Uncredentialed
             }
             PullRequestError::AuthenticationFailed => Self::Unauthenticated,
-            error => Self::Refused(error.to_string()),
+            error => Self::Refused(Refusal(&error).to_string()),
         }
     }
 }
@@ -117,6 +119,7 @@ mod tests {
             github_app::Error::from(ApplicationError::Signing),
             github_app::Error::from(ApplicationError::InvalidOrigin),
             github_app::Error::from(ApplicationError::Client),
+            github_app::Error::from(ApplicationError::AuthenticationRequired),
         ] {
             let rendered = error.to_string();
             assert_eq!(Error::from(error), Error::Storage, "{rendered}");
@@ -149,6 +152,22 @@ mod tests {
         assert_eq!(
             Error::from(github_app::Error::from(ApplicationError::Status(422))),
             Error::Refused("GitHub returned HTTP 422 for the GitHub App request.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_github_refusal_is_said_once_with_its_status() {
+        let error = Error::from(PullRequestError::refused(
+            422,
+            "No commits between main and zone/fix",
+        ));
+        assert_eq!(
+            error,
+            Error::Refused("422 Unprocessable Entity: No commits between main and zone/fix".into())
+        );
+        assert_eq!(
+            error.to_string(),
+            "GitHub refused: 422 Unprocessable Entity: No commits between main and zone/fix"
         );
     }
 }

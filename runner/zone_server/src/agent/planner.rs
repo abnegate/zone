@@ -26,8 +26,10 @@ use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolRes
 use super::WorkspaceScope;
 use super::integrations::source_token;
 use crate::db::auto_projects::{self, Kind, PlannedRepository, PlannedTask, ProjectPlan};
-use crate::db::sources::{self, SourceRow};
+use crate::db::sources;
+use crate::db::sources::SourceRow;
 use crate::db::workspace_members;
+use crate::services::github::Refusal;
 use grant::Grant;
 
 pub const CREATE_REPOSITORY: &str = "create_repository";
@@ -507,16 +509,21 @@ impl Tool for CreateRepositoryTool {
                     .to_string(),
                 ))
             }
-            Err(PullRequestError::RepositoryExists(name)) => Ok(ToolResult::error(format!(
-                "A repository named {name} already exists under that owner; pick another name or use the existing repository's URL."
-            ))),
-            Err(PullRequestError::AuthenticationFailed | PullRequestError::Forbidden) => {
-                Ok(ToolResult::error(
-                    "GitHub refused the source's credential for creating a repository; it needs repository-creation permission.",
-                ))
-            }
-            Err(error) => Ok(ToolResult::error(format!("GitHub refused: {error}"))),
+            Err(error) => Ok(ToolResult::error(uncreated(error))),
         }
+    }
+}
+
+/// Why GitHub did not create the repository, in words the model can act on.
+fn uncreated(error: PullRequestError) -> String {
+    match error {
+        PullRequestError::RepositoryExists(name) => format!(
+            "A repository named {name} already exists under that owner; pick another name or use the existing repository's URL."
+        ),
+        PullRequestError::AuthenticationFailed | PullRequestError::Forbidden => {
+            "GitHub refused the source's credential for creating a repository; it needs repository-creation permission.".to_string()
+        }
+        error => format!("GitHub refused: {}", Refusal(&error)),
     }
 }
 
@@ -723,6 +730,21 @@ mod tests {
     use crate::services::github_app::testing::issuing;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, ResponseTemplate};
+
+    #[test]
+    fn a_github_refusal_to_create_a_repository_is_said_once_with_its_status() {
+        assert_eq!(
+            uncreated(PullRequestError::refused(
+                422,
+                "Repository creation failed: name already exists on this account"
+            )),
+            "GitHub refused: 422 Unprocessable Entity: Repository creation failed: name already exists on this account"
+        );
+        assert_eq!(
+            uncreated(PullRequestError::Forbidden),
+            "GitHub refused the source's credential for creating a repository; it needs repository-creation permission."
+        );
+    }
 
     fn task(kind: &str, title: &str, depends_on: &[usize]) -> Value {
         json!({"kind": kind, "title": title, "description": format!("Do {title}"), "depends_on": depends_on})

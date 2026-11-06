@@ -63,6 +63,7 @@ impl Error {
             ApplicationError::Status(status) => ApplicationError::Status(*status),
             ApplicationError::Response => ApplicationError::Response,
             ApplicationError::InvalidCode => ApplicationError::InvalidCode,
+            ApplicationError::AuthenticationRequired => ApplicationError::AuthenticationRequired,
             unknown => ApplicationError::Transport(unknown.to_string()),
         }
     }
@@ -112,6 +113,7 @@ mod tests {
             Error::from(ApplicationError::Status(503)),
             Error::from(ApplicationError::Response),
             Error::from(ApplicationError::InvalidCode),
+            Error::from(ApplicationError::AuthenticationRequired),
             Error::from(sqlx::Error::PoolTimedOut),
         ] {
             let duplicate = error.duplicate();
