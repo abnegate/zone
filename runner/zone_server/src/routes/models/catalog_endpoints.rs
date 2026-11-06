@@ -1,6 +1,6 @@
-const OLLAMA_SEARCH_URL: &str = "https://ollama.com/search";
-const OLLAMA_REGISTRY_URL: &str = "https://registry.ollama.ai/v2";
-const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+use abnegate_llm::catalog::{
+    DEFAULT_OLLAMA_REGISTRY_URL, DEFAULT_OLLAMA_SEARCH_URL, DEFAULT_OPENROUTER_MODELS_URL,
+};
 
 /// The catalogue origins Zone browses that are not operator configuration.
 ///
@@ -16,9 +16,9 @@ pub(crate) struct CatalogEndpoints {
 impl Default for CatalogEndpoints {
     fn default() -> Self {
         Self {
-            ollama_search: OLLAMA_SEARCH_URL.to_string(),
-            ollama_registry: OLLAMA_REGISTRY_URL.to_string(),
-            openrouter: OPENROUTER_MODELS_URL.to_string(),
+            ollama_search: DEFAULT_OLLAMA_SEARCH_URL.to_string(),
+            ollama_registry: DEFAULT_OLLAMA_REGISTRY_URL.to_string(),
+            openrouter: DEFAULT_OPENROUTER_MODELS_URL.to_string(),
         }
     }
 }
