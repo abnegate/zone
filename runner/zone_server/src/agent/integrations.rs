@@ -293,7 +293,7 @@ impl Tool for Integration {
         if matches!(self.operation, Operation::ReviewThreads) {
             properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Pull request number to read the review threads of."});
             properties["resolved"] = json!({"type": "boolean", "description": "Read the threads already marked resolved instead of the unresolved ones, default false. Unresolved threads are what still needs answering."});
-            properties["after"] = json!({"type": "integer", "minimum": 1, "description": "Id of the last comment a page returned, to read the comments after it. Follow next_after until null."});
+            properties["after"] = json!({"type": "integer", "minimum": 1, "description": "Id of the last comment a page returned, to read the comments after it. Follow next_after until null, keeping the same resolved."});
             properties["comment"] = json!({"type": "integer", "minimum": 1, "description": "Id of one comment marked truncated, to read its whole body instead of the threads."});
             properties["offset"] = json!({"type": "integer", "minimum": 0, "description": "Only with comment: a character offset into that body, default 0. Follow next until null."});
             required.push("number");
@@ -1342,8 +1342,7 @@ impl Github {
             "number": number,
             "complete": complete,
             "reading": if wanted { "resolved" } else { "unresolved" },
-            "unresolved": unresolved,
-            "resolved": nodes.len() - unresolved,
+            "counts": {"unresolved": unresolved, "resolved": nodes.len() - unresolved},
             "after": arguments.after,
             "next_after": u64::MAX,
             "threads": [],
@@ -1372,22 +1371,39 @@ impl Github {
                     }),
                 )
                 .await?;
-            let pull = &mut data["repository"]["pullRequest"];
-            if pull["number"].as_u64() != Some(number) {
+            if data
+                .pointer("/repository/pullRequest/number")
+                .and_then(Value::as_u64)
+                != Some(number)
+            {
                 return Err(
                     "GitHub returned review threads for a different or missing pull request."
                         .into(),
                 );
             }
-            let threads = &mut pull["reviewThreads"];
-            let Value::Array(page) = threads["nodes"].take() else {
+            let threads = data
+                .pointer_mut("/repository/pullRequest/reviewThreads")
+                .ok_or("GitHub returned no review threads.")?;
+            let more = threads
+                .pointer("/pageInfo/hasNextPage")
+                .and_then(Value::as_bool);
+            let next = threads
+                .pointer("/pageInfo/endCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if more == Some(true) && next.as_ref().is_some_and(|next| seen.contains(next)) {
+                return Ok((nodes, false));
+            }
+            let Some(Value::Array(page)) = threads.get_mut("nodes").map(Value::take) else {
                 return Err("GitHub returned review threads that are not a list.".into());
             };
             nodes.extend(page);
-            let next = threads["pageInfo"]["endCursor"].as_str().map(str::to_owned);
-            match (threads["pageInfo"]["hasNextPage"].as_bool(), next) {
+            match (more, next) {
                 (Some(false), _) => return Ok((nodes, true)),
-                (Some(true), Some(next)) if seen.insert(next.clone()) => cursor = Some(next),
+                (Some(true), Some(next)) => {
+                    seen.insert(next.clone());
+                    cursor = Some(next);
+                }
                 _ => return Ok((nodes, false)),
             }
         }
@@ -3975,7 +3991,7 @@ mod tests {
             .await
             .expect("the threads are readable");
 
-        assert_eq!(read["unresolved"], 1);
+        assert_eq!(read["counts"]["unresolved"], 1);
         assert_eq!(read["complete"], true);
         let threads = read["threads"].as_array().expect("threads are a list");
         assert_eq!(
@@ -3983,7 +3999,7 @@ mod tests {
             1,
             "a settled thread is not what still needs answering"
         );
-        assert_eq!(read["resolved"], 1);
+        assert_eq!(read["counts"]["resolved"], 1);
         assert_eq!(threads[0]["path"], "src/lib.rs");
         assert_eq!(threads[0]["line"], 42);
         assert_eq!(threads[0]["comments"][0]["author"], "coderabbitai");
@@ -4011,48 +4027,10 @@ mod tests {
         assert_eq!(threads[0]["path"], "src/old.rs");
         assert_eq!(read["reading"], "resolved");
         assert_eq!(
-            read["unresolved"], 1,
+            read["counts"]["unresolved"], 1,
             "what still needs answering is counted though not read"
         );
-        assert_eq!(read["resolved"], 1);
-    }
-
-    #[tokio::test]
-    async fn a_thread_reopened_between_pages_does_not_skip_the_next_resolved_one() {
-        let server = MockServer::start().await;
-        let mut payload = long_thread_payload(1, 10);
-        let nodes = &mut payload["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"];
-        let template = nodes[0].clone();
-        let threads: Vec<Value> = (1..=3u64)
-            .map(|id| {
-                let mut thread = template.clone();
-                thread["isResolved"] = json!(id != 1);
-                thread["comments"]["nodes"] = json!([review_comment_node(id, "done")]);
-                thread
-            })
-            .collect();
-        *nodes = json!(threads);
-        mock_graphql(&server, payload).await;
-        let mut arguments = readiness_args(Some(7));
-        arguments.resolved = Some(true);
-        arguments.after = Some(1);
-
-        let read = github(&server)
-            .review_threads(&arguments)
-            .await
-            .expect("the comment that marked the place still exists");
-
-        let ids: Vec<&Value> = read["threads"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|thread| &thread["comments"][0]["id"])
-            .collect();
-        assert_eq!(
-            ids,
-            [&json!(2), &json!(3)],
-            "the thread read on the last page was reopened since; the ones after it must still be read"
-        );
+        assert_eq!(read["counts"]["resolved"], 1);
     }
 
     #[tokio::test]
@@ -4328,30 +4306,130 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_thread_resolved_between_pages_does_not_skip_the_next_one() {
-        let server = MockServer::start().await;
+    /// Threads with one comment each, numbered by their comment id, resolved
+    /// where `resolved` says so.
+    fn single_comment_threads(resolved: &[bool]) -> Value {
         let mut payload = long_thread_payload(1, 10);
         let nodes = &mut payload["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"];
-        nodes[0]["isResolved"] = json!(true);
-        let mut next = nodes[0].clone();
-        next["isResolved"] = json!(false);
-        next["comments"]["nodes"] = json!([review_comment_node(2, "next")]);
-        nodes.as_array_mut().unwrap().push(next);
+        let template = nodes[0].clone();
+        *nodes = json!(
+            resolved
+                .iter()
+                .zip(1u64..)
+                .map(|(resolved, id)| {
+                    let mut thread = template.clone();
+                    thread["isResolved"] = json!(resolved);
+                    thread["comments"]["nodes"] = json!([review_comment_node(id, "comment")]);
+                    thread
+                })
+                .collect::<Vec<_>>()
+        );
+        payload
+    }
+
+    async fn ids_after(payload: Value, resolved: bool, after: u64) -> Vec<u64> {
+        let server = MockServer::start().await;
         mock_graphql(&server, payload).await;
         let mut arguments = readiness_args(Some(7));
-        arguments.after = Some(1);
-
+        arguments.resolved = Some(resolved);
+        arguments.after = Some(after);
         let read = github(&server)
             .review_threads(&arguments)
             .await
             .expect("the comment that marked the place still exists");
+        read["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|thread| thread["comments"][0]["id"].as_u64().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_thread_resolved_between_pages_does_not_skip_or_repeat_its_neighbours() {
+        let ids = ids_after(single_comment_threads(&[false, true, false]), false, 2).await;
 
         assert_eq!(
-            read["threads"][0]["comments"][0]["id"], 2,
-            "the thread read on the last page was resolved since; the next one must not be skipped"
+            ids,
+            [3],
+            "thread 2 was read unresolved and resolved since; reading goes on after it, not from the top"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_thread_reopened_between_pages_does_not_skip_or_repeat_its_neighbours() {
+        let ids = ids_after(single_comment_threads(&[true, false, true]), true, 2).await;
+
+        assert_eq!(
+            ids,
+            [3],
+            "thread 2 was read resolved and reopened since; reading goes on after it, not from the top"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cursor_that_cycles_ends_the_listing_without_repeating_threads() {
+        let server = MockServer::start().await;
+        let page = |id: u64, cursor: &str| {
+            let mut payload = single_comment_threads(&[false]);
+            let threads = &mut payload["data"]["repository"]["pullRequest"]["reviewThreads"];
+            threads["nodes"][0]["comments"]["nodes"][0]["databaseId"] = json!(id);
+            threads["pageInfo"] = json!({"hasNextPage": true, "endCursor": cursor});
+            payload
+        };
+        for (after, response) in [
+            (Value::Null, page(1, "A")),
+            (json!("A"), page(2, "B")),
+            (json!("B"), page(1, "A")),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/graphql"))
+                .and(body_partial_json(json!({"variables": {"after": after}})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("a cycling cursor still reads what it found");
+
+        assert_eq!(
+            read["complete"], false,
+            "a cycle is not the end of the list"
+        );
+        let ids: Vec<&Value> = read["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|thread| &thread["comments"][0]["id"])
+            .collect();
+        assert_eq!(
+            ids,
+            [&json!(1), &json!(2)],
+            "the repeated page is not read twice"
         );
         assert_eq!(read["next_after"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_thread_response_is_an_error_not_a_panic() {
+        for data in [
+            json!([]),
+            json!({"repository": "x"}),
+            json!({"repository": {"pullRequest": {"number": 7, "reviewThreads": []}}}),
+        ] {
+            let server = MockServer::start().await;
+            mock_graphql(&server, json!({ "data": data })).await;
+
+            let refused = github(&server)
+                .review_threads(&readiness_args(Some(7)))
+                .await;
+
+            assert!(refused.is_err(), "{data} must be refused, got {refused:?}");
+        }
     }
 
     #[tokio::test]
@@ -4411,10 +4489,10 @@ mod tests {
 
         assert_eq!(read["complete"], true);
         assert_eq!(
-            read["unresolved"], 1,
+            read["counts"]["unresolved"], 1,
             "the open thread on the second page counts though the first page was all resolved"
         );
-        assert_eq!(read["resolved"], 2);
+        assert_eq!(read["counts"]["resolved"], 2);
         assert_eq!(read["threads"][0]["comments"][0]["id"], 51);
         let sent = server.received_requests().await.unwrap();
         let query: Value = serde_json::from_slice(&sent[0].body).unwrap();
