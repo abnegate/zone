@@ -14,6 +14,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::jwt::{AccessClaims, Claims, extract_bearer_token, validate_access_token};
+use super::permission::Permission;
 use crate::db::sessions;
 use crate::state::AppState;
 
@@ -220,14 +221,13 @@ pub async fn require_auth(
 }
 
 /// Check if the user has a required permission
-#[allow(dead_code)]
-pub fn require_permission(claims: &Claims, permission: &str) -> Result<(), AuthError> {
-    if claims.has_permission(permission) {
+pub fn require_permission(claims: &Claims, permission: Permission) -> Result<(), AuthError> {
+    if claims.has_permission(permission.name()) {
         Ok(())
     } else {
         Err(AuthError {
             status: StatusCode::FORBIDDEN,
-            message: format!("Missing required permission: {}", permission),
+            message: permission.refusal(),
         })
     }
 }
@@ -311,34 +311,35 @@ mod tests {
     // Tests for require_permission
     #[test]
     fn test_require_permission_has_permission() {
-        let claims = create_test_claims(false, vec![], vec!["read:users"]);
-        let result = require_permission(&claims, "read:users");
-        assert!(result.is_ok());
+        let claims = create_test_claims(false, vec![], vec!["models:create"]);
+        assert!(require_permission(&claims, Permission::ModelsCreate).is_ok());
     }
 
     #[test]
     fn test_require_permission_missing_permission() {
-        let claims = create_test_claims(false, vec![], vec!["read:users"]);
-        let result = require_permission(&claims, "write:users");
-        assert!(result.is_err());
-        let error = result.unwrap_err();
+        let claims = create_test_claims(false, vec!["user"], vec!["models:read"]);
+        let error = require_permission(&claims, Permission::ModelsCreate).unwrap_err();
         assert_eq!(error.status, StatusCode::FORBIDDEN);
-        assert!(error.message.contains("Missing required permission"));
-        assert!(error.message.contains("write:users"));
+        assert_eq!(error.message, Permission::ModelsCreate.refusal());
+    }
+
+    #[test]
+    fn test_require_permission_does_not_substitute_another_model_permission() {
+        let claims = create_test_claims(false, vec![], vec!["models:create"]);
+        assert!(require_permission(&claims, Permission::ModelsDelete).is_err());
     }
 
     #[test]
     fn test_require_permission_admin_has_all() {
         let claims = create_test_claims(true, vec![], vec![]);
-        let result = require_permission(&claims, "any:permission");
-        assert!(result.is_ok());
+        assert!(require_permission(&claims, Permission::ModelsCreate).is_ok());
+        assert!(require_permission(&claims, Permission::ModelsDelete).is_ok());
     }
 
     #[test]
     fn test_require_permission_empty_permissions() {
         let claims = create_test_claims(false, vec![], vec![]);
-        let result = require_permission(&claims, "read:users");
-        assert!(result.is_err());
+        assert!(require_permission(&claims, Permission::ModelsDelete).is_err());
     }
 
     // Tests for require_role

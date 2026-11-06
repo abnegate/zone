@@ -39,7 +39,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::chats::check_workspace_read_access;
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, ModelInstaller, ModelRemover};
 use crate::db::ai_settings;
 use crate::error::ServerError;
 use crate::pull::{ComfyPull, ManifestFile, Pull, PullStart};
@@ -657,7 +657,7 @@ pub(crate) async fn huggingface_details_or_none(
 /// DELETE /api/models/:name
 pub async fn delete(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    _remover: ModelRemover,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     match delete_named(&state, &name).await {
@@ -777,7 +777,7 @@ fn language_train_base<'a>(bases: &'a [TrainBase], id: &str) -> Option<&'a Train
 /// POST /api/models/train/captions
 pub async fn captions(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    _installer: ModelInstaller,
     request: Request,
 ) -> impl IntoResponse {
     let request = match upload::caption_request(request).await {
@@ -822,7 +822,7 @@ pub async fn captions(
 /// POST /api/models/train/frames
 pub async fn frames(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    _installer: ModelInstaller,
     request: Request,
 ) -> impl IntoResponse {
     let request = match upload::frame_request(request).await {
@@ -941,7 +941,10 @@ fn train_running() -> Response {
 }
 
 /// DELETE /api/models/train
-pub async fn dismiss_train(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
+pub async fn dismiss_train(
+    State(state): State<AppState>,
+    _installer: ModelInstaller,
+) -> impl IntoResponse {
     match dismiss_train_job(&state) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(DismissError::Busy) => train_running(),
@@ -1002,7 +1005,7 @@ fn train_user_id(auth: &AuthUser) -> Result<Uuid, ServerError> {
 /// POST /api/models/train/uploads
 pub async fn create_train_upload(
     State(state): State<AppState>,
-    auth: AuthUser,
+    ModelInstaller(auth): ModelInstaller,
 ) -> impl IntoResponse {
     let user_id = match train_user_id(&auth) {
         Ok(user_id) => user_id,
@@ -1017,7 +1020,7 @@ pub async fn create_train_upload(
 /// POST /api/models/train/uploads/{id}
 pub async fn append_train_upload(
     State(state): State<AppState>,
-    auth: AuthUser,
+    ModelInstaller(auth): ModelInstaller,
     Path(id): Path<Uuid>,
     request: Request,
 ) -> impl IntoResponse {
@@ -1059,7 +1062,7 @@ pub async fn delete_train_upload(
 /// POST /api/models/train
 pub async fn train(
     State(state): State<AppState>,
-    auth: AuthUser,
+    ModelInstaller(auth): ModelInstaller,
     Query(query): Query<TrainQuery>,
     request: Request,
 ) -> impl IntoResponse {
