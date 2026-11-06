@@ -75,6 +75,8 @@ const branches = {
   next_page: 2,
 };
 
+const JAVASCRIPT_URL = 'javascript:alert(1)';
+
 describe('GitHub enums', () => {
   it('names the owners an app can be registered on', () => {
     expect(GitHubAppOwnerTypeSchema.options).toEqual(['User', 'Organization']);
@@ -110,6 +112,11 @@ describe('GitHubAppSchema', () => {
     expect(GitHubAppSchema.safeParse({ ...app, owner_type: 'Enterprise' }).success).toBe(false);
   });
 
+  it('refuses an app whose links are not web URLs', () => {
+    expect(GitHubAppSchema.safeParse({ ...app, html_url: JAVASCRIPT_URL }).success).toBe(false);
+    expect(GitHubAppSchema.safeParse({ ...app, settings_url: JAVASCRIPT_URL }).success).toBe(false);
+  });
+
   it('refuses an app whose GitHub id is not a whole number', () => {
     expect(GitHubAppSchema.safeParse({ ...app, app_id: '101' }).success).toBe(false);
     expect(GitHubAppSchema.safeParse({ ...app, app_id: 101.5 }).success).toBe(false);
@@ -130,6 +137,12 @@ describe('GitHubInstallationSchema', () => {
     expect(
       GitHubInstallationSchema.safeParse({ ...installation, account_type: 'Enterprise' }).success
     ).toBe(true);
+  });
+
+  it('refuses an installation whose link is not a web URL', () => {
+    expect(
+      GitHubInstallationSchema.safeParse({ ...installation, html_url: JAVASCRIPT_URL }).success
+    ).toBe(false);
   });
 
   it('refuses an installation without the app it belongs to', () => {
@@ -168,6 +181,26 @@ describe('GitHubAppRegistrationSchema', () => {
     expect(GitHubAppRegistrationSchema.parse(registration)).toEqual(registration);
   });
 
+  it('refuses a registration whose action is not a web URL', () => {
+    expect(
+      GitHubAppRegistrationSchema.safeParse({
+        action: JAVASCRIPT_URL,
+        manifest: '{"name":"Zone"}',
+        state: 'state-1',
+      }).success
+    ).toBe(false);
+  });
+
+  it('refuses a registration whose action is relative', () => {
+    expect(
+      GitHubAppRegistrationSchema.safeParse({
+        action: '/settings/apps/new',
+        manifest: '{"name":"Zone"}',
+        state: 'state-1',
+      }).success
+    ).toBe(false);
+  });
+
   it('refuses a registration without a manifest', () => {
     expect(
       GitHubAppRegistrationSchema.safeParse({ action: 'https://github.com', state: 'state-1' })
@@ -181,11 +214,21 @@ describe('GitHubInstallationUrlSchema', () => {
     const url = { url: 'https://github.com/apps/zone-acme/installations/new?state=state-2' };
     expect(GitHubInstallationUrlSchema.parse(url)).toEqual(url);
   });
+
+  it('refuses an installation url that is not a web URL', () => {
+    expect(GitHubInstallationUrlSchema.safeParse({ url: JAVASCRIPT_URL }).success).toBe(false);
+  });
 });
 
 describe('GitHubRepositorySchema', () => {
   it('parses a full repository', () => {
     expect(GitHubRepositorySchema.parse(repository)).toEqual(repository);
+  });
+
+  it('refuses a repository whose link is not a web URL', () => {
+    expect(
+      GitHubRepositorySchema.safeParse({ ...repository, html_url: JAVASCRIPT_URL }).success
+    ).toBe(false);
   });
 
   it('refuses a repository whose installation id is a number', () => {
@@ -205,6 +248,15 @@ describe('GitHubRepositoryInstallationSchema', () => {
   it('accepts an installation that lists its repositories', () => {
     const healthy = { ...repositoryInstallation, error: null };
     expect(GitHubRepositoryInstallationSchema.parse(healthy)).toEqual(healthy);
+  });
+
+  it('refuses an installation whose link is not a web URL', () => {
+    expect(
+      GitHubRepositoryInstallationSchema.safeParse({
+        ...repositoryInstallation,
+        html_url: JAVASCRIPT_URL,
+      }).success
+    ).toBe(false);
   });
 
   it('refuses an error it does not know', () => {
