@@ -1,0 +1,10 @@
+{
+  "lora": "loras/studio-style.safetensors",
+  "weight": "studio style lora weights",
+  "sidecar": {
+    "recipe_id": "flux-dev-adapter",
+    "hf_base": "black-forest-labs/FLUX.1-dev",
+    "trigger": "studiostyle"
+  },
+  "modified_at": 1767225600
+}

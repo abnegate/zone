@@ -1,0 +1,249 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "author": "openai",
+          "capabilities": [
+            "text",
+            "image_input",
+            "tools"
+          ],
+          "description": "GPT-4o (\"o\" for \"omni\") is OpenAI's latest AI model, supporting both text and image inputs with text outputs. It maintains the intelligence level of GPT-4 Turbo while being twice as fast.",
+          "details": {
+            "context_length": 128000,
+            "family": "GPT",
+            "format": "api"
+          },
+          "display_name": "OpenAI: GPT-4o",
+          "name": "openai/gpt-4o",
+          "url": "https://openrouter.ai/openai/gpt-4o"
+        },
+        {
+          "author": "anthropic",
+          "capabilities": [
+            "text",
+            "image_input",
+            "tools"
+          ],
+          "description": "New Claude 3.5 Sonnet delivers better-than-Opus capabilities, faster-than-Sonnet speeds, at the same Sonnet prices.",
+          "details": {
+            "context_length": 200000,
+            "family": "Claude",
+            "format": "api"
+          },
+          "display_name": "Anthropic: Claude 3.5 Sonnet",
+          "name": "anthropic/claude-3.5-sonnet",
+          "url": "https://openrouter.ai/anthropic/claude-3.5-sonnet"
+        },
+        {
+          "author": "meta-llama",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Meta's latest class of model (Llama 3.1) launched with a variety of sizes & flavors.",
+          "details": {
+            "context_length": 131072,
+            "family": "llama",
+            "format": "api",
+            "parameter_size": "8B"
+          },
+          "display_name": "Meta: Llama 3.1 8B Instruct",
+          "name": "meta-llama/llama-3.1-8b-instruct",
+          "url": "https://openrouter.ai/meta-llama/llama-3.1-8b-instruct"
+        },
+        {
+          "author": "google",
+          "capabilities": [
+            "image_input",
+            "text",
+            "image_generation"
+          ],
+          "description": "Gemini 2.5 Flash Image is a state of the art image generation model with contextual understanding.",
+          "details": {
+            "context_length": 32768,
+            "family": "Gemini",
+            "format": "api"
+          },
+          "display_name": "Google: Gemini 2.5 Flash Image",
+          "name": "google/gemini-2.5-flash-image",
+          "url": "https://openrouter.ai/google/gemini-2.5-flash-image"
+        },
+        {
+          "author": "deepseek",
+          "capabilities": [
+            "text",
+            "reasoning",
+            "tools"
+          ],
+          "description": "DeepSeek R1 is here: performance on par with OpenAI o1, but open-sourced and with fully open reasoning tokens. It's 671B parameters in size, with 37B active in an inference pass.",
+          "details": {
+            "context_length": 163840,
+            "family": "deepseek",
+            "format": "api"
+          },
+          "display_name": "DeepSeek: R1",
+          "name": "deepseek/deepseek-r1",
+          "url": "https://openrouter.ai/deepseek/deepseek-r1"
+        },
+        {
+          "author": "mistralai",
+          "capabilities": [
+            "text",
+            "audio_input",
+            "tools"
+          ],
+          "description": "Voxtral Small is an enhancement of Mistral Small 3, incorporating state-of-the-art audio input capabilities.",
+          "details": {
+            "context_length": 32000,
+            "family": "mistral",
+            "format": "api",
+            "parameter_size": "24B"
+          },
+          "display_name": "Mistral: Voxtral Small 24B 2507",
+          "name": "mistralai/voxtral-small-24b-2507",
+          "url": "https://openrouter.ai/mistralai/voxtral-small-24b-2507"
+        },
+        {
+          "author": "openrouter",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Your prompt will be processed by a meta-model and routed to one of dozens of models.",
+          "details": {
+            "context_length": 2000000,
+            "family": "Router",
+            "format": "api"
+          },
+          "name": "openrouter/auto",
+          "url": "https://openrouter.ai/openrouter/auto"
+        }
+      ],
+      "next_cursor": null
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "author": "openai",
+          "capabilities": [
+            "text",
+            "image_input",
+            "tools"
+          ],
+          "description": "GPT-4o (\"o\" for \"omni\") is OpenAI's latest AI model, supporting both text and image inputs with text outputs. It maintains the intelligence level of GPT-4 Turbo while being twice as fast.",
+          "details": {
+            "context_length": 128000,
+            "family": "GPT",
+            "format": "api"
+          },
+          "display_name": "OpenAI: GPT-4o",
+          "name": "openai/gpt-4o",
+          "url": "https://openrouter.ai/openai/gpt-4o"
+        },
+        {
+          "author": "anthropic",
+          "capabilities": [
+            "text",
+            "image_input",
+            "tools"
+          ],
+          "description": "New Claude 3.5 Sonnet delivers better-than-Opus capabilities, faster-than-Sonnet speeds, at the same Sonnet prices.",
+          "details": {
+            "context_length": 200000,
+            "family": "Claude",
+            "format": "api"
+          },
+          "display_name": "Anthropic: Claude 3.5 Sonnet",
+          "name": "anthropic/claude-3.5-sonnet",
+          "url": "https://openrouter.ai/anthropic/claude-3.5-sonnet"
+        },
+        {
+          "author": "meta-llama",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Meta's latest class of model (Llama 3.1) launched with a variety of sizes & flavors.",
+          "details": {
+            "context_length": 131072,
+            "family": "llama",
+            "format": "api",
+            "parameter_size": "8B"
+          },
+          "display_name": "Meta: Llama 3.1 8B Instruct",
+          "name": "meta-llama/llama-3.1-8b-instruct",
+          "url": "https://openrouter.ai/meta-llama/llama-3.1-8b-instruct"
+        },
+        {
+          "author": "google",
+          "capabilities": [
+            "image_input",
+            "text",
+            "image_generation"
+          ],
+          "description": "Gemini 2.5 Flash Image is a state of the art image generation model with contextual understanding.",
+          "details": {
+            "context_length": 32768,
+            "family": "Gemini",
+            "format": "api"
+          },
+          "display_name": "Google: Gemini 2.5 Flash Image",
+          "name": "google/gemini-2.5-flash-image",
+          "url": "https://openrouter.ai/google/gemini-2.5-flash-image"
+        },
+        {
+          "author": "deepseek",
+          "capabilities": [
+            "text",
+            "reasoning",
+            "tools"
+          ],
+          "description": "DeepSeek R1 is here: performance on par with OpenAI o1, but open-sourced and with fully open reasoning tokens. It's 671B parameters in size, with 37B active in an inference pass.",
+          "details": {
+            "context_length": 163840,
+            "family": "deepseek",
+            "format": "api"
+          },
+          "display_name": "DeepSeek: R1",
+          "name": "deepseek/deepseek-r1",
+          "url": "https://openrouter.ai/deepseek/deepseek-r1"
+        },
+        {
+          "author": "mistralai",
+          "capabilities": [
+            "text",
+            "audio_input",
+            "tools"
+          ],
+          "description": "Voxtral Small is an enhancement of Mistral Small 3, incorporating state-of-the-art audio input capabilities.",
+          "details": {
+            "context_length": 32000,
+            "family": "mistral",
+            "format": "api",
+            "parameter_size": "24B"
+          },
+          "display_name": "Mistral: Voxtral Small 24B 2507",
+          "name": "mistralai/voxtral-small-24b-2507",
+          "url": "https://openrouter.ai/mistralai/voxtral-small-24b-2507"
+        },
+        {
+          "author": "openrouter",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Your prompt will be processed by a meta-model and routed to one of dozens of models.",
+          "details": {
+            "context_length": 2000000,
+            "family": "Router",
+            "format": "api"
+          },
+          "name": "openrouter/auto",
+          "url": "https://openrouter.ai/openrouter/auto"
+        }
+      ],
+      "next_cursor": null
+    },
+    "status": 200
+  }
+}

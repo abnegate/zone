@@ -150,12 +150,12 @@
       ]
     },
     {
-      "id": "nomic_dimension",
-      "query": "What dimension does get_model_dimension return for nomic-embed-text?",
-      "expect_identifiers": ["nomic-embed-text", "get_model_dimension"],
-      "expect_uri_contains": ["providers/ollama.rs"],
+      "id": "embedding_width_check",
+      "query": "Where does EmbeddingAdapter refuse a nomic-embed-text vector wider than the store?",
+      "expect_identifiers": ["nomic-embed-text", "EmbeddingAdapter"],
+      "expect_uri_contains": ["providers/adapter.rs"],
       "judgments": [
-        {"uri_contains": "providers/ollama.rs", "grade": 3, "must_contain": ["get_model_dimension"]},
+        {"uri_contains": "providers/adapter.rs", "grade": 3, "must_contain": ["EmbeddingDimensionMismatch"]},
         {"uri_contains": "pgvector.rs", "grade": 1}
       ]
     },
@@ -181,12 +181,12 @@
     },
     {
       "id": "ollama_embed_host",
-      "query": "Which handler POSTs to /api/embeddings for Ollama?",
+      "query": "Which host do Ollama's native /api/embeddings calls go to?",
       "expect_identifiers": ["/api/embeddings"],
-      "expect_uri_contains": ["providers/ollama.rs"],
+      "expect_uri_contains": ["services/embedding.rs"],
       "judgments": [
-        {"uri_contains": "providers/ollama.rs", "grade": 3, "must_contain": ["/api/embeddings"]},
-        {"uri_contains": "services/embedding.rs", "grade": 2}
+        {"uri_contains": "services/embedding.rs", "grade": 3, "must_contain": ["/api/embeddings"]},
+        {"uri_contains": "providers/mod.rs", "grade": 2}
       ]
     },
     {
@@ -236,7 +236,7 @@
       "expect_uri_contains": ["embeddings/query.rs"],
       "judgments": [
         {"uri_contains": "embeddings/query.rs", "grade": 3, "must_contain": ["embed_query_text"]},
-        {"uri_contains": "providers/ollama.rs", "grade": 1}
+        {"uri_contains": "providers/adapter.rs", "grade": 1}
       ]
     },
     {

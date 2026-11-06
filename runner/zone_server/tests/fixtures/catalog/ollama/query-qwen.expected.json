@@ -1,0 +1,405 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.6B–235B"
+          },
+          "downloads": 5200000,
+          "name": "qwen3",
+          "size": 5225389443,
+          "sizes": [
+            {
+              "label": "0.6B",
+              "name": "qwen3:0.6b",
+              "size": 522655498
+            },
+            {
+              "label": "1.7B",
+              "name": "qwen3:1.7b",
+              "size": 1359284234
+            },
+            {
+              "label": "4B",
+              "name": "qwen3:4b",
+              "size": 2497283178
+            },
+            {
+              "label": "8B",
+              "name": "qwen3:8b",
+              "size": 5225378105
+            },
+            {
+              "label": "14B",
+              "name": "qwen3:14b",
+              "size": 9276192778
+            },
+            {
+              "label": "30B",
+              "name": "qwen3:30b"
+            },
+            {
+              "label": "32B",
+              "name": "qwen3:32b",
+              "size": 20201255946
+            },
+            {
+              "label": "235B",
+              "name": "qwen3:235b"
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking"
+          ],
+          "url": "https://ollama.com/library/qwen3",
+          "use_cases": [
+            "Tool use",
+            "Reasoning"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "Flagship vision-language model of Qwen and also a significant leap from the previous Qwen2-VL.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "3B–72B"
+          },
+          "downloads": 1000000,
+          "name": "qwen2.5vl",
+          "size": 5969251872,
+          "sizes": [
+            {
+              "label": "3B",
+              "name": "qwen2.5vl:3b"
+            },
+            {
+              "label": "7B",
+              "name": "qwen2.5vl:7b",
+              "size": 5969251872
+            },
+            {
+              "label": "32B",
+              "name": "qwen2.5vl:32b"
+            },
+            {
+              "label": "72B",
+              "name": "qwen2.5vl:72b",
+              "size": 48920006016
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/qwen2.5vl",
+          "use_cases": [
+            "Vision"
+          ]
+        },
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "description": "The latest series of Code-Specific Qwen models, with significant improvements in code generation, code reasoning, and code fixing.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.5B–32B"
+          },
+          "downloads": 7400000,
+          "name": "qwen2.5-coder",
+          "size": 4683088942,
+          "sizes": [
+            {
+              "label": "0.5B",
+              "name": "qwen2.5-coder:0.5b",
+              "size": 397809546
+            },
+            {
+              "label": "1.5B",
+              "name": "qwen2.5-coder:1.5b"
+            },
+            {
+              "label": "3B",
+              "name": "qwen2.5-coder:3b"
+            },
+            {
+              "label": "7B",
+              "name": "qwen2.5-coder:7b",
+              "size": 4683088942
+            },
+            {
+              "label": "14B",
+              "name": "qwen2.5-coder:14b"
+            },
+            {
+              "label": "32B",
+              "name": "qwen2.5-coder:32b",
+              "size": 19851337866
+            }
+          ],
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/library/qwen2.5-coder",
+          "use_cases": [
+            "Tool use",
+            "Reasoning",
+            "Coding"
+          ]
+        },
+        {
+          "capabilities": [
+            "embeddings"
+          ],
+          "description": "Building upon the foundational models of the Qwen3 series, Qwen3 Embedding provides a comprehensive range of text embeddings models in various sizes.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.6B · 4B · 8B"
+          },
+          "downloads": 417200,
+          "name": "qwen3-embedding",
+          "size": 4675000488,
+          "sizes": [
+            {
+              "label": "0.6B",
+              "name": "qwen3-embedding:0.6b",
+              "size": 639151080
+            },
+            {
+              "label": "4B",
+              "name": "qwen3-embedding:4b"
+            },
+            {
+              "label": "8B",
+              "name": "qwen3-embedding:8b",
+              "size": 4675000488
+            }
+          ],
+          "tags": [
+            "embedding"
+          ],
+          "url": "https://ollama.com/library/qwen3-embedding",
+          "use_cases": [
+            "Embeddings"
+          ]
+        }
+      ],
+      "next_cursor": null
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.6B–235B"
+          },
+          "downloads": 5200000,
+          "name": "qwen3",
+          "size": 5225389443,
+          "sizes": [
+            {
+              "label": "0.6B",
+              "name": "qwen3:0.6b",
+              "size": 522655498
+            },
+            {
+              "label": "1.7B",
+              "name": "qwen3:1.7b",
+              "size": 1359284234
+            },
+            {
+              "label": "4B",
+              "name": "qwen3:4b",
+              "size": 2497283178
+            },
+            {
+              "label": "8B",
+              "name": "qwen3:8b",
+              "size": 5225378105
+            },
+            {
+              "label": "14B",
+              "name": "qwen3:14b",
+              "size": 9276192778
+            },
+            {
+              "label": "30B",
+              "name": "qwen3:30b"
+            },
+            {
+              "label": "32B",
+              "name": "qwen3:32b",
+              "size": 20201255946
+            },
+            {
+              "label": "235B",
+              "name": "qwen3:235b"
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking"
+          ],
+          "url": "https://ollama.com/library/qwen3",
+          "use_cases": [
+            "Tool use",
+            "Reasoning"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "Flagship vision-language model of Qwen and also a significant leap from the previous Qwen2-VL.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "3B–72B"
+          },
+          "downloads": 1000000,
+          "name": "qwen2.5vl",
+          "size": 5969251872,
+          "sizes": [
+            {
+              "label": "3B",
+              "name": "qwen2.5vl:3b"
+            },
+            {
+              "label": "7B",
+              "name": "qwen2.5vl:7b",
+              "size": 5969251872
+            },
+            {
+              "label": "32B",
+              "name": "qwen2.5vl:32b"
+            },
+            {
+              "label": "72B",
+              "name": "qwen2.5vl:72b",
+              "size": 48920006016
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/qwen2.5vl",
+          "use_cases": [
+            "Vision"
+          ]
+        },
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "description": "The latest series of Code-Specific Qwen models, with significant improvements in code generation, code reasoning, and code fixing.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.5B–32B"
+          },
+          "downloads": 7400000,
+          "name": "qwen2.5-coder",
+          "size": 4683088942,
+          "sizes": [
+            {
+              "label": "0.5B",
+              "name": "qwen2.5-coder:0.5b",
+              "size": 397809546
+            },
+            {
+              "label": "1.5B",
+              "name": "qwen2.5-coder:1.5b"
+            },
+            {
+              "label": "3B",
+              "name": "qwen2.5-coder:3b"
+            },
+            {
+              "label": "7B",
+              "name": "qwen2.5-coder:7b",
+              "size": 4683088942
+            },
+            {
+              "label": "14B",
+              "name": "qwen2.5-coder:14b"
+            },
+            {
+              "label": "32B",
+              "name": "qwen2.5-coder:32b",
+              "size": 19851337866
+            }
+          ],
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/library/qwen2.5-coder",
+          "use_cases": [
+            "Tool use",
+            "Reasoning",
+            "Coding"
+          ]
+        },
+        {
+          "capabilities": [
+            "embeddings"
+          ],
+          "description": "Building upon the foundational models of the Qwen3 series, Qwen3 Embedding provides a comprehensive range of text embeddings models in various sizes.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.6B · 4B · 8B"
+          },
+          "downloads": 417200,
+          "name": "qwen3-embedding",
+          "size": 4675000488,
+          "sizes": [
+            {
+              "label": "0.6B",
+              "name": "qwen3-embedding:0.6b",
+              "size": 639151080
+            },
+            {
+              "label": "4B",
+              "name": "qwen3-embedding:4b"
+            },
+            {
+              "label": "8B",
+              "name": "qwen3-embedding:8b",
+              "size": 4675000488
+            }
+          ],
+          "tags": [
+            "embedding"
+          ],
+          "url": "https://ollama.com/library/qwen3-embedding",
+          "use_cases": [
+            "Embeddings"
+          ]
+        }
+      ],
+      "next_cursor": null
+    },
+    "status": 200
+  }
+}

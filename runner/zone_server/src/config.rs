@@ -18,14 +18,9 @@ use crate::services::hosts::Hosts;
 use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME, ROOT_PATH};
 
 pub use abnegate_comfy::Config as ComfyUiConfig;
+pub use abnegate_llm::catalog::DEFAULT_GPT4ALL_MODELS_URL;
+pub use abnegate_llm::catalog::DEFAULT_HUGGINGFACE_MODELS_URL;
 pub use abnegate_search::WebSearchConfig;
-
-/// Upstream GPT4All model catalog. Tests should override `Config::gpt4all_models_url`.
-pub const DEFAULT_GPT4ALL_MODELS_URL: &str =
-    "https://raw.githubusercontent.com/nomic-ai/gpt4all/main/gpt4all-chat/metadata/models3.json";
-
-/// Upstream HuggingFace models API. Tests should override `Config::huggingface_models_url`.
-pub const DEFAULT_HUGGINGFACE_MODELS_URL: &str = "https://huggingface.co/api/models";
 
 /// GitHub's own REST origin, which `GITHUB_API_URL` overrides for GitHub
 /// Enterprise. The origin answers only for repositories on the host it names,

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 
-use super::providers::LocalEmbeddingProvider;
+use super::cache;
 use super::rerank::CrossEncoder;
 use crate::error::{ContextError, Result};
 
@@ -68,12 +68,12 @@ impl LocalCrossEncoder {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "jinaai/jina-reranker-v1-turbo-en".into());
-        let cache = LocalEmbeddingProvider::default_cache_dir();
+        let directory = cache::default_directory();
         let loaded = tokio::time::timeout(
             std::time::Duration::from_secs(90),
             tokio::task::spawn_blocking({
                 let name = name.clone();
-                move || Self::new(&name, cache)
+                move || Self::new(&name, directory)
             }),
         )
         .await

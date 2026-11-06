@@ -1,0 +1,86 @@
+[
+  {
+    "name": "qwen3-embedding:0.6b",
+    "model": "qwen3-embedding:0.6b",
+    "dimension": 1024,
+    "max_tokens": 8192
+  },
+  {
+    "name": "qwen3-embedding",
+    "model": "qwen3-embedding",
+    "dimension": 1024,
+    "max_tokens": 8192
+  },
+  {
+    "name": "nomic-embed-text",
+    "model": "nomic-embed-text",
+    "dimension": 768,
+    "max_tokens": 8192
+  },
+  {
+    "name": "nomic-embed-text:latest",
+    "model": "nomic-embed-text:latest",
+    "dimension": 768,
+    "max_tokens": 8192
+  },
+  {
+    "name": "mxbai-embed-large",
+    "model": "mxbai-embed-large",
+    "dimension": 1024,
+    "max_tokens": 512
+  },
+  {
+    "name": "snowflake-arctic-embed",
+    "model": "snowflake-arctic-embed",
+    "dimension": 1024,
+    "max_tokens": 512
+  },
+  {
+    "name": "snowflake-arctic-embed:22m",
+    "model": "snowflake-arctic-embed:22m",
+    "dimension": 1024,
+    "max_tokens": 512
+  },
+  {
+    "name": "snowflake-arctic-embed:33m",
+    "model": "snowflake-arctic-embed:33m",
+    "dimension": 1024,
+    "max_tokens": 512
+  },
+  {
+    "name": "snowflake-arctic-embed:110m",
+    "model": "snowflake-arctic-embed:110m",
+    "dimension": 1024,
+    "max_tokens": 512
+  },
+  {
+    "name": "snowflake-arctic-embed:137m",
+    "model": "snowflake-arctic-embed:137m",
+    "dimension": 1024,
+    "max_tokens": 512
+  },
+  {
+    "name": "snowflake-arctic-embed:335m",
+    "model": "snowflake-arctic-embed:335m",
+    "dimension": 1024,
+    "max_tokens": 512
+  },
+  {
+    "name": "bge-small-en-v1.5",
+    "model": "bge-small-en-v1.5",
+    "dimension": 384,
+    "max_tokens": 512
+  },
+  {
+    "name": "all-minilm",
+    "model": "all-minilm",
+    "dimension": 384,
+    "max_tokens": 256
+  },
+  {
+    "name": "unknown-model",
+    "model": "unknown-model",
+    "dimension": 768,
+    "max_tokens": 512
+  }
+]

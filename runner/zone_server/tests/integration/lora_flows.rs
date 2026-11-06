@@ -4,6 +4,10 @@ use crate::common;
 
 use abnegate_comfy::host::{self, Job, JobDirectory, PREVIEWS_DIRECTORY, Status};
 use abnegate_comfy::train::TrainProgress;
+use abnegate_llm::catalog::BrowseQuery;
+use abnegate_llm::catalog::HuggingFaceProvider;
+use abnegate_llm::catalog::ModelMediumFilter;
+use abnegate_llm::catalog::ModelSort;
 use axum::{
     Json, Router,
     body::Body,
@@ -28,7 +32,6 @@ use tower::ServiceExt;
 use zone_server::auth::{Permission, create_session_access_token};
 use zone_server::config::DEFAULT_HUGGINGFACE_MODELS_URL;
 use zone_server::db::{sessions, users};
-use zone_server::routes::models::{BrowseQuery, HuggingFaceProvider, ModelMediumFilter, ModelSort};
 use zone_server::services::comfy::{policy, settings};
 
 async fn token(pool: &PgPool, secret: &str) -> String {
@@ -370,20 +373,15 @@ const LANGUAGE_JSONL: &[u8] =
 #[tokio::test]
 #[ignore] // Requires network access to huggingface.co
 async fn live_huggingface_adapter_search_finds_qwen_edit_lora() {
-    let provider = HuggingFaceProvider::new(DEFAULT_HUGGINGFACE_MODELS_URL);
+    let provider =
+        HuggingFaceProvider::new(DEFAULT_HUGGINGFACE_MODELS_URL).expect("a HuggingFace client");
+    let options = BrowseQuery::default()
+        .with_query("qwen-image-edit-plus-nsfw-lora")
+        .with_limit(8)
+        .with_sort(ModelSort::DownloadsDescending)
+        .with_medium(ModelMediumFilter::ImageGeneration);
     let models = provider
-        .search_adapters(
-            BrowseQuery {
-                query: Some("qwen-image-edit-plus-nsfw-lora"),
-                cursor: None,
-                limit: 8,
-                sort: ModelSort::DownloadsDesc,
-                family: None,
-                size: Default::default(),
-                medium: ModelMediumFilter::ImageGeneration,
-            },
-            &["Qwen/Qwen-Image-Edit-2511".to_string()],
-        )
+        .search_adapters(options, &["Qwen/Qwen-Image-Edit-2511".to_string()])
         .await
         .expect("live HuggingFace adapter search");
     assert!(

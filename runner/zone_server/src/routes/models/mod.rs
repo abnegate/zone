@@ -2,9 +2,16 @@
 //!
 //! Handles listing, pulling, and deleting models from various sources.
 
+mod catalog_endpoints;
+mod catalog_failure;
+mod catalog_providers;
+mod catalog_source;
 mod method;
+mod popular;
 mod providers;
 mod setup;
+#[cfg(test)]
+mod snapshots;
 mod subject;
 mod train_base;
 mod train_form;
@@ -13,18 +20,11 @@ mod types;
 mod upload;
 
 pub use method::Method;
-pub use providers::{
-    DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider, MAX_PAGE_SIZE, ModelProvider,
-    ProviderError, get_provider, get_provider_with_proxy, huggingface_hub_origin,
-};
 pub use setup::{get_setup, start_setup};
 pub use subject::Subject;
 pub use train_base::TrainBase;
 pub use train_form::TrainForm;
-pub use types::{
-    BrowseQuery, BrowseResponse, DiskUsage, ErrorResponse, ListModelsQuery, ModelDetails,
-    ModelMediumFilter, ModelResponse, ModelSizeFilter, ModelSort,
-};
+pub use types::{BrowseResponse, DiskUsage, ErrorResponse, ListModelsQuery, ModelResponse};
 
 use axum::{
     Json,
@@ -58,12 +58,16 @@ use abnegate_comfy::lora::{self, TrainError};
 use abnegate_comfy::recipe::{self, RecipeCatalog};
 use abnegate_comfy::train;
 use abnegate_comfy::video;
+use abnegate_llm::catalog::ModelCapability;
+use abnegate_llm::catalog::ModelDetails;
+use abnegate_llm::catalog::ModelEntry;
+use abnegate_llm::catalog::huggingface_hub_origin;
 use abnegate_secret::SecretValue;
 use tokio::sync::watch;
 use training::Training;
-use types::ModelCapability;
 
 const MAX_MODEL_NAME_LENGTH: usize = 256;
+const COMFY_SOURCE: &str = "comfy";
 pub(crate) const TRAIN_RUNNING: &str = "a training job is already running";
 const UNREADABLE_CATALOG: &str = "recipe catalog is not readable";
 
@@ -135,76 +139,24 @@ pub(crate) fn validate_model_name(name: &str) -> Result<(), ErrorResponse> {
 }
 
 /// GET /api/models
+///
+/// Without a `source` this lists the installed models; with one it browses
+/// that catalogue.
 pub async fn list(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(query): Query<ListModelsQuery>,
 ) -> impl IntoResponse {
-    let source = query.source.as_deref().unwrap_or("ollama");
-    let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE).min(MAX_PAGE_SIZE);
-    let proxy_url = state.config().model_search_proxy_url.clone();
-
-    // Check if we're in "browse" mode (source param explicitly provided)
-    let is_browse_mode = query.source.is_some();
-
-    match source {
-        "ollama" => {
-            if is_browse_mode {
-                // Browse the Ollama library for available models
-                match get_provider_with_proxy("ollama", proxy_url.as_deref()) {
-                    Ok(provider) => match provider.search(query.to_browse_query(limit)).await {
-                        Ok(response) => Json(response).into_response(),
-                        Err(e) => e.into_response(),
-                    },
-                    Err(e) => e.into_response(),
-                }
-            } else {
-                match query.workspace_id {
-                    Some(workspace) => list_workspace_models(state, &auth, workspace).await,
-                    None => list_installed_models(state).await,
-                }
-            }
-        }
-        "comfy" => Json(list_comfy_models(&state)).into_response(),
-        "gpt4all" => {
-            let provider = match Gpt4AllProvider::with_proxy(
-                state.config().gpt4all_models_url.clone(),
-                proxy_url.as_deref(),
-            ) {
-                Ok(provider) => provider,
-                Err(error) => return error.into_response(),
-            };
-            match provider.search(query.to_browse_query(limit)).await {
-                Ok(response) => Json(response).into_response(),
-                Err(e) => e.into_response(),
-            }
-        }
-        "huggingface" => {
-            let provider = match HuggingFaceProvider::with_proxy(
-                state.config().huggingface_models_url.clone(),
-                proxy_url.as_deref(),
-            ) {
-                Ok(provider) => provider,
-                Err(error) => return error.into_response(),
-            };
-            let opts = query.to_browse_query(limit);
-            match browse_huggingface(&provider, &state, opts).await {
-                Ok(response) => Json(response).into_response(),
-                Err(e) => e.into_response(),
-            }
-        }
-        "openrouter" => match get_provider_with_proxy(source, proxy_url.as_deref()) {
-            Ok(provider) => match provider.search(query.to_browse_query(limit)).await {
-                Ok(response) => Json(response).into_response(),
-                Err(e) => e.into_response(),
-            },
-            Err(e) => e.into_response(),
+    match query.source.as_deref() {
+        None => match query.workspace_id {
+            Some(workspace) => list_workspace_models(state, &auth, workspace).await,
+            None => list_installed_models(state).await,
         },
-        _ => (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!("Unknown source: {}", source))),
-        )
-            .into_response(),
+        Some(COMFY_SOURCE) => Json(list_comfy_models(&state)).into_response(),
+        Some(source) => match providers::browse(&state, source, &query).await {
+            Ok(response) => Json(response).into_response(),
+            Err(failure) => failure.into_response(),
+        },
     }
 }
 
@@ -213,82 +165,15 @@ pub(crate) async fn browse_models(
     source: &str,
     query: ListModelsQuery,
 ) -> Result<BrowseResponse, String> {
-    let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE).min(MAX_PAGE_SIZE);
-    let proxy_url = state.config().model_search_proxy_url.clone();
-    let opts = query.to_browse_query(limit);
-    match source {
-        "ollama" => {
-            let provider = get_provider_with_proxy("ollama", proxy_url.as_deref())
-                .map_err(provider_message)?;
-            provider.search(opts).await.map_err(provider_message)
-        }
-        "comfy" => Ok(BrowseResponse {
+    if source == COMFY_SOURCE {
+        return Ok(BrowseResponse {
             models: list_comfy_models(state),
             next_cursor: None,
-        }),
-        "gpt4all" => {
-            let provider = Gpt4AllProvider::with_proxy(
-                state.config().gpt4all_models_url.clone(),
-                proxy_url.as_deref(),
-            )
-            .map_err(provider_message)?;
-            provider.search(opts).await.map_err(provider_message)
-        }
-        "huggingface" => {
-            let provider = HuggingFaceProvider::with_proxy(
-                state.config().huggingface_models_url.clone(),
-                proxy_url.as_deref(),
-            )
-            .map_err(provider_message)?;
-            browse_huggingface(&provider, state, opts)
-                .await
-                .map_err(provider_message)
-        }
-        "openrouter" => {
-            let provider =
-                get_provider_with_proxy(source, proxy_url.as_deref()).map_err(provider_message)?;
-            provider.search(opts).await.map_err(provider_message)
-        }
-        other => Err(format!("Unknown source: {other}")),
+        });
     }
-}
-
-fn provider_message(error: ProviderError) -> String {
-    match error {
-        ProviderError::HttpError(error) => format!("Failed to connect: {error}"),
-        ProviderError::ParseError(error) => format!("Failed to parse response: {error}"),
-        ProviderError::Unavailable(error) => format!("Provider unavailable: {error}"),
-    }
-}
-
-async fn browse_huggingface(
-    provider: &HuggingFaceProvider,
-    state: &AppState,
-    opts: BrowseQuery<'_>,
-) -> Result<BrowseResponse, ProviderError> {
-    let include_adapters = opts.medium == ModelMediumFilter::ImageGeneration
-        || (opts.medium == ModelMediumFilter::All
-            && opts
-                .query
-                .map(str::trim)
-                .is_some_and(|query| !query.is_empty()));
-    let mut response = provider.search(opts).await?;
-    if include_adapters {
-        let catalog = recipe_catalog(&state.config().comfyui)
-            .unwrap_or_else(|_| RecipeCatalog::packaged().expect("packaged recipes"));
-        let adapters = provider
-            .search_adapters(opts, &catalog.huggingface_bases())
-            .await?;
-        if opts.medium == ModelMediumFilter::ImageGeneration {
-            response.models = adapters;
-            response.next_cursor = None;
-        } else {
-            let mut combined = adapters;
-            combined.extend(response.models);
-            response.models = combined;
-        }
-    }
-    Ok(response)
+    providers::browse(state, source, &query)
+        .await
+        .map_err(|failure| failure.message())
 }
 
 /// The installed inventory when one provider could not be read.
@@ -354,13 +239,15 @@ async fn list_workspace_models(
 /// the endpoint that runs it. Nothing of it is on this instance's disk.
 fn saved_model(name: &str) -> ModelResponse {
     let profile = Model::unshown(name);
+    let mut entry = ModelEntry::default();
+    entry.name = name.to_string();
+    entry.size = Some(0);
+    entry.modified_at = Some(chrono::Utc::now().to_rfc3339());
     ModelResponse {
-        name: name.to_string(),
+        entry,
         completion: profile.completion,
         tools: profile.tools,
         needs_character: Some(profile.needs_character),
-        size: Some(0),
-        modified_at: Some(chrono::Utc::now().to_rfc3339()),
         ..Default::default()
     }
 }
@@ -398,24 +285,27 @@ pub(crate) fn list_comfy_models(state: &AppState) -> Vec<ModelResponse> {
     };
     scan_inventory(config, &catalog)
         .into_iter()
-        .map(|item| ModelResponse {
-            name: item.filename,
-            completion: Some(false),
-            size: Some(item.size),
-            modified_at: item
+        .map(|item| {
+            let mut details = ModelDetails::default();
+            details.format = Some(item.kind);
+            details.family = Some(item.recipe_id.clone());
+            let mut entry = ModelEntry::default();
+            entry.name = item.filename;
+            entry.size = Some(item.size);
+            entry.modified_at = item
                 .modified_at
-                .or_else(|| Some(chrono::Utc::now().to_rfc3339())),
-            description: Some(item.label),
-            capabilities: Some(vec![ModelCapability::ImageGeneration]),
-            details: Some(ModelDetails {
-                format: Some(item.kind),
-                family: Some(item.recipe_id.clone()),
+                .or_else(|| Some(chrono::Utc::now().to_rfc3339()));
+            entry.description = Some(item.label);
+            entry.capabilities = Some(vec![ModelCapability::ImageGeneration]);
+            entry.details = Some(details);
+            ModelResponse {
+                entry,
+                completion: Some(false),
+                ready: Some(item.ready),
+                recipe_id: Some(item.recipe_id),
+                required_files: Some(item.required_files),
                 ..Default::default()
-            }),
-            ready: Some(item.ready),
-            recipe_id: Some(item.recipe_id),
-            required_files: Some(item.required_files),
-            ..Default::default()
+            }
         })
         .collect()
 }
@@ -437,33 +327,23 @@ pub(crate) async fn list_ollama_model_rows(
                         let mut models: Vec<ModelResponse> = tags
                             .models
                             .into_iter()
-                            .map(|m| ModelResponse {
-                                name: m.name,
-                                size: Some(m.size),
-                                digest: Some(m.digest),
-                                modified_at: Some(m.modified_at),
-                                details: m.details.map(|d| ModelDetails {
-                                    format: d.format,
-                                    family: d.family,
-                                    parameter_size: d.parameter_size,
-                                    quantization_level: d.quantization_level,
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            })
+                            .map(OllamaModel::into_model)
                             .collect();
 
                         futures::future::join_all(models.iter_mut().map(|model| async {
-                            let profile =
-                                crate::services::model::Model::profile(ollama_host, &model.name)
-                                    .await;
-                            model.capabilities =
+                            let profile = crate::services::model::Model::profile(
+                                ollama_host,
+                                &model.entry.name,
+                            )
+                            .await;
+                            model.entry.capabilities =
                                 installed_capabilities(profile.capabilities.as_deref());
                             model.completion = profile.completion;
                             model.tools = profile.tools;
                             model.needs_character = Some(profile.needs_character);
                             if let Some(length) = profile.context_length {
                                 model
+                                    .entry
                                     .details
                                     .get_or_insert_with(ModelDetails::default)
                                     .context_length = Some(length);
@@ -532,6 +412,25 @@ struct OllamaModelDetails {
     family: Option<String>,
     parameter_size: Option<String>,
     quantization_level: Option<String>,
+}
+
+impl OllamaModel {
+    fn into_model(self) -> ModelResponse {
+        let mut entry = ModelEntry::default();
+        entry.name = self.name;
+        entry.size = Some(self.size);
+        entry.digest = Some(self.digest);
+        entry.modified_at = Some(self.modified_at);
+        entry.details = self.details.map(|reported| {
+            let mut details = ModelDetails::default();
+            details.format = reported.format;
+            details.family = reported.family;
+            details.parameter_size = reported.parameter_size;
+            details.quantization_level = reported.quantization_level;
+            details
+        });
+        ModelResponse::from(entry)
+    }
 }
 
 /// GET /api/models/:name
@@ -618,7 +517,7 @@ pub(crate) async fn show_model(
                     ))),
                 }
             } else if response.status() == StatusCode::NOT_FOUND {
-                if let Some(info) = huggingface_details_or_none(state, name).await {
+                if let Some(info) = providers::huggingface_details(state, name).await {
                     return serde_json::to_value(info)
                         .map_err(|error| CatalogError::Parse(error.to_string()));
                 }
@@ -628,7 +527,7 @@ pub(crate) async fn show_model(
             }
         }
         Err(error) => {
-            if let Some(info) = huggingface_details_or_none(state, name).await {
+            if let Some(info) = providers::huggingface_details(state, name).await {
                 return serde_json::to_value(info)
                     .map_err(|error| CatalogError::Parse(error.to_string()));
             }
@@ -637,21 +536,6 @@ pub(crate) async fn show_model(
             )))
         }
     }
-}
-
-pub(crate) async fn huggingface_details_or_none(
-    state: &AppState,
-    name: &str,
-) -> Option<types::HuggingFaceModelInfo> {
-    let repo = providers::huggingface_repo_id(name)?;
-    let info = providers::huggingface_repo_downloads(
-        &state.config().huggingface_models_url,
-        state.config().model_search_proxy_url.as_deref(),
-        repo,
-    )
-    .await
-    .ok()?;
-    (info.sizes.is_some() || info.gguf_size.is_some()).then_some(info)
 }
 
 /// DELETE /api/models/:name
@@ -740,19 +624,20 @@ async fn chat_train_bases(state: &AppState) -> Vec<TrainBase> {
 }
 
 fn is_chat_train_model(model: &ModelResponse) -> bool {
-    let capabilities = model.capabilities.as_deref().unwrap_or(&[]);
+    let capabilities = model.entry.capabilities.as_deref().unwrap_or(&[]);
     model.completion == Some(true) || capabilities.contains(&ModelCapability::Text)
 }
 
 fn chat_train_base(model: ModelResponse) -> TrainBase {
     let parameter_size = model
+        .entry
         .details
         .as_ref()
         .and_then(|details| details.parameter_size.as_deref());
-    let finetune = chat_finetune(&model.name, parameter_size);
+    let finetune = chat_finetune(&model.entry.name, parameter_size);
     TrainBase {
-        id: model.name.clone(),
-        label: model.name,
+        id: model.entry.name.clone(),
+        label: model.entry.name,
         edit: false,
         subject: Subject::Language,
         finetune,
@@ -1471,7 +1356,8 @@ mod train_preview_tests {
 #[cfg(test)]
 mod chat_train_base_tests {
     use super::{chat_finetune, is_chat_train_model};
-    use crate::routes::models::types::{ModelCapability, ModelDetails, ModelResponse};
+    use crate::routes::models::types::ModelResponse;
+    use abnegate_llm::catalog::{ModelCapability, ModelDetails, ModelEntry};
 
     fn model(
         name: &str,
@@ -1479,14 +1365,17 @@ mod chat_train_base_tests {
         capabilities: &[ModelCapability],
         parameter_size: Option<&str>,
     ) -> ModelResponse {
+        let mut entry = ModelEntry::default();
+        entry.name = name.to_string();
+        entry.capabilities = (!capabilities.is_empty()).then(|| capabilities.to_vec());
+        entry.details = parameter_size.map(|size| {
+            let mut details = ModelDetails::default();
+            details.parameter_size = Some(size.to_string());
+            details
+        });
         ModelResponse {
-            name: name.to_string(),
+            entry,
             completion,
-            capabilities: (!capabilities.is_empty()).then(|| capabilities.to_vec()),
-            details: parameter_size.map(|size| ModelDetails {
-                parameter_size: Some(size.to_string()),
-                ..Default::default()
-            }),
             ..Default::default()
         }
     }

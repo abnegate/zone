@@ -1,0 +1,232 @@
+{
+  "search": {
+    "": "library.input.html",
+    "q=qwen": "qwen.input.html",
+    "q=llama": "llama.input.html",
+    "c=tools": "tools.input.html",
+    "q=coder": "community.input.html"
+  },
+  "manifests": {
+    "library/qwen3:latest": [
+      5225376047,
+      1570,
+      11338,
+      488
+    ],
+    "library/qwen3:0.6b": [
+      522653440,
+      1570,
+      488
+    ],
+    "library/qwen3:1.7b": [
+      1359282176,
+      1570,
+      488
+    ],
+    "library/qwen3:4b": [
+      2497281120,
+      1570,
+      488
+    ],
+    "library/qwen3:8b": [
+      5225376047,
+      1570,
+      488
+    ],
+    "library/qwen3:14b": [
+      9276190720,
+      1570,
+      488
+    ],
+    "library/qwen3:32b": [
+      20201253888,
+      1570,
+      488
+    ],
+    "library/llama3.2:latest": [
+      2019377376,
+      1429,
+      7711,
+      6016
+    ],
+    "library/llama3.2:1b": [
+      1321082688,
+      1429,
+      7711
+    ],
+    "library/llama3.2:3b": [
+      2019377376,
+      1429,
+      7711
+    ],
+    "library/gemma3:latest": [
+      3338801804,
+      358,
+      8432
+    ],
+    "library/gemma3:1b": [
+      815310432,
+      358
+    ],
+    "library/gemma3:4b": [
+      3338801804,
+      358
+    ],
+    "library/gemma3:12b": [
+      8149190253,
+      358
+    ],
+    "library/gemma3:27b": [
+      17396936941,
+      358
+    ],
+    "library/deepseek-r1:latest": [
+      5225374657,
+      387,
+      1065
+    ],
+    "library/deepseek-r1:1.5b": [
+      1117320736,
+      387
+    ],
+    "library/deepseek-r1:7b": [
+      4683073184,
+      387
+    ],
+    "library/deepseek-r1:8b": [
+      5225374657,
+      387
+    ],
+    "library/deepseek-r1:70b": [
+      42520395584,
+      387
+    ],
+    "library/nomic-embed-text:latest": [
+      274290656,
+      11357,
+      17
+    ],
+    "library/mistral:latest": [
+      4372812000,
+      30000,
+      801
+    ],
+    "library/qwen2.5vl:latest": [
+      5969245856,
+      6016
+    ],
+    "library/qwen2.5vl:7b": [
+      5969245856,
+      6016
+    ],
+    "library/qwen2.5vl:72b": [
+      48920000000,
+      6016
+    ],
+    "library/llava:latest": [
+      4108916384,
+      624434336,
+      99
+    ],
+    "library/llava:7b": [
+      4108916384,
+      624434336,
+      99
+    ],
+    "library/llava:13b": [
+      7365960935,
+      645000000,
+      99
+    ],
+    "library/llava:34b": [
+      19000000000,
+      699000000,
+      99
+    ],
+    "library/phi4:latest": [
+      9053114464,
+      1084
+    ],
+    "library/gpt-oss:latest": [
+      13780154624,
+      7240,
+      489
+    ],
+    "library/gpt-oss:20b": [
+      13780154624,
+      7240,
+      489
+    ],
+    "library/gpt-oss:120b": [
+      65369818941,
+      7240,
+      489
+    ],
+    "jmorgan/coder:latest": [
+      4661211808,
+      1429
+    ],
+    "library/qwen2.5-coder:latest": [
+      4683087332,
+      1610
+    ],
+    "library/qwen2.5-coder:0.5b": [
+      397807936,
+      1610
+    ],
+    "library/qwen2.5-coder:7b": [
+      4683087332,
+      1610
+    ],
+    "library/qwen2.5-coder:32b": [
+      19851336256,
+      1610
+    ],
+    "library/qwen3-embedding:latest": [
+      4675000000,
+      488
+    ],
+    "library/qwen3-embedding:0.6b": [
+      639150592,
+      488
+    ],
+    "library/qwen3-embedding:8b": [
+      4675000000,
+      488
+    ],
+    "library/llama3.1:latest": [
+      4920738944,
+      1481,
+      12403
+    ],
+    "library/llama3.1:8b": [
+      4920738944,
+      1481,
+      12403
+    ],
+    "library/llama3.1:70b": [
+      42520398336,
+      1481,
+      12403
+    ],
+    "library/codellama:latest": [
+      3825807040,
+      7020,
+      4800
+    ],
+    "library/codellama:7b": [
+      3825807040,
+      7020,
+      4800
+    ],
+    "library/codellama:13b": [
+      7365960935,
+      7020,
+      4800
+    ],
+    "library/tinyllama:latest": [
+      637699456,
+      1500
+    ]
+  }
+}

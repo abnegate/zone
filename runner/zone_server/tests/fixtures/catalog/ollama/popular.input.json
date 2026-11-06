@@ -1,0 +1,115 @@
+{
+  "search": {
+    "": "no-cards.input.html",
+    "q=zzz-nothing": "no-cards.input.html",
+    "q=llama": "no-cards.input.html",
+    "c=embedding": "no-cards.input.html"
+  },
+  "manifests": {
+    "library/llama3.2:latest": [
+      2019377376,
+      1429,
+      7711,
+      6016
+    ],
+    "library/llama3.1:latest": [
+      4920738944,
+      1481,
+      12403
+    ],
+    "library/llama3.1:70b": [
+      42520398336,
+      1481,
+      12403
+    ],
+    "library/mistral:latest": [
+      4372812000,
+      30000,
+      801
+    ],
+    "library/mixtral:latest": [
+      26442481545,
+      1591,
+      59
+    ],
+    "library/qwen2.5:latest": [
+      4683073184,
+      1482,
+      11343
+    ],
+    "library/qwen2.5:72b": [
+      47415710080,
+      1482,
+      11343
+    ],
+    "library/phi3:latest": [
+      2176177120,
+      1084,
+      148
+    ],
+    "library/gemma2:latest": [
+      5443152736,
+      358,
+      8432
+    ],
+    "library/deepseek-r1:latest": [
+      5225374657,
+      387,
+      1065
+    ],
+    "library/deepseek-r1:32b": [
+      19851336256,
+      387,
+      1065
+    ],
+    "library/codellama:latest": [
+      3825807040,
+      7020,
+      4800
+    ],
+    "library/starcoder2:latest": [
+      4034000000,
+      1600
+    ],
+    "library/qwen3-embedding:0.6b": [
+      639150592,
+      488
+    ],
+    "library/nomic-embed-text:latest": [
+      274290656,
+      11357,
+      17
+    ],
+    "library/mxbai-embed-large:latest": [
+      669603712,
+      11357,
+      16
+    ],
+    "library/command-r:latest": [
+      18791000000,
+      13000,
+      4100
+    ],
+    "library/yi:latest": [
+      3480000000,
+      1200,
+      6000
+    ],
+    "library/granite3-dense:latest": [
+      4942656512,
+      6200,
+      18000
+    ],
+    "library/smollm2:latest": [
+      1820414496,
+      1429,
+      11338
+    ],
+    "library/dolphin-mixtral:latest": [
+      26442493141,
+      1591,
+      59,
+      12000
+    ]
+  }
+}

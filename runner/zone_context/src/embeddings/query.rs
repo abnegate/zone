@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn extracts_kebab_and_api_path() {
         let rewritten = rewrite_query(
-            "What dimension does get_model_dimension return for nomic-embed-text at /api/embeddings?",
+            "What budget does embed_char_budget return for nomic-embed-text at /api/embeddings?",
         );
         assert!(
             rewritten
@@ -681,7 +681,7 @@ mod tests {
             rewritten
                 .identifiers
                 .iter()
-                .any(|i| i == "get_model_dimension")
+                .any(|i| i == "embed_char_budget")
         );
         assert!(
             rewritten
