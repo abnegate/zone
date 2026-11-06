@@ -439,7 +439,6 @@ fn standing(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -472,8 +471,6 @@ mod tests {
     const CODEX_HOME: &str = "CODEX_HOME";
     const ESCAPE: &str = "../escape";
     const STAGING: &str = ".carrying-";
-    const READ_ONLY: u32 = 0o500;
-    const PRIVATE: u32 = 0o700;
 
     fn whole() -> RunContext {
         RunContext::from_messages(vec![
@@ -1167,11 +1164,11 @@ mod tests {
                 .join("projects")
                 .join(Session::project(&work))
         };
-        let (landed, sealed, occupied) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        let read_only = folder(sealed);
-        fs::create_dir_all(&read_only).expect("the read-only folder");
-        fs::set_permissions(&read_only, fs::Permissions::from_mode(READ_ONLY))
-            .expect("the folder made read-only");
+        let (landed, filed, occupied) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let file = folder(filed);
+        fs::create_dir_all(file.parent().expect("the projects folder"))
+            .expect("the projects folder");
+        fs::write(&file, TRANSCRIPT).expect("a file where the session's folder goes");
         fs::create_dir_all(
             folder(occupied)
                 .join(format!("{SESSION}.jsonl"))
@@ -1190,13 +1187,14 @@ mod tests {
         };
 
         let carried = into(landed).await;
-        let refused = into(sealed).await;
+        let refused = into(filed).await;
         let blocked = into(occupied).await;
-        fs::set_permissions(&read_only, fs::Permissions::from_mode(PRIVATE))
-            .expect("the folder writable again");
 
         assert!(carried, "the session was not carried");
-        assert!(!refused, "a session was carried into a read-only folder");
+        assert!(
+            !refused,
+            "a session was carried into a folder that is a file"
+        );
         assert!(!blocked, "a session replaced a directory");
         assert_eq!(
             staged(agents.path()),

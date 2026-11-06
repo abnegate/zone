@@ -37,7 +37,6 @@ impl Continuation<'_> {
     pub fn fresh(agent: AgentKind) -> Option<Session> {
         match agent {
             AgentKind::Claude => Some(Session::pinned(Uuid::new_v4().to_string())),
-            AgentKind::Codex => None,
             _ => None,
         }
     }

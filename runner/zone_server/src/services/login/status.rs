@@ -52,7 +52,7 @@ static HOST: LazyLock<Host> = LazyLock::new(|| Host::new(FRESH));
 pub struct AgentStatus {
     #[serde(with = "name")]
     pub agent: AgentKind,
-    pub provider: String,
+    pub provider: Option<String>,
     /// The best of the organization's logins, as its `label` is: the one a turn would start on.
     pub state: State,
     pub source: Option<Source>,
@@ -166,7 +166,7 @@ impl AgentStatus {
     fn signed_out(agent: AgentKind) -> Self {
         Self {
             agent,
-            provider: ai_settings::provider(agent).to_string(),
+            provider: ai_settings::provider(agent).map(str::to_string),
             state: State::SignedOut,
             source: None,
             label: None,
@@ -1031,7 +1031,7 @@ mod tests {
         let expected = vec![
             AgentStatus {
                 agent: AgentKind::Claude,
-                provider: "claude_code".to_string(),
+                provider: Some("claude_code".to_string()),
                 state: State::SignedIn,
                 source: Some(Source::Zone),
                 label: Some("jake@example.com".to_string()),
@@ -1068,7 +1068,7 @@ mod tests {
             },
             AgentStatus {
                 agent: AgentKind::Codex,
-                provider: "codex".to_string(),
+                provider: Some("codex".to_string()),
                 state: State::Pending,
                 source: None,
                 label: None,

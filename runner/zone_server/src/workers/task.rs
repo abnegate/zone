@@ -4395,8 +4395,8 @@ mod retry_tests {
         ]
     }
 
-    /// A failure no retry gets past is read on the words abnegate-agent-cli
-    /// begins it with, as the crate itself reports each one.
+    /// A failure no retry gets past is read on the words the crate begins it
+    /// with, as the crate itself reports each one.
     #[tokio::test]
     async fn agent_terminal_markers_are_the_crates() {
         assert_eq!(
@@ -4453,10 +4453,9 @@ mod retry_tests {
         }
     }
 
-    /// abnegate-agent-cli knows a refusal for usage credits only by the
-    /// `api_error` claude types it with. A Fable refusal in claude's words
-    /// alone is a failure the next attempt may get past, where Zone's own
-    /// provider read those words as a refusal no retry survives.
+    /// A refusal for usage credits is known only by the `api_error` claude
+    /// types it with. A Fable refusal in claude's words alone is a failure the
+    /// next attempt may get past.
     #[tokio::test]
     async fn a_fable_refusal_without_its_api_error_is_retried() {
         let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
@@ -4488,11 +4487,10 @@ mod retry_tests {
         );
     }
 
-    /// abnegate-agent-cli words a context the account cannot fund as "usage
-    /// credits required for this context length", and a context length is
-    /// what an endpoint's failure is terminal for. No endpoint words its
-    /// failure so, and a coding agent's refusal is terminal as it always was,
-    /// so the one judgement that moved is this synthetic one, from transient.
+    /// A context the account cannot fund is worded "usage credits required
+    /// for this context length", and a context length is what an endpoint's
+    /// failure is terminal for, so an endpoint failure in those words is
+    /// terminal like a coding agent's.
     #[test]
     fn an_endpoint_failure_in_the_crates_long_context_words_is_terminal_for_naming_a_context_length()
      {
@@ -4575,8 +4573,8 @@ mod retry_tests {
         }
     }
 
-    /// zone_core follows a coding agent's failure with the tail of its stderr,
-    /// which is where codex alone reports a renewal it could not make. Nothing
+    /// A coding agent's failure is followed by the tail of its stderr, which
+    /// is where codex alone reports a renewal it could not make. Nothing
     /// else there is the agent's verdict on its own turn: a retry log, or a
     /// warning about some other server, must not decide whether it retries.
     #[test]

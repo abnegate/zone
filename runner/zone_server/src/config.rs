@@ -270,7 +270,7 @@ const DEFAULT_CODEX_SANDBOX: CodexSandbox = CodexSandbox::WorkspaceWrite;
 
 /// The sandboxes codex may run granted tools in. A turn that withholds them already runs
 /// read-only, so `read-only` names no choice an operator could make.
-const GRANTED_SANDBOXES: [CodexSandbox; 2] =
+pub(crate) const GRANTED_SANDBOXES: [CodexSandbox; 2] =
     [CodexSandbox::WorkspaceWrite, CodexSandbox::DangerFullAccess];
 
 /// Owner-only access, for directories holding an agent's credentials and
