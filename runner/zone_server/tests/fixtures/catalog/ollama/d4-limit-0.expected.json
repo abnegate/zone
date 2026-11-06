@@ -1,14 +1,144 @@
 {
   "browse": {
     "ok": {
-      "models": [],
-      "next_cursor": "offset:0"
+      "models": [
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.6B–235B"
+          },
+          "downloads": 5200000,
+          "name": "qwen3",
+          "size": 5225389443,
+          "sizes": [
+            {
+              "label": "0.6B",
+              "name": "qwen3:0.6b",
+              "size": 522655498
+            },
+            {
+              "label": "1.7B",
+              "name": "qwen3:1.7b",
+              "size": 1359284234
+            },
+            {
+              "label": "4B",
+              "name": "qwen3:4b",
+              "size": 2497283178
+            },
+            {
+              "label": "8B",
+              "name": "qwen3:8b",
+              "size": 5225378105
+            },
+            {
+              "label": "14B",
+              "name": "qwen3:14b",
+              "size": 9276192778
+            },
+            {
+              "label": "30B",
+              "name": "qwen3:30b"
+            },
+            {
+              "label": "32B",
+              "name": "qwen3:32b",
+              "size": 20201255946
+            },
+            {
+              "label": "235B",
+              "name": "qwen3:235b"
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking"
+          ],
+          "url": "https://ollama.com/library/qwen3",
+          "use_cases": [
+            "Tool use",
+            "Reasoning"
+          ]
+        }
+      ],
+      "next_cursor": "offset:1"
     }
   },
   "list": {
     "body": {
-      "models": [],
-      "next_cursor": "offset:0"
+      "models": [
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.6B–235B"
+          },
+          "downloads": 5200000,
+          "name": "qwen3",
+          "size": 5225389443,
+          "sizes": [
+            {
+              "label": "0.6B",
+              "name": "qwen3:0.6b",
+              "size": 522655498
+            },
+            {
+              "label": "1.7B",
+              "name": "qwen3:1.7b",
+              "size": 1359284234
+            },
+            {
+              "label": "4B",
+              "name": "qwen3:4b",
+              "size": 2497283178
+            },
+            {
+              "label": "8B",
+              "name": "qwen3:8b",
+              "size": 5225378105
+            },
+            {
+              "label": "14B",
+              "name": "qwen3:14b",
+              "size": 9276192778
+            },
+            {
+              "label": "30B",
+              "name": "qwen3:30b"
+            },
+            {
+              "label": "32B",
+              "name": "qwen3:32b",
+              "size": 20201255946
+            },
+            {
+              "label": "235B",
+              "name": "qwen3:235b"
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking"
+          ],
+          "url": "https://ollama.com/library/qwen3",
+          "use_cases": [
+            "Tool use",
+            "Reasoning"
+          ]
+        }
+      ],
+      "next_cursor": "offset:1"
     },
     "status": 200
   }

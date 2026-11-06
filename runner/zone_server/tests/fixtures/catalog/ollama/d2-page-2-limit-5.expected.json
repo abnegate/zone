@@ -1,13 +1,313 @@
 {
   "browse": {
     "ok": {
-      "models": [],
+      "models": [
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "details": {
+            "family": "mistral",
+            "format": "gguf",
+            "parameter_size": "7B"
+          },
+          "downloads": 17600000,
+          "name": "mistral",
+          "size": 4372842801,
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/library/mistral",
+          "use_cases": [
+            "Tool use"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "Flagship vision-language model of Qwen and also a significant leap from the previous Qwen2-VL.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "3B–72B"
+          },
+          "downloads": 1000000,
+          "name": "qwen2.5vl",
+          "size": 5969251872,
+          "sizes": [
+            {
+              "label": "3B",
+              "name": "qwen2.5vl:3b"
+            },
+            {
+              "label": "7B",
+              "name": "qwen2.5vl:7b",
+              "size": 5969251872
+            },
+            {
+              "label": "32B",
+              "name": "qwen2.5vl:32b"
+            },
+            {
+              "label": "72B",
+              "name": "qwen2.5vl:72b",
+              "size": 48920006016
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/qwen2.5vl",
+          "use_cases": [
+            "Vision"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "LLaVA is a novel end-to-end trained large multimodal model that combines a vision encoder and Vicuna for general-purpose visual and language understanding.",
+          "details": {
+            "format": "gguf",
+            "parameter_size": "7B · 13B · 34B"
+          },
+          "downloads": 9600000,
+          "name": "llava",
+          "size": 4733350819,
+          "sizes": [
+            {
+              "label": "7B",
+              "name": "llava:7b",
+              "size": 4733350819
+            },
+            {
+              "label": "13B",
+              "name": "llava:13b",
+              "size": 8010961034
+            },
+            {
+              "label": "34B",
+              "name": "llava:34b",
+              "size": 19699000099
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/llava",
+          "use_cases": [
+            "Vision",
+            "Multimodal",
+            "Coding"
+          ]
+        },
+        {
+          "description": "Phi-4 is a 14B parameter, state-of-the-art open model from Microsoft.",
+          "details": {
+            "family": "phi",
+            "format": "gguf",
+            "parameter_size": "14B"
+          },
+          "downloads": 5800000,
+          "name": "phi4",
+          "size": 9053115548,
+          "url": "https://ollama.com/library/phi4"
+        },
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "OpenAI's open-weight models designed for powerful reasoning, agentic tasks, and versatile developer use cases.",
+          "details": {
+            "format": "gguf",
+            "parameter_size": "20B · 120B"
+          },
+          "downloads": 3100000,
+          "name": "gpt-oss",
+          "size": 13780162353,
+          "sizes": [
+            {
+              "label": "20B",
+              "name": "gpt-oss:20b",
+              "size": 13780162353
+            },
+            {
+              "label": "120B",
+              "name": "gpt-oss:120b",
+              "size": 65369826670
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking",
+            "cloud"
+          ],
+          "url": "https://ollama.com/library/gpt-oss",
+          "use_cases": [
+            "Tool use",
+            "Reasoning",
+            "Agents"
+          ]
+        }
+      ],
       "next_cursor": null
     }
   },
   "list": {
     "body": {
-      "models": [],
+      "models": [
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "details": {
+            "family": "mistral",
+            "format": "gguf",
+            "parameter_size": "7B"
+          },
+          "downloads": 17600000,
+          "name": "mistral",
+          "size": 4372842801,
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/library/mistral",
+          "use_cases": [
+            "Tool use"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "Flagship vision-language model of Qwen and also a significant leap from the previous Qwen2-VL.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "3B–72B"
+          },
+          "downloads": 1000000,
+          "name": "qwen2.5vl",
+          "size": 5969251872,
+          "sizes": [
+            {
+              "label": "3B",
+              "name": "qwen2.5vl:3b"
+            },
+            {
+              "label": "7B",
+              "name": "qwen2.5vl:7b",
+              "size": 5969251872
+            },
+            {
+              "label": "32B",
+              "name": "qwen2.5vl:32b"
+            },
+            {
+              "label": "72B",
+              "name": "qwen2.5vl:72b",
+              "size": 48920006016
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/qwen2.5vl",
+          "use_cases": [
+            "Vision"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "LLaVA is a novel end-to-end trained large multimodal model that combines a vision encoder and Vicuna for general-purpose visual and language understanding.",
+          "details": {
+            "format": "gguf",
+            "parameter_size": "7B · 13B · 34B"
+          },
+          "downloads": 9600000,
+          "name": "llava",
+          "size": 4733350819,
+          "sizes": [
+            {
+              "label": "7B",
+              "name": "llava:7b",
+              "size": 4733350819
+            },
+            {
+              "label": "13B",
+              "name": "llava:13b",
+              "size": 8010961034
+            },
+            {
+              "label": "34B",
+              "name": "llava:34b",
+              "size": 19699000099
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/llava",
+          "use_cases": [
+            "Vision",
+            "Multimodal",
+            "Coding"
+          ]
+        },
+        {
+          "description": "Phi-4 is a 14B parameter, state-of-the-art open model from Microsoft.",
+          "details": {
+            "family": "phi",
+            "format": "gguf",
+            "parameter_size": "14B"
+          },
+          "downloads": 5800000,
+          "name": "phi4",
+          "size": 9053115548,
+          "url": "https://ollama.com/library/phi4"
+        },
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "OpenAI's open-weight models designed for powerful reasoning, agentic tasks, and versatile developer use cases.",
+          "details": {
+            "format": "gguf",
+            "parameter_size": "20B · 120B"
+          },
+          "downloads": 3100000,
+          "name": "gpt-oss",
+          "size": 13780162353,
+          "sizes": [
+            {
+              "label": "20B",
+              "name": "gpt-oss:20b",
+              "size": 13780162353
+            },
+            {
+              "label": "120B",
+              "name": "gpt-oss:120b",
+              "size": 65369826670
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking",
+            "cloud"
+          ],
+          "url": "https://ollama.com/library/gpt-oss",
+          "use_cases": [
+            "Tool use",
+            "Reasoning",
+            "Agents"
+          ]
+        }
+      ],
       "next_cursor": null
     },
     "status": 200
