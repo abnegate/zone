@@ -2,17 +2,30 @@
 //! the backend from `services::backend`, zone's tools from a `mcp::Turn` lease, and the session
 //! moved from one home to another the way a handover moves it.
 //!
-//! Each test prepares temporary homes and runs a copy of this binary with only their paths in the
-//! environment, so no agent finds the host's `CLAUDE_CONFIG_DIR`, `CLAUDE_SECURESTORAGE_CONFIG_DIR`
-//! or `CODEX_HOME`, and nothing calls `set_var`. Every agent runs through a wrapper that records
-//! its process id, the names of the variables it was given and the home it ran in.
+//! Each test prepares temporary homes and runs a copy of this binary in a cleared environment that
+//! holds only the [`KEPT`] variables the parent has set, the run's own variables and the
+//! temporary homes' paths, so no agent finds the host's `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, a
+//! sign-in token or any other variable of the host's, and nothing calls `set_var`. `HOME` stays
+//! the host's, since claude finds the login Keychain through it. Every agent runs through a
+//! wrapper that records its process id, the names of the variables it was given and the home it
+//! ran in.
 //!
-//! Ignored because each spends real turns of the host user's subscriptions. The claude test signs
-//! in through the host's Keychain item and skips when `claude auth status` reports it signed out.
-//! The codex test copies `~/.codex/auth.json` and skips when its last refresh is a week old, since
-//! a refresh inside the copy would rotate the token and sign the host's own codex out. The claude
-//! organization login test runs only when `CLAUDE_CODE_OAUTH_TOKEN` holds a token from
-//! `claude setup-token`. Run by hand, from `runner/`, against a migrated database:
+//! Ignored because each spends real turns of the host user's subscriptions, and because two of
+//! them share the host's own sign-in:
+//!
+//! - The claude test runs with `CLAUDE_SECURESTORAGE_CONFIG_DIR` empty, so claude reads its
+//!   sign-in from the host's own unsuffixed Keychain item and writes back to it: should claude
+//!   refresh its OAuth token during the run, the rotated token replaces the host's, and a host
+//!   claude refreshing at the same moment can lose that race and be signed out. It skips when
+//!   `claude auth status` reports the item signed out.
+//! - The codex test copies `~/.codex/auth.json` and skips when its last refresh is a week old,
+//!   since a refresh inside the copy would rotate the token and sign the host's own codex out. It
+//!   fails when the host's `auth.json` changed during the run.
+//! - The claude organization login test runs only when `CLAUDE_CODE_OAUTH_TOKEN` holds a token
+//!   from `claude setup-token`, and only that test's copy is handed the token.
+//!
+//! A test that skips passes, and says so with a `SKIPPED:` line on standard error that the test
+//! harness does not capture. Run by hand, from `runner/`, against a migrated database:
 //!
 //! `TEST_DATABASE_URL=<url> DATABASE_URL=<url> REDIS_URL=<url> cargo test -p zone_server
 //! --no-default-features --features zone_context/test-utils --test integration -- --ignored
@@ -21,6 +34,7 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,6 +48,7 @@ use abnegate_llm::{LlmConfig, Message, ReasoningEffort};
 use abnegate_secret::SecretValue;
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, SignIn, Toolset, cli};
@@ -66,6 +81,21 @@ const TOOLS_DIRECTORY: &str = "ZONE_CHAT_AGENT_CWD";
 const SECURE_STORAGE: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
 /// What every agent's own home is named by, none of which a copy may inherit.
 const HOST_HOMES: &[&str] = &["CLAUDE_CONFIG_DIR", SECURE_STORAGE, "CODEX_HOME"];
+/// All a copy is given of the parent's environment, each when the parent has it set.
+const KEPT: &[&str] = &[
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TEST_DATABASE_URL",
+    "ZONE_CONTEXT_TEST_DATABASE_URL",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "RUST_LOG",
+    "RUST_BACKTRACE",
+];
 
 const CLAUDE_MODEL: &str = "haiku";
 const CODEX_MODEL: &str = "gpt-6-luna";
@@ -75,7 +105,6 @@ const CLAUDE_STATE: &str = ".claude.json";
 const CLAUDE_PROJECTS: &str = "projects";
 const CODEX_SESSIONS: &str = "sessions";
 const HOST_CLAUDE_HOME: &str = ".claude";
-const HOST_CLAUDE_HOMES: &[&str] = &[HOST_CLAUDE_HOME, ".claude-clutch"];
 const HOST_CODEX_HOME: &str = ".codex";
 const STALE_AFTER: TimeDelta = TimeDelta::days(7);
 const LAST_REFRESH: &str = "last_refresh";
@@ -96,6 +125,7 @@ const AGENTS: &str = "agents";
 const PROBE: &str = "probe";
 const PROJECT: &str = "project";
 const SESSIONS: &str = "sessions";
+const SKIPPED: &str = "skipped";
 
 const PROBED_TOOL: &str = "list_files";
 const RECALL: &str = "What was the word I asked you to remember? Reply with only that word.";
@@ -161,6 +191,12 @@ impl Run {
     fn record(&self, name: &str, value: &str) {
         fs::write(self.root.join(name), value).expect("a record for the parent");
     }
+
+    /// Tell the parent the lanes were skipped and why, for it to report past the capture.
+    fn skip(&self, reason: &str) {
+        println!("SKIPPED: {reason}");
+        self.record(SKIPPED, reason);
+    }
 }
 
 /// What one turn produced: its text, the session it announced, zone's tools it called, the
@@ -193,10 +229,16 @@ struct Listing {
 impl Listing {
     fn take() -> Self {
         let home = host_home();
-        let claude = HOST_CLAUDE_HOMES
-            .iter()
-            .map(|directory| home.join(directory).join(CLAUDE_PROJECTS))
-            .flat_map(|projects| entries(&projects))
+        let configured = home::variable(AgentKind::Claude)
+            .and_then(env::var_os)
+            .filter(|directory| !directory.is_empty())
+            .map(PathBuf::from);
+        let claude = [Some(home.join(HOST_CLAUDE_HOME)), configured]
+            .into_iter()
+            .flatten()
+            .collect::<BTreeSet<PathBuf>>()
+            .into_iter()
+            .flat_map(|directory| entries(&directory.join(CLAUDE_PROJECTS)))
             .collect();
         let codex = files(&home.join(HOST_CODEX_HOME).join(CODEX_SESSIONS));
         Self { claude, codex }
@@ -249,6 +291,30 @@ impl Listing {
 
 fn host_home() -> PathBuf {
     PathBuf::from(env::var_os("HOME").expect("HOME is set"))
+}
+
+fn codex_credentials() -> PathBuf {
+    host_home().join(HOST_CODEX_HOME).join(CREDENTIALS)
+}
+
+/// The SHA-256 of the host's own codex sign-in, or `None` when it cannot be read.
+fn codex_fingerprint() -> Option<Vec<u8>> {
+    fs::read(codex_credentials())
+        .ok()
+        .map(|credentials| Sha256::digest(credentials).to_vec())
+}
+
+/// Say a test skipped on the process's real standard error, which the test harness does not
+/// capture, so a skip that passes is never mistaken for a run.
+fn skipped(reason: &str) {
+    let _ = writeln!(io::stderr(), "SKIPPED: {reason}");
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the copy's lanes")
 }
 
 fn entries(directory: &Path) -> Vec<PathBuf> {
@@ -306,7 +372,7 @@ fn wrap(run: &Path, agent: AgentKind) {
 /// Why codex's own sign-in cannot be copied safely, when it cannot: it was refreshed too long
 /// ago. Reads nothing of `auth.json` but its last refresh.
 fn codex_refresh_is_stale() -> Option<String> {
-    let path = host_home().join(HOST_CODEX_HOME).join(CREDENTIALS);
+    let path = codex_credentials();
     let Ok(text) = fs::read_to_string(&path) else {
         return Some(format!("{} cannot be read", path.display()));
     };
@@ -335,8 +401,9 @@ fn codex_refresh_is_stale() -> Option<String> {
     })
 }
 
-/// Prepare a run for `agent` and run `test` in a copy of this binary given only its temporary
-/// homes, then assert the host's own homes hold nothing of it.
+/// Prepare a run for `agent` and run `test` in a copy of this binary given only the [`KEPT`]
+/// variables and its temporary homes, then assert the host's own homes hold nothing of it and,
+/// for codex, that the host's own sign-in is unchanged.
 fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
     let before = Listing::take();
     let unready = match (agent, sign_in) {
@@ -349,9 +416,10 @@ fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
         _ => None,
     };
     if let Some(reason) = unready {
-        println!("SKIPPED: {reason}");
+        skipped(&reason);
         return;
     }
+    let codex_before = (agent == AgentKind::Codex).then(codex_fingerprint);
     let root = env::var_os(ROOT).map_or_else(env::temp_dir, PathBuf::from);
     fs::create_dir_all(&root).expect("the run root");
     let run = TempDir::new_in(&root).expect("a run directory");
@@ -361,21 +429,22 @@ fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
     }
 
     let mut command = Command::new(env::current_exe().expect("this test binary"));
+    command.env_clear().args([
+        "--exact",
+        test,
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    for name in KEPT {
+        if let Some(value) = env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     command
-        .args([
-            "--exact",
-            test,
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
         .env(COPY, "1")
         .env(RUN, run.path())
-        .env(TOOLS_DIRECTORY, run.path().join(PROBE))
-        .env_remove(cli::PASSTHROUGH);
-    for variable in HOST_HOMES {
-        command.env_remove(variable);
-    }
+        .env(TOOLS_DIRECTORY, run.path().join(PROBE));
     match (agent, sign_in) {
         (AgentKind::Claude, SignIn::Host) => {
             let home = host_home();
@@ -399,12 +468,15 @@ fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
                     format!("{configuration},{SECURE_STORAGE}"),
                 );
         }
+        (AgentKind::Claude, SignIn::Organization) => {
+            command.env(
+                CLAUDE_CODE_OAUTH_TOKEN,
+                env::var_os(CLAUDE_CODE_OAUTH_TOKEN).expect("the token was checked above"),
+            );
+        }
         (AgentKind::Codex, _) => {
-            fs::copy(
-                host_home().join(HOST_CODEX_HOME).join(CREDENTIALS),
-                run.path().join(AUTH),
-            )
-            .expect("a copy of codex's sign-in");
+            fs::copy(codex_credentials(), run.path().join(AUTH))
+                .expect("a copy of codex's sign-in");
         }
         _ => {}
     }
@@ -416,6 +488,14 @@ fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     println!("{printed}");
+    if let Some(before) = codex_before {
+        assert!(
+            codex_fingerprint() == before,
+            "{} changed while the codex lanes ran: the host user's codex login may have been \
+             rotated and signed out; run `codex login` if the host's codex no longer works",
+            codex_credentials().display()
+        );
+    }
     Listing::take().assert_untouched_by(&before, run.path());
 
     assert!(output.status.success(), "the {agent} lanes failed");
@@ -423,6 +503,9 @@ fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
         printed.contains("1 passed"),
         "the copy ran no test: {printed}"
     );
+    if let Ok(reason) = fs::read_to_string(run.path().join(SKIPPED)) {
+        skipped(reason.trim());
+    }
 }
 
 /// The harness's state with the agent run through the wrapper, the host's sign-in allowed, and
@@ -733,9 +816,9 @@ async fn claude_preflight(run: &Run) -> bool {
             true
         }
         Ok(_) => {
-            println!(
-                "SKIPPED: claude auth status reports the host's Keychain item signed out under a \
-                 temporary CLAUDE_CONFIG_DIR with CLAUDE_SECURESTORAGE_CONFIG_DIR empty"
+            run.skip(
+                "claude auth status reports the host's Keychain item signed out under a \
+                 temporary CLAUDE_CONFIG_DIR with CLAUDE_SECURESTORAGE_CONFIG_DIR empty",
             );
             false
         }
@@ -984,11 +1067,11 @@ async fn organization_lanes(agent: AgentKind) {
     }
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "spends four turns of the host user's real Claude subscription"]
-async fn claude_runs_moves_stops_and_resumes_through_zone() {
+fn claude_runs_moves_stops_and_resumes_through_zone() {
     if env::var_os(COPY).is_some() {
-        claude_lanes().await;
+        runtime().block_on(claude_lanes());
         return;
     }
     parent(
@@ -998,11 +1081,11 @@ async fn claude_runs_moves_stops_and_resumes_through_zone() {
     );
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "spends four turns of the host user's real ChatGPT subscription"]
-async fn codex_runs_moves_stops_resumes_and_requires_zone() {
+fn codex_runs_moves_stops_resumes_and_requires_zone() {
     if env::var_os(COPY).is_some() {
-        organization_lanes(AgentKind::Codex).await;
+        runtime().block_on(organization_lanes(AgentKind::Codex));
         return;
     }
     parent(
@@ -1012,11 +1095,11 @@ async fn codex_runs_moves_stops_resumes_and_requires_zone() {
     );
 }
 
-#[tokio::test]
+#[test]
 #[ignore = "spends four turns of the Claude subscription CLAUDE_CODE_OAUTH_TOKEN signs in to"]
-async fn a_claude_organization_login_runs_moves_stops_and_resumes_through_zone() {
+fn a_claude_organization_login_runs_moves_stops_and_resumes_through_zone() {
     if env::var_os(COPY).is_some() {
-        organization_lanes(AgentKind::Claude).await;
+        runtime().block_on(organization_lanes(AgentKind::Claude));
         return;
     }
     parent(
