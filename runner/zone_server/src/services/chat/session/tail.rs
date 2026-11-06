@@ -102,7 +102,7 @@ mod tests {
     }
 
     fn sent(tail: &RunContext) -> String {
-        render(&project(&tail.entries, tail.summary.as_ref()).expect("a projectable tail"))
+        render(&project(&tail.entries, tail.summary.as_ref()).expect("a projectable tail")).text()
     }
 
     #[test]

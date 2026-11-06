@@ -13,6 +13,8 @@ sqlx = ["abnegate-secret/sqlx"]
 test-support = []
 
 [dependencies]
+base64 = { workspace = true }
+tempfile = "=3.27.0"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
@@ -51,7 +53,6 @@ rmcp = { workspace = true, default-features = false, features = [
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
-tempfile = "=3.27.0"
 tracing-subscriber = { workspace = true }
 wiremock = "=0.6.5"
 rmcp = { workspace = true, default-features = false, features = [

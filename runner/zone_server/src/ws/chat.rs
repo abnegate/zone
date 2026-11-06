@@ -5763,7 +5763,7 @@ cat 'DIR/reply.jsonl'
                                 .split_terminator('\0')
                                 .map(str::to_string)
                                 .collect(),
-                            stdin,
+                            stdin: zone_core::llm::provider::prompt(&stdin),
                             directory: directory.trim().to_string(),
                         })
                         .filter(|run| run.flag("--session-id").or(run.flag("--resume")).is_some())

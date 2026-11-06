@@ -26,11 +26,15 @@
 mod agent;
 mod cli;
 mod event;
+mod image;
+mod input;
 mod lines;
 mod observer;
 mod occupancy;
 mod output;
 mod parser;
+#[cfg(any(test, feature = "test-support"))]
+mod recorded;
 mod rollout;
 mod session;
 mod settings;
@@ -45,10 +49,12 @@ pub use observer::Observer;
 pub use occupancy::Occupancy;
 pub use output::Output;
 pub use parser::claude::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
+#[cfg(any(test, feature = "test-support"))]
+pub use recorded::prompt;
 pub use session::Session;
 pub use settings::{
     BuiltinTools, CliSettings, CodexSandbox, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT,
     DEFAULT_TIMEOUT, SignIn, Toolset,
 };
 pub use subagent::{StepStatus, Subagent, SubagentStatus, SubagentStep};
-pub use transcript::{render, render_tail};
+pub use transcript::{Part, Transcript, render, render_tail};
