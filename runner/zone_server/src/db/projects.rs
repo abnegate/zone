@@ -1,5 +1,8 @@
 //! Project database queries
 
+use std::fmt;
+
+use abnegate_secret::REDACTED;
 use chrono::NaiveDateTime;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -7,7 +10,7 @@ use uuid::Uuid;
 use super::DbResult;
 
 /// Project row from database
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub struct ProjectRow {
     pub id: Uuid,
     pub workspace_id: Option<Uuid>,
@@ -19,6 +22,29 @@ pub struct ProjectRow {
     pub github_access_token: Option<String>,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
+    pub github_installation_id: Option<Uuid>,
+}
+
+impl fmt::Debug for ProjectRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProjectRow")
+            .field("id", &self.id)
+            .field("workspace_id", &self.workspace_id)
+            .field("source_id", &self.source_id)
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("status", &self.status)
+            .field("github_repo_url", &self.github_repo_url)
+            .field(
+                "github_access_token",
+                &self.github_access_token.as_ref().map(|_| REDACTED),
+            )
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("github_installation_id", &self.github_installation_id)
+            .finish()
+    }
 }
 
 /// List projects with workspace and optional status filter
@@ -28,10 +54,12 @@ pub async fn list_projects(
     status: Option<&str>,
 ) -> DbResult<Vec<ProjectRow>> {
     if let Some(status) = status {
-        let rows = sqlx::query!(
+        sqlx::query_as!(
+            ProjectRow,
             r#"
             SELECT id, workspace_id, source_id, name, description, status,
-                   github_repo_url, github_access_token, created_at, updated_at
+                   github_repo_url, github_access_token, created_at, updated_at,
+                   github_installation_id
             FROM projects
             WHERE workspace_id = $1 AND status = $2
             ORDER BY created_at DESC
@@ -40,28 +68,14 @@ pub async fn list_projects(
             status
         )
         .fetch_all(pool)
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| ProjectRow {
-                id: r.id,
-                workspace_id: r.workspace_id,
-                source_id: r.source_id,
-                name: r.name,
-                description: r.description,
-                status: r.status,
-                github_repo_url: r.github_repo_url,
-                github_access_token: r.github_access_token,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-            })
-            .collect())
+        .await
     } else {
-        let rows = sqlx::query!(
+        sqlx::query_as!(
+            ProjectRow,
             r#"
             SELECT id, workspace_id, source_id, name, description, status,
-                   github_repo_url, github_access_token, created_at, updated_at
+                   github_repo_url, github_access_token, created_at, updated_at,
+                   github_installation_id
             FROM projects
             WHERE workspace_id = $1
             ORDER BY created_at DESC
@@ -69,52 +83,25 @@ pub async fn list_projects(
             workspace_id
         )
         .fetch_all(pool)
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| ProjectRow {
-                id: r.id,
-                workspace_id: r.workspace_id,
-                source_id: r.source_id,
-                name: r.name,
-                description: r.description,
-                status: r.status,
-                github_repo_url: r.github_repo_url,
-                github_access_token: r.github_access_token,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
-            })
-            .collect())
+        .await
     }
 }
 
 /// Get project by ID
 pub async fn get_project(pool: &PgPool, id: Uuid) -> DbResult<Option<ProjectRow>> {
-    let row = sqlx::query!(
+    sqlx::query_as!(
+        ProjectRow,
         r#"
         SELECT id, workspace_id, source_id, name, description, status,
-               github_repo_url, github_access_token, created_at, updated_at
+               github_repo_url, github_access_token, created_at, updated_at,
+               github_installation_id
         FROM projects
         WHERE id = $1
         "#,
         id
     )
     .fetch_optional(pool)
-    .await?;
-
-    Ok(row.map(|r| ProjectRow {
-        id: r.id,
-        workspace_id: r.workspace_id,
-        source_id: r.source_id,
-        name: r.name,
-        description: r.description,
-        status: r.status,
-        github_repo_url: r.github_repo_url,
-        github_access_token: r.github_access_token,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    }))
+    .await
 }
 
 /// Get a project only when it belongs to the specified workspace.
@@ -126,7 +113,8 @@ pub async fn get_project_in_workspace(
     sqlx::query_as::<_, ProjectRow>(
         r#"
         SELECT id, workspace_id, source_id, name, description, status,
-               github_repo_url, github_access_token, created_at, updated_at
+               github_repo_url, github_access_token, created_at, updated_at,
+               github_installation_id
         FROM projects
         WHERE id = $1 AND workspace_id = $2
         "#,
@@ -154,7 +142,8 @@ pub async fn create(pool: &PgPool, project: NewProject<'_>) -> DbResult<ProjectR
         INSERT INTO projects (name, description, workspace_id, source_id, status)
         VALUES ($1, $2, $3, $4, COALESCE($5, 'active'))
         RETURNING id, workspace_id, source_id, name, description, status,
-                  github_repo_url, github_access_token, created_at, updated_at
+                  github_repo_url, github_access_token, created_at, updated_at,
+                  github_installation_id
         "#,
     )
     .bind(project.name)
@@ -198,7 +187,8 @@ pub async fn set_source(
         SET source_id = $2, updated_at = NOW()
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
-                  github_repo_url, github_access_token, created_at, updated_at
+                  github_repo_url, github_access_token, created_at, updated_at,
+                  github_installation_id
         "#,
     )
     .bind(id)
@@ -215,7 +205,8 @@ pub async fn update_project(
     description: Option<&str>,
     status: Option<&str>,
 ) -> DbResult<Option<ProjectRow>> {
-    let row = sqlx::query!(
+    sqlx::query_as!(
+        ProjectRow,
         r#"
         UPDATE projects
         SET name = COALESCE($2, name),
@@ -224,7 +215,8 @@ pub async fn update_project(
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
-                  github_repo_url, github_access_token, created_at, updated_at
+                  github_repo_url, github_access_token, created_at, updated_at,
+                  github_installation_id
         "#,
         id,
         name,
@@ -232,20 +224,7 @@ pub async fn update_project(
         status
     )
     .fetch_optional(pool)
-    .await?;
-
-    Ok(row.map(|r| ProjectRow {
-        id: r.id,
-        workspace_id: r.workspace_id,
-        source_id: r.source_id,
-        name: r.name,
-        description: r.description,
-        status: r.status,
-        github_repo_url: r.github_repo_url,
-        github_access_token: r.github_access_token,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    }))
+    .await
 }
 
 /// Delete a project
@@ -263,65 +242,164 @@ pub async fn link_github(
     id: Uuid,
     repo_url: &str,
     access_token: Option<&str>,
+    github_installation_id: Option<Uuid>,
 ) -> DbResult<Option<ProjectRow>> {
-    let row = sqlx::query!(
+    sqlx::query_as!(
+        ProjectRow,
         r#"
         UPDATE projects
         SET github_repo_url = $2,
             github_access_token = $3,
+            github_installation_id = $4,
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
-                  github_repo_url, github_access_token, created_at, updated_at
+                  github_repo_url, github_access_token, created_at, updated_at,
+                  github_installation_id
         "#,
         id,
         repo_url,
-        access_token
+        access_token,
+        github_installation_id
     )
     .fetch_optional(pool)
-    .await?;
-
-    Ok(row.map(|r| ProjectRow {
-        id: r.id,
-        workspace_id: r.workspace_id,
-        source_id: r.source_id,
-        name: r.name,
-        description: r.description,
-        status: r.status,
-        github_repo_url: r.github_repo_url,
-        github_access_token: r.github_access_token,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    }))
+    .await
 }
 
 /// Unlink GitHub repository from a project
 pub async fn unlink_github(pool: &PgPool, id: Uuid) -> DbResult<Option<ProjectRow>> {
-    let row = sqlx::query!(
+    sqlx::query_as!(
+        ProjectRow,
         r#"
         UPDATE projects
         SET github_repo_url = NULL,
             github_access_token = NULL,
+            github_installation_id = NULL,
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
-                  github_repo_url, github_access_token, created_at, updated_at
+                  github_repo_url, github_access_token, created_at, updated_at,
+                  github_installation_id
         "#,
         id
     )
     .fetch_optional(pool)
-    .await?;
+    .await
+}
 
-    Ok(row.map(|r| ProjectRow {
-        id: r.id,
-        workspace_id: r.workspace_id,
-        source_id: r.source_id,
-        name: r.name,
-        description: r.description,
-        status: r.status,
-        github_repo_url: r.github_repo_url,
-        github_access_token: r.github_access_token,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    }))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::sources::testing;
+
+    async fn widgets(pool: &PgPool, workspace_id: Uuid) -> ProjectRow {
+        create(
+            pool,
+            NewProject {
+                name: "Widgets",
+                description: None,
+                workspace_id: Some(workspace_id),
+                source_id: None,
+                status: None,
+            },
+        )
+        .await
+        .expect("a project")
+    }
+
+    #[tokio::test]
+    async fn linking_with_an_installation_stores_it_and_unlinking_clears_it() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let project = widgets(&pool, installation.workspace).await;
+        assert_eq!(project.github_installation_id, None);
+
+        let linked = link_github(
+            &pool,
+            project.id,
+            "https://github.com/acme/widgets",
+            None,
+            Some(installation.id),
+        )
+        .await
+        .expect("the link")
+        .expect("the project");
+        assert_eq!(linked.github_installation_id, Some(installation.id));
+        assert_eq!(linked.github_access_token, None);
+
+        let unlinked = unlink_github(&pool, project.id)
+            .await
+            .expect("the unlink")
+            .expect("the project");
+        assert_eq!(unlinked.github_installation_id, None);
+        assert_eq!(unlinked.github_repo_url, None);
+    }
+
+    #[tokio::test]
+    async fn every_project_read_and_write_returns_the_installation() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let project = widgets(&pool, installation.workspace).await;
+        link_github(
+            &pool,
+            project.id,
+            "https://github.com/acme/widgets",
+            None,
+            Some(installation.id),
+        )
+        .await
+        .expect("the link");
+        let expected = Some(installation.id);
+
+        let in_workspace = get_project_in_workspace(&pool, project.id, installation.workspace)
+            .await
+            .expect("the read")
+            .expect("the project");
+        assert_eq!(in_workspace.github_installation_id, expected);
+        let by_id = get_project(&pool, project.id)
+            .await
+            .expect("the read")
+            .expect("the project");
+        assert_eq!(by_id.github_installation_id, expected);
+        for status in [None, Some("active")] {
+            let listed = list_projects(&pool, installation.workspace, status)
+                .await
+                .expect("the listing");
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].github_installation_id, expected);
+        }
+        let renamed = update_project(&pool, project.id, Some("Gadgets"), None, None)
+            .await
+            .expect("the update")
+            .expect("the project");
+        assert_eq!(renamed.github_installation_id, expected);
+        let unsourced = set_source(&pool, project.id, None)
+            .await
+            .expect("the update")
+            .expect("the project");
+        assert_eq!(unsourced.github_installation_id, expected);
+    }
+
+    #[test]
+    fn debug_redacts_the_access_token() {
+        let row = ProjectRow {
+            id: Uuid::new_v4(),
+            workspace_id: None,
+            source_id: None,
+            name: "Widgets".to_string(),
+            description: None,
+            status: "active".to_string(),
+            github_repo_url: Some("https://github.com/acme/widgets".to_string()),
+            github_access_token: Some("ghp_legacy_plaintext".to_string()),
+            created_at: None,
+            updated_at: None,
+            github_installation_id: None,
+        };
+
+        let rendered = format!("{row:?}");
+
+        assert!(!rendered.contains("ghp_legacy_plaintext"), "{rendered}");
+        assert!(rendered.contains(REDACTED), "{rendered}");
+        assert!(rendered.contains("acme/widgets"), "{rendered}");
+    }
 }

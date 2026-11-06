@@ -991,6 +991,7 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             "011_time_zones.sql",
             "012_task_title_pending.sql",
             "015_task_chat.sql",
+            "017_github_connections.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );

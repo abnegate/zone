@@ -11,8 +11,10 @@
 //! would leave the project without continuous integration, without tests or
 //! without a way to ship is refused with the reason, and the model plans again.
 
+mod grant;
+
 use abnegate_secret::SecretValue;
-use abnegate_vcs::{GitService, PullRequestError};
+use abnegate_vcs::{GitService, PullRequestError, RepositoryUrl};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,11 +23,25 @@ use uuid::Uuid;
 use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::WorkspaceScope;
+use super::integrations::source_token;
 use crate::db::auto_projects::{self, Kind, PlannedRepository, PlannedTask, ProjectPlan};
-use crate::db::{sources, workspace_members};
+use crate::db::sources::{self, SourceRow};
+use crate::db::workspace_members;
+use grant::Grant;
 
 pub const CREATE_REPOSITORY: &str = "create_repository";
 pub const FINALIZE_PROJECT: &str = "finalize_project";
+
+const SOURCE_UNREADABLE: &str = "Could not read the source.";
+const SOURCE_MISSING: &str = "Source not found in this workspace or inactive.";
+const SOURCE_NOT_GITHUB: &str = "The source is not a GitHub source.";
+pub(crate) const SOURCE_CREDENTIAL_MISSING: &str =
+    "The GitHub source has no credential; connect GitHub or add a token to it first.";
+pub(crate) const REPOSITORY_NEEDS_TOKEN: &str = "Creating a repository needs a GitHub source with an access token; a GitHub App connection cannot create repositories.";
+pub(crate) const REPOSITORY_NOT_THE_SOURCES: &str = "`repository.url` is not the source's repository, so the source's credential cannot be used for it. Give the source alone to use its repository, add the grant create_repository returned for a repository it created, or give the URL alone for a repository the runs reach without a credential.";
+const SOURCE_NAMES_NO_REPOSITORY: &str = "The source names no repository. Create one with create_repository, or give `repository.url` alone.";
+const GRANT_WITHOUT_REPOSITORY: &str =
+    "`repository.grant` needs the `source_id` and `url` it was issued with.";
 
 /// Tasks one project may be planned with.
 pub const MAX_TASKS: usize = 100;
@@ -68,6 +84,9 @@ pub struct RepositoryRef {
     /// A repository URL: an existing one, or one create_repository returned.
     #[serde(default)]
     pub url: Option<String>,
+    /// What create_repository returned to prove the source's credential created `url`.
+    #[serde(default)]
+    pub grant: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -126,8 +145,9 @@ impl Blueprint {
         }
         // A source alone means the source's own repository; a URL alone means
         // a repository the runs reach without a credential; both together is
-        // what create_repository hands back: the new repository's URL and the
-        // source whose token pushes to it.
+        // the source's own repository, or what create_repository hands back:
+        // the new repository's URL, the source whose token pushes to it, and
+        // the grant proving that token created it.
         if let Some(repository) = &self.repository {
             if repository.source_id.is_none() && repository.url.is_none() {
                 return Err("`repository` names neither a source nor a URL.".to_string());
@@ -135,6 +155,11 @@ impl Blueprint {
             if let Some(url) = &repository.url {
                 GitService::repository_url(url)
                     .map_err(|error| format!("`repository.url` is not a repository: {error}"))?;
+            }
+            if repository.grant.is_some()
+                && (repository.source_id.is_none() || repository.url.is_none())
+            {
+                return Err(GRANT_WITHOUT_REPOSITORY.to_string());
             }
         }
         if self.tasks.is_empty() {
@@ -281,35 +306,53 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
     registry.register(Arc::new(FinalizeProjectTool(scope.clone())));
 }
 
-/// The GitHub source's token and its configured owner and repository.
+/// The GitHub source's token, the installation it was minted for when the
+/// source is connected through a GitHub App, and its configured owner.
 struct SourceCredential {
     token: SecretValue,
+    installation: Option<Uuid>,
     owner: Option<String>,
-    repo: Option<String>,
 }
 
-/// The token and repository a connected GitHub source holds, decrypted for one call.
-async fn source_credential(
-    scope: &WorkspaceScope,
-    source_id: Uuid,
-) -> Result<SourceCredential, String> {
+/// The active GitHub source `source_id` names in this workspace.
+async fn github_source(scope: &WorkspaceScope, source_id: Uuid) -> Result<SourceRow, String> {
     let source = sources::get_source(scope.state.db(), source_id, scope.workspace_id)
         .await
-        .map_err(|_| "Could not read the source.".to_string())?
+        .map_err(|_| SOURCE_UNREADABLE.to_string())?
         .filter(|source| source.is_active.unwrap_or(true))
-        .ok_or("Source not found in this workspace or inactive.")?;
-    if source.source_type != "github" {
-        return Err("The source is not a GitHub source.".to_string());
+        .ok_or(SOURCE_MISSING)?;
+    if source.source_type != sources::GITHUB {
+        return Err(SOURCE_NOT_GITHUB.to_string());
     }
-    let encrypted = source
-        .credentials_encrypted
-        .ok_or("The GitHub source has no credential stored; add a token to it first.")?;
-    let token = crate::crypto::decrypt(scope.state.encryption_key(), &encrypted)
-        .map_err(|_| "The source credentials could not be decrypted.".to_string())?;
+    Ok(source)
+}
+
+/// The repository `url` names, in the one spelling every address of it shares.
+fn repository(url: &str) -> Option<String> {
+    RepositoryUrl::parse(url)
+        .ok()
+        .map(|url| url.as_str().to_ascii_lowercase())
+}
+
+/// The address of the repository `source` is configured for.
+fn configured(source: &SourceRow) -> Option<String> {
+    let owner = source.config["owner"].as_str()?;
+    let repo = source.config["repo"].as_str()?;
+    Some(format!("https://github.com/{owner}/{repo}"))
+}
+
+/// The credential `source` reaches GitHub with, resolved for one call.
+async fn source_credential(
+    scope: &WorkspaceScope,
+    source: &SourceRow,
+) -> Result<SourceCredential, String> {
+    let token = source_token(&scope.state, source)
+        .await?
+        .ok_or(SOURCE_CREDENTIAL_MISSING)?;
     Ok(SourceCredential {
-        token: SecretValue::new(token),
+        token,
+        installation: source.github_installation_id,
         owner: source.config["owner"].as_str().map(str::to_string),
-        repo: source.config["repo"].as_str().map(str::to_string),
     })
 }
 
@@ -402,7 +445,14 @@ impl Tool for CreateRepositoryTool {
         if let Err(refusal) = authorized_writer(&self.0).await {
             return Ok(ToolResult::error(refusal));
         }
-        let credential = match source_credential(&self.0, arguments.source_id).await {
+        let source = match github_source(&self.0, arguments.source_id).await {
+            Ok(source) => source,
+            Err(refusal) => return Ok(ToolResult::error(refusal)),
+        };
+        if source.github_installation_id.is_some() {
+            return Ok(ToolResult::error(REPOSITORY_NEEDS_TOKEN));
+        }
+        let credential = match source_credential(&self.0, &source).await {
             Ok(credential) => credential,
             Err(refusal) => return Ok(ToolResult::error(refusal)),
         };
@@ -430,28 +480,69 @@ impl Tool for CreateRepositoryTool {
             )
             .await
         {
-            Ok(created) => Ok(ToolResult::success(
-                json!({
-                    "url": created.url,
-                    "clone_url": created.clone_url,
-                    "default_branch": created.default_branch.as_str(),
-                    "source_id": arguments.source_id,
-                    "message": "Repository created with an initial commit. Pass its url and this source_id to finalize_project as the repository."
-                })
-                .to_string(),
-            )),
+            Ok(created) => {
+                let grant = repository(&format!(
+                    "https://github.com/{}/{}",
+                    created.repository.owner(),
+                    created.repository.name()
+                ))
+                .map(|repository| {
+                    Grant::new(
+                        self.0.state.encryption_key(),
+                        self.0.workspace_id,
+                        arguments.source_id,
+                    )
+                    .issue(&repository)
+                });
+                Ok(ToolResult::success(
+                    json!({
+                        "url": created.url,
+                        "clone_url": created.clone_url,
+                        "default_branch": created.default_branch.as_str(),
+                        "source_id": arguments.source_id,
+                        "grant": grant,
+                        "message": "Repository created with an initial commit. Pass its url, this source_id and this grant to finalize_project as the repository."
+                    })
+                    .to_string(),
+                ))
+            }
             Err(PullRequestError::RepositoryExists(name)) => Ok(ToolResult::error(format!(
                 "A repository named {name} already exists under that owner; pick another name or use the existing repository's URL."
             ))),
-            Err(PullRequestError::AuthenticationFailed | PullRequestError::Forbidden) => Ok(ToolResult::error(
-                "GitHub refused the source's credential for creating a repository; it needs repository-creation permission.",
-            )),
+            Err(PullRequestError::AuthenticationFailed | PullRequestError::Forbidden) => {
+                Ok(ToolResult::error(
+                    "GitHub refused the source's credential for creating a repository; it needs repository-creation permission.",
+                ))
+            }
             Err(error) => Ok(ToolResult::error(format!("GitHub refused: {error}"))),
         }
     }
 }
 
 struct FinalizeProjectTool(WorkspaceScope);
+
+impl FinalizeProjectTool {
+    /// Whether `source`'s credential may go with the project on `url`: it is the source's own
+    /// repository, or one the source's stored token created, which `grant` proves. An
+    /// installation is never carried to another repository, since it did not create one.
+    fn credentialed(&self, source: &SourceRow, url: &str, grant: Option<&str>) -> bool {
+        let Some(requested) = repository(url) else {
+            return false;
+        };
+        if configured(source).as_deref().and_then(repository).as_ref() == Some(&requested) {
+            return true;
+        }
+        source.github_installation_id.is_none()
+            && grant.is_some_and(|grant| {
+                Grant::new(
+                    self.0.state.encryption_key(),
+                    self.0.workspace_id,
+                    source.id,
+                )
+                .admits(&requested, grant)
+            })
+    }
+}
 
 #[async_trait]
 impl Tool for FinalizeProjectTool {
@@ -476,7 +567,8 @@ impl Tool for FinalizeProjectTool {
                     "type": "object",
                     "properties": {
                         "source_id": {"type": "string", "format": "uuid", "description": "A connected GitHub source; its repository and credential are used."},
-                        "url": {"type": "string", "description": "The repository URL, existing or just created. With source_id, the source supplies the credential."}
+                        "url": {"type": "string", "description": "The repository URL, existing or just created. With source_id it must be the source's own repository, or one create_repository made from that source, and then the source supplies the credential."},
+                        "grant": {"type": "string", "description": "The grant create_repository returned with the repository it created, passed with its url and source_id."}
                     },
                     "additionalProperties": false
                 },
@@ -535,46 +627,50 @@ impl Tool for FinalizeProjectTool {
         if let Err(refusal) = authorized_writer(&self.0).await {
             return Ok(ToolResult::error(refusal));
         }
-        let (url, token) = match &blueprint.repository {
+        let (url, token, installation) = match &blueprint.repository {
             Some(RepositoryRef {
                 source_id: Some(source_id),
                 url,
+                grant,
             }) => {
-                let credential = match source_credential(&self.0, *source_id).await {
+                let source = match github_source(&self.0, *source_id).await {
+                    Ok(source) => source,
+                    Err(refusal) => return Ok(ToolResult::error(refusal)),
+                };
+                let url = match (url.clone(), configured(&source)) {
+                    (Some(url), _) => url,
+                    (None, Some(configured)) => configured,
+                    (None, None) => return Ok(ToolResult::error(SOURCE_NAMES_NO_REPOSITORY)),
+                };
+                if !self.credentialed(&source, &url, grant.as_deref()) {
+                    return Ok(ToolResult::error(REPOSITORY_NOT_THE_SOURCES));
+                }
+                let credential = match source_credential(&self.0, &source).await {
                     Ok(credential) => credential,
                     Err(refusal) => return Ok(ToolResult::error(refusal)),
                 };
-                let url = match url.clone() {
-                    Some(url) => url,
-                    None => match (credential.owner.as_deref(), credential.repo.as_deref()) {
-                        (Some(owner), Some(repo)) => format!("https://github.com/{owner}/{repo}"),
-                        _ => {
+                if let Some(installation) = credential.installation {
+                    (Some(url), None, Some(installation))
+                } else {
+                    match crate::crypto::encrypt(
+                        self.0.state.encryption_key(),
+                        credential.token.expose(),
+                    ) {
+                        Ok(sealed) => (Some(url), Some(sealed), None),
+                        Err(_) => {
                             return Ok(ToolResult::error(
-                                "The source names no repository; give `repository.url` as well.",
+                                "The repository token could not be encrypted for storage.",
                             ));
                         }
-                    },
-                };
-                // Stored the way the source keeps it: encrypted at rest, opened
-                // by the checkout and pull request code that uses it.
-                let sealed = match crate::crypto::encrypt(
-                    self.0.state.encryption_key(),
-                    credential.token.expose(),
-                ) {
-                    Ok(sealed) => sealed,
-                    Err(_) => {
-                        return Ok(ToolResult::error(
-                            "The repository token could not be encrypted for storage.",
-                        ));
                     }
-                };
-                (Some(url), Some(sealed))
+                }
             }
             Some(RepositoryRef {
                 source_id: None,
                 url: Some(url),
-            }) => (Some(url.clone()), None),
-            _ => (None, None),
+                ..
+            }) => (Some(url.clone()), None, None),
+            _ => (None, None, None),
         };
         let planned = blueprint.planned_tasks();
         let plan = ProjectPlan {
@@ -583,6 +679,7 @@ impl Tool for FinalizeProjectTool {
             repository: url.as_deref().map(|url| PlannedRepository {
                 url,
                 token: token.as_deref(),
+                github_installation_id: installation,
             }),
             brief: &blueprint.spec,
             tasks: &planned,
@@ -625,6 +722,11 @@ impl Tool for FinalizeProjectTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::integrations::SOURCE_DISCONNECTED;
+    use crate::agent::testing::{Connected, MINTED_TOKEN, OWNER, REPOSITORY, STORED_TOKEN, number};
+    use crate::services::github_app::testing::issuing;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, ResponseTemplate};
 
     fn task(kind: &str, title: &str, depends_on: &[usize]) -> Value {
         json!({"kind": kind, "title": title, "description": format!("Do {title}"), "depends_on": depends_on})
@@ -790,5 +892,342 @@ mod tests {
         let mut good = sound();
         good["repository"] = json!({"url": "https://github.com/acme/shop"});
         assert!(Blueprint::parse(&good).is_ok());
+    }
+
+    fn finalizing(source: &SourceRow) -> Value {
+        let mut plan = sound();
+        plan["repository"] = json!({"source_id": source.id});
+        plan
+    }
+
+    fn creating(source: &SourceRow) -> Value {
+        json!({"source_id": source.id, "name": "shop"})
+    }
+
+    fn refusal(result: ToolResult) -> String {
+        assert!(!result.success, "expected a refusal, got {result:?}");
+        result.error.expect("a refusal carries its reason")
+    }
+
+    fn created(result: ToolResult) -> Value {
+        assert!(result.success, "expected success, got {result:?}");
+        serde_json::from_str(&result.output.expect("a result")).expect("a JSON result")
+    }
+
+    async fn stored(connected: &Connected, project: &Value) -> (Option<Uuid>, Option<String>) {
+        let project = Uuid::parse_str(project["project_id"].as_str().expect("a project id"))
+            .expect("a project uuid");
+        sqlx::query_as(
+            "SELECT github_installation_id, github_access_token FROM projects WHERE id = $1",
+        )
+        .bind(project)
+        .fetch_one(&connected.pool)
+        .await
+        .expect("the project")
+    }
+
+    async fn projects(connected: &Connected) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE workspace_id = $1")
+            .bind(connected.workspace)
+            .fetch_one(&connected.pool)
+            .await
+            .expect("count the projects")
+    }
+
+    #[tokio::test]
+    async fn finalizing_with_an_installation_source_records_the_installation_and_no_token() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 1).await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(finalizing(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+        let project = created(result);
+
+        assert_eq!(
+            project["repository_url"],
+            format!("https://github.com/{OWNER}/{REPOSITORY}")
+        );
+        assert_eq!(
+            stored(&connected, &project).await,
+            (Some(installation), None)
+        );
+    }
+
+    #[tokio::test]
+    async fn finalizing_with_a_stored_token_source_seals_the_token_into_the_project() {
+        let connected = Connected::new().await;
+        let source = connected.source(None, Some(STORED_TOKEN)).await;
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(finalizing(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+        let (installation, token) = stored(&connected, &created(result)).await;
+
+        let token = token.expect("the project holds the source's token");
+        assert_eq!(installation, None);
+        assert_ne!(token, STORED_TOKEN, "the token is sealed at rest");
+        assert_eq!(
+            crate::crypto::open(connected.state.encryption_key(), &token),
+            STORED_TOKEN
+        );
+    }
+
+    #[tokio::test]
+    async fn finalizing_with_a_revoked_installation_asks_for_a_reconnect_and_writes_nothing() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 0).await;
+        let installation = connected.revoked(number).await;
+        let source = connected
+            .source(Some(installation), Some(STORED_TOKEN))
+            .await;
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(finalizing(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(refusal(result), SOURCE_DISCONNECTED);
+        assert_eq!(projects(&connected).await, 0);
+    }
+
+    #[tokio::test]
+    async fn finalizing_with_a_source_holding_no_credential_says_how_to_add_one() {
+        let connected = Connected::new().await;
+        let source = connected.source(None, None).await;
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(finalizing(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(refusal(result), SOURCE_CREDENTIAL_MISSING);
+    }
+
+    #[tokio::test]
+    async fn creating_a_repository_refuses_an_installation_source_without_minting() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 0).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .named("any repository creation")
+            .mount(&connected.github)
+            .await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+
+        let result = CreateRepositoryTool(connected.scope())
+            .execute(creating(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(refusal(result), REPOSITORY_NEEDS_TOKEN);
+    }
+
+    async fn creation(connected: &Connected) {
+        let bearer = format!("Bearer {STORED_TOKEN}");
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(header("Authorization", bearer.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": OWNER})))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/repos"))
+            .and(header("Authorization", bearer.as_str()))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "name": "shop",
+                "owner": {"login": OWNER},
+                "html_url": format!("https://github.com/{OWNER}/shop"),
+                "clone_url": format!("https://github.com/{OWNER}/shop.git"),
+                "default_branch": "main",
+            })))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn creating_a_repository_sends_a_stored_token_source_its_token() {
+        let connected = Connected::new().await;
+        creation(&connected).await;
+        let source = connected.source(None, Some(STORED_TOKEN)).await;
+
+        let result = CreateRepositoryTool(connected.scope())
+            .execute(creating(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(
+            created(result)["url"],
+            format!("https://github.com/{OWNER}/shop")
+        );
+    }
+
+    fn finalizing_at(source: &SourceRow, url: &str, grant: Option<&str>) -> Value {
+        let mut plan = sound();
+        plan["repository"] = json!({"source_id": source.id, "url": url, "grant": grant});
+        plan
+    }
+
+    #[tokio::test]
+    async fn finalizing_a_stored_token_source_at_another_repository_copies_no_token() {
+        let connected = Connected::new().await;
+        let source = connected.source(None, Some(STORED_TOKEN)).await;
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(
+                finalizing_at(&source, "https://github.com/elsewhere/secrets", None),
+                &ToolContext::default(),
+            )
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(refusal(result), REPOSITORY_NOT_THE_SOURCES);
+        assert_eq!(projects(&connected).await, 0);
+    }
+
+    #[tokio::test]
+    async fn finalizing_an_installation_source_at_another_repository_carries_no_installation() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 0).await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let grant = Grant::new(
+            connected.state.encryption_key(),
+            connected.workspace,
+            source.id,
+        )
+        .issue("https://github.com/elsewhere/secrets.git");
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(
+                finalizing_at(
+                    &source,
+                    "https://github.com/elsewhere/secrets",
+                    Some(&grant),
+                ),
+                &ToolContext::default(),
+            )
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(refusal(result), REPOSITORY_NOT_THE_SOURCES);
+        assert_eq!(projects(&connected).await, 0);
+    }
+
+    #[tokio::test]
+    async fn finalizing_at_the_sources_own_repository_however_it_is_spelled_keeps_the_token() {
+        let connected = Connected::new().await;
+        let source = connected.source(None, Some(STORED_TOKEN)).await;
+        let url = format!(
+            "https://github.com/{}/{}.git",
+            OWNER.to_uppercase(),
+            REPOSITORY
+        );
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(finalizing_at(&source, &url, None), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+        let (installation, token) = stored(&connected, &created(result)).await;
+
+        assert_eq!(installation, None);
+        assert_eq!(
+            crate::crypto::open(
+                connected.state.encryption_key(),
+                &token.expect("the project holds the source's token")
+            ),
+            STORED_TOKEN
+        );
+    }
+
+    #[tokio::test]
+    async fn finalizing_an_installation_source_at_its_own_repository_records_the_installation() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 1).await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let url = format!("https://github.com/{OWNER}/{REPOSITORY}");
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(finalizing_at(&source, &url, None), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(
+            stored(&connected, &created(result)).await,
+            (Some(installation), None)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repository_the_source_created_is_finalized_with_its_token() {
+        let connected = Connected::new().await;
+        creation(&connected).await;
+        let source = connected.source(None, Some(STORED_TOKEN)).await;
+        let repository = created(
+            CreateRepositoryTool(connected.scope())
+                .execute(creating(&source), &ToolContext::default())
+                .await
+                .expect("the tool answers"),
+        );
+        let url = repository["url"].as_str().expect("a url");
+        let grant = repository["grant"].as_str().expect("a grant");
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(
+                finalizing_at(&source, url, Some(grant)),
+                &ToolContext::default(),
+            )
+            .await
+            .expect("the tool answers");
+        let (_, token) = stored(&connected, &created(result)).await;
+
+        assert_eq!(
+            crate::crypto::open(
+                connected.state.encryption_key(),
+                &token.expect("the project holds the source's token")
+            ),
+            STORED_TOKEN
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grant_issued_to_another_source_carries_no_token() {
+        let connected = Connected::new().await;
+        let source = connected.source(None, Some(STORED_TOKEN)).await;
+        let grant = Grant::new(
+            connected.state.encryption_key(),
+            connected.workspace,
+            Uuid::new_v4(),
+        )
+        .issue("https://github.com/elsewhere/secrets.git");
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(
+                finalizing_at(
+                    &source,
+                    "https://github.com/elsewhere/secrets",
+                    Some(&grant),
+                ),
+                &ToolContext::default(),
+            )
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(refusal(result), REPOSITORY_NOT_THE_SOURCES);
+        assert_eq!(projects(&connected).await, 0);
     }
 }

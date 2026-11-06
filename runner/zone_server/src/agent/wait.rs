@@ -31,7 +31,7 @@ use zone_core::context::Entry;
 use zone_core::tools::job::{JobExited, Jobs};
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
-use super::integrations::{Configuration, Github, SETTLED_ASSESSMENTS};
+use super::integrations::{Configuration, Github, SETTLED_ASSESSMENTS, source_token};
 use super::tools::WorkspaceScope;
 use crate::db::{sources, task_access, tasks, workspace_members};
 use crate::services::chat::session::RunContext;
@@ -321,7 +321,6 @@ const SOURCE_FOREIGN: &str = "Source not found in this workspace or inactive.";
 const SOURCE_NOT_GITHUB: &str = "Waiting on checks currently supports connected GitHub sources \
     only.";
 const SOURCE_CONFIGURATION_INVALID: &str = "The GitHub source configuration is invalid.";
-const SOURCE_CREDENTIALS_INVALID: &str = "The source credentials could not be decrypted.";
 const WORKSPACE_UNREADABLE: &str = "You cannot read this workspace.";
 
 /// What a wait nobody registered is called, so even that reads as a timeout
@@ -979,17 +978,12 @@ impl WaitForTool {
             .map_err(|_| SOURCE_UNREADABLE.to_string())?
             .filter(|source| source.is_active.unwrap_or(true))
             .ok_or(SOURCE_FOREIGN)?;
-        if source.source_type != "github" {
+        if source.source_type != sources::GITHUB {
             return Err(SOURCE_NOT_GITHUB.to_string());
         }
-        let mut configuration: Configuration = serde_json::from_value(source.config)
+        let mut configuration = Configuration::deserialize(&source.config)
             .map_err(|_| SOURCE_CONFIGURATION_INVALID.to_string())?;
-        if let Some(encrypted) = source.credentials_encrypted {
-            configuration.token = Some(
-                crate::crypto::decrypt(scope.state.encryption_key(), &encrypted)
-                    .map_err(|_| SOURCE_CREDENTIALS_INVALID.to_string())?,
-            );
-        }
+        configuration.token = source_token(&scope.state, &source).await?;
         Github::new(configuration)?.at(scope.state.config())
     }
 }
@@ -998,13 +992,17 @@ impl WaitForTool {
 mod tests {
     use super::*;
 
-    use crate::agent::integrations::{PENDING_ASSESSMENT, SUCCESS_ASSESSMENT};
+    use crate::agent::integrations::{PENDING_ASSESSMENT, SOURCE_DISCONNECTED, SUCCESS_ASSESSMENT};
+    use crate::agent::testing::{Connected, MINTED_TOKEN, OWNER, REPOSITORY, STORED_TOKEN, number};
+    use crate::services::github_app::testing::{issuing, uninstalled};
     use crate::state::{AppState, test_config};
     use abnegate_llm::Role;
     use std::collections::{HashMap, VecDeque};
     use std::path::Path;
     use std::sync::Mutex as Lock;
     use tempfile::TempDir;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, ResponseTemplate};
     use zone_core::context;
     use zone_core::tools::job::{JobCommand, JobStarted};
 
@@ -2165,5 +2163,94 @@ mod tests {
             .await
             .expect("the fixture ends the run");
         }
+    }
+
+    const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    async fn answering(connected: &Connected, token: &str, endpoint: &str, body: Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPOSITORY}/{endpoint}")))
+            .and(header("Authorization", format!("Bearer {token}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_check_wait_reads_github_with_the_installations_minted_token() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 1).await;
+        answering(
+            &connected,
+            MINTED_TOKEN,
+            "commits/main",
+            json!({"sha": HEAD}),
+        )
+        .await;
+        answering(
+            &connected,
+            MINTED_TOKEN,
+            "actions/runs",
+            json!({"workflow_runs": [], "total_count": 0}),
+        )
+        .await;
+        answering(
+            &connected,
+            MINTED_TOKEN,
+            &format!("commits/{HEAD}/check-runs"),
+            json!({"check_runs": []}),
+        )
+        .await;
+        answering(
+            &connected,
+            MINTED_TOKEN,
+            &format!("commits/{HEAD}/statuses"),
+            json!([]),
+        )
+        .await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let scope = tool.scope.as_ref().expect("a workspace scope");
+
+        let (reference, sha, _) = tool
+            .github(scope, source.id)
+            .await
+            .expect("the source resolves to a GitHub client")
+            .settled(None)
+            .await
+            .expect("the checks are read with the installation's token");
+
+        assert_eq!((reference.as_str(), sha.as_str()), ("main", HEAD));
+    }
+
+    #[tokio::test]
+    async fn a_check_wait_on_an_installation_github_removed_is_refused_without_the_stored_token() {
+        let connected = Connected::new().await;
+        let number = number();
+        Mock::given(method("POST"))
+            .and(path(format!("/app/installations/{number}/access_tokens")))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        uninstalled(&connected.github, number).await;
+        Mock::given(header("Authorization", format!("Bearer {STORED_TOKEN}")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&connected.github)
+            .await;
+        let installation = connected.installation(number).await;
+        let source = connected
+            .source(Some(installation), Some(STORED_TOKEN))
+            .await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let scope = tool.scope.as_ref().expect("a workspace scope");
+
+        let refusal = tool.github(scope, source.id).await.err();
+
+        assert_eq!(refusal.as_deref(), Some(SOURCE_DISCONNECTED));
     }
 }

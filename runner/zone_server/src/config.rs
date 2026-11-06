@@ -32,6 +32,12 @@ pub const DEFAULT_HUGGINGFACE_MODELS_URL: &str = "https://huggingface.co/api/mod
 /// so pointing it elsewhere does not redirect github.com repositories to it.
 pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 
+/// GitHub's own web origin, where Apps are registered and installed.
+/// `GITHUB_WEB_URL` overrides it; unset, it follows `GITHUB_API_URL`.
+pub const DEFAULT_GITHUB_WEB_URL: &str = "https://github.com";
+
+const GITHUB_API_HOST: &str = "api.github.com";
+
 /// The path GitHub Enterprise serves its REST API under.
 const GITHUB_VERSIONED_REST: [&str; 2] = ["api", "v3"];
 
@@ -114,6 +120,9 @@ pub struct Config {
     /// Whether `github_api_url` may be plain HTTP. Off unless the operator
     /// opts in, because the token then crosses the network in the clear.
     pub github_api_allows_http: bool,
+    /// Origin of the GitHub web UI that App registration and installation
+    /// pages are served from.
+    pub github_web_url: String,
     /// Live web search via SearXNG (through Gluetun when the VPN profile is up)
     pub web_search: WebSearchConfig,
     /// Direct ComfyUI image generation and artifact storage.
@@ -1062,6 +1071,85 @@ fn within(host: &str, allowed: &str) -> bool {
         })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OriginFault {
+    Malformed,
+    Credentials,
+    NotOrigin,
+    PlainHttp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GithubOrigin {
+    Api,
+    Web,
+}
+
+impl GithubOrigin {
+    fn refusal(self, fault: OriginFault) -> &'static str {
+        match (self, fault) {
+            (Self::Api, OriginFault::Malformed) => {
+                "GITHUB_API_URL must be an absolute http or https URL with a host"
+            }
+            (Self::Api, OriginFault::Credentials) => {
+                "GITHUB_API_URL must not carry credentials; set GITHUB_TOKEN instead"
+            }
+            (Self::Api, OriginFault::NotOrigin) => {
+                "GITHUB_API_URL must be an origin, without a query or fragment"
+            }
+            (Self::Api, OriginFault::PlainHttp) => {
+                "GITHUB_API_URL is plain http; set GITHUB_API_ALLOW_HTTP=true to send the repository token over it"
+            }
+            (Self::Web, OriginFault::Malformed) => {
+                "GITHUB_WEB_URL must be an absolute http or https URL with a host"
+            }
+            (Self::Web, OriginFault::Credentials) => "GITHUB_WEB_URL must not carry credentials",
+            (Self::Web, OriginFault::NotOrigin) => {
+                "GITHUB_WEB_URL must be an origin, without a query or fragment"
+            }
+            (Self::Web, OriginFault::PlainHttp) => {
+                "GITHUB_WEB_URL is plain http; set GITHUB_API_ALLOW_HTTP=true to allow it"
+            }
+        }
+    }
+}
+
+/// Private and LAN hosts pass on purpose: the origin is operator
+/// configuration, routinely a loopback or LAN GitHub Enterprise host.
+fn validate_github_origin(value: &str, allows_http: bool) -> Result<(), OriginFault> {
+    let url = reqwest::Url::parse(value).map_err(|_| OriginFault::Malformed)?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.host_str().is_some_and(|host| !host.is_empty())
+    {
+        return Err(OriginFault::Malformed);
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(OriginFault::Credentials);
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(OriginFault::NotOrigin);
+    }
+    if url.scheme() == "http" && !allows_http {
+        return Err(OriginFault::PlainHttp);
+    }
+    Ok(())
+}
+
+fn github_web_default(api: &str) -> String {
+    let hosted = reqwest::Url::parse(api)
+        .ok()
+        .and_then(|url| {
+            url.host_str()
+                .map(|host| host.eq_ignore_ascii_case(GITHUB_API_HOST))
+        })
+        .unwrap_or(false);
+    let versioned = format!("/{}", GITHUB_VERSIONED_REST.join("/"));
+    match hosted {
+        true => DEFAULT_GITHUB_WEB_URL.to_string(),
+        false => api.strip_suffix(&versioned).unwrap_or(api).to_string(),
+    }
+}
+
 fn env_truthy(name: &str, default: bool) -> bool {
     match env::var(name) {
         Ok(value) => TRUE.contains(&value.to_ascii_lowercase().as_str()),
@@ -1173,39 +1261,15 @@ impl Config {
             .filter(|url| !url.is_empty())
             .unwrap_or_else(|| DEFAULT_GITHUB_API_URL.to_string());
         let github_api_allows_http = env_truthy("GITHUB_API_ALLOW_HTTP", false);
-        // A prefix is not an origin: `https:///api/v3` passes one and leaves
-        // PullRequestService building request URLs with no host to send them to. Parsing
-        // also refuses embedded credentials, which would otherwise reach any
-        // log that prints this config.
-        match reqwest::Url::parse(&github_api_url) {
-            Ok(url)
-                if matches!(url.scheme(), "http" | "https")
-                    && url.host_str().is_some_and(|host| !host.is_empty()) =>
-            {
-                if !url.username().is_empty() || url.password().is_some() {
-                    return Err(ConfigError::Invalid(
-                        "GITHUB_API_URL must not carry credentials; set GITHUB_TOKEN instead",
-                    ));
-                }
-                // An origin every caller joins a rooted path onto has no use
-                // for either, and both are places a token gets written down.
-                if url.query().is_some() || url.fragment().is_some() {
-                    return Err(ConfigError::Invalid(
-                        "GITHUB_API_URL must be an origin, without a query or fragment",
-                    ));
-                }
-                if url.scheme() == "http" && !github_api_allows_http {
-                    return Err(ConfigError::Invalid(
-                        "GITHUB_API_URL is plain http; set GITHUB_API_ALLOW_HTTP=true to send the repository token over it",
-                    ));
-                }
-            }
-            _ => {
-                return Err(ConfigError::Invalid(
-                    "GITHUB_API_URL must be an absolute http or https URL with a host",
-                ));
-            }
-        }
+        validate_github_origin(&github_api_url, github_api_allows_http)
+            .map_err(|fault| ConfigError::Invalid(GithubOrigin::Api.refusal(fault)))?;
+        let github_web_url = env::var("GITHUB_WEB_URL")
+            .ok()
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| github_web_default(&github_api_url));
+        validate_github_origin(&github_web_url, github_api_allows_http)
+            .map_err(|fault| ConfigError::Invalid(GithubOrigin::Web.refusal(fault)))?;
 
         let agents = AgentConfig::from_env()?;
         let clones = clone_root(env_path(CLONE_ROOT), &agents.state)?;
@@ -1260,6 +1324,7 @@ impl Config {
             app_base_url,
             github_api_url,
             github_api_allows_http,
+            github_web_url,
             web_search: crate::services::search::from_environment(),
             comfyui: crate::services::comfy::settings::load()
                 .map_err(|error| ConfigError::Invalid(error.message()))?,
@@ -1309,6 +1374,7 @@ impl std::fmt::Debug for Config {
             .field("app_base_url", &self.app_base_url)
             .field("github_api_url", &self.github_api_url)
             .field("github_api_allows_http", &self.github_api_allows_http)
+            .field("github_web_url", &self.github_web_url)
             .field("web_search", &self.web_search)
             .field("comfyui", &self.comfyui)
             .field("source_index", &self.source_index)
@@ -1363,6 +1429,7 @@ mod tests {
             app_base_url: "http://localhost:3000".to_string(),
             github_api_url: DEFAULT_GITHUB_API_URL.to_string(),
             github_api_allows_http: false,
+            github_web_url: DEFAULT_GITHUB_WEB_URL.to_string(),
             web_search: crate::services::search::defaults(),
             comfyui: crate::services::comfy::settings::development(),
             source_index: SourceIndexConfig::default(),
@@ -1602,6 +1669,7 @@ mod tests {
             "ENCRYPTION_KEY",
             "GITHUB_API_ALLOW_HTTP",
             "GITHUB_API_URL",
+            "GITHUB_WEB_URL",
             "JWT_SECRET",
             "LITELLM_HOST",
             "LITELLM_KEY",
@@ -1741,6 +1809,114 @@ mod tests {
         assert!(
             refused.pull_requests().is_err(),
             "without the opt-in the client refuses a plain http origin too"
+        );
+    }
+
+    #[test]
+    fn the_github_web_origin_follows_the_api_origin_unless_set() {
+        let names = [
+            "DATABASE_URL",
+            "ENCRYPTION_KEY",
+            "GITHUB_API_ALLOW_HTTP",
+            "GITHUB_API_URL",
+            "GITHUB_WEB_URL",
+            "JWT_SECRET",
+            "LITELLM_HOST",
+            "LITELLM_KEY",
+            "REDIS_URL",
+            MODEL_BACKEND,
+            MODEL_BACKEND_EXECUTABLE,
+            AGENT_STATE,
+            AGENT_HOST_LOGIN,
+            CLAUDE_TOKEN_URL,
+            USAGE_TTL,
+            CLAUDE_API_URL,
+            CODEX_API_URL,
+            CODEX_SANDBOX,
+        ];
+        let mut environment = Variables::isolated(&names);
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("ENCRYPTION_KEY", "12345678901234567890123456789012");
+        environment.set("DATABASE_URL", "postgres://localhost/zone");
+        environment.set("REDIS_URL", "redis://localhost");
+        environment.set("LITELLM_HOST", "http://localhost:4000");
+        environment.set("LITELLM_KEY", "key");
+
+        assert_eq!(
+            Config::from_env().expect("unset is valid").github_web_url,
+            DEFAULT_GITHUB_WEB_URL,
+            "api.github.com is served from github.com"
+        );
+
+        environment.set("GITHUB_API_URL", "https://ghe.local/api/v3");
+        assert_eq!(
+            Config::from_env()
+                .expect("an enterprise origin is valid")
+                .github_web_url,
+            "https://ghe.local",
+            "an enterprise web UI is its REST origin without /api/v3"
+        );
+
+        environment.set("GITHUB_WEB_URL", "  https://github.internal.example/  ");
+        assert_eq!(
+            Config::from_env()
+                .expect("an explicit web origin is valid")
+                .github_web_url,
+            "https://github.internal.example",
+            "an explicit setting wins, trimmed and without its trailing slash"
+        );
+
+        environment.set("GITHUB_WEB_URL", "https://someone:t0ken@ghe.local");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid(
+                "GITHUB_WEB_URL must not carry credentials"
+            ))
+        ));
+
+        environment.set("GITHUB_WEB_URL", "https://ghe.local?state=t0ken");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid(
+                "GITHUB_WEB_URL must be an origin, without a query or fragment"
+            ))
+        ));
+
+        environment.set("GITHUB_WEB_URL", "ghe.local");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid(
+                "GITHUB_WEB_URL must be an absolute http or https URL with a host"
+            ))
+        ));
+
+        environment.set("GITHUB_WEB_URL", "http://192.168.1.5");
+        assert!(
+            matches!(
+                Config::from_env(),
+                Err(ConfigError::Invalid(
+                    "GITHUB_WEB_URL is plain http; set GITHUB_API_ALLOW_HTTP=true to allow it"
+                ))
+            ),
+            "plain http needs the same opt-in as the API origin"
+        );
+
+        environment.set("GITHUB_API_ALLOW_HTTP", "true");
+        assert_eq!(
+            Config::from_env()
+                .expect("a LAN host over http is allowed once opted in")
+                .github_web_url,
+            "http://192.168.1.5"
+        );
+
+        environment.remove("GITHUB_WEB_URL");
+        environment.set("GITHUB_API_URL", "http://127.0.0.1:9000");
+        assert_eq!(
+            Config::from_env()
+                .expect("a loopback API origin is allowed once opted in")
+                .github_web_url,
+            "http://127.0.0.1:9000",
+            "an origin without /api/v3 is its own web origin"
         );
     }
 
@@ -1946,6 +2122,7 @@ mod tests {
             "DATABASE_URL",
             "ENCRYPTION_KEY",
             "GITHUB_API_URL",
+            "GITHUB_WEB_URL",
             "JWT_SECRET",
             "LITELLM_HOST",
             "LITELLM_KEY",
@@ -2037,6 +2214,7 @@ mod tests {
         let names = [
             "APP_BASE_URL",
             "GITHUB_API_URL",
+            "GITHUB_WEB_URL",
             "CORS_ALLOW_CREDENTIALS",
             "CORS_ORIGINS",
             CONNECT_URLS,
@@ -2129,6 +2307,7 @@ mod tests {
         assert!(!defaults.cors_allow_credentials);
         assert_eq!(defaults.app_base_url, "http://localhost:3000");
         assert_eq!(defaults.github_api_url, DEFAULT_GITHUB_API_URL);
+        assert_eq!(defaults.github_web_url, DEFAULT_GITHUB_WEB_URL);
         assert_eq!(defaults.source_index, SourceIndexConfig::default());
         assert_eq!(defaults.monitoring, MonitoringConfig::from_env());
         assert_eq!(defaults.train_upload_limit_mb, 4096);
@@ -2193,6 +2372,7 @@ mod tests {
             configured.github_api_url,
             "https://github.example.com/api/v3"
         );
+        assert_eq!(configured.github_web_url, "https://github.example.com");
         assert_eq!(
             configured.source_index,
             SourceIndexConfig {
@@ -2918,6 +3098,7 @@ mod tests {
             "DATABASE_URL",
             "ENCRYPTION_KEY",
             "GITHUB_API_URL",
+            "GITHUB_WEB_URL",
             "JWT_SECRET",
             "LITELLM_HOST",
             "LITELLM_KEY",

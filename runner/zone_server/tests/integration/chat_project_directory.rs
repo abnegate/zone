@@ -90,13 +90,16 @@ impl Fixture {
         });
         sources::create_source(
             &self.pool,
-            self.workspace,
-            &Uuid::new_v4().to_string(),
-            kind,
-            config,
-            None,
-            None,
-            sealed.as_deref(),
+            sources::NewSource {
+                workspace_id: self.workspace,
+                name: &Uuid::new_v4().to_string(),
+                source_type: kind,
+                config,
+                description: None,
+                url: None,
+                credentials_encrypted: sealed.as_deref(),
+                github_installation_id: None,
+            },
         )
         .await
         .expect("a source")
@@ -411,7 +414,7 @@ async fn a_project_linked_to_a_repository_with_no_source_starts_in_its_checkout(
     let path = checkout(&mounted.path().join("repository"), REMOTE);
     fixture.mount(&[mounted.path()]).await;
     let project = fixture.project(None).await;
-    projects::link_github(&fixture.pool, project, GITHUB, None)
+    projects::link_github(&fixture.pool, project, GITHUB, None, None)
         .await
         .expect("a linked repository");
     let chat = fixture.chat(Some(project)).await;
@@ -432,7 +435,7 @@ async fn a_source_comes_before_the_repository_linked_to_its_project() {
         .source("filesystem", json!({"path": folder.path()}), None)
         .await;
     let project = fixture.project(Some(source)).await;
-    projects::link_github(&fixture.pool, project, GITHUB, None)
+    projects::link_github(&fixture.pool, project, GITHUB, None, None)
         .await
         .expect("a linked repository");
     let chat = fixture.chat(Some(project)).await;
@@ -457,7 +460,7 @@ async fn a_source_that_is_gone_gives_way_to_the_repository_linked_to_its_project
         )
         .await;
     let project = fixture.project(Some(source)).await;
-    projects::link_github(&fixture.pool, project, GITHUB, None)
+    projects::link_github(&fixture.pool, project, GITHUB, None, None)
         .await
         .expect("a linked repository");
     let chat = fixture.chat(Some(project)).await;

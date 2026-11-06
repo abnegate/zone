@@ -153,8 +153,7 @@ dependencies = [
 [[package]]
 name = "abnegate-secret"
 version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb5c48f1f7916c8dec8b4dfc5bd64ec04f84c9607fd07f9c020f9544f31b94c0"
+source = "git+https://github.com/abnegate/crates?rev=870da51565c439af924ae6e080516d783454ad65#870da51565c439af924ae6e080516d783454ad65"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -172,16 +171,19 @@ dependencies = [
 [[package]]
 name = "abnegate-vcs"
 version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81233f9d124be1adb793bea351fae470914ec1c57fc9ef88e629d2e2ae3d8761"
+source = "git+https://github.com/abnegate/crates?rev=870da51565c439af924ae6e080516d783454ad65#870da51565c439af924ae6e080516d783454ad65"
 dependencies = [
  "abnegate-secret",
  "base64 0.23.1",
  "chrono",
+ "hex",
+ "hmac",
+ "jsonwebtoken",
  "nix",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -9637,6 +9639,7 @@ dependencies = [
  "zone_chat",
  "zone_context",
  "zone_core",
+ "zone_server",
 ]
 
 [[package]]

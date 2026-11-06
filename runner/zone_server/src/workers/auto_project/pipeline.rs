@@ -24,6 +24,7 @@ use crate::db::auto_projects::{
 };
 use crate::db::tasks::{self, TaskRow};
 use crate::services::endpoint::Origin;
+use crate::services::github_app::Error as GitHubError;
 use crate::workers::conflict::RepairOutcome;
 use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception};
 
@@ -53,6 +54,10 @@ pub const CI_TASK_DESCRIPTION: &str = "The repository has no checks: nothing run
      dependencies. The workflow must run green on its own pull request.";
 pub const CI_TASK_CRITERIA: &str = "A pull_request workflow exists and passes on the pull request that adds it; tests, lint and \
      type checks run in it; a deliberately broken test would fail it.";
+
+const REPOSITORY_TOKEN_MISSING: &str =
+    "repository_token_missing: link the repository with a token on the project";
+const REPOSITORY_DISCONNECTED: &str = "repository_disconnected: the project's GitHub connection was removed or suspended; reconnect GitHub";
 
 const NO_BOT_REVIEW_PREFIX: &str = "no review from: ";
 const REFRESHED_PREFIX: &str = "refreshed from base";
@@ -124,51 +129,29 @@ impl Step<'_> {
 
 /// Take the task's next step.
 pub async fn advance(drive: &Drive<'_>, task: &TaskAutomation) -> Result<(), String> {
-    let pool = drive.state.db();
-    let Some(row) = tasks::get_task(pool, task.task_id)
+    let Some(row) = tasks::get_task(drive.state.db(), task.task_id)
         .await
         .map_err(|error| error.to_string())?
     else {
         return Ok(());
     };
     let Some(pr_url) = row.pr_url.clone() else {
-        auto_projects::set_stage(
-            pool,
-            task.task_id,
-            drive.project.project_id,
-            Stage::Paused,
-            Some("the task has no pull request to drive"),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        return Ok(());
+        return pause(drive, task, "the task has no pull request to drive").await;
     };
     let reference = match drive.services.pr.pull_request(&pr_url) {
         Ok(reference) => reference,
         Err(error) => {
-            auto_projects::set_stage(
-                pool,
-                task.task_id,
-                drive.project.project_id,
-                Stage::Paused,
-                Some(&format!("the pull request URL cannot be read: {error}")),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-            return Ok(());
+            let reason = format!("the pull request URL cannot be read: {error}");
+            return pause(drive, task, &reason).await;
         }
     };
-    let Some(token) = access_token(drive.state, &row).await else {
-        auto_projects::set_stage(
-            pool,
-            task.task_id,
-            drive.project.project_id,
-            Stage::Paused,
-            Some("repository_token_missing: link the repository with a token on the project"),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        return Ok(());
+    let token = match access_token(drive.state, &row, &drive.services.pr, &reference).await {
+        Ok(Some(token)) => token,
+        Ok(None) => return pause(drive, task, REPOSITORY_TOKEN_MISSING).await,
+        Err(GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected) => {
+            return pause(drive, task, REPOSITORY_DISCONNECTED).await;
+        }
+        Err(error) => return Err(error.to_string()),
     };
     let step = Step {
         drive,
@@ -186,6 +169,19 @@ pub async fn advance(drive: &Drive<'_>, task: &TaskAutomation) -> Result<(), Str
         Stage::PostMerge => post_merge(&step).await,
         _ => Ok(()),
     }
+}
+
+/// Pause a task before its step could be read, with the reason.
+async fn pause(drive: &Drive<'_>, task: &TaskAutomation, reason: &str) -> Result<(), String> {
+    auto_projects::set_stage(
+        drive.state.db(),
+        task.task_id,
+        drive.project.project_id,
+        Stage::Paused,
+        Some(reason),
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// Merged or closed somewhere else: nothing here to drive any more.
@@ -2201,6 +2197,7 @@ mod tests {
                     repository: Some(PlannedRepository {
                         url: "https://github.com/acme/shop",
                         token: Some("token"),
+                        github_installation_id: None,
                     }),
                     brief: &json!({}),
                     tasks: &[PlannedTask {
@@ -2483,5 +2480,128 @@ mod tests {
             Some("post-merge: no merge commit recorded")
         );
         assert_eq!(asked, 0, "nothing is asked of GitHub about no commit");
+    }
+
+    /// The project the merged task was opened on.
+    async fn linked_project(merged: &Merged) -> Uuid {
+        sqlx::query_scalar("SELECT project_id FROM task_projects WHERE task_id = $1")
+            .bind(merged.task)
+            .fetch_one(merged.state.db())
+            .await
+            .expect("the task's project")
+    }
+
+    /// GitHub refuses, and the test fails on, any request carrying `token`.
+    async fn refusing(server: &wiremock::MockServer, token: &str) {
+        use wiremock::matchers::header;
+        use wiremock::{Mock, ResponseTemplate};
+
+        Mock::given(header("authorization", format!("Bearer {token}")))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(0)
+            .mount(server)
+            .await;
+    }
+
+    /// Advance the merged task from awaiting checks, and answer where it
+    /// ended up.
+    async fn advanced(merged: &Merged) -> TaskAutomation {
+        auto_projects::set_stage(
+            merged.state.db(),
+            merged.task,
+            merged.project.project_id,
+            Stage::AwaitingChecks,
+            None,
+        )
+        .await
+        .expect("the task awaits its checks");
+        let task = merged.automation().await;
+        advance(&merged.drive(), &task)
+            .await
+            .expect("a step without a credential pauses rather than failing");
+        merged.automation().await
+    }
+
+    #[tokio::test]
+    async fn a_revoked_installation_pauses_the_task_to_reconnect_github_and_lends_no_token() {
+        use crate::services::github_app::testing::{installation_number, installed, provider};
+
+        let server = wiremock::MockServer::start().await;
+        refusing(&server, "fallback-token").await;
+        let merged = Merged::new(&server).await;
+        let pool = merged.state.db();
+        merged
+            .state
+            .install_github(provider(&server, *merged.state.encryption_key()));
+        let installation = installed(
+            pool,
+            merged.state.github(),
+            merged.organization,
+            installation_number(),
+        )
+        .await;
+        crate::db::github_installations::mark_revoked(pool, installation)
+            .await
+            .expect("the installation is revoked");
+        let project = linked_project(&merged).await;
+        sqlx::query(
+            "UPDATE projects SET github_access_token = NULL, github_installation_id = $2 WHERE id = $1",
+        )
+        .bind(project)
+        .bind(installation)
+        .execute(pool)
+        .await
+        .expect("the project is on the installation");
+        let fallback =
+            crate::db::projects::create_project(pool, "Fallback", None, Some(merged.workspace))
+                .await
+                .expect("a second project");
+        crate::db::projects::link_github(
+            pool,
+            fallback.id,
+            "https://github.com/acme/elsewhere",
+            Some("fallback-token"),
+            None,
+        )
+        .await
+        .expect("the second project holds a token");
+        sqlx::query("INSERT INTO task_projects (task_id, project_id) VALUES ($1, $2)")
+            .bind(merged.task)
+            .bind(fallback.id)
+            .execute(pool)
+            .await
+            .expect("the task is on both projects");
+
+        let after = advanced(&merged).await;
+        let asked = requests(&server).await;
+        merged.remove().await;
+
+        assert_eq!(after.stage(), Stage::Paused);
+        assert_eq!(after.reason.as_deref(), Some(REPOSITORY_DISCONNECTED));
+        assert_eq!(
+            asked, 0,
+            "nothing is asked of GitHub without the credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_of_another_repository_lends_its_token_to_no_pull_request() {
+        let server = wiremock::MockServer::start().await;
+        refusing(&server, "token").await;
+        let merged = Merged::new(&server).await;
+        sqlx::query("UPDATE projects SET github_repo_url = $2 WHERE id = $1")
+            .bind(linked_project(&merged).await)
+            .bind("https://github.com/acme/elsewhere")
+            .execute(merged.state.db())
+            .await
+            .expect("the project moves to another repository");
+
+        let after = advanced(&merged).await;
+        let asked = requests(&server).await;
+        merged.remove().await;
+
+        assert_eq!(after.stage(), Stage::Paused);
+        assert_eq!(after.reason.as_deref(), Some(REPOSITORY_TOKEN_MISSING));
+        assert_eq!(asked, 0, "the other repository's token is never sent");
     }
 }

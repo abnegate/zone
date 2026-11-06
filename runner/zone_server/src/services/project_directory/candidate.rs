@@ -8,13 +8,12 @@ use uuid::Uuid;
 use super::search::Search;
 use super::{Missing, Origin, Start, scan};
 use crate::config::Config;
-use crate::db::sources::SourceRow;
+use crate::db::sources::{GITHUB, SourceRow};
 use crate::db::workspace_host_directories;
 use crate::host_mounts::{CONTAINER_ROOT, HostMounts, normalize};
 use crate::state::AppState;
 
 const FILESYSTEM: &str = "filesystem";
-const GITHUB: &str = "github";
 const GITLAB: &str = "gitlab";
 const GITLAB_HOST: &str = "https://gitlab.com";
 
@@ -30,7 +29,7 @@ pub(super) enum Candidate {
 }
 
 impl Candidate {
-    pub(super) fn of_source(key: &[u8], source: &SourceRow) -> Option<Self> {
+    pub(super) fn of_source(source: &SourceRow, token: Option<SecretValue>) -> Option<Self> {
         match source.source_type.as_str() {
             FILESYSTEM => text(&source.config, &["base_path", "path"])
                 .map(|path| Self::Folder(path.to_string())),
@@ -42,7 +41,7 @@ impl Candidate {
                         .ok()?;
                 Some(Self::Repository {
                     origin: Origin::parse(url.as_str())?,
-                    clone: Some((url, credential(key, source))),
+                    clone: Some((url, token)),
                 })
             }
             GITLAB => {
@@ -62,14 +61,11 @@ impl Candidate {
         }
     }
 
-    pub(super) fn of_project(key: &[u8], url: &str, token: Option<&str>) -> Option<Self> {
+    pub(super) fn of_project(url: &str, token: Option<SecretValue>) -> Option<Self> {
         let url = GitService::repository_url(url).ok()?;
         Some(Self::Repository {
             origin: Origin::parse(url.as_str())?,
-            clone: Some((
-                url,
-                token.map(|stored| SecretValue::new(crate::crypto::open(key, stored))),
-            )),
+            clone: Some((url, token)),
         })
     }
 
@@ -146,19 +142,6 @@ fn text<'a>(config: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-/// The token a source's repository is cloned with. A credential that cannot be opened is not
-/// presented, and the clone then fails or succeeds on what the repository allows anyone.
-fn credential(key: &[u8], source: &SourceRow) -> Option<SecretValue> {
-    let encrypted = source.credentials_encrypted.as_deref()?;
-    match crate::crypto::decrypt(key, encrypted) {
-        Ok(token) => Some(SecretValue::new(token)),
-        Err(error) => {
-            tracing::warn!(source = %source.id, %error, "Could not open the source's credentials");
-            None
-        }
-    }
-}
-
 /// The folder a source names: a host path through the mounts, or a path already under the
 /// container's mount of them, which is how a source indexed from inside the container names it.
 fn folder(mounts: &HostMounts, path: &str) -> Option<PathBuf> {
@@ -209,10 +192,6 @@ mod tests {
 
     use super::*;
 
-    fn key() -> [u8; 16] {
-        Uuid::new_v4().into_bytes()
-    }
-
     fn source(kind: &str, config: Value) -> SourceRow {
         SourceRow {
             id: Uuid::nil(),
@@ -228,6 +207,7 @@ mod tests {
             created_at: None,
             updated_at: None,
             workspace_id: None,
+            github_installation_id: None,
         }
     }
 
@@ -263,33 +243,67 @@ mod tests {
     fn a_source_is_a_folder_or_a_repository_and_anything_else_has_no_directory() {
         for config in [json!({"base_path": "/srv"}), json!({"path": "/srv"})] {
             assert!(matches!(
-                Candidate::of_source(&key(), &source(FILESYSTEM, config)),
+                Candidate::of_source(&source(FILESYSTEM, config), None),
                 Some(Candidate::Folder(path)) if path == "/srv"
             ));
         }
         assert!(matches!(
-            Candidate::of_source(&key(), &source(GITHUB, json!({"owner": "o", "repo": "r"}))),
+            Candidate::of_source(&source(GITHUB, json!({"owner": "o", "repo": "r"})), None),
             Some(Candidate::Repository { clone: Some(_), .. })
         ));
         assert!(matches!(
             Candidate::of_source(
-                &key(),
-                &source(GITLAB, json!({"project_id": "g/p", "host": "https://git.example"}))
+                &source(GITLAB, json!({"project_id": "g/p", "host": "https://git.example"})),
+                None
             ),
             Some(Candidate::Repository { clone: None, origin })
                 if Some(origin.clone()) == Origin::parse("git@git.example:g/p.git")
         ));
         assert!(
             Candidate::of_source(
-                &key(),
-                &source(GITHUB, json!({"owner": "--upload-pack=evil", "repo": "r"}))
+                &source(GITHUB, json!({"owner": "--upload-pack=evil", "repo": "r"})),
+                None
             )
             .is_none(),
             "an owner GitHub would not allow is never given to git"
         );
         for kind in ["web", "text", "notion"] {
-            assert!(Candidate::of_source(&key(), &source(kind, json!({}))).is_none());
+            assert!(Candidate::of_source(&source(kind, json!({})), None).is_none());
         }
+    }
+
+    #[test]
+    fn a_repository_is_cloned_with_the_token_it_was_given() {
+        let token = |candidate: Option<Candidate>| match candidate {
+            Some(Candidate::Repository {
+                clone: Some((_, token)),
+                ..
+            }) => token.map(|token| token.expose().to_string()),
+            _ => panic!("a GitHub repository is cloneable"),
+        };
+
+        assert_eq!(
+            token(Candidate::of_source(
+                &source(GITHUB, json!({"owner": "o", "repo": "r"})),
+                Some(SecretValue::new("ghs_installationtoken"))
+            )),
+            Some("ghs_installationtoken".to_string())
+        );
+        assert_eq!(
+            token(Candidate::of_project(
+                "https://github.com/o/r",
+                Some(SecretValue::new("ghp_projecttoken"))
+            )),
+            Some("ghp_projecttoken".to_string())
+        );
+        assert_eq!(
+            token(Candidate::of_source(
+                &source(GITHUB, json!({"owner": "o", "repo": "r"})),
+                None
+            )),
+            None,
+            "a repository with no credential is cloned anonymously"
+        );
     }
 
     #[test]

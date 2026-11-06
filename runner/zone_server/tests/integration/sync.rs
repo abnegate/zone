@@ -72,6 +72,7 @@ async fn setup_test_state() -> AppState {
         app_base_url: "http://localhost:3000".to_string(),
         github_api_url: zone_server::config::DEFAULT_GITHUB_API_URL.to_string(),
         github_api_allows_http: false,
+        github_web_url: zone_server::config::DEFAULT_GITHUB_WEB_URL.to_string(),
         web_search: zone_server::services::search::defaults(),
         comfyui: Default::default(),
         source_index: Default::default(),
@@ -3451,6 +3452,7 @@ async fn connected(github: &MockServer) -> (common::TestClient, String, String) 
         Uuid::parse_str(&project).unwrap(),
         "http://127.0.0.1/acme/project",
         Some(&encrypted),
+        None,
     )
     .await
     .unwrap();

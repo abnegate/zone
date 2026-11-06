@@ -17,6 +17,7 @@ use thiserror::Error;
 use super::{Provider, webhook_path};
 use crate::db::projects;
 use crate::db::sync_config::{self, SyncConfigRow};
+use crate::services::github_app;
 use crate::state::AppState;
 use uuid::Uuid;
 
@@ -33,6 +34,9 @@ const EVENTS: [WebhookEvent; 1] = [WebhookEvent::Issues];
 pub enum HookError {
     #[error("the project holds no GitHub token to update the webhook with")]
     Tokenless,
+
+    #[error("the project's GitHub credential could not be resolved: {0}")]
+    Credential(github_app::Error),
 
     #[error("the GitHub origin is misconfigured: {0}")]
     Origin(PullRequestError),
@@ -66,21 +70,26 @@ pub struct Hook {
 
 impl Hook {
     /// The webhook for `row`, or `None` when it is not a GitHub sync or its
-    /// project holds no token to register one with.
+    /// project has no credential to register one with.
     pub async fn of(state: &AppState, row: &SyncConfigRow) -> Result<Option<Self>, HookError> {
         if !matches!(row.provider.parse(), Ok(Provider::GitHub)) {
             return Ok(None);
         }
-        let Some(stored) = projects::get_project(state.db(), row.project_id)
-            .await?
-            .and_then(|project| project.github_access_token)
-        else {
+        let Some(project) = projects::get_project(state.db(), row.project_id).await? else {
             return Ok(None);
         };
         let Some(repository_url) = row
             .config
             .get("external_repo_url")
             .and_then(|value| value.as_str())
+        else {
+            return Ok(None);
+        };
+        let Some(credential) = state
+            .github()
+            .project(state.db(), &project)
+            .await
+            .map_err(HookError::Credential)?
         else {
             return Ok(None);
         };
@@ -97,7 +106,7 @@ impl Hook {
         Ok(Some(Self {
             service,
             repository,
-            token: SecretValue::new(crate::crypto::open(state.encryption_key(), &stored)),
+            token: credential.into_secret(),
             url,
         }))
     }
@@ -296,5 +305,87 @@ async fn record(
     match sync_config::get_sync_config(state.db(), row.id).await? {
         Some(_) => Err(HookError::Changed),
         None => Err(HookError::Deleted),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::config::Config;
+    use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
+    use crate::services::github_app::testing::{installation_number, installed, issuing, provider};
+
+    const WEBHOOK: u64 = 7;
+
+    #[tokio::test]
+    async fn an_installation_project_signs_its_webhook_with_a_minted_token() {
+        let github = MockServer::start().await;
+        let number = installation_number();
+        issuing(&github, number, "ghs_hooktoken", 1).await;
+        Mock::given(method("PATCH"))
+            .and(path(format!("/repos/acme/project/hooks/{WEBHOOK}/config")))
+            .and(header("authorization", "Bearer ghs_hooktoken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&github)
+            .await;
+        let pool = pool().await;
+        let state = AppState::new(
+            Config {
+                github_api_url: github.uri(),
+                github_api_allows_http: true,
+                app_base_url: "https://console.example.test".to_string(),
+                ..crate::state::test_config()
+            },
+            pool.clone(),
+            None,
+        );
+        state.install_github(provider(&github, *state.encryption_key()));
+        let organization = seed_organization(&pool).await;
+        let workspace = seed_workspace(&pool, organization).await;
+        let installation = installed(&pool, state.github(), organization, number).await;
+        let project = projects::create_project(&pool, "Hooked", None, Some(workspace))
+            .await
+            .unwrap();
+        projects::link_github(
+            &pool,
+            project.id,
+            "http://127.0.0.1/acme/project",
+            None,
+            Some(installation),
+        )
+        .await
+        .unwrap();
+        let row = sync_config::create_sync_config(
+            &pool,
+            project.id,
+            "github",
+            true,
+            json!({
+                "external_repo_url": "http://127.0.0.1/acme/project",
+                HOOK_ID: WEBHOOK,
+                HOOK_SIGNED: true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let hook = Hook::of(&state, &row)
+            .await
+            .unwrap()
+            .expect("an installation project has a credential for its webhook");
+        let signed = hook.sign_with(&state, row.clone(), "rotated").await;
+
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(signed.unwrap().id, row.id);
     }
 }

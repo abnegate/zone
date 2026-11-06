@@ -32,13 +32,16 @@ async fn create_test_source(
 
     sources::create_source(
         pool,
-        workspace_id,
-        name,
-        source_type,
-        config,
-        None,
-        None,
-        None,
+        sources::NewSource {
+            workspace_id,
+            name,
+            source_type,
+            config,
+            description: None,
+            url: None,
+            credentials_encrypted: None,
+            github_installation_id: None,
+        },
     )
     .await
     .expect("Failed to create test source")

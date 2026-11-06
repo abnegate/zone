@@ -1,38 +1,67 @@
 //! Failures on the GitHub App path, worded so none can carry a credential.
 
-use thiserror::Error;
+use std::sync::Arc;
 
-#[derive(Debug, Error)]
-pub enum GithubAppError {
-    #[error("The GitHub App configuration is missing or invalid.")]
-    Configuration,
-    #[error("The GitHub App private key could not be read.")]
-    PrivateKey,
-    #[error("The GitHub App private key could not be sealed for storage.")]
+use abnegate_vcs::pull_request::ApplicationError;
+use thiserror::Error as ThisError;
+
+#[derive(Debug, ThisError)]
+pub enum Error {
+    #[error(transparent)]
+    Application(#[from] ApplicationError),
+    #[error("The GitHub App secret could not be sealed for storage.")]
     Sealing,
-    #[error("The GitHub App private key is not sealed, or could not be unsealed.")]
+    #[error("The GitHub App secret is not sealed, or could not be unsealed.")]
     Unsealing,
-    #[error("The GitHub App JWT could not be signed.")]
-    Signing,
-    #[error("The installation token request failed: {0}")]
-    Transport(String),
-    #[error("GitHub returned HTTP {0} for the installation token request.")]
-    Status(u16),
-    #[error("The installation token response could not be read.")]
-    Response,
-    #[error("The stored source credential could not be decrypted.")]
+    #[error("The stored credential could not be decrypted.")]
     Credential,
+    #[error(
+        "The GitHub account this was connected through was removed from GitHub. Reconnect GitHub."
+    )]
+    Revoked,
+    #[error(
+        "The GitHub account this was connected through is suspended on GitHub. Reconnect GitHub."
+    )]
+    Suspended,
+    #[error("The GitHub connection this was using no longer exists. Reconnect GitHub.")]
+    NotConnected,
+    #[error("The GitHub connection could not be read: {0}")]
+    Database(#[source] Arc<sqlx::Error>),
 }
 
-/// A `reqwest` failure as a [`GithubAppError::Transport`], with the URL removed.
-///
-/// `reqwest::Error` appends `for url (...)` to its `Display`. A GitHub App
-/// request carries its bearer credential in a header rather than the URL, but a
-/// redirect, a proxy or a future caller can put one in the URL, and an error
-/// string is copied into logs and handed back to users. Stripping the URL costs
-/// nothing and removes the whole class of leak.
-pub fn transport(error: reqwest::Error) -> GithubAppError {
-    GithubAppError::Transport(error.without_url().to_string())
+impl From<sqlx::Error> for Error {
+    fn from(fault: sqlx::Error) -> Self {
+        Self::Database(Arc::new(fault))
+    }
+}
+
+impl Error {
+    pub(super) fn duplicate(&self) -> Self {
+        match self {
+            Self::Application(fault) => Self::Application(Self::application(fault)),
+            Self::Sealing => Self::Sealing,
+            Self::Unsealing => Self::Unsealing,
+            Self::Credential => Self::Credential,
+            Self::Revoked => Self::Revoked,
+            Self::Suspended => Self::Suspended,
+            Self::NotConnected => Self::NotConnected,
+            Self::Database(fault) => Self::Database(Arc::clone(fault)),
+        }
+    }
+
+    fn application(fault: &ApplicationError) -> ApplicationError {
+        match fault {
+            ApplicationError::InvalidOrigin => ApplicationError::InvalidOrigin,
+            ApplicationError::Client => ApplicationError::Client,
+            ApplicationError::PrivateKey => ApplicationError::PrivateKey,
+            ApplicationError::Signing => ApplicationError::Signing,
+            ApplicationError::Transport(cause) => ApplicationError::Transport(cause.clone()),
+            ApplicationError::Status(status) => ApplicationError::Status(*status),
+            ApplicationError::Response => ApplicationError::Response,
+            ApplicationError::InvalidCode => ApplicationError::InvalidCode,
+            unknown => ApplicationError::Transport(unknown.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -40,32 +69,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_variant_echoes_key_material() {
+    fn an_application_failure_renders_as_the_crate_worded_it() {
         assert_eq!(
-            GithubAppError::Status(404).to_string(),
-            "GitHub returned HTTP 404 for the installation token request."
+            Error::from(ApplicationError::Status(404)).to_string(),
+            "GitHub returned HTTP 404 for the GitHub App request."
         );
-        assert!(!GithubAppError::PrivateKey.to_string().contains("BEGIN"));
-        assert!(!GithubAppError::Signing.to_string().contains("BEGIN"));
     }
 
-    #[tokio::test]
-    async fn transport_errors_drop_the_request_url() {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(50))
-            .build()
-            .expect("client");
+    #[test]
+    fn no_variant_echoes_key_material() {
+        for error in [
+            Error::Sealing,
+            Error::Unsealing,
+            Error::Credential,
+            Error::from(ApplicationError::PrivateKey),
+            Error::from(ApplicationError::Signing),
+        ] {
+            assert!(!error.to_string().contains("BEGIN"), "{error}");
+        }
+    }
 
-        let error = client
-            .post("http://127.0.0.1:1/app/installations/1/access_tokens?credential=leaked")
-            .send()
-            .await
-            .expect_err("a request to a closed port fails");
+    #[test]
+    fn a_duplicate_is_the_same_failure() {
+        for error in [
+            Error::Sealing,
+            Error::Unsealing,
+            Error::Credential,
+            Error::Revoked,
+            Error::Suspended,
+            Error::NotConnected,
+            Error::from(ApplicationError::InvalidOrigin),
+            Error::from(ApplicationError::Client),
+            Error::from(ApplicationError::PrivateKey),
+            Error::from(ApplicationError::Signing),
+            Error::from(ApplicationError::Transport(
+                "connection refused".to_string(),
+            )),
+            Error::from(ApplicationError::Status(503)),
+            Error::from(ApplicationError::Response),
+            Error::from(ApplicationError::InvalidCode),
+            Error::from(sqlx::Error::PoolTimedOut),
+        ] {
+            let duplicate = error.duplicate();
+            assert_eq!(duplicate.to_string(), error.to_string());
+            assert_eq!(
+                std::mem::discriminant(&duplicate),
+                std::mem::discriminant(&error)
+            );
+        }
+    }
 
-        let rendered = transport(error).to_string();
-        assert!(
-            !rendered.contains("credential=leaked") && !rendered.contains("127.0.0.1"),
-            "the request URL survived into the error: {rendered}"
-        );
+    #[test]
+    fn a_duplicate_status_keeps_its_variant() {
+        assert!(matches!(
+            Error::from(ApplicationError::Status(404)).duplicate(),
+            Error::Application(ApplicationError::Status(404))
+        ));
     }
 }
