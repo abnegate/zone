@@ -86,18 +86,32 @@ mod tests {
             GithubAppError::Configuration
         ));
 
-        for error in [
-            ApplicationError::PrivateKey,
-            ApplicationError::Signing,
-            ApplicationError::Transport(CAUSE.to_string()),
-            ApplicationError::Status(STATUS),
-            ApplicationError::Response,
+        for (error, expected) in [
+            (
+                ApplicationError::PrivateKey,
+                "The GitHub App private key could not be read.".to_string(),
+            ),
+            (
+                ApplicationError::Signing,
+                "The GitHub App JWT could not be signed.".to_string(),
+            ),
+            (
+                ApplicationError::Transport(CAUSE.to_string()),
+                format!("The installation token request failed: {CAUSE}"),
+            ),
+            (
+                ApplicationError::Status(STATUS),
+                format!("GitHub returned HTTP {STATUS} for the installation token request."),
+            ),
+            (
+                ApplicationError::Response,
+                "The installation token response could not be read.".to_string(),
+            ),
         ] {
-            let expected = error.to_string();
             assert_eq!(
                 GithubAppError::from(error).to_string(),
                 expected,
-                "a mapped variant must keep the crate's wording, which is Zone's"
+                "a mapped variant must keep Zone's wording, whatever the crate calls it"
             );
         }
     }
