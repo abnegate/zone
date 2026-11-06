@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { join } from 'node:path';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentProps, ComponentType, ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import type { GitHubRepositorySearch } from '../../../api/github';
+import { read } from '../../../test/css';
 import type { OrgRole } from '../../../types';
 import type {
   GitHubRepositoriesResponse,
@@ -586,5 +588,28 @@ describe('SourceDetail access token field', () => {
     renderDetail(gitHubSource());
 
     expect(accessTokenField()).toBeTruthy();
+  });
+});
+
+describe('SourceDetail field styling', () => {
+  const styledInputTypes = [
+    ...read(join(import.meta.dir, '..', '..', '..', 'styles', 'forms.css')).matchAll(
+      /:where\(input\[type='([a-z]+)'\]\)/g
+    ),
+  ].map((match) => match[1]);
+
+  it.each(['Type', 'URL', 'Name'])('gives the %s field a type the form styles match', (label) => {
+    renderDetail(gitHubSource());
+
+    expect(styledInputTypes).toContain(screen.getByLabelText(label).getAttribute('type') ?? '');
+  });
+
+  it('gives every text field a type the form styles match', () => {
+    const { container } = renderDetail(gitHubSource());
+
+    const unstyled = [...container.querySelectorAll('input:not([type="checkbox"])')]
+      .filter((input) => !styledInputTypes.includes(input.getAttribute('type') ?? ''))
+      .map((input) => input.id);
+    expect(unstyled).toEqual([]);
   });
 });
