@@ -9,8 +9,10 @@
 pub mod device;
 pub mod jwt;
 pub mod middleware;
+pub mod model_guard;
 pub mod organization_guard;
 pub mod password;
+pub mod permission;
 pub mod time_zone;
 pub mod workspace_guard;
 
@@ -19,6 +21,8 @@ pub use jwt::{
     validate_access_token,
 };
 pub use middleware::{AuthSession, AuthUser, require_auth};
+pub use model_guard::{ModelInstaller, ModelRemover};
 pub use organization_guard::{OrgAdmin, OrgMember, OrgOwner};
 pub use password::{hash_password, verify_password};
+pub use permission::Permission;
 pub use workspace_guard::{WorkspaceAdmin, WorkspaceMember, WorkspaceOwner, WorkspaceWriter};

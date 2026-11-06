@@ -168,8 +168,10 @@ impl Agent {
             .map_while(|run| {
                 let arguments =
                     std::fs::read_to_string(self.log.join(format!("{run}.arguments"))).ok()?;
-                let prompt = std::fs::read_to_string(self.log.join(format!("{run}.prompt")))
-                    .expect("a run that recorded its arguments recorded its prompt");
+                let prompt = zone_core::llm::provider::prompt(
+                    &std::fs::read_to_string(self.log.join(format!("{run}.prompt")))
+                        .expect("a run that recorded its arguments recorded its prompt"),
+                );
                 Some(Invocation {
                     arguments: arguments
                         .split('\0')

@@ -476,7 +476,7 @@ test.describe('Models Page', () => {
     await setupModelsRoutes(page);
 
     // Set up authentication (navigates to /login)
-    await setupAuth(page);
+    await setupAuth(page, { admin: true });
 
     // Navigate to models page
     await page.goto('/models');
