@@ -1346,6 +1346,35 @@ mod tests {
     use wiremock::matchers::path;
     use zone_core::variables::Variables;
 
+    /// abnegate-agent-cli adds a read-only sandbox, which a turn that withholds codex's tools
+    /// already runs in. An operator naming it for granted tools gets an error, not a codex that
+    /// cannot write what it was granted tools to write.
+    #[test]
+    fn zone_codex_sandbox_refuses_read_only() {
+        assert!(
+            matches!(
+                codex_sandbox(Some(CodexSandbox::ReadOnly.as_str().to_string())),
+                Err(ConfigError::Invalid(
+                    "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access"
+                ))
+            ),
+            "read-only is not a sandbox for granted tools"
+        );
+        assert!(!GRANTED_SANDBOXES.contains(&CodexSandbox::ReadOnly));
+        for value in [None, Some(String::new()), Some("  ".to_string())] {
+            assert_eq!(
+                codex_sandbox(value).expect("the default sandbox"),
+                CodexSandbox::WorkspaceWrite
+            );
+        }
+        for sandbox in [CodexSandbox::WorkspaceWrite, CodexSandbox::DangerFullAccess] {
+            assert_eq!(
+                codex_sandbox(Some(format!(" {} ", sandbox.as_str()))).expect("a granted sandbox"),
+                sandbox
+            );
+        }
+    }
+
     fn create_test_config() -> Config {
         Config {
             host: "localhost".to_string(),

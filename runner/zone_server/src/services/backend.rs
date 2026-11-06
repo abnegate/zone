@@ -1459,4 +1459,239 @@ mod tests {
             }
         );
     }
+
+    /// The variables Zone's own provider set on every Claude backend before it ran on
+    /// abnegate-agent-cli, which `isolate()` now sets on the run instead.
+    const ISOLATION_VARIABLES: [&str; 5] = [
+        "DISABLE_AUTOUPDATER",
+        "MCP_TOOL_TIMEOUT",
+        "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+    ];
+
+    const GRANTED_SANDBOXES: [CodexSandbox; 2] =
+        [CodexSandbox::WorkspaceWrite, CodexSandbox::DangerFullAccess];
+
+    const SIGN_INS: [SignIn; 3] = [SignIn::Instance, SignIn::Organization, SignIn::Host];
+
+    /// A config whose instance default is `agent`, keeping agent state under `state`.
+    fn defaulting_to(agent: AgentKind, state: &Path, sandbox: CodexSandbox) -> Config {
+        let mut config = Config {
+            model_backend: ModelBackend::Cli {
+                agent,
+                executable: None,
+            },
+            agents: AgentConfig {
+                state: state.to_path_buf(),
+                ..crate::state::test_agents()
+            },
+            ..crate::state::test_config()
+        };
+        config.agents.codex_sandbox = sandbox;
+        config
+    }
+
+    /// One of `organization`'s logins of `agent`, resolved to `resolved`, as the router hands
+    /// it over: no database holds it.
+    fn picked(organization: Uuid, agent: AgentKind, resolved: Login) -> Chosen {
+        let now = Utc::now();
+        Chosen {
+            login: agent_logins::AgentLoginRow {
+                id: Uuid::new_v4(),
+                organization_id: organization,
+                agent: agent.as_str().to_string(),
+                account: None,
+                credential: None,
+                label: None,
+                expires_at: None,
+                windows: None,
+                headroom: None,
+                usage_fetched_at: None,
+                exhausted_until: None,
+                last_used_at: None,
+                created_at: now,
+                updated_at: now,
+            },
+            agent,
+            resolved,
+            snapshot: None,
+        }
+    }
+
+    fn resolved_login(agent: AgentKind, codex_home: &Path) -> Login {
+        match agent {
+            AgentKind::Codex => Login::Codex {
+                home: codex_home.to_path_buf(),
+            },
+            _ => Login::Claude {
+                token: SecretValue::new(ACCESS),
+            },
+        }
+    }
+
+    /// Every backend Zone builds to run `agent` in production, by how it was reached: the
+    /// instance's default, the host's sign-in standing in for an organization, and an
+    /// organization's own login.
+    fn production_backends(
+        agent: AgentKind,
+        sandbox: CodexSandbox,
+    ) -> Vec<(&'static str, LlmBackend)> {
+        let state = TempDir::new().expect("an agent state root");
+        let codex_home = TempDir::new().expect("a codex login's home");
+        let config = defaulting_to(agent, state.path(), sandbox);
+        let organization = Uuid::new_v4();
+        let chosen = picked(
+            organization,
+            agent,
+            resolved_login(agent, codex_home.path()),
+        );
+        vec![
+            ("the instance's default", instance(&config)),
+            (
+                "the host's sign-in",
+                host(&config, organization, agent)
+                    .expect("the host's backend")
+                    .backend,
+            ),
+            (
+                "an organization's login",
+                on_login(&config, organization, &chosen, None)
+                    .expect("the login's backend")
+                    .backend,
+            ),
+        ]
+    }
+
+    /// abnegate-agent-cli gives a run five minutes. Every backend Zone runs an agent on starts
+    /// from Zone's thirty, so a task or a review that never bounds its backend outlives it.
+    #[test]
+    fn production_agent_backends_allow_thirty_minutes() {
+        for &agent in AgentKind::ALL {
+            for (reached, backend) in production_backends(agent, CodexSandbox::WorkspaceWrite) {
+                let (_, settings, _) = cli(Ok(backend));
+                assert_eq!(
+                    settings.timeout,
+                    cli::TURN_TIMEOUT,
+                    "{agent} on {reached} kept the crate's {:?}",
+                    abnegate_agent_cli::DEFAULT_TIMEOUT
+                );
+            }
+        }
+    }
+
+    /// Zone no longer folds Claude's isolation variables into a backend: `confined` isolates
+    /// every run, and the crate sets them there, beside the MCP timeouts only a toolset asks for.
+    #[test]
+    fn prepared_settings_carry_no_claude_defaults() {
+        for &agent in AgentKind::ALL {
+            for (reached, backend) in production_backends(agent, CodexSandbox::WorkspaceWrite) {
+                let (agent, settings, _) = cli(Ok(backend));
+                for name in ISOLATION_VARIABLES {
+                    assert_eq!(
+                        variable(&settings, name),
+                        None,
+                        "{agent} on {reached} carries {name}"
+                    );
+                }
+                let run = cli::confined(
+                    agent,
+                    settings,
+                    None,
+                    zone_core::llm::BuiltinTools::Withheld,
+                );
+                assert!(run.isolated, "{agent} on {reached} runs unisolated");
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_codex_settings_name_the_configured_sandbox() {
+        for sandbox in GRANTED_SANDBOXES {
+            for (reached, backend) in production_backends(AgentKind::Codex, sandbox) {
+                assert_eq!(
+                    cli(Ok(backend)).1.sandbox,
+                    Some(sandbox),
+                    "codex on {reached}"
+                );
+            }
+            for (reached, backend) in production_backends(AgentKind::Claude, sandbox) {
+                assert_eq!(
+                    cli(Ok(backend)).1.sandbox,
+                    None,
+                    "claude on {reached} names no sandbox"
+                );
+            }
+        }
+    }
+
+    /// A run withholds the host's configuration variables, so a login's home reaches its agent
+    /// only as a variable Zone sets, never as a name passed through from the host.
+    #[test]
+    fn an_organization_login_names_its_home_through_a_variable() {
+        for &agent in AgentKind::ALL {
+            let state = TempDir::new().expect("an agent state root");
+            let codex_home = TempDir::new().expect("a codex login's home");
+            let config = defaulting_to(agent, state.path(), CodexSandbox::WorkspaceWrite);
+            let organization = Uuid::new_v4();
+            let chosen = picked(
+                organization,
+                agent,
+                resolved_login(agent, codex_home.path()),
+            );
+            let home = match agent {
+                AgentKind::Codex => codex_home.path().to_path_buf(),
+                _ => config
+                    .agents
+                    .login_home(organization, agent, chosen.login.id),
+            };
+            let name = home::variable(agent).expect("a home variable");
+
+            let (_, settings, _) = cli(Ok(on_login(&config, organization, &chosen, None)
+                .expect("the login's backend")
+                .backend));
+            let run = cli::confined(
+                agent,
+                settings,
+                None,
+                zone_core::llm::BuiltinTools::Withheld,
+            );
+
+            assert!(
+                run.withhold_host_credentials,
+                "{agent} inherits the host's sign-in"
+            );
+            assert_eq!(
+                variable(&run, name).map(PathBuf::from),
+                Some(home),
+                "{agent} is not pointed at its login's home"
+            );
+            assert!(
+                !run.allowed.contains(name),
+                "{agent} takes {name} from the host"
+            );
+        }
+    }
+
+    /// `bounded`, `in_directory` and `effort` reconfigure a backend's agent and leave whose
+    /// sign-in it runs under alone, so a failed sign-in is still sent to whoever can renew it.
+    #[test]
+    fn bounding_a_backend_keeps_its_sign_in() {
+        let directory = TempDir::new().expect("a chat's directory");
+        let budget = Duration::from_secs(60);
+        for &agent in AgentKind::ALL {
+            for sign_in in SIGN_INS {
+                let backend = || LlmBackend::cli(agent, cli::settings()).with_sign_in(sign_in);
+                for (change, configured) in [
+                    ("bounded", bounded(backend(), budget)),
+                    ("in_directory", in_directory(backend(), directory.path())),
+                    ("effort", effort(backend(), ReasoningEffort::High)),
+                ] {
+                    let (kept, _, kept_sign_in) = cli(Ok(configured));
+                    assert_eq!(kept, agent, "{change} moved the backend off {agent}");
+                    assert_eq!(kept_sign_in, sign_in, "{change} dropped {agent}'s sign-in");
+                }
+            }
+        }
+    }
 }
