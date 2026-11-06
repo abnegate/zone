@@ -21,11 +21,20 @@ use uuid::Uuid;
 use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::WorkspaceScope;
+use super::integrations::source_token;
 use crate::db::auto_projects::{self, Kind, PlannedRepository, PlannedTask, ProjectPlan};
-use crate::db::{sources, workspace_members};
+use crate::db::sources::{self, SourceRow};
+use crate::db::workspace_members;
 
 pub const CREATE_REPOSITORY: &str = "create_repository";
 pub const FINALIZE_PROJECT: &str = "finalize_project";
+
+const SOURCE_UNREADABLE: &str = "Could not read the source.";
+const SOURCE_MISSING: &str = "Source not found in this workspace or inactive.";
+const SOURCE_NOT_GITHUB: &str = "The source is not a GitHub source.";
+pub(crate) const SOURCE_CREDENTIAL_MISSING: &str =
+    "The GitHub source has no credential; connect GitHub or add a token to it first.";
+pub(crate) const REPOSITORY_NEEDS_TOKEN: &str = "Creating a repository needs a GitHub source with an access token; a GitHub App connection cannot create repositories.";
 
 /// Tasks one project may be planned with.
 pub const MAX_TASKS: usize = 100;
@@ -281,33 +290,39 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
     registry.register(Arc::new(FinalizeProjectTool(scope.clone())));
 }
 
-/// The GitHub source's token and its configured owner and repository.
+/// The GitHub source's token, the installation it was minted for when the
+/// source is connected through a GitHub App, and its configured owner and repository.
 struct SourceCredential {
     token: SecretValue,
+    installation: Option<Uuid>,
     owner: Option<String>,
     repo: Option<String>,
 }
 
-/// The token and repository a connected GitHub source holds, decrypted for one call.
-async fn source_credential(
-    scope: &WorkspaceScope,
-    source_id: Uuid,
-) -> Result<SourceCredential, String> {
+/// The active GitHub source `source_id` names in this workspace.
+async fn github_source(scope: &WorkspaceScope, source_id: Uuid) -> Result<SourceRow, String> {
     let source = sources::get_source(scope.state.db(), source_id, scope.workspace_id)
         .await
-        .map_err(|_| "Could not read the source.".to_string())?
+        .map_err(|_| SOURCE_UNREADABLE.to_string())?
         .filter(|source| source.is_active.unwrap_or(true))
-        .ok_or("Source not found in this workspace or inactive.")?;
+        .ok_or(SOURCE_MISSING)?;
     if source.source_type != "github" {
-        return Err("The source is not a GitHub source.".to_string());
+        return Err(SOURCE_NOT_GITHUB.to_string());
     }
-    let encrypted = source
-        .credentials_encrypted
-        .ok_or("The GitHub source has no credential stored; add a token to it first.")?;
-    let token = crate::crypto::decrypt(scope.state.encryption_key(), &encrypted)
-        .map_err(|_| "The source credentials could not be decrypted.".to_string())?;
+    Ok(source)
+}
+
+/// The credential `source` reaches GitHub with, resolved for one call.
+async fn source_credential(
+    scope: &WorkspaceScope,
+    source: &SourceRow,
+) -> Result<SourceCredential, String> {
+    let token = source_token(&scope.state, source)
+        .await?
+        .ok_or(SOURCE_CREDENTIAL_MISSING)?;
     Ok(SourceCredential {
-        token: SecretValue::new(token),
+        token,
+        installation: source.github_installation_id,
         owner: source.config["owner"].as_str().map(str::to_string),
         repo: source.config["repo"].as_str().map(str::to_string),
     })
@@ -402,7 +417,14 @@ impl Tool for CreateRepositoryTool {
         if let Err(refusal) = authorized_writer(&self.0).await {
             return Ok(ToolResult::error(refusal));
         }
-        let credential = match source_credential(&self.0, arguments.source_id).await {
+        let source = match github_source(&self.0, arguments.source_id).await {
+            Ok(source) => source,
+            Err(refusal) => return Ok(ToolResult::error(refusal)),
+        };
+        if source.github_installation_id.is_some() {
+            return Ok(ToolResult::error(REPOSITORY_NEEDS_TOKEN));
+        }
+        let credential = match source_credential(&self.0, &source).await {
             Ok(credential) => credential,
             Err(refusal) => return Ok(ToolResult::error(refusal)),
         };
@@ -535,12 +557,16 @@ impl Tool for FinalizeProjectTool {
         if let Err(refusal) = authorized_writer(&self.0).await {
             return Ok(ToolResult::error(refusal));
         }
-        let (url, token) = match &blueprint.repository {
+        let (url, token, installation) = match &blueprint.repository {
             Some(RepositoryRef {
                 source_id: Some(source_id),
                 url,
             }) => {
-                let credential = match source_credential(&self.0, *source_id).await {
+                let credential = match github_source(&self.0, *source_id).await {
+                    Ok(source) => source_credential(&self.0, &source).await,
+                    Err(refusal) => Err(refusal),
+                };
+                let credential = match credential {
                     Ok(credential) => credential,
                     Err(refusal) => return Ok(ToolResult::error(refusal)),
                 };
@@ -555,26 +581,27 @@ impl Tool for FinalizeProjectTool {
                         }
                     },
                 };
-                // Stored the way the source keeps it: encrypted at rest, opened
-                // by the checkout and pull request code that uses it.
-                let sealed = match crate::crypto::encrypt(
-                    self.0.state.encryption_key(),
-                    credential.token.expose(),
-                ) {
-                    Ok(sealed) => sealed,
-                    Err(_) => {
-                        return Ok(ToolResult::error(
-                            "The repository token could not be encrypted for storage.",
-                        ));
+                if let Some(installation) = credential.installation {
+                    (Some(url), None, Some(installation))
+                } else {
+                    match crate::crypto::encrypt(
+                        self.0.state.encryption_key(),
+                        credential.token.expose(),
+                    ) {
+                        Ok(sealed) => (Some(url), Some(sealed), None),
+                        Err(_) => {
+                            return Ok(ToolResult::error(
+                                "The repository token could not be encrypted for storage.",
+                            ));
+                        }
                     }
-                };
-                (Some(url), Some(sealed))
+                }
             }
             Some(RepositoryRef {
                 source_id: None,
                 url: Some(url),
-            }) => (Some(url.clone()), None),
-            _ => (None, None),
+            }) => (Some(url.clone()), None, None),
+            _ => (None, None, None),
         };
         let planned = blueprint.planned_tasks();
         let plan = ProjectPlan {
@@ -583,7 +610,7 @@ impl Tool for FinalizeProjectTool {
             repository: url.as_deref().map(|url| PlannedRepository {
                 url,
                 token: token.as_deref(),
-                github_installation_id: None,
+                github_installation_id: installation,
             }),
             brief: &blueprint.spec,
             tasks: &planned,
@@ -626,6 +653,11 @@ impl Tool for FinalizeProjectTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::integrations::SOURCE_DISCONNECTED;
+    use crate::agent::testing::{Connected, MINTED_TOKEN, OWNER, REPOSITORY, STORED_TOKEN, number};
+    use crate::services::github_app::testing::issuing;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, ResponseTemplate};
 
     fn task(kind: &str, title: &str, depends_on: &[usize]) -> Value {
         json!({"kind": kind, "title": title, "description": format!("Do {title}"), "depends_on": depends_on})
@@ -791,5 +823,180 @@ mod tests {
         let mut good = sound();
         good["repository"] = json!({"url": "https://github.com/acme/shop"});
         assert!(Blueprint::parse(&good).is_ok());
+    }
+
+    fn finalizing(source: &SourceRow) -> Value {
+        let mut plan = sound();
+        plan["repository"] = json!({"source_id": source.id});
+        plan
+    }
+
+    fn creating(source: &SourceRow) -> Value {
+        json!({"source_id": source.id, "name": "shop"})
+    }
+
+    fn refusal(result: ToolResult) -> String {
+        assert!(!result.success, "expected a refusal, got {result:?}");
+        result.error.expect("a refusal carries its reason")
+    }
+
+    fn created(result: ToolResult) -> Value {
+        assert!(result.success, "expected success, got {result:?}");
+        serde_json::from_str(&result.output.expect("a result")).expect("a JSON result")
+    }
+
+    async fn stored(connected: &Connected, project: &Value) -> (Option<Uuid>, Option<String>) {
+        let project = Uuid::parse_str(project["project_id"].as_str().expect("a project id"))
+            .expect("a project uuid");
+        sqlx::query_as(
+            "SELECT github_installation_id, github_access_token FROM projects WHERE id = $1",
+        )
+        .bind(project)
+        .fetch_one(&connected.pool)
+        .await
+        .expect("the project")
+    }
+
+    async fn projects(connected: &Connected) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE workspace_id = $1")
+            .bind(connected.workspace)
+            .fetch_one(&connected.pool)
+            .await
+            .expect("count the projects")
+    }
+
+    #[tokio::test]
+    async fn finalizing_with_an_installation_source_records_the_installation_and_no_token() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 1).await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(finalizing(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+        let project = created(result);
+
+        assert_eq!(
+            project["repository_url"],
+            format!("https://github.com/{OWNER}/{REPOSITORY}")
+        );
+        assert_eq!(
+            stored(&connected, &project).await,
+            (Some(installation), None)
+        );
+    }
+
+    #[tokio::test]
+    async fn finalizing_with_a_stored_token_source_seals_the_token_into_the_project() {
+        let connected = Connected::new().await;
+        let source = connected.source(None, Some(STORED_TOKEN)).await;
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(finalizing(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+        let (installation, token) = stored(&connected, &created(result)).await;
+
+        let token = token.expect("the project holds the source's token");
+        assert_eq!(installation, None);
+        assert_ne!(token, STORED_TOKEN, "the token is sealed at rest");
+        assert_eq!(
+            crate::crypto::open(connected.state.encryption_key(), &token),
+            STORED_TOKEN
+        );
+    }
+
+    #[tokio::test]
+    async fn finalizing_with_a_revoked_installation_asks_for_a_reconnect_and_writes_nothing() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 0).await;
+        let installation = connected.revoked(number).await;
+        let source = connected
+            .source(Some(installation), Some(STORED_TOKEN))
+            .await;
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(finalizing(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(refusal(result), SOURCE_DISCONNECTED);
+        assert_eq!(projects(&connected).await, 0);
+    }
+
+    #[tokio::test]
+    async fn finalizing_with_a_source_holding_no_credential_says_how_to_add_one() {
+        let connected = Connected::new().await;
+        let source = connected.source(None, None).await;
+
+        let result = FinalizeProjectTool(connected.scope())
+            .execute(finalizing(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(refusal(result), SOURCE_CREDENTIAL_MISSING);
+    }
+
+    #[tokio::test]
+    async fn creating_a_repository_refuses_an_installation_source_without_minting() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 0).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .named("any repository creation")
+            .mount(&connected.github)
+            .await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+
+        let result = CreateRepositoryTool(connected.scope())
+            .execute(creating(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(refusal(result), REPOSITORY_NEEDS_TOKEN);
+    }
+
+    #[tokio::test]
+    async fn creating_a_repository_sends_a_stored_token_source_its_token() {
+        let connected = Connected::new().await;
+        let bearer = format!("Bearer {STORED_TOKEN}");
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(header("Authorization", bearer.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": OWNER})))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/repos"))
+            .and(header("Authorization", bearer.as_str()))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "name": "shop",
+                "owner": {"login": OWNER},
+                "html_url": format!("https://github.com/{OWNER}/shop"),
+                "clone_url": format!("https://github.com/{OWNER}/shop.git"),
+                "default_branch": "main",
+            })))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        let source = connected.source(None, Some(STORED_TOKEN)).await;
+
+        let result = CreateRepositoryTool(connected.scope())
+            .execute(creating(&source), &ToolContext::default())
+            .await
+            .expect("the tool answers");
+
+        assert_eq!(
+            created(result)["url"],
+            format!("https://github.com/{OWNER}/shop")
+        );
     }
 }
