@@ -31,40 +31,30 @@ macro_rules! columns {
     };
 }
 
-/// Matches the subagents that are still running. Spelled out rather than bound
-/// so the planner can match it to `chat_subagents_running_idx`'s predicate,
-/// which a parameter never proves.
+/// Matches the rows that are still running. Spelled out rather than bound so
+/// the planner can match it to the running partial indexes' predicates, which
+/// a parameter never proves.
 macro_rules! running {
     () => {
         "status = 'running'"
     };
 }
 
-/// Stops the running subagents `$1`'s turns matching `$condition` left, fails
-/// their running steps with them, and selects each as a [`Stopped`], oldest
-/// first. `$3` is the stopped subagent status, and `$4` and `$5` the failed and
-/// running step statuses.
-macro_rules! stop_running {
-    ($condition:literal) => {
+/// Fails the running steps of the subagents a `stopped` CTE settled, and
+/// selects each of them as a [`Stopped`], oldest first. `$failed` and
+/// `$running` are the placeholders of the failed and running step statuses.
+macro_rules! fail_stopped_steps {
+    ($failed:literal, $running:literal) => {
         concat!(
-            "WITH stopped AS (
-                 UPDATE chat_subagents
-                    SET status = $3::text,
-                        finished_at = COALESCE(finished_at, clock_timestamp()),
-                        revision = revision + 1,
-                        updated_at = clock_timestamp()
-                  WHERE chat_id = $1 AND ",
-            $condition,
-            " AND ",
-            running!(),
-            "
-                 RETURNING *
-             ),
-             failed AS (
+            "failed AS (
                  UPDATE chat_subagent_steps p
-                    SET status = $4::text
+                    SET status = ",
+            $failed,
+            "::text
                    FROM stopped
-                  WHERE p.subagent_id = stopped.id AND p.status = $5::text
+                  WHERE p.subagent_id = stopped.id AND p.status = ",
+            $running,
+            "::text
                  RETURNING p.*
              )
              SELECT ",
@@ -82,9 +72,39 @@ macro_rules! stop_running {
     };
 }
 
+/// Stops the running subagents of chat `$1` that match `$condition`, fails
+/// their running steps with them, and selects each as a [`Stopped`], oldest
+/// first. `$3` is the stopped subagent status, and `$4` and `$5` the failed and
+/// running step statuses.
+macro_rules! stop_running {
+    ($($condition:tt)+) => {
+        concat!(
+            "WITH stopped AS (
+                 UPDATE chat_subagents
+                    SET status = $3::text,
+                        finished_at = COALESCE(finished_at, clock_timestamp()),
+                        revision = revision + 1,
+                        updated_at = clock_timestamp()
+                  WHERE chat_id = $1 AND ",
+            $($condition)+,
+            " AND ",
+            running!(),
+            "
+                 RETURNING *
+             ), ",
+            fail_stopped_steps!("$4", "$5")
+        )
+    };
+}
+
 const STOP: &str = stop_running!("message_id = $2");
 
-const STOP_OTHERS: &str = stop_running!("message_id IS DISTINCT FROM $2");
+const STOP_OTHERS: &str = stop_running!(
+    "message_id IS DISTINCT FROM $2
+     AND EXISTS (SELECT 1 FROM chat_turns t WHERE t.chat_id = $1 AND t.id = $2 AND t.",
+    running!(),
+    ")"
+);
 
 const ABANDON: &str = concat!(
     "WITH stopped AS (
@@ -110,13 +130,25 @@ const ABANDON: &str = concat!(
      SELECT count(*) FROM stopped"
 );
 
+/// A settled subagent that is running again, as it is only when a turn other
+/// than the one that ran it reports it running: the update names the run that
+/// turn started rather than the one that ended.
+macro_rules! resumed {
+    () => {
+        "($8::text = $15::text AND s.status <> $15::text
+          AND $2::uuid IS NOT NULL AND s.message_id IS DISTINCT FROM $2::uuid)"
+    };
+}
+
 /// Records what `change` says about one subagent, creating its row the first
 /// time the chat hears of it. Its steps are [`record_steps`]'s to write.
 ///
 /// The turn that first named it keeps it. A finished subagent never runs
-/// again, and `stopped`, which is all a sweep or a shutdown knows, never hides
-/// the completion or failure it already reported; a reported outcome may still
-/// replace a `stopped` one.
+/// again within that turn, and `stopped`, which is all a sweep or a shutdown
+/// knows, never hides the completion or failure it already reported; a
+/// reported outcome may still replace a `stopped` one. Only another turn
+/// reporting it running starts it again: that turn takes it, and the outcome
+/// of the run before is cleared.
 pub async fn record<'e, E>(executor: E, change: &SubagentChange<'_>) -> DbResult<SubagentRow>
 where
     E: Executor<'e, Database = Postgres>,
@@ -133,7 +165,9 @@ where
              clock_timestamp()
          )
          ON CONFLICT (chat_id, external_id) DO UPDATE SET
-             message_id = COALESCE(s.message_id, $2),
+             message_id = CASE WHEN ",
+        resumed!(),
+        " THEN $2 ELSE COALESCE(s.message_id, $2) END,
              description = COALESCE($4, s.description),
              kind = COALESCE($5, s.kind),
              model = COALESCE($6, s.model),
@@ -141,19 +175,39 @@ where
              status = CASE
                  WHEN $8::text IS NULL THEN s.status
                  WHEN s.status = $15::text THEN $8::text
+                 WHEN ",
+        resumed!(),
+        " THEN $8::text
                  WHEN $8::text IN ($15::text, $16::text) THEN s.status
                  ELSE $8::text
              END,
-             tool_uses = COALESCE($9, s.tool_uses),
-             duration_ms = COALESCE($10, s.duration_ms),
-             tokens = COALESCE($11, s.tokens),
-             last_tool = COALESCE($12, s.last_tool),
-             summary = COALESCE($13, s.summary),
-             error = COALESCE($14, s.error),
-             finished_at = COALESCE(
+             tool_uses = CASE WHEN ",
+        resumed!(),
+        " THEN $9 ELSE COALESCE($9, s.tool_uses) END,
+             duration_ms = CASE WHEN ",
+        resumed!(),
+        " THEN $10 ELSE COALESCE($10, s.duration_ms) END,
+             tokens = CASE WHEN ",
+        resumed!(),
+        " THEN $11 ELSE COALESCE($11, s.tokens) END,
+             last_tool = CASE WHEN ",
+        resumed!(),
+        " THEN $12 ELSE COALESCE($12, s.last_tool) END,
+             summary = CASE WHEN ",
+        resumed!(),
+        " THEN $13 ELSE COALESCE($13, s.summary) END,
+             error = CASE WHEN ",
+        resumed!(),
+        " THEN $14 ELSE COALESCE($14, s.error) END,
+             started_at = CASE WHEN ",
+        resumed!(),
+        " THEN clock_timestamp() ELSE s.started_at END,
+             finished_at = CASE WHEN ",
+        resumed!(),
+        " THEN NULL ELSE COALESCE(
                  s.finished_at,
                  CASE WHEN COALESCE($8::text, s.status) <> $15::text THEN clock_timestamp() END
-             ),
+             ) END,
              revision = s.revision + 1,
              updated_at = clock_timestamp()
          RETURNING ",
@@ -276,6 +330,59 @@ where
     })
 }
 
+/// Fails the steps subagent `subagent_id` left running and returns them in the
+/// order it took them. A subagent that has finished runs no step, so whatever
+/// step it never reported on is settled with it.
+pub async fn fail_running_steps<'e, E>(
+    executor: E,
+    subagent_id: Uuid,
+) -> DbResult<Vec<SubagentStep>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let failed: Json<Vec<SubagentStep>> = sqlx::query_scalar(
+        "WITH failed AS (
+             UPDATE chat_subagent_steps
+                SET status = $2::text
+              WHERE subagent_id = $1 AND status = $3::text
+             RETURNING step_id, name, subject, status, position
+         )
+         SELECT COALESCE(
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'id', step_id, 'name', name, 'subject', subject, 'status', status)
+                        ORDER BY position),
+                    '[]'::jsonb)
+           FROM failed",
+    )
+    .bind(subagent_id)
+    .bind(StepStatus::Failed.as_str())
+    .bind(StepStatus::Running.as_str())
+    .fetch_one(executor)
+    .await?;
+    Ok(failed.0)
+}
+
+/// Whether turn `message_id` of `chat_id` is still there to record subagents
+/// for: its turn or its message is. Holds both until the caller's transaction
+/// ends, so deleting the message waits for whatever that transaction writes,
+/// and removes it with the rest.
+pub async fn hold_turn<'e, E>(executor: E, chat_id: Uuid, message_id: Uuid) -> DbResult<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+                    SELECT 1 FROM chat_turns WHERE chat_id = $1 AND id = $2 FOR KEY SHARE)
+             OR EXISTS (
+                    SELECT 1 FROM messages WHERE chat_id = $1 AND id = $2 FOR KEY SHARE)",
+    )
+    .bind(chat_id)
+    .bind(message_id)
+    .fetch_one(executor)
+    .await
+}
+
 /// Every subagent `chat_id` started, oldest first.
 pub async fn list<'e, E>(executor: E, chat_id: Uuid) -> DbResult<Vec<SubagentRow>>
 where
@@ -338,11 +445,11 @@ where
 /// starts, so those stop at the chat's next turn rather than the server's next
 /// boot.
 ///
-/// Safe only because a chat runs one turn at a time: a turn holds the chat's
-/// `chat_leases` row until it ends, and no other turn can take it while the
-/// lease is live. Any running subagent of another turn therefore belongs to a
-/// turn that is over. A chat that ever runs turns side by side must narrow
-/// this to the turns its lease has fenced off.
+/// A chat runs one turn at a time: a turn holds the chat's lease until it
+/// ends, and the turn that takes the lease next settles it as it begins. So
+/// while turn `message_id` is still `running`, any running subagent of
+/// another turn belongs to one that is over. Once it is not, a newer turn may
+/// own them, and this stops nothing.
 pub async fn stop_others<'e, E>(
     executor: E,
     chat_id: Uuid,
@@ -352,6 +459,35 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     stop_matching(executor, STOP_OTHERS, chat_id, message_id).await
+}
+
+/// The subagents among `ids` of `chat_id` that are no longer running, oldest
+/// first, each with every step it failed.
+pub async fn settled<'e, E>(executor: E, chat_id: Uuid, ids: &[Uuid]) -> DbResult<Vec<Stopped>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as(concat!(
+        "SELECT ",
+        columns!(),
+        ", COALESCE(
+               (SELECT jsonb_agg(
+                           jsonb_build_object(
+                               'id', p.step_id, 'name', p.name,
+                               'subject', p.subject, 'status', p.status)
+                           ORDER BY p.position)
+                  FROM chat_subagent_steps p WHERE p.subagent_id = s.id AND p.status = $3::text),
+               '[]'::jsonb) AS failed
+           FROM chat_subagents s
+          WHERE s.chat_id = $1 AND s.id = ANY($2) AND s.status <> $4::text
+          ORDER BY s.started_at, s.id"
+    ))
+    .bind(chat_id)
+    .bind(ids)
+    .bind(StepStatus::Failed.as_str())
+    .bind(SubagentStatus::Running.as_str())
+    .fetch_all(executor)
+    .await
 }
 
 async fn stop_matching<'e, E>(

@@ -5,7 +5,7 @@ use zone_core::llm::Subagent;
 use super::pending::Pending;
 
 /// The updates that arrived together, folded into one per subagent in the
-/// order each subagent was first heard of.
+/// order each subagent was first heard of, after any a failed write left over.
 #[derive(Default)]
 pub(super) struct Batch {
     pending: Vec<Pending>,
@@ -25,5 +25,16 @@ impl Batch {
 
     pub(super) fn into_pending(self) -> Vec<Pending> {
         self.pending
+    }
+}
+
+impl From<Vec<Pending>> for Batch {
+    fn from(pending: Vec<Pending>) -> Self {
+        let positions = pending
+            .iter()
+            .enumerate()
+            .map(|(position, pending)| (pending.update.id.clone(), position))
+            .collect();
+        Self { pending, positions }
     }
 }

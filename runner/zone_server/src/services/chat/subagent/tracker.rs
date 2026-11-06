@@ -55,6 +55,7 @@ impl Tracker {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use sqlx::PgPool;
@@ -65,6 +66,7 @@ mod tests {
     use super::*;
     use crate::db::chat_subagents::{self, SubagentChange};
     use crate::db::chats::create_chat;
+    use crate::db::context::RUNNING as TURN_RUNNING;
     use crate::services::chat::subagent::ChatSubagent;
 
     const PATIENCE: Duration = Duration::from_secs(10);
@@ -85,10 +87,11 @@ mod tests {
             .await
             .expect("the test database accepts connections");
             let chat_id = chat(&pool).await;
+            let message_id = running_turn(&pool, chat_id).await;
             Self {
                 state: AppState::new(crate::state::test_config(), pool, None),
                 chat_id,
-                message_id: Uuid::new_v4(),
+                message_id,
             }
         }
 
@@ -106,6 +109,13 @@ mod tests {
         /// A tracker that writes nothing until `hold` is notified, so every
         /// update a test sends before that arrives as one burst.
         fn held(&self) -> (Tracker, Announced, Arc<Notify>) {
+            let (tracker, announced, hold, _) = self.failing(0);
+            (tracker, announced, hold)
+        }
+
+        /// A held tracker whose first `failures` writes fail as an outage
+        /// would, and the count of those still to fail.
+        fn failing(&self, failures: usize) -> (Tracker, Announced, Arc<Notify>, Arc<AtomicUsize>) {
             let (announce, announced) = mpsc::unbounded_channel();
             let mut keeper = Keeper::new(
                 self.state.clone(),
@@ -115,7 +125,22 @@ mod tests {
             );
             let hold = Arc::new(Notify::new());
             keeper.hold = Some(hold.clone());
-            (Tracker::kept(keeper), announced, hold)
+            keeper.outage.store(failures, Ordering::SeqCst);
+            let outage = keeper.outage.clone();
+            (Tracker::kept(keeper), announced, hold, outage)
+        }
+
+        /// What deleting the turn's message leaves of it: nothing.
+        async fn delete(&self) {
+            chat_subagents::remove(self.state.db(), self.chat_id, self.message_id)
+                .await
+                .expect("the turn's subagents removed");
+            sqlx::query("DELETE FROM chat_turns WHERE chat_id = $1 AND id = $2")
+                .bind(self.chat_id)
+                .bind(self.message_id)
+                .execute(self.state.db())
+                .await
+                .expect("the turn deleted");
         }
 
         async fn running(&self, chat_id: Uuid, external_id: &str, message_id: Option<Uuid>) {
@@ -148,6 +173,31 @@ mod tests {
                 .expect("the subagent's steps")
                 .expect("the subagent")
         }
+    }
+
+    /// A running turn of `chat_id`, as the chat's store begins it.
+    async fn running_turn(pool: &PgPool, chat_id: Uuid) -> Uuid {
+        let message = Uuid::new_v4();
+        let turn = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, chat_id, role, content) VALUES ($1, $2, 'user', 'Go')",
+        )
+        .bind(message)
+        .bind(chat_id)
+        .execute(pool)
+        .await
+        .expect("a user message");
+        sqlx::query(
+            "INSERT INTO chat_turns (id, chat_id, user_message_id, fence, status) VALUES ($1, $2, $3, 1, $4)",
+        )
+        .bind(turn)
+        .bind(chat_id)
+        .bind(message)
+        .bind(TURN_RUNNING)
+        .execute(pool)
+        .await
+        .expect("a turn");
+        turn
     }
 
     async fn chat(pool: &PgPool) -> Uuid {
@@ -228,13 +278,17 @@ mod tests {
             summary: Some("Looks good".to_string()),
             ..finished("toolu_01Agent")
         });
-        let (last, unstepped) = next(&mut announced).await;
+        let (last, settled) = next(&mut announced).await;
         drop(tracker);
 
         assert_eq!(first.1, [step("toolu_01Step", StepStatus::Running)]);
         assert_eq!(second.1, [step("toolu_01Step", StepStatus::Succeeded)]);
         assert_eq!(third.1, [step("toolu_02Step", StepStatus::Running)]);
-        assert_eq!(unstepped, []);
+        assert_eq!(
+            settled,
+            [step("toolu_02Step", StepStatus::Failed)],
+            "a step still running when its subagent finished is settled with it"
+        );
         assert_eq!(
             [
                 first.0.step_count,
@@ -266,7 +320,7 @@ mod tests {
             turn.steps(&last).await,
             [
                 step("toolu_01Step", StepStatus::Succeeded),
-                step("toolu_02Step", StepStatus::Running),
+                step("toolu_02Step", StepStatus::Failed),
             ]
         );
         assert_eq!(
@@ -448,6 +502,135 @@ mod tests {
         assert_eq!(
             turn.status(turn.chat_id, "earlier").await,
             SubagentStatus::Stopped.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subagent_that_finishes_fails_the_steps_it_never_reported_on() {
+        let turn = Turn::new().await;
+        let (tracker, mut announced) = turn.track();
+
+        tracker.track(&stepped(
+            "toolu_01Agent",
+            step("toolu_lost", StepStatus::Running),
+        ));
+        next(&mut announced).await;
+        tracker.track(&finished("toolu_01Agent"));
+        let (finished, steps) = next(&mut announced).await;
+        drop(tracker);
+
+        assert_eq!(finished.status, SubagentStatus::Completed);
+        assert_eq!(steps, [step("toolu_lost", StepStatus::Failed)]);
+        assert_eq!(
+            turn.steps(&finished).await,
+            [step("toolu_lost", StepStatus::Failed)]
+        );
+        assert_eq!(rest(announced).await, []);
+    }
+
+    #[tokio::test]
+    async fn a_subagent_its_turns_settling_stopped_is_announced_stopped() {
+        let turn = Turn::new().await;
+        let (tracker, mut announced) = turn.track();
+        tracker.track(&stepped(
+            "toolu_01Agent",
+            step("toolu_open", StepStatus::Running),
+        ));
+        let (started, _) = next(&mut announced).await;
+
+        chat_subagents::stop(turn.state.db(), turn.chat_id, turn.message_id)
+            .await
+            .expect("the turn's interruption");
+        drop(tracker);
+
+        let announcements = rest(announced).await;
+        assert_eq!(announcements.len(), 1, "{announcements:?}");
+        let (stopped, failed) = &announcements[0];
+        assert_eq!(stopped.id, started.id);
+        assert_eq!(stopped.status, SubagentStatus::Stopped);
+        assert!(stopped.revision > started.revision);
+        assert_eq!(failed, &[step("toolu_open", StepStatus::Failed)]);
+    }
+
+    #[tokio::test]
+    async fn an_update_an_outage_kept_from_the_database_is_written_once_it_can_be() {
+        let turn = Turn::new().await;
+        let (tracker, announced, hold, _) = turn.failing(1);
+
+        tracker.track(&Subagent {
+            summary: Some("Looks good".to_string()),
+            ..finished("toolu_01Agent")
+        });
+        drop(tracker);
+        hold.notify_one();
+
+        let announcements = rest(announced).await;
+        assert_eq!(announcements.len(), 1, "{announcements:?}");
+        let (subagent, _) = &announcements[0];
+        assert_eq!(subagent.status, SubagentStatus::Completed);
+        assert_eq!(subagent.summary.as_deref(), Some("Looks good"));
+        assert_eq!(
+            turn.status(turn.chat_id, "toolu_01Agent").await,
+            SubagentStatus::Completed.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn updates_kept_from_the_database_go_ahead_of_the_next_burst() {
+        let turn = Turn::new().await;
+        let (tracker, mut announced, hold, outage) = turn.failing(1);
+        tracker.track(&Subagent {
+            description: Some("Survey".to_string()),
+            step: Some(step("toolu_first", StepStatus::Running)),
+            ..Subagent::new("toolu_01Agent")
+        });
+        hold.notify_one();
+        tokio::time::timeout(PATIENCE, async {
+            while outage.load(Ordering::SeqCst) > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the outage over in time");
+
+        tracker.track(&stepped(
+            "toolu_01Agent",
+            step("toolu_second", StepStatus::Running),
+        ));
+        let (subagent, steps) = next(&mut announced).await;
+        drop(tracker);
+
+        let both = [
+            step("toolu_first", StepStatus::Running),
+            step("toolu_second", StepStatus::Running),
+        ];
+        assert_eq!(steps, both);
+        assert_eq!(subagent.description, "Survey");
+        assert_eq!(subagent.step_count, 2);
+        assert_eq!(turn.steps(&subagent).await, both);
+        rest(announced).await;
+    }
+
+    #[tokio::test]
+    async fn an_update_for_a_deleted_turn_brings_none_of_its_subagents_back() {
+        let turn = Turn::new().await;
+        let (tracker, mut announced) = turn.track();
+        tracker.track(&stepped(
+            "toolu_01Agent",
+            step("toolu_open", StepStatus::Running),
+        ));
+        next(&mut announced).await;
+
+        turn.delete().await;
+        tracker.track(&finished("toolu_01Agent"));
+        drop(tracker);
+
+        assert_eq!(rest(announced).await, []);
+        assert_eq!(
+            chat_subagents::list(turn.state.db(), turn.chat_id)
+                .await
+                .expect("the chat's subagents"),
+            []
         );
     }
 }
