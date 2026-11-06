@@ -1,11 +1,12 @@
 export const GITHUB_TAB = 'github';
-export const GITHUB_SETTINGS_PATH = '/org-settings?tab=github';
 
 export const GitHubSearchParameter = {
   Tab: 'tab',
   Outcome: 'github',
   Organization: 'organization',
 } as const;
+
+export const GITHUB_SETTINGS_PATH = `/org-settings?${GitHubSearchParameter.Tab}=${GITHUB_TAB}`;
 
 export const GitHubOutcome = {
   Installed: 'installed',
