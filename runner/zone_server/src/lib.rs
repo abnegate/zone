@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod pull;
 pub mod routes;
+pub mod secret;
 pub mod services;
 pub mod setup;
 pub mod state;
