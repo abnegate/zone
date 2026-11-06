@@ -180,6 +180,19 @@ pub fn create_router(state: AppState) -> Router {
             "/api/invitations/{token}/accept",
             post(invitations::accept_invitation),
         )
+        // Organization GitHub connection
+        .route(
+            "/api/organizations/{org_id}/github",
+            get(github::connection::get),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/apps",
+            post(github::connection::register),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/apps/{app_id}",
+            delete(github::connection::delete_app),
+        )
         // Workspaces (nested under organizations)
         .route(
             "/api/organizations/{org_id}/workspaces",
