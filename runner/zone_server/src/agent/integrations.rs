@@ -29,7 +29,7 @@ use crate::db::sources::{self, SourceRow};
 use crate::db::workspace_members;
 use crate::services::chat::pull_request::{self as chat_pull_request, Opened};
 use crate::services::checkout;
-use crate::services::github_app::{Credential, Error as GithubError};
+use crate::services::github_app::{Credential, Error as GitHubError, Unauthenticated};
 use crate::services::prioritisation::{
     Configuration as Prioritisation, Prioritiser, RiskSignal, pull_request,
 };
@@ -200,7 +200,7 @@ struct Arguments {
     reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Configuration {
     pub(crate) owner: String,
     pub(crate) repo: String,
@@ -221,23 +221,76 @@ pub(crate) async fn source_token(
     state: &AppState,
     source: &SourceRow,
 ) -> Result<Option<SecretValue>, &'static str> {
-    match state.github().source(state.db(), source).await {
-        Ok(credential) => Ok(credential.map(Credential::into_secret)),
-        Err(error) => {
+    Ok(source_credential(state, source)
+        .await?
+        .map(Credential::into_secret))
+}
+
+async fn source_credential(
+    state: &AppState,
+    source: &SourceRow,
+) -> Result<Option<Credential>, &'static str> {
+    state
+        .github()
+        .source(state.db(), source)
+        .await
+        .inspect_err(|error| {
             tracing::warn!(%error, source = %source.id, "GitHub source credential could not be resolved");
-            Err(refusal(&error))
-        }
+        })
+        .map_err(|error| refusal(&error))
+}
+
+/// Runs `operation` on a client for `configuration` that holds `source`'s
+/// credential. A minted token GitHub refuses is minted again and the
+/// operation run once more with it.
+pub(crate) async fn authenticated<T, F, Fut>(
+    state: &AppState,
+    source: &SourceRow,
+    configuration: Configuration,
+    operation: F,
+) -> Result<T, String>
+where
+    F: Fn(Github) -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let client = |token: Option<SecretValue>| {
+        Github::new(Configuration {
+            token,
+            ..configuration.clone()
+        })?
+        .at(state.config())
+    };
+    let Some(credential) = source_credential(state, source).await? else {
+        return operation(client(None)?).await;
+    };
+    let (client, operation) = (&client, &operation);
+    state
+        .github()
+        .retrying(state.db(), credential, |token| async move {
+            let github = client(Some(token)).map_err(Refusal)?;
+            operation(github).await.map_err(Refusal)
+        })
+        .await
+        .map_err(|Refusal(message)| message)
+}
+
+/// A failed GitHub operation, as the model reads it.
+struct Refusal(String);
+
+impl Unauthenticated for Refusal {
+    fn unauthenticated(&self) -> bool {
+        self.0 == status_error(StatusCode::UNAUTHORIZED)
     }
 }
 
-fn refusal(error: &GithubError) -> &'static str {
+fn refusal(error: &GitHubError) -> &'static str {
     match error {
-        GithubError::Revoked | GithubError::Suspended | GithubError::NotConnected => {
+        GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected => {
             SOURCE_DISCONNECTED
         }
-        GithubError::Credential | GithubError::Unsealing => SOURCE_CREDENTIALS_INVALID,
-        GithubError::Application(ApplicationError::Transport(_)) => SOURCE_UNREACHABLE,
-        GithubError::Application(ApplicationError::Status(status))
+        GitHubError::Credential | GitHubError::Unsealing => SOURCE_CREDENTIALS_INVALID,
+        GitHubError::Application(ApplicationError::Transport(_)) => SOURCE_UNREACHABLE,
+        GitHubError::Application(ApplicationError::Status(status))
             if StatusCode::from_u16(*status).is_ok_and(|status| status.is_server_error()) =>
         {
             SOURCE_UNREACHABLE
@@ -476,21 +529,28 @@ impl Integration {
                 "Live integrations currently support connected GitHub sources only.".to_string(),
             );
         }
-        let mut configuration = Configuration::deserialize(&source.config)
+        let configuration = Configuration::deserialize(&source.config)
             .map_err(|_| "The GitHub source configuration is invalid.".to_string())?;
-        configuration.token = source_token(&self.scope.state, &source).await?;
-        let github = Github::new(configuration)?.at(self.scope.state.config())?;
-        let mut result = if matches!(self.operation, Operation::CreatePull) {
-            self.open_pull(&github, &arguments).await?
-        } else if write {
-            github.write(self.operation, &arguments).await?
-        } else {
-            github.observe(self.operation, &arguments).await?
-        };
+        let arguments = &arguments;
+        let mut result = authenticated(
+            &self.scope.state,
+            &source,
+            configuration,
+            |github| async move {
+                if matches!(self.operation, Operation::CreatePull) {
+                    self.open_pull(&github, arguments).await
+                } else if write {
+                    github.write(self.operation, arguments).await
+                } else {
+                    github.observe(self.operation, arguments).await
+                }
+            },
+        )
+        .await?;
         result["source_id"] = json!(arguments.source_id);
         result["observed_at"] = json!(Utc::now().to_rfc3339());
         if matches!(self.operation, Operation::CreatePull) {
-            self.record(&arguments, &result).await;
+            self.record(arguments, &result).await;
         }
         Ok(result)
     }
@@ -531,7 +591,7 @@ impl Integration {
             &head,
             &base,
         )
-        .await
+        .await?
         .ok_or_else(refused)?;
         Ok(json!({
             "repository": repository,
@@ -2438,7 +2498,8 @@ fn retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
 
 // Provider response bodies and request errors can contain secrets.
 /// The open pull request from `head` into `base`, found through abnegate-vcs.
-/// A head on a fork (`owner:branch`) is not one the crate can look up.
+/// A head on a fork (`owner:branch`) is not one the crate can look up. Only
+/// GitHub refusing the token fails the lookup; any other failure finds none.
 async fn existing_pull(
     config: &Config,
     token: &SecretValue,
@@ -2446,29 +2507,48 @@ async fn existing_pull(
     repo: &str,
     head: &str,
     base: &str,
-) -> Option<Value> {
+) -> Result<Option<Value>, String> {
     if head.contains(':') {
-        return None;
+        return Ok(None);
     }
-    let service = config.pull_requests().ok()?;
-    let repository = service
-        .parse_github_url(&format!("{}/{owner}/{repo}", github_web_origin(config)?))
-        .ok()?;
-    let branch = BranchName::parse(head).ok()?;
-    let url = service
-        .pull_request_exists_for_branch(&repository, token, &branch)
-        .await
-        .ok()??;
-    let reference = service.pull_request(&url).ok()?;
-    let detail = service.fetch_pull(&reference, token).await.ok()?;
-    (detail.base.as_str() == base).then(|| {
-        json!({
-            "number": detail.number.get(),
-            "html_url": detail.url,
-            "title": detail.title,
-            "state": "open",
-        })
-    })
+    let Some(service) = config.pull_requests().ok() else {
+        return Ok(None);
+    };
+    let Some(repository) = github_web_origin(config).and_then(|origin| {
+        service
+            .parse_github_url(&format!("{origin}/{owner}/{repo}"))
+            .ok()
+    }) else {
+        return Ok(None);
+    };
+    let Ok(branch) = BranchName::parse(head) else {
+        return Ok(None);
+    };
+    let found = async {
+        let Some(url) = service
+            .pull_request_exists_for_branch(&repository, token, &branch)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Ok(reference) = service.pull_request(&url) else {
+            return Ok(None);
+        };
+        service.fetch_pull(&reference, token).await.map(Some)
+    };
+    match found.await {
+        Ok(Some(detail)) => Ok((detail.base.as_str() == base).then(|| {
+            json!({
+                "number": detail.number.get(),
+                "html_url": detail.url,
+                "title": detail.title,
+                "state": "open",
+            })
+        })),
+        Ok(None) => Ok(None),
+        Err(error) if error.unauthenticated() => Err(status_error(StatusCode::UNAUTHORIZED)),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Where the configured GitHub serves repositories to a browser: its API host
@@ -6359,10 +6439,7 @@ mod tests {
         let number = number();
         issuing(&connected.github, number, MINTED_TOKEN, 0).await;
         issues(&connected, STORED_TOKEN, 0).await;
-        let installation = connected.revoked(number).await;
-        let source = connected
-            .source(Some(installation), Some(STORED_TOKEN))
-            .await;
+        let source = connected.revoked_source(number, Some(STORED_TOKEN)).await;
 
         let refusal = connected_tool(&connected, Operation::Issues)
             .run(json!({"source_id": source.id}))
@@ -6397,32 +6474,32 @@ mod tests {
     #[test]
     fn each_provider_failure_is_refused_for_what_it_is() {
         for (error, expected) in [
-            (GithubError::Revoked, SOURCE_DISCONNECTED),
-            (GithubError::Suspended, SOURCE_DISCONNECTED),
-            (GithubError::NotConnected, SOURCE_DISCONNECTED),
-            (GithubError::Credential, SOURCE_CREDENTIALS_INVALID),
-            (GithubError::Unsealing, SOURCE_CREDENTIALS_INVALID),
+            (GitHubError::Revoked, SOURCE_DISCONNECTED),
+            (GitHubError::Suspended, SOURCE_DISCONNECTED),
+            (GitHubError::NotConnected, SOURCE_DISCONNECTED),
+            (GitHubError::Credential, SOURCE_CREDENTIALS_INVALID),
+            (GitHubError::Unsealing, SOURCE_CREDENTIALS_INVALID),
             (
-                GithubError::Application(ApplicationError::Transport("reset".into())),
+                GitHubError::Application(ApplicationError::Transport("reset".into())),
                 SOURCE_UNREACHABLE,
             ),
             (
-                GithubError::Application(ApplicationError::Status(500)),
+                GitHubError::Application(ApplicationError::Status(500)),
                 SOURCE_UNREACHABLE,
             ),
             (
-                GithubError::Application(ApplicationError::Status(503)),
+                GitHubError::Application(ApplicationError::Status(503)),
                 SOURCE_UNREACHABLE,
             ),
             (
-                GithubError::Application(ApplicationError::Status(401)),
+                GitHubError::Application(ApplicationError::Status(401)),
                 SOURCE_CREDENTIALS_UNRESOLVED,
             ),
             (
-                GithubError::Application(ApplicationError::PrivateKey),
+                GitHubError::Application(ApplicationError::PrivateKey),
                 SOURCE_CREDENTIALS_UNRESOLVED,
             ),
-            (GithubError::Sealing, SOURCE_CREDENTIALS_UNRESOLVED),
+            (GitHubError::Sealing, SOURCE_CREDENTIALS_UNRESOLVED),
         ] {
             assert_eq!(refusal(&error), expected, "{error:?}");
         }
