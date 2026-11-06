@@ -1,5 +1,4 @@
-use abnegate_llm::catalog::ModelDetails;
-use abnegate_llm::catalog::ModelEntry;
+use abnegate_llm::catalog::{ModelDetails, ModelEntry};
 
 const FORMAT: &str = "gguf";
 const LIBRARY_URL: &str = "https://ollama.com/library";

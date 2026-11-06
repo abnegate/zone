@@ -1,17 +1,10 @@
 //! Shared types for model management
 
-use abnegate_llm::catalog::BrowseQuery;
-use abnegate_llm::catalog::ModelEntry;
-use abnegate_llm::catalog::ModelMediumFilter;
-use abnegate_llm::catalog::ModelPage;
-use abnegate_llm::catalog::ModelSize;
-use abnegate_llm::catalog::ModelSizeFilter;
-use abnegate_llm::catalog::ModelSort;
-use axum::Json;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use serde::Deserialize;
-use serde::Serialize;
+use abnegate_llm::catalog::{
+    BrowseQuery, ModelEntry, ModelMediumFilter, ModelPage, ModelSize, ModelSizeFilter, ModelSort,
+};
+use axum::{Json, http::StatusCode, response::IntoResponse};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
