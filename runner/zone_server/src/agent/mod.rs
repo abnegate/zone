@@ -86,9 +86,14 @@ pub struct ToolCallRecord {
     pub success: bool,
     pub detail: String,
     pub duration_ms: u64,
+    /// Absent on calls stored before offsets were kept; the console draws those first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<usize>,
     /// Model thinking that immediately preceded this call, shown in the trace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_at: Option<usize>,
     /// Why the model said it was making this call, for side-effecting tools.
     /// Model-authored: the console labels it as stated, never as observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,6 +130,8 @@ mod tests {
             success: true,
             detail: "3 passages".to_string(),
             duration_ms: 42,
+            at: None,
+            reasoning_at: None,
             reasoning: Some("Search workspace docs first.".into()),
             reason: Some("The user asked what changed in the deploy.".into()),
             preview: None,
@@ -160,6 +167,8 @@ mod tests {
             success: true,
             detail: "Waiting for your answer…".to_string(),
             duration_ms: 1,
+            at: None,
+            reasoning_at: None,
             reasoning: None,
             reason: None,
             preview: None,
@@ -209,6 +218,10 @@ mod tests {
         });
 
         let parsed: ToolCallRecord = serde_json::from_value(stored).unwrap();
+        assert_eq!(
+            parsed.at, None,
+            "a call stored before offsets were kept has none, and the console draws it first"
+        );
         assert_eq!(parsed.reason, None);
         assert_eq!(parsed.reasoning, None);
         assert!(

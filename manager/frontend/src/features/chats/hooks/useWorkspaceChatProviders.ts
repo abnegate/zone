@@ -4,12 +4,17 @@ import type { WorkspaceChatProviders } from '../types';
 
 const LOAD_FAILED = 'Failed to load AI providers';
 
+interface Loaded {
+  workspaceId: string;
+  providers: WorkspaceChatProviders;
+}
+
 /**
  * The providers a new chat in this workspace may be created on, and the
  * workspace default it follows when none is chosen.
  */
 export function useWorkspaceChatProviders(workspaceId: string | null) {
-  const [providers, setProviders] = useState<WorkspaceChatProviders | null>(null);
+  const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const request = useRef(0);
@@ -18,14 +23,14 @@ export function useWorkspaceChatProviders(workspaceId: string | null) {
     const current = ++request.current;
     setError(null);
     if (!id) {
-      setProviders(null);
+      setLoaded(null);
       setLoading(false);
       return;
     }
     setLoading(true);
     try {
-      const loaded = await chatsApi.getWorkspaceChatProviders(id);
-      if (current === request.current) setProviders(loaded);
+      const providers = await chatsApi.getWorkspaceChatProviders(id);
+      if (current === request.current) setLoaded({ workspaceId: id, providers });
     } catch (error) {
       if (current !== request.current) return;
       setError(error instanceof Error ? error.message : LOAD_FAILED);
@@ -35,9 +40,11 @@ export function useWorkspaceChatProviders(workspaceId: string | null) {
   }, []);
 
   useEffect(() => {
-    setProviders(null);
+    setLoaded(null);
     void load(workspaceId);
   }, [workspaceId, load]);
+
+  const providers = loaded?.workspaceId === workspaceId ? loaded.providers : null;
 
   const refresh = useCallback((): Promise<void> => load(workspaceId), [workspaceId, load]);
 

@@ -270,6 +270,8 @@ pub async fn opening(
         resets_at,
         carried,
         at: 0,
+        calls: 0,
+        reasoning: None,
     })
 }
 
@@ -871,7 +873,8 @@ mod tests {
         );
         assert_eq!(handover.login(), codex.id);
         assert_eq!(
-            serde_json::to_value(switch.notice(12)).expect("a notice"),
+            serde_json::to_value(switch.notice(12, 3, Some("Out of room.".to_string())))
+                .expect("a notice"),
             serde_json::json!({
                 "from": "a@example.com",
                 "to": "c@example.com",
@@ -881,6 +884,8 @@ mod tests {
                 "resets_at": "2027-09-23T06:10:00Z",
                 "carried": false,
                 "at": 12,
+                "calls": 3,
+                "reasoning": "Out of room.",
             })
         );
     }
@@ -1242,6 +1247,8 @@ mod tests {
                 resets_at: Some(resets()),
                 carried: true,
                 at: 0,
+                calls: 0,
+                reasoning: None,
             })
         );
         assert!(landed, "the session file moved with the chat");
@@ -1316,6 +1323,8 @@ mod tests {
                 resets_at: None,
                 carried: false,
                 at: 0,
+                calls: 0,
+                reasoning: None,
             })
         );
     }

@@ -132,6 +132,7 @@ function status(overrides: Record<string, unknown>) {
     mergeable: 'clean',
     auto_merge: { enabled: false, unavailable: PENDING_RELEASE },
     draft_unavailable: PENDING_RELEASE,
+    threads: { open: 0, resolved: 0 },
     observed_at: sentAt,
     ...overrides,
   };
@@ -158,12 +159,14 @@ const PULL_REQUESTS = [
   pullRequest(12, 'Add the widget catalogue with search and filters', {
     mergeable: 'blocked',
     checks: 'pending',
+    threads: { open: 2, resolved: 3 },
   }),
   pullRequest(13, 'Fix the price rounding in the cart', {
     checks: 'failing',
     mergeable: 'unstable',
     additions: 9,
     deletions: 4,
+    threads: { open: 0, resolved: 4 },
   }),
   pullRequest(14, 'Draft: rework the catalogue cover', {
     draft: true,
@@ -177,6 +180,7 @@ const PULL_REQUESTS = [
     deletions: 2,
     auto_merge: { enabled: false, unavailable: 'It is no longer open.' },
     draft_unavailable: 'It is no longer open.',
+    threads: null,
   }),
 ];
 
@@ -340,6 +344,12 @@ test.describe('Chat changes and gallery panel', () => {
     await expect(panel.getByText('widgets #13')).toBeVisible();
     await expect(panel.getByRole('img', { name: 'Checks failing' })).toBeVisible();
     await expect(panel.getByRole('img', { name: 'Merged' })).toBeVisible();
+    await expect(
+      panel.getByRole('img', { name: '2 open review threads, 3 resolved' })
+    ).toBeVisible();
+    await expect(
+      panel.getByRole('img', { name: '0 open review threads, 4 resolved' })
+    ).toBeVisible();
 
     const transcript = await page.locator('.messages-container').boundingBox();
     const beside = await panel.boundingBox();

@@ -130,6 +130,11 @@ describe('selectedContextTokens', () => {
     expect(selectedContextTokens(null, 262144)).toBe(262144);
     expect(selectedContextTokens(undefined, null)).toBe(32768);
   });
+
+  it('never shows more than the native window', () => {
+    expect(selectedContextTokens(32768, 4096)).toBe(4096);
+    expect(selectedContextTokens(32768, null)).toBe(32768);
+  });
 });
 
 describe('chatShowsCharacter', () => {

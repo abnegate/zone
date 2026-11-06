@@ -411,7 +411,15 @@ async fn get_auth_token(client: &TestClient) -> String {
         .await;
 
     let body = response.json_value();
-    body["access_token"].as_str().unwrap().to_string()
+    body["access_token"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "registration returned {} without an access token: {body}",
+                response.status
+            )
+        })
+        .to_string()
 }
 
 #[tokio::test]

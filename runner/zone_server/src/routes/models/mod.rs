@@ -462,6 +462,12 @@ pub(crate) async fn list_ollama_model_rows(
                             model.completion = profile.completion;
                             model.tools = profile.tools;
                             model.needs_character = Some(profile.needs_character);
+                            if let Some(length) = profile.context_length {
+                                model
+                                    .details
+                                    .get_or_insert_with(ModelDetails::default)
+                                    .context_length = Some(length);
+                            }
                         }))
                         .await;
                         Ok(models)
