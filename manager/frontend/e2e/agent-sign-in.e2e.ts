@@ -30,6 +30,9 @@ interface Scenario {
 const organizationId = '00000000-0000-0000-0000-000000000001';
 const workspaceId = '00000000-0000-0000-0000-000000000001';
 const agentsPath = `/api/organizations/${organizationId}/agents`;
+const organizationAi = '/settings/organization/ai';
+const workspaceAi = '/settings/workspace/ai';
+const userId = 'user-1';
 const authorize =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=e2e-fake-client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference+user%3Aprofile&code_challenge=e2e-fake-challenge&code_challenge_method=S256&state=e2e-fake-state';
 const fullAuthorize =
@@ -264,6 +267,7 @@ async function mockApi(page: Page, scenario: Scenario): Promise<Captured[]> {
         json: {
           ...settings(scenario.workspaceProvider ?? 'self_hosted'),
           overrides: scenario.workspaceProvider !== undefined,
+          inherits_provider: scenario.workspaceProvider === undefined,
           organization_keys: { litellm: false, openai: false, anthropic: false },
         },
       });
@@ -271,6 +275,24 @@ async function mockApi(page: Page, scenario: Scenario): Promise<Captured[]> {
     }
     if (path === `${workspaceSettings}/effective`) {
       await route.fulfill({ json: settings(scenario.workspaceProvider ?? scenario.provider) });
+      return;
+    }
+    if (path === `/api/workspaces/${workspaceId}/members`) {
+      await route.fulfill({
+        json: {
+          members: [
+            {
+              id: '00000000-0000-0000-0000-0000000000a1',
+              user_id: userId,
+              workspace_id: workspaceId,
+              role: 'admin',
+              email: 'user@example.com',
+              display_name: null,
+              joined_at: '2024-01-01T00:00:00Z',
+            },
+          ],
+        },
+      });
       return;
     }
     if (path === '/api/models') {
@@ -292,6 +314,23 @@ async function capture(page: Page, name: string): Promise<void> {
   ).toBeVisible();
   await expect(cards.nth(1).getByLabel('Fast Model')).toBeVisible();
   await expect(cards.nth(1).getByLabel('Reasoning Model')).toBeVisible();
+  await expectContained(page);
+  await still(page, name);
+}
+
+async function captureWorkspace(page: Page, name: string): Promise<void> {
+  const cards = page.locator('.settings-card');
+  await expect(cards).toHaveCount(1);
+  const provider = cards.getByRole('group', { name: 'Provider', exact: true });
+  await expect(provider.getByLabel('AI Provider')).toBeVisible();
+  await expect(provider.locator('.agent-sign-in')).toBeVisible();
+  await expect(cards.getByRole('group', { name: 'Fast Model', exact: true })).toBeVisible();
+  await expect(cards.getByRole('group', { name: 'Reasoning Model', exact: true })).toBeVisible();
+  await expectContained(page);
+  await still(page, name);
+}
+
+async function expectContained(page: Page): Promise<void> {
   const layout = await page.evaluate(() => {
     const panel = document.querySelector('.agent-sign-in');
     const card = panel?.closest('.settings-card')?.getBoundingClientRect();
@@ -306,10 +345,8 @@ async function capture(page: Page, name: string): Promise<void> {
     return { escaped, scrollsSideways: root.scrollWidth > root.clientWidth };
   });
   expect(layout).toEqual({ escaped: [], scrollsSideways: false });
-  await still(page, name);
 }
 
-/** Screenshots the page with the pointer on a blank corner, so no control shows its hover. */
 async function still(page: Page, name: string): Promise<void> {
   const viewport = page.viewportSize();
   if (viewport) await page.mouse.move(viewport.width - 1, viewport.height - 1);
@@ -352,7 +389,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await expect(panel.getByText('Not signed in')).toBeVisible();
@@ -460,7 +497,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await panel.getByRole('button', { name: 'Sign in with Claude' }).click();
@@ -540,7 +577,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await panel.getByRole('button', { name: 'Sign in with Claude' }).click();
@@ -601,7 +638,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await panel.getByRole('button', { name: 'Sign in with Claude' }).click();
@@ -651,7 +688,7 @@ test.describe('Coding agent sign-in', () => {
     await still(page, 'returned');
 
     await page.getByRole('button', { name: 'Go to organization settings' }).click();
-    await expect(page).toHaveURL(/\/org-settings$/);
+    await expect(page).toHaveURL(/\/settings\/organization\/ai$/);
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await expect(panel.getByRole('status').getByText('Signed in', { exact: true })).toBeVisible();
   });
@@ -732,7 +769,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await panel.getByRole('button', { name: 'Sign in with Claude' }).click();
@@ -788,7 +825,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Codex sign-in' });
     await panel.getByRole('button', { name: 'Sign in with ChatGPT' }).click();
@@ -832,7 +869,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Codex sign-in' });
     await panel.getByRole('button', { name: 'Sign in with ChatGPT' }).click();
@@ -842,13 +879,35 @@ test.describe('Coding agent sign-in', () => {
     await capture(page, 'codex-refused');
   });
 
+  test('the old organization settings address opens organization AI settings', async ({
+    page,
+  }) => {
+    await mockApi(page, {
+      role: 'owner',
+      provider: 'claude_code',
+      agents: (method, path) => {
+        if (method === 'GET' && path === '') return signedOut;
+        return { status: 404, json: { error: `unexpected ${method} ${path}` } };
+      },
+    });
+    await setupAuth(page, { isAdmin: true });
+    await page.goto('/org-settings');
+
+    await expect(page).toHaveURL(/\/settings\/organization\/ai$/);
+    await expect(page.getByRole('combobox', { name: 'AI Provider' })).toHaveText(
+      'Claude Code (Claude subscription)'
+    );
+    await expect(
+      page.getByRole('region', { name: 'Claude Code sign-in' }).getByText('Not signed in')
+    ).toBeVisible();
+  });
+
   test('a member sees a sign-in in progress as not signed in, with no code or button', async ({
     page,
   }) => {
     const captured = await mockApi(page, {
       role: 'member',
       provider: 'claude_code',
-      workspaceProvider: 'codex',
       agents: (method, path) => {
         const hidden = status('codex', {
           state: 'pending',
@@ -864,13 +923,15 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page);
-    await page.goto('/settings');
-    await page.getByRole('tab', { name: 'AI Settings' }).click();
+    await page.goto(workspaceAi);
 
-    await expect(page.getByLabel('Override organization AI settings')).toBeChecked();
-    await expect(page.getByRole('combobox', { name: 'AI Provider' })).toHaveText(
-      'Codex (ChatGPT subscription)'
-    );
+    const row = page.getByRole('group', { name: 'Provider', exact: true });
+    await expect(row).toContainText('Claude Code (Claude subscription)');
+    await expect(row).toContainText('Inherited from organization');
+    await row.getByRole('button', { name: 'Override Provider' }).click();
+    const provider = row.getByRole('combobox', { name: 'AI Provider' });
+    await expect(provider).toHaveText('Claude Code (Claude subscription)');
+    await chooseSelect(provider, 'Codex (ChatGPT subscription)');
     const panel = page.getByRole('region', { name: 'Codex sign-in' });
     await expect(panel.getByText('Not signed in', { exact: true })).toBeVisible();
     await expect(panel.getByText('Signing in', { exact: true })).toHaveCount(0);
@@ -878,7 +939,7 @@ test.describe('Coding agent sign-in', () => {
     await expect(panel.getByRole('button')).toHaveCount(0);
     await expect(panel.getByRole('link')).toHaveCount(0);
     await expect(panel.getByText('ABCD-EFGHI')).toHaveCount(0);
-    await capture(page, 'member-neutral');
+    await captureWorkspace(page, 'member-neutral');
     expect(
       captured.filter((request) => request.method !== 'GET' && request.path.startsWith(agentsPath))
     ).toHaveLength(0);
@@ -901,10 +962,13 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page);
-    await page.goto('/settings');
-    await page.getByRole('tab', { name: 'AI Settings' }).click();
+    await page.goto(workspaceAi);
 
-    await expect(page.getByRole('combobox', { name: 'AI Provider' })).toHaveText(
+    const row = page.getByRole('group', { name: 'Provider', exact: true });
+    await expect(row).toContainText('Set for this workspace');
+    await expect(row.getByRole('button', { name: 'Reset Provider' })).toBeVisible();
+    await row.getByRole('button', { name: 'Edit Provider' }).click();
+    await expect(row.getByRole('combobox', { name: 'AI Provider' })).toHaveText(
       'Claude Code (Claude subscription)'
     );
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
@@ -917,7 +981,7 @@ test.describe('Coding agent sign-in', () => {
     await expect(panel.getByText('alex@example.com')).toBeVisible();
     await expect(panel.getByRole('button')).toHaveCount(0);
     await expect(panel.getByText('Save Changes to use this provider.')).toHaveCount(0);
-    await capture(page, 'member-view');
+    await captureWorkspace(page, 'member-view');
     expect(
       captured.filter((request) => request.method !== 'GET' && request.path.startsWith(agentsPath))
     ).toHaveLength(0);
@@ -956,7 +1020,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     const accounts = panel.getByRole('list', { name: 'Claude Code accounts' });
@@ -1025,7 +1089,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     const spent = panel.getByRole('listitem').filter({ hasText: 'jake@example.com' });
@@ -1062,7 +1126,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     const spent = panel.getByRole('listitem').filter({ hasText: 'jake@example.com' });
@@ -1106,7 +1170,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Claude Code sign-in' });
     await panel.getByRole('button', { name: 'Sign out alex@example.com' }).click();
@@ -1158,7 +1222,7 @@ test.describe('Coding agent sign-in', () => {
       },
     });
     await setupAuth(page, { isAdmin: true });
-    await page.goto('/org-settings');
+    await page.goto(organizationAi);
 
     const panel = page.getByRole('region', { name: 'Codex sign-in' });
     await expect(panel.getByText('team@example.com')).toBeVisible();
