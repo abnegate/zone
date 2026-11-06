@@ -611,6 +611,77 @@ mod tests {
         rest(announced).await;
     }
 
+    /// A turn whose subagent `toolu_01Agent` was announced running with step
+    /// `toolu_open` open, and then finished while the first `failures`
+    /// transactions after that fail as an outage would.
+    async fn finished_in_an_outage(
+        turn: &Turn,
+        failures: usize,
+    ) -> (ChatSubagent, Vec<(ChatSubagent, Vec<SubagentStep>)>) {
+        let (tracker, mut announced, hold, outage) = turn.failing(0);
+        hold.notify_one();
+        tracker.track(&stepped(
+            "toolu_01Agent",
+            step("toolu_open", StepStatus::Running),
+        ));
+        let (started, _) = next(&mut announced).await;
+
+        outage.store(failures, Ordering::SeqCst);
+        tracker.track(&Subagent {
+            summary: Some("Looks good".to_string()),
+            ..finished("toolu_01Agent")
+        });
+        drop(tracker);
+
+        let announcements = rest(announced).await;
+        assert_eq!(outage.load(Ordering::SeqCst), 0, "every failure was met");
+        (started, announcements)
+    }
+
+    #[tokio::test]
+    async fn an_outcome_whose_last_retry_failed_is_written_with_the_turns_final_stop() {
+        let turn = Turn::new().await;
+
+        let (started, announcements) = finished_in_an_outage(&turn, 2).await;
+
+        assert_eq!(announcements.len(), 1, "{announcements:?}");
+        let (subagent, steps) = &announcements[0];
+        assert_eq!(subagent.id, started.id);
+        assert_eq!(
+            subagent.status,
+            SubagentStatus::Completed,
+            "the turn's stop never hides the outcome it wrote first"
+        );
+        assert_eq!(subagent.summary.as_deref(), Some("Looks good"));
+        assert_eq!(steps, &[step("toolu_open", StepStatus::Failed)]);
+        assert_eq!(
+            turn.status(turn.chat_id, "toolu_01Agent").await,
+            SubagentStatus::Completed.as_str()
+        );
+        assert_eq!(
+            turn.steps(subagent).await,
+            [step("toolu_open", StepStatus::Failed)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_final_stop_that_fails_leaves_the_outcome_and_the_stop_to_the_sweep() {
+        let turn = Turn::new().await;
+
+        let (started, announcements) = finished_in_an_outage(&turn, 3).await;
+
+        assert_eq!(announcements, [], "nothing was written to announce");
+        assert_eq!(
+            turn.status(turn.chat_id, "toolu_01Agent").await,
+            SubagentStatus::Running.as_str(),
+            "neither the outcome nor the stop landed"
+        );
+        assert_eq!(
+            turn.steps(&started).await,
+            [step("toolu_open", StepStatus::Running)]
+        );
+    }
+
     #[tokio::test]
     async fn an_update_for_a_deleted_turn_brings_none_of_its_subagents_back() {
         let turn = Turn::new().await;

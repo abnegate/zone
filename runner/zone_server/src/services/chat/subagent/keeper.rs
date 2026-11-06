@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use sqlx::PgConnection;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 use zone_core::llm::{Subagent, SubagentStatus, SubagentStep};
@@ -17,6 +18,9 @@ use crate::state::AppState;
 /// resources and operator intervention.
 const TRANSIENT_CLASSES: [&str; 4] = ["08", "40", "53", "57"];
 
+/// A subagent as a write left it, with the steps that write changed.
+type Written = (SubagentRow, Vec<SubagentStep>);
+
 /// Writes one turn's subagent updates as they arrive and announces each write.
 pub(super) struct Keeper {
     state: AppState,
@@ -31,7 +35,7 @@ pub(super) struct Keeper {
     /// Held closed until a test has queued every update it means to send.
     #[cfg(test)]
     pub(super) hold: Option<Arc<tokio::sync::Notify>>,
-    /// How many writes a test has made fail as an outage would.
+    /// How many transactions a test has made fail as an outage would.
     #[cfg(test)]
     pub(super) outage: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -91,13 +95,16 @@ impl Keeper {
             let batch = Batch::from(std::mem::take(&mut self.retained));
             self.record_all(batch).await;
         }
-        if !self.retained.is_empty() {
-            tracing::warn!(chat = %self.chat_id, lost = self.retained.len(), "a turn ended before its subagents' updates could be recorded");
+        match self.finish().await {
+            Ok(written) => {
+                for (row, steps) in written {
+                    self.announce(ChatSubagent::from(row), steps).await;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(chat = %self.chat_id, lost = self.retained.len(), %error, "could not record a turn's last subagent updates or stop the subagents it left running");
+            }
         }
-
-        let stopped = chat_subagents::stop(self.state.db(), self.chat_id, self.message_id).await;
-        self.settled(stopped, "could not stop the subagents a turn left running")
-            .await;
         self.reconcile().await;
     }
 
@@ -124,19 +131,45 @@ impl Keeper {
     /// One upsert of the subagent and, when the burst touched any of its
     /// steps, one of those steps, in one transaction that holds the turn so it
     /// is not deleted underneath. Nothing is written for a turn already gone.
-    async fn write(&self, pending: &Pending) -> DbResult<Option<(SubagentRow, Vec<SubagentStep>)>> {
+    async fn write(&self, pending: &Pending) -> DbResult<Option<Written>> {
         #[cfg(test)]
-        if self
-            .outage
-            .try_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |left| left.checked_sub(1),
-            )
-            .is_ok()
-        {
-            return Err(sqlx::Error::PoolTimedOut);
+        self.outage()?;
+        let mut transaction = self.state.db().begin().await?;
+        if !chat_subagents::hold_turn(&mut *transaction, self.chat_id, self.message_id).await? {
+            return Ok(None);
         }
+        let written = self.store(&mut transaction, pending).await?;
+        transaction.commit().await?;
+        Ok(Some(written))
+    }
+
+    /// Writes the updates still retained and stops the subagents the turn left
+    /// running, all in one transaction, and returns every subagent it changed
+    /// in the order it changed them. A reported outcome is written before the
+    /// stop, so the stop never hides it, and when the transaction fails neither
+    /// lands: the turn's subagents stay running for the sweep to stop.
+    async fn finish(&self) -> DbResult<Vec<Written>> {
+        #[cfg(test)]
+        self.outage()?;
+        let mut transaction = self.state.db().begin().await?;
+        let mut written = Vec::with_capacity(self.retained.len());
+        if chat_subagents::hold_turn(&mut *transaction, self.chat_id, self.message_id).await? {
+            for pending in &self.retained {
+                written.push(self.store(&mut transaction, pending).await?);
+            }
+        }
+        let stopped =
+            chat_subagents::stop(&mut *transaction, self.chat_id, self.message_id).await?;
+        transaction.commit().await?;
+        written.extend(
+            stopped
+                .into_iter()
+                .map(|Stopped { subagent, failed }| (subagent, failed.0)),
+        );
+        Ok(written)
+    }
+
+    async fn store(&self, connection: &mut PgConnection, pending: &Pending) -> DbResult<Written> {
         let update = &pending.update;
         let change = SubagentChange {
             chat_id: self.chat_id,
@@ -154,22 +187,29 @@ impl Keeper {
             summary: update.summary.as_deref(),
             error: update.error.as_deref(),
         };
-        let mut transaction = self.state.db().begin().await?;
-        if !chat_subagents::hold_turn(&mut *transaction, self.chat_id, self.message_id).await? {
-            return Ok(None);
-        }
-        let mut row = chat_subagents::record(&mut *transaction, &change).await?;
+        let mut row = chat_subagents::record(&mut *connection, &change).await?;
         let recorded =
-            chat_subagents::record_steps(&mut *transaction, row.id, &pending.steps).await?;
+            chat_subagents::record_steps(&mut *connection, row.id, &pending.steps).await?;
         let mut steps = recorded.changed;
         if update.status.is_some_and(SubagentStatus::finished)
             && row.status != SubagentStatus::Running.as_str()
         {
-            steps.extend(chat_subagents::fail_running_steps(&mut *transaction, row.id).await?);
+            steps.extend(chat_subagents::fail_running_steps(&mut *connection, row.id).await?);
         }
-        transaction.commit().await?;
         row.step_count += recorded.added;
-        Ok(Some((row, steps)))
+        Ok((row, steps))
+    }
+
+    #[cfg(test)]
+    fn outage(&self) -> DbResult<()> {
+        match self.outage.try_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |left| left.checked_sub(1),
+        ) {
+            Ok(_) => Err(sqlx::Error::PoolTimedOut),
+            Err(_) => Ok(()),
+        }
     }
 
     async fn settled(&mut self, stopped: DbResult<Vec<Stopped>>, failure: &'static str) {
