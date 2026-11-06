@@ -13,6 +13,7 @@ import {
 import type { ChatSubagent, SubagentStep } from '../subagentTypes';
 import { frameType, subscribeFrames } from '../utils/frames';
 import {
+  absentSubagents,
   groupByMessage,
   mergeSteps,
   mergeSubagent,
@@ -72,8 +73,9 @@ function withoutSteps(caches: StepCaches, ids: ReadonlySet<string>): StepCaches 
 
 /**
  * The chat's subagents: read once per chat and kept current by the socket's
- * subagent frames. Every read is merged rather than swapped in, so a frame
- * that lands while a read is in flight is never undone by the older answer.
+ * subagent frames. A read decides which agents exist, except those a frame
+ * announced while it was in flight; the rest are merged rather than swapped
+ * in, so a frame that lands mid-read is never undone by the older answer.
  * Steps are read only for the agents someone asked to see, then kept current
  * from each frame's changed steps.
  */
@@ -83,23 +85,42 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
   const answered = useRef<string | null>(null);
   const requested = useRef(new Set<string>());
   const removed = useRef(new Set<string>());
+  const announced = useRef(new Set<string>());
   const stepReads = useRef(new Map<string, number>());
   const wasStreaming = useRef(streaming);
   const current = reading.chatId === chatId ? reading : NOTHING_READ;
 
+  const forget = useCallback((ids: ReadonlySet<string>) => {
+    for (const id of ids) {
+      removed.current.add(id);
+      requested.current.delete(id);
+      stepReads.current.delete(id);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     const attempt = ++read.current;
+    announced.current = new Set();
     if (!chatId) {
       setReading(NOTHING_READ);
       return;
     }
     try {
-      const loaded = withoutSubagents(await chatsApi.getChatSubagents(chatId), removed.current);
+      const answer = await chatsApi.getChatSubagents(chatId);
       if (attempt !== read.current) return;
+      const loaded = withoutSubagents(answer, removed.current);
+      const kept = new Set([...announced.current, ...loaded.map((subagent) => subagent.id)]);
       answered.current = chatId;
       setReading((last) => {
         const base = forChat(last, chatId);
-        return { ...base, subagents: mergeSubagents(base.subagents, loaded), error: null };
+        const gone = absentSubagents(base.subagents, kept);
+        forget(gone);
+        return {
+          ...base,
+          subagents: mergeSubagents(withoutSubagents(base.subagents, gone), loaded),
+          steps: withoutSteps(base.steps, gone),
+          error: null,
+        };
       });
     } catch (failure) {
       if (attempt !== read.current) return;
@@ -107,7 +128,7 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
       const error = failure instanceof Error ? failure.message : SUBAGENTS_LOAD_FAILED;
       setReading((last) => ({ ...forChat(last, chatId), error }));
     }
-  }, [chatId]);
+  }, [chatId, forget]);
 
   const loadSteps = useCallback(
     async (id: string) => {
@@ -170,6 +191,7 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
       const update = SubagentFrameSchema.safeParse(frame);
       if (!update.success || update.data.chat_id !== chatId) return;
       const { subagent, steps } = update.data;
+      announced.current.add(subagent.id);
       setReading((last) => {
         const base = forChat(last, chatId);
         const subagents = mergeSubagent(base.subagents, subagent);
@@ -190,11 +212,7 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
       const removal = SubagentsRemovedFrameSchema.safeParse(frame);
       if (!removal.success || removal.data.chat_id !== chatId) return;
       const ids = new Set(removal.data.ids);
-      for (const id of ids) {
-        removed.current.add(id);
-        requested.current.delete(id);
-        stepReads.current.delete(id);
-      }
+      forget(ids);
       setReading((last) => {
         if (last.chatId !== chatId) return last;
         const subagents = withoutSubagents(last.subagents, ids);
@@ -220,7 +238,7 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
           return;
       }
     });
-  }, [chatId, resync]);
+  }, [chatId, resync, forget]);
 
   const byMessage = useMemo(() => groupByMessage(current.subagents), [current.subagents]);
   const steps = useMemo(() => loadedSteps(current.steps), [current.steps]);

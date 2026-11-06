@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import type { ChatSubagent, SubagentStep } from '../subagentTypes';
 import {
+  absentSubagents,
   formatDuration,
   groupByMessage,
   instant,
@@ -140,6 +141,15 @@ describe('withoutSubagents', () => {
     const list = [REVIEWER, TESTER];
     expect(withoutSubagents(list, new Set([REVIEWER.id, 'unknown']))).toEqual([TESTER]);
     expect(withoutSubagents(list, new Set(['unknown']))).toBe(list);
+  });
+});
+
+describe('absentSubagents', () => {
+  it('names the agents that are not kept', () => {
+    const list = [REVIEWER, TESTER];
+    expect(absentSubagents(list, new Set([TESTER.id, 'unknown']))).toEqual(new Set([REVIEWER.id]));
+    expect(absentSubagents(list, new Set([REVIEWER.id, TESTER.id]))).toEqual(new Set());
+    expect(absentSubagents([], new Set())).toEqual(new Set());
   });
 });
 
