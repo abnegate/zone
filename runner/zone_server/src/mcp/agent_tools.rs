@@ -72,8 +72,8 @@ mod tests {
     use crate::agent::question::ASK_USER;
     use crate::agent::wait::WAIT_FOR;
     use crate::agent::{ToolProfile, WorkspaceScope};
+    use abnegate_agent_cli::{AgentKind, CliSettings};
     use uuid::Uuid;
-    use zone_core::llm::{AgentKind, CliSettings};
     use zone_core::tools::WaitFor;
 
     const ENDPOINT: &str = "http://127.0.0.1:8421/mcp";
@@ -185,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_agents_turn_is_offered_no_tool_that_ends_zones_turn() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let backend = LlmBackend::cli(agent, CliSettings::default());
             for tools in [chat().await, task().await] {
                 let every = tools.names().to_vec();
@@ -307,7 +307,7 @@ mod tests {
     /// calls it rather than by the registry's spelling.
     #[tokio::test]
     async fn an_agents_chat_is_served_zones_github_writers_under_the_name_it_calls() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let backend = LlmBackend::cli(agent, CliSettings::default());
             let mut tools = offered(&backend, chat().await);
 
@@ -351,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_agent_is_served_what_its_turn_offers_and_zones_loop_keeps_nothing() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let backend = LlmBackend::cli(agent, CliSettings::default());
             for tools in [chat().await, task().await] {
                 let mut tools = offered(&backend, tools);

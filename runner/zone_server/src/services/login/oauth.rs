@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::time::Duration;
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_agent_cli::login::LoginError;
 use abnegate_agent_cli::login::claude::Authorization;
 use abnegate_agent_cli::login::claude::Code;
@@ -17,7 +18,6 @@ use aiusg::provider::is_signed_out;
 use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
 use sqlx::PgConnection;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use super::attempts::{self, Attempt};
 use super::caller::Caller;

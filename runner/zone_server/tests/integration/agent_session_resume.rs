@@ -19,11 +19,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use abnegate_agent_cli::Session;
+use abnegate_agent_cli::{AgentKind, Session};
 use serde_json::Value;
 use tempfile::TempDir;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
+use zone_server::services::agent::home::{self, CLAUDE_CODE_OAUTH_TOKEN};
 
 const HOMES: &str = "ZONE_SPIKE_CODEX_HOMES";
 const HOME_SEPARATOR: char = ':';
@@ -82,15 +82,9 @@ fn listing(directory: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// `agent` as abnegate-agent-cli names it.
-fn bridged(agent: AgentKind) -> abnegate_agent_cli::AgentKind {
-    abnegate_agent_cli::AgentKind::named(agent.as_str())
-        .unwrap_or_else(|| panic!("abnegate-agent-cli runs no {agent}"))
-}
-
 fn carry(from: &Path, to: &Path, agent: AgentKind, work: &Path, id: &str) {
     let carried = Session::resumed(id)
-        .carry(bridged(agent), from, to, work)
+        .carry(agent, from, to, work)
         .unwrap_or_else(|error| {
             panic!(
                 "{agent} kept session {id} nowhere Session::locate looks ({error}); {} holds {:#?}",
@@ -105,10 +99,12 @@ fn claude(home: &Path, work: &Path, token: &str, session: [&str; 2], prompt: &st
     let mut command = Command::new(AgentKind::Claude.executable());
     command
         .current_dir(work)
-        .env(AgentKind::Claude.home(), home)
-        .env("CLAUDE_CODE_OAUTH_TOKEN", token)
+        .env(
+            home::variable(AgentKind::Claude).expect("a home variable"),
+            home,
+        )
+        .env(CLAUDE_CODE_OAUTH_TOKEN, token)
         .env_remove("ANTHROPIC_API_KEY")
-        .envs(AgentKind::Claude.defaults().iter().copied())
         .args([
             "--output-format",
             "json",
@@ -142,7 +138,10 @@ fn codex(home: &Path, work: &Path, arguments: &[&str], prompt: &str) -> CodexTur
     let mut command = Command::new(AgentKind::Codex.executable());
     command
         .current_dir(work)
-        .env(AgentKind::Codex.home(), home)
+        .env(
+            home::variable(AgentKind::Codex).expect("a home variable"),
+            home,
+        )
         .env_remove("OPENAI_API_KEY")
         .env_remove("CODEX_API_KEY")
         .args([
@@ -180,7 +179,7 @@ fn codex(home: &Path, work: &Path, arguments: &[&str], prompt: &str) -> CodexTur
 #[ignore = "spends two turns of a real Claude subscription"]
 fn claude_session_resume_across_homes() {
     let token = required(
-        "CLAUDE_CODE_OAUTH_TOKEN",
+        CLAUDE_CODE_OAUTH_TOKEN,
         "set it to a token printed by `claude setup-token`",
     );
     let first = TempDir::new().expect("a first config directory");
@@ -223,7 +222,7 @@ fn claude_session_resume_across_homes() {
 #[ignore = "spends two turns of a real Claude subscription"]
 fn claude_session_resume_across_directories() {
     let token = required(
-        "CLAUDE_CODE_OAUTH_TOKEN",
+        CLAUDE_CODE_OAUTH_TOKEN,
         "set it to a token printed by `claude setup-token`",
     );
     let home = TempDir::new().expect("a config directory");
@@ -240,7 +239,7 @@ fn claude_session_resume_across_directories() {
         &format!("Remember the word {word}. Reply with only OK."),
     );
     Session::resumed(id.as_str())
-        .relocate(bridged(AgentKind::Claude), home.path(), second.path())
+        .relocate(AgentKind::Claude, home.path(), second.path())
         .unwrap_or_else(|error| {
             panic!(
                 "claude kept session {id} nowhere Session::relocate looks ({error}); {} holds {:#?}",

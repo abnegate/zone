@@ -4,11 +4,13 @@
 //! anyone outside the chat's workspace.
 
 use crate::common::context::{Socket, finish, send};
+use crate::common::stand_in::{MCP_CONFIGURATION, MCP_TOKEN};
 use crate::common::{
     TestClient, context_database_url, create_test_router, create_test_state, test_config,
     test_email, test_password,
 };
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_secret::SecretValue;
 use abnegate_secret::encrypt_value;
 use axum::http::StatusCode;
@@ -22,7 +24,6 @@ use tokio_tungstenite::connect_async;
 use uuid::Uuid;
 use wiremock::matchers::{body_partial_json, body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::AgentKind;
 use zone_server::config::{Config, ModelBackend};
 use zone_server::db::chat_pull_requests::{self, NewPullRequest};
 use zone_server::db::sources;
@@ -62,8 +63,9 @@ impl Agent {
         std::fs::write(
             &agent.executable,
             format!(
-                "#!/bin/sh\ncat > /dev/null\nprintf '%s' \"$ZONE_MCP_TOKEN\" > {token}\nprintf \
-                 '%s' \"$*\" > {arguments}.partial\nmv {arguments}.partial {arguments}\nwhile [ \
+                "#!/bin/sh\ncat > /dev/null\nprintf '%s' \"{MCP_TOKEN}\" > {token}\n{{ printf \
+                 '%s' \"$*\"; {MCP_CONFIGURATION}; }} > {arguments}.partial\nmv \
+                 {arguments}.partial {arguments}\nwhile [ \
                  ! -f {release} ]; do sleep 0.05; done\ncat {lines}\n",
                 token = agent.token.display(),
                 arguments = agent.arguments.display(),

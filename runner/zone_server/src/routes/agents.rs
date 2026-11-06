@@ -6,6 +6,7 @@ mod kind;
 mod receipt_request;
 mod status_query;
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_agent_cli::login::claude::Flow;
 use abnegate_agent_cli::login::claude::Scope;
 use abnegate_secret::SecretValue;
@@ -18,7 +19,6 @@ use chrono::{DateTime, Utc};
 use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use crate::auth::jwt::Claims;
 use crate::auth::{AuthSession, AuthUser};
@@ -87,7 +87,9 @@ pub async fn list(
 ) -> Result<Json<Statuses>, Failure> {
     let viewer = viewer(&state, &auth.0, organization).await?;
     let agents = try_join_all(
-        AgentKind::ALL.map(|agent| AgentStatus::read(&state, organization, agent, viewer, None)),
+        AgentKind::ALL
+            .iter()
+            .map(|&agent| AgentStatus::read(&state, organization, agent, viewer, None)),
     )
     .await
     .map_err(Failure::database)?;
@@ -156,6 +158,7 @@ pub async fn start(
                 expires_at: prompt.expires_at,
             }
         }
+        _ => return Err(Failure::new(StatusCode::NOT_FOUND, UNKNOWN_AGENT)),
     };
     Ok(Json(login))
 }
@@ -224,6 +227,7 @@ pub async fn cancel(
             admin(&state, &auth.0, organization).await?;
             devices::cancel(&state, organization).await;
         }
+        _ => return Err(Failure::new(StatusCode::NOT_FOUND, UNKNOWN_AGENT)),
     }
     Ok(StatusCode::NO_CONTENT)
 }

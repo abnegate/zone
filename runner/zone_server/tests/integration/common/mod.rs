@@ -8,6 +8,7 @@
 pub mod context;
 pub mod database;
 pub mod mail;
+pub mod stand_in;
 pub mod transcript;
 
 pub use database::Database;

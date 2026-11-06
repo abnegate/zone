@@ -16,12 +16,13 @@ pub use switch::Switch;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use abnegate_agent_cli::{AgentKind, Session};
 use abnegate_llm::Message;
 use chrono::Utc;
 use uuid::Uuid;
 use zone_chat::history::NewEntry;
 use zone_core::context::Entry;
-use zone_core::llm::{AgentKind, LlmBackend, Session};
+use zone_core::llm::LlmBackend;
 
 use super::session::RunContext;
 use crate::config::Config;
@@ -178,10 +179,7 @@ impl Handover {
             _ => false,
         };
         let session = match session.filter(|_| carried) {
-            Some(id) => Some(Session {
-                id: id.to_string(),
-                resume: true,
-            }),
+            Some(id) => Some(Session::resumed(id.to_string())),
             None => Continuation::fresh(chosen.agent),
         };
         let resolved =
@@ -258,10 +256,7 @@ pub async fn opening(
     if carried {
         resolved.backend = resumed(
             std::mem::replace(&mut resolved.backend, LlmBackend::Http),
-            Session {
-                id: previous.id.clone(),
-                resume: true,
-            },
+            Session::resumed(previous.id.clone()),
         );
     }
     Some(Notice {
@@ -326,7 +321,12 @@ fn instruction() -> Entry {
 /// be moved is left for the agent to refuse, and the turn then replays the chat. The move runs on
 /// a blocking thread, off the runtime.
 pub async fn settle(config: &Config, organization: Uuid, resolved: &Resolved) {
-    let (Some(login), LlmBackend::Cli { agent, settings }) = (&resolved.login, &resolved.backend)
+    let (
+        Some(login),
+        LlmBackend::Cli {
+            agent, settings, ..
+        },
+    ) = (&resolved.login, &resolved.backend)
     else {
         return;
     };
@@ -336,14 +336,11 @@ pub async fn settle(config: &Config, organization: Uuid, resolved: &Resolved) {
     if !session.resume {
         return;
     }
-    let Some(kind) = bridged(*agent) else {
-        tracing::warn!(%agent, "The agent's sessions cannot be moved");
-        return;
-    };
-    let home = config.agents.login_home(organization, *agent, login.id);
+    let agent = *agent;
+    let home = config.agents.login_home(organization, agent, login.id);
     let work = work.clone();
-    let session = abnegate_agent_cli::Session::resumed(session.id.clone());
-    match tokio::task::spawn_blocking(move || session.relocate(kind, &home, &work)).await {
+    let session = session.clone();
+    match tokio::task::spawn_blocking(move || session.relocate(agent, &home, &work)).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::info!(%error, "The agent session cannot be moved to the chat's directory");
@@ -366,18 +363,14 @@ async fn carry(
     directory: Option<&Path>,
     id: &str,
 ) -> bool {
-    let Some(kind) = bridged(agent) else {
-        tracing::warn!(%agent, "The agent's sessions cannot be carried; replaying the chat instead");
-        return false;
-    };
     let agents = config.agents.clone();
     let work = directory.map_or_else(|| agents.work(organization, agent), Path::to_path_buf);
     let left = agents.login_home(organization, agent, from);
-    let session = abnegate_agent_cli::Session::resumed(id);
+    let session = Session::resumed(id);
     let copied = tokio::task::spawn_blocking(move || {
         agents
             .create_login_home(organization, agent, to)
-            .map(|home| session.carry(kind, &left, &home, &work))
+            .map(|home| session.carry(agent, &left, &home, &work))
     })
     .await;
     match copied {
@@ -400,19 +393,9 @@ async fn carry(
     }
 }
 
-/// `agent` as abnegate-agent-cli names it.
-fn bridged(agent: AgentKind) -> Option<abnegate_agent_cli::AgentKind> {
-    abnegate_agent_cli::AgentKind::named(agent.as_str())
-}
-
 /// `backend` resuming `session` in place of the one it was given.
 fn resumed(backend: LlmBackend, session: Session) -> LlmBackend {
-    match backend {
-        LlmBackend::Cli { agent, settings } => {
-            LlmBackend::cli(agent, settings.with_session(session))
-        }
-        LlmBackend::Http => LlmBackend::Http,
-    }
+    backend.configured(|settings| settings.with_session(session))
 }
 
 /// `row` as the chat names it.
@@ -460,16 +443,16 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use abnegate_agent_cli::CliSettings;
     use abnegate_agent_cli::SessionError;
     use abnegate_agent_cli::login::claude::Tokens;
+    use abnegate_agent_cli::transcript::render;
     use abnegate_llm::Limit;
     use abnegate_secret::SecretValue;
     use chrono::{DateTime, SecondsFormat, TimeDelta, TimeZone};
     use sqlx::PgPool;
     use tempfile::TempDir;
     use zone_core::context::project;
-    use zone_core::llm::CliSettings;
-    use zone_core::llm::provider::render;
 
     use super::*;
     use crate::config::AgentConfig;
@@ -501,7 +484,6 @@ mod tests {
 
     fn sent(context: &RunContext) -> String {
         render(&project(&context.entries, context.summary.as_ref()).expect("a projectable context"))
-            .text()
     }
 
     fn resets() -> DateTime<Utc> {
@@ -540,7 +522,7 @@ mod tests {
     fn transcript(home: &Path, work: &Path, id: &str) -> PathBuf {
         let path = home
             .join("projects")
-            .join(abnegate_agent_cli::Session::project(work))
+            .join(Session::project(work))
             .join(format!("{id}.jsonl"));
         fs::create_dir_all(path.parent().expect("a project folder")).expect("the folder");
         fs::write(&path, TRANSCRIPT).expect("the session file");
@@ -566,7 +548,9 @@ mod tests {
 
     fn cli(backend: &LlmBackend) -> (AgentKind, &CliSettings) {
         match backend {
-            LlmBackend::Cli { agent, settings } => (*agent, settings),
+            LlmBackend::Cli {
+                agent, settings, ..
+            } => (*agent, settings),
             LlmBackend::Http => panic!("a handover runs on a coding agent"),
         }
     }
@@ -624,10 +608,7 @@ mod tests {
     fn a_carried_session_the_cli_refuses_falls_back_to_a_replay_with_the_partial() {
         let from = identity(AgentKind::Claude, "a@example.com");
         let to = identity(AgentKind::Claude, "b@example.com");
-        let resumed = Session {
-            id: SESSION.into(),
-            resume: true,
-        };
+        let resumed = Session::resumed(SESSION);
         let generation = Generation {
             resolved: Resolved {
                 backend: LlmBackend::cli(
@@ -856,7 +837,7 @@ mod tests {
             let directory = fs::canonicalize(directory).expect("the directory");
             let path = home
                 .join("projects")
-                .join(abnegate_agent_cli::Session::project(&directory))
+                .join(Session::project(&directory))
                 .join(format!("{id}.jsonl"));
             fs::create_dir_all(path.parent().expect("a project folder")).expect("the folder");
             fs::write(&path, b"{}\n").expect("the session file");
@@ -873,19 +854,15 @@ mod tests {
             let work = fs::canonicalize(self.work(login.agent)).expect("the working directory");
             let path = home
                 .join("projects")
-                .join(abnegate_agent_cli::Session::project(&work))
+                .join(Session::project(&work))
                 .join(format!("{id}.jsonl"));
             fs::create_dir_all(path.parent().expect("a project folder")).expect("the folder");
             fs::write(path, TRANSCRIPT).expect("the session file");
         }
 
         fn carried(&self, login: &LoginIdentity, id: &str) -> bool {
-            abnegate_agent_cli::Session::resumed(id)
-                .locate(
-                    bridged(login.agent).expect("an agent abnegate-agent-cli runs"),
-                    &self.home(login),
-                    &self.work(login.agent),
-                )
+            Session::resumed(id)
+                .locate(login.agent, &self.home(login), &self.work(login.agent))
                 .is_some()
         }
 
@@ -1037,13 +1014,7 @@ mod tests {
         assert_eq!(switch.to, to);
         assert!(switch.carried);
         assert!(landed, "the session file is in the next login's home");
-        assert_eq!(
-            switch.session(),
-            Some(Session {
-                id: SESSION.into(),
-                resume: true
-            })
-        );
+        assert_eq!(switch.session(), Some(Session::resumed(SESSION)));
         assert_eq!(switch.model, None, "the same agent keeps the turn's model");
         assert_eq!(
             settings.variables.get(CLAUDE_CONFIG_DIR).map(PathBuf::from),
@@ -1091,13 +1062,10 @@ mod tests {
         let fixture = Fixture::new().await;
         let login = fixture.claude("a@example.com").await;
         fixture.session(&login, SESSION);
-        let left =
-            fixture
-                .home(&login)
-                .join("projects")
-                .join(abnegate_agent_cli::Session::project(
-                    &fixture.work(AgentKind::Claude),
-                ));
+        let left = fixture
+            .home(&login)
+            .join("projects")
+            .join(Session::project(&fixture.work(AgentKind::Claude)));
         let project = TempDir::new().expect("a project folder");
         let chosen: Chosen = router::pick(
             &fixture.state,
@@ -1114,17 +1082,14 @@ mod tests {
             fixture.state.config(),
             fixture.organization,
             &chosen,
-            Some(Session {
-                id: SESSION.into(),
-                resume: true,
-            }),
+            Some(Session::resumed(SESSION)),
         )
         .expect("a backend");
         resolved.backend = backend::in_directory(resolved.backend, project.path());
 
         settle(fixture.state.config(), fixture.organization, &resolved).await;
-        let found = abnegate_agent_cli::Session::resumed(SESSION).locate(
-            abnegate_agent_cli::AgentKind::Claude,
+        let found = Session::resumed(SESSION).locate(
+            AgentKind::Claude,
             &fixture.home(&login),
             project.path(),
         );
@@ -1155,10 +1120,7 @@ mod tests {
                 AgentKind::Claude,
                 CliSettings::default()
                     .with_working_directory(project.path())
-                    .with_session(Session {
-                        id: SESSION.into(),
-                        resume: true,
-                    }),
+                    .with_session(Session::resumed(SESSION)),
             ),
             login: Some(login),
         };
@@ -1177,8 +1139,8 @@ mod tests {
             "the runtime's only thread was held while the session moved"
         );
         assert!(
-            abnegate_agent_cli::Session::resumed(SESSION)
-                .locate(abnegate_agent_cli::AgentKind::Claude, &home, project.path())
+            Session::resumed(SESSION)
+                .locate(AgentKind::Claude, &home, project.path())
                 .is_some(),
             "the agent would not find its session"
         );
@@ -1203,7 +1165,7 @@ mod tests {
                 .create_login_home(organization, AgentKind::Claude, login)
                 .expect("the login's home")
                 .join("projects")
-                .join(abnegate_agent_cli::Session::project(&work))
+                .join(Session::project(&work))
         };
         let (landed, sealed, occupied) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let read_only = folder(sealed);
@@ -1251,8 +1213,8 @@ mod tests {
         fixture.session(&from, SESSION);
         let projects = fixture.home(&from).join("projects");
         fs::write(projects.join("escape.jsonl"), TRANSCRIPT).expect("a file the id names");
-        let refused = abnegate_agent_cli::Session::resumed(ESCAPE).carry(
-            abnegate_agent_cli::AgentKind::Claude,
+        let refused = Session::resumed(ESCAPE).carry(
+            AgentKind::Claude,
             &fixture.home(&from),
             &fixture.home(&to),
             &fixture.work(AgentKind::Claude),
@@ -1488,10 +1450,7 @@ mod tests {
         assert!(landed, "the session file moved with the chat");
         assert_eq!(
             cli(&resolved.backend).1.session,
-            Some(Session {
-                id: SESSION.into(),
-                resume: true
-            }),
+            Some(Session::resumed(SESSION)),
             "the turn resumes the carried session"
         );
         assert_eq!(unmoved, None, "a chat kept on its login is told nothing");

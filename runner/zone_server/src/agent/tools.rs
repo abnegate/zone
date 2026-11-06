@@ -10,6 +10,7 @@
 //! File and shell operations run in the server runtime, inside the container
 //! for Docker deployments, with the server process permissions.
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_llm::ToolDefinition;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -17,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
+use zone_core::llm::Toolset;
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::toolbox::{
@@ -916,7 +917,7 @@ impl ChatTools {
     /// The name this turn's model calls the tool `name` by.
     pub fn qualified(&self, name: &str) -> String {
         match self.agent {
-            Some(agent) => agent.tool(name),
+            Some(agent) => agent.tool(Toolset::SERVER, name),
             None => name.to_string(),
         }
     }
@@ -3295,7 +3296,7 @@ mod tests {
         config.agents.state = root.to_path_buf();
         let home = config
             .agents
-            .create_home(Uuid::new_v4(), zone_core::llm::AgentKind::Codex)
+            .create_home(Uuid::new_v4(), abnegate_agent_cli::AgentKind::Codex)
             .expect("the organization's codex home");
         std::fs::write(
             home.join("auth.json"),

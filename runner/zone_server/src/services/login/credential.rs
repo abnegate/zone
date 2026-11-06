@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_agent_cli::login::LoginError;
 use abnegate_agent_cli::login::claude::Client;
 use abnegate_agent_cli::login::claude::Tokens;
@@ -11,7 +12,6 @@ use abnegate_secret::SecretValue;
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use super::claude::{self, Sealed};
 use super::homes;
@@ -68,7 +68,7 @@ pub async fn resolve(state: &AppState, login: &AgentLoginRow) -> Result<Login, E
             Err(super::error::Error::Database(error)) => Err(Error::Database(error)),
             Err(error) => Err(Error::Home(error.to_string())),
         },
-        None => Err(Error::Unreadable(format!(
+        _ => Err(Error::Unreadable(format!(
             "{} is not an agent Zone drives",
             login.agent
         ))),

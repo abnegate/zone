@@ -17,6 +17,7 @@ pub mod verdict;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_agent_cli::{CREDITS_REQUIRED, LONG_CONTEXT_CREDITS_REQUIRED};
 use abnegate_llm::{Message, ToolDefinition};
 use abnegate_secret::SecretValue;
 use abnegate_vcs::{ChangedFile, PullRequestDetail, PullRequestReference, PullRequestService};
@@ -24,7 +25,6 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
 use zone_core::llm::LlmBackend;
-use zone_core::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
 use zone_core::tools::{ToolContext, ToolResult};
 
 use crate::db::auto_projects::{Finding, ReviewRow};
@@ -45,7 +45,7 @@ const REVIEW_TEMPERATURE: f32 = 0.0;
 /// How zone_core begins a coding agent's refusal of a model or a context the
 /// signed-in account cannot spend usage credits on, which every tick meets
 /// again.
-const UNFUNDED_MARKERS: [&str; 2] = [UNFUNDED, UNFUNDED_CONTEXT];
+const UNFUNDED_MARKERS: [&str; 2] = [CREDITS_REQUIRED, LONG_CONTEXT_CREDITS_REQUIRED];
 
 #[derive(Debug, Error)]
 pub enum ReviewError {
@@ -243,13 +243,13 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_agent_cli::AgentKind;
     use abnegate_llm::Limit;
     use abnegate_vcs::{BranchName, CommitSha, Mergeability};
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use uuid::Uuid;
-    use zone_core::llm::AgentKind;
 
     use crate::config::{Config, ModelBackend};
 
@@ -421,7 +421,7 @@ mod tests {
 
         assert_eq!(verdict.outcome, Outcome::Approve);
         assert_eq!(verdict.summary, "The cart is sound.");
-        let prompt = zone_core::llm::provider::prompt(
+        let prompt = zone_core::llm::cli::prompt(
             &std::fs::read_to_string(&prompt).expect("the agent was given a prompt"),
         );
         assert!(
@@ -463,11 +463,11 @@ mod tests {
             panic!("expected an unfunded reviewer, got {error:?}");
         };
         assert_eq!(reviewer, "fable");
-        assert_eq!(reason, &format!("claude: {UNFUNDED}: {REFUSAL}"));
+        assert_eq!(reason, &format!("claude: {CREDITS_REQUIRED}: {REFUSAL}"));
         assert_eq!(
             error.stalled(),
             Some(format!(
-                "the reviewer model fable cannot run: claude: {UNFUNDED}: {REFUSAL}"
+                "the reviewer model fable cannot run: claude: {CREDITS_REQUIRED}: {REFUSAL}"
             )),
             "the task pauses with claude's words rather than asking every tick"
         );
@@ -522,7 +522,7 @@ mod tests {
             "fable",
             abnegate_llm::Error::api(
                 StatusCode::BAD_REQUEST.as_u16(),
-                format!("{UNFUNDED}: {REFUSAL}"),
+                format!("{CREDITS_REQUIRED}: {REFUSAL}"),
             ),
         );
 
@@ -534,10 +534,13 @@ mod tests {
     /// agent's own words, never in the stderr that follows them.
     #[test]
     fn an_unfunded_reviewer_is_read_from_the_agents_own_words() {
-        let agent = LlmBackend::cli(AgentKind::Claude, zone_core::llm::CliSettings::default());
+        let agent = LlmBackend::cli(
+            AgentKind::Claude,
+            abnegate_agent_cli::CliSettings::default(),
+        );
         let stderr_only = format!(
-            "claude: the agent exited without completing its event stream{}{UNFUNDED}: {REFUSAL}",
-            zone_core::llm::provider::STDERR_HEADING
+            "claude: the agent exited without completing its event stream{}{CREDITS_REQUIRED}: {REFUSAL}",
+            abnegate_agent_cli::STDERR_HEADING
         );
 
         assert!(matches!(
@@ -549,7 +552,7 @@ mod tests {
                 &agent,
                 "sonnet[1m]",
                 abnegate_llm::Error::Agent(format!(
-                    "claude: {UNFUNDED_CONTEXT}: API Error: Usage credits required for 1M context"
+                    "claude: {LONG_CONTEXT_CREDITS_REQUIRED}: API Error: Usage credits required for 1M context"
                 ))
             ),
             ReviewError::Unfunded { .. }
@@ -561,7 +564,10 @@ mod tests {
     /// its words always made it.
     #[test]
     fn a_credits_limit_is_an_unfunded_reviewer_and_any_other_limit_a_model_failure() {
-        let agent = LlmBackend::cli(AgentKind::Claude, zone_core::llm::CliSettings::default());
+        let agent = LlmBackend::cli(
+            AgentKind::Claude,
+            abnegate_agent_cli::CliSettings::default(),
+        );
         let limited = |message: &str, credits: bool| {
             abnegate_llm::Error::limited("claude", Limit::new(message).with_credits(credits))
         };
@@ -592,7 +598,7 @@ mod tests {
             ReviewError::model(
                 &agent,
                 "fable",
-                limited(&format!("{UNFUNDED}: {REFUSAL}"), false)
+                limited(&format!("{CREDITS_REQUIRED}: {REFUSAL}"), false)
             ),
             ReviewError::Unfunded { .. }
         ));

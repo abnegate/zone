@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use zone_core::llm::Subagent;
+use abnegate_agent_cli::Subagent;
 
 use super::pending::Pending;
 

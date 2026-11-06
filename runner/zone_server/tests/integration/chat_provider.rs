@@ -3,13 +3,13 @@
 //! choice that stops being usable fails in the chat instead of falling back,
 //! and coding agents offer their own models and reasoning efforts.
 
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::Occupancy;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::AgentKind;
-use zone_core::llm::provider::Occupancy;
 use zone_server::config::{AgentConfig, Config};
 use zone_server::db::agent_logins::{self, Insert};
 use zone_server::db::chats::occupancy::{self, Reported};
@@ -1905,7 +1905,7 @@ async fn report(tenant: &Tenant, chat: &str, model: &str, window: u64, used: Opt
         &Reported {
             agent: AgentKind::Claude,
             model: model.to_string(),
-            occupancy: Occupancy::reported(Some(window), used).expect("a reported window"),
+            occupancy: Occupancy::reported(window, used).expect("a reported window"),
         },
     )
     .await

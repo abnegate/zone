@@ -2,9 +2,10 @@
 
 use std::sync::LazyLock;
 
+use abnegate_agent_cli::Output;
 use regex::Regex;
 use serde_json::Value;
-use zone_core::llm::{Output, Toolset};
+use zone_core::llm::Toolset;
 
 /// The agents' names for the tool that runs a shell command.
 const SHELL_TOOLS: [&str; 2] = ["Bash", "command_execution"];

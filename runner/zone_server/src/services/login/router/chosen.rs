@@ -1,4 +1,4 @@
-use zone_core::llm::AgentKind;
+use abnegate_agent_cli::AgentKind;
 
 use crate::db::agent_logins::AgentLoginRow;
 use crate::services::login::credential::Login;

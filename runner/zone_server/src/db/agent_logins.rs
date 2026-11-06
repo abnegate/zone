@@ -277,9 +277,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use abnegate_agent_cli::AgentKind;
     use chrono::TimeZone;
     use sqlx::PgPool;
-    use zone_core::llm::{AgentKind, window};
+    use zone_core::llm::window;
 
     use super::*;
 
@@ -730,7 +731,7 @@ mod tests {
         let ours = organization(&pool).await;
         let theirs = organization(&pool).await;
 
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             assert!(
                 list_for(&pool, ours, agent.as_str())
                     .await
@@ -926,7 +927,7 @@ mod tests {
         assert!(database.is_check_violation());
         assert_eq!(database.constraint(), Some(AGENT_CHECK));
 
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             insert(
                 &pool,
                 &Insert {

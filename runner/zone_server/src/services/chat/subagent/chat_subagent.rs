@@ -1,7 +1,7 @@
+use abnegate_agent_cli::SubagentStatus;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
-use zone_core::llm::SubagentStatus;
 
 use crate::db::chat_subagents::SubagentRow;
 
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn every_stored_status_is_sent_as_itself() {
-        for status in SubagentStatus::ALL {
+        for &status in SubagentStatus::ALL {
             let stored = SubagentRow {
                 status: status.as_str().to_string(),
                 ..row()

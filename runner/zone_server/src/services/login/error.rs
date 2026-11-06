@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use zone_core::llm::AgentKind;
+use abnegate_agent_cli::AgentKind;
 
 /// What an admin is told when Zone itself failed; the server's log has why.
 pub const UNSAVED: &str = "Zone could not finish the sign-in. Start again.";

@@ -11,11 +11,14 @@
 use crate::common;
 
 use crate::common::context::{Socket, finish, next, send};
+use crate::common::stand_in::{MCP_CONFIGURATION, MCP_TOKEN};
 use crate::common::{
     TestClient, context_database_url, create_test_router, create_test_state, test_config,
     test_email, test_password,
 };
 
+use abnegate_agent_cli::Occupancy;
+use abnegate_agent_cli::{AgentKind, CliSettings};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -27,8 +30,7 @@ use tokio_tungstenite::connect_async;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::provider::Occupancy;
-use zone_core::llm::{AgentKind, CliSettings, LlmBackend};
+use zone_core::llm::{LlmBackend, Toolset};
 use zone_server::agent::ASK_USER;
 use zone_server::agent::wait::WAIT_FOR;
 use zone_server::config::ModelBackend;
@@ -79,9 +81,9 @@ impl Agent {
         let mut file = std::fs::File::create(&agent.executable).expect("the stand-in agent");
         writeln!(
             file,
-            "#!/bin/sh\ncat > {prompt}\npwd -P > {directory}\nprintf '%s' \"$ZONE_MCP_TOKEN\" > \
-             {token}\nprintf '%s' \"$*\" > {arguments}.partial\nmv {arguments}.partial \
-             {arguments}\nwhile [ ! -f {release} ]; do sleep 0.05; done\necho \
+            "#!/bin/sh\ncat > {prompt}\npwd -P > {directory}\nprintf '%s' \"{MCP_TOKEN}\" > \
+             {token}\n{{ printf '%s' \"$*\"; {MCP_CONFIGURATION}; }} > {arguments}.partial\nmv \
+             {arguments}.partial {arguments}\nwhile [ ! -f {release} ]; do sleep 0.05; done\necho \
              '{assistant}'\necho '{result}'",
             directory = agent.directory.display(),
             prompt = agent.prompt.display(),
@@ -168,8 +170,9 @@ impl Agent {
         std::fs::write(
             &self.executable,
             format!(
-                "#!/bin/sh\ncat > /dev/null\nprintf '%s' \"$ZONE_MCP_TOKEN\" > {token}\nprintf \
-                 '%s' \"$*\" > {arguments}\nsleep 600 > /dev/null 2>&1 &\nprintf '%s' \"$!\" > \
+                "#!/bin/sh\ncat > /dev/null\nprintf '%s' \"{MCP_TOKEN}\" > {token}\n{{ printf \
+                 '%s' \"$*\"; {MCP_CONFIGURATION}; }} > {arguments}\nsleep 600 > /dev/null 2>&1 \
+                 &\nprintf '%s' \"$!\" > \
                  {forked}\nprintf '%s' \"$$\" > {leader}\nwhile :; do sleep 0.05; done\n",
                 token = self.token.display(),
                 arguments = self.arguments.display(),
@@ -246,16 +249,12 @@ fn fanned_out(root: &Path, depth: usize) {
 /// would have read it: where to reach zone, and which tools it may call.
 fn served(arguments: &str) -> (String, Vec<String>) {
     let endpoint = between(arguments, r#""url":""#, '"').expect("zone named its MCP endpoint");
-    let allowed = match arguments.split("--allowedTools ").nth(1) {
-        Some(rest) => rest
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .split(',')
-            .map(str::to_string)
-            .collect(),
-        None => Vec::new(),
-    };
+    let allowed = arguments
+        .split("--allowedTools ")
+        .skip(1)
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
+        .collect();
     (endpoint, allowed)
 }
 
@@ -477,7 +476,7 @@ async fn a_project_chats_agent_runs_in_the_directory_its_prompt_names() {
     let turn = harness.turn("Where are you?").await;
     harness.agent.spawned().await;
     let ran_in = std::fs::read_to_string(&harness.agent.directory).expect("the agent's directory");
-    let prompt = zone_core::llm::provider::prompt(
+    let prompt = zone_core::llm::cli::prompt(
         &std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt"),
     );
     harness.agent.finish();
@@ -550,7 +549,7 @@ async fn a_cli_turn_serves_its_tools_for_the_life_of_the_turn_and_no_longer() {
     // Over MCP a question or a wait returns at once, parking nothing, and the
     // turn would read that as an answer nobody gave. So the agent is neither
     // served one nor told of one, and asks the reader in its reply instead.
-    let prompt = zone_core::llm::provider::prompt(
+    let prompt = zone_core::llm::cli::prompt(
         &std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt"),
     );
     for tool in [ASK_USER, WAIT_FOR] {
@@ -904,11 +903,11 @@ async fn every_turn_in_a_workspace_on_github_opens_pull_requests_through_zone() 
             (LlmBackend::Http, CREATE_PULL_REQUEST.to_string()),
             (
                 LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
-                AgentKind::Claude.tool(CREATE_PULL_REQUEST),
+                AgentKind::Claude.tool(Toolset::SERVER, CREATE_PULL_REQUEST),
             ),
             (
                 LlmBackend::cli(AgentKind::Codex, CliSettings::default()),
-                AgentKind::Codex.tool(CREATE_PULL_REQUEST),
+                AgentKind::Codex.tool(Toolset::SERVER, CREATE_PULL_REQUEST),
             ),
         ]
     };
@@ -960,7 +959,7 @@ async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_
         let turn = harness.turn("Open a pull request for this branch.").await;
         let (arguments, token) = harness.agent.spawned().await;
         let (endpoint, allowed) = served(&arguments);
-        let qualified = AgentKind::Claude.tool(CREATE_PULL_REQUEST);
+        let qualified = AgentKind::Claude.tool(Toolset::SERVER, CREATE_PULL_REQUEST);
 
         assert!(allowed.contains(&qualified), "{allowed:?}");
         let (status, listed) = rpc(&endpoint, &token, "tools/list", json!({})).await;
@@ -980,7 +979,7 @@ async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_
             "sandboxed {sandboxed}: {names:?}"
         );
 
-        let prompt = zone_core::llm::provider::prompt(
+        let prompt = zone_core::llm::cli::prompt(
             &std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt"),
         );
         assert!(
@@ -1027,9 +1026,6 @@ async fn a_cli_turn_keeps_the_window_its_agent_reported_and_shows_it_as_it_ends(
     assert_eq!(kept.model, "sonnet");
     assert_eq!(
         kept.occupancy,
-        Occupancy {
-            window: 200_000,
-            used: Some(3 + 120 + 16_500 + 9),
-        }
+        Occupancy::reported(200_000, Some(3 + 120 + 16_500 + 9)).expect("a reported window")
     );
 }

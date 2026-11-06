@@ -1,5 +1,5 @@
+use abnegate_agent_cli::SubagentStep;
 use serde::Serialize;
-use zone_core::llm::SubagentStep;
 
 #[derive(Debug, Serialize)]
 pub struct Steps {

@@ -1,5 +1,6 @@
 //! Application state
 
+use abnegate_agent_cli::CliSettings;
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use abnegate_secret::MasterKey;
 use dashmap::DashMap;
@@ -13,7 +14,7 @@ use zone_context::adapters::{
 };
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
-use zone_core::llm::{CliSettings, LlmBackend};
+use zone_core::llm::LlmBackend;
 use zone_core::mcp::McpHub;
 
 use crate::cache::Cache;
@@ -470,10 +471,10 @@ mod tests {
     use super::*;
     use crate::secret::Unseal;
     use crate::secret::fixture;
+    use abnegate_agent_cli::AgentKind;
     use abnegate_notify::MockMailer;
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
-    use zone_core::llm::AgentKind;
     use zone_core::variables::Variables;
 
     const REDIS_URL: &str = "REDIS_URL";
@@ -571,7 +572,7 @@ mod tests {
 
     #[test]
     fn every_configured_agent_reaches_the_client_as_its_own_backend() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let config = backed_by(ModelBackend::Cli {
                 agent,
                 executable: None,
@@ -580,6 +581,7 @@ mod tests {
             let LlmBackend::Cli {
                 agent: chosen,
                 settings,
+                ..
             } = llm_backend(&config)
             else {
                 panic!("{agent} was configured and the client was still built on HTTP");

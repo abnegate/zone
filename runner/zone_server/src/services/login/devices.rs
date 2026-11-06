@@ -16,6 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_agent_cli::login::codex::{
     self, Account, CREDENTIALS, Device, DeviceLogin, Prompt, Staging,
 };
@@ -27,8 +28,7 @@ use futures::future::{BoxFuture, FutureExt, Shared};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-use zone_core::environment;
-use zone_core::llm::AgentKind;
+use zone_core::llm::cli;
 
 use super::error::Error;
 use super::locks::{Guard, Locks};
@@ -36,6 +36,7 @@ use super::{audit, homes, oauth};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow, Insert};
 use crate::db::organizations;
+use crate::services::agent::home;
 use crate::state::AppState;
 
 const STOPPED: &str = "The codex sign-in stopped before it finished";
@@ -168,17 +169,20 @@ pub fn failure(organization: Uuid) -> Option<String> {
         .map(|failure| failure.value().clone())
 }
 
-/// The environment every sign-in command for `agent` runs with: what any agent inherits from the
-/// server, and the agent's own defaults. It names no home, so a command reads the host's own
-/// sign-in unless its caller adds one.
+/// The variable that stops Claude Code updating itself while a sign-in command runs.
+const AUTOUPDATER: &str = "DISABLE_AUTOUPDATER";
+
+/// What [`AUTOUPDATER`] is set to.
+const DISABLED: &str = "1";
+
+/// The environment every sign-in command for `agent` runs with: what any child that is not an
+/// agent inherits from the server, and for Claude, no update of itself. It names no home, so a
+/// command reads the host's own sign-in unless its caller adds one.
 pub(super) fn variables(agent: AgentKind) -> BTreeMap<String, String> {
-    let mut variables = environment::inherited();
-    variables.extend(
-        agent
-            .defaults()
-            .iter()
-            .map(|(name, value)| ((*name).to_string(), (*value).to_string())),
-    );
+    let mut variables = cli::inherited();
+    if agent == AgentKind::Claude {
+        variables.insert(AUTOUPDATER.to_string(), DISABLED.to_string());
+    }
     variables
 }
 
@@ -379,6 +383,11 @@ impl Devices {
                     remove(state, organization, &login, user, email).await?;
                 }
                 log_out(config, &config.agents.home(organization, agent)).await?;
+            }
+            _ => {
+                return Err(Error::Internal(format!(
+                    "Zone cannot sign the {agent} CLI out"
+                )));
             }
         }
         Ok(())
@@ -700,11 +709,11 @@ async fn log_out(config: &Config, home: &Path) -> Result<(), Error> {
 async fn describe(config: &Config, organization: Uuid, home: &Path) -> Option<String> {
     let mut variables = variables(AgentKind::Codex);
     variables.insert(
-        AgentKind::Codex.home().to_string(),
+        home::variable(AgentKind::Codex)?.to_string(),
         home.to_str()?.to_string(),
     );
     let cli = Cli::new(config.agent_executable(AgentKind::Codex)).with_environment(variables);
-    match Status::check(abnegate_agent_cli::AgentKind::Codex, &cli).await {
+    match Status::check(AgentKind::Codex, &cli).await {
         Ok(status) => status.label,
         Err(error) => {
             tracing::warn!(%organization, error = %said(&error), "could not ask codex how it signed in");
@@ -1124,18 +1133,19 @@ esac"#
     }
 
     #[test]
-    fn every_sign_in_command_runs_with_the_agents_defaults_and_no_agents_home() {
-        for agent in AgentKind::ALL {
+    fn every_sign_in_command_runs_with_no_agents_home_and_claude_never_updates_itself() {
+        for &agent in AgentKind::ALL {
             let variables = variables(agent);
 
-            for (name, value) in agent.defaults() {
-                assert_eq!(
-                    variables.get(*name).map(String::as_str),
-                    Some(*value),
-                    "{name}"
-                );
-            }
-            for home in AgentKind::ALL.map(AgentKind::home) {
+            assert_eq!(
+                variables.get(AUTOUPDATER).map(String::as_str),
+                (agent == AgentKind::Claude).then_some(DISABLED),
+                "{agent}"
+            );
+            for home in AgentKind::ALL
+                .iter()
+                .filter_map(|&agent| home::variable(agent))
+            {
                 assert!(
                     !variables.contains_key(home),
                     "{home} would point {agent}'s host sign-in check at another home"

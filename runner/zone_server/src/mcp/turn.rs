@@ -569,7 +569,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
-    use zone_core::llm::provider::DEFAULT_TIMEOUT;
+    use zone_core::llm::cli::TURN_TIMEOUT;
     use zone_core::tools::Session;
     use zone_core::tools::job::{JobCommand, Jobs};
 
@@ -662,7 +662,7 @@ mod tests {
     async fn a_token_answers_for_as_long_as_its_lease_is_held() {
         let opened = open(ApprovalPolicy::auto()).await;
 
-        tokio::time::advance(DEFAULT_TIMEOUT * 4).await;
+        tokio::time::advance(TURN_TIMEOUT * 4).await;
 
         assert!(
             Turn::find(&opened.token).is_some(),
