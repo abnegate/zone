@@ -9,7 +9,9 @@ use futures::{Stream, StreamExt};
 use tempfile::TempDir;
 
 use super::*;
-use crate::llm::provider::{STDERR_HEADING, Subagent, SubagentStatus, UNFUNDED};
+use crate::llm::provider::{
+    STDERR_HEADING, StepStatus, Subagent, SubagentStatus, SubagentStep, UNFUNDED,
+};
 
 const COMPLETION: &str = r#"{
     "id": "completion",
@@ -1531,6 +1533,73 @@ async fn news_of_a_subagent_never_reaches_the_reader_as_a_chunk() {
     assert_eq!(spoken(&delivered), "");
     assert_eq!(reasoned(&delivered), "");
     assert_eq!(reasons(&delivered), [STOP]);
+}
+
+fn step(name: &str, subject: Option<&str>, status: StepStatus) -> AgentEvent {
+    AgentEvent::Subagent(Subagent {
+        step: Some(SubagentStep {
+            id: format!("toolu_{name}"),
+            name: name.to_string(),
+            subject: subject.map(str::to_string),
+            status,
+        }),
+        ..Subagent::new("toolu_01Agent")
+    })
+}
+
+#[tokio::test]
+async fn a_subagents_call_just_made_is_reasoned_as_the_main_agents_are() {
+    let events = agent_events(vec![
+        Ok(step("Grep", Some("pub mod"), StepStatus::Running)),
+        Ok(step("Grep", Some("pub mod"), StepStatus::Succeeded)),
+        Ok(step("TodoWrite", None, StepStatus::Running)),
+        Ok(step("Read", Some("/w/a.rs"), StepStatus::Failed)),
+        Ok(step(
+            "mcp__zone__search_code",
+            Some("x"),
+            StepStatus::Running,
+        )),
+        Ok(AgentEvent::Finished {
+            finish_reason: Some("success".to_string()),
+        }),
+    ]);
+
+    let (delivered, failure) =
+        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
+
+    assert!(failure.is_none(), "a subagent failed the turn: {failure:?}");
+    assert_eq!(delivered.len(), 3, "{delivered:?}");
+    assert_eq!(reasoned(&delivered), "- Grep `pub mod`\n- TodoWrite\n");
+    assert_eq!(spoken(&delivered), "");
+    assert_eq!(reasons(&delivered), [STOP]);
+}
+
+/// A task run sets no observer, so a subagent's own calls are listed in the
+/// turn's reasoning as the main agent's are, rather than lost.
+#[tokio::test]
+async fn a_subagents_calls_are_reasoned_when_nothing_observes_the_turn() {
+    const STREAM: &str = include_str!("../provider/parser/fixtures/claude/subagents.jsonl");
+    let directory = TempDir::new().expect("a temporary directory");
+    let replay = directory.path().join("stream.jsonl");
+    std::fs::write(&replay, STREAM).expect("the replayed stream");
+    let client = agent_client(fake(&directory, &format!("cat '{}'", replay.display())));
+
+    let stream = stream_turn(&client, None).await.expect("a running agent");
+    let (delivered, failure) = collected(stream).await;
+
+    assert!(failure.is_none(), "the turn failed: {failure:?}");
+    assert_eq!(
+        reasoned(&delivered),
+        [
+            "- Agent `Survey the crate`\n",
+            "- Grep `pub mod`\n",
+            "- Read `/w/src/missing.rs`\n",
+            "- Agent `Review the change`\n",
+            "- Bash `cargo build`\n",
+            "- Bash `cargo test -p zone_core`\n",
+        ]
+        .concat()
+    );
 }
 
 #[test]

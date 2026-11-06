@@ -54,7 +54,8 @@ pub enum AgentEvent {
     Occupancy(Occupancy),
     /// News of a subagent the agent started for itself. It goes to the turn's
     /// observer rather than the reader: a subagent runs on after the main
-    /// answer, so it is shown beside the answer, not in it.
+    /// answer, so it is shown beside the answer, not in it. A turn nothing
+    /// observes hands it on, and lists the subagent's own calls as reasoning.
     Subagent(Subagent),
     Failed(String),
     Finished {
@@ -106,12 +107,19 @@ impl Paragraphs {
 /// A call of zone's own tools has none: it arrives at zone over MCP, and the
 /// turn shows it as zone's own card, so it would otherwise be shown twice.
 pub fn activity(call: &ToolCall) -> Option<String> {
-    let name = &call.function.name;
+    listed(
+        &call.function.name,
+        subject(&call.function.arguments).as_deref(),
+    )
+}
+
+/// [`activity`]'s line for a tool `name` used on `subject`.
+pub(super) fn listed(name: &str, subject: Option<&str>) -> Option<String> {
     if name.starts_with(&Toolset::qualified(Toolset::SERVER, "")) {
         return None;
     }
-    Some(match subject(&call.function.arguments) {
-        Some(subject) => format!("- {name} {}\n", code_span(&subject)),
+    Some(match subject {
+        Some(subject) => format!("- {name} {}\n", code_span(subject)),
         None => format!("- {name}\n"),
     })
 }
