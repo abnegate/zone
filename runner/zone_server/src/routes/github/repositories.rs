@@ -1,6 +1,3 @@
-//! The repositories an organization's GitHub installations reach, and the
-//! branches of each.
-
 use std::num::{NonZeroU8, NonZeroU32};
 use std::sync::Arc;
 
@@ -21,7 +18,7 @@ use crate::state::AppState;
 
 const DEFAULT_PER_PAGE: u32 = 50;
 
-const MAX_PER_PAGE: u8 = 100;
+const MAXIMUM_PER_PAGE: u8 = 100;
 
 const BRANCH_PAGE_SIZE: NonZeroU8 = NonZeroU8::new(100).unwrap();
 
@@ -69,7 +66,7 @@ pub struct BranchSearch {
 pub struct BranchPath {
     id: Uuid,
     owner: String,
-    repo: String,
+    repository: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -161,7 +158,7 @@ fn page_of(page: u32) -> Result<NonZeroU32, ServerError> {
 fn per_page_of(per_page: u32) -> Result<NonZeroU8, ServerError> {
     u8::try_from(per_page)
         .ok()
-        .filter(|per_page| *per_page <= MAX_PER_PAGE)
+        .filter(|per_page| *per_page <= MAXIMUM_PER_PAGE)
         .and_then(NonZeroU8::new)
         .ok_or_else(|| ServerError::BadRequest(INVALID_PER_PAGE.to_string()))
 }
@@ -221,7 +218,6 @@ pub fn select(
     (selected, total, next_page)
 }
 
-/// `GET /api/organizations/{org_id}/github/repositories`
 pub async fn list(
     member: OrgMember,
     State(state): State<AppState>,
@@ -297,7 +293,6 @@ async fn listed(
         .map_err(|error| Unlisted::of(installation.id, &error))
 }
 
-/// `GET /api/organizations/{org_id}/github/installations/{id}/repositories/{owner}/{repo}/branches`
 pub async fn branches(
     member: OrgMember,
     State(state): State<AppState>,
@@ -308,7 +303,7 @@ pub async fn branches(
     let Query(search) =
         search.map_err(|rejection| ServerError::BadRequest(rejection.body_text()))?;
     let page = page_of(search.page)?;
-    let repository = pull_request::Repository::new(&path.owner, &path.repo)
+    let repository = pull_request::Repository::new(&path.owner, &path.repository)
         .map_err(|_| repository_not_found())?;
     let service = state.config().pull_requests().map_err(|error| {
         tracing::error!(error = %error, "The GitHub API origin is not usable");
