@@ -466,6 +466,7 @@ mod tests {
 
     fn sent(context: &RunContext) -> String {
         render(&project(&context.entries, context.summary.as_ref()).expect("a projectable context"))
+            .text()
     }
 
     fn resets() -> DateTime<Utc> {
