@@ -12,6 +12,7 @@ import type { DiskUsage, InstalledModel, ProviderErrors } from '../types';
 export function useModels(workspaceId?: string) {
   const { isAuthenticated, isLoading: authLoading, logout } = useAuth();
   const [models, setModels] = useState<InstalledModel[]>([]);
+  const [listed, setListed] = useState(workspaceId);
   const [disk, setDisk] = useState<DiskUsage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +20,6 @@ export function useModels(workspaceId?: string) {
   const latest = useRef(0);
 
   const fetchModels = useCallback(async () => {
-    // Wait for auth to finish loading before fetching
     if (authLoading || !isAuthenticated) return;
 
     const request = ++latest.current;
@@ -31,6 +31,7 @@ export function useModels(workspaceId?: string) {
       const response = await modelsApi.getModels(workspaceId);
       if (!current()) return;
       setModels(response.models || []);
+      setListed(workspaceId);
       setProviderErrors(response.errors ?? {});
     } catch (err) {
       if (!current()) return;
@@ -68,5 +69,13 @@ export function useModels(workspaceId?: string) {
     }
   }, []);
 
-  return { models, disk, loading, error, providerErrors, refresh: fetchModels, deleteModel };
+  return {
+    models: listed === workspaceId ? models : [],
+    disk,
+    loading,
+    error,
+    providerErrors,
+    refresh: fetchModels,
+    deleteModel,
+  };
 }

@@ -108,6 +108,31 @@ describe('useModels', () => {
     expect(result.current.models).toEqual(saved);
   });
 
+  it('reports no models for the next workspace until its own arrive', async () => {
+    let answerSecond: (value: unknown) => void = () => {};
+    const second = new Promise((resolve) => {
+      answerSecond = resolve;
+    });
+    const earlier = [{ name: 'llama2', size: 1, modified_at: '' }];
+    const later = [{ name: 'qwen3:8b', size: 1, modified_at: '' }];
+    mockGetModels.mockResolvedValueOnce({ models: earlier }).mockImplementationOnce(() => second);
+
+    const { result, rerender } = renderHook(({ workspace }) => useModels(workspace), {
+      initialProps: { workspace: 'ws-1' },
+    });
+    await waitFor(() => {
+      expect(result.current.models).toEqual(earlier);
+    });
+    rerender({ workspace: 'ws-2' });
+
+    expect(result.current.models).toEqual([]);
+    await act(async () => {
+      answerSecond({ models: later });
+      await second;
+    });
+    expect(result.current.models).toEqual(later);
+  });
+
   it('does not fetch when not authenticated', async () => {
     authState = { isAuthenticated: false, isLoading: false };
 

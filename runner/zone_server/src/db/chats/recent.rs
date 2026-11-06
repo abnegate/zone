@@ -70,11 +70,17 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use abnegate_llm::Message;
+    use serde_json::{Value, json};
     use sqlx::PgPool;
+    use zone_chat::history::ReplayMessage;
 
     use super::*;
     use crate::db::chats::provider::{self, Choice};
     use crate::db::chats::{create_chat_with_title, create_message, update_chat};
+    use crate::db::context::Store;
     use crate::services::stages::AUTO;
 
     struct Fixture {
@@ -153,10 +159,41 @@ mod tests {
             .expect("the chat ages");
         }
 
-        async fn type_in(&self, chat: Uuid) {
-            create_message(&self.pool, chat, "user", "Hello", None)
+        fn store(&self, chat: Uuid) -> Store {
+            Store::new(self.pool.clone(), chat, Some(self.workspace))
+        }
+
+        async fn turn(&self, chat: Uuid, metadata: Option<Value>) {
+            let store = self.store(chat);
+            let lease = store
+                .acquire(Uuid::new_v4(), Duration::from_secs(60))
                 .await
-                .expect("a typed message");
+                .expect("a lease");
+            store
+                .begin(
+                    &lease,
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    "Hello",
+                    metadata,
+                    ReplayMessage::from(&Message::user("Hello")),
+                )
+                .await
+                .expect("a turn");
+            store.release(&lease).await.expect("the lease is released");
+        }
+
+        async fn post(&self, chat: Uuid, role: &str, metadata: Option<Value>) {
+            let store = self.store(chat);
+            let lease = store
+                .acquire(Uuid::new_v4(), Duration::from_secs(60))
+                .await
+                .expect("a lease");
+            store
+                .create_message(&lease, role, "Hello", metadata)
+                .await
+                .expect("a message");
+            store.release(&lease).await.expect("the lease is released");
         }
 
         async fn recent(&self) -> Recent {
@@ -216,10 +253,29 @@ mod tests {
         fixture.age(older, 3).await;
         let newer = fixture.chat(fixture.workspace, "newer", None).await;
 
-        fixture.type_in(older).await;
-        assert_eq!(fixture.recent().await.model_name, "older", "typing counts");
+        fixture.turn(older, None).await;
+        assert_eq!(
+            fixture.recent().await.model_name,
+            "older",
+            "a typed turn counts"
+        );
 
         fixture.age(older, 3).await;
+        fixture.post(newer, "user", None).await;
+        assert_eq!(
+            fixture.recent().await.model_name,
+            "newer",
+            "a posted message counts"
+        );
+        fixture.post(older, "user", None).await;
+        assert_eq!(
+            fixture.recent().await.model_name,
+            "older",
+            "a posted message counts"
+        );
+
+        fixture.age(older, 3).await;
+        fixture.age(newer, 2).await;
         update_chat(
             &fixture.pool,
             newer,
@@ -257,7 +313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automations_and_renames_never_make_a_chat_the_recent_one() {
+    async fn automations_renames_and_uncarried_settings_never_make_a_chat_the_recent_one() {
         let fixture = Fixture::new().await;
         let older = fixture.chat(fixture.workspace, "older", None).await;
         fixture.age(older, 3).await;
@@ -271,17 +327,24 @@ mod tests {
             older,
             "user",
             "Scheduled",
-            Some(serde_json::json!({ "source": "reminder" })),
+            Some(json!({ "source": "reminder" })),
         )
         .await
         .unwrap();
+        fixture
+            .turn(older, Some(json!({ "source": "reminder" })))
+            .await;
+        fixture.post(older, "assistant", None).await;
+        fixture
+            .post(older, "user", Some(json!({ "source": "auto_project" })))
+            .await;
         update_chat(
             &fixture.pool,
             older,
             Some("Renamed"),
             None,
-            None,
-            None,
+            Some(true),
+            Some(true),
             None,
             None,
             None,

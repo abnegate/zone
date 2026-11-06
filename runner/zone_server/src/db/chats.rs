@@ -25,7 +25,7 @@ fn effort(value: &str) -> ReasoningEffort {
 
 /// Whether a member typed the message, rather than a reminder, project or
 /// other automation posting it under the member's role.
-fn typed(role: &str, metadata: Option<&serde_json::Value>) -> bool {
+pub(crate) fn typed(role: &str, metadata: Option<&serde_json::Value>) -> bool {
     role == "user" && metadata.is_none_or(|metadata| metadata.get("source").is_none())
 }
 
@@ -326,8 +326,6 @@ pub async fn update_chat(
     }
     let configured = model_name.is_some()
         || agent_enabled.is_some()
-        || agent_sandboxed.is_some()
-        || auto_approve.is_some()
         || reasoning_effort.is_some()
         || context_tokens.is_some();
     if configured {

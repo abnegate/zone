@@ -929,6 +929,61 @@ async fn the_chat_provider_checks_are_added_unvalidated_and_proven_after() {
     database.cleanup().await;
 }
 
+#[tokio::test]
+async fn chats_start_out_used_when_a_member_last_typed_in_them() {
+    let database = Database::new().await;
+    database.through(15).await;
+    let (workspace, _) = database.workspace().await;
+    let chat = |days: i32| {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO chats(workspace_id,title,model_name,reasoning_effort,created_at,updated_at) \
+             VALUES($1,'Migration','auto','auto',NOW() - make_interval(days => $2),NOW()) RETURNING id",
+        )
+        .bind(workspace)
+        .bind(days)
+        .fetch_one(&database.pool)
+    };
+    let typed = chat(5).await.unwrap();
+    let untouched = chat(3).await.unwrap();
+    for (role, metadata, days) in [
+        ("user", serde_json::json!({}), 4),
+        ("assistant", serde_json::json!({}), 2),
+        ("user", serde_json::json!({ "source": "reminder" }), 1),
+    ] {
+        sqlx::query(
+            "INSERT INTO messages(chat_id,role,content,metadata,created_at) \
+             VALUES($1,$2,'Migration',$3,NOW() - make_interval(days => $4))",
+        )
+        .bind(typed)
+        .bind(role)
+        .bind(metadata)
+        .bind(days)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    }
+    database.through(17).await;
+
+    let age = |chat: Uuid| {
+        sqlx::query_scalar::<_, i32>(
+            "SELECT EXTRACT(DAY FROM NOW() - used_at)::int FROM chats WHERE id=$1",
+        )
+        .bind(chat)
+        .fetch_one(&database.pool)
+    };
+    assert_eq!(
+        age(typed).await.unwrap(),
+        4,
+        "a chat was last used when a member last typed in it, not when a reply or reminder landed"
+    );
+    assert_eq!(
+        age(untouched).await.unwrap(),
+        3,
+        "a chat nobody typed in was last used when it was created"
+    );
+    database.cleanup().await;
+}
+
 /// Every lock a later migration takes on a live table is one ordinary traffic
 /// already holds, and the boot holds sqlx's advisory lock while it queues for
 /// them: an unbounded wait wedges every other instance instead of failing with
