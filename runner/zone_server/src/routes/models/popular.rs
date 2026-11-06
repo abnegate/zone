@@ -2,13 +2,10 @@ mod entries;
 mod manifest_size;
 mod refine;
 
-use abnegate_llm::catalog::BrowseQuery;
-use abnegate_llm::catalog::CatalogError;
-use abnegate_llm::catalog::ModelMediumFilter;
-use abnegate_llm::catalog::ModelPage;
-use abnegate_llm::catalog::ModelProvider;
-use abnegate_llm::catalog::ModelSort;
-use abnegate_llm::catalog::OllamaProvider;
+use abnegate_llm::catalog::{
+    BrowseQuery, CatalogError, ModelMediumFilter, ModelPage, ModelProvider, ModelSort,
+    OllamaProvider,
+};
 
 const PROBE_LIMIT: usize = 1;
 
@@ -82,6 +79,9 @@ fn searched_category(medium: ModelMediumFilter) -> ModelMediumFilter {
     }
 }
 
+/// Zone's popular models that `options` keeps, as one page. Registry sizes
+/// are looked up only for the models that survive the filters: every one of
+/// them when the order is by size, otherwise just the page.
 async fn fallback(
     registry_url: &str,
     proxy_url: Option<&str>,
@@ -90,37 +90,38 @@ async fn fallback(
     let page_size = options.page_size();
     let offset = refine::cursor_offset(options.cursor, page_size)?;
     let client = manifest_size::client(proxy_url)?;
-    let models = entries::popular_models();
-    if matches!(
-        options.sort,
-        ModelSort::SizeAscending | ModelSort::SizeDescending
-    ) {
-        let models = manifest_size::attach(models, &client, registry_url).await;
-        return Ok(refine::paginate(
-            refine::refine(models, options),
-            offset,
-            page_size,
-        ));
+    let mut models = refine::filter(entries::popular_models(), options);
+    if is_size_order(options.sort) {
+        models = manifest_size::attach(models, &client, registry_url).await;
+        refine::sort(&mut models, options.sort);
+        return Ok(refine::paginate(models, offset, page_size));
     }
-    let mut page = refine::paginate(refine::refine(models, options), offset, page_size);
+    refine::sort(&mut models, options.sort);
+    let mut page = refine::paginate(models, offset, page_size);
     page.models = manifest_size::attach(page.models, &client, registry_url).await;
     Ok(page)
+}
+
+fn is_size_order(sort: ModelSort) -> bool {
+    matches!(sort, ModelSort::SizeAscending | ModelSort::SizeDescending)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::Router;
-    use axum::extract::Query;
-    use axum::extract::State;
-    use axum::http::StatusCode;
-    use axum::response::Html;
-    use axum::response::IntoResponse;
-    use axum::response::Response;
-    use axum::routing::get;
+    use abnegate_llm::catalog::ModelSizeFilter;
+    use axum::{
+        Router,
+        extract::{Query, State},
+        http::{HeaderMap, StatusCode, header::USER_AGENT},
+        response::{Html, IntoResponse, Response},
+        routing::get,
+    };
     use std::collections::BTreeMap;
-    use std::sync::Arc;
-    use std::sync::Mutex;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     const NO_CARDS: &str = "<html><body><a href=\"/search\">Models</a></body></html>";
     const TOOL_CARD: &str = "<html><body><a href=\"/library/qwen3\"><p>Qwen 3</p>\
@@ -139,6 +140,13 @@ mod tests {
     struct Search {
         library: Library,
         requests: Mutex<Vec<String>>,
+        fallback_lookups: AtomicUsize,
+    }
+
+    struct Browsed {
+        page: ModelPage,
+        requests: Vec<String>,
+        fallback_lookups: usize,
     }
 
     async fn search_page(
@@ -161,14 +169,23 @@ mod tests {
         }
     }
 
-    async fn browse(library: Library, options: BrowseQuery<'_>) -> (ModelPage, Vec<String>) {
+    async fn manifest(State(search): State<Arc<Search>>, headers: HeaderMap) -> StatusCode {
+        let agent = headers.get(USER_AGENT).map(|value| value.as_bytes());
+        if agent == Some(manifest_size::USER_AGENT.as_bytes()) {
+            search.fallback_lookups.fetch_add(1, Ordering::SeqCst);
+        }
+        StatusCode::NOT_FOUND
+    }
+
+    async fn browse(library: Library, options: BrowseQuery<'_>) -> Browsed {
         let search = Arc::new(Search {
             library,
             requests: Mutex::new(Vec::new()),
+            fallback_lookups: AtomicUsize::new(0),
         });
         let router = Router::new()
             .route("/search", get(search_page))
-            .route("/v2/{*path}", get(|| async { StatusCode::NOT_FOUND }))
+            .route("/v2/{*path}", get(manifest))
             .with_state(search.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -183,16 +200,21 @@ mod tests {
             .await
             .expect("a page");
         let requests = search.requests.lock().expect("requests").clone();
-        (page, requests)
+        Browsed {
+            page,
+            requests,
+            fallback_lookups: search.fallback_lookups.load(Ordering::SeqCst),
+        }
     }
 
     #[tokio::test]
     async fn a_library_page_without_cards_falls_back_to_popular_models() {
-        let (page, requests) = browse(Library::NoCards, BrowseQuery::default()).await;
-        assert_eq!(page.models.len(), 20);
-        assert_eq!(page.models[0].name, "llama3.2");
-        assert_eq!(page.next_cursor.as_deref(), Some("offset:20"));
-        assert_eq!(requests, ["", ""]);
+        let browsed = browse(Library::NoCards, BrowseQuery::default()).await;
+        assert_eq!(browsed.page.models.len(), 20);
+        assert_eq!(browsed.page.models[0].name, "llama3.2");
+        assert_eq!(browsed.page.next_cursor.as_deref(), Some("offset:20"));
+        assert_eq!(browsed.requests, ["", ""]);
+        assert_eq!(browsed.fallback_lookups, 20);
     }
 
     #[tokio::test]
@@ -200,12 +222,12 @@ mod tests {
         let mut options = BrowseQuery::default();
         options.query = Some("coder");
         options.family = Some("llama");
-        options.size = abnegate_llm::catalog::ModelSizeFilter::Small;
+        options.size = ModelSizeFilter::Small;
         options.medium = ModelMediumFilter::Embeddings;
         options.sort = ModelSort::NameDescending;
-        let (_, requests) = browse(Library::NoCards, options).await;
+        let browsed = browse(Library::NoCards, options).await;
         assert_eq!(
-            requests,
+            browsed.requests,
             ["q=coder llama&c=embedding", "q=coder llama&c=embedding"]
         );
     }
@@ -214,47 +236,82 @@ mod tests {
     async fn a_medium_ollama_cannot_search_by_is_left_off_the_probe() {
         let mut options = BrowseQuery::default();
         options.medium = ModelMediumFilter::Text;
-        let (_, requests) = browse(Library::NoCards, options).await;
-        assert_eq!(requests, ["", ""]);
+        let browsed = browse(Library::NoCards, options).await;
+        assert_eq!(browsed.requests, ["", ""]);
     }
 
     #[tokio::test]
     async fn filters_that_empty_a_listed_page_keep_it_empty() {
         let mut options = BrowseQuery::default();
         options.family = Some("qwen");
-        let (page, requests) = browse(Library::PlainCard, options).await;
-        assert!(page.models.is_empty());
-        assert_eq!(page.next_cursor, None);
-        assert_eq!(requests, ["q=qwen", "q=qwen"]);
+        let browsed = browse(Library::PlainCard, options).await;
+        assert!(browsed.page.models.is_empty());
+        assert_eq!(browsed.page.next_cursor, None);
+        assert_eq!(browsed.requests, ["q=qwen", "q=qwen"]);
+        assert_eq!(browsed.fallback_lookups, 0);
     }
 
     #[tokio::test]
-    async fn a_category_page_whose_cards_lack_it_stays_empty_as_zone_left_it() {
+    async fn a_category_page_whose_cards_lack_it_falls_back_to_popular_models_that_lack_it_too() {
         let mut options = BrowseQuery::default();
         options.medium = ModelMediumFilter::Tools;
-        let (listed, _) = browse(Library::ToolCard, options).await;
-        assert_eq!(listed.models.len(), 1);
+        let listed = browse(Library::ToolCard, options).await;
+        assert_eq!(listed.page.models.len(), 1);
+        assert_eq!(listed.requests, ["c=tools"]);
 
-        let (page, requests) = browse(Library::PlainCard, options).await;
-        assert!(page.models.is_empty(), "{:?}", page.models);
-        assert_eq!(requests, ["c=tools", "c=tools"]);
+        let fallen_back = browse(Library::PlainCard, options).await;
+        assert!(
+            fallen_back.page.models.is_empty(),
+            "{:?}",
+            fallen_back.page.models
+        );
+        assert_eq!(fallen_back.requests, ["c=tools", "c=tools"]);
+        assert_eq!(fallen_back.fallback_lookups, 0);
+    }
+
+    #[tokio::test]
+    async fn a_size_order_sizes_no_popular_model_the_medium_drops() {
+        let mut options = BrowseQuery::default();
+        options.medium = ModelMediumFilter::Tools;
+        options.sort = ModelSort::SizeAscending;
+        for library in [Library::NoCards, Library::PlainCard] {
+            let browsed = browse(library, options).await;
+            assert!(browsed.page.models.is_empty(), "{:?}", browsed.page.models);
+            assert_eq!(browsed.requests, ["c=tools", "c=tools"]);
+            assert_eq!(browsed.fallback_lookups, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_size_order_sizes_only_the_popular_models_the_family_keeps() {
+        let mut options = BrowseQuery::default();
+        options.family = Some("qwen");
+        options.sort = ModelSort::SizeDescending;
+        options.limit = 1;
+        let browsed = browse(Library::NoCards, options).await;
+        let kept = refine::filter(entries::popular_models(), &options).len();
+        assert!(kept > 1, "{kept}");
+        assert_eq!(browsed.page.models.len(), 1);
+        assert_eq!(browsed.fallback_lookups, kept);
     }
 
     #[tokio::test]
     async fn a_failed_probe_keeps_the_empty_page() {
         let mut options = BrowseQuery::default();
         options.family = Some("qwen");
-        let (page, requests) = browse(Library::FailsAfterFirst, options).await;
-        assert!(page.models.is_empty());
-        assert_eq!(page.next_cursor, None);
-        assert_eq!(requests.len(), 2);
+        let browsed = browse(Library::FailsAfterFirst, options).await;
+        assert!(browsed.page.models.is_empty());
+        assert_eq!(browsed.page.next_cursor, None);
+        assert_eq!(browsed.requests.len(), 2);
+        assert_eq!(browsed.fallback_lookups, 0);
     }
 
     #[tokio::test]
     async fn a_listed_page_is_answered_without_a_probe() {
-        let (page, requests) = browse(Library::PlainCard, BrowseQuery::default()).await;
-        assert_eq!(page.models[0].name, "mistral");
-        assert_eq!(requests, [""]);
+        let browsed = browse(Library::PlainCard, BrowseQuery::default()).await;
+        assert_eq!(browsed.page.models[0].name, "mistral");
+        assert_eq!(browsed.requests, [""]);
+        assert_eq!(browsed.fallback_lookups, 0);
     }
 
     #[test]

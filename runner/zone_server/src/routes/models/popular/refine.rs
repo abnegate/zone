@@ -1,14 +1,8 @@
-use std::cmp::Ordering;
-use std::cmp::Reverse;
-
-use abnegate_llm::catalog::BrowseQuery;
-use abnegate_llm::catalog::CatalogError;
-use abnegate_llm::catalog::ModelCapability;
-use abnegate_llm::catalog::ModelEntry;
-use abnegate_llm::catalog::ModelMediumFilter;
-use abnegate_llm::catalog::ModelPage;
-use abnegate_llm::catalog::ModelSizeFilter;
-use abnegate_llm::catalog::ModelSort;
+use abnegate_llm::catalog::{
+    BrowseQuery, CatalogError, ModelCapability, ModelEntry, ModelMediumFilter, ModelPage,
+    ModelSizeFilter, ModelSort,
+};
+use std::cmp::{Ordering, Reverse};
 
 const OFFSET_PREFIX: &str = "offset:";
 const PAGE_PREFIX: &str = "page:";
@@ -19,10 +13,9 @@ const SMALL_BELOW: f64 = 4.0;
 const MEDIUM_BELOW: f64 = 16.0;
 const LARGE_BELOW: f64 = 40.0;
 
-/// The models `options` keeps, in the order it asks for.
-pub(super) fn refine(mut models: Vec<ModelEntry>, options: &BrowseQuery<'_>) -> Vec<ModelEntry> {
+/// The models `options`' family, size and medium keep.
+pub(super) fn filter(mut models: Vec<ModelEntry>, options: &BrowseQuery<'_>) -> Vec<ModelEntry> {
     models.retain(|model| matches_query(model, options));
-    sort(&mut models, options.sort);
     models
 }
 
@@ -97,8 +90,6 @@ fn matches_size(model: &ModelEntry, size: ModelSizeFilter) -> bool {
 }
 
 fn matches_medium(model: &ModelEntry, medium: ModelMediumFilter) -> bool {
-    use ModelCapability::*;
-
     let wanted: &[ModelCapability] = match medium {
         ModelMediumFilter::Text => {
             return match model.capabilities.as_deref() {
@@ -106,18 +97,34 @@ fn matches_medium(model: &ModelEntry, medium: ModelMediumFilter) -> bool {
                 Some(capabilities) => capabilities.iter().any(|capability| {
                     matches!(
                         capability,
-                        Text | ImageInput | VideoInput | Audio | AudioInput | Tools | Reasoning
+                        ModelCapability::Text
+                            | ModelCapability::ImageInput
+                            | ModelCapability::VideoInput
+                            | ModelCapability::Audio
+                            | ModelCapability::AudioInput
+                            | ModelCapability::Tools
+                            | ModelCapability::Reasoning
                     )
                 }),
             };
         }
-        ModelMediumFilter::Image => &[ImageInput, ImageGeneration],
-        ModelMediumFilter::ImageGeneration => &[ImageGeneration],
-        ModelMediumFilter::Video => &[VideoInput, VideoGeneration],
-        ModelMediumFilter::Audio => &[Audio, AudioInput, AudioGeneration],
-        ModelMediumFilter::Tools => &[Tools],
-        ModelMediumFilter::Embeddings => &[Embeddings],
-        ModelMediumFilter::Reasoning => &[Reasoning],
+        ModelMediumFilter::Image => &[
+            ModelCapability::ImageInput,
+            ModelCapability::ImageGeneration,
+        ],
+        ModelMediumFilter::ImageGeneration => &[ModelCapability::ImageGeneration],
+        ModelMediumFilter::Video => &[
+            ModelCapability::VideoInput,
+            ModelCapability::VideoGeneration,
+        ],
+        ModelMediumFilter::Audio => &[
+            ModelCapability::Audio,
+            ModelCapability::AudioInput,
+            ModelCapability::AudioGeneration,
+        ],
+        ModelMediumFilter::Tools => &[ModelCapability::Tools],
+        ModelMediumFilter::Embeddings => &[ModelCapability::Embeddings],
+        ModelMediumFilter::Reasoning => &[ModelCapability::Reasoning],
         _ => return true,
     };
     model.capabilities.as_deref().is_some_and(|capabilities| {
@@ -127,7 +134,8 @@ fn matches_medium(model: &ModelEntry, medium: ModelMediumFilter) -> bool {
     })
 }
 
-fn sort(models: &mut [ModelEntry], sort: ModelSort) {
+/// `models` in the order `sort` asks for.
+pub(super) fn sort(models: &mut [ModelEntry], sort: ModelSort) {
     match sort {
         ModelSort::NameAscending => models.sort_by_key(|model| model.name.to_lowercase()),
         ModelSort::NameDescending => models.sort_by_key(|model| Reverse(model.name.to_lowercase())),
@@ -250,6 +258,11 @@ mod tests {
         models.iter().map(|model| model.name.as_str()).collect()
     }
 
+    fn sorted(mut models: Vec<ModelEntry>, order: ModelSort) -> Vec<ModelEntry> {
+        sort(&mut models, order);
+        models
+    }
+
     #[test]
     fn millions_and_billions_read_as_billions() {
         assert_eq!(parse_billions("3.8B"), Some(3.8));
@@ -302,21 +315,18 @@ mod tests {
             model("large", "llama", "8B", Some(8)),
             model("small", "llama", "3B", Some(3)),
         ];
-        let mut options = BrowseQuery::default();
-        options.sort = ModelSort::SizeAscending;
         assert_eq!(
-            names(&refine(models.clone(), &options)),
+            names(&sorted(models.clone(), ModelSort::SizeAscending)),
             ["small", "large", "unsized"]
         );
-        options.sort = ModelSort::SizeDescending;
         assert_eq!(
-            names(&refine(models, &options)),
+            names(&sorted(models, ModelSort::SizeDescending)),
             ["large", "small", "unsized"]
         );
     }
 
     #[test]
-    fn refine_filters_then_sorts() {
+    fn a_filter_keeps_the_family_in_its_listed_order() {
         let models = vec![
             model("qwen2.5", "qwen", "7B", None),
             model("llama3.2", "llama", "3B", None),
@@ -324,8 +334,12 @@ mod tests {
         ];
         let mut options = BrowseQuery::default();
         options.family = Some("llama");
-        options.sort = ModelSort::NameAscending;
-        assert_eq!(names(&refine(models, &options)), ["codellama", "llama3.2"]);
+        let kept = filter(models, &options);
+        assert_eq!(names(&kept), ["llama3.2", "codellama"]);
+        assert_eq!(
+            names(&sorted(kept, ModelSort::NameAscending)),
+            ["codellama", "llama3.2"]
+        );
     }
 
     #[test]
