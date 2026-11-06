@@ -36,6 +36,10 @@ impl From<sqlx::Error> for Error {
 }
 
 impl Error {
+    pub fn disconnects(&self) -> bool {
+        matches!(self, Self::Revoked | Self::Suspended | Self::NotConnected)
+    }
+
     pub(super) fn duplicate(&self) -> Self {
         match self {
             Self::Application(fault) => Self::Application(Self::application(fault)),
@@ -116,6 +120,24 @@ mod tests {
                 std::mem::discriminant(&duplicate),
                 std::mem::discriminant(&error)
             );
+        }
+    }
+
+    #[test]
+    fn only_a_lost_connection_disconnects() {
+        for error in [Error::Revoked, Error::Suspended, Error::NotConnected] {
+            assert!(error.disconnects(), "{error:?}");
+        }
+
+        for error in [
+            Error::Sealing,
+            Error::Unsealing,
+            Error::Credential,
+            Error::from(ApplicationError::Status(404)),
+            Error::from(ApplicationError::Transport("refused".to_string())),
+            Error::from(sqlx::Error::PoolTimedOut),
+        ] {
+            assert!(!error.disconnects(), "{error:?}");
         }
     }
 

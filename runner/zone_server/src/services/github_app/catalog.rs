@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use abnegate_secret::SecretValue;
-use abnegate_vcs::pull_request::{ApplicationError, ApplicationService, InstalledRepository};
+use abnegate_vcs::pull_request::{ApplicationService, InstalledRepository};
 use uuid::Uuid;
 
 use entry::Entry;
@@ -126,7 +126,7 @@ impl Catalog {
     pub(super) async fn listed(
         applications: &ApplicationService,
         token: SecretValue,
-    ) -> Result<Vec<InstalledRepository>, ApplicationError> {
+    ) -> Result<Vec<InstalledRepository>, Error> {
         let mut repositories = Vec::new();
         let mut next = Some(NonZeroU32::MIN);
         while let Some(page) = next {
@@ -180,6 +180,7 @@ mod tests {
     use std::sync::LazyLock;
 
     use abnegate_secret::MasterKey;
+    use abnegate_vcs::pull_request::ApplicationError;
     use abnegate_vcs::{RemoteBranchName, Repository};
     use futures::future::join_all;
     use serde_json::{Value, json};

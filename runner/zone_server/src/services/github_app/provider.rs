@@ -128,9 +128,8 @@ impl Provider {
             .organization_installation(db, organization_id, installation)
             .await?;
         let applications = self.applications()?;
-        Ok(self
-            .retrying(db, credential, |token| Catalog::listed(applications, token))
-            .await?)
+        self.retrying(db, credential, |token| Catalog::listed(applications, token))
+            .await
     }
 
     pub fn seal(&self, secret: &SecretValue) -> Result<String, Error> {
@@ -295,19 +294,19 @@ impl Provider {
     where
         F: Fn(SecretValue) -> Fut,
         Fut: Future<Output = Result<T, E>>,
-        E: Unauthenticated,
+        E: Unauthenticated + From<Error>,
     {
-        let scope = credential.scope();
+        let Some(scope) = credential.scope() else {
+            return call(credential.into_secret()).await;
+        };
         let refused = match call(credential.into_secret()).await {
             Err(error) if error.unauthenticated() => error,
             answered => return answered,
         };
-        let Some(scope) = scope else {
-            return Err(refused);
-        };
 
         match self.refreshed(db, scope).await {
             Ok(fresh) => call(fresh.into_secret()).await,
+            Err(error) if error.disconnects() => Err(E::from(error)),
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -494,6 +493,7 @@ mod tests {
     use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
     use crate::secret::fixture::seal;
     use crate::secret::fixture::seal_legacy;
+    use crate::services::github_app::Failure;
     use crate::services::github_app::testing::{
         TEST_PRIVATE_KEY, installation_number, installed, issuing, provider, uninstalled,
     };
@@ -868,9 +868,12 @@ mod tests {
         credential: Credential,
         service: &PullRequestService,
         repository: &Repository,
-    ) -> Result<BranchName, PullRequestError> {
+    ) -> Result<BranchName, Failure<PullRequestError>> {
         assert_send(provider.retrying(db, credential, |token| async move {
-            service.get_default_branch(repository, &token).await
+            service
+                .get_default_branch(repository, &token)
+                .await
+                .map_err(Failure::Call)
         }))
         .await
     }
@@ -881,9 +884,12 @@ mod tests {
         credential: Credential,
         service: &PullRequestService,
         repository: &Repository,
-    ) -> Result<(BranchName, SecretValue), PullRequestError> {
+    ) -> Result<(BranchName, SecretValue), Failure<PullRequestError>> {
         assert_send(provider.retrying(db, credential, |token| async move {
-            let branch = service.get_default_branch(repository, &token).await?;
+            let branch = service
+                .get_default_branch(repository, &token)
+                .await
+                .map_err(Failure::Call)?;
             Ok((branch, token))
         }))
         .await
@@ -1505,12 +1511,15 @@ mod tests {
         let error = provider
             .retrying(&pool, credential, |_token| async {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(PullRequestError::AuthenticationFailed)
+                Err::<(), _>(Failure::Call(PullRequestError::AuthenticationFailed))
             })
             .await
             .expect_err("the stored token was refused");
 
-        assert!(matches!(error, PullRequestError::AuthenticationFailed));
+        assert!(matches!(
+            error,
+            Failure::Call(PullRequestError::AuthenticationFailed)
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1526,12 +1535,12 @@ mod tests {
             .provider
             .retrying(&connected.pool, credential, |_token| async {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(PullRequestError::NotFound)
+                Err::<(), _>(Failure::Call(PullRequestError::NotFound))
             })
             .await
             .expect_err("the repository is missing");
 
-        assert!(matches!(error, PullRequestError::NotFound));
+        assert!(matches!(error, Failure::Call(PullRequestError::NotFound)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1548,17 +1557,20 @@ mod tests {
             .provider
             .retrying(&connected.pool, credential, |_token| async {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(PullRequestError::AuthenticationFailed)
+                Err::<(), _>(Failure::Call(PullRequestError::AuthenticationFailed))
             })
             .await
             .expect_err("the token was refused and no fresh one could be minted");
 
-        assert!(matches!(error, PullRequestError::AuthenticationFailed));
+        assert!(matches!(
+            error,
+            Failure::Call(PullRequestError::AuthenticationFailed)
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn a_remint_refused_by_a_revocation_returns_the_original_error() {
+    async fn a_remint_refused_by_a_revocation_surfaces_the_revocation() {
         let server = MockServer::start().await;
         let connected = Connected::new(&server).await;
         issuing_once(&server, connected.number, "ghs_first").await;
@@ -1569,13 +1581,65 @@ mod tests {
         let error = connected
             .provider
             .retrying(&connected.pool, credential, |_token| async {
-                Err::<(), _>(PullRequestError::AuthenticationFailed)
+                Err::<(), _>(Failure::Call(PullRequestError::AuthenticationFailed))
             })
             .await
             .expect_err("the installation was removed");
 
-        assert!(matches!(error, PullRequestError::AuthenticationFailed));
+        assert!(
+            matches!(error, Failure::Connection(Error::Revoked)),
+            "{error:?}"
+        );
         assert_eq!(connected.status().await, InstallationStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn a_remint_of_an_installation_suspended_meanwhile_surfaces_the_suspension() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_first", 1).await;
+        let credential = connected.resolve().await.expect("mint");
+        github_installations::mark_suspended(&connected.pool, connected.installation)
+            .await
+            .expect("suspend");
+
+        let error = connected
+            .provider
+            .retrying(&connected.pool, credential, |_token| async {
+                Err::<(), _>(Error::Application(ApplicationError::Status(401)))
+            })
+            .await
+            .expect_err("the installation was suspended");
+
+        assert!(matches!(error, Error::Suspended), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_remint_of_an_installation_removed_meanwhile_surfaces_not_connected() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_first", 1).await;
+        let credential = connected.resolve().await.expect("mint");
+        github_installations::delete(
+            &connected.pool,
+            connected.organization,
+            connected.installation,
+        )
+        .await
+        .expect("remove the installation");
+
+        let error = connected
+            .provider
+            .retrying(&connected.pool, credential, |_token| async {
+                Err::<(), _>(Failure::Call(PullRequestError::AuthenticationFailed))
+            })
+            .await
+            .expect_err("the installation is gone");
+
+        assert!(
+            matches!(error, Failure::Connection(Error::NotConnected)),
+            "{error:?}"
+        );
     }
 
     fn app_row(provider: &Provider, app_id: i64) -> AppRow {
@@ -1714,7 +1778,7 @@ mod tests {
                     let mut seen = tokens.lock().expect("tokens");
                     seen.push(token.expose().to_string());
                     match seen.len() {
-                        1 => Err(ApplicationError::Status(401)),
+                        1 => Err(Error::Application(ApplicationError::Status(401))),
                         _ => Ok(token),
                     }
                 }

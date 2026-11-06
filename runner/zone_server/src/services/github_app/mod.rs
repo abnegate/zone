@@ -6,6 +6,7 @@ pub mod address;
 pub mod catalog;
 pub mod credential;
 pub mod error;
+pub mod failure;
 mod flight;
 mod flights;
 pub mod installations;
@@ -26,6 +27,7 @@ pub mod testing;
 
 pub use credential::Credential;
 pub use error::Error;
+pub use failure::Failure;
 pub use provider::Provider;
 pub use unauthenticated::Unauthenticated;
 pub use unrecorded::Unrecorded;
