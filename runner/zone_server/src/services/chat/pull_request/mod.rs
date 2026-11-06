@@ -6,6 +6,7 @@ mod auto_merge;
 mod cache;
 mod changes;
 mod checks;
+mod connection;
 mod credential;
 mod detection;
 mod error;
@@ -34,6 +35,7 @@ use crate::state::AppState;
 pub use auto_merge::AutoMerge;
 pub use cache::StatusCache;
 pub use checks::Checks;
+pub use connection::Connection;
 pub use error::Error;
 pub use mergeable::Mergeable;
 pub use opened::Opened;
@@ -72,15 +74,18 @@ pub async fn track(state: &AppState, workspace_id: Uuid, row: PullRequestRow) ->
         return Ok(Tracked {
             row,
             status: Some(cached),
-            credentialed: true,
+            connection: Connection::Credentialed,
         });
     }
-    let Some(credential) = credential(state, workspace_id, &row).await? else {
-        return Ok(Tracked {
-            row,
-            status: None,
-            credentialed: false,
-        });
+    let credential = match credential(state, workspace_id, &row).await? {
+        Ok(credential) => credential,
+        Err(connection) => {
+            return Ok(Tracked {
+                row,
+                status: None,
+                connection,
+            });
+        }
     };
     let status = match observed(state, &row, credential).await {
         Ok(status) => {
@@ -95,7 +100,7 @@ pub async fn track(state: &AppState, workspace_id: Uuid, row: PullRequestRow) ->
     Ok(Tracked {
         row,
         status,
-        credentialed: true,
+        connection: Connection::Credentialed,
     })
 }
 
@@ -182,17 +187,21 @@ async fn open(state: &AppState, workspace_id: Uuid, row: &PullRequestRow) -> Res
     })
 }
 
-/// The credential of the source that can act on `row`, if one can. A source
-/// whose credential cannot be had counts as none.
+/// The credential of the source that can act on `row`, or else why the
+/// workspace cannot reach GitHub for it.
 async fn credential(
     state: &AppState,
     workspace_id: Uuid,
     row: &PullRequestRow,
-) -> DbResult<Option<Credential>> {
+) -> DbResult<Result<Credential, Connection>> {
     let Some(source) = credential::source(state, workspace_id, row).await? else {
-        return Ok(None);
+        return Ok(Err(Connection::Uncredentialed));
     };
-    Ok(resolved(state, row, &source).await.ok().flatten())
+    Ok(match resolved(state, row, &source).await {
+        Ok(Some(credential)) => Ok(credential),
+        Ok(None) => Err(Connection::Uncredentialed),
+        Err(error) => Err(Connection::from(error)),
+    })
 }
 
 async fn required(

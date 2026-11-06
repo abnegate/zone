@@ -123,6 +123,29 @@ fn refused(error: Error) -> ServerError {
         | Error::Disconnected
         | Error::Unauthenticated
         | Error::Refused(_) => ServerError::Conflict(error.to_string()),
-        Error::Unreachable | Error::Storage => ServerError::Internal(error.to_string()),
+        Error::Unreachable => ServerError::BadGateway(error.to_string()),
+        Error::Storage => ServerError::Internal(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_out_of_reach_is_a_bad_gateway() {
+        assert!(matches!(
+            refused(Error::Unreachable),
+            ServerError::BadGateway(message) if message == Error::Unreachable.to_string()
+        ));
+        assert!(matches!(refused(Error::Storage), ServerError::Internal(_)));
+        for error in [
+            Error::Uncredentialed,
+            Error::Disconnected,
+            Error::Unauthenticated,
+            Error::Refused("Resource not accessible by integration".to_string()),
+        ] {
+            assert!(matches!(refused(error), ServerError::Conflict(_)));
+        }
     }
 }
