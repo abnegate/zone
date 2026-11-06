@@ -7,7 +7,7 @@
   top: 100%;
   left: 0;
   right: 0;
-  z-index: 100;
+  z-index: var(--ui-layer-popover);
   margin-top: var(--ui-space-1);
   max-height: 20rem;
   overflow-y: auto;
@@ -16,12 +16,6 @@
   border-radius: var(--ui-radius-lg);
   box-shadow: var(--ui-shadow-lg);
   animation: ui-fade-down var(--ui-duration-fast) var(--ui-ease-out);
-}
-
-.repository-picker-popup ul {
-  margin: 0;
-  padding: 0;
-  list-style: none;
 }
 
 .repository-picker-popup > [role='listbox'] > [role='group'] {
