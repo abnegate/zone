@@ -393,7 +393,9 @@ make install-cli
 
 ### Database Migrations
 
-Migrations are in `runner/zone_server/migrations/`. Fresh installs apply the squashed `001_initial_schema.sql`, then each later numbered migration in order.
+Migrations are in `runner/zone_server/migrations/`. Fresh installs apply the `0001_v1.sql` baseline, then each later migration in order. Number a new migration after the highest one there (`0002_…`), and never edit one that has shipped: databases record its checksum and refuse to boot when it changes.
+
+A database migrated before the v1 baseline, through `024_chat_subagents.sql`, moves onto it at the next boot: the server swaps its 23 ledger rows for the baseline's one and leaves the schema and data alone. A database stopped short of 024 is refused; start a build from commit `218739e7` against it once to finish those migrations, then upgrade.
 
 ### Project Structure
 
