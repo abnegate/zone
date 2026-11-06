@@ -51,6 +51,8 @@ const AUTHOR_EMAIL: &str = "zone@localhost";
 
 const BRANCH_PREFIX: &str = "zone/task";
 
+const LOST_LEASE: &str = "Task execution lost its lease";
+
 pub(crate) const MISMATCHED_ORIGIN: &str =
     "Checkout repository no longer matches the task repository";
 
@@ -148,10 +150,10 @@ impl Repository {
     /// The repository a task works in, and the candidate holding it whose
     /// credential may reach it. A requested repository no candidate holds
     /// has no holder, so no credential is ever used for another repository.
-    fn select<T>(
-        requested: Option<RepositoryUrl>,
-        candidates: Vec<(RepositoryUrl, T)>,
-    ) -> Result<Option<(RepositoryUrl, Option<T>)>, String> {
+    pub(crate) fn select<Key: PartialEq, T>(
+        requested: Option<Key>,
+        candidates: Vec<(Key, T)>,
+    ) -> Result<Option<(Key, Option<T>)>, String> {
         if let Some(url) = requested {
             let holder = candidates
                 .into_iter()
@@ -249,14 +251,14 @@ impl Checkout {
         execution: tasks::Execution,
     ) -> Result<Self, String> {
         let tasks::Execution { run, owner, .. } = execution;
-        let repository = Repository::resolve(pool, github, task).await?;
         if !execution
             .authorized(pool, false)
             .await
             .map_err(|_| "Cannot verify checkout ownership")?
         {
-            return Err("Task execution lost its lease".to_string());
+            return Err(LOST_LEASE.to_string());
         }
+        let repository = Repository::resolve(pool, github, task).await?;
         // The run and owner are durable before a directory can exist. Recovery
         // derives names only from these identifiers, never from a stored path.
         let root = Self::root(pool);
@@ -1844,7 +1846,7 @@ mod tests {
         github: Provider,
         installation: Uuid,
         task: TaskRow,
-        _server: wiremock::MockServer,
+        server: wiremock::MockServer,
     }
 
     async fn connected(token: &str, mints: u64) -> Connected {
@@ -1891,7 +1893,7 @@ mod tests {
             github,
             installation,
             task,
-            _server: server,
+            server,
         }
     }
 
@@ -1930,6 +1932,39 @@ mod tests {
         assert_eq!(
             error,
             crate::services::github_app::Error::Revoked.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unauthorized_run_mints_no_installation_token() {
+        let connected = connected("ghs_unused", 0).await;
+        let run = tasks::create_task_run(&connected.pool, connected.task.id)
+            .await
+            .unwrap();
+        let unclaimed = tasks::Execution {
+            task: connected.task.id,
+            run: run.id,
+            owner: Uuid::new_v4(),
+            actor: None,
+        };
+
+        let prepared = Checkout::prepare(
+            &connected.pool,
+            &connected.github,
+            &connected.task,
+            unclaimed,
+        )
+        .await;
+
+        assert_eq!(prepared.err().as_deref(), Some(LOST_LEASE));
+        assert!(
+            connected
+                .server
+                .received_requests()
+                .await
+                .unwrap()
+                .is_empty(),
+            "a run without its lease must not ask GitHub for a token"
         );
     }
 }
