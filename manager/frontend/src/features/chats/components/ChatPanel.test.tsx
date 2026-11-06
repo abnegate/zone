@@ -9,6 +9,7 @@ import type { ChatPullRequest, ChatTask } from '../types';
 import type { GalleryItem } from '../utils/gallery';
 import { PANEL_WIDTH } from '../utils/panel';
 import type { ChatSource, ChatSources, SourceRequest } from '../utils/sources';
+import { groupByMessage } from '../utils/subagents';
 import { ChatPanel } from './ChatPanel';
 
 const PULL_REQUEST: ChatPullRequest = {
@@ -62,7 +63,8 @@ const SUBAGENT: ChatSubagent = {
   last_tool: 'Read',
   summary: 'Looks right.',
   error: null,
-  steps: [{ id: 'toolu_x1', name: 'Read', subject: 'src/cart.ts', status: 'succeeded' }],
+  step_count: 1,
+  revision: 3,
   started_at: '2026-11-05T10:00:00Z',
   finished_at: '2026-11-05T10:00:42Z',
   updated_at: '2026-11-05T10:00:42Z',
@@ -117,8 +119,15 @@ function changes(pullRequests: ChatPullRequest[] = []): ChatPullRequests {
   };
 }
 
-function agents(subagents: ChatSubagent[]): ChatSubagents {
-  return { subagents, error: null, refresh: mock(async () => undefined) };
+function agents(subagents: ChatSubagent[] = [], error: string | null = null): ChatSubagents {
+  return {
+    subagents,
+    byMessage: groupByMessage(subagents),
+    steps: {},
+    error,
+    refresh: mock(async () => undefined),
+    loadSteps: mock(async () => undefined),
+  };
 }
 
 function tasked(tasks: ChatTask[] = [], error: string | null = null): ChatTasks {
@@ -128,6 +137,7 @@ function tasked(tasks: ChatTask[] = [], error: string | null = null): ChatTasks 
 interface PanelOptions {
   pullRequests?: ChatPullRequest[];
   subagents?: ChatSubagent[];
+  subagentsError?: string;
   shownSubagent?: SubagentRequest | null;
   tasks?: ChatTask[];
   tasksError?: string;
@@ -149,7 +159,7 @@ function panel(
         chatId="chat-1"
         userId={options.userId ?? 'user-1'}
         changes={changes(options.pullRequests)}
-        subagents={options.subagents && agents(options.subagents)}
+        subagents={agents(options.subagents, options.subagentsError ?? null)}
         shownSubagent={options.shownSubagent ?? null}
         onSubagentShown={onSubagentShown}
         tasks={tasked(options.tasks, options.tasksError ?? null)}
@@ -336,14 +346,18 @@ describe('ChatPanel', () => {
     ).toBeInTheDocument();
   });
 
-  it('leaves the agents out when it is given none, or none were started', () => {
-    const { unmount } = renderPanel({ media: [IMAGE] });
+  it('leaves the agents out of a chat that started none', () => {
+    renderPanel({ subagents: [], media: [IMAGE] });
+
     expect(screen.queryByRole('button', { name: /^Agents, \d/ })).toBeNull();
     expect(screen.getByRole('button', { name: /: 1 media item$/ })).toBeInTheDocument();
-    unmount();
+  });
 
-    renderPanel({ subagents: [], media: [IMAGE] });
-    expect(screen.queryByRole('button', { name: /^Agents, \d/ })).toBeNull();
+  it('shows why the agents could not be read even before any were listed', () => {
+    renderPanel({ subagentsError: 'Failed to load agents' });
+
+    expect(screen.getByRole('button', { name: 'Agents, 0' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Failed to load agents');
   });
 
   it('comes back from its rail to show and expand the agent a chip points to', async () => {

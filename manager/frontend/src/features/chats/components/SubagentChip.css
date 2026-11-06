@@ -53,27 +53,3 @@
 .chat-subagent-chip-status {
   flex: none;
 }
-
-.chat-subagent-chip-pulse {
-  width: var(--ui-space-1-5);
-  height: var(--ui-space-1-5);
-  border-radius: 50%;
-  background: currentColor;
-  animation: chat-subagent-chip-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes chat-subagent-chip-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.25;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .chat-subagent-chip-pulse {
-    animation: none;
-  }
-}

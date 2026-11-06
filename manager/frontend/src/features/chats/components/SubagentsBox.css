@@ -80,14 +80,6 @@ button.chat-subagent-title {
   flex-shrink: 0;
 }
 
-.chat-subagent-pulse {
-  width: var(--ui-space-1-5);
-  height: var(--ui-space-1-5);
-  border-radius: 50%;
-  background: currentColor;
-  animation: chat-subagent-pulse 1.2s ease-in-out infinite;
-}
-
 .chat-subagent-meta {
   min-width: 0;
   overflow: hidden;
@@ -114,11 +106,66 @@ button.chat-subagent-title {
 }
 
 .chat-subagent-summary {
+  --chat-subagent-summary-lines: 3;
+
   color: var(--ui-text-secondary);
+}
+
+.chat-subagent-summary[data-clamped='true'] {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--chat-subagent-summary-lines);
+  line-clamp: var(--chat-subagent-summary-lines);
+}
+
+.chat-subagent-summary-toggle,
+.chat-subagent-steps-retry {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-accent);
+  font: inherit;
+  font-size: var(--ui-text-xs);
+  cursor: pointer;
+}
+
+.chat-subagent-summary-toggle {
+  align-self: flex-start;
+}
+
+.chat-subagent-summary-toggle:hover,
+.chat-subagent-steps-retry:hover {
+  text-decoration: underline;
+}
+
+.chat-subagent-summary-toggle:focus-visible,
+.chat-subagent-steps-retry:focus-visible {
+  border-radius: var(--ui-radius-sm);
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
 }
 
 .chat-subagent-error {
   color: var(--chat-change-removed);
+}
+
+.chat-subagent-steps-region {
+  padding: 0 0 0 var(--ui-space-4);
+}
+
+.chat-subagent-steps-note {
+  margin: 0;
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-xs);
+}
+
+.chat-subagent-steps-error {
+  color: var(--chat-change-removed);
+}
+
+.chat-subagent-steps-retry {
+  margin-left: var(--ui-space-1-5);
 }
 
 .chat-subagent-steps {
@@ -126,7 +173,7 @@ button.chat-subagent-title {
   flex-direction: column;
   gap: var(--ui-space-0-5);
   margin: 0;
-  padding: 0 0 0 var(--ui-space-4);
+  padding: 0;
   list-style: none;
 }
 
@@ -157,7 +204,7 @@ button.chat-subagent-title {
 
 .chat-subagent-step--running .chat-subagent-step-status {
   background: var(--ui-accent);
-  animation: chat-subagent-pulse 1.2s ease-in-out infinite;
+  animation: chat-subagent-pulse var(--chat-subagent-pulse-duration) ease-in-out infinite;
 }
 
 .chat-subagent-step-name {
@@ -184,18 +231,7 @@ button.chat-subagent-title {
   font-size: var(--ui-text-xs);
 }
 
-@keyframes chat-subagent-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.25;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .chat-subagent-pulse,
   .chat-subagent-step--running .chat-subagent-step-status,
   .chat-subagent-caret {
     animation: none;

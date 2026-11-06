@@ -39,7 +39,7 @@ export interface ChatPanelProps {
   chatId: string;
   userId: string | null;
   changes: ChatPullRequests;
-  subagents?: ChatSubagents;
+  subagents: ChatSubagents;
   tasks: ChatTasks;
   media: readonly GalleryItem[];
   sources: ChatSources;
@@ -183,8 +183,7 @@ export function ChatPanel({
   }, [resizing, resize, widthKey]);
 
   const showsChanges = changes.pullRequests.length > 0 || changes.dismissed !== null;
-  const agents = subagents?.subagents ?? [];
-  const showsSubagents = agents.length > 0;
+  const showsSubagents = subagents.subagents.length > 0 || subagents.error !== null;
   const showsTasks = tasks.tasks.length > 0 || tasks.error !== null;
   const showsGallery = media.length > 0;
   const showsSources = sources.all.length > 0;
@@ -220,7 +219,7 @@ export function ChatPanel({
 
   const summary = [
     showsChanges ? counted(changes.pullRequests.length, 'change', 'changes') : null,
-    showsSubagents ? counted(agents.length, 'agent', 'agents') : null,
+    showsSubagents ? counted(subagents.subagents.length, 'agent', 'agents') : null,
     showsTasks ? counted(tasks.tasks.length, 'task', 'tasks') : null,
     showsGallery ? counted(media.length, 'media item', 'media items') : null,
     showsSources ? counted(sources.all.length, 'source', 'sources') : null,
@@ -231,7 +230,7 @@ export function ChatPanel({
   const boxes = (target: Placement) => {
     const rendered: Record<PanelBoxId, ReactNode> = {
       changes: showsChanges && <ChangesBox chatId={chatId} userId={userId} changes={changes} />,
-      subagents: showsSubagents && subagents && (
+      subagents: showsSubagents && (
         <SubagentsBox
           key={chatId}
           userId={userId}

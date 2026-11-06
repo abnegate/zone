@@ -12,7 +12,10 @@ export interface SubagentStep {
   status: StepStatus;
 }
 
-/** A Claude Code or Codex subagent, keyed to the assistant message whose turn started it. */
+/**
+ * A Claude Code or Codex subagent, keyed to the assistant message whose turn started it.
+ * Its steps are read on demand; `revision` orders two copies of the same row.
+ */
 export interface ChatSubagent {
   id: string;
   chat_id: string;
@@ -29,7 +32,8 @@ export interface ChatSubagent {
   last_tool: string | null;
   summary: string | null;
   error: string | null;
-  steps: SubagentStep[];
+  step_count: number;
+  revision: number;
   started_at: string;
   finished_at: string | null;
   updated_at: string;

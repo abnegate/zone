@@ -28,6 +28,7 @@ import '../features/chats/pages/ChatsPage.css';
 import '../features/chats/components/ChatPanel.css';
 import '../features/chats/components/SourcesBox.css';
 import '../features/chats/components/TasksBox.css';
+import '../features/chats/components/SubagentPulse.css';
 import '../features/chats/components/SubagentsBox.css';
 import '../features/chats/components/SubagentChip.css';
 import '../features/settings/organization/components/AuditLogsSection.css';

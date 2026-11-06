@@ -1,4 +1,4 @@
-import type { ChatSubagent, StepStatus, SubagentStatus } from '../subagentTypes';
+import type { ChatSubagent, StepStatus, SubagentStatus, SubagentStep } from '../subagentTypes';
 import type { TaskTint } from './tasks';
 
 const SECOND = 1_000;
@@ -7,6 +7,7 @@ const HOUR = 60 * MINUTE;
 const MILLISECOND_DIGITS = 3;
 const FRACTIONAL_SECONDS = /T[^.]*\.(\d+)/;
 const UNNAMED = 'Agent';
+const LABEL_PREFIX = `${UNNAMED}: `;
 
 const STATUS_LABELS: Record<SubagentStatus, string> = {
   running: 'Running',
@@ -42,8 +43,8 @@ export function instant(stamp: string | null): number {
   return beyond ? milliseconds + Number(`0.${beyond}`) : milliseconds;
 }
 
-function newer(candidate: ChatSubagent, held: ChatSubagent): boolean {
-  return !(instant(held.updated_at) > instant(candidate.updated_at));
+function supersedes(candidate: ChatSubagent, held: ChatSubagent): boolean {
+  return candidate.revision >= held.revision;
 }
 
 function startOrder(stamp: string): number {
@@ -58,13 +59,16 @@ function byStart(left: ChatSubagent, right: ChatSubagent): number {
   return left.id < right.id ? -1 : 1;
 }
 
-/** Folds rows into a list, keeping whichever copy of each was written last, in start order. */
+/**
+ * Folds rows into a list in start order, keeping the copy of each with the
+ * higher revision; on a tie the incoming copy wins.
+ */
 export function mergeSubagents(list: ChatSubagent[], loaded: ChatSubagent[]): ChatSubagent[] {
   const merged = new Map(list.map((subagent) => [subagent.id, subagent]));
   let changed = false;
   for (const incoming of loaded) {
     const held = merged.get(incoming.id);
-    if (held && (held === incoming || !newer(incoming, held))) continue;
+    if (held && (held === incoming || !supersedes(incoming, held))) continue;
     merged.set(incoming.id, incoming);
     changed = true;
   }
@@ -75,13 +79,62 @@ export function mergeSubagent(list: ChatSubagent[], incoming: ChatSubagent): Cha
   return mergeSubagents(list, [incoming]);
 }
 
-export function startedIn(list: ChatSubagent[], messageId: string): ChatSubagent[] {
-  return list.filter((subagent) => subagent.message_id === messageId);
+export function withoutSubagents(list: ChatSubagent[], ids: ReadonlySet<string>): ChatSubagent[] {
+  const kept = list.filter((subagent) => !ids.has(subagent.id));
+  return kept.length === list.length ? list : kept;
+}
+
+/** Each message's subagents, in start order, keyed by the message whose turn started them. */
+export function groupByMessage(list: readonly ChatSubagent[]): Map<string, ChatSubagent[]> {
+  const grouped = new Map<string, ChatSubagent[]>();
+  for (const subagent of list) {
+    if (subagent.message_id === null) continue;
+    const started = grouped.get(subagent.message_id);
+    if (started) started.push(subagent);
+    else grouped.set(subagent.message_id, [subagent]);
+  }
+  return grouped;
+}
+
+function settled(step: SubagentStep): boolean {
+  return step.status !== 'running';
+}
+
+/**
+ * Applies step updates over a list by step id, appending new steps in arrival
+ * order. A settled step never goes back to running, so an update older than
+ * the copy held cannot undo it.
+ */
+export function mergeSteps(list: SubagentStep[], updates: readonly SubagentStep[]): SubagentStep[] {
+  if (updates.length === 0) return list;
+  const merged = [...list];
+  const positions = new Map(merged.map((step, index) => [step.id, index]));
+  let changed = false;
+  for (const update of updates) {
+    const position = positions.get(update.id);
+    if (position === undefined) {
+      positions.set(update.id, merged.length);
+      merged.push(update);
+      changed = true;
+      continue;
+    }
+    const held = merged[position];
+    if (held === update || (settled(held) && !settled(update))) continue;
+    merged[position] = update;
+    changed = true;
+  }
+  return changed ? merged : list;
 }
 
 /** What the agent was asked to do, or a plain name when it was given no description. */
 export function subagentName(subagent: ChatSubagent): string {
   return subagent.description.trim() || UNNAMED;
+}
+
+/** `Agent: <description>`, or just `Agent` when it was given no description. */
+export function subagentLabel(subagent: ChatSubagent): string {
+  const description = subagent.description.trim();
+  return description ? `${LABEL_PREFIX}${description}` : UNNAMED;
 }
 
 export function subagentActive(subagent: ChatSubagent): boolean {

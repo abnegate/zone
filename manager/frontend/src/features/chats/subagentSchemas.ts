@@ -3,8 +3,12 @@ import { tolerantArray } from './schemas';
 import { STEP_STATUSES, SUBAGENT_STATUSES } from './subagentTypes';
 
 export const SUBAGENT_FRAME = 'subagent';
+export const SUBAGENTS_REMOVED_FRAME = 'subagents_removed';
 export const INIT_FRAME = 'init';
 export const MESSAGE_START_FRAME = 'message_start';
+
+export const SUBAGENTS_LOAD_FAILED = 'Failed to load agents';
+export const STEPS_LOAD_FAILED = 'Failed to load steps';
 
 /**
  * A status this client does not know yet is read as settled rather than
@@ -16,6 +20,7 @@ const UNKNOWN_STEP_STATUS = 'running';
 /** A bad value in a descriptive field costs that field, never the row. */
 const forgivingText = z.string().nullable().catch(null);
 const forgivingCount = z.number().nullable().catch(null);
+const forgivingTally = z.number().int().nonnegative().catch(0);
 
 export const SubagentStepSchema = z.object({
   id: z.string(),
@@ -40,7 +45,8 @@ export const ChatSubagentSchema = z.object({
   last_tool: forgivingText,
   summary: forgivingText,
   error: forgivingText,
-  steps: tolerantArray(SubagentStepSchema).catch([]),
+  step_count: forgivingTally,
+  revision: forgivingTally,
   started_at: z.string(),
   finished_at: forgivingText,
   updated_at: z.string(),
@@ -50,14 +56,26 @@ export const ChatSubagentsResponseSchema = z.object({
   subagents: tolerantArray(ChatSubagentSchema).default([]),
 });
 
+export const SubagentStepsResponseSchema = z.object({
+  steps: tolerantArray(SubagentStepSchema).default([]),
+});
+
+/** One write to a subagent: its new row, and only the steps that write changed. */
 export const SubagentFrameSchema = z.object({
   type: z.literal(SUBAGENT_FRAME),
   chat_id: z.string(),
   subagent: ChatSubagentSchema,
+  steps: tolerantArray(SubagentStepSchema).catch([]),
 });
 
-/** A frame after which the stored agents may have moved on without this client seeing it. */
-export const ResyncFrameSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal(INIT_FRAME) }),
-  z.object({ type: z.literal(MESSAGE_START_FRAME), resumed: z.literal(true) }),
-]);
+export const SubagentsRemovedFrameSchema = z.object({
+  type: z.literal(SUBAGENTS_REMOVED_FRAME),
+  chat_id: z.string(),
+  ids: z.array(z.string()),
+});
+
+/** A reply picked back up after a dropped socket, after which stored agents may have moved on. */
+export const ResumedStartFrameSchema = z.object({
+  type: z.literal(MESSAGE_START_FRAME),
+  resumed: z.literal(true),
+});

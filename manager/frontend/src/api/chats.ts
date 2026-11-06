@@ -13,8 +13,13 @@ import {
   PullRequestDiffSchema,
   WorkspaceChatProvidersSchema,
 } from '../features/chats/schemas';
-import { ChatSubagentsResponseSchema } from '../features/chats/subagentSchemas';
-import type { ChatSubagent } from '../features/chats/subagentTypes';
+import {
+  ChatSubagentsResponseSchema,
+  STEPS_LOAD_FAILED,
+  SUBAGENTS_LOAD_FAILED,
+  SubagentStepsResponseSchema,
+} from '../features/chats/subagentSchemas';
+import type { ChatSubagent, SubagentStep } from '../features/chats/subagentTypes';
 import type {
   Chat,
   ChatProviders,
@@ -263,9 +268,20 @@ class ChatsApi {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
-      throw await ApiError.from(response, 'Failed to load agents');
+      throw await ApiError.from(response, SUBAGENTS_LOAD_FAILED);
     }
     return parse(ChatSubagentsResponseSchema, await response.json()).subagents;
+  }
+
+  async getChatSubagentSteps(chatId: string, subagentId: string): Promise<SubagentStep[]> {
+    const response = await fetch(
+      `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/subagents/${encodeURIComponent(subagentId)}/steps`,
+      { headers: this.getHeaders() }
+    );
+    if (!response.ok) {
+      throw await ApiError.from(response, STEPS_LOAD_FAILED);
+    }
+    return parse(SubagentStepsResponseSchema, await response.json()).steps;
   }
 
   async updateChatPullRequest(
