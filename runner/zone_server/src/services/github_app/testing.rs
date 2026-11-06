@@ -1,5 +1,5 @@
 /// A throwaway RSA key, generated for these tests and used nowhere else.
-pub(crate) const TEST_PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
+pub const TEST_PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAu5dqhjvoHZtbdSz9bGJAMp3r+1bqzy/9lhjVz5crI2yWhz7I
 z3M0H74MQPCHhlOn8nyeOs1cclBLRt7iX7/wgkaP9mGGpvCzLXYdLH4JrrMZj7r5
 Pjt0KHrrouTvYXjuCTu2F6QnBcIe+Esz5Vs/+V2fa73I+M1C0sHdX22YNIazcAcB

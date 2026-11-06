@@ -11,8 +11,8 @@ pub mod provider;
 mod scope;
 pub mod unauthenticated;
 
-#[cfg(test)]
-pub(crate) mod testing;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use credential::Credential;
 pub use error::Error;
