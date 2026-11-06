@@ -435,6 +435,35 @@ async fn the_openai_compatible_engine_posts_the_batch_to_v1_embeddings() {
 }
 
 #[tokio::test]
+async fn a_host_ending_in_v1_posts_to_v1_embeddings_once() {
+    for suffix in ["/v1", "/v1/"] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(OPENAI_COMPATIBLE_PATH))
+            .respond_with(OpenAiCompatibleResponder {
+                width: 768,
+                context_limit: None,
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let provider = EmbeddingProviderFactory::create(&self_hosted(
+            format!("{}{suffix}", server.uri()),
+            Some(EMBEDDING_ENGINE_OPENAI_COMPATIBLE),
+            None,
+        ))
+        .unwrap();
+        provider.embed_batch(&["alpha"]).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests[0].url.path(),
+            OPENAI_COMPATIBLE_PATH,
+            "{suffix}: Zone posted to /v1/v1/embeddings"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_openai_compatible_batch_past_the_context_falls_back_per_text() {
     let (server, provider) = openai_compatible(OpenAiCompatibleResponder {
         width: 768,

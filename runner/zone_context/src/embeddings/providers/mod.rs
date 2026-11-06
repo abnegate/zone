@@ -61,7 +61,7 @@ pub struct AiSettings {
     /// Provider name: "self_hosted", "openai", "anthropic", "bedrock"
     pub provider: String,
     /// Host URL for the self-hosted engines: Ollama's root for `ollama`, the
-    /// OpenAI-compatible server's root (without `/v1`) for
+    /// OpenAI-compatible server's root, with or without `/v1`, for
     /// `openai_compatible`
     pub litellm_host: Option<String>,
     /// Bearer key for the self-hosted HTTP engines; blank sends none
@@ -133,12 +133,17 @@ impl EmbeddingProviderFactory {
         )))
     }
 
+    fn openai_compatible_base(host: &str) -> String {
+        let root = host.trim_end_matches(PATH_SEPARATOR);
+        let root = root.strip_suffix(OPENAI_COMPATIBLE_PATH).unwrap_or(root);
+        format!("{root}{OPENAI_COMPATIBLE_PATH}")
+    }
+
     fn create_openai_compatible(settings: &AiSettings) -> Result<Arc<dyn EmbeddingService>> {
-        let base_url = format!(
-            "{}{OPENAI_COMPATIBLE_PATH}",
-            Self::host(settings)?.trim_end_matches(PATH_SEPARATOR)
+        let mut config = OpenAiCompatibleEmbeddingConfig::new(
+            Self::openai_compatible_base(Self::host(settings)?),
+            Self::http_model(settings),
         );
-        let mut config = OpenAiCompatibleEmbeddingConfig::new(base_url, Self::http_model(settings));
         if let Some(key) = &settings.litellm_key {
             config = config.with_api_key(key.as_str());
         }
@@ -300,6 +305,17 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(provider.model(), DEFAULT_OLLAMA_EMBEDDING_MODEL);
+    }
+
+    #[test]
+    fn the_openai_compatible_base_ends_in_one_v1() {
+        for host in ["http://h", "http://h/", "http://h/v1", "http://h/v1/"] {
+            assert_eq!(
+                EmbeddingProviderFactory::openai_compatible_base(host),
+                "http://h/v1",
+                "{host}"
+            );
+        }
     }
 
     #[test]
