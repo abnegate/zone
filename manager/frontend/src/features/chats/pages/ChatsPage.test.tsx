@@ -1771,15 +1771,11 @@ describe('ChatsPage', () => {
       expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
     });
 
-    it('keeps pending feedback and blocks another send until the response ends', async () => {
-      const input = await sendPrompt();
+    it('keeps pending feedback while the response runs', async () => {
+      await sendPrompt();
       expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
-      fireEvent.change(input, { target: { value: 'another prompt' } });
-      fireEvent.keyDown(input, { key: 'Enter' });
-      expect(mockWsSend).toHaveBeenCalledTimes(1);
-      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 
       act(() => socket.emit({ type: 'status', message: 'Generating image…' }));
       expect(screen.getByRole('status')).toHaveTextContent('Generating image…');
@@ -1787,8 +1783,146 @@ describe('ChatsPage', () => {
       expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       act(() => socket.emit({ type: 'message_end', message_id: 'reply', content: 'Done' }));
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
       expect(screen.getByText('Done')).toBeInTheDocument();
+    });
+
+    describe('queue', () => {
+      const frames = () => mockWsSend.mock.calls.map(([frame]) => JSON.parse(String(frame)));
+
+      const queueBehindTheTurn = async (): Promise<HTMLTextAreaElement> => {
+        const input = await sendPrompt();
+        fireEvent.change(input, { target: { value: 'and make it blue' } });
+        expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await waitFor(() => expect(input.value).toBe(''));
+        const queued = frames().at(-1);
+        expect(queued).toEqual({
+          type: 'send',
+          id: expect.any(String),
+          content: 'and make it blue',
+        });
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id: queued.id, content: 'and make it blue' }],
+            held: false,
+          })
+        );
+        return input;
+      };
+
+      it('queues a message typed while the response runs and shows it as queued', async () => {
+        await queueBehindTheTurn();
+
+        const item = screen.getByTestId('queued-message');
+        expect(within(item).queryByText(/queued/i)).not.toBeInTheDocument();
+        expect(within(item).getByText('and make it blue')).toBeInTheDocument();
+        expect(within(item).getByRole('button', { name: 'Interrupt' })).toBeInTheDocument();
+        expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
+      });
+
+      it('offers Queue beside Stop once something is typed', async () => {
+        const input = await sendPrompt();
+        expect(screen.queryByRole('button', { name: 'Queue' })).not.toBeInTheDocument();
+        fireEvent.change(input, { target: { value: 'next' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+        await waitFor(() =>
+          expect(frames().at(-1)).toEqual({ type: 'send', id: expect.any(String), content: 'next' })
+        );
+      });
+
+      it('sends the queued message as the next turn when the response ends', async () => {
+        await queueBehindTheTurn();
+        const { id } = frames().at(-1);
+
+        act(() => {
+          socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' });
+          socket.emit({ type: 'message_end', message_id: 'reply', content: 'A red rooster' });
+          socket.emit({
+            type: 'queue',
+            messages: [],
+            held: false,
+            started: { id, content: 'and make it blue' },
+          });
+        });
+
+        expect(screen.queryByTestId('queued-message')).not.toBeInTheDocument();
+        expect(screen.getByText('and make it blue').closest('.message-user')).not.toBeNull();
+        expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
+      });
+
+      it('interrupts the running turn for the queued message', async () => {
+        await queueBehindTheTurn();
+        const { id } = frames().at(-1);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }));
+        expect(frames().at(-1)).toEqual({ type: 'interrupt', id });
+
+        act(() => {
+          socket.emit({ type: 'cancelled', message_id: null });
+          socket.emit({
+            type: 'queue',
+            messages: [],
+            held: false,
+            started: { id, content: 'and make it blue' },
+          });
+        });
+        expect(screen.queryByTestId('queued-message')).not.toBeInTheDocument();
+        expect(screen.getByText('and make it blue')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+      });
+
+      it('removes a queued message', async () => {
+        await queueBehindTheTurn();
+        const { id } = frames().at(-1);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Remove queued message' }));
+        expect(frames().at(-1)).toEqual({ type: 'remove_queued', id });
+
+        act(() => socket.emit({ type: 'queue', messages: [], held: false }));
+        expect(screen.queryByTestId('queued-message')).not.toBeInTheDocument();
+      });
+
+      it('edits a queued message before it goes', async () => {
+        await queueBehindTheTurn();
+        const { id } = frames().at(-1);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Edit queued message' }));
+        const editor = screen.getByRole('textbox', { name: 'Edit queued message' });
+        expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+        fireEvent.change(editor, { target: { value: 'and make it green' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        expect(frames().at(-1)).toEqual({ type: 'edit_queued', id, content: 'and make it green' });
+
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id, content: 'and make it green' }],
+            held: false,
+          })
+        );
+        expect(screen.getByText('and make it green')).toBeInTheDocument();
+      });
+
+      it('holds the queue after Stop and offers to send it now', async () => {
+        await queueBehindTheTurn();
+        const { id } = frames().at(-1);
+
+        act(() => {
+          socket.emit({ type: 'cancelled', message_id: null });
+          socket.emit({
+            type: 'queue',
+            messages: [{ id, content: 'and make it blue' }],
+            held: true,
+          });
+        });
+
+        const item = screen.getByTestId('queued-message');
+        expect(within(item).queryByRole('button', { name: 'Interrupt' })).not.toBeInTheDocument();
+        fireEvent.click(within(item).getByRole('button', { name: 'Send now' }));
+        expect(frames().at(-1)).toEqual({ type: 'interrupt', id });
+      });
     });
 
     it('shows image generation errors in the active conversation and permits retry', async () => {
@@ -1876,13 +2010,12 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
       await waitFor(() => {
-        expect(mockWsSend).toHaveBeenCalledWith(
-          JSON.stringify({
-            type: 'send',
-            content: 'Test message',
-            metadata: undefined,
-          })
-        );
+        expect(mockWsSend.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toContainEqual({
+          type: 'send',
+          id: expect.any(String),
+          content: 'Test message',
+          metadata: undefined,
+        });
       });
     });
 
@@ -1915,13 +2048,12 @@ describe('ChatsPage', () => {
       fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
 
       await waitFor(() => {
-        expect(mockWsSend).toHaveBeenCalledWith(
-          JSON.stringify({
-            type: 'send',
-            content: 'Enter test',
-            metadata: undefined,
-          })
-        );
+        expect(mockWsSend.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toContainEqual({
+          type: 'send',
+          id: expect.any(String),
+          content: 'Enter test',
+          metadata: undefined,
+        });
       });
     });
 
@@ -2875,21 +3007,20 @@ describe('ChatsPage', () => {
       });
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
       await waitFor(() => {
-        expect(mockWsSend).toHaveBeenCalledWith(
-          JSON.stringify({
-            type: 'send',
-            content: 'Make this a watercolor',
-            metadata: {
-              attachments: [
-                {
-                  name: 'generated-image-1.webp',
-                  mime: 'image/webp',
-                  url: 'data:image/webp;base64,generated',
-                },
-              ],
-            },
-          })
-        );
+        expect(mockWsSend.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toContainEqual({
+          type: 'send',
+          id: expect.any(String),
+          content: 'Make this a watercolor',
+          metadata: {
+            attachments: [
+              {
+                name: 'generated-image-1.webp',
+                mime: 'image/webp',
+                url: 'data:image/webp;base64,generated',
+              },
+            ],
+          },
+        });
       });
     });
 

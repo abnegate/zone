@@ -8,6 +8,8 @@
 //! 3. Client sends "send" messages to trigger AI responses
 //! 4. Server streams AI response chunks as they arrive
 //! 5. Client can send "cancel" to interrupt generation
+//!    A "send" during a turn is queued; "interrupt", "edit_queued" and
+//!    "remove_queued" act on the queue, and every change is sent as "queue"
 //! 6. Connection closes on error or client disconnect
 
 use abnegate_comfy::MediaType;
@@ -61,6 +63,10 @@ use crate::workers::embeddings::spawn_message_embedding_task;
 use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 use zone_chat::history::ReplayMessage;
 use zone_core::context::ContextUsage;
+
+mod queue;
+
+use queue::{Finished, Interrupted, Queued, Started};
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
@@ -313,7 +319,15 @@ impl ChatStream {
     /// one twice.
     async fn join(&self) -> (Vec<ServerMessage>, broadcast::Receiver<ServerMessage>) {
         let live = self.live.lock().await;
-        (live.replay(), self.events.subscribe())
+        let mut frames = live.replay();
+        if let Some((messages, held)) = queue::snapshot(self.chat_id) {
+            frames.push(ServerMessage::Queue {
+                messages,
+                held,
+                started: None,
+            });
+        }
+        (frames, self.events.subscribe())
     }
 }
 
@@ -329,6 +343,95 @@ async fn publish(stream: &ChatStream, message: ServerMessage) {
     let mut live = stream.live.lock().await;
     live.record(&message);
     let _ = stream.events.send(message);
+}
+
+/// Broadcast the queue as it is now. Read under the lock a joining connection
+/// reads it under, so the last queue frame every connection sees is current.
+async fn announce(stream: &ChatStream, started: Option<Queued>) {
+    let _live = stream.live.lock().await;
+    let (messages, held) = queue::snapshot(stream.chat_id).unwrap_or_default();
+    let _ = stream.events.send(ServerMessage::Queue {
+        messages,
+        held,
+        started,
+    });
+}
+
+/// A turn holds the chat's generation permit, including one the queue did not start.
+fn generating(chat_id: Uuid) -> bool {
+    CHAT_GENERATIONS
+        .get(&chat_id)
+        .is_some_and(|generation| generation.available_permits() == 0)
+}
+
+fn cancel_turns(chat_id: Uuid) {
+    for entry in CHAT_CANCELLATIONS
+        .iter()
+        .filter(|entry| entry.key().0 == chat_id)
+    {
+        let _ = entry.value().send(());
+    }
+    crate::agent::ApprovalPolicy::deny_chat(chat_id);
+}
+
+/// Register the turn a message is starting under the queue's lock, so a Stop
+/// or Interrupt that takes the lock next cancels this turn and not one before it.
+fn begin(chat_id: Uuid, started: Started) -> (Queued, Generation) {
+    let generation = Generation::registered(chat_id, started.turn);
+    (started.message, generation)
+}
+
+/// Run a message and then whatever was queued behind it, with nobody needing
+/// to stay connected.
+fn drive(
+    state: AppState,
+    stream: Arc<ChatStream>,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    first: (Queued, Generation),
+    told: bool,
+) {
+    let announcer = stream.clone();
+    let started = told.then(|| first.0.clone());
+    let turn = move |(message, generation): (Queued, Generation)| {
+        let state = state.clone();
+        let stream = stream.clone();
+        async move {
+            handle_send_message(
+                &state,
+                &stream,
+                chat_id,
+                workspace_id,
+                message.author,
+                &message.content,
+                message.metadata,
+                generation,
+                false,
+            )
+            .await
+        }
+    };
+    let running = turn(first);
+    let teller = announcer.clone();
+    tokio::spawn(async move {
+        if started.is_some() {
+            announce(&announcer, started).await;
+        }
+        let draining = queue::drain(
+            chat_id,
+            running,
+            move |started| turn(begin(chat_id, started)),
+            move |started| {
+                let stream = teller.clone();
+                async move { announce(&stream, started).await }
+            },
+        );
+        let drained =
+            futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(draining)).await;
+        if drained.is_err() {
+            announce(&announcer, None).await;
+        }
+    });
 }
 
 /// Send frames the caller already holds to one connection.
@@ -353,7 +456,10 @@ struct Generation {
 
 impl Generation {
     fn new(chat_id: Uuid) -> Self {
-        let message_id = Uuid::new_v4();
+        Self::registered(chat_id, Uuid::new_v4())
+    }
+
+    fn registered(chat_id: Uuid, message_id: Uuid) -> Self {
         let (sender, cancel) = broadcast::channel(1);
         CHAT_CANCELLATIONS.insert((chat_id, message_id), sender);
         Self {
@@ -419,15 +525,30 @@ fn failure(endpoint: &Endpoint, backend: &LlmBackend, message: String) -> String
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// Authenticate with JWT
-    Auth { token: String },
-    /// Send a new user message
+    Auth {
+        token: String,
+    },
+    /// Send a new user message, queued behind a turn that is still running.
     Send {
+        #[serde(default = "Uuid::new_v4")]
+        id: Uuid,
         content: String,
         #[serde(default)]
         metadata: Option<serde_json::Value>,
     },
     /// Cancel current generation
     Cancel,
+    /// Stop the running turn and send this queued message next.
+    Interrupt {
+        id: Uuid,
+    },
+    EditQueued {
+        id: Uuid,
+        content: String,
+    },
+    RemoveQueued {
+        id: Uuid,
+    },
     /// Confirm or reject a mutating file/shell tool call.
     ApproveTool {
         tool_call_id: String,
@@ -591,6 +712,14 @@ pub enum ServerMessage {
     },
     /// Generation cancelled
     Cancelled { message_id: Option<Uuid> },
+    /// The whole queue, sent on every change. `started` is the message that
+    /// just left it to begin a turn.
+    Queue {
+        messages: Vec<Queued>,
+        held: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        started: Option<Queued>,
+    },
     /// Error message
     Error { message: String },
     /// Non-fatal progress (e.g. web search in progress)
@@ -1340,8 +1469,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                     // the turn from the top instead of rendering a gap.
                     Err(broadcast::error::RecvError::Lagged(frames)) => {
                         tracing::warn!(%chat_id, frames, "Chat connection fell behind, replaying");
-                        let (resume, receiver) = stream.join().await;
+                        let (mut resume, receiver) = stream.join().await;
                         events = receiver;
+                        // The queue changes it missed may have emptied it, which
+                        // a join alone says nothing about.
+                        if !resume.iter().any(|frame| matches!(frame, ServerMessage::Queue { .. })) {
+                            resume.push(ServerMessage::Queue {
+                                messages: Vec::new(),
+                                held: false,
+                                started: None,
+                            });
+                        }
                         if !forward(&sender, resume).await {
                             break;
                         }
@@ -1365,7 +1503,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
 
                         // Parse client message
                         match serde_json::from_str::<ClientMessage>(&text) {
-                            Ok(ClientMessage::Send { content, metadata }) => {
+                            Ok(ClientMessage::Send { id, content, metadata }) => {
                                 // Rate limiting check
                                 if rate_limit_window_start.elapsed() > Duration::from_secs(60) {
                                     message_count = 0;
@@ -1398,40 +1536,66 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     continue;
                                 }
 
-                                // Handle the send message
-                                let task_state = state.clone();
-                                let task_stream = stream.clone();
-                                let task_content = content;
-                                let generation = Generation::new(chat_id);
-                                tokio::spawn(async move {
-                                    handle_send_message(
-                                        &task_state,
-                                        &task_stream,
-                                        chat_id,
-                                        workspace_id,
-                                        user_id,
-                                        &task_content,
-                                        metadata,
-                                        generation,
-                                        false,
-                                    ).await;
+                                let message = Queued { id, content, metadata, author: user_id };
+                                let started = queue::with(chat_id, |queue| {
+                                    queue
+                                        .submit(message, generating(chat_id))
+                                        .map(|started| begin(chat_id, started))
                                 });
+                                match started {
+                                    // A message that starts at once never showed in the
+                                    // queue, so there is no change for anyone to hear.
+                                    Some(started) => {
+                                        let told = started.0.id != id;
+                                        drive(state.clone(), stream.clone(), chat_id, workspace_id, started, told);
+                                    }
+                                    None => announce(&stream, None).await,
+                                }
                             }
                             Ok(ClientMessage::Cancel) => {
-                                // Broadcast cancellation to all active streams for this chat
-                                // Iterate and send to all matching (chat_id, *) keys
-                                let keys_to_cancel: Vec<_> = CHAT_CANCELLATIONS
-                                    .iter()
-                                    .filter(|entry| entry.key().0 == chat_id)
-                                    .map(|entry| *entry.key())
-                                    .collect();
-
-                                for key in keys_to_cancel {
-                                    if let Some(tx) = CHAT_CANCELLATIONS.get(&key) {
-                                        let _ = tx.send(());
+                                queue::with(chat_id, |queue| {
+                                    queue.stop(generating(chat_id));
+                                    cancel_turns(chat_id);
+                                });
+                            }
+                            Ok(ClientMessage::Interrupt { id }) => {
+                                let started = queue::with(chat_id, |queue| {
+                                    match queue.interrupt(id, generating(chat_id)) {
+                                        Interrupted::Cancel => {
+                                            cancel_turns(chat_id);
+                                            None
+                                        }
+                                        Interrupted::Start(started) => Some(begin(chat_id, started)),
+                                        Interrupted::Missing => None,
                                     }
+                                });
+                                match started {
+                                    Some(started) => {
+                                        drive(state.clone(), stream.clone(), chat_id, workspace_id, started, true);
+                                    }
+                                    None => announce(&stream, None).await,
                                 }
-                                crate::agent::ApprovalPolicy::deny_chat(chat_id);
+                            }
+                            Ok(ClientMessage::EditQueued { id, content }) => {
+                                if content.len() > MAX_MESSAGE_LENGTH {
+                                    let error_msg = ServerMessage::Error {
+                                        message: "Message too long".to_string(),
+                                    };
+                                    let _ = send_server(&sender, error_msg).await;
+                                    continue;
+                                }
+                                queue::with(chat_id, |queue| {
+                                    if content.trim().is_empty() {
+                                        queue.remove(id)
+                                    } else {
+                                        queue.edit(id, content, user_id)
+                                    }
+                                });
+                                announce(&stream, None).await;
+                            }
+                            Ok(ClientMessage::RemoveQueued { id }) => {
+                                queue::with(chat_id, |queue| queue.remove(id));
+                                announce(&stream, None).await;
                             }
                             Ok(ClientMessage::ApproveTool {
                                 tool_call_id,
@@ -2494,6 +2658,8 @@ async fn handle_audio_generation(
 /// must still be put to somebody. It waits, finds no one, and is declined —
 /// which is the right answer when the alternative is acting unasked. Reading
 /// tools are below that tier and run either way, so a watch still works.
+/// Whether the user's message was saved: a queued turn stopped before then has
+/// left nothing in the chat, so the queue puts it back.
 async fn handle_send_message(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -2504,7 +2670,7 @@ async fn handle_send_message(
     metadata: Option<serde_json::Value>,
     mut request: Generation,
     unattended: bool,
-) {
+) -> bool {
     let generation = CHAT_GENERATIONS
         .entry(chat_id)
         .or_insert_with(|| Arc::new(Semaphore::new(1)))
@@ -2513,7 +2679,7 @@ async fn handle_send_message(
         biased;
         _ = request.cancel.recv() => {
             request.cancelled(stream).await;
-            return;
+            return false;
         }
         permit = generation.acquire() => permit.expect("chat semaphore is never closed"),
     };
@@ -2529,7 +2695,7 @@ async fn handle_send_message(
             },
         )
         .await;
-        return;
+        return false;
     }
     let mut session = match Session::acquire(state, chat_id, workspace_id, request.message_id).await
     {
@@ -2542,7 +2708,7 @@ async fn handle_send_message(
                 },
             )
             .await;
-            return;
+            return false;
         }
     };
     if generation_deadline(state.config().chat.timeout).is_err() {
@@ -2554,20 +2720,21 @@ async fn handle_send_message(
             },
         )
         .await;
-        return;
+        return false;
     }
     crate::agent::ApprovalPolicy::register(chat_id, request.approvals.clone());
     let mut jobs: Vec<String> = Vec::new();
     let preparation = tokio::select! {
         biased;
-        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:OWNERSHIP_LOST.into()}).await; return; }
+        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:OWNERSHIP_LOST.into()}).await; return false; }
         _ = request.cancel.recv() => {
             let _=session.close().await;
                         request.cancelled(stream).await;
-            return;
+            return false;
         }
         result = prepare_message(state, chat_id, workspace_id, content, metadata.as_ref()) => result,
     };
+    let mut saved = false;
     let result = async {
         let routing = preparation?;
         if request.is_cancelled() {
@@ -2579,6 +2746,7 @@ async fn handle_send_message(
         // before honouring Stop. Dropping an INSERT future cannot roll it back.
         let mut message=LlmMessage::user(content);message.images=session::images(metadata.as_ref());
         let user_message=session.store.begin(&session.lease,session.turn,Uuid::new_v4(),content,metadata.clone(),ReplayMessage::from(&message)).await?;
+        saved = true;
         crate::workers::titles::spawn(state.clone(),&user_message);
         spawn_message_embedding_task(state.clone(),user_message.id,chat_id,content.to_string());
         publish(stream,ServerMessage::MessageSaved {message_id:user_message.id,role:"user".into(),content:content.to_string(),metadata:metadata.clone()}).await;
@@ -2703,6 +2871,7 @@ async fn handle_send_message(
         )
         .await;
     }
+    saved
 }
 
 /// Run one chat turn with nobody connected.
@@ -2757,6 +2926,16 @@ pub(crate) async fn run_turn(
         true,
     )
     .await;
+    let released = queue::with(chat_id, |queue| match queue.release() {
+        Finished::Next(started) => Some(Some(begin(chat_id, started))),
+        Finished::Held => Some(None),
+        Finished::Idle => None,
+    });
+    match released {
+        Some(Some(started)) => drive(state.clone(), stream, chat_id, workspace_id, started, true),
+        Some(None) => announce(&stream, None).await,
+        None => {}
+    }
     message_id
 }
 
@@ -6757,6 +6936,99 @@ cat 'DIR/reply.jsonl'
         );
     }
 
+    #[tokio::test]
+    async fn a_joining_connection_sees_the_queue_and_later_changes() {
+        let chat_id = Uuid::new_v4();
+        let stream = ChatStream::of(chat_id);
+        let (frames, _) = stream.join().await;
+        assert!(frames.is_empty(), "an empty queue sends nothing on join");
+
+        let first = Queued {
+            id: Uuid::new_v4(),
+            content: "first".into(),
+            metadata: None,
+            author: Uuid::new_v4(),
+        };
+        let second = Queued {
+            id: Uuid::new_v4(),
+            content: "second".into(),
+            ..first.clone()
+        };
+        queue::with(chat_id, |queue| queue.submit(first, false));
+        queue::with(chat_id, |queue| queue.submit(second.clone(), false));
+
+        let (frames, mut events) = stream.join().await;
+        let [
+            ServerMessage::Queue {
+                messages,
+                held,
+                started,
+            },
+        ] = frames.as_slice()
+        else {
+            panic!(
+                "a reload sees the queue: {}",
+                frame_kinds(&frames).join(",")
+            );
+        };
+        assert_eq!(messages, std::slice::from_ref(&second));
+        assert!(!held);
+        assert!(started.is_none());
+
+        queue::with(chat_id, |queue| queue.remove(second.id));
+        announce(&stream, None).await;
+        let Ok(ServerMessage::Queue { messages, .. }) = events.recv().await else {
+            panic!("every connection hears the queue change");
+        };
+        assert!(messages.is_empty());
+        queue::with(chat_id, |queue| queue.finish(true));
+    }
+
+    #[test]
+    fn a_queue_frame_carries_what_the_console_renders() {
+        let id = Uuid::new_v4();
+        let frame = ServerMessage::Queue {
+            messages: vec![Queued {
+                id,
+                content: "next".into(),
+                metadata: Some(serde_json::json!({ "attachments": [] })),
+                author: Uuid::new_v4(),
+            }],
+            held: true,
+            started: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            serde_json::json!({
+                "type": "queue",
+                "messages": [{ "id": id, "content": "next", "metadata": { "attachments": [] } }],
+                "held": true,
+            })
+        );
+    }
+
+    #[test]
+    fn queue_actions_deserialize() {
+        let id = Uuid::new_v4();
+        let send: ClientMessage = serde_json::from_value(
+            serde_json::json!({ "type": "send", "id": id, "content": "hi" }),
+        )
+        .unwrap();
+        assert!(matches!(send, ClientMessage::Send { id: sent, .. } if sent == id));
+        let interrupt: ClientMessage =
+            serde_json::from_value(serde_json::json!({ "type": "interrupt", "id": id })).unwrap();
+        assert!(matches!(interrupt, ClientMessage::Interrupt { id: target } if target == id));
+        let edit: ClientMessage = serde_json::from_value(
+            serde_json::json!({ "type": "edit_queued", "id": id, "content": "changed" }),
+        )
+        .unwrap();
+        assert!(matches!(edit, ClientMessage::EditQueued { content, .. } if content == "changed"));
+        let remove: ClientMessage =
+            serde_json::from_value(serde_json::json!({ "type": "remove_queued", "id": id }))
+                .unwrap();
+        assert!(matches!(remove, ClientMessage::RemoveQueued { id: target } if target == id));
+    }
+
     /// A user with a live session, and a chat in a workspace it can write to.
     async fn seed_chat(pool: &PgPool, secret: &str) -> (String, Uuid) {
         let suffix = Uuid::new_v4().simple().to_string();
@@ -7168,7 +7440,9 @@ cat 'DIR/reply.jsonl'
         let json = r#"{"type": "send", "content": "Hello AI"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::Send { content, metadata } => {
+            ClientMessage::Send {
+                content, metadata, ..
+            } => {
                 assert_eq!(content, "Hello AI");
                 assert!(metadata.is_none());
             }
@@ -7181,7 +7455,9 @@ cat 'DIR/reply.jsonl'
         let json = r#"{"type": "send", "content": "Hello", "metadata": {"key": "value"}}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::Send { content, metadata } => {
+            ClientMessage::Send {
+                content, metadata, ..
+            } => {
                 assert_eq!(content, "Hello");
                 assert!(metadata.is_some());
                 let meta = metadata.unwrap();
