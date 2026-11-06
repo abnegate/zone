@@ -42,5 +42,6 @@ import '../features/settings/workspace/pages/WorkspaceSettingsPage.css';
 import '../features/sources/pages/SourcesPage.css';
 import '../features/tasks/components/QuestionPrompt.css';
 import '../features/tasks/pages/TasksPage.css';
+import '../features/github/components/RepositoryPicker.css';
 import '../App.css';
 import '@zone/ui/styles/globals.css';
