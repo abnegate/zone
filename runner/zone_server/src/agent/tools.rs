@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 use zone_core::llm::Toolset;
+use zone_core::llm::cli::{inheritable, passthrough};
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::toolbox::{
@@ -148,38 +149,31 @@ const SAFE_ENV: &[&str] = &[
 /// Locale variables (`LC_ALL`, `LC_CTYPE`, and the rest) pass through as a set.
 const SAFE_ENV_PREFIX: &str = "LC_";
 
-/// Names an operator has deliberately added to [`SAFE_ENV`], comma separated.
-const ENV_PASSTHROUGH: &str = "ZONE_AGENT_ENV_PASSTHROUGH";
-
 /// Bytes a file tool will read in one call.
 const MAX_TOOL_FILE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Seconds a tool-launched command may run before it is killed.
 const TOOL_COMMAND_TIMEOUT_SECS: u64 = 300;
 
+/// [`SAFE_ENV`] and the locale variables from `vars`, with the names the operator listed in
+/// `passthrough` that any other child of Zone's may inherit, so a sign-in passed through for the
+/// operator's own scripts never reaches a tool.
 fn safe_env(
     vars: impl IntoIterator<Item = (String, String)>,
-    passthrough: &str,
+    passthrough: &[String],
 ) -> HashMap<String, String> {
-    let operator: HashSet<&str> = passthrough
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .collect();
+    let inheritable = inheritable(passthrough);
     vars.into_iter()
         .filter(|(key, _)| {
             SAFE_ENV.contains(&key.as_str())
                 || key.starts_with(SAFE_ENV_PREFIX)
-                || operator.contains(key.as_str())
+                || (passthrough.contains(key) && inheritable.contains(key))
         })
         .collect()
 }
 
 fn tool_env() -> HashMap<String, String> {
-    safe_env(
-        std::env::vars(),
-        &std::env::var(ENV_PASSTHROUGH).unwrap_or_default(),
-    )
+    safe_env(std::env::vars(), &passthrough())
 }
 
 /// Chat keeps the host's filesystem reach, but gets the same narrow environment
@@ -2032,6 +2026,20 @@ mod tests {
             .collect()
     }
 
+    /// Set on the copy of this binary that reads its own environment.
+    const PASSED_THROUGH_COPY: &str = "ZONE_SERVER_TOOL_ENV_COPY";
+
+    const PASSED_THROUGH_CREDENTIALS: [(&str, &str); 2] = [
+        ("ANTHROPIC_API_KEY", "sk-ant-notrealkey"),
+        (Toolset::TOKEN_VARIABLE, "zone-mcp-notrealtoken"),
+    ];
+
+    const PASSED_THROUGH_CERTIFICATE: (&str, &str) = ("CORPORATE_CA", "/etc/ssl/corporate.pem");
+
+    fn named(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
     const SECRETS: &[(&str, &str)] = &[
         ("DATABASE_URL", "postgres://zone:hunter2@postgres:5432/zone"),
         ("JWT_SECRET", "a-signing-key-of-at-least-32-characters"),
@@ -2061,7 +2069,7 @@ mod tests {
         ]);
         vars.extend(process_env(SECRETS));
 
-        let env = safe_env(vars, "");
+        let env = safe_env(vars, &[]);
 
         for key in [
             "PATH",
@@ -2092,7 +2100,7 @@ mod tests {
             ("JWT_SECRET", "a-signing-key-of-at-least-32-characters"),
         ]);
 
-        let env = safe_env(vars, " CARGO_HOME , ,SSH_AUTH_SOCK ");
+        let env = safe_env(vars, &named(&["CARGO_HOME", "SSH_AUTH_SOCK"]));
 
         assert_eq!(
             env.get("CARGO_HOME").map(String::as_str),
@@ -2108,9 +2116,66 @@ mod tests {
     #[test]
     fn safe_env_passthrough_is_exact_not_a_prefix() {
         let vars = process_env(&[("JWT_SECRET", "s"), ("JWT", "s")]);
-        let env = safe_env(vars, "JWT");
+        let env = safe_env(vars, &named(&["JWT"]));
         assert!(env.contains_key("JWT"));
         assert!(!env.contains_key("JWT_SECRET"));
+    }
+
+    #[test]
+    fn safe_env_drops_a_credential_however_the_operator_names_it() {
+        let vars = process_env(&PASSED_THROUGH_CREDENTIALS);
+        let names: Vec<&str> = PASSED_THROUGH_CREDENTIALS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+
+        let env = safe_env(vars, &named(&names));
+
+        assert!(env.is_empty(), "{env:?}");
+    }
+
+    /// The copy runs with the variables set and reads them through [`tool_env`], so nothing
+    /// here calls `set_var` on a process whose other tests start children.
+    #[test]
+    fn a_credential_the_operator_passes_through_never_reaches_a_tool() {
+        if std::env::var_os(PASSED_THROUGH_COPY).is_some() {
+            let env = tool_env();
+            for (name, _) in PASSED_THROUGH_CREDENTIALS {
+                assert!(!env.contains_key(name), "{name} reached a tool");
+            }
+            let (name, value) = PASSED_THROUGH_CERTIFICATE;
+            assert_eq!(env.get(name).map(String::as_str), Some(value));
+            return;
+        }
+
+        let listed: Vec<&str> = PASSED_THROUGH_CREDENTIALS
+            .iter()
+            .chain([&PASSED_THROUGH_CERTIFICATE])
+            .map(|(name, _)| *name)
+            .collect();
+        let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "agent::tools::tests::a_credential_the_operator_passes_through_never_reaches_a_tool",
+                "--nocapture",
+            ])
+            .env(PASSED_THROUGH_COPY, "1")
+            .envs(PASSED_THROUGH_CREDENTIALS)
+            .envs([PASSED_THROUGH_CERTIFICATE])
+            .env(zone_core::llm::cli::PASSTHROUGH, listed.join(","))
+            .output()
+            .expect("a copy of this test binary");
+        let printed = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(output.status.success(), "{printed}");
+        assert!(
+            printed.contains("1 passed"),
+            "the copy ran no test: {printed}"
+        );
     }
 
     #[tokio::test]
