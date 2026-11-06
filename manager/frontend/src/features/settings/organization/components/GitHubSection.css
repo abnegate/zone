@@ -1,0 +1,130 @@
+.github-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
+}
+
+.github-section p {
+  margin: 0;
+}
+
+.github-read-only,
+.github-empty {
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-muted);
+}
+
+.github-accounts {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-bg-elevated);
+}
+
+.github-account {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  min-height: var(--ui-space-12);
+  padding: var(--ui-space-2) var(--ui-space-3) var(--ui-space-2) var(--ui-space-4);
+}
+
+.github-account + .github-account {
+  border-top: 1px solid var(--ui-border);
+}
+
+.github-account-identity {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: var(--ui-space-1);
+}
+
+.github-account-login {
+  overflow: hidden;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.github-account-type,
+.github-account-pending {
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
+  white-space: nowrap;
+}
+
+.github-account-state {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.github-account-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  gap: var(--ui-space-2);
+}
+
+.github-account-remove {
+  color: var(--ui-error);
+}
+
+.github-connect {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-field-gap);
+}
+
+.github-connect-target {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.github-connect-legend {
+  margin-bottom: var(--ui-space-2);
+  padding: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+  color: var(--ui-text-primary);
+}
+
+.github-connect-target .radio-group {
+  align-self: flex-start;
+}
+
+.github-connect-actions,
+.github-section-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ui-space-2);
+}
+
+.github-remove .ui-checkbox-wrapper {
+  margin-top: var(--ui-space-3);
+}
+
+@media (max-width: 768px) {
+  .github-account {
+    flex-wrap: wrap;
+  }
+
+  .github-account-actions {
+    width: 100%;
+  }
+}
