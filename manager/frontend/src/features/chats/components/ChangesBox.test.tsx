@@ -55,6 +55,8 @@ const OPEN: ChatPullRequest = {
   status: STATUS,
   writable: true,
   credentialed: true,
+  auto_fix: false,
+  auto_fixing: false,
 };
 
 const MENU = 'Actions for widgets #12';
@@ -187,6 +189,38 @@ describe('ChangesBox', () => {
     await settleMenu();
     expect(mockUpdateChatPullRequest).toHaveBeenLastCalledWith('chat-1', 'pr-1', {
       auto_merge: false,
+    });
+  });
+
+  it('turns auto-fix on, and off again once it is on', async () => {
+    mockUpdateChatPullRequest
+      .mockResolvedValueOnce({ ...OPEN, auto_fix: true })
+      .mockResolvedValueOnce({ ...OPEN, auto_fix: false });
+    await shown([OPEN]);
+
+    await chooseMenuItem(MENU, 'Fix automatically');
+    expect(mockUpdateChatPullRequest).toHaveBeenCalledWith('chat-1', 'pr-1', {
+      auto_fix: true,
+    });
+
+    await openMenu(MENU);
+    fireEvent.click(menuItem('Stop fixing automatically'));
+    await settleMenu();
+    expect(mockUpdateChatPullRequest).toHaveBeenLastCalledWith('chat-1', 'pr-1', {
+      auto_fix: false,
+    });
+
+    await openMenu(MENU);
+    expect(menuItem('Fix automatically')).toBeInTheDocument();
+  });
+
+  it('still lets a writer stop auto-fix once no source or status can be read', async () => {
+    mockUpdateChatPullRequest.mockResolvedValue({ ...OPEN, auto_fix: false });
+    await shown([{ ...OPEN, auto_fix: true, credentialed: false, status: null }]);
+
+    await chooseMenuItem(MENU, 'Stop fixing automatically');
+    expect(mockUpdateChatPullRequest).toHaveBeenCalledWith('chat-1', 'pr-1', {
+      auto_fix: false,
     });
   });
 
