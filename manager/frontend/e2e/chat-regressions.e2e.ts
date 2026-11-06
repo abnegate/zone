@@ -253,7 +253,6 @@ test.describe('Chat regressions', () => {
     socket.setOnSend(async () => {
       await socket.emit({ type: 'message_start', message_id: 'a1', role: 'assistant' });
       await socket.emit({ type: 'chunk', content: '```rust\nfn main() {\n', index: 0 });
-      await socket.emit({ type: 'status', message: 'Generating response…' });
     });
 
     await page.fill('.message-form textarea', 'Show a rust main');

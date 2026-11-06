@@ -386,9 +386,20 @@ export const ChatProvidersSchema = z.object({
   cli: z.boolean().optional().catch(undefined),
 });
 
+export const RecentChatSchema = z.object({
+  model_name: z.string(),
+  provider: AiProviderSchema.nullable(),
+  provider_model: z.string().nullable(),
+  reasoning_effort: ReasoningEffortSchema,
+  agent_enabled: z.boolean(),
+  offline: z.boolean(),
+  context_tokens: z.number().int().positive().nullable(),
+});
+
 export const WorkspaceChatProvidersSchema = z.object({
   default: ChatProviderOfferSchema,
   providers: tolerantArray(ChatProviderOfferSchema),
+  recent: RecentChatSchema.nullish().catch(null),
 });
 
 export const SendMessageRequestSchema = z.object({
@@ -470,6 +481,10 @@ export const PullRequestStatusSchema = z.object({
     unavailable: z.string().nullable(),
   }),
   draft_unavailable: z.string().nullable().catch(null),
+  threads: z
+    .object({ open: z.number().int().nonnegative(), resolved: z.number().int().nonnegative() })
+    .nullable()
+    .catch(null),
   observed_at: z.string(),
 });
 

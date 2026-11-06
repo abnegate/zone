@@ -328,6 +328,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libncurses-dev libpython3-dev libxml2-dev uuid-dev tzdata \
     && rm -rf /var/lib/apt/lists/*
 
+# Shared libraries Playwright's browsers link against. Without them the
+# browsers download and then refuse to launch, so an agent in this image can
+# run the unit tests of a web project but never its end-to-end ones.
+#
+# The package list, the libraries it has to deliver, and the check that it did
+# all live beside the script, so the manager-image workflow can run exactly
+# this against the same base image on a pull request.
+COPY manager/browser-packages.txt manager/browser-libraries.txt /opt/browser/
+COPY manager/bin/install-browser-libraries.sh /opt/browser/install.sh
+RUN sh /opt/browser/install.sh /opt/browser
+
 COPY --from=rust-toolchain /opt/rust /opt/rust
 COPY --from=go-toolchain /usr/local/go /usr/local/go
 COPY --from=jvm /opt/jvm /opt/jvm

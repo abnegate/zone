@@ -11,6 +11,7 @@ import {
 } from '../utils/pullRequests';
 import { MenuIcon } from './MenuIcon';
 import { PullRequestStatusIcon } from './PullRequestStatusIcon';
+import { ReviewThreads } from './ReviewThreads';
 
 export interface PullRequestItemProps {
   pullRequest: ChatPullRequest;
@@ -126,6 +127,7 @@ export function PullRequestItem(props: PullRequestItemProps) {
               </span>
             </span>
           )}
+          {pullRequest.status?.threads && <ReviewThreads threads={pullRequest.status.threads} />}
           {autoMerging && (
             <span className="chat-change-auto" title={AUTO_MERGE_HINT}>
               Auto-merge

@@ -929,6 +929,74 @@ async fn the_chat_provider_checks_are_added_unvalidated_and_proven_after() {
     database.cleanup().await;
 }
 
+#[tokio::test]
+async fn chats_start_out_used_when_a_member_last_typed_in_them() {
+    let database = Database::new().await;
+    database.through(15).await;
+    let (workspace, _) = database.workspace().await;
+    let chat = |days: i32| {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO chats(workspace_id,title,model_name,reasoning_effort,created_at,updated_at) \
+             VALUES($1,'Migration','auto','auto',NOW() - make_interval(days => $2),NOW()) RETURNING id",
+        )
+        .bind(workspace)
+        .bind(days)
+        .fetch_one(&database.pool)
+    };
+    let unlabelled = chat(6).await.unwrap();
+    let listed = chat(6).await.unwrap();
+    let untouched = chat(3).await.unwrap();
+    for (chat, role, metadata, days) in [
+        (unlabelled, "user", None, 4),
+        (unlabelled, "assistant", None, 2),
+        (
+            unlabelled,
+            "user",
+            Some(serde_json::json!({ "source": "reminder" })),
+            1,
+        ),
+        (listed, "user", Some(serde_json::json!({})), 5),
+        (listed, "user", Some(serde_json::json!(["source"])), 4),
+    ] {
+        sqlx::query(
+            "INSERT INTO messages(chat_id,role,content,metadata,created_at) \
+             VALUES($1,$2,'Migration',$3,NOW() - make_interval(days => $4))",
+        )
+        .bind(chat)
+        .bind(role)
+        .bind(metadata)
+        .bind(days)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    }
+    database.through(17).await;
+
+    let age = |chat: Uuid| {
+        sqlx::query_scalar::<_, i32>(
+            "SELECT EXTRACT(DAY FROM NOW() - used_at)::int FROM chats WHERE id=$1",
+        )
+        .bind(chat)
+        .fetch_one(&database.pool)
+    };
+    assert_eq!(
+        age(unlabelled).await.unwrap(),
+        4,
+        "a chat was last used when a member last typed in it, not when a reply or reminder landed"
+    );
+    assert_eq!(
+        age(listed).await.unwrap(),
+        4,
+        "only a source key marks a message as automated, as the server reads it"
+    );
+    assert_eq!(
+        age(untouched).await.unwrap(),
+        3,
+        "a chat nobody typed in was last used when it was created"
+    );
+    database.cleanup().await;
+}
+
 /// Every lock a later migration takes on a live table is one ordinary traffic
 /// already holds, and the boot holds sqlx's advisory lock while it queues for
 /// them: an unbounded wait wedges every other instance instead of failing with
@@ -991,7 +1059,8 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             "011_time_zones.sql",
             "012_task_title_pending.sql",
             "015_task_chat.sql",
-            "016_project_position.sql",
+            "017_chat_used_at.sql",
+            "018_project_position.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );
