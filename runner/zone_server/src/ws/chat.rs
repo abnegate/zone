@@ -5193,7 +5193,7 @@ mod tests {
                 scope: "user:inference".to_string(),
                 subscription: None,
             }
-            .seal(state.encryption_key())
+            .seal(state.master_key())
             .expect("tokens to seal");
             let login = db::agent_logins::insert(
                 &organization.pool,

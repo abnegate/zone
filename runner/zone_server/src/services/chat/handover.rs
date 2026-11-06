@@ -701,7 +701,7 @@ mod tests {
                 subscription: None,
             };
             let sealed = tokens
-                .seal(self.state.encryption_key())
+                .seal(self.state.master_key())
                 .expect("tokens to seal");
             self.store(AgentKind::Claude, Some(&sealed), label).await
         }

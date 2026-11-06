@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::db::DbResult;
 use crate::db::chat_pull_requests::{GITHUB, PullRequestRow};
 use crate::db::sources::{self, SourceRow};
+use crate::secret::Unseal;
 use crate::state::AppState;
 
 /// The source the pull request was opened through, or else the workspace's
@@ -38,8 +39,8 @@ pub async fn repository_source(
 /// stored credential cannot be opened, cannot act.
 pub fn token(state: &AppState, source: &SourceRow) -> Option<SecretValue> {
     let encrypted = source.credentials_encrypted.as_deref()?;
-    match crate::crypto::decrypt(state.encryption_key(), encrypted) {
-        Ok(token) => Some(SecretValue::new(token)),
+    match state.master_key().open_strict(encrypted) {
+        Ok(token) => Some(token),
         Err(_) => {
             tracing::warn!(source = %source.id, "a GitHub source's credential could not be decrypted");
             None

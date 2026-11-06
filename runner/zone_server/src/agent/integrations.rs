@@ -25,6 +25,7 @@ use super::releases::{self, Lookup, ReleaseIdentity, ReleasePipeline, RunEvidenc
 use super::tools::{WorkspaceScope, apply_record_cap, json_chars, take_array, truncate};
 use crate::config::{Config, github_graphql_url};
 use crate::db::{sources, workspace_members};
+use crate::secret::Unseal;
 use crate::services::chat::pull_request::{self as chat_pull_request, Opened};
 use crate::services::checkout;
 use crate::services::prioritisation::{
@@ -435,7 +436,11 @@ impl Integration {
             .map_err(|_| "The GitHub source configuration is invalid.".to_string())?;
         if let Some(encrypted) = source.credentials_encrypted {
             configuration.token = Some(
-                crate::crypto::decrypt(self.scope.state.encryption_key(), &encrypted)
+                self.scope
+                    .state
+                    .master_key()
+                    .open_strict(&encrypted)
+                    .map(|token| token.expose().to_string())
                     .map_err(|_| "The source credentials could not be decrypted.".to_string())?,
             );
         }

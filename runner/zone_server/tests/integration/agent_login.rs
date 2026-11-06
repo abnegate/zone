@@ -11,8 +11,10 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_secret::MasterKey;
 use abnegate_secret::SecretValue;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -1507,7 +1509,7 @@ async fn a_pasted_code_signs_the_organization_in_and_only_a_sealed_login_is_kept
             "the stored login shows {secret}"
         );
     }
-    let tokens = Tokens::open(stage.client.state().encryption_key(), &credential)
+    let tokens = Tokens::open(stage.client.state().master_key(), &credential)
         .expect("the stored login opens with the server's key");
     assert_eq!(tokens.access.expose(), ACCESS);
     assert_eq!(
@@ -1590,8 +1592,7 @@ async fn a_claude_login_zone_cannot_open_has_expired() {
     let stage = Stage::claude(&claude).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
-    let mut another_key = [0_u8; 32];
-    rand::fill(&mut another_key);
+    let another_key = MasterKey::generate().expect("another key");
     let tokens = Tokens {
         access: SecretValue::new(ACCESS),
         refresh: Some(SecretValue::new(REFRESH)),
@@ -3505,7 +3506,7 @@ async fn a_member_reads_every_login_and_never_a_token() {
     let member = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
     seat(&stage.client, organization, &owner, &member, "member").await;
-    let key = *stage.client.state().encryption_key();
+    let key = Arc::clone(stage.client.state().master_key());
     let tokens = Tokens {
         access: SecretValue::new(ACCESS),
         refresh: Some(SecretValue::new(REFRESH)),
@@ -3949,7 +3950,7 @@ async fn a_status_refreshes_a_stale_snapshot_and_keeps_a_fresh_one() {
     let stage = Stage::claude(&claude).await;
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
-    let key = *stage.client.state().encryption_key();
+    let key = Arc::clone(stage.client.state().master_key());
     let stored = |access: &str, used: f64, fetched_at: DateTime<Utc>| {
         let tokens = Tokens {
             access: SecretValue::new(access),

@@ -1,5 +1,7 @@
 //! Source endpoints
 
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -14,6 +16,7 @@ use super::error::ErrorResponse;
 use crate::auth::AuthUser;
 use crate::db::sources;
 use crate::error::ServerError;
+use crate::secret::Unseal;
 use crate::state::AppState;
 
 /// Maximum name length
@@ -424,19 +427,20 @@ pub async fn create(
             .into_response();
     }
 
-    // Encrypt credentials before storing
     let credentials_encrypted = match req.credentials.as_ref() {
-        Some(creds) => match crate::crypto::encrypt(state.encryption_key(), creds) {
-            Ok(encrypted) => Some(encrypted),
-            Err(e) => {
-                tracing::error!("Encryption failed: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
+        Some(credentials) => {
+            match encrypt_value(&SecretValue::new(credentials.clone()), state.master_key()) {
+                Ok(encrypted) => Some(encrypted),
+                Err(error) => {
+                    tracing::error!("Encryption failed: {}", error);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::new("Internal server error")),
+                    )
+                        .into_response();
+                }
             }
-        },
+        }
         None => None,
     };
 
@@ -584,18 +588,19 @@ pub async fn update(
     let mut credentials_changed = false;
 
     // If credentials provided, encrypt and update them
-    if let Some(creds) = &req.credentials {
-        let encrypted = match crate::crypto::encrypt(state.encryption_key(), creds) {
-            Ok(encrypted) => encrypted,
-            Err(e) => {
-                tracing::error!("Encryption failed: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        };
+    if let Some(credentials) = &req.credentials {
+        let encrypted =
+            match encrypt_value(&SecretValue::new(credentials.clone()), state.master_key()) {
+                Ok(encrypted) => encrypted,
+                Err(error) => {
+                    tracing::error!("Encryption failed: {}", error);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::new("Internal server error")),
+                    )
+                        .into_response();
+                }
+            };
 
         if let Err(e) = sources::update_credentials(state.db(), id, workspace_id, &encrypted).await
         {
@@ -752,8 +757,8 @@ pub async fn verify(
     let mut config = source_row.config.clone();
 
     // Decrypt and inject credentials if present
-    if let Some(encrypted_creds) = &source_row.credentials_encrypted {
-        match crate::crypto::decrypt(state.encryption_key(), encrypted_creds) {
+    if let Some(encrypted_credentials) = &source_row.credentials_encrypted {
+        match state.master_key().open_strict(encrypted_credentials) {
             Ok(decrypted) => {
                 if let Some(config_obj) = config.as_object_mut() {
                     // Use source-type-specific credential field names
@@ -762,7 +767,10 @@ pub async fn verify(
                         "notion" => "api_key",
                         _ => "token",
                     };
-                    config_obj.insert(cred_field.to_string(), serde_json::Value::String(decrypted));
+                    config_obj.insert(
+                        cred_field.to_string(),
+                        serde_json::Value::String(decrypted.expose().to_string()),
+                    );
                 }
             }
             Err(e) => {

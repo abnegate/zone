@@ -451,7 +451,7 @@ mod tests {
                 scope: "user:inference".to_string(),
                 subscription: None,
             }
-            .seal(self.state.encryption_key())
+            .seal(self.state.master_key())
             .expect("tokens to seal")
         }
 

@@ -7722,7 +7722,7 @@ mod cli_tests {
             scope: "user:inference".to_string(),
             subscription: None,
         }
-        .seal(state.encryption_key())
+        .seal(state.master_key())
         .expect("the tokens to seal")
     }
 
