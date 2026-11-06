@@ -44,6 +44,7 @@ async fn lease(harness: &Harness) -> (Lease, Console) {
             user: Some(Uuid::new_v4()),
             approval: ApprovalPolicy::required(ApprovalGate::new()),
             calls: LoopBudget::chat().max_tool_calls,
+            builtin: BuiltinTools::Withheld,
         },
         tools,
         events,

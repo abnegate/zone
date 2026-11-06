@@ -42,6 +42,7 @@ import {
   MessageContent,
   ProviderError,
   ProviderPicker,
+  QueueItem,
   SourcesButton,
   SubagentChips,
 } from '../components';
@@ -240,8 +241,13 @@ export default function ChatsPage() {
     error: chatError,
     streaming,
     status: chatStatus,
+    queue,
+    held,
     sendMessage: sendMessageFn,
     cancelGeneration,
+    interruptQueued,
+    editQueued,
+    removeQueued,
     approveTool,
     setAgentEnabled: setAgentEnabledFn,
     setAutoApprove: setAutoApproveFn,
@@ -940,7 +946,7 @@ export default function ChatsPage() {
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
     const sendable = attachments.filter(isSendable);
-    if (!isAuthenticated || !displayedChat || sending || streaming) return;
+    if (!isAuthenticated || !displayedChat || sending) return;
     if (attaching.pending > 0) return;
     if (!messageInput.trim() && sendable.length === 0) return;
 
@@ -1744,6 +1750,16 @@ export default function ChatsPage() {
                   {streaming || chatStatus ? (
                     <Generation key={selectedChatId} status={chatStatus} />
                   ) : null}
+                  {queue.map((message) => (
+                    <QueueItem
+                      key={message.id}
+                      message={message}
+                      held={held}
+                      onInterrupt={interruptQueued}
+                      onEdit={editQueued}
+                      onRemove={removeQueued}
+                    />
+                  ))}
                   <div ref={messagesEndRef} />
                 </div>
 
@@ -1884,14 +1900,32 @@ export default function ChatsPage() {
                         rows={1}
                       />
                       {streaming ? (
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="sm"
-                          onClick={cancelGeneration}
-                        >
-                          Stop
-                        </Button>
+                        <>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={cancelGeneration}
+                          >
+                            Stop
+                          </Button>
+                          {messageInput.trim() || attachments.some(isSendable) ? (
+                            <Button
+                              type="submit"
+                              variant="primary"
+                              size="sm"
+                              loading={sending}
+                              disabled={attaching.pending > 0}
+                              title={
+                                attaching.pending > 0
+                                  ? 'Wait for attachments to finish before queueing'
+                                  : undefined
+                              }
+                            >
+                              Queue
+                            </Button>
+                          ) : null}
+                        </>
                       ) : (
                         <Button
                           type="submit"

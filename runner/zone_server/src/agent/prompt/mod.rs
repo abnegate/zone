@@ -70,8 +70,9 @@ const PLAIN: &[Section] = &[
 /// negative_prompt line previously measured 23,377.
 pub const CHAT_MAX_CHARS: usize = 24_200;
 /// A planner chat adds the interview section to the chat prompt; measured
-/// the same way and rounded up the same way.
-pub const PLANNER_MAX_CHARS: usize = 26_500;
+/// the same way and rounded up the same way. `read_review_threads` joining
+/// the catalog measured it at 26,515.
+pub const PLANNER_MAX_CHARS: usize = 26_600;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 pub const TASK_MAX_CHARS: usize = 14_000;
 
@@ -238,6 +239,7 @@ mod tests {
         "read_document",
         "read_file",
         "read_repository_file",
+        "read_review_threads",
         "run_command",
         "run_shell",
         "search_chat_history",

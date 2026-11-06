@@ -18,6 +18,7 @@ export { MessageContent } from './MessageContent';
 export { ProviderError } from './ProviderError';
 export { ProviderPicker } from './ProviderPicker';
 export { QuestionCard } from './QuestionCard';
+export { QueueItem } from './QueueItem';
 export { Reasoning } from './Reasoning';
 export { SourcesButton } from './SourcesButton';
 export { SubagentChips } from './SubagentChips';
