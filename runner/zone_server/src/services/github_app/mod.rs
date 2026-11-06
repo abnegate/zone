@@ -2,6 +2,7 @@
 //! token, a private key, or a URL.
 
 pub mod access;
+pub mod address;
 pub mod catalog;
 pub mod credential;
 pub mod error;

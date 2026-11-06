@@ -1,6 +1,5 @@
 use abnegate_vcs::pull_request::{self, Installation};
 use chrono::{DateTime, Utc};
-use reqwest::Url;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -9,9 +8,8 @@ use crate::db::github_installations::{
     self, AccountType, InstallationRow, InstallationUpsert, RepositorySelection,
 };
 
+use super::address::addressable;
 use super::unrecorded::Unrecorded;
-
-const SCHEMES: [&str; 2] = ["http", "https"];
 
 pub async fn record(
     db: &PgPool,
@@ -26,7 +24,7 @@ pub async fn record(
         account_login: &installation.account.login,
         account_type: account_type(installation.account.kind)?,
         repository_selection: repository_selection(installation.repository_selection)?,
-        html_url: addressable(&installation.html_url)?,
+        html_url: address(&installation.html_url)?,
         suspended_at: installation.suspended_at.map(DateTime::<Utc>::from),
         created_by,
     };
@@ -68,10 +66,8 @@ fn repository_selection(
     }
 }
 
-fn addressable(html_url: &str) -> Result<&str, Unrecorded> {
-    Url::parse(html_url)
-        .ok()
-        .filter(|url| SCHEMES.contains(&url.scheme()))
+fn address(html_url: &str) -> Result<&str, Unrecorded> {
+    addressable(html_url)
         .map(|_| html_url)
         .ok_or(Unrecorded::Unaddressable)
 }
@@ -209,21 +205,14 @@ mod tests {
         let organization = seed_organization(&db).await;
         let app = seed_app(&db, organization, "acme").await;
 
-        for html_url in [
-            "/organizations/acme/settings/installations/1",
-            "javascript:alert(1)",
-            "ftp://github.com/acme",
-            "",
-        ] {
-            let mut installation = installation_of(&app, installation_id());
-            installation.html_url = html_url.to_string();
+        let mut installation = installation_of(&app, installation_id());
+        installation.html_url = "javascript:alert(1)".to_string();
 
-            let refused = record(&db, &app, &installation, None)
-                .await
-                .expect_err("an address a browser cannot safely follow must not be filed");
+        let refused = record(&db, &app, &installation, None)
+            .await
+            .expect_err("an address a browser cannot safely follow must not be filed");
 
-            assert!(matches!(refused, Unrecorded::Unaddressable), "{refused:?}");
-        }
+        assert!(matches!(refused, Unrecorded::Unaddressable), "{refused:?}");
         assert_eq!(rows(&db, organization).await, 0);
     }
 

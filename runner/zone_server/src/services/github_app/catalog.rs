@@ -10,12 +10,12 @@ use std::time::{Duration, Instant};
 
 use abnegate_secret::SecretValue;
 use abnegate_vcs::pull_request::{ApplicationError, ApplicationService, InstalledRepository};
-use reqwest::Url;
 use uuid::Uuid;
 
 use entry::Entry;
 use fetch::Fetch;
 
+use super::address::addressable;
 use super::error::Error;
 use super::flights::Flights;
 use super::scope::Scope;
@@ -24,8 +24,6 @@ use super::tenant::Tenant;
 pub const TTL: Duration = Duration::from_secs(60);
 
 const PAGE_SIZE: NonZeroU8 = NonZeroU8::new(100).unwrap();
-
-const SCHEMES: [&str; 2] = ["http", "https"];
 
 #[derive(Default)]
 pub struct Catalog {
@@ -137,8 +135,7 @@ impl Catalog {
         repositories
             .into_iter()
             .filter(|repository| {
-                let linkable = Url::parse(repository.html_url())
-                    .is_ok_and(|url| SCHEMES.contains(&url.scheme()));
+                let linkable = addressable(repository.html_url()).is_some();
                 if !linkable {
                     tracing::warn!(
                         installation = %installation,
@@ -215,32 +212,20 @@ mod tests {
     }
 
     #[test]
-    fn an_absolute_web_address_over_http_or_https_is_kept() {
-        for html_url in [
-            "https://github.com/acme/widgets",
-            "http://10.0.0.5:8080/acme/widgets",
-        ] {
-            let kept = Catalog::addressable(Uuid::new_v4(), vec![linkable(html_url)]);
+    fn a_repository_with_an_absolute_web_address_is_kept() {
+        let html_url = "http://10.0.0.5:8080/acme/widgets";
 
-            assert_eq!(kept.len(), 1, "{html_url}");
-            assert_eq!(kept[0].html_url(), html_url);
-        }
+        let kept = Catalog::addressable(Uuid::new_v4(), vec![linkable(html_url)]);
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].html_url(), html_url);
     }
 
     #[test]
     fn a_repository_without_an_absolute_web_address_is_left_out() {
-        for html_url in [
-            "",
-            "acme/widgets",
-            "/acme/widgets",
-            "ftp://github.com/acme/widgets",
-            "javascript:alert(1)",
-        ] {
-            assert!(
-                Catalog::addressable(Uuid::new_v4(), vec![linkable(html_url)]).is_empty(),
-                "{html_url}"
-            );
-        }
+        assert!(
+            Catalog::addressable(Uuid::new_v4(), vec![linkable("javascript:alert(1)")]).is_empty()
+        );
     }
 
     #[test]

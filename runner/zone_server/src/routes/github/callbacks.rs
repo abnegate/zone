@@ -5,7 +5,6 @@ use axum::extract::{Query, State};
 use axum::http::header::{ALLOW, CACHE_CONTROL, LOCATION, REFERRER_POLICY};
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use reqwest::Url;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,6 +18,7 @@ use crate::db::github_connection_states::{self, ConsumedState, Purpose};
 use crate::db::organization_members::{self, OrgRole};
 use crate::db::users;
 use crate::routes::common::{AuditEvent, audit};
+use crate::services::github_app::address::addressable;
 use crate::services::github_app::error::Error as GitHubError;
 use crate::services::github_app::installations;
 use crate::services::github_app::manifest;
@@ -27,7 +27,6 @@ use crate::state::AppState;
 use failure::Failure;
 
 const GET: HeaderValue = HeaderValue::from_static("GET");
-const SCHEMES: [&str; 2] = ["http", "https"];
 
 #[derive(Debug, Default, Deserialize)]
 struct ManifestParameters {
@@ -216,7 +215,9 @@ async fn store(
         AccountType::Organization => OwnerType::Organization,
         _ => return Err(Failure::UnknownOwnerType),
     };
-    let html_url = addressable(&application.html_url).ok_or(Failure::Unaddressable)?;
+    let html_url = addressable(&application.html_url)
+        .map(String::from)
+        .ok_or(Failure::Unaddressable)?;
     let app_id = i64::try_from(application.id.get()).map_err(|_| Failure::OutOfRange)?;
     let provider = state.github();
     let client_secret = provider.seal(&application.client_secret)?;
@@ -336,15 +337,6 @@ async fn recorded(
     .await;
 }
 
-/// The address normalized to its serialized form, which is always a valid
-/// header value, when it is an absolute http(s) URL.
-fn addressable(html_url: &str) -> Option<String> {
-    Url::parse(html_url)
-        .ok()
-        .filter(|url| SCHEMES.contains(&url.scheme()))
-        .map(String::from)
-}
-
 fn redirect(target: &str) -> Response {
     let Ok(target) = HeaderValue::try_from(target) else {
         tracing::error!("A GitHub callback built a redirect that is not a valid header value");
@@ -394,26 +386,6 @@ mod tests {
         let parameters: ManifestParameters = received(&uri("state=one&state=two&code=x"));
         assert_eq!(parameters.state, None);
         assert_eq!(parameters.code, None);
-    }
-
-    #[test]
-    fn only_an_absolute_web_address_is_addressable() {
-        assert_eq!(
-            addressable("https://github.com/apps/zone-acme").as_deref(),
-            Some("https://github.com/apps/zone-acme")
-        );
-        assert_eq!(
-            addressable("http://192.168.1.5:8080/apps/zone").as_deref(),
-            Some("http://192.168.1.5:8080/apps/zone")
-        );
-        for refused in [
-            "/apps/zone-acme",
-            "javascript:alert(1)",
-            "ftp://github.com/apps/x",
-            "",
-        ] {
-            assert_eq!(addressable(refused), None, "{refused}");
-        }
     }
 
     #[test]
