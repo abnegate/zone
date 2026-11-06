@@ -149,11 +149,24 @@ export function SourceDetail({
 
         <div className="form-group">
           <label htmlFor="source-type">Type</label>
-          <input id="source-type" value={getSourceLabel(source.source_type)} readOnly disabled />
+          <input
+            type="text"
+            id="source-type"
+            value={getSourceLabel(source.source_type)}
+            readOnly
+            disabled
+          />
         </div>
         <div className="form-group">
           <label htmlFor="source-url">URL</label>
-          <input id="source-url" className="input-mono" value={source.url} readOnly disabled />
+          <input
+            type="text"
+            id="source-url"
+            className="input-mono"
+            value={source.url}
+            readOnly
+            disabled
+          />
         </div>
         {source.source_type === GITHUB_SOURCE_TYPE && (
           <GitHubSourceConnection
@@ -166,7 +179,12 @@ export function SourceDetail({
         )}
         <div className="form-group">
           <label htmlFor="source-name">Name</label>
-          <input id="source-name" value={name} onChange={(event) => setName(event.target.value)} />
+          <input
+            type="text"
+            id="source-name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
         </div>
         <div className="form-group">
           <label htmlFor="source-description">
