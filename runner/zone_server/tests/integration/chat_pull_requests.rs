@@ -254,29 +254,35 @@ fn link(github: &MockServer, number: u64) -> String {
     format!("{}/acme/widgets/pull/{number}", github.uri())
 }
 
+/// Pull request 12 as GitHub's REST API describes it: open, and a draft when
+/// `draft` is.
+fn detail(github: &MockServer, draft: bool) -> Value {
+    json!({
+        "node_id": NODE,
+        "number": 12,
+        "title": TITLE,
+        "state": "open",
+        "draft": draft,
+        "merged": false,
+        "mergeable": true,
+        "mergeable_state": if draft { "draft" } else { "blocked" },
+        "head": {"ref": "feature", "sha": HEAD},
+        "base": {"ref": "main", "sha": HEAD},
+        "html_url": link(github, 12),
+        "additions": 40,
+        "deletions": 3,
+        "changed_files": 2,
+        "commits": 1,
+    })
+}
+
 /// GitHub as it describes pull request 12: open, its checks passing, and its
 /// repository allowing auto-merge.
 async fn describe(github: &MockServer, draft: bool) {
     Mock::given(method("GET"))
         .and(path("/repos/acme/widgets/pulls/12"))
         .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "node_id": NODE,
-            "number": 12,
-            "title": TITLE,
-            "state": "open",
-            "draft": draft,
-            "merged": false,
-            "mergeable": true,
-            "mergeable_state": if draft { "draft" } else { "blocked" },
-            "head": {"ref": "feature", "sha": HEAD},
-            "base": {"ref": "main", "sha": HEAD},
-            "html_url": link(github, 12),
-            "additions": 40,
-            "deletions": 3,
-            "changed_files": 2,
-            "commits": 1,
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(detail(github, draft)))
         .mount(github)
         .await;
     Mock::given(method("GET"))
@@ -1005,6 +1011,11 @@ async fn ready_for_review_takes_a_draft_out_of_draft_on_github() {
         json!({"id": NODE}),
     )
     .await;
+    threads_read()
+        .respond_with(threads_answer(&[]))
+        .expect(2)
+        .mount(&github)
+        .await;
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
@@ -1165,25 +1176,12 @@ async fn review_threads_read_as_unknown_when_github_will_not_list_them() {
 #[tokio::test]
 async fn a_merged_pull_request_is_listed_without_reading_its_review_threads() {
     let github = MockServer::start().await;
+    let mut merged = detail(&github, false);
+    merged["state"] = json!("closed");
+    merged["merged"] = json!(true);
     Mock::given(method("GET"))
         .and(path("/repos/acme/widgets/pulls/12"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "node_id": NODE,
-            "number": 12,
-            "title": TITLE,
-            "state": "closed",
-            "draft": false,
-            "merged": true,
-            "mergeable": null,
-            "mergeable_state": "unknown",
-            "head": {"ref": "feature", "sha": HEAD},
-            "base": {"ref": "main", "sha": HEAD},
-            "html_url": link(&github, 12),
-            "additions": 40,
-            "deletions": 3,
-            "changed_files": 2,
-            "commits": 1,
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(merged))
         .mount(&github)
         .await;
     threads_read()
@@ -1201,6 +1199,34 @@ async fn a_merged_pull_request_is_listed_without_reading_its_review_threads() {
 
     assert_eq!(listed[0]["status"]["state"], "merged", "{listed}");
     assert_eq!(listed[0]["status"]["threads"], Value::Null, "{listed}");
+}
+
+#[tokio::test]
+async fn review_threads_counted_moments_ago_are_listed_without_asking_github_again() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    threads_read()
+        .respond_with(threads_answer(&[false, true]))
+        .expect(1)
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    workspace.record(&link(&github, 12)).await;
+
+    let first = workspace.listed(&workspace.token).await;
+    let second = workspace.listed(&workspace.token).await;
+
+    for listed in [first, second] {
+        assert_eq!(
+            listed[0]["status"]["threads"],
+            json!({"open": 1, "resolved": 1}),
+            "{listed}"
+        );
+    }
 }
 
 #[tokio::test]
