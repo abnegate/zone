@@ -3,6 +3,6 @@ use serde::Serialize;
 use crate::services::chat::subagent::ChatSubagent;
 
 #[derive(Debug, Serialize)]
-pub struct SubagentsResponse {
+pub struct Response {
     pub subagents: Vec<ChatSubagent>,
 }

@@ -1,211 +1,74 @@
 //! Keeping a chat's subagents as one of its turns reports them.
 
-use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
-use zone_core::llm::{Subagent, SubagentStep};
+use zone_core::llm::Subagent;
 
-use super::ChatSubagent;
-use crate::db::DbResult;
-use crate::db::chat_subagents::{self, SubagentChange, SubagentRow};
+use super::Announcer;
+use super::keeper::Keeper;
 use crate::state::AppState;
 
 /// Stores what one chat turn's agent says about its subagents, and announces
 /// each stored change to the chat's readers.
 ///
-/// An agent can report many steps in one burst, so the updates already
-/// waiting are folded together: each subagent they touch is written and
-/// announced once per burst rather than once per update.
+/// Nothing happens until the turn's agent names its first subagent: only then
+/// does the tracker stop what earlier turns left running and start writing.
+/// An agent can report many steps in one burst, so the updates already waiting
+/// are folded together: each subagent they touch is written and announced once
+/// per burst, with only the steps that burst changed.
 pub struct Tracker {
-    updates: UnboundedSender<Subagent>,
+    keeper: Keeper,
+    updates: OnceLock<UnboundedSender<Subagent>>,
 }
 
 impl Tracker {
-    /// Starts keeping turn `message_id`'s subagents. The turn's tracker is
-    /// done once every clone of the observer holding it is gone.
-    pub fn spawn(
+    /// Keeps turn `message_id`'s subagents. The turn's tracker is done once
+    /// every clone of the observer holding it is gone.
+    pub fn new(
         state: AppState,
         chat_id: Uuid,
         message_id: Uuid,
-        announce: UnboundedSender<ChatSubagent>,
+        announcer: Arc<dyn Announcer>,
     ) -> Self {
-        let (updates, received) = mpsc::unbounded_channel();
-        let keeper = Keeper {
-            state,
-            chat_id,
-            message_id,
-            announce,
-            steps: HashMap::new(),
-        };
-        tokio::spawn(keeper.run(received));
-        Self { updates }
+        Self {
+            keeper: Keeper::new(state, chat_id, message_id, announcer),
+            updates: OnceLock::new(),
+        }
     }
 
     pub fn track(&self, subagent: &Subagent) {
-        let _ = self.updates.send(subagent.clone());
+        let updates = self.updates.get_or_init(|| self.keeper.clone().start());
+        let _ = updates.send(subagent.clone());
     }
 
+    /// A tracker whose updates go to the returned receiver instead.
     #[cfg(test)]
-    pub(crate) fn listening() -> (Self, UnboundedReceiver<Subagent>) {
-        let (updates, received) = mpsc::unbounded_channel();
-        (Self { updates }, received)
+    pub(crate) fn listening(
+        state: AppState,
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<Subagent>) {
+        let (updates, received) = tokio::sync::mpsc::unbounded_channel();
+        let (unheard, _) = tokio::sync::mpsc::unbounded_channel::<(
+            super::ChatSubagent,
+            Vec<zone_core::llm::SubagentStep>,
+        )>();
+        let tracker = Self {
+            keeper: Keeper::new(state, Uuid::nil(), Uuid::nil(), Arc::new(unheard)),
+            updates: OnceLock::from(updates),
+        };
+        (tracker, received)
     }
 }
 
 impl fmt::Debug for Tracker {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Tracker").finish_non_exhaustive()
+        formatter
+            .debug_struct("Tracker")
+            .field("started", &self.updates.get().is_some())
+            .finish_non_exhaustive()
     }
-}
-
-struct Keeper {
-    state: AppState,
-    chat_id: Uuid,
-    message_id: Uuid,
-    announce: UnboundedSender<ChatSubagent>,
-    /// Every step each subagent has reported this turn, since a stored list
-    /// is replaced whole rather than appended to.
-    steps: HashMap<String, Vec<SubagentStep>>,
-}
-
-impl Keeper {
-    async fn run(mut self, mut updates: UnboundedReceiver<Subagent>) {
-        let others =
-            chat_subagents::stop_others(self.state.db(), self.chat_id, self.message_id).await;
-        self.settled(
-            others,
-            "could not stop the subagents an earlier turn left running",
-        );
-
-        let mut heard = false;
-        while let Some(first) = updates.recv().await {
-            heard = true;
-            let mut batch = Batch::default();
-            batch.add(first, &mut self.steps);
-            while let Ok(next) = updates.try_recv() {
-                batch.add(next, &mut self.steps);
-            }
-            for pending in batch.pending {
-                self.record(pending).await;
-            }
-        }
-
-        if heard {
-            let stopped =
-                chat_subagents::stop(self.state.db(), self.chat_id, self.message_id).await;
-            self.settled(stopped, "could not stop the subagents a turn left running");
-        }
-    }
-
-    async fn record(&self, pending: Pending) {
-        let update = pending.update;
-        let steps = match pending.stepped {
-            true => self.steps.get(&update.id).map(Vec::as_slice),
-            false => None,
-        };
-        let change = SubagentChange {
-            chat_id: self.chat_id,
-            message_id: Some(self.message_id),
-            external_id: &update.id,
-            description: update.description.as_deref(),
-            kind: update.kind.as_deref(),
-            model: update.model.as_deref(),
-            background: update.background,
-            status: update.status,
-            tool_uses: update.tool_uses.map(stored),
-            duration_ms: update.duration_ms.map(stored),
-            tokens: update.tokens.map(stored),
-            last_tool: update.last_tool.as_deref(),
-            summary: update.summary.as_deref(),
-            error: update.error.as_deref(),
-            steps,
-        };
-        match chat_subagents::record(self.state.db(), &change).await {
-            Ok(row) => self.publish(row),
-            Err(error) => {
-                tracing::warn!(chat = %self.chat_id, subagent = %update.id, %error, "could not record a subagent's update");
-            }
-        }
-    }
-
-    fn settled(&self, rows: DbResult<Vec<SubagentRow>>, failure: &'static str) {
-        match rows {
-            Ok(rows) => rows.into_iter().for_each(|row| self.publish(row)),
-            Err(error) => tracing::warn!(chat = %self.chat_id, %error, "{failure}"),
-        }
-    }
-
-    fn publish(&self, row: SubagentRow) {
-        let _ = self.announce.send(ChatSubagent::from(row));
-    }
-}
-
-/// The updates that arrived together, folded into one per subagent in the
-/// order each subagent was first heard of.
-#[derive(Default)]
-struct Batch {
-    pending: Vec<Pending>,
-    positions: HashMap<String, usize>,
-}
-
-struct Pending {
-    update: Subagent,
-    stepped: bool,
-}
-
-impl Batch {
-    fn add(&mut self, mut update: Subagent, steps: &mut HashMap<String, Vec<SubagentStep>>) {
-        let stepped = match update.step.take() {
-            Some(step) => {
-                upsert(steps.entry(update.id.clone()).or_default(), step);
-                true
-            }
-            None => false,
-        };
-        match self.positions.get(&update.id) {
-            Some(&position) => {
-                let pending = &mut self.pending[position];
-                pending.stepped |= stepped;
-                fold(&mut pending.update, update);
-            }
-            None => {
-                self.positions.insert(update.id.clone(), self.pending.len());
-                self.pending.push(Pending { update, stepped });
-            }
-        }
-    }
-}
-
-fn upsert(steps: &mut Vec<SubagentStep>, step: SubagentStep) {
-    match steps.iter_mut().find(|known| known.id == step.id) {
-        Some(known) => *known = step,
-        None => steps.push(step),
-    }
-}
-
-fn fold(earlier: &mut Subagent, later: Subagent) {
-    fn newer<T>(earlier: &mut Option<T>, later: Option<T>) {
-        if later.is_some() {
-            *earlier = later;
-        }
-    }
-    newer(&mut earlier.description, later.description);
-    newer(&mut earlier.kind, later.kind);
-    newer(&mut earlier.model, later.model);
-    newer(&mut earlier.background, later.background);
-    newer(&mut earlier.status, later.status);
-    newer(&mut earlier.tool_uses, later.tool_uses);
-    newer(&mut earlier.duration_ms, later.duration_ms);
-    newer(&mut earlier.tokens, later.tokens);
-    newer(&mut earlier.last_tool, later.last_tool);
-    newer(&mut earlier.summary, later.summary);
-    newer(&mut earlier.error, later.error);
-}
-
-fn stored(count: u64) -> i64 {
-    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -213,12 +76,18 @@ mod tests {
     use std::time::Duration;
 
     use sqlx::PgPool;
-    use zone_core::llm::{StepStatus, SubagentStatus};
+    use tokio::sync::Notify;
+    use tokio::sync::mpsc::{self, UnboundedReceiver};
+    use zone_core::llm::{StepStatus, SubagentStatus, SubagentStep};
 
     use super::*;
+    use crate::db::chat_subagents::{self, SubagentChange};
     use crate::db::chats::create_chat;
+    use crate::services::chat::subagent::ChatSubagent;
 
     const PATIENCE: Duration = Duration::from_secs(10);
+
+    type Announced = UnboundedReceiver<(ChatSubagent, Vec<SubagentStep>)>;
 
     struct Turn {
         state: AppState,
@@ -241,11 +110,24 @@ mod tests {
             }
         }
 
-        fn track(&self) -> (Tracker, UnboundedReceiver<ChatSubagent>) {
+        fn track(&self) -> (Tracker, Announced) {
             let (announce, announced) = mpsc::unbounded_channel();
-            let tracker =
-                Tracker::spawn(self.state.clone(), self.chat_id, self.message_id, announce);
+            let tracker = Tracker::new(
+                self.state.clone(),
+                self.chat_id,
+                self.message_id,
+                Arc::new(announce),
+            );
             (tracker, announced)
+        }
+
+        /// A tracker that writes nothing until `hold` is notified, so every
+        /// update a test sends before that arrives as one burst.
+        fn held(&self) -> (Tracker, Announced, Arc<Notify>) {
+            let (mut tracker, announced) = self.track();
+            let hold = Arc::new(Notify::new());
+            tracker.keeper.hold = Some(hold.clone());
+            (tracker, announced, hold)
         }
 
         async fn running(&self, chat_id: Uuid, external_id: &str, message_id: Option<Uuid>) {
@@ -271,6 +153,13 @@ mod tests {
                 .expect("the subagent")
                 .status
         }
+
+        async fn steps(&self, subagent: &ChatSubagent) -> Vec<SubagentStep> {
+            chat_subagents::steps(self.state.db(), self.chat_id, subagent.id)
+                .await
+                .expect("the subagent's steps")
+                .expect("the subagent")
+        }
     }
 
     async fn chat(pool: &PgPool) -> Uuid {
@@ -280,7 +169,7 @@ mod tests {
             .id
     }
 
-    async fn next(announced: &mut UnboundedReceiver<ChatSubagent>) -> ChatSubagent {
+    async fn next(announced: &mut Announced) -> (ChatSubagent, Vec<SubagentStep>) {
         tokio::time::timeout(PATIENCE, announced.recv())
             .await
             .expect("an announcement in time")
@@ -288,11 +177,11 @@ mod tests {
     }
 
     /// Every announcement still to come, once the tracker has finished.
-    async fn rest(mut announced: UnboundedReceiver<ChatSubagent>) -> Vec<ChatSubagent> {
+    async fn rest(mut announced: Announced) -> Vec<(ChatSubagent, Vec<SubagentStep>)> {
         let mut rest = Vec::new();
         loop {
             match tokio::time::timeout(PATIENCE, announced.recv()).await {
-                Ok(Some(subagent)) => rest.push(subagent),
+                Ok(Some(announcement)) => rest.push(announcement),
                 Ok(None) => return rest,
                 Err(_) => panic!("the tracker never finished: {rest:?}"),
             }
@@ -323,7 +212,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn updates_in_turn_merge_into_one_subagent_whose_steps_are_kept_by_id() {
+    async fn updates_in_turn_merge_into_one_subagent_and_announce_only_the_steps_they_changed() {
         let turn = Turn::new().await;
         let (tracker, mut announced) = turn.track();
 
@@ -334,26 +223,49 @@ mod tests {
             step: Some(step("toolu_01Step", StepStatus::Running)),
             ..Subagent::new("toolu_01Agent")
         });
-        next(&mut announced).await;
+        let first = next(&mut announced).await;
         tracker.track(&stepped(
             "toolu_01Agent",
             step("toolu_01Step", StepStatus::Succeeded),
         ));
-        next(&mut announced).await;
+        let second = next(&mut announced).await;
         tracker.track(&Subagent {
             tool_uses: Some(2),
             last_tool: Some("Read".to_string()),
             step: Some(step("toolu_02Step", StepStatus::Running)),
             ..Subagent::new("toolu_01Agent")
         });
-        next(&mut announced).await;
+        let third = next(&mut announced).await;
         tracker.track(&Subagent {
             summary: Some("Looks good".to_string()),
             ..finished("toolu_01Agent")
         });
-        let last = next(&mut announced).await;
+        let (last, unstepped) = next(&mut announced).await;
         drop(tracker);
 
+        assert_eq!(first.1, [step("toolu_01Step", StepStatus::Running)]);
+        assert_eq!(second.1, [step("toolu_01Step", StepStatus::Succeeded)]);
+        assert_eq!(third.1, [step("toolu_02Step", StepStatus::Running)]);
+        assert_eq!(unstepped, []);
+        assert_eq!(
+            [
+                first.0.step_count,
+                second.0.step_count,
+                third.0.step_count,
+                last.step_count
+            ],
+            [1, 1, 2, 2]
+        );
+        let revisions = [
+            first.0.revision,
+            second.0.revision,
+            third.0.revision,
+            last.revision,
+        ];
+        assert!(
+            revisions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{revisions:?}"
+        );
         assert_eq!(last.message_id, Some(turn.message_id));
         assert_eq!(last.description, "Ask for a review");
         assert_eq!(last.kind.as_deref(), Some("general-purpose"));
@@ -363,7 +275,7 @@ mod tests {
         assert_eq!(last.summary.as_deref(), Some("Looks good"));
         assert_eq!(last.status, SubagentStatus::Completed);
         assert_eq!(
-            last.steps,
+            turn.steps(&last).await,
             [
                 step("toolu_01Step", StepStatus::Succeeded),
                 step("toolu_02Step", StepStatus::Running),
@@ -384,7 +296,7 @@ mod tests {
     #[tokio::test]
     async fn a_burst_of_steps_is_written_and_announced_once() {
         let turn = Turn::new().await;
-        let (tracker, announced) = turn.track();
+        let (tracker, announced, hold) = turn.held();
         let steps: Vec<SubagentStep> = (0..20)
             .map(|index| step(&format!("toolu_{index:02}"), StepStatus::Succeeded))
             .collect();
@@ -394,17 +306,21 @@ mod tests {
         }
         tracker.track(&finished("toolu_01Agent"));
         drop(tracker);
+        hold.notify_one();
 
         let announcements = rest(announced).await;
         assert_eq!(announcements.len(), 1, "{announcements:?}");
-        assert_eq!(announcements[0].steps, steps);
-        assert_eq!(announcements[0].status, SubagentStatus::Completed);
+        let (subagent, changed) = &announcements[0];
+        assert_eq!(changed, &steps);
+        assert_eq!(subagent.step_count, 20);
+        assert_eq!(subagent.status, SubagentStatus::Completed);
+        assert_eq!(turn.steps(subagent).await, steps);
     }
 
     #[tokio::test]
     async fn subagents_reported_together_are_announced_once_each() {
         let turn = Turn::new().await;
-        let (tracker, announced) = turn.track();
+        let (tracker, announced, hold) = turn.held();
 
         tracker.track(&stepped("thread-1", step("call-1", StepStatus::Running)));
         tracker.track(&stepped("thread-2", step("call-2", StepStatus::Running)));
@@ -412,29 +328,24 @@ mod tests {
         tracker.track(&finished("thread-2"));
         tracker.track(&finished("thread-1"));
         drop(tracker);
+        hold.notify_one();
 
         let announcements = rest(announced).await;
         let named: Vec<&str> = announcements
             .iter()
-            .map(|subagent| subagent.external_id.as_str())
+            .map(|(subagent, _)| subagent.external_id.as_str())
             .collect();
         assert_eq!(
             named,
             ["thread-1", "thread-2"],
             "in the order first heard of"
         );
-        assert_eq!(
-            announcements[0].steps,
-            [step("call-1", StepStatus::Succeeded)]
-        );
-        assert_eq!(
-            announcements[1].steps,
-            [step("call-2", StepStatus::Running)]
-        );
+        assert_eq!(announcements[0].1, [step("call-1", StepStatus::Succeeded)]);
+        assert_eq!(announcements[1].1, [step("call-2", StepStatus::Running)]);
     }
 
     #[tokio::test]
-    async fn a_new_turn_stops_what_earlier_turns_of_its_chat_left_running() {
+    async fn a_turn_stops_what_earlier_turns_left_running_before_it_writes() {
         let turn = Turn::new().await;
         let elsewhere = chat(turn.state.db()).await;
         turn.running(turn.chat_id, "earlier", Some(Uuid::new_v4()))
@@ -442,20 +353,55 @@ mod tests {
         turn.running(turn.chat_id, "unowned", None).await;
         turn.running(elsewhere, "foreign", Some(Uuid::new_v4()))
             .await;
+        let earlier = chat_subagents::list(turn.state.db(), turn.chat_id)
+            .await
+            .expect("the chat's subagents")
+            .into_iter()
+            .find(|row| row.external_id == "earlier")
+            .expect("the earlier subagent");
+        chat_subagents::record_steps(
+            turn.state.db(),
+            earlier.id,
+            &[
+                step("toolu_done", StepStatus::Succeeded),
+                step("toolu_open", StepStatus::Running),
+            ],
+        )
+        .await
+        .expect("the earlier subagent's steps");
 
         let (tracker, announced) = turn.track();
+        tracker.track(&finished("mine"));
         drop(tracker);
 
         let announcements = rest(announced).await;
-        let stopped: Vec<(&str, SubagentStatus)> = announcements
+        let heard: Vec<(&str, SubagentStatus, &[SubagentStep])> = announcements
             .iter()
-            .map(|subagent| (subagent.external_id.as_str(), subagent.status))
+            .map(|(subagent, steps)| {
+                (
+                    subagent.external_id.as_str(),
+                    subagent.status,
+                    steps.as_slice(),
+                )
+            })
             .collect();
         assert_eq!(
-            stopped,
+            heard,
             [
-                ("earlier", SubagentStatus::Stopped),
-                ("unowned", SubagentStatus::Stopped),
+                (
+                    "earlier",
+                    SubagentStatus::Stopped,
+                    [step("toolu_open", StepStatus::Failed)].as_slice()
+                ),
+                ("unowned", SubagentStatus::Stopped, [].as_slice()),
+                ("mine", SubagentStatus::Completed, [].as_slice()),
+            ]
+        );
+        assert_eq!(
+            turn.steps(&announcements[0].0).await,
+            [
+                step("toolu_done", StepStatus::Succeeded),
+                step("toolu_open", StepStatus::Failed),
             ]
         );
         assert_eq!(
@@ -466,7 +412,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_turn_that_ends_stops_the_subagents_it_left_running() {
+    async fn a_turn_that_ends_stops_the_subagents_it_left_running_and_fails_their_steps() {
         let turn = Turn::new().await;
         let (tracker, mut announced) = turn.track();
 
@@ -474,21 +420,28 @@ mod tests {
             "toolu_01Agent",
             step("toolu_x", StepStatus::Running),
         ));
-        let started = next(&mut announced).await;
+        let (started, _) = next(&mut announced).await;
         drop(tracker);
 
         assert_eq!(started.status, SubagentStatus::Running);
         let announcements = rest(announced).await;
         assert_eq!(announcements.len(), 1, "{announcements:?}");
-        assert_eq!(announcements[0].id, started.id);
-        assert_eq!(announcements[0].status, SubagentStatus::Stopped);
-        assert!(announcements[0].finished_at.is_some());
+        let (stopped, failed) = &announcements[0];
+        assert_eq!(stopped.id, started.id);
+        assert_eq!(stopped.status, SubagentStatus::Stopped);
+        assert!(stopped.finished_at.is_some());
+        assert!(stopped.revision > started.revision);
+        assert_eq!(failed, &[step("toolu_x", StepStatus::Failed)]);
+        assert_eq!(
+            turn.steps(stopped).await,
+            [step("toolu_x", StepStatus::Failed)]
+        );
     }
 
     #[tokio::test]
-    async fn a_turn_that_heard_of_no_subagent_sweeps_nothing_of_its_own() {
+    async fn a_turn_that_hears_of_no_subagent_touches_nothing() {
         let turn = Turn::new().await;
-        turn.running(turn.chat_id, "toolu_01Agent", Some(turn.message_id))
+        turn.running(turn.chat_id, "earlier", Some(Uuid::new_v4()))
             .await;
 
         let (tracker, announced) = turn.track();
@@ -496,7 +449,7 @@ mod tests {
 
         assert_eq!(rest(announced).await, []);
         assert_eq!(
-            turn.status(turn.chat_id, "toolu_01Agent").await,
+            turn.status(turn.chat_id, "earlier").await,
             SubagentStatus::Running.as_str()
         );
     }
