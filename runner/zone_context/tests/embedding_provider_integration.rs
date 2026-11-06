@@ -2,6 +2,7 @@
 //! providers, against a mocked server.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use abnegate_llm::modality::vendor::{OllamaEmbeddingConfig, OllamaEmbeddingProvider};
 use serde_json::{Value, json};
@@ -22,6 +23,9 @@ const CONCURRENCY: usize = 10;
 const CONTEXT_LIMIT_CHARACTERS: usize = 1000;
 const LONG_TEXT_CHARACTERS: usize = 5000;
 const LONG_BODY_CHARACTERS: usize = 500;
+const SHORT_PROMPT_TIMEOUT: Duration = Duration::from_millis(200);
+const DEADLINE_MARGIN: Duration = Duration::from_secs(1);
+const SLOW_ANSWER: Duration = Duration::from_secs(3);
 const INPUTS_PER_REQUEST: usize = 64;
 const LARGE_BATCH: usize = INPUTS_PER_REQUEST * 2 + 5;
 const OPENAI_CONTEXT_LENGTH: &str = r#"{"error":{"message":"This model's maximum context length is 512 tokens, however you requested 2250 tokens. Please reduce your prompt.","type":"invalid_request_error","param":null,"code":null}}"#;
@@ -105,14 +109,44 @@ async fn test_ollama_handles_api_error() {
 }
 
 #[tokio::test]
-async fn test_ollama_handles_timeout() {
-    let provider = adapter(OllamaEmbeddingConfig::new("http://192.0.2.1:1234", MODEL));
-    let result = tokio::time::timeout(
-        tokio::time::Duration::from_millis(100),
-        provider.embed("test text"),
-    )
-    .await;
-    assert!(result.is_err() || result.unwrap().is_err());
+async fn a_short_prompt_past_its_deadline_is_an_embedding_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(OLLAMA_PATH))
+        .respond_with(embedding(&[0.5; 768]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(OLLAMA_PATH))
+        .respond_with(embedding(&[0.5; 768]).set_delay(SLOW_ANSWER))
+        .mount(&server)
+        .await;
+    let provider = adapter(
+        OllamaEmbeddingConfig::new(server.uri(), MODEL)
+            .with_dimensions(768)
+            .with_short_prompt_timeout(SHORT_PROMPT_TIMEOUT),
+    );
+    provider
+        .embed("warm up")
+        .await
+        .expect("the first answer is immediate");
+    let started = Instant::now();
+    let error = provider
+        .embed("test text")
+        .await
+        .expect_err("the answer comes after the deadline");
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(error, ContextError::Embedding(_)),
+        "Expected Embedding error, got {error:?}"
+    );
+    assert!(!error.is_fatal_embedding(), "{error:?}");
+    assert!(
+        elapsed < SHORT_PROMPT_TIMEOUT + DEADLINE_MARGIN,
+        "gave up after {elapsed:?}, not at the {SHORT_PROMPT_TIMEOUT:?} deadline"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
