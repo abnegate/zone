@@ -430,6 +430,15 @@ pub fn create_router(state: AppState) -> Router {
             "/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai/effective",
             get(ai_settings::get_effective),
         )
+        // GitHub repositories
+        .route(
+            "/api/organizations/{org_id}/github/repositories",
+            get(github::repositories::list),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/installations/{id}/repositories/{owner}/{repo}/branches",
+            get(github::repositories::branches),
+        )
         // Coding agent sign-ins
         .route("/api/organizations/{org_id}/agents", get(agents::list))
         .route(
