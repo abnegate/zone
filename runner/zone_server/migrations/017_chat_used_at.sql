@@ -8,7 +8,7 @@ SET used_at = COALESCE(GREATEST(chat.created_at, (
     FROM public.messages AS message
     WHERE message.chat_id = chat.id
         AND message.role = 'user'
-        AND NOT (COALESCE(message.metadata, '{}'::jsonb) ? 'source')
+        AND message.metadata -> 'source' IS NULL
 )), chat.used_at);
 
 CREATE INDEX idx_chats_workspace_used

@@ -943,18 +943,26 @@ async fn chats_start_out_used_when_a_member_last_typed_in_them() {
         .bind(days)
         .fetch_one(&database.pool)
     };
-    let typed = chat(5).await.unwrap();
+    let unlabelled = chat(6).await.unwrap();
+    let listed = chat(6).await.unwrap();
     let untouched = chat(3).await.unwrap();
-    for (role, metadata, days) in [
-        ("user", serde_json::json!({}), 4),
-        ("assistant", serde_json::json!({}), 2),
-        ("user", serde_json::json!({ "source": "reminder" }), 1),
+    for (chat, role, metadata, days) in [
+        (unlabelled, "user", None, 4),
+        (unlabelled, "assistant", None, 2),
+        (
+            unlabelled,
+            "user",
+            Some(serde_json::json!({ "source": "reminder" })),
+            1,
+        ),
+        (listed, "user", Some(serde_json::json!({})), 5),
+        (listed, "user", Some(serde_json::json!(["source"])), 4),
     ] {
         sqlx::query(
             "INSERT INTO messages(chat_id,role,content,metadata,created_at) \
              VALUES($1,$2,'Migration',$3,NOW() - make_interval(days => $4))",
         )
-        .bind(typed)
+        .bind(chat)
         .bind(role)
         .bind(metadata)
         .bind(days)
@@ -972,9 +980,14 @@ async fn chats_start_out_used_when_a_member_last_typed_in_them() {
         .fetch_one(&database.pool)
     };
     assert_eq!(
-        age(typed).await.unwrap(),
+        age(unlabelled).await.unwrap(),
         4,
         "a chat was last used when a member last typed in it, not when a reply or reminder landed"
+    );
+    assert_eq!(
+        age(listed).await.unwrap(),
+        4,
+        "only a source key marks a message as automated, as the server reads it"
     );
     assert_eq!(
         age(untouched).await.unwrap(),

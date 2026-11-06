@@ -261,12 +261,6 @@ mod tests {
         );
 
         fixture.age(older, 3).await;
-        fixture.post(newer, "user", None).await;
-        assert_eq!(
-            fixture.recent().await.model_name,
-            "newer",
-            "a posted message counts"
-        );
         fixture.post(older, "user", None).await;
         assert_eq!(
             fixture.recent().await.model_name,

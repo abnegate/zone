@@ -4,6 +4,8 @@ import { modelsApi } from '../../../api/models';
 import { useAuth } from '../../../features/auth';
 import type { DiskUsage, InstalledModel, ProviderErrors } from '../types';
 
+const UNLISTED: InstalledModel[] = [];
+
 /**
  * The installed models, or with `workspaceId` the models a chat in that
  * workspace can run: only those its AI settings save when they send its
@@ -70,7 +72,7 @@ export function useModels(workspaceId?: string) {
   }, []);
 
   return {
-    models: listed === workspaceId ? models : [],
+    models: listed === workspaceId ? models : UNLISTED,
     disk,
     loading,
     error,
