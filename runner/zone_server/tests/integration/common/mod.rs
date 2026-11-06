@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod context;
+pub mod github_app;
 pub mod mail;
 pub mod transcript;
 
