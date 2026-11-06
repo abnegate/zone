@@ -749,6 +749,8 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    use abnegate_agent_cli::login::claude::Redirect;
+    use abnegate_agent_cli::login::claude::Scope;
     use sqlx::PgPool;
     use tempfile::TempDir;
     use tokio::time::timeout;
@@ -756,7 +758,6 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
     use crate::services::login::caller::Caller;
-    use crate::services::login::claude::{Redirect, Scope};
     use crate::services::login::codex::testing::{PROMPT, capture, script};
     use crate::services::login::console::Console;
     use crate::services::login::credential;
@@ -1314,6 +1315,7 @@ esac"#
             .failures
             .insert(scene.organization, "an earlier sign-in failed".to_string());
         let claude = oauth::start(
+            scene.state.config(),
             scene.organization,
             &Caller {
                 user: scene.user,
@@ -1324,7 +1326,8 @@ esac"#
             Redirect::Loopback(CALLBACK_PORT),
             Console::at(CONSOLE, &[CONSOLE.to_string()]),
         )
-        .await;
+        .await
+        .expect("a started Claude sign-in");
         let claude_state = reqwest::Url::parse(&claude.url)
             .expect("an authorize URL")
             .query_pairs()

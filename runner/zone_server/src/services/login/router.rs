@@ -316,6 +316,7 @@ fn group(preferred: AgentKind, agent: AgentKind) -> usize {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use abnegate_agent_cli::login::claude::Tokens;
     use abnegate_secret::SecretValue;
     use chrono::SubsecRound;
     use futures::future::try_join_all;
@@ -329,7 +330,7 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, Config};
     use crate::db::agent_logins::{AgentLoginRow, Insert};
-    use crate::services::login::claude::Tokens;
+    use crate::services::login::claude::Sealed;
     use crate::services::login::credential::Login;
 
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";
@@ -443,14 +444,14 @@ mod tests {
         }
 
         fn sealed(&self, expires_at: DateTime<Utc>) -> String {
-            Tokens {
-                access: SecretValue::new(format!("access-{}", Uuid::new_v4())),
-                refresh: None,
+            Tokens::new(
+                SecretValue::new(format!("access-{}", Uuid::new_v4())),
+                None,
                 expires_at,
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            }
+                None,
+                "user:inference",
+                None,
+            )
             .seal(self.state.master_key())
             .expect("tokens to seal")
         }
