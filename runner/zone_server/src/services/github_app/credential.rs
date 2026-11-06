@@ -31,6 +31,16 @@ impl Credential {
         self.scope
     }
 
+    /// This credential presenting `secret`, the token a call through
+    /// [`super::Provider::retrying`] last succeeded with, so the next call
+    /// starts from the token GitHub accepted rather than one it refused.
+    pub fn renewed(&self, secret: SecretValue) -> Self {
+        Self {
+            secret,
+            scope: self.scope,
+        }
+    }
+
     pub fn secret(&self) -> &SecretValue {
         &self.secret
     }
@@ -97,6 +107,16 @@ mod tests {
             Credential::stored(SecretValue::new("ghp_personalaccesstoken")).scope(),
             None
         );
+    }
+
+    #[test]
+    fn a_renewed_credential_presents_the_new_token_for_the_same_installation() {
+        let scope = scope();
+        let renewed = Credential::installed(SecretValue::new("ghs_refusedtoken"), scope)
+            .renewed(SecretValue::new("ghs_reminted"));
+
+        assert_eq!(renewed.secret().expose(), "ghs_reminted");
+        assert_eq!(renewed.scope(), Some(scope));
     }
 
     #[test]
