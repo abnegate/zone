@@ -978,14 +978,12 @@ impl WaitForTool {
             .map_err(|_| SOURCE_UNREADABLE.to_string())?
             .filter(|source| source.is_active.unwrap_or(true))
             .ok_or(SOURCE_FOREIGN)?;
-        if source.source_type != "github" {
+        if source.source_type != sources::GITHUB {
             return Err(SOURCE_NOT_GITHUB.to_string());
         }
         let mut configuration = Configuration::deserialize(&source.config)
             .map_err(|_| SOURCE_CONFIGURATION_INVALID.to_string())?;
-        configuration.token = source_token(&scope.state, &source)
-            .await?
-            .map(|token| token.expose().to_string());
+        configuration.token = source_token(&scope.state, &source).await?;
         Github::new(configuration)?.at(scope.state.config())
     }
 }

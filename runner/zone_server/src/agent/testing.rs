@@ -94,7 +94,7 @@ impl Connected {
             NewSource {
                 workspace_id: self.workspace,
                 name: &name,
-                source_type: "github",
+                source_type: sources::GITHUB,
                 config: json!({"owner": OWNER, "repo": REPOSITORY, "branch": "main"}),
                 description: None,
                 url: None,
