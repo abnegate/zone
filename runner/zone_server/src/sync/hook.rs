@@ -17,6 +17,7 @@ use thiserror::Error;
 use super::{Provider, webhook_path};
 use crate::db::projects;
 use crate::db::sync_config::{self, SyncConfigRow};
+use crate::secret::Unseal;
 use crate::state::AppState;
 use uuid::Uuid;
 
@@ -33,6 +34,9 @@ const EVENTS: [WebhookEvent; 1] = [WebhookEvent::Issues];
 pub enum HookError {
     #[error("the project holds no GitHub token to update the webhook with")]
     Tokenless,
+
+    #[error("a credential is sealed under a key this deployment does not hold")]
+    Unopenable,
 
     #[error("the GitHub origin is misconfigured: {0}")]
     Origin(PullRequestError),
@@ -97,7 +101,10 @@ impl Hook {
         Ok(Some(Self {
             service,
             repository,
-            token: SecretValue::new(crate::crypto::open(state.encryption_key(), &stored)),
+            token: state
+                .master_key()
+                .open_lenient(&stored)
+                .map_err(|_| HookError::Unopenable)?,
             url,
         }))
     }

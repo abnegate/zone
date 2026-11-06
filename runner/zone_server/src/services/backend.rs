@@ -532,7 +532,7 @@ mod tests {
                 scope: "user:inference".to_string(),
                 subscription: None,
             };
-            let sealed = tokens.seal(state.encryption_key()).expect("tokens to seal");
+            let sealed = tokens.seal(state.master_key()).expect("tokens to seal");
             self.store(AgentKind::Claude, Some(&sealed)).await
         }
 

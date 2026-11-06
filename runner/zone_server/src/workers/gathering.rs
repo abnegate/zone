@@ -12,6 +12,7 @@ use zone_context::stream::{GatheringCallback, GatheringEvent};
 use zone_core::Source;
 
 use crate::db::{context_gatherings, gathering_events, sources};
+use crate::secret::Unseal;
 use crate::state::AppState;
 
 // Max concurrent gatherings to prevent resource exhaustion
@@ -381,18 +382,21 @@ pub(crate) fn core_source_from_row(
 
     let category = source_type.category();
     let mut config = db_source.config.clone();
-    if let Some(encrypted_creds) = &db_source.credentials_encrypted {
-        match crate::crypto::decrypt(state.encryption_key(), encrypted_creds) {
+    if let Some(encrypted_credentials) = &db_source.credentials_encrypted {
+        match state.master_key().open_strict(encrypted_credentials) {
             Ok(decrypted) => {
                 if let Some(config_obj) = config.as_object_mut() {
-                    config_obj.insert("token".to_string(), serde_json::Value::String(decrypted));
+                    config_obj.insert(
+                        "token".to_string(),
+                        serde_json::Value::String(decrypted.expose().to_string()),
+                    );
                 }
             }
-            Err(e) => {
+            Err(error) => {
                 tracing::error!(
                     "Failed to decrypt credentials for source {}: {}. Source will be skipped.",
                     db_source.id,
-                    e
+                    error
                 );
                 return None;
             }

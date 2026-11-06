@@ -2,6 +2,7 @@ use crate::common;
 
 use std::time::Duration;
 
+use abnegate_secret::MasterKey;
 use axum::http::StatusCode;
 use serde_json::json;
 use tokio::time::timeout;
@@ -380,7 +381,7 @@ async fn pr_worker_rejects_legacy_foreign_project_associations() {
         .expect("task is readable")
         .expect("task exists");
     // Any key does: the refusal comes before a token is read.
-    let key: [u8; 32] = rand::random();
+    let key = MasterKey::generate().unwrap();
     let error = match Repository::resolve(&pool, &key, &row).await {
         Err(error) => error,
         Ok(_) => panic!("a foreign project must not resolve to a repository"),

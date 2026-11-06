@@ -9,6 +9,8 @@ use crate::common::{
     test_email, test_password,
 };
 
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -142,7 +144,7 @@ impl Workspace {
     }
 
     async fn connect_github(&self) -> Uuid {
-        let encrypted = zone_server::crypto::encrypt(self.state.encryption_key(), GITHUB_TOKEN)
+        let encrypted = encrypt_value(&SecretValue::new(GITHUB_TOKEN), self.state.master_key())
             .expect("an encrypted token");
         sources::create_source(
             self.state.db(),

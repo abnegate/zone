@@ -39,6 +39,10 @@ use super::summary;
 /// to another reviewer, and a model that cannot answer is reviewing nothing.
 const MAX_VERDICTLESS_ROUNDS: usize = 2;
 
+const REPOSITORY_TOKEN_MISSING: &str =
+    "repository_token_missing: link the repository with a token on the project";
+const REPOSITORY_TOKEN_UNOPENABLE: &str = "repository_token_unopenable: the project's token is sealed under a key this deployment does not hold; link the repository with a token again";
+
 /// Bytes of diff a reviewer is shown.
 const DIFF_BYTES: usize = 60_000;
 /// Paths the merge notice names.
@@ -158,17 +162,24 @@ pub async fn advance(drive: &Drive<'_>, task: &TaskAutomation) -> Result<(), Str
             return Ok(());
         }
     };
-    let Some(token) = access_token(drive.state, &row).await else {
-        auto_projects::set_stage(
-            pool,
-            task.task_id,
-            drive.project.project_id,
-            Stage::Paused,
-            Some("repository_token_missing: link the repository with a token on the project"),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        return Ok(());
+    let token = match access_token(drive.state, &row).await {
+        Ok(Some(token)) => token,
+        unusable => {
+            let reason = match unusable {
+                Err(_) => REPOSITORY_TOKEN_UNOPENABLE,
+                _ => REPOSITORY_TOKEN_MISSING,
+            };
+            auto_projects::set_stage(
+                pool,
+                task.task_id,
+                drive.project.project_id,
+                Stage::Paused,
+                Some(reason),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
     };
     let step = Step {
         drive,

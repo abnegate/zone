@@ -1,6 +1,7 @@
 //! Application state
 
 use abnegate_http::{RateLimitConfig, RateLimiter};
+use abnegate_secret::MasterKey;
 use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -96,8 +97,8 @@ struct AppStateInner {
     pub pull_registry: PullRegistry,
     /// The one LoRA training run. Survives the HTTP request that started it.
     pub train_jobs: TrainRegistry,
-    /// Derived encryption key (32 bytes) for AES-256-GCM
-    pub encryption_key: [u8; 32],
+    /// The key stored credentials are sealed with
+    pub master_key: Arc<MasterKey>,
     /// Semaphore for limiting concurrent indexing operations
     pub index_semaphore: Arc<Semaphore>,
     /// Training uploads carry a whole dataset in one body, so a handler holds
@@ -194,7 +195,7 @@ impl AppState {
         context_service: Option<Arc<ContextService>>,
         mail: Option<Arc<AccountMail>>,
     ) -> Self {
-        let encryption_key = crate::crypto::derive_key(config.encryption_key())
+        let master_key = crate::secret::derive(config.encryption_key())
             .expect("Encryption key should be valid (validated in Config::from_env)");
 
         let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
@@ -218,10 +219,10 @@ impl AppState {
                 context_service,
                 mail,
                 rate_limiter,
-                sync_registry: SyncRegistry::new(),
+                sync_registry: SyncRegistry::new(Arc::clone(&master_key)),
                 pull_registry: PullRegistry::new(),
                 train_jobs: TrainRegistry::new(),
-                encryption_key,
+                master_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
@@ -268,9 +269,9 @@ impl AppState {
         self.inner.context_service.as_ref()
     }
 
-    /// Get the encryption key for source credentials
-    pub fn encryption_key(&self) -> &[u8; 32] {
-        &self.inner.encryption_key
+    /// The key stored credentials are sealed with
+    pub fn master_key(&self) -> &Arc<MasterKey> {
+        &self.inner.master_key
     }
 
     /// The account mail sender, when an SMTP relay is configured.
@@ -467,6 +468,8 @@ pub(crate) fn test_config() -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secret::Unseal;
+    use crate::secret::fixture;
     use abnegate_notify::MockMailer;
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
@@ -692,7 +695,17 @@ mod tests {
             state.frame_semaphore().available_permits(),
             MAX_CONCURRENT_FRAME_EXTRACT
         );
-        assert_eq!(state.encryption_key().len(), 32);
+        assert_eq!(
+            state
+                .master_key()
+                .open_strict(&fixture::seal(
+                    "ghp_sealed_by_the_state",
+                    state.master_key()
+                ))
+                .unwrap()
+                .expose(),
+            "ghp_sealed_by_the_state"
+        );
         let _ = state.rate_limiter();
         let _ = state.sync_registry();
         let _ = state.pull_registry();

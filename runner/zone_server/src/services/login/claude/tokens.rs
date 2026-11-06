@@ -1,10 +1,13 @@
 //! A Claude sign-in's tokens, and the sealed form they are stored in.
 
+use abnegate_secret::MasterKey;
 use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{Error, label};
+use crate::secret::Unseal;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
@@ -35,14 +38,13 @@ impl Tokens {
             .map(str::to_string)
     }
 
-    pub fn seal(&self, key: &[u8; 32]) -> Result<String, Error> {
+    pub fn seal(&self, key: &MasterKey) -> Result<String, Error> {
         let plaintext = SecretValue::new(serde_json::to_string(self).map_err(|_| Error::Sealing)?);
-        crate::crypto::encrypt(key, plaintext.expose()).map_err(|_| Error::Sealing)
+        encrypt_value(&plaintext, key).map_err(|_| Error::Sealing)
     }
 
-    pub fn open(key: &[u8; 32], sealed: &str) -> Result<Self, Error> {
-        let plaintext =
-            SecretValue::new(crate::crypto::decrypt(key, sealed).map_err(|_| Error::Sealing)?);
+    pub fn open(key: &MasterKey, sealed: &str) -> Result<Self, Error> {
+        let plaintext = key.open_strict(sealed).map_err(|_| Error::Sealing)?;
         serde_json::from_str(plaintext.expose()).map_err(|_| Error::Sealing)
     }
 }
@@ -50,8 +52,10 @@ impl Tokens {
 #[cfg(test)]
 mod tests {
     use abnegate_secret::REDACTED;
+    use abnegate_secret::is_encrypted;
 
     use super::*;
+    use crate::secret::fixture::seal_legacy;
 
     const ACCESS: &str = "fake-access-token-for-tests";
     const REFRESH: &str = "fake-refresh-token-for-tests";
@@ -74,10 +78,8 @@ mod tests {
         }
     }
 
-    fn key() -> [u8; 32] {
-        let mut key = [0u8; 32];
-        rand::fill(&mut key);
-        key
+    fn key() -> MasterKey {
+        MasterKey::generate().expect("a key")
     }
 
     #[test]
@@ -92,15 +94,37 @@ mod tests {
         }
         assert_eq!(Tokens::open(&key, &sealed).expect("open"), tokens);
         assert!(matches!(
-            Tokens::open(&[0; 32], &sealed),
+            Tokens::open(&MasterKey::new([0; 32]), &sealed),
             Err(Error::Sealing)
         ));
     }
 
     #[test]
+    fn tokens_are_sealed_in_an_envelope_that_opens() {
+        let key = key();
+        let tokens = tokens();
+
+        let sealed = tokens.seal(&key).expect("seal");
+
+        assert!(is_encrypted(&sealed), "{sealed} is not an envelope");
+        assert_eq!(Tokens::open(&key, &sealed).expect("open"), tokens);
+    }
+
+    #[test]
+    fn tokens_sealed_before_the_envelope_existed_open() {
+        let key = key();
+        let tokens = tokens();
+        let serialised = serde_json::to_string(&tokens).expect("serialise");
+
+        let opened = Tokens::open(&key, &seal_legacy(&serialised, &key)).expect("a legacy body");
+
+        assert_eq!(opened, tokens);
+    }
+
+    #[test]
     fn tokens_sealed_before_their_lifetime_was_recorded_open_with_it_unknown() {
         let key = key();
-        let sealed = crate::crypto::encrypt(&key, UNTIMED).expect("the earlier form to seal");
+        let sealed = seal_legacy(UNTIMED, &key);
 
         let opened = Tokens::open(&key, &sealed).expect("tokens sealed in the earlier form");
 

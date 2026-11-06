@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use abnegate_secret::MasterKey;
 use abnegate_secret::SecretValue;
 use abnegate_vcs::{GitService, RepositoryUrl};
 use serde_json::Value;
@@ -11,6 +12,7 @@ use crate::config::Config;
 use crate::db::sources::SourceRow;
 use crate::db::workspace_host_directories;
 use crate::host_mounts::{CONTAINER_ROOT, HostMounts, normalize};
+use crate::secret::Unseal;
 use crate::state::AppState;
 
 const FILESYSTEM: &str = "filesystem";
@@ -30,7 +32,7 @@ pub(super) enum Candidate {
 }
 
 impl Candidate {
-    pub(super) fn of_source(key: &[u8], source: &SourceRow) -> Option<Self> {
+    pub(super) fn of_source(key: &MasterKey, source: &SourceRow) -> Option<Self> {
         match source.source_type.as_str() {
             FILESYSTEM => text(&source.config, &["base_path", "path"])
                 .map(|path| Self::Folder(path.to_string())),
@@ -62,14 +64,11 @@ impl Candidate {
         }
     }
 
-    pub(super) fn of_project(key: &[u8], url: &str, token: Option<&str>) -> Option<Self> {
+    pub(super) fn of_project(key: &MasterKey, url: &str, token: Option<&str>) -> Option<Self> {
         let url = GitService::repository_url(url).ok()?;
         Some(Self::Repository {
             origin: Origin::parse(url.as_str())?,
-            clone: Some((
-                url,
-                token.map(|stored| SecretValue::new(crate::crypto::open(key, stored))),
-            )),
+            clone: Some((url, token.and_then(|stored| project_token(key, stored)))),
         })
     }
 
@@ -148,10 +147,16 @@ fn text<'a>(config: &'a Value, keys: &[&str]) -> Option<&'a str> {
 
 /// The token a source's repository is cloned with. A credential that cannot be opened is not
 /// presented, and the clone then fails or succeeds on what the repository allows anyone.
-fn credential(key: &[u8], source: &SourceRow) -> Option<SecretValue> {
+fn project_token(key: &MasterKey, stored: &str) -> Option<SecretValue> {
+    key.open_lenient(stored)
+        .inspect_err(|error| tracing::warn!(%error, "Could not open the project's token"))
+        .ok()
+}
+
+fn credential(key: &MasterKey, source: &SourceRow) -> Option<SecretValue> {
     let encrypted = source.credentials_encrypted.as_deref()?;
-    match crate::crypto::decrypt(key, encrypted) {
-        Ok(token) => Some(SecretValue::new(token)),
+    match key.open_strict(encrypted) {
+        Ok(token) => Some(token),
         Err(error) => {
             tracing::warn!(source = %source.id, %error, "Could not open the source's credentials");
             None
@@ -208,9 +213,66 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::secret::fixture;
 
-    fn key() -> [u8; 16] {
-        Uuid::new_v4().into_bytes()
+    const TOKEN: &str = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
+    const REPOSITORY_URL: &str = "https://github.com/owner/repository";
+
+    fn key() -> MasterKey {
+        MasterKey::generate().expect("a key")
+    }
+
+    fn token(candidate: Option<Candidate>) -> Option<String> {
+        match candidate {
+            Some(Candidate::Repository {
+                clone: Some((_, token)),
+                ..
+            }) => token.map(|token| token.expose().to_string()),
+            _ => panic!("a candidate that clones"),
+        }
+    }
+
+    fn github_source(credential: &str) -> SourceRow {
+        SourceRow {
+            credentials_encrypted: Some(credential.to_string()),
+            ..source(GITHUB, json!({"owner": "owner", "repo": "repository"}))
+        }
+    }
+
+    #[test]
+    fn a_project_token_opens_whether_sealed_sealed_before_envelopes_or_plain() {
+        let key = key();
+        for stored in [
+            fixture::seal(TOKEN, &key),
+            fixture::seal_legacy(TOKEN, &key),
+            TOKEN.to_string(),
+        ] {
+            assert_eq!(
+                token(Candidate::of_project(&key, REPOSITORY_URL, Some(&stored))).as_deref(),
+                Some(TOKEN),
+                "{stored} did not open to the token"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_credential_opens_only_when_sealed() {
+        let key = key();
+        for sealed in [
+            fixture::seal(TOKEN, &key),
+            fixture::seal_legacy(TOKEN, &key),
+        ] {
+            assert_eq!(
+                token(Candidate::of_source(&key, &github_source(&sealed))).as_deref(),
+                Some(TOKEN),
+                "{sealed} did not open to the token"
+            );
+        }
+        assert_eq!(
+            token(Candidate::of_source(&key, &github_source(TOKEN))),
+            None,
+            "a plaintext credential is never presented"
+        );
     }
 
     fn source(kind: &str, config: Value) -> SourceRow {

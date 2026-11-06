@@ -32,6 +32,7 @@ pub mod projects;
 pub mod recovery;
 pub mod refresh_tokens;
 pub mod reminders;
+pub mod sealing;
 pub mod sessions;
 pub mod sources;
 pub mod subscriptions;

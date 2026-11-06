@@ -34,6 +34,7 @@ use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry
 use super::integrations::{Configuration, Github, SETTLED_ASSESSMENTS};
 use super::tools::WorkspaceScope;
 use crate::db::{sources, task_access, tasks, workspace_members};
+use crate::secret::Unseal;
 use crate::services::chat::session::RunContext;
 use crate::services::task_progress::ProgressMessage;
 
@@ -986,7 +987,11 @@ impl WaitForTool {
             .map_err(|_| SOURCE_CONFIGURATION_INVALID.to_string())?;
         if let Some(encrypted) = source.credentials_encrypted {
             configuration.token = Some(
-                crate::crypto::decrypt(scope.state.encryption_key(), &encrypted)
+                scope
+                    .state
+                    .master_key()
+                    .open_strict(&encrypted)
+                    .map(|token| token.expose().to_string())
                     .map_err(|_| SOURCE_CREDENTIALS_INVALID.to_string())?,
             );
         }
