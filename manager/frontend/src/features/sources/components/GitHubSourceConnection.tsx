@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { githubApi } from '../../../api/github';
 import { GITHUB_SETTINGS_PATH } from '../../github/callback';
 import type { GitHubConfig, Source, UpdateSourceRequest } from '../types';
-import { GitHubSourceState, gitHubSourceState, reachableRepository } from '../utils';
+import { GitHubSourceState, reachableRepository, resolveGitHubSourceState } from '../utils';
 
 const REPOSITORY_SEARCH_LIMIT = 100;
 
@@ -23,7 +23,7 @@ interface GitHubSourceConnectionProps {
   onError: (message: string | null) => void;
 }
 
-function describe(state: GitHubSourceState, login: string | null): string {
+function connectionSummary(state: GitHubSourceState, login: string | null): string {
   switch (state) {
     case GitHubSourceState.App:
       return login ? `Connected through GitHub App (${login})` : 'Connected through GitHub App';
@@ -65,7 +65,7 @@ export function GitHubSourceConnection({
   const [connecting, setConnecting] = useState(false);
   const [unreachable, setUnreachable] = useState(false);
 
-  const state = gitHubSourceState(source);
+  const state = resolveGitHubSourceState(source);
   const action = connectAction(state);
   const fullName = repositoryFullName(source);
 
@@ -89,8 +89,8 @@ export function GitHubSourceConnection({
       }
       await updateSource({ github_installation_id: repository.installation_id });
       await onSaved();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Failed to connect the source to GitHub');
+    } catch (error) {
+      onError(error instanceof Error ? error.message : 'Failed to connect the source to GitHub');
     } finally {
       setConnecting(false);
     }
@@ -99,7 +99,7 @@ export function GitHubSourceConnection({
   return (
     <section className="source-github-connection" aria-label="GitHub connection">
       <div className="source-github-connection-summary">
-        <p>{describe(state, source.github_account_login ?? null)}</p>
+        <p>{connectionSummary(state, source.github_account_login ?? null)}</p>
         {action && (
           <Button variant="secondary" size="sm" onClick={handleConnect} loading={connecting}>
             {action}
