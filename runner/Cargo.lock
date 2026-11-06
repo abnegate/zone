@@ -69,7 +69,8 @@ dependencies = [
 [[package]]
 name = "abnegate-http"
 version = "0.1.5"
-source = "git+https://github.com/abnegate/crates?rev=b514d4570079d26c6646126d55d6541ab3a63418#b514d4570079d26c6646126d55d6541ab3a63418"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "528c5a149eda5cc0c9b410db3ebf405d73822a6e4cba746838c5f3188f18d65d"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -153,7 +154,8 @@ dependencies = [
 [[package]]
 name = "abnegate-secret"
 version = "0.1.7"
-source = "git+https://github.com/abnegate/crates?rev=b514d4570079d26c6646126d55d6541ab3a63418#b514d4570079d26c6646126d55d6541ab3a63418"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0f63949a638c023acdc8721e61f232bd97b900a69df163dd085eaea28414aea"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -170,8 +172,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-vcs"
-version = "0.1.9"
-source = "git+https://github.com/abnegate/crates?rev=b514d4570079d26c6646126d55d6541ab3a63418#b514d4570079d26c6646126d55d6541ab3a63418"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8b5af808064b1c4aba4e98b593c5823453fbb975521232e1e65dadd71e2c4e7"
 dependencies = [
  "abnegate-http",
  "abnegate-secret",
