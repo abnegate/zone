@@ -1,9 +1,5 @@
-/**
- * Source Schemas
- * Zod validation schemas for all source-related types.
- */
-
 import { z } from 'zod';
+import { GitHubInstallationStatusSchema } from '../github/installationStatus';
 
 export const SourceCategorySchema = z.enum(['file', 'calendar', 'mail', 'chat', 'web', 'text']);
 export const SourceTypeSchema = z.enum([
@@ -139,6 +135,10 @@ export const SourceSchema = z
     is_active: z.boolean(),
     last_verified_at: z.string().nullable().optional(),
     last_error: z.string().nullable().optional(),
+    github_installation_id: z.string().nullish(),
+    has_credentials: z.boolean().optional(),
+    github_installation_status: GitHubInstallationStatusSchema.nullish(),
+    github_account_login: z.string().nullish(),
     created_at: z.string(),
     updated_at: z.string(),
   })
@@ -157,6 +157,7 @@ export const CreateSourceRequestSchema = z.object({
   source_type: SourceTypeSchema,
   config: SourceConfigSchema,
   credentials: z.string().optional(),
+  github_installation_id: z.string().optional(),
   description: z.string().optional(),
   url: z.string().optional(),
 });
@@ -165,6 +166,7 @@ export const UpdateSourceRequestSchema = z.object({
   name: z.string().min(1).optional(),
   config: SourceConfigSchema.optional(),
   credentials: z.string().optional(),
+  github_installation_id: z.string().nullable().optional(),
   description: z.string().optional(),
   is_active: z.boolean().optional(),
   url: z.string().optional(),

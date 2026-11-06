@@ -87,3 +87,45 @@ describe('project automation schemas', () => {
     expect(ProjectAutomationSchema.safeParse(bad).success).toBe(false);
   });
 });
+
+describe('project GitHub installation fields', () => {
+  it('keeps the installation a newer server sends', () => {
+    const parsed = ProjectSchema.parse({
+      ...project,
+      github_installation_id: 'installation-1',
+      github_installation_status: 'revoked',
+      github_account_login: 'acme',
+    });
+
+    expect(parsed.github_installation_id).toBe('installation-1');
+    expect(parsed.github_installation_status).toBe('revoked');
+    expect(parsed.github_account_login).toBe('acme');
+  });
+
+  it('accepts null installation fields', () => {
+    const parsed = ProjectSchema.parse({
+      ...project,
+      github_installation_id: null,
+      github_installation_status: null,
+      github_account_login: null,
+    });
+
+    expect(parsed.github_installation_id).toBeNull();
+    expect(parsed.github_installation_status).toBeNull();
+    expect(parsed.github_account_login).toBeNull();
+  });
+
+  it('parses a project from an older server without the installation fields', () => {
+    const parsed = ProjectSchema.parse(project);
+
+    expect(parsed.github_installation_id).toBeUndefined();
+    expect(parsed.github_installation_status).toBeUndefined();
+    expect(parsed.github_account_login).toBeUndefined();
+  });
+
+  it('refuses an unknown installation status', () => {
+    expect(
+      ProjectSchema.safeParse({ ...project, github_installation_status: 'deleted' }).success
+    ).toBe(false);
+  });
+});
