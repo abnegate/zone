@@ -6,11 +6,8 @@ import {
   DevicesSection,
   OrgMembersSection,
 } from '../organization/components';
-import {
-  ConnectDevicesSection,
-  HostFoldersPanel,
-  WorkspaceMembersSection,
-} from '../workspace/components';
+import { ConnectDevicesSection } from '../server/components';
+import { HostFoldersPanel, WorkspaceMembersSection } from '../workspace/components';
 
 interface SettingsContentProps {
   group: SettingsGroup;

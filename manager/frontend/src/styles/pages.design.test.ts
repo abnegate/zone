@@ -317,7 +317,7 @@ describe('auth layout', () => {
   });
 
   it('sizes session rows at 40 with a 28px pager', () => {
-    const sessions = read(join(features, 'auth', 'pages', 'SessionsPage.css'));
+    const sessions = read(join(features, 'auth', 'components', 'SessionsSection.css'));
     expect(rule(sessions, '.sessions-table td')).toContain('height: var(--ui-list-row)');
     expect(rule(sessions, '.sessions-table td')).toContain('padding: 0 var(--ui-space-3)');
     expect(rule(sessions, '.sessions-table td')).toContain('box-shadow: inset 0 -1px');
@@ -465,8 +465,8 @@ describe('sources page layout', () => {
 });
 
 describe('settings page layout', () => {
-  const css = read(join(features, 'settings', 'workspace', 'pages', 'WorkspaceSettingsPage.css'));
-  const page = read(join(features, 'settings', 'workspace', 'pages', 'WorkspaceSettingsPage.tsx'));
+  const css = read(join(features, 'settings', 'pages', 'SettingsPage.css'));
+  const section = read(join(features, 'settings', 'server', 'components', 'FeaturesSection.tsx'));
 
   it('sticks the save footer to the scroller edge so it does not lift at the end of the scroll', () => {
     const footer = rule(css, '.settings-actions');
@@ -479,12 +479,11 @@ describe('settings page layout', () => {
     expect(body).toContain('flex-direction: column');
   });
 
-  it('keeps feature setup on a settings tab without a content card', () => {
+  it('keeps feature setup in a settings section without a content card', () => {
     const panel = read(join(features, 'models', 'components', 'FeaturesPanel.css'));
     expect(panel).not.toContain('.card');
     expect(rule(panel, '.models-feature')).toContain('border-bottom: 1px solid var(--ui-border)');
-    expect(page).toContain('value="features"');
-    expect(page).toContain('<FeaturesPanel');
+    expect(section).toContain('<FeaturesPanel');
   });
 });
 

@@ -15,7 +15,6 @@ import {
 } from '../navigation/sections';
 import { useSettingsAccess } from '../navigation/useSettingsAccess';
 import SettingsContent from './SettingsContent';
-import '../workspace/pages/WorkspaceSettingsPage.css';
 import './SettingsPage.css';
 
 const TITLE = 'Settings';

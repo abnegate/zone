@@ -9,7 +9,7 @@ const pages = join(import.meta.dir, '..', '..', 'pages');
 const styles = join(import.meta.dir, '..', '..', 'styles');
 
 describe('settings surfaces', () => {
-  const shell = read(join(settings, 'workspace', 'pages', 'WorkspaceSettingsPage.css'));
+  const shell = read(join(settings, 'pages', 'SettingsPage.css'));
 
   it('paints a flat page and a body that centres at the content width', () => {
     expect(shell).not.toContain('radial-gradient');
@@ -40,34 +40,36 @@ describe('settings surfaces', () => {
     expect(shell).toContain('.form-grid > .form-group:only-child');
   });
 
-  it('starts the tab body at the gutter because the tab list lives in the page bar', () => {
-    expect(rule(shell, '.settings-page .ui-tabs-content')).toContain('margin-top: 0');
-  });
-
-  it('renders the AI override as one 32px toggle row with a 32x18 switch', () => {
-    expect(shell).not.toContain('.checkbox-row');
-    expect(rule(shell, '.toggle-row')).toContain('height: var(--ui-control-height)');
-    expect(rule(shell, '.toggle-row')).toContain('align-items: center');
-    const control = rule(shell, ".toggle-row input[type='checkbox']");
-    expect(control).toContain('width: var(--ui-space-8)');
-    expect(control).toContain('height: 1.125rem');
-    expect(control).toContain('appearance: none');
-    expect(rule(shell, '.toggle-row-label')).toContain('font-size: var(--ui-text-sm)');
-    expect(rule(shell, '.toggle-row-label')).toContain('font-weight: 500');
-    const description = rule(shell, '.toggle-row-description');
-    expect(description).toContain('font-size: var(--ui-text-xs)');
-    expect(description).toContain('white-space: nowrap');
-    expect(description).toContain('text-overflow: ellipsis');
-    expect(
-      rule(shell, '.form-grid + .form-grid,\n.toggle-row + .form-grid,\n.form-grid + .alert')
-    ).toContain('margin-top: var(--ui-field-gap)');
-  });
-
   it('stacks a section row on a phone without widening the body past the viewport', () => {
     const phone = media(shell, '(max-width: 768px)');
     expect(rule(phone, '.section-row-copy')).toContain('align-self: stretch');
     expect(rule(phone, '.settings-page .section-description')).toContain('max-width: 100%');
     expect(rule(shell, '.settings-page .section-description')).toContain('text-overflow: ellipsis');
+  });
+
+  it('lays the shell out as a sticky nav column beside the content', () => {
+    const layout = rule(shell, '.settings-layout');
+    expect(layout).toContain('display: grid');
+    expect(layout).toContain('grid-template-columns: var(--settings-nav-width) minmax(0, 1fr)');
+    const nav = rule(shell, '.settings-shell .settings-nav');
+    expect(nav).toContain('position: sticky');
+    expect(nav).toContain('top: 0');
+  });
+
+  it('stacks the shell into one column and unpins the nav on a phone', () => {
+    const phone = media(shell, '(max-width: 768px)');
+    expect(rule(phone, '.settings-layout')).toContain('grid-template-columns: minmax(0, 1fr)');
+    expect(rule(phone, '.settings-shell .settings-nav')).toContain('position: static');
+  });
+
+  it('draws an inherited field as one control-height row', () => {
+    const inherited = read(join(settings, 'workspace', 'components', 'InheritedField.css'));
+    expect(rule(inherited, '.inherited-field')).toContain(
+      'border-bottom: 1px solid var(--ui-border-subtle)'
+    );
+    const row = rule(inherited, '.inherited-field-row');
+    expect(row).toContain('display: grid');
+    expect(row).toContain('min-height: var(--ui-control-height)');
   });
 
   it('keeps the save row in view as a 48px sticky footer', () => {
@@ -101,7 +103,7 @@ describe('settings surfaces', () => {
   });
 
   it('sets connect URLs in the body face at the control height', () => {
-    const css = read(join(settings, 'workspace', 'components', 'ConnectDevicesSection.css'));
+    const css = read(join(settings, 'server', 'components', 'ConnectDevicesSection.css'));
     expect(css).not.toMatch(/#[0-9a-f]{3,6}\b/i);
     expect(css).not.toContain('rgba(');
     expect(rule(css, '.connect-url')).toContain('font-family: var(--ui-font-mono)');
