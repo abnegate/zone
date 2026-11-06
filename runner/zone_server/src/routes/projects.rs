@@ -26,11 +26,8 @@ use super::common::Timestamps;
 /// The statuses `projects.status` accepts.
 pub const PROJECT_STATUSES: [&str; 3] = ["active", "on_hold", "cancelled"];
 
-const DISCONNECTED: &str = "This GitHub account isn't connected to this organization, or it was \
-     disconnected. Reconnect GitHub.";
-
 const CONFLICTING_CREDENTIALS: &str =
-    "Give either an access token or a GitHub installation, not both";
+    "Send either access_token or github_installation_id, not both.";
 
 fn not_found() -> ServerError {
     ServerError::NotFound("Project not found".to_string())
@@ -108,7 +105,7 @@ async fn attachable_installation(
     github_installations::attachable(state.db(), workspace_id, installation_id)
         .await?
         .map(|installation| installation.id)
-        .ok_or_else(|| ServerError::BadRequest(DISCONNECTED.to_string()))
+        .ok_or_else(|| ServerError::BadRequest(github_installations::UNATTACHABLE.to_string()))
 }
 
 /// The installations `ids` name, keyed by id, in one query.
@@ -861,14 +858,5 @@ mod tests {
 
         assert_eq!(request.github_installation_id, Some(installation_id));
         assert_eq!(request.access_token, None);
-    }
-
-    #[test]
-    fn the_disconnected_message_reads_as_one_sentence_pair() {
-        assert_eq!(
-            DISCONNECTED,
-            "This GitHub account isn't connected to this organization, or it was disconnected. \
-             Reconnect GitHub."
-        );
     }
 }

@@ -237,6 +237,10 @@ pub async fn get(
     .await
 }
 
+/// Why a source or project was refused an installation [`attachable`] did not return.
+pub const UNATTACHABLE: &str = "This GitHub account isn't connected to this organization, or it was \
+     disconnected. Reconnect GitHub.";
+
 /// The installation, if a source or project in `workspace_id` may use it:
 /// it belongs to the workspace's organization and is neither revoked nor suspended.
 pub async fn attachable(
@@ -784,5 +788,14 @@ mod tests {
                 .await
                 .unwrap();
         assert!(consumed.is_none());
+    }
+
+    #[test]
+    fn the_unattachable_message_reads_as_one_sentence_pair() {
+        assert_eq!(
+            UNATTACHABLE,
+            "This GitHub account isn't connected to this organization, or it was disconnected. \
+             Reconnect GitHub."
+        );
     }
 }

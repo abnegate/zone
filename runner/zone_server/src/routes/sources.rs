@@ -35,8 +35,6 @@ const CREDENTIALS_AND_INSTALLATION: &str =
 
 const INSTALLATION_REQUIRES_GITHUB: &str = "Only GitHub sources can use a GitHub connection.";
 
-const INSTALLATION_UNAVAILABLE: &str = "This GitHub account isn't connected to this organization, or it was disconnected. Reconnect GitHub.";
-
 fn internal() -> ServerError {
     ServerError::Internal(INTERNAL_ERROR.to_string())
 }
@@ -73,7 +71,7 @@ async fn validate_installation(
     match github_installations::attachable(state.db(), workspace_id, installation).await {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(ServerError::BadRequest(
-            INSTALLATION_UNAVAILABLE.to_string(),
+            github_installations::UNATTACHABLE.to_string(),
         )),
         Err(error) => {
             tracing::error!(workspace_id = %workspace_id, installation = %installation, error = %error, "Database error checking GitHub installation");
