@@ -1,3 +1,4 @@
+mod agent_cli_live;
 mod agent_host_login;
 mod agent_login;
 mod agent_session_resume;
