@@ -1,6 +1,7 @@
 //! Who a served turn acts for, and how far it may go.
 
 use uuid::Uuid;
+use zone_core::llm::BuiltinTools;
 
 use crate::agent::ApprovalPolicy;
 
@@ -17,4 +18,6 @@ pub struct Scope {
     /// How many calls the agent may make: as many as zone's own loop would
     /// have made for the same turn.
     pub calls: usize,
+    /// Whether the agent keeps its own file and shell tools beside zone's.
+    pub builtin: BuiltinTools,
 }

@@ -209,6 +209,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/workspaces/{workspace_id}/projects/auto",
             post(projects::start_auto),
         )
+        .route(
+            "/api/workspaces/{workspace_id}/projects/order",
+            put(projects::reorder),
+        )
         .route("/api/projects", get(projects::list).post(projects::create))
         .route(
             "/api/projects/{id}",

@@ -15,7 +15,7 @@ import {
 } from '@dnd-kit/core';
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { boxSteps, nearestBox } from '../utils/boxDrop';
+import { nearestSlot, slotSteps } from '../../../shared/utils/listDrop';
 import { boxTitle, dropSide, isPanelBox, type PanelBoxId } from '../utils/boxes';
 import { BoxSlot } from './BoxSlot';
 
@@ -74,7 +74,7 @@ export function BoxList({ boxes, onMove, onDraggingChange }: BoxListProps) {
 
   useEffect(() => () => dragging.current?.(false), []);
 
-  const steps = useMemo(() => ({ coordinateGetter: boxSteps(() => current.current) }), []);
+  const steps = useMemo(() => ({ coordinateGetter: slotSteps(() => current.current) }), []);
   const sensors = useSensors(useSensor(PointerSensor, POINTER), useSensor(KeyboardSensor, steps));
 
   const place = (id: UniqueIdentifier) =>
@@ -124,7 +124,7 @@ export function BoxList({ boxes, onMove, onDraggingChange }: BoxListProps) {
   return (
     <DndContext
       sensors={sensors}
-      collisionDetection={nearestBox}
+      collisionDetection={nearestSlot}
       accessibility={{ announcements: SILENT, container: unrendered }}
       onDragStart={start}
       onDragOver={move}

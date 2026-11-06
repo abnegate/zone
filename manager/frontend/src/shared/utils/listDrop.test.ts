@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 import type { ClientRect, DroppableContainer, UniqueIdentifier } from '@dnd-kit/core';
-import { boxSteps, nearestBox } from './boxDrop';
+import { nearestSlot, slotSteps } from './listDrop';
 
 function rect(top: number, height: number): ClientRect {
   return { top, height, bottom: top + height, left: 0, right: 300, width: 300 };
@@ -15,7 +15,7 @@ const RECTS = new Map<UniqueIdentifier, ClientRect>([
 const CONTAINERS = [...RECTS.keys()].map((id) => ({ id }) as DroppableContainer);
 
 function collide(y: number | null, collisionRect: ClientRect = rect(0, 40)) {
-  return nearestBox({
+  return nearestSlot({
     active: { id: 'changes' } as never,
     collisionRect,
     droppableRects: RECTS,
@@ -28,7 +28,7 @@ function key(code: string) {
   return { code, preventDefault: mock() } as unknown as KeyboardEvent;
 }
 
-describe('nearestBox', () => {
+describe('nearestSlot', () => {
   it('finds the box under the pointer', () => {
     expect(collide(20)).toEqual(['changes']);
     expect(collide(200)).toEqual(['sources']);
@@ -48,7 +48,7 @@ describe('nearestBox', () => {
 
   it('finds nothing in an empty list', () => {
     expect(
-      nearestBox({
+      nearestSlot({
         active: { id: 'changes' } as never,
         collisionRect: rect(0, 40),
         droppableRects: new Map(),
@@ -59,8 +59,8 @@ describe('nearestBox', () => {
   });
 });
 
-describe('boxSteps', () => {
-  const steps = boxSteps(() => ['changes', 'sources', 'gallery']);
+describe('slotSteps', () => {
+  const steps = slotSteps(() => ['changes', 'sources', 'gallery']);
 
   function step(code: string, over: UniqueIdentifier | null, collisionRect = rect(0, 40)) {
     const event = key(code);

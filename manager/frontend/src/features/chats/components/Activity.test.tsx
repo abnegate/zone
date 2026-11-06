@@ -138,15 +138,15 @@ describe('Activity', () => {
     expect(screen.getByText('git status').tagName).toBe('CODE');
   });
 
-  it('puts thinking that led to no call above the trace', () => {
+  it('puts thinking that came after the calls below them', () => {
     render(
       <Activity reasoning="No tool needed for this." calls={[call()]} live answered={false} />
     );
 
     expect(
       follows(
-        screen.getByText('No tool needed for this.'),
-        screen.getByText('Searched the knowledge base')
+        screen.getByText('Searched the knowledge base'),
+        screen.getByText('No tool needed for this.')
       )
     ).toBe(true);
   });

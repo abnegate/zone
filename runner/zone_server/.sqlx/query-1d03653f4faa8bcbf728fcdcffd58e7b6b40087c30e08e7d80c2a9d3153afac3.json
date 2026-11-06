@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE projects\n        SET github_repo_url = NULL,\n            github_access_token = NULL,\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, workspace_id, source_id, name, description, status,\n                  github_repo_url, github_access_token, created_at, updated_at\n        ",
+  "query": "\n        UPDATE projects\n        SET source_id = $2, updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, workspace_id, source_id, name, description, status,\n                  github_repo_url, github_access_token, created_at, updated_at, \"position\"\n        ",
   "describe": {
     "columns": [
       {
@@ -112,10 +112,22 @@
             "name": "updated_at"
           }
         }
+      },
+      {
+        "ordinal": 10,
+        "name": "position",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "projects",
+            "name": "position"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "Uuid"
       ]
     },
@@ -129,8 +141,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "497f5bd6d863874a3db41e0a87f631ecec810e4bfcaf9bdd2acfa606240cdb46"
+  "hash": "1d03653f4faa8bcbf728fcdcffd58e7b6b40087c30e08e7d80c2a9d3153afac3"
 }

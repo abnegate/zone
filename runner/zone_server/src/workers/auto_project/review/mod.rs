@@ -421,7 +421,9 @@ mod tests {
 
         assert_eq!(verdict.outcome, Outcome::Approve);
         assert_eq!(verdict.summary, "The cart is sound.");
-        let prompt = std::fs::read_to_string(&prompt).expect("the agent was given a prompt");
+        let prompt = zone_core::llm::provider::prompt(
+            &std::fs::read_to_string(&prompt).expect("the agent was given a prompt"),
+        );
         assert!(
             prompt.contains(DIFF),
             "the agent reviews from the diff inline: {prompt}"
