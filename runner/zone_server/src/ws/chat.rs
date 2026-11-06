@@ -7295,6 +7295,41 @@ cat 'DIR/reply.jsonl'
         assert!(matches!(endpoint.backend(), LlmBackend::Http));
     }
 
+    #[test]
+    fn a_coding_agent_served_tools_is_watched_beside_them() {
+        let observer: Arc<dyn Observer> = Arc::new(Watching);
+        let mut tools = ChatTools::empty();
+        let served = AgentTools::serve(
+            &cli(),
+            &mut tools,
+            crate::mcp::testing::scope(Uuid::new_v4()),
+            "http://127.0.0.1:1/mcp",
+        )
+        .expect("a coding agent is served the turn's tools");
+
+        for (sandboxed, kept) in [
+            (true, BuiltinTools::Withheld),
+            (false, BuiltinTools::Granted),
+        ] {
+            let client = equipped(
+                LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli()),
+                Some(&served),
+                &observer,
+                sandboxed,
+            );
+
+            assert!(
+                client.toolset().is_some(),
+                "sandboxed {sandboxed}: the agent reaches the turn's tools"
+            );
+            assert_eq!(client.builtin_tools(), kept, "sandboxed {sandboxed}");
+            assert!(
+                observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
+                "sandboxed {sandboxed}: serving tools does not unwatch the agent"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_joining_connection_sees_the_queue_and_later_changes() {
         let chat_id = Uuid::new_v4();

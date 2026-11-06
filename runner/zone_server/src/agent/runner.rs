@@ -411,7 +411,8 @@ pub fn run_with_context(
                 if let Some(deltas) = &choice.delta.tool_calls {
                     pending.merge(deltas);
                 }
-                // A usage-only SSE frame may follow finish_reason; drain through [DONE].
+                // A usage-only SSE frame, or the window a coding agent reports once it has
+                // exited, may follow finish_reason; drain through the stream's end.
             }
             let mut requested = pending.finish();
             let parsed = if agentic && !text.is_empty() {
