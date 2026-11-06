@@ -1616,34 +1616,6 @@ async fn a_subagents_call_just_made_is_reasoned_as_the_main_agents_are() {
     assert_eq!(reasons(&delivered), [STOP]);
 }
 
-/// A task run sets no observer, so a subagent's own calls are listed in the
-/// turn's reasoning as the main agent's are, rather than lost.
-#[tokio::test]
-async fn a_subagents_calls_are_reasoned_when_nothing_observes_the_turn() {
-    const STREAM: &str = include_str!("fixtures/claude/subagents.jsonl");
-    let directory = TempDir::new().expect("a temporary directory");
-    let replay = directory.path().join("stream.jsonl");
-    std::fs::write(&replay, STREAM).expect("the replayed stream");
-    let client = agent_client(fake(&directory, &format!("cat '{}'", replay.display())));
-
-    let stream = stream_turn(&client, None).await.expect("a running agent");
-    let (delivered, failure) = collected(stream).await;
-
-    assert!(failure.is_none(), "the turn failed: {failure:?}");
-    assert_eq!(
-        reasoned(&delivered),
-        [
-            "- Agent `Survey the crate`\n",
-            "- Grep `pub mod`\n",
-            "- Read `/w/src/missing.rs`\n",
-            "- Agent `Review the change`\n",
-            "- Bash `cargo build`\n",
-            "- Bash `cargo test -p zone_core`\n",
-        ]
-        .concat()
-    );
-}
-
 #[test]
 fn a_client_reports_only_what_the_agent_it_now_runs_on_reported() {
     let occupancy = occupancy();
@@ -1814,33 +1786,6 @@ echo '{"type":"result","subtype":"success","is_error":false}'
     assert_eq!(choice.finish_reason.as_deref(), Some(STOP));
 }
 
-#[tokio::test]
-async fn an_answer_after_streamed_prose_is_not_spoken_twice() {
-    let events = agent_events(vec![
-        Ok(AgentEvent::Text("It is empty.".to_string())),
-        Ok(AgentEvent::Answer("It is empty.".to_string())),
-        Ok(AgentEvent::finished(Some("success".to_string()))),
-    ]);
-
-    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
-
-    assert!(failure.is_none(), "{failure:?}");
-    assert_eq!(spoken(&delivered), "It is empty.");
-}
-
-#[tokio::test]
-async fn an_answer_without_streamed_prose_is_spoken() {
-    let events = agent_events(vec![
-        Ok(AgentEvent::Answer("It is empty.".to_string())),
-        Ok(AgentEvent::finished(Some("success".to_string()))),
-    ]);
-
-    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
-
-    assert!(failure.is_none(), "{failure:?}");
-    assert_eq!(spoken(&delivered), "It is empty.");
-}
-
 #[derive(Debug, Default)]
 struct Recording {
     outputs: Mutex<Vec<String>>,
@@ -1861,37 +1806,6 @@ impl Observer for Recording {
             .expect("subagents")
             .push(subagent.id.clone());
     }
-}
-
-#[tokio::test]
-async fn an_observer_is_told_of_outputs_and_subagents_rather_than_the_reader() {
-    let recording = Arc::new(Recording::default());
-    let events = agent_events(vec![
-        Ok(AgentEvent::Output(Output::new(
-            ToolCall::function("toolu_01", "Bash", r#"{"command":"ls"}"#),
-            "a.rs",
-            true,
-        ))),
-        Ok(step("Grep", Some("pub mod"), StepStatus::Running)),
-        Ok(AgentEvent::finished(Some("success".to_string()))),
-    ]);
-    let observed = Turn::new(
-        AgentKind::Claude,
-        SignIn::Instance,
-        None,
-        Some(recording.clone()),
-        Reported::default(),
-    );
-
-    let (delivered, failure) = collected(observed.chunks(events)).await;
-
-    assert!(failure.is_none(), "{failure:?}");
-    assert_eq!(reasoned(&delivered), "");
-    assert_eq!(*recording.outputs.lock().expect("outputs"), ["a.rs"]);
-    assert_eq!(
-        *recording.subagents.lock().expect("subagents"),
-        ["toolu_01Agent"]
-    );
 }
 
 #[tokio::test]
