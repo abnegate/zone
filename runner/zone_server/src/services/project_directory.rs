@@ -16,11 +16,12 @@ pub use missing::Missing;
 pub use origin::Origin;
 pub use start::Start;
 
+use abnegate_secret::SecretValue;
 use uuid::Uuid;
 
 use crate::db::chats;
 use crate::db::projects::{self, ProjectRow};
-use crate::db::sources;
+use crate::db::sources::{self, SourceRow};
 use crate::services::github_app::Credential;
 use crate::state::AppState;
 use candidate::Candidate;
@@ -93,13 +94,7 @@ async fn candidates(state: &AppState, project: &ProjectRow, workspace: Uuid) -> 
     if let Some(id) = project.source_id {
         match sources::get_source(state.db(), id, workspace).await {
             Ok(Some(source)) if source.is_active.unwrap_or(true) => {
-                let token = match state.github().source(state.db(), &source).await {
-                    Ok(credential) => credential.map(Credential::into_secret),
-                    Err(error) => {
-                        tracing::warn!(source = %source.id, %error, "Could not resolve the source's credential");
-                        None
-                    }
-                };
+                let token = source_token(state, &source).await;
                 candidates.extend(Candidate::of_source(&source, token));
             }
             Ok(_) => {}
@@ -119,4 +114,71 @@ async fn candidates(state: &AppState, project: &ProjectRow, workspace: Uuid) -> 
         candidates.extend(Candidate::of_project(url, token));
     }
     candidates
+}
+
+/// The token a GitHub source clones with. No other kind of source clones, so no other kind's
+/// credential is resolved.
+async fn source_token(state: &AppState, source: &SourceRow) -> Option<SecretValue> {
+    if source.source_type != sources::GITHUB {
+        return None;
+    }
+    match state.github().source(state.db(), source).await {
+        Ok(credential) => credential.map(Credential::into_secret),
+        Err(error) => {
+            tracing::warn!(source = %source.id, %error, "Could not resolve the source's credential");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::agent::testing::{Connected, MINTED_TOKEN, number};
+    use crate::db::projects::NewProject;
+    use crate::db::sources::NewSource;
+    use crate::services::github_app::testing::issuing;
+
+    const SLACK: &str = "slack";
+
+    #[tokio::test]
+    async fn a_source_that_cannot_clone_never_has_its_credential_resolved() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 0).await;
+        let installation = connected.installation(number).await;
+        let source = sources::create_source(
+            &connected.pool,
+            NewSource {
+                workspace_id: connected.workspace,
+                name: &format!("Slack {}", Uuid::new_v4()),
+                source_type: SLACK,
+                config: json!({}),
+                description: None,
+                url: None,
+                credentials_encrypted: None,
+                github_installation_id: Some(installation),
+            },
+        )
+        .await
+        .expect("create the source");
+        let project = projects::create(
+            &connected.pool,
+            NewProject {
+                name: "Notes",
+                description: None,
+                workspace_id: Some(connected.workspace),
+                source_id: Some(source.id),
+                status: None,
+            },
+        )
+        .await
+        .expect("create the project");
+
+        let found = candidates(&connected.state, &project, connected.workspace).await;
+
+        assert!(found.is_empty());
+    }
 }

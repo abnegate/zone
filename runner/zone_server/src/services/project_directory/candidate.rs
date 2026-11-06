@@ -8,13 +8,12 @@ use uuid::Uuid;
 use super::search::Search;
 use super::{Missing, Origin, Start, scan};
 use crate::config::Config;
-use crate::db::sources::SourceRow;
+use crate::db::sources::{GITHUB, SourceRow};
 use crate::db::workspace_host_directories;
 use crate::host_mounts::{CONTAINER_ROOT, HostMounts, normalize};
 use crate::state::AppState;
 
 const FILESYSTEM: &str = "filesystem";
-const GITHUB: &str = "github";
 const GITLAB: &str = "gitlab";
 const GITLAB_HOST: &str = "https://gitlab.com";
 

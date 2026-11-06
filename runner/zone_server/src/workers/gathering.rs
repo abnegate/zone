@@ -3,7 +3,9 @@
 //! Executes context gathering operations in the background, persisting
 //! events to the database for WebSocket streaming.
 
+use abnegate_vcs::pull_request::InstallationId;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -11,7 +13,7 @@ use zone_context::content::FetchConfig;
 use zone_context::stream::{GatheringCallback, GatheringEvent};
 use zone_core::Source;
 
-use crate::db::{context_gatherings, gathering_events, sources};
+use crate::db::{context_gatherings, gathering_events, github_installations, sources};
 use crate::state::AppState;
 
 // Max concurrent gatherings to prevent resource exhaustion
@@ -170,35 +172,30 @@ pub async fn execute_gathering(
         }
     };
 
-    // Fetch sources from database with workspace_id filter for authorization
-    let db_sources = match sources::get_sources_by_ids(state.db(), &source_ids, workspace_id).await
-    {
-        Ok(s) => s,
-        Err(e) => {
+    let rows = match sources::get_sources_by_ids(state.db(), &source_ids, workspace_id).await {
+        Ok(rows) => rows,
+        Err(error) => {
             obs.set_status("error");
-            tracing::error!("Failed to fetch sources from database: {}", e);
-            if let Err(e) = context_gatherings::update_gathering_status(
+            tracing::error!("Failed to fetch sources from database: {}", error);
+            if let Err(error) = context_gatherings::update_gathering_status(
                 state.db(),
                 gathering_id,
                 "failed",
-                Some(&format!("Failed to fetch sources: {}", e)),
+                Some(&format!("Failed to fetch sources: {}", error)),
             )
             .await
             {
                 tracing::error!(
                     "CRITICAL: Failed to update gathering {} status: {}",
                     gathering_id,
-                    e
+                    error
                 );
             }
             return;
         }
     };
 
-    let mut sources: Vec<Source> = Vec::with_capacity(db_sources.len());
-    for db_source in db_sources {
-        sources.extend(core_source_from_row(state, db_source).await);
-    }
+    let sources = prepared(state, rows).await;
 
     if sources.is_empty() {
         obs.set_status("no_sources");
@@ -360,6 +357,39 @@ pub async fn execute_gathering(
     }
 }
 
+/// `rows` as the core sources a gathering reads, each holding the credential it lasts the
+/// gathering with.
+async fn prepared(state: &AppState, rows: Vec<sources::SourceRow>) -> Vec<Source> {
+    refresh(state, &rows).await;
+    let mut prepared = Vec::with_capacity(rows.len());
+    for row in rows {
+        prepared.extend(core_source_from_row(state, row).await);
+    }
+    prepared
+}
+
+/// Forgets the cached token of every installation `rows` reach GitHub through, so each is minted
+/// afresh for the gathering rather than handed one that may expire partway through it.
+async fn refresh(state: &AppState, rows: &[sources::SourceRow]) {
+    let installations: HashSet<Uuid> = rows
+        .iter()
+        .filter_map(|row| row.github_installation_id)
+        .collect();
+    for installation in installations {
+        match github_installations::credential(state.db(), installation).await {
+            Ok(Some(credential)) => {
+                if let Ok(number) = u64::try_from(credential.installation_id) {
+                    state.github().invalidate(InstallationId::new(number));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%installation, %error, "Could not read the installation to refresh its token");
+            }
+        }
+    }
+}
+
 /// Convert a database source row into a core `Source`, with its credential as `token`.
 pub(crate) async fn core_source_from_row(
     state: &AppState,
@@ -368,7 +398,7 @@ pub(crate) async fn core_source_from_row(
     let source_type = match db_source.source_type.as_str() {
         "text" => zone_core::SourceType::Text,
         "filesystem" => zone_core::SourceType::Filesystem,
-        "github" => zone_core::SourceType::GitHub,
+        sources::GITHUB => zone_core::SourceType::GitHub,
         "gitlab" => zone_core::SourceType::GitLab,
         "google_calendar" => zone_core::SourceType::GoogleCalendar,
         "google_mail" => zone_core::SourceType::GoogleMail,
@@ -426,8 +456,10 @@ pub(crate) async fn core_source_from_row(
 
 #[cfg(test)]
 mod tests {
+    use chrono::{Duration, SecondsFormat, Utc};
     use serde_json::json;
-    use wiremock::MockServer;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::db::github_apps::tests::{pool, seed_organization, seed_workspace};
@@ -508,6 +540,65 @@ mod tests {
 
         assert_eq!(source.config[TOKEN], json!(MINTED_TOKEN));
         assert_eq!(source.config["owner"], json!("acme"));
+    }
+
+    async fn minting(github: &MockServer, token: &str, lifetime: Duration) {
+        let expires_at = (Utc::now() + lifetime).to_rfc3339_opts(SecondsFormat::Secs, true);
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/app/installations/{INSTALLATION_ID}/access_tokens"
+            )))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "token": token,
+                "expires_at": expires_at,
+            })))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(github)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_gathering_mints_a_fresh_token_rather_than_one_about_to_expire() {
+        let harness = Harness::new().await;
+        minting(
+            &harness.github,
+            "ghs_throwaway_expiring",
+            Duration::minutes(6),
+        )
+        .await;
+        minting(&harness.github, MINTED_TOKEN, Duration::hours(1)).await;
+        let installation = harness.installation().await;
+        let row = harness.source(None, Some(installation)).await;
+        harness
+            .state
+            .github()
+            .source(harness.state.db(), &row)
+            .await
+            .expect("the cache is warmed with a token six minutes from expiry");
+
+        let gathered = prepared(&harness.state, vec![row]).await;
+
+        assert_eq!(gathered.len(), 1);
+        assert_eq!(gathered[0].config[TOKEN], json!(MINTED_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn sources_sharing_an_installation_are_gathered_with_one_mint() {
+        let harness = Harness::new().await;
+        issuing(&harness.github, INSTALLATION_ID, MINTED_TOKEN, 1).await;
+        let installation = harness.installation().await;
+        let first = harness.source(None, Some(installation)).await;
+        let second = harness.source(None, Some(installation)).await;
+
+        let gathered = prepared(&harness.state, vec![first, second]).await;
+
+        assert_eq!(gathered.len(), 2);
+        assert!(
+            gathered
+                .iter()
+                .all(|source| source.config[TOKEN] == json!(MINTED_TOKEN))
+        );
     }
 
     #[tokio::test]
