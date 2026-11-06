@@ -15,9 +15,11 @@ mod observation;
 mod open;
 mod opened;
 mod push;
+mod reading;
 mod recorder;
 mod state;
 mod status;
+mod threads;
 mod tracked;
 
 use abnegate_secret::SecretValue;
@@ -43,10 +45,12 @@ pub use push::push;
 pub use recorder::{Recorder, record};
 pub use state::State;
 pub use status::Status;
+pub use threads::Threads;
 pub use tracked::Tracked;
 
 use observation::Observation;
 use open::Open;
+use reading::Reading;
 
 /// The most of a pull request's diff read for one view.
 const DIFF_BYTES: usize = 1024 * 1024;
@@ -169,7 +173,7 @@ async fn open(state: &AppState, workspace_id: Uuid, row: &PullRequestRow) -> Res
         state
             .github()
             .retrying(state.db(), credential, |token| async move {
-                let observation = observe(service, reference, &token, row).await?;
+                let observation = observe(service, reference, &token, row, Reading::Change).await?;
                 Ok::<_, Error>((observation, token))
             })
             .await?
@@ -251,7 +255,9 @@ async fn observed(
     state
         .github()
         .retrying(state.db(), credential, |token| async move {
-            Ok(observe(service, reference, &token, row).await?.status)
+            Ok(observe(service, reference, &token, row, Reading::Listing)
+                .await?
+                .status)
         })
         .await
 }
@@ -261,6 +267,7 @@ async fn observe(
     reference: &PullRequestReference,
     token: &SecretValue,
     row: &PullRequestRow,
+    reading: Reading,
 ) -> Result<Observation, Error> {
     let detail = service.fetch_pull(reference, token).await?;
     let lifecycle = match (detail.merged, detail.state) {
@@ -269,14 +276,16 @@ async fn observe(
         (false, _) => State::Open,
     };
     let mergeable = Mergeable::from(detail.mergeable_state);
-    let (checks, (auto_merge, methods)) = match lifecycle {
+    let (checks, (auto_merge, methods), threads) = match lifecycle {
         State::Open => tokio::join!(
             checks(service, reference, token, &detail.head_sha, row),
             automation(service, reference, token, mergeable, row),
+            threads(service, reference, token, row, reading),
         ),
         State::Closed | State::Merged => (
             Checks::None,
             (AutoMerge::unavailable(AutoMerge::SETTLED), Vec::new()),
+            None,
         ),
     };
     let draft_unavailable = match lifecycle {
@@ -295,6 +304,7 @@ async fn observe(
             mergeable,
             auto_merge,
             draft_unavailable,
+            threads,
             observed_at: chrono::Utc::now(),
         },
         node_id: detail.node_id,
@@ -318,6 +328,25 @@ async fn checks(
         Err(error) => {
             tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's checks");
             Checks::Unknown
+        }
+    }
+}
+
+async fn threads(
+    service: &PullRequestService,
+    reference: &PullRequestReference,
+    token: &SecretValue,
+    row: &PullRequestRow,
+    reading: Reading,
+) -> Option<Threads> {
+    if reading == Reading::Change {
+        return None;
+    }
+    match service.fetch_review_threads(reference, token).await {
+        Ok(records) => Some(Threads::from(records.as_slice())),
+        Err(error) => {
+            tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's review threads");
+            None
         }
     }
 }

@@ -148,8 +148,8 @@ pub struct ChatResponse {
     purpose: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_id: Option<Uuid>,
-    /// The provider the chat chose, null while it follows its workspace's. Only a single chat
-    /// whose choice could be read carries it.
+    /// The provider the chat chose, null while it follows its workspace's. A chat whose choice
+    /// couldn't be read leaves it out.
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<Option<Provider>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -488,13 +488,23 @@ pub async fn list(
     match chats::list_chats(state.db(), Some(query.workspace_id), query.archived).await {
         Ok(items) => {
             let ids: Vec<_> = items.iter().map(|chat| chat.id).collect();
+            let choices = match chats::provider::of(state.db(), &ids).await {
+                Ok(choices) => Some(choices),
+                Err(error) => {
+                    tracing::warn!(%error, "Could not read the listed chats' providers");
+                    None
+                }
+            };
             match chats::links_for(state.db(), &ids).await {
                 Ok(links) => Json(ChatsListResponse {
                     chats: items
                         .into_iter()
                         .map(|chat| {
                             let id = chat.id;
-                            ChatResponse::from(chat).with_link(links.get(&id).cloned())
+                            let choice = choices.as_ref().map(|choices| choices.get(&id));
+                            ChatResponse::from(chat)
+                                .with_link(links.get(&id).cloned())
+                                .with_choice(choice)
                         })
                         .collect(),
                 })

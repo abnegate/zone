@@ -11,15 +11,17 @@ use dashmap::DashMap;
 use futures::{Stream, StreamExt};
 use once_cell::sync::Lazy;
 use rmcp::model::{CallToolResult, ContentBlock};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
-use zone_core::llm::Toolset;
-use zone_core::tools::ToolResult;
+use zone_core::llm::{BuiltinTools, Toolset};
+use zone_core::tools::{PERMISSION_TOOL, ToolResult};
 
+use super::progress::Progress;
 use super::scope::Scope;
+use crate::agent::runner::call_signature;
 use crate::agent::{AgentEvent, ChatTools};
 use crate::utils::crypto::{generate_token, hash_token};
 
@@ -31,9 +33,31 @@ const SPENT: &str =
 /// loop uses for the same thing.
 const EXHAUSTED: &str = "The configured tool-call budget was reached.";
 
+/// What a call that already failed, with nothing changed since, is told
+/// instead of being run.
+const REPEATED_CALL: &str = "This call already failed and nothing has changed since, so it was not run. Try something \
+     else.";
+
+/// What every call is told once the turn has stopped making progress.
+const STALLED: &str = "Repeated failed calls made no progress. Finish with what you already have.";
+
+/// What the console is told when the turn stalls, in the words zone's own loop
+/// uses for the same thing.
+const REPEATED: &str = "Repeated failed calls made no progress.";
+
 /// What a call is told when the reader did not allow it. The same words a
 /// chat's own denied call is told, because it is the same decision.
 const DENIED: &str = "The user denied this tool call.";
+
+/// What the agent is told when zone could not read its permission question.
+const UNREADABLE: &str = "Zone could not read that permission request.";
+
+/// What the agent is told when no console is open to answer its question.
+const UNATTENDED: &str = "Nobody is listening to this chat to answer for it.";
+
+/// What the console shows on a permission card the reader allowed. The agent
+/// runs the tool itself, so zone never sees it finish.
+const ALLOWED: &str = "Allowed";
 
 /// Distinguishes a call the agent made over MCP from the chat's own ids in the
 /// console trace and in the approval gate.
@@ -54,6 +78,10 @@ pub struct Turn {
     events: UnboundedSender<AgentEvent>,
     /// Calls the agent has made, refused ones included.
     made: AtomicUsize,
+    progress: Mutex<Progress>,
+    /// Set once a failed call is repeated with nothing changed since. Every
+    /// later call is refused, as zone's own loop finalizes the turn.
+    stalled: AtomicBool,
 }
 
 impl Turn {
@@ -63,6 +91,8 @@ impl Turn {
             tools,
             events,
             made: AtomicUsize::new(0),
+            progress: Mutex::default(),
+            stalled: AtomicBool::new(false),
         }
     }
 
@@ -90,6 +120,12 @@ impl Turn {
         self.tools.has(name) && !self.tools.ends_turn(name)
     }
 
+    /// Whether a call to `name` is answered here: a tool this turn serves, or
+    /// the question an agent asks before running one of its own.
+    pub(crate) fn answers(&self, name: &str) -> bool {
+        name == PERMISSION_TOOL || self.serves(name)
+    }
+
     pub(crate) fn find(token: &str) -> Option<Arc<Self>> {
         LIVE.get(&hash_token(token)).map(|entry| Arc::clone(&entry))
     }
@@ -110,13 +146,88 @@ impl Turn {
         &self.tools
     }
 
+    /// Answer an agent's question about one of *its own* tools.
+    ///
+    /// Claude asks here before running a tool its own permission rules would
+    /// stop. Zone answers under the chat's approval policy: at once when the
+    /// chat auto-approves, otherwise as the same card zone's own confirmed
+    /// tools raise. Nothing is bypassed; the decision moves to the one place
+    /// the reader can see and answer it.
+    ///
+    /// Spends no budget. The agent asking whether a call may run is not the
+    /// call, and charging for the question would halve what a turn can do.
+    pub(crate) async fn permission(&self, arguments: &str) -> CallToolResult {
+        let Ok(asked) = serde_json::from_str::<Question>(arguments) else {
+            return verdict(None, UNREADABLE);
+        };
+        let approval = &self.scope.approval;
+        let id = format!("{CALL_PREFIX}{}", Uuid::new_v4().simple());
+        let pending = approval.expect_decision(&id);
+        if pending.is_none() {
+            return verdict(Some(&asked.input), "");
+        }
+        let stated = asked.input.to_string();
+        self.publish(AgentEvent::ToolCallStarted {
+            id: id.clone(),
+            name: asked.tool_name.clone(),
+            arguments: stated.clone(),
+        });
+        let started = Instant::now();
+        let raised = self.publish(AgentEvent::ToolApprovalRequired {
+            id: id.clone(),
+            name: asked.tool_name.clone(),
+            arguments: stated.clone(),
+            reason: crate::agent::reason(&stated),
+            // Zone renders an effect for its own tools; it knows nothing about
+            // what the agent's own tool would do beyond what the agent said.
+            preview: None,
+        });
+        if !raised {
+            approval.decide(&id, false);
+            return verdict(None, UNATTENDED);
+        }
+        let allowed = approval.awaited_decision(&id, pending).await;
+        self.publish(AgentEvent::ToolCallCompleted {
+            id,
+            name: asked.tool_name,
+            success: allowed,
+            detail: if allowed { ALLOWED } else { DENIED }.to_string(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            citations: Vec::new(),
+            receipt: None,
+        });
+        match allowed {
+            true => verdict(Some(&asked.input), ""),
+            false => verdict(None, DENIED),
+        }
+    }
+
     /// Run one tool call for this turn, gated by the chat's approval policy
-    /// and held to the turn's budget.
+    /// and held to the turn's budget and to making progress.
     pub(crate) async fn run(&self, name: &str, arguments: &str) -> CallToolResult {
+        if name == PERMISSION_TOOL {
+            return self.permission(arguments).await;
+        }
         let made = self.made.fetch_add(1, Ordering::Relaxed);
         if made >= self.scope.calls {
             return self.refuse(made);
         }
+        if self.stalled.load(Ordering::Relaxed) {
+            return self.stall();
+        }
+        let signature = call_signature(name, arguments);
+        let generation = {
+            let mut progress = self.progress();
+            if self.sees_every_change() && progress.repeats(&signature) {
+                let warned = progress.warn();
+                drop(progress);
+                return match warned {
+                    true => self.stall(),
+                    false => CallToolResult::error(vec![ContentBlock::text(REPEATED_CALL)]),
+                };
+            }
+            progress.generation()
+        };
         let id = format!("{CALL_PREFIX}{}", Uuid::new_v4().simple());
         self.publish(AgentEvent::ToolCallStarted {
             id: id.clone(),
@@ -135,6 +246,13 @@ impl Turn {
             .write_receipt(&id, name, arguments, &result)
             .await;
         let message = result.to_message();
+        self.progress().record(
+            signature,
+            generation,
+            self.tools.mutating(name),
+            result.success,
+            &message,
+        );
 
         self.publish(AgentEvent::ToolCallCompleted {
             id,
@@ -191,9 +309,49 @@ impl Turn {
         CallToolResult::error(vec![ContentBlock::text(SPENT)])
     }
 
+    /// Refuse a call once the turn has stopped making progress. The console is
+    /// told once, when it stalls, and shown no call that never ran.
+    fn stall(&self) -> CallToolResult {
+        if !self.stalled.swap(true, Ordering::Relaxed) {
+            self.publish(AgentEvent::Finalizing(REPEATED.to_string()));
+        }
+        CallToolResult::error(vec![ContentBlock::text(STALLED)])
+    }
+
+    /// Whether every change the agent can make goes through zone. Its own file
+    /// and shell tools change things zone never sees, so a call that failed
+    /// may succeed when made again with nothing zone could call progress.
+    fn sees_every_change(&self) -> bool {
+        self.scope.builtin == BuiltinTools::Withheld
+    }
+
+    fn progress(&self) -> MutexGuard<'_, Progress> {
+        self.progress.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn publish(&self, event: AgentEvent) -> bool {
         self.events.send(event).is_ok()
     }
+}
+
+/// What the agent asks about one of its own tools.
+#[derive(serde::Deserialize)]
+struct Question {
+    tool_name: String,
+    input: serde_json::Value,
+}
+
+/// The answer, in the shape the agent reads it in.
+///
+/// Always a successful result: the question was answered either way, and
+/// returning an error would read to the agent as zone failing to answer
+/// rather than as a refusal it should respect.
+fn verdict(allowed: Option<&serde_json::Value>, refusal: &str) -> CallToolResult {
+    let body = match allowed {
+        Some(input) => serde_json::json!({"behavior": "allow", "updatedInput": input}),
+        None => serde_json::json!({"behavior": "deny", "message": refusal}),
+    };
+    CallToolResult::success(vec![ContentBlock::text(body.to_string())])
 }
 
 /// A live turn's registration. Dropping it revokes the token.
@@ -230,12 +388,19 @@ pub fn merged<'a>(
         futures::pin_mut!(events);
         loop {
             tokio::select! {
+                // The agent writes before it calls, so what it wrote is counted ahead of the call.
                 biased;
-                Some(call) = calls.recv() => yield call,
                 event = events.next() => match event {
+                    Some(ended @ (AgentEvent::Limited(_) | AgentEvent::Failed(_))) => {
+                        while let Ok(call) = calls.try_recv() {
+                            yield call;
+                        }
+                        yield ended;
+                    }
                     Some(event) => yield event,
                     None => break,
                 },
+                Some(call) = calls.recv() => yield call,
             }
         }
         while let Ok(call) = calls.try_recv() {
@@ -256,6 +421,145 @@ fn detail(message: &str) -> String {
 }
 
 #[cfg(test)]
+mod permission_tests {
+    use super::super::testing::{next_card, open};
+    use super::*;
+    use crate::agent::{ApprovalGate, ApprovalPolicy};
+    use serde_json::json;
+
+    fn asked() -> String {
+        json!({"tool_name": "Bash", "input": {"command": "ls"}}).to_string()
+    }
+
+    fn body(result: &CallToolResult) -> serde_json::Value {
+        let text = result
+            .content
+            .iter()
+            .find_map(|block| block.as_text())
+            .expect("the answer is a text block")
+            .text
+            .clone();
+        serde_json::from_str(&text).expect("the answer is a JSON envelope")
+    }
+
+    #[tokio::test]
+    async fn an_auto_approving_chat_answers_the_agent_at_once() {
+        let opened = open(ApprovalPolicy::auto()).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        let answer = turn.run(PERMISSION_TOOL, &asked()).await;
+
+        assert_eq!(
+            answer.is_error,
+            Some(false),
+            "the question was answered, so the result is not an error"
+        );
+        assert_eq!(body(&answer)["behavior"], "allow", "{:?}", answer.content);
+    }
+
+    #[tokio::test]
+    async fn a_refused_card_reaches_the_agent_as_a_denial() {
+        let mut opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        let asking = tokio::spawn(async move { turn.run(PERMISSION_TOOL, &asked()).await });
+
+        let card = next_card(&mut opened.events).await;
+        assert_eq!(
+            card.name, "Bash",
+            "the card names the agent's own tool, not zone's"
+        );
+        assert!(opened.approval.decide(&card.id, false), "the refusal lands");
+
+        let answer = asking.await.expect("the question is answered");
+        assert_eq!(answer.is_error, Some(false));
+        assert_eq!(body(&answer)["behavior"], "deny", "{:?}", answer.content);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_question_is_denied_even_when_the_chat_auto_approves() {
+        let opened = open(ApprovalPolicy::auto()).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        for unreadable in [
+            json!({"tool_name": "Bash"}).to_string(),
+            json!({"input": {"command": "ls"}}).to_string(),
+            "not json".to_string(),
+        ] {
+            let answer = turn.run(PERMISSION_TOOL, &unreadable).await;
+            assert_eq!(
+                body(&answer)["behavior"],
+                "deny",
+                "{unreadable}: {:?}",
+                answer.content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_decided_card_is_settled_in_the_console() {
+        for approved in [true, false] {
+            let mut opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
+            let turn = Turn::find(&opened.token).expect("the turn");
+
+            let asking = tokio::spawn(async move { turn.run(PERMISSION_TOOL, &asked()).await });
+
+            let card = next_card(&mut opened.events).await;
+            assert!(opened.approval.decide(&card.id, approved));
+            asking.await.expect("the question is answered");
+
+            let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    match opened
+                        .events
+                        .recv()
+                        .await
+                        .expect("the console hears the turn")
+                    {
+                        AgentEvent::ToolCallCompleted { id, success, .. } => break (id, success),
+                        _ => continue,
+                    }
+                }
+            })
+            .await
+            .expect("the decided card is settled");
+            assert_eq!(
+                settled,
+                (card.id, approved),
+                "the card stops waiting once the reader has answered it"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_question_nobody_is_listening_to_is_denied_rather_than_held() {
+        let opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+        drop(opened.events);
+
+        let answer = turn.run(PERMISSION_TOOL, &asked()).await;
+
+        assert_eq!(body(&answer)["behavior"], "deny", "{:?}", answer.content);
+    }
+
+    #[tokio::test]
+    async fn asking_spends_none_of_the_turns_budget() {
+        let opened = open(ApprovalPolicy::auto()).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        for _ in 0..3 {
+            turn.run(PERMISSION_TOOL, &asked()).await;
+        }
+
+        assert_eq!(
+            turn.made.load(Ordering::Relaxed),
+            0,
+            "asking whether a call may run is not the call"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::testing::{drain, next_card, open, scope, tools, wait_for_card, write};
     use super::*;
@@ -268,6 +572,62 @@ mod tests {
     use zone_core::llm::provider::DEFAULT_TIMEOUT;
     use zone_core::tools::Session;
     use zone_core::tools::job::{JobCommand, Jobs};
+
+    #[tokio::test]
+    async fn what_the_agent_wrote_is_yielded_before_a_call_that_arrived_with_it() {
+        let (sender, mut calls) = unbounded_channel();
+        sender
+            .send(AgentEvent::ToolCallStarted {
+                id: "call_1".to_string(),
+                name: "list_chats".to_string(),
+                arguments: "{}".to_string(),
+            })
+            .unwrap();
+        let written = futures::stream::iter(vec![AgentEvent::Chunk("Let me look. ".to_string())]);
+
+        let order: Vec<&str> = merged(written, &mut calls)
+            .map(|event| match event {
+                AgentEvent::Chunk(_) => "text",
+                AgentEvent::ToolCallStarted { .. } => "call",
+                _ => "other",
+            })
+            .collect()
+            .await;
+
+        assert_eq!(
+            order,
+            ["text", "call"],
+            "a call placed ahead of the text before it is drawn above that text"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_that_arrived_before_the_round_failed_is_yielded_before_the_failure() {
+        let (sender, mut calls) = unbounded_channel();
+        sender
+            .send(AgentEvent::ToolCallStarted {
+                id: "call_1".to_string(),
+                name: "list_chats".to_string(),
+                arguments: "{}".to_string(),
+            })
+            .unwrap();
+        let failed = futures::stream::iter(vec![AgentEvent::Failed("signed out".to_string())]);
+
+        let order: Vec<&str> = merged(failed, &mut calls)
+            .map(|event| match event {
+                AgentEvent::Failed(_) => "failed",
+                AgentEvent::ToolCallStarted { .. } => "call",
+                _ => "other",
+            })
+            .collect()
+            .await;
+
+        assert_eq!(
+            order,
+            ["call", "failed"],
+            "a turn stops reading at a failure, so a call queued behind it lands in the next login's round"
+        );
+    }
 
     #[tokio::test]
     async fn a_token_reaches_the_turn_it_was_minted_for() {
@@ -355,6 +715,101 @@ mod tests {
             "the console is told once that the budget ran out, and shown no call that never \
              ran: {told:?}"
         );
+    }
+
+    /// A task's budget is unlimited, so without this a coding agent repeating
+    /// a call that keeps failing would run until the attempt's deadline.
+    #[tokio::test]
+    async fn a_repeated_failure_is_refused_and_a_second_stops_the_turn() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let chat = Uuid::new_v4();
+        let (sender, mut events) = unbounded_channel();
+        let lease =
+            Turn::new(scope(chat), tools(chat).await, sender).open("http://127.0.0.1:8080/mcp");
+        let turn = Turn::find(lease.toolset().token.expose()).expect("the turn");
+        let missing =
+            json!({ "path": directory.path().join("missing.txt").to_string_lossy() }).to_string();
+
+        let failed = turn.run("read_file", &missing).await;
+        assert_eq!(failed.is_error, Some(true), "{failed:?}");
+        assert_eq!(drain(&mut events), ["started", "completed"]);
+
+        let warned = turn.run("read_file", &missing).await;
+        assert!(
+            format!("{:?}", warned.content).contains(REPEATED_CALL),
+            "{:?}",
+            warned.content
+        );
+        assert!(drain(&mut events).is_empty(), "a refused repeat ran");
+
+        let stopped = turn.run("read_file", &missing).await;
+        assert!(
+            format!("{:?}", stopped.content).contains(STALLED),
+            "{:?}",
+            stopped.content
+        );
+        let after = directory.path().join("after.txt");
+        let refused = turn.run("write_file", &write(&after).to_string()).await;
+        assert!(
+            format!("{:?}", refused.content).contains(STALLED),
+            "{:?}",
+            refused.content
+        );
+        assert!(!after.exists(), "a call after the turn stalled ran");
+        let told: Vec<AgentEvent> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(
+            matches!(told.as_slice(), [AgentEvent::Finalizing(reason)] if reason == REPEATED),
+            "the console is told once that the turn stalled, and shown no call that never \
+             ran: {told:?}"
+        );
+    }
+
+    /// An agent that keeps its own shell can create what a failed call was
+    /// missing without zone seeing it, so the retry must run.
+    #[tokio::test]
+    async fn a_turn_whose_agent_keeps_its_own_tools_retries_a_failed_call() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let chat = Uuid::new_v4();
+        let (sender, _events) = unbounded_channel();
+        let lease = Turn::new(
+            Scope {
+                builtin: BuiltinTools::Granted,
+                ..scope(chat)
+            },
+            tools(chat).await,
+            sender,
+        )
+        .open("http://127.0.0.1:8080/mcp");
+        let turn = Turn::find(lease.toolset().token.expose()).expect("the turn");
+        let path = directory.path().join("made-elsewhere.txt");
+        let read = json!({ "path": path.to_string_lossy() }).to_string();
+
+        let failed = turn.run("read_file", &read).await;
+        assert_eq!(failed.is_error, Some(true), "{failed:?}");
+        std::fs::write(&path, "made by the agent's own shell").expect("write");
+
+        let retried = turn.run("read_file", &read).await;
+        assert_eq!(retried.is_error, Some(false), "{retried:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failure_followed_by_a_change_may_be_retried() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let chat = Uuid::new_v4();
+        let (sender, _events) = unbounded_channel();
+        let lease =
+            Turn::new(scope(chat), tools(chat).await, sender).open("http://127.0.0.1:8080/mcp");
+        let turn = Turn::find(lease.toolset().token.expose()).expect("the turn");
+        let path = directory.path().join("later.txt");
+        let read = json!({ "path": path.to_string_lossy() }).to_string();
+
+        let failed = turn.run("read_file", &read).await;
+        assert_eq!(failed.is_error, Some(true), "{failed:?}");
+        let written = turn.run("write_file", &write(&path).to_string()).await;
+        assert_eq!(written.is_error, Some(false), "{written:?}");
+
+        let retried = turn.run("read_file", &read).await;
+        assert_eq!(retried.is_error, Some(false), "{retried:?}");
     }
 
     #[tokio::test]

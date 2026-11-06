@@ -49,9 +49,20 @@ export interface ChatProviders {
   cli?: boolean;
 }
 
+export interface RecentChat {
+  model_name: string;
+  provider: AiProvider | null;
+  provider_model: string | null;
+  reasoning_effort: ReasoningEffort;
+  agent_enabled: boolean;
+  offline: boolean;
+  context_tokens: number | null;
+}
+
 export interface WorkspaceChatProviders {
   default: ChatProviderOffer;
   providers: ChatProviderOffer[];
+  recent?: RecentChat | null;
 }
 
 export interface SetChatProviderRequest {

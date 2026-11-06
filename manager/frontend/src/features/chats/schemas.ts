@@ -138,7 +138,9 @@ export const ToolCallRecordSchema = z.object({
   success: z.boolean(),
   detail: z.string(),
   duration_ms: z.number(),
+  at: z.number().int().nonnegative().optional().catch(undefined),
   reasoning: z.string().optional(),
+  reasoning_at: z.number().int().nonnegative().optional().catch(undefined),
   reason: statedReason,
   preview: observedPreview,
   /**
@@ -229,6 +231,8 @@ export const HandoverSchema = z.object({
   resets_at: absentWhenEmpty,
   carried: z.boolean(),
   at: z.number().int().nonnegative(),
+  calls: z.number().int().nonnegative().optional().catch(undefined),
+  reasoning: z.string().optional().catch(undefined),
 });
 
 export const HandoversSchema = tolerantArray(HandoverSchema);
@@ -242,6 +246,7 @@ export const MessageMetadataSchema = z
     web_search: z.boolean().optional(),
     memory_used: z.boolean().optional().catch(undefined),
     reasoning: z.string().optional(),
+    reasoning_at: z.number().int().nonnegative().optional().catch(undefined),
     handovers: HandoversSchema.optional().catch(undefined),
     source: z.string().optional().catch(undefined),
     reminder_id: z.string().optional().catch(undefined),
@@ -386,9 +391,20 @@ export const ChatProvidersSchema = z.object({
   cli: z.boolean().optional().catch(undefined),
 });
 
+export const RecentChatSchema = z.object({
+  model_name: z.string(),
+  provider: AiProviderSchema.nullable(),
+  provider_model: z.string().nullable(),
+  reasoning_effort: ReasoningEffortSchema,
+  agent_enabled: z.boolean(),
+  offline: z.boolean(),
+  context_tokens: z.number().int().positive().nullable(),
+});
+
 export const WorkspaceChatProvidersSchema = z.object({
   default: ChatProviderOfferSchema,
   providers: tolerantArray(ChatProviderOfferSchema),
+  recent: RecentChatSchema.nullish().catch(null),
 });
 
 export const SendMessageRequestSchema = z.object({
@@ -470,6 +486,10 @@ export const PullRequestStatusSchema = z.object({
     unavailable: z.string().nullable(),
   }),
   draft_unavailable: z.string().nullable().catch(null),
+  threads: z
+    .object({ open: z.number().int().nonnegative(), resolved: z.number().int().nonnegative() })
+    .nullable()
+    .catch(null),
   observed_at: z.string(),
 });
 

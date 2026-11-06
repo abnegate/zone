@@ -16,7 +16,9 @@ import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import SubNav from '../../../shared/components/SubNav/SubNav';
+import TransferChip from '../../../shared/components/TransferChip/TransferChip';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import { useTransfers } from '../../../shared/hooks/useTransfers';
 import { useModels } from '../../models';
 import { useProjects } from '../../projects/hooks';
 import type { AiProvider } from '../../settings/workspace/types';
@@ -40,6 +42,7 @@ import {
   MessageContent,
   ProviderError,
   ProviderPicker,
+  QueueItem,
   SourcesButton,
 } from '../components';
 import { Activity } from '../components/Activity';
@@ -68,6 +71,7 @@ import {
   AUTO_MODEL,
   arrangeChats,
   asksModelName,
+  attachmentId,
   attachmentMetadata,
   audioAttachments,
   automated,
@@ -81,6 +85,7 @@ import {
   chatShowsReasoning,
   chatSources,
   contextTokenOptions,
+  DEFAULT_NEW_CHAT,
   DEFAULT_PROVIDER,
   defaultContextTokens,
   effectiveOffer,
@@ -100,6 +105,8 @@ import {
   MODEL_PLACEHOLDER,
   modelLabel,
   modelSelectOptions,
+  type NewChatSettings,
+  newChatSettings,
   observationKey,
   offersAgent,
   offersAgentOn,
@@ -116,7 +123,7 @@ import {
   selectedContextTokens,
   shortModelName,
   sourceAttachment,
-  splitAtHandovers,
+  splitTurn,
   toPlainText,
   videoAttachments,
   writeChatGroupBy,
@@ -130,6 +137,7 @@ const NEW_CHAT_MODEL_REQUIRED = 'Choose a model for this provider.';
 const PROVIDER_EFFORT_RESET_FAILED =
   'AI provider changed, but its reasoning effort could not be reset';
 const MODEL_EFFORT_RESET_FAILED = 'Model changed, but its reasoning effort could not be reset';
+const MODEL_CONTEXT_RESET_FAILED = 'Model changed, but its context size could not be fitted to it';
 
 const failure = (prefix: string, error: unknown): string =>
   error instanceof Error ? `${prefix}: ${error.message}` : prefix;
@@ -157,6 +165,7 @@ export default function ChatsPage() {
   const [newChatProject, setNewChatProject] = useState(NO_PROJECT);
   const [newChatOffline, setNewChatOffline] = useState(false);
   const [newChatContext, setNewChatContext] = useState(String(defaultContextTokens()));
+  const [newChatEdited, setNewChatEdited] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -180,6 +189,16 @@ export default function ChatsPage() {
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
+
+  const attaching = useTransfers<Attachment>({
+    run: (file, { signal, onProgress }) => readAttachment(file, { signal, onProgress }),
+    identify: attachmentId,
+    onDone: (attachment) => {
+      setAttachments((prev) =>
+        prev.some((item) => item.id === attachment.id) ? prev : [...prev, attachment]
+      );
+    },
+  });
 
   const addStartingImage = (image: { name: string; mime: string; url: string }) => {
     const next = sourceAttachment(image);
@@ -219,8 +238,13 @@ export default function ChatsPage() {
     error: chatError,
     streaming,
     status: chatStatus,
+    queue,
+    held,
     sendMessage: sendMessageFn,
     cancelGeneration,
+    interruptQueued,
+    editQueued,
+    removeQueued,
     approveTool,
     setAgentEnabled: setAgentEnabledFn,
     setAutoApprove: setAutoApproveFn,
@@ -495,16 +519,31 @@ export default function ChatsPage() {
     setSearchParams({}, { replace: true });
   };
 
-  const resetNewChat = () => {
-    setNewChatProvider(DEFAULT_PROVIDER);
-    setNewChatModel(AUTO_MODEL);
-    setNewChatAgent(false);
+  const applyNewChat = (settings: NewChatSettings) => {
+    setNewChatProvider(settings.provider);
+    setNewChatModel(settings.model);
+    setNewChatAgent(settings.agent);
     setNewChatAutoApprove(false);
-    setNewChatReasoning(AUTO_EFFORT);
-    setNewChatProject(NO_PROJECT);
-    setNewChatOffline(false);
-    setNewChatContext(String(defaultContextTokens()));
+    setNewChatReasoning(settings.reasoning);
+    setNewChatOffline(settings.offline);
+    setNewChatContext(settings.context);
   };
+
+  const resetNewChat = () => {
+    setNewChatEdited(false);
+    applyNewChat(DEFAULT_NEW_CHAT);
+    setNewChatProject(NO_PROJECT);
+  };
+
+  const editNewChat = () => {
+    setNewChatEdited(true);
+  };
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: an open, untouched new chat follows the workspace's recent chat as it loads
+  useEffect(() => {
+    if (!showNewChatModal || newChatEdited) return;
+    applyNewChat(newChatSettings(workspaceProviders, models));
+  }, [showNewChatModal, newChatEdited, workspaceProviders, models]);
 
   const workspaceId = currentWorkspace?.id ?? null;
   const [newChatWorkspace, setNewChatWorkspace] = useState(workspaceId);
@@ -527,6 +566,7 @@ export default function ChatsPage() {
   };
 
   const handleNewChatProvider = (provider: string) => {
+    editNewChat();
     const offer = newChatOfferFor(provider);
     const model = offer?.requires_model ? '' : AUTO_MODEL;
     keepNewChatAgent(offer, model);
@@ -542,6 +582,7 @@ export default function ChatsPage() {
   };
 
   const handleNewChatModel = (name: string) => {
+    editNewChat();
     setNewChatModel(name);
     keepNewChatAgent(newChatOffer, name);
     const installed = findInstalledModel(models, name);
@@ -603,6 +644,10 @@ export default function ChatsPage() {
 
   const reportForChat = (chatId: string, message: string) => {
     if (latestSelectedChatId.current === chatId) setChatOperationError(message);
+  };
+
+  const reportAll = (chatId: string, problems: string[]) => {
+    if (problems.length > 0) reportForChat(chatId, problems.join('. '));
   };
 
   const handleToggleAgent = async () => {
@@ -679,6 +724,7 @@ export default function ChatsPage() {
     if (!isAuthenticated || !displayedChat) return false;
     const chatId = displayedChat.id;
     const modelName = displayedChat.model_name;
+    const contextTokens = displayedChat.context_tokens;
     setChatOperationError(null);
     markChanging(chatId, true);
     try {
@@ -691,21 +737,46 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return false;
     }
+    const runs = provider === null ? modelName : model;
+    const problems: string[] = [];
     try {
       const offer = offerFor(provider);
-      if (offer) await settleEffort(effortsFor(offer, provider === null ? modelName : model));
+      if (offer) await settleEffort(effortsFor(offer, runs));
     } catch (error) {
-      reportForChat(chatId, failure(PROVIDER_EFFORT_RESET_FAILED, error));
+      problems.push(failure(PROVIDER_EFFORT_RESET_FAILED, error));
+    }
+    try {
+      await fitContext(provider ?? chatDefaultProvider, contextTokens, runs ?? AUTO_MODEL);
+    } catch (error) {
+      problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
-      if (latestSelectedChatId.current === chatId) await refreshChat();
-      markChanging(chatId, false);
+      reportAll(chatId, problems);
+      try {
+        await Promise.all([
+          refreshChats(),
+          latestSelectedChatId.current === chatId ? refreshChat() : undefined,
+        ]);
+      } finally {
+        markChanging(chatId, false);
+      }
     }
     return true;
+  };
+
+  const fitContext = async (
+    provider: AiProvider | null,
+    tokens: number | null | undefined,
+    model: string
+  ) => {
+    if (!offersContextOn(provider, chatDefaultProvider, models, model)) return;
+    const native = findInstalledModel(models, model)?.details?.context_length;
+    if (tokens && native && tokens > native) await setContextTokensFn(native);
   };
 
   const handleProviderModel = async (name: string) => {
     if (!isAuthenticated || !displayedChat || !chatProviders) return;
     const chatId = displayedChat.id;
+    const contextTokens = displayedChat.context_tokens;
     setChatOperationError(null);
     markChanging(chatId, true);
     try {
@@ -715,15 +786,25 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return;
     }
+    const problems: string[] = [];
     try {
       await settleEffort(effortsFor(chatProviders.default, name));
     } catch (error) {
-      reportForChat(chatId, failure(MODEL_EFFORT_RESET_FAILED, error));
+      problems.push(failure(MODEL_EFFORT_RESET_FAILED, error));
+    }
+    try {
+      await fitContext(chatDefaultProvider, contextTokens, name);
+    } catch (error) {
+      problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
+      reportAll(chatId, problems);
       try {
-        if (latestSelectedChatId.current === chatId) {
-          await Promise.all([refreshProviders(), refreshChat()]);
-        }
+        await Promise.all([
+          refreshChats(),
+          latestSelectedChatId.current === chatId
+            ? Promise.all([refreshProviders(), refreshChat()])
+            : undefined,
+        ]);
       } finally {
         markChanging(chatId, false);
       }
@@ -767,12 +848,8 @@ export default function ChatsPage() {
       }
       leftover.push(file);
     }
-    if (leftover.length === 0) return;
-    const read = await Promise.all(leftover.map(readAttachment));
-    setAttachments((prev) => {
-      const seen = new Set(prev.map((a) => a.id));
-      return [...prev, ...read.filter((a) => !seen.has(a.id))];
-    });
+    const attached = new Set(attachments.map((attachment) => attachment.id));
+    attaching.start(leftover.filter((file) => !attached.has(attachmentId(file))));
   };
 
   const handleSaveCharacter = async (event: FormEvent) => {
@@ -857,7 +934,8 @@ export default function ChatsPage() {
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
     const sendable = attachments.filter(isSendable);
-    if (!isAuthenticated || !displayedChat || sending || streaming) return;
+    if (!isAuthenticated || !displayedChat || sending) return;
+    if (attaching.pending > 0) return;
     if (!messageInput.trim() && sendable.length === 0) return;
 
     const chatId = displayedChat.id;
@@ -995,7 +1073,7 @@ export default function ChatsPage() {
       <div className="chat-item-content">
         <span className="chat-title">{chat.title}</span>
         <span className="chat-meta">
-          <span className="chat-meta-model">{modelLabel(chat.model_name)}</span>
+          <span className="chat-meta-model">{modelLabel(requestedModel(chat))}</span>
           <span className="chat-meta-time">· {formatDate(chat.updated_at)}</span>
         </span>
       </div>
@@ -1505,6 +1583,17 @@ export default function ChatsPage() {
                       const live = streaming && message.id === displayedChat.messages.at(-1)?.id;
                       const body = message.content.trim();
                       const awaitingAnswer = /^\[waiting for your answer\]$/i.test(body);
+                      const parts = splitTurn(
+                        awaitingAnswer ? '' : message.content,
+                        toolCalls,
+                        handovers,
+                        message.metadata?.reasoning
+                          ? {
+                              text: message.metadata.reasoning,
+                              at: message.metadata.reasoning_at,
+                            }
+                          : undefined
+                      );
                       return (
                         <div
                           key={message.id}
@@ -1579,19 +1668,36 @@ export default function ChatsPage() {
                               ))}
                             </div>
                           )}
-                          <Activity
-                            reasoning={message.metadata?.reasoning}
-                            calls={toolCalls}
-                            live={live}
-                            answered={index < lastUserIndex}
-                            onDecide={approveTool}
-                            onAnswer={handleAnswerQuestions}
-                          />
-                          {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
-                          {(body || handovers.length > 0) && !awaitingAnswer ? (
+                          {parts.length > 0 ? (
                             <div className="message-content">
-                              {splitAtHandovers(message.content, handovers).map((part) =>
-                                part.kind === 'text' ? (
+                              {parts.map((part, position) => {
+                                if (part.kind === 'calls') {
+                                  return (
+                                    <Activity
+                                      key={
+                                        part.calls[0]
+                                          ? `calls-${part.calls[0].id}`
+                                          : `thinking-${position}`
+                                      }
+                                      reasoning={part.reasoning}
+                                      calls={part.calls}
+                                      live={live}
+                                      answered={index < lastUserIndex}
+                                      onDecide={approveTool}
+                                      onAnswer={handleAnswerQuestions}
+                                    />
+                                  );
+                                }
+                                if (part.kind === 'handover') {
+                                  return (
+                                    <HandoverNotice
+                                      key={`handover-${part.handover.at}-${part.handover.to}`}
+                                      handover={part.handover}
+                                      agentChanged={part.agentChanged}
+                                    />
+                                  );
+                                }
+                                return (
                                   <MessageContent
                                     key={`text-${part.offset}`}
                                     content={part.text}
@@ -1605,16 +1711,11 @@ export default function ChatsPage() {
                                       })
                                     }
                                   />
-                                ) : (
-                                  <HandoverNotice
-                                    key={`handover-${part.handover.at}-${part.handover.to}`}
-                                    handover={part.handover}
-                                    agentChanged={part.agentChanged}
-                                  />
-                                )
-                              )}
+                                );
+                              })}
                             </div>
                           ) : null}
+                          {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                           {cited && (
                             <SourcesButton
                               count={cited.length}
@@ -1631,11 +1732,18 @@ export default function ChatsPage() {
                     </div>
                   ) : null}
                   {streaming || chatStatus ? (
-                    <Generation
-                      key={selectedChatId}
-                      status={chatStatus || 'Generating response…'}
-                    />
+                    <Generation key={selectedChatId} status={chatStatus} />
                   ) : null}
+                  {queue.map((message) => (
+                    <QueueItem
+                      key={message.id}
+                      message={message}
+                      held={held}
+                      onInterrupt={interruptQueued}
+                      onEdit={editQueued}
+                      onRemove={removeQueued}
+                    />
+                  ))}
                   <div ref={messagesEndRef} />
                 </div>
 
@@ -1657,8 +1765,16 @@ export default function ChatsPage() {
                       void handleIncomingFiles(e.dataTransfer.files);
                     }}
                   >
-                    {attachments.length > 0 && (
+                    {attachments.length + attaching.transfers.length > 0 && (
                       <div className="message-attachments">
+                        {attaching.transfers.map((transfer) => (
+                          <TransferChip
+                            key={transfer.id}
+                            transfer={transfer}
+                            onCancel={attaching.cancel}
+                            onRetry={attaching.retry}
+                          />
+                        ))}
                         {attachments.map((attachment) => (
                           <span
                             key={attachment.id}
@@ -1703,6 +1819,13 @@ export default function ChatsPage() {
                         ))}
                       </div>
                     )}
+                    {attaching.pending > 0 ? (
+                      <p className="message-form-hint" role="status">
+                        {attaching.pending === 1
+                          ? 'Send is ready once the file finishes attaching.'
+                          : `Send is ready once ${attaching.pending} files finish attaching.`}
+                      </p>
+                    ) : null}
                     {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
                       <p className="message-form-hint">
                         Ask to generate, edit, remove an object, change the setting, or animate and
@@ -1761,21 +1884,47 @@ export default function ChatsPage() {
                         rows={1}
                       />
                       {streaming ? (
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="sm"
-                          onClick={cancelGeneration}
-                        >
-                          Stop
-                        </Button>
+                        <>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={cancelGeneration}
+                          >
+                            Stop
+                          </Button>
+                          {messageInput.trim() || attachments.some(isSendable) ? (
+                            <Button
+                              type="submit"
+                              variant="primary"
+                              size="sm"
+                              loading={sending}
+                              disabled={attaching.pending > 0}
+                              title={
+                                attaching.pending > 0
+                                  ? 'Wait for attachments to finish before queueing'
+                                  : undefined
+                              }
+                            >
+                              Queue
+                            </Button>
+                          ) : null}
+                        </>
                       ) : (
                         <Button
                           type="submit"
                           variant="primary"
                           size="sm"
                           loading={sending}
-                          disabled={!messageInput.trim() && !attachments.some(isSendable)}
+                          disabled={
+                            attaching.pending > 0 ||
+                            (!messageInput.trim() && !attachments.some(isSendable))
+                          }
+                          title={
+                            attaching.pending > 0
+                              ? 'Wait for attachments to finish before sending'
+                              : undefined
+                          }
                         >
                           Send
                         </Button>
@@ -1923,6 +2072,7 @@ export default function ChatsPage() {
               label="Context"
               value={newChatContext}
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                editNewChat();
                 setNewChatContext(event.target.value);
               }}
               helpText={
@@ -1937,7 +2087,10 @@ export default function ChatsPage() {
             label="Offline"
             helpText="Never use web search, page fetch, or curl/wget. Connected sources still work."
             checked={newChatOffline}
-            onCheckedChange={setNewChatOffline}
+            onCheckedChange={(checked) => {
+              editNewChat();
+              setNewChatOffline(checked);
+            }}
           />
           {showNewChatAgent && (
             <Checkbox
@@ -1945,6 +2098,7 @@ export default function ChatsPage() {
               helpText="Search workspace content, use connected GitHub data and run tools when asked. Needs a tool-calling model."
               checked={newChatAgent}
               onCheckedChange={(checked) => {
+                editNewChat();
                 setNewChatAgent(checked);
                 if (!checked) setNewChatAutoApprove(false);
               }}
@@ -1955,7 +2109,10 @@ export default function ChatsPage() {
               label="Auto-approve writes and commands"
               helpText="Skip the confirmation prompt for write_file, apply_patch, run_command and run_shell. You can change this later on the chat."
               checked={newChatAutoApprove}
-              onCheckedChange={setNewChatAutoApprove}
+              onCheckedChange={(checked) => {
+                editNewChat();
+                setNewChatAutoApprove(checked);
+              }}
             />
           )}
           {showNewChatReasoning && (
@@ -1963,6 +2120,7 @@ export default function ChatsPage() {
               label="Reasoning"
               value={newChatEffort}
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                editNewChat();
                 setNewChatReasoning(event.target.value as ReasoningEffort);
               }}
               helpText={

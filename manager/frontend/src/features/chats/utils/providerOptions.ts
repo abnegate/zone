@@ -37,6 +37,10 @@ export function isAgentOffer(offer: ChatProviderOffer): boolean {
   return isAgentProvider(offer.provider);
 }
 
+export function offersDefaultModels(offer: ChatProviderOffer): boolean {
+  return offer.models.length > 0 && (offer.provider === SELF_HOSTED || isAgentOffer(offer));
+}
+
 /** `installed` is null when the list does not describe the models `offer` runs. */
 export function offersAgentOn<T extends ModelHints & { name: string }>(
   offer: ChatProviderOffer | null,

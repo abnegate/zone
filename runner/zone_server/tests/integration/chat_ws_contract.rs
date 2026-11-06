@@ -1213,6 +1213,113 @@ const SPAWNING_CALL: &str = "call_run_shell";
 const WAITING_CALL: &str = "call_wait_for";
 const DEADLINE: &str = "2026-09-13T18:30:00Z";
 
+const BEFORE_CALL: &str = "Let me look. ";
+const AFTER_CALL: &str = "Found it.";
+
+#[tokio::test]
+async fn a_tool_call_records_where_in_the_answer_it_ran() {
+    let provider = MockServer::start().await;
+    let rounds = Arc::new(Mutex::new(VecDeque::from(vec![
+        sse(vec![
+            json!({"content": BEFORE_CALL}),
+            json!({"tool_calls": [{
+                "index": 0,
+                "id": "call_list",
+                "type": "function",
+                "function": {"name": "list_chats", "arguments": "{}"}
+            }]}),
+        ]),
+        sse(vec![json!({"content": AFTER_CALL})]),
+    ])));
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(move |_request: &wiremock::Request| {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    rounds
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .expect("extra completion"),
+                )
+        })
+        .mount(&provider)
+        .await;
+
+    let mut config = test_config();
+    config.litellm_host = provider.uri();
+    config.comfyui.enabled = false;
+    config.web_search.enabled = false;
+    let pool = create_test_pool().await;
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, _workspace, chat) = seed(&client).await;
+    client
+        .put_json_auth(
+            &format!("/api/chats/{chat}"),
+            &json!({"agent_enabled": true, "agent_sandboxed": true}),
+            &token,
+        )
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+    let address = spawn(config, pool).await;
+    let mut socket = authenticate(&address, chat, &token).await;
+
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "send", "content": "Which chats are there?"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let frames = drain_turn(&mut socket).await;
+
+    let before = BEFORE_CALL.chars().count();
+    let call = frames
+        .iter()
+        .find(|frame| frame["type"] == "tool_call")
+        .expect("the call is announced live");
+    assert_eq!(
+        call["at"], before,
+        "the live frame places the call after the text written before it: {frames:?}"
+    );
+
+    let history = client
+        .get_auth(&format!("/api/chats/{chat}"), &token)
+        .await
+        .json_value();
+    let stored = history["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .expect("the turn is kept")
+        .clone();
+    let record = &stored["metadata"]["tool_calls"][0];
+    assert_eq!(record["name"], "list_chats");
+    assert_eq!(
+        record["at"], before,
+        "a reload places the call where it ran, not above the whole answer"
+    );
+    let content: Vec<char> = stored["content"].as_str().unwrap().chars().collect();
+    assert_eq!(
+        content[..before].iter().collect::<String>(),
+        BEFORE_CALL,
+        "the offset counts exactly the text that came before the call"
+    );
+    assert!(
+        content[before..]
+            .iter()
+            .collect::<String>()
+            .contains(AFTER_CALL),
+        "the text written after the call follows the offset: {content:?}"
+    );
+}
+
 /// The four frames the job and wait cards are drawn from, serialised straight
 /// off the variant rather than provoked through a socket.
 ///

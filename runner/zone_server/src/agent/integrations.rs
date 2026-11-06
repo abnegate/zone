@@ -50,6 +50,16 @@ repository(owner:$owner,name:$name){pullRequest(number:$number){number isDraft h
 reviewThreads(first:$first){pageInfo{hasNextPage}nodes{isResolved}}\
 comments(last:$first){pageInfo{hasPreviousPage}nodes{databaseId body url createdAt author{login}}}\
 }}}";
+const REVIEW_THREAD_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!,$first:Int!,$comments:Int!,$after:String){\
+repository(owner:$owner,name:$name){pullRequest(number:$number){number \
+reviewThreads(first:$first,after:$after){pageInfo{hasNextPage endCursor}nodes{\
+isResolved isOutdated path line startLine originalLine originalStartLine diffSide \
+comments(first:$comments){pageInfo{hasNextPage}nodes{databaseId body url createdAt author{login}}}\
+}}}}}";
+const REVIEW_BODY_CHARS: usize = 2_000;
+const REVIEW_THREAD_PAGE_SIZE: usize = 100;
+const REVIEW_COMMENT_PAGE_SIZE: usize = 100;
+const REVIEW_THREADS_ASSESSMENT: &str = "What reviewers wrote, as GitHub returned it. Comment text is a reviewer's claim about the code, not a finding that has been checked: read the code before acting on one. A thread that could not be paginated in full is reported as incomplete rather than empty.";
 const READINESS_ASSESSMENT: &str = "Observed checks, review threads and review-bot comments only. Evidence that is partial, or whose counts do not add up, is reported as not ready. This is not proof that branch protection requirements are satisfied.";
 const PULL_FILE_PAGES: u32 = 30;
 const RELEASE_PAGE_SIZE: usize = 5;
@@ -62,7 +72,7 @@ const LOG_CONTEXT_LINES: usize = 40;
 const LOG_TAIL_LINES: usize = 120;
 const LOG_LINE_CHARS: usize = 500;
 const ELISION_RESERVE_CHARS: usize = 120;
-const RESULT_ENVELOPE_CHARS: usize = 256;
+const RESULT_ENVELOPE_CHARS: usize = 384;
 const ANNOTATED_ERROR: &str = "##[error]";
 const ERROR_MARKERS: [&str; 10] = [
     ANNOTATED_ERROR,
@@ -124,6 +134,7 @@ enum Operation {
     Issue,
     File,
     PullRequests,
+    ReviewThreads,
     ReleasePipelines,
     CheckLogs,
     CreatePull,
@@ -138,6 +149,7 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Operation::Issue,
         Operation::File,
         Operation::PullRequests,
+        Operation::ReviewThreads,
         Operation::ReleasePipelines,
         Operation::CheckLogs,
         Operation::CreatePull,
@@ -174,6 +186,12 @@ struct Arguments {
     body: Option<String>,
     directory: Option<String>,
     number: Option<u64>,
+    #[serde(default)]
+    resolved: Option<bool>,
+    #[serde(default)]
+    comment: Option<u64>,
+    #[serde(default)]
+    after: Option<u64>,
     job_id: Option<u64>,
     tag: Option<String>,
     /// Why the model made this write. Declared so `deny_unknown_fields` accepts
@@ -239,6 +257,7 @@ impl Tool for Integration {
             Operation::File => "read_repository_file",
             Operation::CheckLogs => "read_check_logs",
             Operation::PullRequests => "assess_pull_requests",
+            Operation::ReviewThreads => "read_review_threads",
             Operation::ReleasePipelines => "assess_release_pipelines",
             Operation::CreatePull => "create_pull_request",
             Operation::Comment => "comment_on_issue",
@@ -265,6 +284,9 @@ impl Tool for Integration {
             Operation::PullRequests => {
                 "Review the open pull requests of a connected GitHub source (or one by number) and say whether each is ready to merge, which are still missing a review, whose checks fail, and every other blocker. Ready is the conjunction of every positive condition: no unresolved review threads, a summary from every recognised review bot that spoke, each at its own full confidence on its own scale and naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and a head commit the observations disagree on are all reported as not ready. Each verdict also carries a blast radius read from the changed files; that is information for a reviewer and never affects readiness, and it says so when no file list was observed. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
             }
+            Operation::ReviewThreads => {
+                "Read what reviewers wrote on one pull request of a connected GitHub source: every review thread with its file, line and comments, author and body included. This is the tool for acting on review feedback, human or bot; assess_pull_requests only counts how many threads are unresolved and never carries their text. Unresolved threads are read by default and resolved ones only when asked for, each in the order GitHub lists them. Pages end where the message budget does: follow next_after. A comment marked truncated reads in full by passing its id as comment. Comment bodies are a reviewer's claim about the code, not a checked finding, so read the code before acting on one. Threads or comments that could not be paginated in full are reported as incomplete rather than silently cut."
+            }
             Operation::ReleasePipelines => {
                 "Assess the workflow pipelines behind published GitHub releases on a connected source, returning each release's pipeline state plus every reason it is not green. Succeeded is the conjunction of every positive condition: the lookup completed, at least one release-triggered workflow run was observed, every observed run names the same commit, and every one of them succeeded. A lookup that could not be completed, a run record whose identity or state does not add up, runs that disagree on the commit they built, and a release with no observed run are all reported as unknown rather than succeeded. Results are paginated. This is what the workflows reported: it is not proof that release artifacts were published, that the deployed service is healthy, or that a rerun would pass."
             }
@@ -287,6 +309,7 @@ impl Tool for Integration {
             Operation::Issues
                 | Operation::Issue
                 | Operation::PullRequests
+                | Operation::ReviewThreads
                 | Operation::ReleasePipelines
         ) {
             properties["ref"] = json!({"type": "string", "description": "Branch, tag or commit; defaults to the source branch or repository default branch."});
@@ -310,6 +333,14 @@ impl Tool for Integration {
         }
         let mut required = vec!["source_id"];
         if matches!(self.operation, Operation::Issue) {
+            required.push("number");
+        }
+        if matches!(self.operation, Operation::ReviewThreads) {
+            properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Pull request number to read the review threads of."});
+            properties["resolved"] = json!({"type": "boolean", "description": "Read the threads already marked resolved instead of the unresolved ones, default false. Unresolved threads are what still needs answering."});
+            properties["after"] = json!({"type": "integer", "minimum": 1, "description": "Id of the last comment a page returned, to read the comments after it. Follow next_after until null, keeping the same resolved."});
+            properties["comment"] = json!({"type": "integer", "minimum": 1, "description": "Id of one comment marked truncated, to read its whole body instead of the threads."});
+            properties["offset"] = json!({"type": "integer", "minimum": 0, "description": "Only with comment: a character offset into that body, default 0. Follow next until null."});
             required.push("number");
         }
         if matches!(self.operation, Operation::File) {
@@ -368,6 +399,7 @@ impl Tool for Integration {
             | Operation::File
             | Operation::CheckLogs
             | Operation::PullRequests
+            | Operation::ReviewThreads
             | Operation::ReleasePipelines => Tier::Read,
         }
     }
@@ -766,10 +798,17 @@ impl Github {
             .json()
             .await
             .map_err(|_| "GitHub returned an invalid response.".to_string())?;
-        if response
-            .get("errors")
-            .is_some_and(|errors| errors.as_array().is_none_or(|rows| !rows.is_empty()))
+        if let Some(errors) = response.get("errors")
+            && errors.as_array().is_none_or(|rows| !rows.is_empty())
         {
+            if errors.as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["type"] == "NOT_FOUND"
+                        && row["path"] == json!(["repository", "pullRequest"])
+                })
+            }) {
+                return Err("GitHub found no pull request with that number on this source.".into());
+            }
             return Err(
                 "GitHub rejected the review query. Check source access, permissions and rate limits."
                     .into(),
@@ -933,6 +972,11 @@ impl Github {
             result["repository"] = json!(repository);
             return Ok(result);
         }
+        if matches!(operation, Operation::ReviewThreads) {
+            let mut result = self.review_threads(arguments).await?;
+            result["repository"] = json!(repository);
+            return Ok(result);
+        }
         if matches!(operation, Operation::ReleasePipelines) {
             let mut result = self.release_pipelines(arguments).await?;
             result["repository"] = json!(repository);
@@ -993,6 +1037,7 @@ impl Github {
             Operation::Issues
             | Operation::Issue
             | Operation::PullRequests
+            | Operation::ReviewThreads
             | Operation::ReleasePipelines
             | Operation::CheckLogs
             | Operation::CreatePull
@@ -1283,6 +1328,168 @@ impl Github {
                 Ok(Some(_)) | Err(_) => return Vec::new(),
             }
         }
+    }
+
+    /// Every review thread on the pull request, with what each reviewer wrote.
+    async fn review_threads(&self, arguments: &Arguments) -> Result<Value, String> {
+        if arguments.reference.is_some() {
+            return Err("ref does not apply: review threads belong to the pull request and are read as they stand now, not at a commit.".into());
+        }
+        let number = arguments
+            .number
+            .filter(|number| *number > 0)
+            .ok_or("number is required: name the pull request to read.")?;
+        if number > i32::MAX as u64 {
+            return Err(format!(
+                "{number} is larger than any pull request number GitHub assigns."
+            ));
+        }
+        if let Some(comment) = arguments.comment {
+            if arguments.after.is_some() {
+                return Err(
+                    "after pages the threads; with comment, page its body with offset.".into(),
+                );
+            }
+            return self
+                .whole_comment(number, comment, arguments.offset.unwrap_or(0))
+                .await;
+        }
+        if arguments.offset.is_some() {
+            return Err("offset only applies with comment; page the threads with after.".into());
+        }
+        let wanted = arguments.resolved.unwrap_or(false);
+        let (nodes, complete) = self.all_review_threads(number).await?;
+        let unresolved = nodes.iter().filter(|node| !resolved(node)).count();
+        let kept: Vec<(usize, &Value)> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| resolved(node) == wanted)
+            .collect();
+        let start = match arguments.after {
+            None => (0, 0),
+            Some(id) => resume_after(&nodes, &kept, id)?,
+        };
+        let kept: Vec<&Value> = kept.into_iter().map(|(_, node)| node).collect();
+        let mut page = json!({
+            "assessment": REVIEW_THREADS_ASSESSMENT,
+            "number": number,
+            "complete": complete,
+            "reading": if wanted { "resolved" } else { "unresolved" },
+            "counts": {"unresolved": unresolved, "resolved": nodes.len() - unresolved},
+            "after": arguments.after,
+            "next_after": u64::MAX,
+            "threads": [],
+        });
+        let (rows, next) = review_thread_page(&kept, start, json_chars(&page))?;
+        page["threads"] = json!(rows);
+        page["next_after"] = json!(next);
+        Ok(page)
+    }
+
+    async fn all_review_threads(&self, number: u64) -> Result<(Vec<Value>, bool), String> {
+        let mut nodes = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let mut data = self
+                .graphql(
+                    REVIEW_THREAD_QUERY,
+                    json!({
+                        "owner": self.configuration.owner,
+                        "name": self.configuration.repo,
+                        "number": number,
+                        "first": REVIEW_THREAD_PAGE_SIZE,
+                        "comments": REVIEW_COMMENT_PAGE_SIZE,
+                        "after": cursor,
+                    }),
+                )
+                .await?;
+            if data
+                .pointer("/repository/pullRequest/number")
+                .and_then(Value::as_u64)
+                != Some(number)
+            {
+                return Err(
+                    "GitHub returned review threads for a different or missing pull request."
+                        .into(),
+                );
+            }
+            let threads = data
+                .pointer_mut("/repository/pullRequest/reviewThreads")
+                .ok_or("GitHub returned no review threads.")?;
+            let more = threads
+                .pointer("/pageInfo/hasNextPage")
+                .and_then(Value::as_bool);
+            let next = threads
+                .pointer("/pageInfo/endCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if more == Some(true) && next.as_ref().is_some_and(|next| seen.contains(next)) {
+                return Ok((nodes, false));
+            }
+            let Some(Value::Array(page)) = threads.get_mut("nodes").map(Value::take) else {
+                return Err("GitHub returned review threads that are not a list.".into());
+            };
+            nodes.extend(page);
+            match (more, next) {
+                (Some(false), _) => return Ok((nodes, true)),
+                (Some(true), Some(next)) => {
+                    seen.insert(next.clone());
+                    cursor = Some(next);
+                }
+                _ => return Ok((nodes, false)),
+            }
+        }
+    }
+
+    /// One review comment's whole body, for a comment `read_review_threads`
+    /// had to cut. Read over REST by id, and refused unless it belongs to the
+    /// pull request being read.
+    async fn whole_comment(&self, number: u64, id: u64, offset: u64) -> Result<Value, String> {
+        let comment = self
+            .get(&["pulls", "comments", &id.to_string()], &[])
+            .await?;
+        if comment["id"].as_u64() != Some(id)
+            || !comment["pull_request_url"].as_str().is_some_and(|url| {
+                is_pull_api_url(
+                    url,
+                    &self.configuration.owner,
+                    &self.configuration.repo,
+                    number,
+                )
+            })
+        {
+            return Err("That review comment does not belong to this pull request.".into());
+        }
+        let body = comment["body"].as_str().unwrap_or_default();
+        let total = body.chars().count() as u64;
+        if offset > total {
+            return Err("offset is past the end of the comment.".into());
+        }
+        let mut page = json!({
+            "assessment": REVIEW_THREADS_ASSESSMENT,
+            "number": number,
+            "comment": id,
+            "author": comment["user"]["login"].as_str().unwrap_or("unknown"),
+            "path": comment["path"],
+            "url": comment["html_url"],
+            "body": "",
+            "offset": offset,
+            "next": total,
+            "total": total,
+            "complete": false,
+        });
+        let room = MAX_TOOL_MESSAGE_CHARS
+            .saturating_sub(RESULT_ENVELOPE_CHARS)
+            .saturating_sub(json_chars(&page));
+        let rest = &body[byte_at(body, offset as usize)..];
+        let taken = escaped_fit(rest, room).min(FILE_PAGE_CHARS as usize);
+        let end = offset + taken as u64;
+        let next = (end < total).then_some(end);
+        page["body"] = json!(&rest[..byte_at(rest, taken)]);
+        page["next"] = json!(next);
+        page["complete"] = json!(next.is_none());
+        Ok(page)
     }
 
     async fn review(&self, number: u64) -> Result<Review, String> {
@@ -1965,6 +2172,154 @@ fn elision(count: usize) -> String {
     format!("… {count} lines omitted …")
 }
 
+fn resolved(thread: &Value) -> bool {
+    thread["isResolved"].as_bool().unwrap_or(false)
+}
+
+/// The threads from `start` (a thread, and how many of its comments to skip)
+/// onwards, cut where the next comment would take the page past the tool
+/// message budget. At least one comment is always returned so a caller
+/// following `next_after` always moves forward.
+fn review_thread_page(
+    threads: &[&Value],
+    (start, mut first): (usize, usize),
+    mut used: usize,
+) -> Result<(Vec<Value>, Option<u64>), String> {
+    let budget = MAX_TOOL_MESSAGE_CHARS.saturating_sub(RESULT_ENVELOPE_CHARS);
+    let mut rows = Vec::new();
+    let mut last = None;
+    for thread in &threads[start..] {
+        let comments = array(&thread["comments"]["nodes"])?;
+        let skip = std::mem::take(&mut first);
+        if skip >= comments.len() {
+            continue;
+        }
+        let (line, start_line) = located(thread);
+        let mut row = json!({
+            "path": thread["path"],
+            "line": line,
+            "start_line": start_line,
+            "side": thread["diffSide"],
+            "resolved": resolved(thread),
+            "outdated": thread["isOutdated"].as_bool().unwrap_or(false),
+            "first_comment": skip,
+            "comments_complete": thread["comments"]["pageInfo"]["hasNextPage"].as_bool() == Some(false),
+            "comments": [],
+        });
+        let mut cost = json_chars(&row) + 1;
+        let mut wrote = Vec::new();
+        for comment in &comments[skip..] {
+            let id = comment["databaseId"]
+                .as_u64()
+                .ok_or("GitHub returned a review comment without an id.")?;
+            let entry = review_comment_row(comment);
+            cost += json_chars(&entry) + 1;
+            if used + cost > budget && last.is_some() {
+                if !wrote.is_empty() {
+                    row["comments"] = json!(wrote);
+                    rows.push(row);
+                }
+                return Ok((rows, last));
+            }
+            wrote.push(entry);
+            last = Some(id);
+        }
+        used += cost;
+        row["comments"] = json!(wrote);
+        rows.push(row);
+    }
+    Ok((rows, None))
+}
+
+/// Where the page after comment `id` starts in `kept`, which holds threads
+/// in GitHub's order with their index there. The comment is found among
+/// every thread, so a thread resolved or reopened since the last page still
+/// marks the place: reading resumes at the next kept thread after it.
+fn resume_after(
+    nodes: &[Value],
+    kept: &[(usize, &Value)],
+    id: u64,
+) -> Result<(usize, usize), String> {
+    let (thread, position) = nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, thread)| {
+            thread["comments"]["nodes"]
+                .as_array()?
+                .iter()
+                .position(|comment| comment["databaseId"].as_u64() == Some(id))
+                .map(|position| (index, position))
+        })
+        .ok_or_else(|| {
+            format!("Comment {id} is no longer among these threads: it may have been deleted. Read again without after.")
+        })?;
+    if let Some(at) = kept.iter().position(|(index, _)| *index == thread) {
+        return Ok((at, position + 1));
+    }
+    Ok((kept.partition_point(|(index, _)| *index < thread), 0))
+}
+
+/// An outdated thread no longer maps onto the current diff, so GitHub nulls
+/// its current lines; the lines it was written against still locate it.
+fn located(thread: &Value) -> (Value, Value) {
+    if thread["line"].is_null() {
+        (
+            thread["originalLine"].clone(),
+            thread["originalStartLine"].clone(),
+        )
+    } else {
+        (thread["line"].clone(), thread["startLine"].clone())
+    }
+}
+
+/// How many leading characters of `text` fit in `budget` once serialized as a
+/// JSON string, so a body of newlines or quotes cannot double past the cap.
+fn escaped_fit(text: &str, budget: usize) -> usize {
+    let mut cost = 0;
+    for (count, character) in text.chars().enumerate() {
+        cost += match character {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            control if control < ' ' => 6,
+            _ => 1,
+        };
+        if cost > budget {
+            return count;
+        }
+    }
+    text.chars().count()
+}
+
+fn review_comment_row(node: &Value) -> Value {
+    let comment = review_comment(node);
+    let kept = escaped_fit(&comment.body, REVIEW_BODY_CHARS);
+    json!({
+        "id": comment.id,
+        "author": if comment.author.is_empty() { "unknown" } else { comment.author.as_str() },
+        "body": truncate(&comment.body, kept),
+        "truncated": kept < comment.body.chars().count(),
+        "url": comment.url,
+        "created_at": comment.created_at,
+    })
+}
+
+fn byte_at(text: &str, characters: usize) -> usize {
+    text.char_indices()
+        .nth(characters)
+        .map_or(text.len(), |(index, _)| index)
+}
+
+/// Whether `value` is the REST URL of pull request `number` on `owner/repo`.
+/// GitHub answers with a repository's canonical casing, which the casing a
+/// source was saved with need not match.
+fn is_pull_api_url(value: &str, owner: &str, repo: &str, number: u64) -> bool {
+    value.rsplit_once('/').is_some_and(|(prefix, last)| {
+        last == number.to_string()
+            && prefix
+                .to_ascii_lowercase()
+                .ends_with(&format!("/repos/{owner}/{repo}/pulls").to_ascii_lowercase())
+    })
+}
+
 fn text_page(content: &str, offset: u64, limit: u64) -> Result<(String, u64, Option<u64>), String> {
     let total = content.chars().count() as u64;
     if limit == 0 || offset > total {
@@ -2535,7 +2890,7 @@ mod tests {
     use crate::services::github_app::testing::issuing;
     use crate::state::AppState;
     use std::time::Instant;
-    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use zone_core::tools::REASON_DESCRIPTION;
 
@@ -2566,9 +2921,13 @@ mod tests {
     }
 
     fn github(server: &MockServer) -> Github {
+        github_named(server, "owner", "repository")
+    }
+
+    fn github_named(server: &MockServer, owner: &str, repo: &str) -> Github {
         let mut github = Github::new(Configuration {
-            owner: "owner".into(),
-            repo: "repository".into(),
+            owner: owner.into(),
+            repo: repo.into(),
             branch: Some("main".into()),
             path: None,
             token: Some("test-secret".into()),
@@ -2636,6 +2995,7 @@ mod tests {
             Operation::Issue,
             Operation::File,
             Operation::PullRequests,
+            Operation::ReviewThreads,
             Operation::ReleasePipelines,
             Operation::CheckLogs,
         ] {
@@ -2721,6 +3081,9 @@ mod tests {
             body: None,
             directory: None,
             number: Some(number),
+            resolved: None,
+            comment: None,
+            after: None,
             job_id: None,
             tag: None,
             reason: None,
@@ -2846,6 +3209,9 @@ mod tests {
                     body: None,
                     directory: None,
                     number: None,
+                    resolved: None,
+                    comment: None,
+                    after: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3153,6 +3519,9 @@ mod tests {
                     body: None,
                     directory: None,
                     number: None,
+                    resolved: None,
+                    comment: None,
+                    after: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3284,6 +3653,9 @@ mod tests {
                     body: Some("details".into()),
                     directory: None,
                     number: None,
+                    resolved: None,
+                    comment: None,
+                    after: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3329,6 +3701,9 @@ mod tests {
                     body: Some("ship it".into()),
                     directory: None,
                     number: Some(7),
+                    resolved: None,
+                    comment: None,
+                    after: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3436,6 +3811,9 @@ mod tests {
             body: body.map(str::to_string),
             directory: None,
             number,
+            resolved: None,
+            comment: None,
+            after: None,
             job_id: None,
             tag: None,
             reason: None,
@@ -3563,10 +3941,811 @@ mod tests {
             body: None,
             directory: None,
             number,
+            resolved: None,
+            comment: None,
+            after: None,
             job_id: None,
             tag: None,
             reason: None,
         }
+    }
+
+    fn thread_payload(more_threads: bool, more_comments: bool) -> Value {
+        json!({"data": {"repository": {"pullRequest": {
+            "number": 7,
+            "reviewThreads": {
+                "pageInfo": {"hasNextPage": more_threads},
+                "nodes": [
+                    {
+                        "isResolved": true,
+                        "isOutdated": true,
+                        "path": "src/old.rs",
+                        "line": 1,
+                        "startLine": null,
+                        "diffSide": "RIGHT",
+                        "comments": {
+                            "pageInfo": {"hasNextPage": false},
+                            "nodes": [review_comment_node(2, "Already dealt with.")]
+                        }
+                    },
+                    {
+                        "isResolved": false,
+                        "isOutdated": false,
+                        "path": "src/lib.rs",
+                        "line": 42,
+                        "startLine": null,
+                        "diffSide": "RIGHT",
+                        "comments": {
+                            "pageInfo": {"hasNextPage": more_comments},
+                            "nodes": [review_comment_node(1, "This unwrap panics on an empty list.")]
+                        }
+                    }
+                ]
+            }
+        }}}})
+    }
+
+    fn review_comment_node(id: u64, body: &str) -> Value {
+        json!({
+            "databaseId": id,
+            "body": body,
+            "url": format!("https://github.com/owner/repository/pull/7#discussion_r{id}"),
+            "createdAt": "2026-11-05T00:00:00Z",
+            "author": {"login": "coderabbitai"}
+        })
+    }
+
+    fn long_thread_payload(comments: u64, chars: usize) -> Value {
+        let nodes: Vec<Value> = (1..=comments)
+            .map(|id| review_comment_node(id, &"x".repeat(chars)))
+            .collect();
+        json!({"data": {"repository": {"pullRequest": {
+            "number": 7,
+            "reviewThreads": {
+                "pageInfo": {"hasNextPage": false},
+                "nodes": [{
+                    "isResolved": false,
+                    "isOutdated": false,
+                    "path": "src/lib.rs",
+                    "line": 42,
+                    "startLine": null,
+                    "diffSide": "RIGHT",
+                    "comments": {"pageInfo": {"hasNextPage": false}, "nodes": nodes}
+                }]
+            }
+        }}}})
+    }
+
+    #[tokio::test]
+    async fn review_threads_carry_what_a_reviewer_wrote() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+
+        assert_eq!(read["counts"]["unresolved"], 1);
+        assert_eq!(read["complete"], true);
+        let threads = read["threads"].as_array().expect("threads are a list");
+        assert_eq!(
+            threads.len(),
+            1,
+            "a settled thread is not what still needs answering"
+        );
+        assert_eq!(read["counts"]["resolved"], 1);
+        assert_eq!(threads[0]["path"], "src/lib.rs");
+        assert_eq!(threads[0]["line"], 42);
+        assert_eq!(threads[0]["comments"][0]["author"], "coderabbitai");
+        assert_eq!(
+            threads[0]["comments"][0]["body"], "This unwrap panics on an empty list.",
+            "the body is the whole point of this tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_threads_are_read_when_asked_for() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.resolved = Some(true);
+
+        let read = github(&server)
+            .review_threads(&arguments)
+            .await
+            .expect("the threads are readable");
+
+        let threads = read["threads"].as_array().expect("a list");
+        assert_eq!(threads.len(), 1, "only the resolved thread was asked for");
+        assert_eq!(threads[0]["resolved"], true);
+        assert_eq!(threads[0]["path"], "src/old.rs");
+        assert_eq!(read["reading"], "resolved");
+        assert_eq!(
+            read["counts"]["unresolved"], 1,
+            "what still needs answering is counted though not read"
+        );
+        assert_eq!(read["counts"]["resolved"], 1);
+    }
+
+    #[tokio::test]
+    async fn an_outdated_thread_keeps_the_line_it_was_written_against() {
+        let server = MockServer::start().await;
+        let mut payload = thread_payload(false, false);
+        let thread = &mut payload["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][1];
+        thread["isOutdated"] = json!(true);
+        thread["line"] = Value::Null;
+        thread["originalLine"] = json!(40);
+        mock_graphql(&server, payload).await;
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+
+        assert_eq!(read["threads"][0]["outdated"], true);
+        assert_eq!(
+            read["threads"][0]["line"], 40,
+            "a push that moved the code must not lose where the comment was"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_threads_do_not_advertise_a_ref() {
+        let schema = tool(Operation::ReviewThreads).parameters_schema();
+        assert!(
+            schema["properties"].get("ref").is_none(),
+            "threads are read as they stand now, never at a commit: {schema}"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_threads_refuse_a_ref() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.reference = Some("an-old-commit".into());
+
+        let refused = github(&server)
+            .review_threads(&arguments)
+            .await
+            .expect_err("current threads must not pass for the threads at a ref");
+
+        assert!(refused.contains("ref does not apply"), "{refused}");
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "a refused ref is refused before GitHub is asked"
+        );
+    }
+
+    /// The longest owner and repository names GitHub allows, so a page that
+    /// fits with these fits with any.
+    fn longest_github(server: &MockServer) -> Github {
+        github_named(server, &"o".repeat(39), &"r".repeat(100))
+    }
+
+    /// The size of `read` once `observe` and `run` have added what they add.
+    fn delivered(mut read: Value, github: &Github) -> usize {
+        read["repository"] = json!(format!(
+            "https://github.com/{}/{}",
+            github.configuration.owner, github.configuration.repo
+        ));
+        read["source_id"] = json!(Uuid::new_v4());
+        read["observed_at"] = json!(Utc::now().to_rfc3339());
+        json_chars(&read)
+    }
+
+    async fn read_every_comment(github: &Github) -> (Vec<u64>, usize) {
+        let mut seen = Vec::new();
+        let mut after = None;
+        let mut pages = 0;
+        loop {
+            let mut arguments = readiness_args(Some(7));
+            arguments.after = after;
+            let read = github
+                .review_threads(&arguments)
+                .await
+                .expect("each page is readable");
+            for thread in read["threads"].as_array().expect("threads are a list") {
+                for comment in thread["comments"].as_array().expect("comments are a list") {
+                    seen.push(comment["id"].as_u64().expect("every comment has an id"));
+                }
+            }
+            after = read["next_after"].as_u64();
+            let size = delivered(read, github);
+            assert!(
+                size <= MAX_TOOL_MESSAGE_CHARS,
+                "a page must survive the transcript cap whole, got {size}"
+            );
+            pages += 1;
+            assert!(pages <= 100, "following next_after must finish");
+            if after.is_none() {
+                return (seen, pages);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn review_threads_page_within_the_message_budget() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, long_thread_payload(20, REVIEW_BODY_CHARS)).await;
+
+        let (seen, pages) = read_every_comment(&longest_github(&server)).await;
+
+        assert!(pages > 1, "twenty long comments cannot fit one message");
+        assert_eq!(
+            seen,
+            (1..=20).collect::<Vec<_>>(),
+            "every comment arrives exactly once, in order"
+        );
+    }
+
+    #[tokio::test]
+    async fn pages_cut_across_threads_without_losing_a_comment() {
+        let server = MockServer::start().await;
+        let threads: Vec<Value> = (0..6u64)
+            .map(|thread| {
+                let comments: Vec<Value> = (1..=3u64)
+                    .map(|index| {
+                        let id = thread * 3 + index;
+                        review_comment_node(id, &"z\n\"".repeat(150 * id as usize))
+                    })
+                    .collect();
+                json!({
+                    "isResolved": false,
+                    "isOutdated": false,
+                    "path": format!("src/{thread}.rs"),
+                    "line": thread + 1,
+                    "startLine": null,
+                    "diffSide": "RIGHT",
+                    "comments": {"pageInfo": {"hasNextPage": false}, "nodes": comments}
+                })
+            })
+            .collect();
+        mock_graphql(
+            &server,
+            json!({"data": {"repository": {"pullRequest": {
+                "number": 7,
+                "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": threads}
+            }}}}),
+        )
+        .await;
+
+        let (seen, pages) = read_every_comment(&longest_github(&server)).await;
+
+        assert!(
+            pages > 2,
+            "eighteen escape-heavy comments span several pages"
+        );
+        assert_eq!(
+            seen,
+            (1..=18).collect::<Vec<_>>(),
+            "every comment arrives exactly once, in order"
+        );
+    }
+
+    #[test]
+    fn the_envelope_reserve_covers_the_longest_repository_names() {
+        let mut envelope = json!({"repository": format!(
+            "https://github.com/{}/{}",
+            "o".repeat(39),
+            "r".repeat(100)
+        )});
+        envelope["source_id"] = json!(Uuid::new_v4());
+        envelope["observed_at"] = json!(Utc::now().to_rfc3339());
+
+        assert!(
+            json_chars(&envelope) < RESULT_ENVELOPE_CHARS,
+            "what observe and run add after a page is sized must fit the reserve, got {}",
+            json_chars(&envelope)
+        );
+    }
+
+    #[test]
+    fn escaped_fit_counts_what_json_adds() {
+        assert_eq!(escaped_fit("plain", 10), 5);
+        assert_eq!(
+            escaped_fit("\n\n\n", 4),
+            2,
+            "a newline costs two once escaped"
+        );
+        assert_eq!(escaped_fit("\u{1}", 5), 0, "a bare control costs six");
+        assert_eq!(
+            json_chars(&json!("\"\\\n\r\t\u{8}\u{c}\u{1}é")),
+            2 + 2 * 7 + 6 + 1,
+            "the costs mirror serde_json's own escaping"
+        );
+        assert_eq!(escaped_fit("\"\\\n\r\t\u{8}\u{c}\u{1}é", 21), 9);
+        assert_eq!(escaped_fit("\"\\\n\r\t\u{8}\u{c}\u{1}é", 20), 8);
+    }
+
+    #[tokio::test]
+    async fn an_escape_heavy_comment_still_fits_one_message() {
+        let server = MockServer::start().await;
+        let mut payload = long_thread_payload(1, 0);
+        payload["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"]
+            [0]["body"] = json!("\u{1}".repeat(REVIEW_BODY_CHARS));
+        mock_graphql(&server, payload).await;
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+        assert_eq!(read["threads"][0]["comments"][0]["truncated"], true);
+
+        let size = delivered(read, &github(&server));
+        assert!(
+            size <= MAX_TOOL_MESSAGE_CHARS,
+            "a body that escapes to six times its length must still fit, got {size}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_escape_heavy_comment_reads_whole_across_pages() {
+        let server = MockServer::start().await;
+        let body = "line\n\"quoted\"\n".repeat(2_000);
+        mock(
+            &server,
+            "pulls/comments/1",
+            json!({
+                "id": 1,
+                "body": body,
+                "html_url": "https://github.com/owner/repository/pull/7#discussion_r1",
+                "pull_request_url": "https://api.github.com/repos/owner/repository/pulls/7",
+                "user": {"login": "coderabbitai"}
+            }),
+        )
+        .await;
+        let github = github(&server);
+        let mut read = String::new();
+        let mut offset = Some(0);
+        let mut pages = 0;
+
+        while let Some(next) = offset {
+            let mut arguments = readiness_args(Some(7));
+            arguments.comment = Some(1);
+            arguments.offset = Some(next);
+            let page = github
+                .review_threads(&arguments)
+                .await
+                .expect("each page is readable");
+            read.push_str(page["body"].as_str().expect("a body page"));
+            offset = page["next"].as_u64();
+            let size = delivered(page, &github);
+            assert!(
+                size <= MAX_TOOL_MESSAGE_CHARS,
+                "an escaped page must survive the transcript cap whole, got {size}"
+            );
+            pages += 1;
+            assert!(pages <= 50, "following next must finish");
+        }
+
+        assert_eq!(read, body, "the pages join back into the whole comment");
+    }
+
+    #[tokio::test]
+    async fn a_cursor_whose_comment_is_gone_is_refused() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.after = Some(99);
+
+        let refused = github(&server)
+            .review_threads(&arguments)
+            .await
+            .expect_err("a cursor that no longer lands anywhere must not restart silently");
+
+        assert!(
+            refused.contains("no longer among these threads"),
+            "{refused}"
+        );
+    }
+
+    /// Threads with one comment each, numbered by their comment id, resolved
+    /// where `resolved` says so.
+    fn single_comment_threads(resolved: &[bool]) -> Value {
+        let mut payload = long_thread_payload(1, 10);
+        let nodes = &mut payload["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"];
+        let template = nodes[0].clone();
+        *nodes = json!(
+            resolved
+                .iter()
+                .zip(1u64..)
+                .map(|(resolved, id)| {
+                    let mut thread = template.clone();
+                    thread["isResolved"] = json!(resolved);
+                    thread["comments"]["nodes"] = json!([review_comment_node(id, "comment")]);
+                    thread
+                })
+                .collect::<Vec<_>>()
+        );
+        payload
+    }
+
+    async fn ids_after(payload: Value, resolved: bool, after: u64) -> Vec<u64> {
+        let server = MockServer::start().await;
+        mock_graphql(&server, payload).await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.resolved = Some(resolved);
+        arguments.after = Some(after);
+        let read = github(&server)
+            .review_threads(&arguments)
+            .await
+            .expect("the comment that marked the place still exists");
+        read["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|thread| thread["comments"][0]["id"].as_u64().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_thread_resolved_between_pages_does_not_skip_or_repeat_its_neighbours() {
+        let ids = ids_after(single_comment_threads(&[false, true, false]), false, 2).await;
+
+        assert_eq!(
+            ids,
+            [3],
+            "thread 2 was read unresolved and resolved since; reading goes on after it, not from the top"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_thread_reopened_between_pages_does_not_skip_or_repeat_its_neighbours() {
+        let ids = ids_after(single_comment_threads(&[true, false, true]), true, 2).await;
+
+        assert_eq!(
+            ids,
+            [3],
+            "thread 2 was read resolved and reopened since; reading goes on after it, not from the top"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cursor_that_cycles_ends_the_listing_without_repeating_threads() {
+        let server = MockServer::start().await;
+        let page = |id: u64, cursor: &str| {
+            let mut payload = single_comment_threads(&[false]);
+            let threads = &mut payload["data"]["repository"]["pullRequest"]["reviewThreads"];
+            threads["nodes"][0]["comments"]["nodes"][0]["databaseId"] = json!(id);
+            threads["pageInfo"] = json!({"hasNextPage": true, "endCursor": cursor});
+            payload
+        };
+        for (after, response) in [
+            (Value::Null, page(1, "A")),
+            (json!("A"), page(2, "B")),
+            (json!("B"), page(1, "A")),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/graphql"))
+                .and(body_partial_json(json!({"variables": {"after": after}})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("a cycling cursor still reads what it found");
+
+        assert_eq!(
+            read["complete"], false,
+            "a cycle is not the end of the list"
+        );
+        let ids: Vec<&Value> = read["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|thread| &thread["comments"][0]["id"])
+            .collect();
+        assert_eq!(
+            ids,
+            [&json!(1), &json!(2)],
+            "the repeated page is not read twice"
+        );
+        assert_eq!(read["next_after"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_thread_response_is_an_error_not_a_panic() {
+        for data in [
+            json!([]),
+            json!({"repository": "x"}),
+            json!({"repository": {"pullRequest": {"number": 7, "reviewThreads": []}}}),
+        ] {
+            let server = MockServer::start().await;
+            mock_graphql(&server, json!({ "data": data })).await;
+
+            let refused = github(&server)
+                .review_threads(&readiness_args(Some(7)))
+                .await;
+
+            assert!(refused.is_err(), "{data} must be refused, got {refused:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn offset_without_comment_is_refused() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.offset = Some(3);
+
+        let refused = github(&server)
+            .review_threads(&arguments)
+            .await
+            .expect_err("a character offset means nothing across threads");
+
+        assert!(refused.contains("page the threads with after"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn every_page_of_threads_is_read() {
+        let server = MockServer::start().await;
+        let mut first = thread_payload(true, false);
+        first["data"]["repository"]["pullRequest"]["reviewThreads"]["pageInfo"]["endCursor"] =
+            json!("cursor-1");
+        first["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][1]["isResolved"] =
+            json!(true);
+        let mut second = long_thread_payload(1, 10);
+        second["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"]
+            [0]["databaseId"] = json!(51);
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_partial_json(json!({"variables": {
+                "owner": "owner",
+                "name": "repository",
+                "number": 7,
+                "first": REVIEW_THREAD_PAGE_SIZE,
+                "comments": REVIEW_COMMENT_PAGE_SIZE,
+                "after": null
+            }})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(first))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_partial_json(
+                json!({"variables": {"after": "cursor-1"}}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(second))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("every page is readable");
+
+        assert_eq!(read["complete"], true);
+        assert_eq!(
+            read["counts"]["unresolved"], 1,
+            "the open thread on the second page counts though the first page was all resolved"
+        );
+        assert_eq!(read["counts"]["resolved"], 2);
+        assert_eq!(read["threads"][0]["comments"][0]["id"], 51);
+        let sent = server.received_requests().await.unwrap();
+        let query: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        assert_eq!(query["query"], REVIEW_THREAD_QUERY);
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_that_does_not_exist_says_so() {
+        let server = MockServer::start().await;
+        mock_graphql(
+            &server,
+            json!({"data": {"repository": {"pullRequest": null}}, "errors": [{
+                "type": "NOT_FOUND",
+                "path": ["repository", "pullRequest"],
+                "message": "Could not resolve to a PullRequest with the number of 9999."
+            }]}),
+        )
+        .await;
+
+        let refused = github(&server)
+            .review_threads(&readiness_args(Some(9_999)))
+            .await
+            .expect_err("a missing pull request is not an access problem");
+
+        assert!(
+            refused.contains("no pull request with that number"),
+            "{refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repository_github_will_not_show_is_an_access_problem() {
+        let server = MockServer::start().await;
+        mock_graphql(
+            &server,
+            json!({"data": {"repository": null}, "errors": [{
+                "type": "NOT_FOUND",
+                "path": ["repository"],
+                "message": "Could not resolve to a Repository with the name 'owner/repository'."
+            }]}),
+        )
+        .await;
+
+        let refused = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect_err("a repository the token cannot see is not a wrong number");
+
+        assert!(refused.contains("Check source access"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_number_github_cannot_hold_is_refused_before_asking() {
+        let server = MockServer::start().await;
+
+        let refused = github(&server)
+            .review_threads(&readiness_args(Some(i32::MAX as u64 + 1)))
+            .await
+            .expect_err("GraphQL numbers are 32-bit");
+
+        assert!(
+            refused.contains("larger than any pull request number"),
+            "{refused}"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_outdated_range_keeps_both_ends_from_one_revision() {
+        let server = MockServer::start().await;
+        let mut payload = thread_payload(false, false);
+        let thread = &mut payload["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][1];
+        thread["startLine"] = Value::Null;
+        thread["originalLine"] = json!(30);
+        thread["originalStartLine"] = json!(25);
+        mock_graphql(&server, payload).await;
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+
+        assert_eq!(read["threads"][0]["line"], 42);
+        assert_eq!(
+            read["threads"][0]["start_line"],
+            Value::Null,
+            "a current line must not be paired with a start from an older revision"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cut_comment_reads_in_full_by_id() {
+        let server = MockServer::start().await;
+        let body = "y".repeat(REVIEW_BODY_CHARS * 2);
+        mock_graphql(&server, long_thread_payload(1, body.len())).await;
+        mock(
+            &server,
+            "pulls/comments/1",
+            json!({
+                "id": 1,
+                "body": body,
+                "path": "src/lib.rs",
+                "html_url": "https://github.com/owner/repository/pull/7#discussion_r1",
+                "pull_request_url": "https://api.github.com/repos/owner/repository/pulls/7",
+                "user": {"login": "coderabbitai"}
+            }),
+        )
+        .await;
+        let github = github(&server);
+
+        let threads = github
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+        let cut = &threads["threads"][0]["comments"][0];
+        assert_eq!(cut["truncated"], true);
+        assert_eq!(cut["id"], 1);
+
+        let mut arguments = readiness_args(Some(7));
+        arguments.comment = Some(1);
+        let whole = github
+            .review_threads(&arguments)
+            .await
+            .expect("the cut comment is readable by id");
+        assert_eq!(whole["body"], body.as_str(), "nothing is cut this time");
+        assert_eq!(whole["complete"], true);
+        assert_eq!(whole["author"], "coderabbitai");
+    }
+
+    #[tokio::test]
+    async fn a_comment_from_another_pull_request_is_refused() {
+        let server = MockServer::start().await;
+        mock(
+            &server,
+            "pulls/comments/1",
+            json!({
+                "id": 1,
+                "body": "elsewhere",
+                "pull_request_url": "https://api.github.com/repos/owner/repository/pulls/70",
+                "user": {"login": "someone"}
+            }),
+        )
+        .await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.comment = Some(1);
+
+        let refused = github(&server)
+            .review_threads(&arguments)
+            .await
+            .expect_err("a comment on pull request 70 is not feedback on 7");
+
+        assert!(refused.contains("does not belong"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_comment_reads_though_github_cases_the_repository_differently() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/Owner/Repository/pulls/comments/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 1,
+                "body": "found it",
+                "pull_request_url": "https://api.github.com/repos/owner/repository/pulls/7",
+                "user": {"login": "coderabbitai"}
+            })))
+            .mount(&server)
+            .await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.comment = Some(1);
+
+        let read = github_named(&server, "Owner", "Repository")
+            .review_threads(&arguments)
+            .await
+            .expect("a source saved as Owner/Repository owns owner/repository");
+
+        assert_eq!(read["body"], "found it");
+    }
+
+    #[test]
+    fn a_pull_api_url_matches_its_own_number_only() {
+        let url = "https://api.github.com/repos/owner/repository/pulls/182";
+        assert!(is_pull_api_url(url, "Owner", "Repository", 182));
+        assert!(!is_pull_api_url(url, "owner", "repository", 18));
+        assert!(!is_pull_api_url(url, "owner", "repository", 82));
+        assert!(!is_pull_api_url(url, "wner", "repository", 182));
+        assert!(!is_pull_api_url(
+            "https://api.github.com/repos/owner/repository/issues/182",
+            "owner",
+            "repository",
+            182
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_page_that_did_not_finish_says_so() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(true, true)).await;
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+
+        assert_eq!(read["complete"], false);
+        assert_eq!(read["threads"][0]["comments_complete"], false);
+    }
+
+    #[tokio::test]
+    async fn review_threads_for_another_pull_request_are_refused() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+
+        let refused = github(&server)
+            .review_threads(&readiness_args(Some(8)))
+            .await
+            .expect_err("threads numbered for a different pull request are not evidence");
+
+        assert!(refused.contains("different or missing"), "{refused}");
     }
 
     async fn mock_pull(server: &MockServer, head: &str) {
@@ -4062,6 +5241,9 @@ mod tests {
             body: None,
             directory: None,
             number,
+            resolved: None,
+            comment: None,
+            after: None,
             job_id,
             tag: None,
             reason: None,

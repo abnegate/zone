@@ -9488,6 +9488,7 @@ dependencies = [
  "abnegate-secret",
  "async-stream",
  "async-trait",
+ "base64 0.23.1",
  "chrono",
  "dashmap",
  "dirs 7.0.0",

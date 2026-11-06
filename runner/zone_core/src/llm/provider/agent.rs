@@ -1,6 +1,7 @@
 //! The coding agent CLIs this crate knows how to drive.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use abnegate_llm::ReasoningEffort;
@@ -10,6 +11,7 @@ use super::event::AgentEvent;
 use super::parser;
 use super::session::Session;
 use super::settings::{BuiltinTools, CodexSandbox, DEFAULT_TIMEOUT, Toolset};
+use crate::tools::PERMISSION_TOOL;
 
 const MODEL: &str = "--model";
 const EFFORT: &str = "--effort";
@@ -123,6 +125,18 @@ const SESSION_ID: &str = "--session-id";
 const RESUME: &str = "--resume";
 const CLAUDE_PROMPT: &str = "--print";
 
+/// Claude reads its turn as one stream-json user message, the only input that
+/// carries images, and answers in stream-json.
+const CLAUDE_STREAMING: &[&str] = &[
+    "--verbose",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+];
+const CODEX_EXEC: &[&str] = &["exec", "--json", "--skip-git-repo-check"];
+const CODEX_IMAGE: &str = "--image";
+
 const CODEX_RESUME: &str = "resume";
 const CODEX_PROMPT: &str = "-";
 
@@ -130,6 +144,12 @@ const STRICT_MCP_CONFIG: &str = "--strict-mcp-config";
 const MCP_CONFIG: &str = "--mcp-config";
 const ALLOWED_TOOLS: &str = "--allowedTools";
 const BUILTIN_TOOLS: &str = "--tools";
+/// Where claude asks before running one of its own tools. This is the opposite
+/// of a bypass: rather than switching claude's permission checks off, it sends
+/// each decision to zone, which answers it under the chat's approval policy --
+/// at once when the chat auto-approves, and otherwise as a card the reader
+/// answers, the same one zone's own confirmed tools raise.
+const PERMISSION_PROMPT_TOOL: &str = "--permission-prompt-tool";
 
 const IGNORE_USER_CONFIG: &str = "--ignore-user-config";
 const DISABLE: &str = "--disable";
@@ -353,10 +373,11 @@ impl AgentKind {
         builtin_tools: BuiltinTools,
         sandbox: CodexSandbox,
         session: Option<&Session>,
+        images: &[PathBuf],
     ) -> Vec<String> {
         let mut arguments: Vec<String> = match self {
-            Self::Claude => ["--verbose", "--output-format", "stream-json"],
-            Self::Codex => ["exec", "--json", "--skip-git-repo-check"],
+            Self::Claude => CLAUDE_STREAMING,
+            Self::Codex => CODEX_EXEC,
         }
         .iter()
         .map(|argument| (*argument).to_string())
@@ -408,6 +429,16 @@ impl AgentKind {
                 }
                 Self::Codex => {}
             }
+        }
+
+        // Codex's --image takes any number of values, so each is joined to
+        // its flag: a bare path would swallow the `-` prompt that follows.
+        if self == Self::Codex {
+            arguments.extend(
+                images
+                    .iter()
+                    .map(|path| format!("{CODEX_IMAGE}={}", path.display())),
+            );
         }
 
         arguments.push(
@@ -500,6 +531,14 @@ fn claude_tool_arguments(toolset: Option<&Toolset>, builtin_tools: BuiltinTools)
         if !allowed.is_empty() {
             arguments.push(ALLOWED_TOOLS.to_string());
             arguments.push(allowed);
+        }
+
+        if !withheld {
+            // Only with its own tools in hand does claude have anything to ask
+            // about, and only with zone's server configured is there anywhere
+            // for the question to go.
+            arguments.push(PERMISSION_PROMPT_TOOL.to_string());
+            arguments.push(Toolset::qualified(Toolset::SERVER, PERMISSION_TOOL));
         }
     }
 
@@ -702,6 +741,7 @@ mod tests {
                 BuiltinTools::Granted,
                 CodexSandbox::default(),
                 None,
+                &[],
             )
         }
     }
@@ -749,6 +789,8 @@ mod tests {
             arguments,
             [
                 "--verbose",
+                "--input-format",
+                "stream-json",
                 "--output-format",
                 "stream-json",
                 "--model",
@@ -1030,6 +1072,7 @@ mod tests {
                         builtin_tools,
                         CodexSandbox::default(),
                         None,
+                        &[],
                     );
 
                     assert_eq!(
@@ -1061,6 +1104,7 @@ mod tests {
                     builtin_tools,
                     CodexSandbox::default(),
                     None,
+                    &[],
                 );
                 assert!(
                     !arguments
@@ -1069,6 +1113,79 @@ mod tests {
                     "{arguments:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn claude_asks_zone_before_running_its_own_tools() {
+        let toolset = toolset();
+
+        let asks = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            None,
+            Some(&toolset),
+            BuiltinTools::Granted,
+            CodexSandbox::default(),
+            None,
+            &[],
+        );
+        assert_eq!(
+            value_after(&asks, PERMISSION_PROMPT_TOOL),
+            Some("mcp__zone__approve_tool_call"),
+            "{asks:?}"
+        );
+
+        let withheld = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            None,
+            Some(&toolset),
+            BuiltinTools::Withheld,
+            CodexSandbox::default(),
+            None,
+            &[],
+        );
+        assert_eq!(
+            value_after(&withheld, PERMISSION_PROMPT_TOOL),
+            None,
+            "an agent holding none of its own tools has nothing to ask about: {withheld:?}"
+        );
+
+        let unserved = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            None,
+            None,
+            BuiltinTools::Granted,
+            CodexSandbox::default(),
+            None,
+            &[],
+        );
+        assert_eq!(
+            value_after(&unserved, PERMISSION_PROMPT_TOOL),
+            None,
+            "without zone's server there is nowhere for the question to go: {unserved:?}"
+        );
+    }
+
+    #[test]
+    fn routing_a_permission_question_is_not_bypassing_one() {
+        let toolset = toolset();
+        let arguments = AgentKind::Claude
+            .arguments_with(
+                Some("opus"),
+                None,
+                Some(&toolset),
+                BuiltinTools::Granted,
+                CodexSandbox::default(),
+                None,
+                &[],
+            )
+            .join(" ");
+
+        for bypass in PERMISSION_BYPASSES {
+            assert!(
+                !arguments.contains(bypass),
+                "{bypass} would switch the checks off rather than route them: {arguments}"
+            );
         }
     }
 
@@ -1098,6 +1215,7 @@ mod tests {
                         builtin_tools,
                         sandbox,
                         None,
+                        &[],
                     );
                     let codex = codex(served, builtin_tools, sandbox);
                     for arguments in [&claude, &codex] {
@@ -1175,6 +1293,7 @@ mod tests {
             builtin_tools,
             sandbox,
             None,
+            &[],
         )
     }
 
@@ -1188,6 +1307,7 @@ mod tests {
             BuiltinTools::Withheld,
             CodexSandbox::default(),
             None,
+            &[],
         );
 
         assert!(
@@ -1228,6 +1348,7 @@ mod tests {
                             builtin_tools,
                             sandbox,
                             None,
+                            &[],
                         )
                         .join(" ");
 
@@ -1254,6 +1375,7 @@ mod tests {
             BuiltinTools::Granted,
             CodexSandbox::default(),
             None,
+            &[],
         );
 
         assert!(
@@ -1273,6 +1395,7 @@ mod tests {
             BuiltinTools::Withheld,
             CodexSandbox::default(),
             None,
+            &[],
         );
 
         assert!(
@@ -1541,6 +1664,7 @@ mod tests {
                     builtin_tools,
                     CodexSandbox::default(),
                     None,
+                    &[],
                 );
                 let new = AgentKind::Claude.arguments_with(
                     Some("opus"),
@@ -1549,6 +1673,7 @@ mod tests {
                     builtin_tools,
                     CodexSandbox::default(),
                     Some(&pinned(id)),
+                    &[],
                 );
                 let resume = AgentKind::Claude.arguments_with(
                     Some("opus"),
@@ -1557,6 +1682,7 @@ mod tests {
                     builtin_tools,
                     CodexSandbox::default(),
                     Some(&resumed(id)),
+                    &[],
                 );
 
                 assert!(
@@ -1577,6 +1703,62 @@ mod tests {
     }
 
     #[test]
+    fn codex_names_each_image_just_before_its_prompt_whether_or_not_it_resumes() {
+        let images = [
+            PathBuf::from("/tmp/zone-images-a/1.png"),
+            PathBuf::from("/tmp/zone-images-a/2.jpg"),
+        ];
+        for session in [None, Some(resumed("thread-1"))] {
+            let arguments = AgentKind::Codex.arguments_with(
+                Some("gpt-6-sol"),
+                None,
+                None,
+                BuiltinTools::Granted,
+                CodexSandbox::default(),
+                session.as_ref(),
+                &images,
+            );
+
+            assert_eq!(
+                arguments[arguments.len() - 3..],
+                [
+                    "--image=/tmp/zone-images-a/1.png",
+                    "--image=/tmp/zone-images-a/2.jpg",
+                    "-",
+                ],
+                "{arguments:?}"
+            );
+            if session.is_some() {
+                let resume = arguments.iter().position(|argument| argument == "resume");
+                assert!(
+                    resume < arguments.iter().position(|a| a.starts_with("--image=")),
+                    "a resumed turn's images belong to resume: {arguments:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_is_never_handed_an_image_flag() {
+        let arguments = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            None,
+            None,
+            BuiltinTools::Granted,
+            CodexSandbox::default(),
+            None,
+            &[PathBuf::from("/tmp/zone-images-a/1.png")],
+        );
+
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.contains("--image")),
+            "{arguments:?}"
+        );
+    }
+
+    #[test]
     fn a_codex_resume_reads_the_prompt_from_stdin() {
         let id = "019b2c41-0000-7000-8000-000000000001";
         let arguments = AgentKind::Codex.arguments_with(
@@ -1586,6 +1768,7 @@ mod tests {
             BuiltinTools::Granted,
             CodexSandbox::WorkspaceWrite,
             Some(&resumed(id)),
+            &[],
         );
 
         assert_eq!(
@@ -1611,6 +1794,7 @@ mod tests {
             BuiltinTools::Granted,
             CodexSandbox::WorkspaceWrite,
             Some(&pinned(id)),
+            &[],
         );
         assert_eq!(
             new,
@@ -1635,6 +1819,7 @@ mod tests {
                         builtin_tools,
                         sandbox,
                         Some(&resumed(id)),
+                        &[],
                     );
                     let confinement = match builtin_tools {
                         BuiltinTools::Withheld => READ_ONLY,
@@ -1746,6 +1931,7 @@ mod tests {
             BuiltinTools::Granted,
             CodexSandbox::default(),
             session,
+            &[],
         )
     }
 
