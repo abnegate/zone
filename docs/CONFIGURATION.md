@@ -404,9 +404,9 @@ setting a monthly cap, at claude.ai/settings/usage.
   `projects/`, codex's under `sessions/`. Zone keeps the Claude tokens in the
   database and hands a turn its sign-in's token in `CLAUDE_CODE_OAUTH_TOKEN`;
   it does not write them here. Zone does not prune the session files. A codex
-  login made before migration 003 sits at `codex/auth.json` until Zone first
+  login made before sign-ins were kept per account sits at `codex/auth.json` until Zone first
   needs it, and then moves into its sign-in's home; see
-  [OPERATIONS.md](OPERATIONS.md#upgrading-to-migration-003). Deleting an
+  [OPERATIONS.md](OPERATIONS.md#several-sign-ins-per-agent). Deleting an
   organization stops any codex sign-in it has in progress, runs `codex logout`
   in each of its codex homes, and removes `<dir>/<organization id>` with
   everything in it. The delete request waits for any change to the
@@ -1527,11 +1527,9 @@ once approved, and its file tools read whatever else the server's user can.
 - **Backups.** `make backup` and `make restore` include
   `zone_manager_agent_state`, and with it every organization's codex login; see
   [OPERATIONS.md](OPERATIONS.md).
-- **Upgrading.** Several accounts per agent add migrations 003 and 004 on
-  top of the squashed initial schema and 002, after which an older image
-  stops with `VersionMissing(3)`. A database migrated before the squash
-  cannot be upgraded in place. Back up first; see
-  [OPERATIONS.md](OPERATIONS.md#upgrading-to-migration-003).
+- **Upgrading.** What an existing install's sign-ins and session files do
+  on upgrade is in
+  [OPERATIONS.md](OPERATIONS.md#several-sign-ins-per-agent).
 - **Refused at boot**: a relative `ZONE_AGENT_STATE_DIR`, or none when neither
   `XDG_STATE_HOME` nor `HOME` is absolute; a `ZONE_AGENT_HOST_LOGIN` that is not
   one of the spellings above; a `ZONE_CLAUDE_TOKEN_URL` that is not an absolute

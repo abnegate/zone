@@ -56,7 +56,7 @@ async fn main() {
                 .expect("Failed to connect to database");
             zone_server::db::migrations::run(&pool)
                 .await
-                .expect("Failed to run migrations");
+                .unwrap_or_else(|error| panic!("Failed to run migrations: {error}"));
             pool.close().await;
             tracing::info!("Migrations complete");
             return;
@@ -83,7 +83,7 @@ async fn main() {
 
     zone_server::db::migrations::run(&db)
         .await
-        .expect("Failed to run migrations");
+        .unwrap_or_else(|error| panic!("Failed to run migrations: {error}"));
 
     tracing::info!("Migrations complete");
 

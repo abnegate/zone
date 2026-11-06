@@ -20,28 +20,4 @@ macro_rules! source {
     };
 }
 
-pub const EMBEDDED: &[Source] = &[
-    source!("001_initial_schema.sql"),
-    source!("002_chat_offline.sql"),
-    source!("003_chat_context_tokens.sql"),
-    source!("004_agent_login_usage.sql"),
-    source!("005_agent_login_usage_validation.sql"),
-    source!("006_runpod_api_key.sql"),
-    source!("007_devices.sql"),
-    source!("008_workspace_host_directories.sql"),
-    source!("009_chat_provider.sql"),
-    source!("010_chat_provider_validation.sql"),
-    source!("011_time_zones.sql"),
-    source!("012_task_title_pending.sql"),
-    source!("013_chat_agent_context.sql"),
-    source!("014_chat_pull_requests.sql"),
-    source!("015_task_chat.sql"),
-    source!("017_chat_used_at.sql"),
-    source!("018_project_position.sql"),
-    source!("019_typed_message_index.sql"),
-    source!("020_chat_pull_request_auto_fix.sql"),
-    source!("021_chat_pull_request_auto_fix_validation.sql"),
-    source!("022_task_origin.sql"),
-    source!("023_task_origin_backfill.sql"),
-    source!("024_chat_subagents.sql"),
-];
+pub const EMBEDDED: &[Source] = &[source!("0001_v1.sql")];
