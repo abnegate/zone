@@ -2,10 +2,11 @@
 
 use serde_json::Value;
 
-use super::transcript::SEPARATOR;
+/// What one message's text blocks are joined with.
+const SEPARATOR: &str = "\n\n";
 
 /// The prompt text an agent read from `stdin`: a claude stream-json message's
-/// text blocks, or codex's stdin as it is.
+/// text blocks, or a plain prompt as it was written.
 pub fn prompt(stdin: &str) -> String {
     let Ok(message) = serde_json::from_str::<Value>(stdin.trim_end()) else {
         return stdin.to_string();
@@ -34,7 +35,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_stdin_reads_back_as_it_was_written() {
+    fn a_plain_prompt_reads_back_as_it_was_written() {
         assert_eq!(prompt("User:\nping"), "User:\nping");
     }
 }
