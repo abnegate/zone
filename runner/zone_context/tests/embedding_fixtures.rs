@@ -549,14 +549,16 @@ fn ollama_models_match_fixture() {
 
 #[cfg(feature = "local-embeddings")]
 mod local {
-    use super::{PROVIDER, Provider, read_fixture};
-
-    use abnegate_llm::modality::vendor::FastembedConfig;
+    use abnegate_llm::EmbeddingProvider;
+    use abnegate_llm::modality::vendor::{FastembedConfig, FastembedProvider};
     use fastembed::{EmbeddingModel, TextEmbedding};
     use serde::Deserialize;
+    use zone_context::embeddings::cache;
     use zone_context::embeddings::providers::{
         AiSettings, EMBEDDING_ENGINE_LOCAL, PROVIDER_SELF_HOSTED,
     };
+
+    use super::{PROVIDER, Provider, read_fixture};
 
     const LOCAL_FIXTURE: &str = "local_nomic_embed_text.json";
     const LOCAL_MODELS_FIXTURE: &str = "local_models.json";
@@ -567,8 +569,7 @@ mod local {
     const LONG_PARAGRAPH_SENTENCES: usize = 90;
     const MEDIUM_PARAGRAPH_SENTENCES: usize = 22;
     const SNOWFLAKE_LARGE_MODEL: &str = "SnowflakeArcticEmbedL";
-    const SNOWFLAKE_EXTRA_SMALL_TAG: &str = "snowflake-arctic-embed:22m";
-    const SNOWFLAKE_EXTRA_SMALL_DIMENSION: usize = 384;
+    const PROBE_TEXT: &str = "hello";
     const SNOWFLAKE_SIZE_MODELS: [(&str, &str); 4] = [
         ("snowflake-arctic-embed:22m", "SnowflakeArcticEmbedXS"),
         ("snowflake-arctic-embed:33m", "SnowflakeArcticEmbedS"),
@@ -742,6 +743,68 @@ mod local {
             .unwrap_or_else(|error| panic!("{model:?} loads: {error}"))
     }
 
+    async fn load_directly(name: &'static str) -> FastembedProvider {
+        tokio::task::spawn_blocking(move || {
+            FastembedProvider::new(
+                FastembedConfig::new()
+                    .with_model(name)
+                    .with_cache_directory(cache::default_directory()),
+            )
+        })
+        .await
+        .expect("load task")
+        .unwrap_or_else(|error| panic!("{name} loads: {error}"))
+    }
+
+    fn loadable_names(resolutions: &[ResolvedModel]) -> Vec<&str> {
+        resolutions
+            .iter()
+            .filter(|resolution| resolution.error.is_none())
+            .map(|resolution| resolution.name.as_str())
+            .collect()
+    }
+
+    /// Loads `name` through the factory and through the crate directly, so
+    /// a wrong name-to-model mapping in the crate fails here rather than
+    /// changing the width of stored vectors.
+    async fn check_loaded_model(provider: Provider, name: &'static str) {
+        let expected = departed_resolutions(read_fixture(LOCAL_MODELS_FIXTURE))
+            .into_iter()
+            .find(|resolution| resolution.name == name)
+            .unwrap_or_else(|| panic!("{name} is recorded"));
+        let embedder = load(provider, Some(name)).await;
+        assert_eq!(embedder.model(), name);
+        assert_eq!(
+            Some(embedder.dimension()),
+            expected.dimension,
+            "{name}: width"
+        );
+        assert_eq!(
+            Some(embedder.max_tokens()),
+            expected.max_tokens,
+            "{name}: maximum tokens"
+        );
+        let vector = embedder.embed(PROBE_TEXT).await.expect("embed");
+        assert_eq!(
+            Some(vector.len()),
+            expected.dimension,
+            "{name}: vector width"
+        );
+        drop(embedder);
+
+        let loaded = load_directly(name).await;
+        assert_eq!(
+            Some(loaded.loaded_model()),
+            expected.model.as_deref(),
+            "{name}: loaded model"
+        );
+        assert_eq!(
+            Some(loaded.dimensions() as usize),
+            expected.dimension,
+            "{name}: loaded width"
+        );
+    }
+
     async fn check_local_vectors(provider: Provider) {
         let embedder = load(provider, None).await;
 
@@ -801,17 +864,62 @@ mod local {
         check_local_vectors(PROVIDER).await;
     }
 
-    #[tokio::test]
-    #[ignore = "loads the snowflake-arctic-embed-xs weights, about 90 MB on a cold cache"]
-    async fn snowflake_size_tags_load_their_own_model_locally() {
-        let embedder = load(PROVIDER, Some(SNOWFLAKE_EXTRA_SMALL_TAG)).await;
-        assert_eq!(embedder.model(), SNOWFLAKE_EXTRA_SMALL_TAG);
-        assert_eq!(
-            embedder.dimension(),
-            SNOWFLAKE_EXTRA_SMALL_DIMENSION,
-            "Zone loaded snowflake-arctic-embed-l at 1024 for every tag"
-        );
-        let vector = embedder.embed("hello").await.expect("embed");
-        assert_eq!(vector.len(), SNOWFLAKE_EXTRA_SMALL_DIMENSION);
+    #[test]
+    fn every_loadable_model_has_a_load_test() {
+        let resolutions: Vec<ResolvedModel> = read_fixture(LOCAL_MODELS_FIXTURE);
+        assert_eq!(loadable_names(&resolutions), LOADED_MODEL_NAMES);
+    }
+
+    macro_rules! loaded_model_tests {
+        ($($test:ident: $name:literal, $reason:literal;)+) => {
+            const LOADED_MODEL_NAMES: &[&str] = &[$($name),+];
+
+            $(
+                #[tokio::test]
+                #[ignore = $reason]
+                async fn $test() {
+                    check_loaded_model(PROVIDER, $name).await;
+                }
+            )+
+        };
+    }
+
+    loaded_model_tests! {
+        nomic_embed_text_loads_its_recorded_model:
+            "nomic-embed-text",
+            "loads the nomic-embed-text-v1.5 weights, about 550 MB on a cold cache";
+        nomic_embed_text_latest_loads_its_recorded_model:
+            "nomic-embed-text:latest",
+            "loads the nomic-embed-text-v1.5 weights, about 550 MB on a cold cache";
+        mxbai_embed_large_loads_its_recorded_model:
+            "mxbai-embed-large",
+            "loads the mxbai-embed-large-v1 weights, about 1.3 GB on a cold cache";
+        snowflake_arctic_embed_loads_its_recorded_model:
+            "snowflake-arctic-embed",
+            "loads the snowflake-arctic-embed-l weights, about 1.3 GB on a cold cache";
+        snowflake_arctic_embed_22m_loads_the_extra_small_model:
+            "snowflake-arctic-embed:22m",
+            "loads the snowflake-arctic-embed-xs weights, about 90 MB on a cold cache";
+        snowflake_arctic_embed_33m_loads_the_small_model:
+            "snowflake-arctic-embed:33m",
+            "loads the snowflake-arctic-embed-s weights, about 130 MB on a cold cache";
+        snowflake_arctic_embed_110m_loads_the_medium_model:
+            "snowflake-arctic-embed:110m",
+            "loads the snowflake-arctic-embed-m weights, about 440 MB on a cold cache";
+        snowflake_arctic_embed_137m_loads_the_medium_long_model:
+            "snowflake-arctic-embed:137m",
+            "loads the snowflake-arctic-embed-m-long weights, about 550 MB on a cold cache";
+        snowflake_arctic_embed_335m_loads_the_large_model:
+            "snowflake-arctic-embed:335m",
+            "loads the snowflake-arctic-embed-l weights, about 1.3 GB on a cold cache";
+        bge_small_en_loads_its_recorded_model:
+            "bge-small-en-v1.5",
+            "loads the bge-small-en-v1.5 weights, about 130 MB on a cold cache";
+        all_minilm_loads_its_recorded_model:
+            "all-minilm",
+            "loads the all-MiniLM-L6-v2 weights, about 90 MB on a cold cache";
+        nomic_hugging_face_id_loads_its_recorded_model:
+            "nomic-ai/nomic-embed-text-v1.5",
+            "loads the nomic-embed-text-v1.5 weights, about 550 MB on a cold cache";
     }
 }
