@@ -49,7 +49,9 @@ const REPAIR_TOKENS: u32 = 8_192;
 const NO_REPAIR_BACKEND: &str =
     "Conflict repair needs zone's own tool loop, which a coding agent CLI backend does not provide";
 
-const NO_REPOSITORY: &str = "No GitHub repository configured";
+const NO_CREDENTIAL: &str = "No access token configured for the selected repository";
+
+const NO_HOLDER: &str = "No project of the task holds the pull request's repository";
 
 const DISCONNECTED: &str =
     "The project's GitHub connection was removed or suspended. Reconnect GitHub.";
@@ -311,24 +313,31 @@ impl Publication<'_> {
         let repository = Repository::resolve(self.state.db(), self.state.github(), &task)
             .await?
             .ok_or("Task repository changed during execution")?;
-        let token = repository
-            .token
-            .ok_or("No access token configured for the selected repository")?;
+        let credential = repository.token.ok_or(NO_CREDENTIAL)?;
         let branch = &baseline.branch;
         let target = self
             .service
             .parse_github_url(baseline.repository.as_str())
             .map_err(|error| error.to_string())?;
+        let (service, target) = (&self.service, &target);
         self.authorized().await?;
         let base = self
-            .service
-            .get_default_branch(&target, &token)
+            .state
+            .github()
+            .retrying(self.state.db(), credential.clone(), |token| async move {
+                service.get_default_branch(target, &token).await
+            })
             .await
             .map_err(|error| error.to_string())?;
         self.authorized().await?;
         let existing = self
-            .service
-            .pull_request_exists_for_branch(&target, &token, branch)
+            .state
+            .github()
+            .retrying(self.state.db(), credential.clone(), |token| async move {
+                service
+                    .pull_request_exists_for_branch(target, &token, branch)
+                    .await
+            })
             .await
             .map_err(|error| error.to_string())?;
         self.identity(baseline).await?;
@@ -354,7 +363,7 @@ impl Publication<'_> {
         let commit = self
             .retried(baseline, || {
                 self.remote
-                    .push(worktree, branch, &baseline.repository, &token)
+                    .push(worktree, branch, &baseline.repository, credential.secret())
             })
             .await?;
         // The push is the fact, and it is recorded the moment it succeeded,
@@ -405,9 +414,15 @@ impl Publication<'_> {
             .with_changes(&changes)
             .render();
         self.authorized().await?;
+        let (base, title, body) = (&base, &title, &body);
         let created = self
-            .service
-            .create_pull_request(&target, &token, branch, &base, &title, &body, false)
+            .state
+            .github()
+            .retrying(self.state.db(), credential, |token| async move {
+                service
+                    .create_pull_request(target, &token, branch, base, title, body, false)
+                    .await
+            })
             .await
             .map_err(|error| error.to_string())?;
         self.identity(baseline).await?;
@@ -542,8 +557,8 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
         }
     };
 
-    let access_token = match access_token(state, &task, &service, &reference).await {
-        Ok(Some(access_token)) => access_token,
+    let credential = match credential(state, &task, &service, &reference).await {
+        Ok(Some(credential)) => credential,
         Ok(None) => return ReceptionSyncResult::NoCredentials,
         Err(GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected) => {
             return ReceptionSyncResult::Error(DISCONNECTED.to_string());
@@ -558,7 +573,14 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
         }
     };
 
-    let reception = match service.fetch_reception(&reference, &access_token).await {
+    let (service, reference) = (&service, &reference);
+    let reception = match state
+        .github()
+        .retrying(state.db(), credential, |token| async move {
+            service.fetch_reception(reference, &token).await
+        })
+        .await
+    {
         Ok(reception) => reception,
         Err(error) => {
             return ReceptionSyncResult::Error(format!("Failed to read reception: {}", error));
@@ -594,22 +616,28 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         return RepairOutcome::Failed("Task has no branch to repair".to_string());
     };
 
-    let Some(project_id) = task.project_ids.first().copied() else {
-        return RepairOutcome::Failed("Task has no project".to_string());
+    let Some(pr_url) = task.pr_url.as_deref() else {
+        return RepairOutcome::NotConflicted;
+    };
+    let pull_requests = match state.config().pull_requests() {
+        Ok(service) => service,
+        Err(error) => {
+            return RepairOutcome::Failed(format!("GitHub origin is misconfigured: {error}"));
+        }
+    };
+    let reference = match pull_requests.pull_request(pr_url) {
+        Ok(reference) => reference,
+        Err(error) => return RepairOutcome::Failed(format!("Invalid pull request URL: {error}")),
     };
 
-    let project = match projects::get_project(state.db(), project_id).await {
+    let project = match holder(state, &task, &pull_requests, &reference).await {
         Ok(Some(project)) => project,
-        Ok(None) => return RepairOutcome::Failed(format!("Project {} not found", project_id)),
-        Err(error) => return RepairOutcome::Failed(format!("Failed to get project: {}", error)),
-    };
-
-    let Some(repo_url) = &project.github_repo_url else {
-        return RepairOutcome::Failed(NO_REPOSITORY.to_string());
+        Ok(None) => return RepairOutcome::Failed(NO_HOLDER.to_string()),
+        Err(error) => return RepairOutcome::Failed(format!("Failed to get project: {error}")),
     };
     let access_token = match state.github().project(state.db(), &project).await {
         Ok(Some(credential)) => credential.into_secret(),
-        Ok(None) => return RepairOutcome::Failed(NO_REPOSITORY.to_string()),
+        Ok(None) => return RepairOutcome::Failed(NO_CREDENTIAL.to_string()),
         Err(GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected) => {
             return RepairOutcome::Failed(DISCONNECTED.to_string());
         }
@@ -623,37 +651,24 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         }
     };
 
-    let pull_requests = match state.config().pull_requests() {
-        Ok(service) => service,
-        Err(error) => {
-            return RepairOutcome::Failed(format!("GitHub origin is misconfigured: {error}"));
-        }
-    };
-    let parsed = pull_requests
-        .parse_github_url(repo_url)
-        .map_err(|error| error.to_string())
-        .and_then(|repository| {
-            RepositoryUrl::parse(repo_url)
-                .map(|remote| (repository, remote))
-                .map_err(|error| error.to_string())
-        });
-    let (repository, remote) = match parsed {
-        Ok(parsed) => parsed,
-        Err(error) => return RepairOutcome::Failed(format!("Invalid GitHub URL: {error}")),
-    };
-
-    if !conflicted(&pull_requests, task.pr_url.as_deref(), &access_token).await {
+    if !conflicted(&pull_requests, &reference, &access_token).await {
         return RepairOutcome::NotConflicted;
     }
 
     let base = match pull_requests
-        .get_default_branch(&repository, &access_token)
+        .get_default_branch(reference.repository(), &access_token)
         .await
     {
         Ok(base) => base,
         Err(error) => {
             return RepairOutcome::Failed(format!("Failed to get default branch: {}", error));
         }
+    };
+
+    let remote = match project.github_repo_url.as_deref().map(RepositoryUrl::parse) {
+        Some(Ok(remote)) => remote,
+        Some(Err(error)) => return RepairOutcome::Failed(format!("Invalid GitHub URL: {error}")),
+        None => return RepairOutcome::Failed(NO_HOLDER.to_string()),
     };
 
     let Ok(head) = BranchName::parse(branch_name) else {
@@ -742,18 +757,10 @@ async fn report_repair(state: &AppState, task_id: Uuid) {
 /// a guess is how a repair ends up running against a tree nobody asked about.
 async fn conflicted(
     service: &PullRequestService,
-    pr_url: Option<&str>,
+    reference: &PullRequestReference,
     access_token: &SecretValue,
 ) -> bool {
-    let Some(pr_url) = pr_url else {
-        return false;
-    };
-
-    let Ok(reference) = service.pull_request(pr_url) else {
-        return false;
-    };
-
-    match service.fetch_mergeability(&reference, access_token).await {
+    match service.fetch_mergeability(reference, access_token).await {
         Ok(mergeability) => mergeability.conflicted(),
         Err(error) => {
             tracing::warn!(%error, "Could not read pull request mergeability");
@@ -847,17 +854,41 @@ async fn repair_model(
     Ok(model)
 }
 
-/// The credential of the task's project that holds the pull request's
-/// repository, chosen as a checkout chooses it. A project of another
-/// repository is never a candidate, and a holder whose GitHub connection was
-/// removed or suspended fails the resolution rather than giving way to
-/// another project's token.
+/// The token of the task's project that holds the pull request's repository.
 pub(crate) async fn access_token(
     state: &AppState,
     task: &tasks::TaskRow,
     pull_requests: &PullRequestService,
     reference: &PullRequestReference,
 ) -> Result<Option<SecretValue>, GitHubError> {
+    Ok(credential(state, task, pull_requests, reference)
+        .await?
+        .map(Credential::into_secret))
+}
+
+/// The credential of the task's project that holds the pull request's
+/// repository. A holder whose GitHub connection was removed or suspended
+/// fails the resolution rather than giving way to another project's token.
+async fn credential(
+    state: &AppState,
+    task: &tasks::TaskRow,
+    pull_requests: &PullRequestService,
+    reference: &PullRequestReference,
+) -> Result<Option<Credential>, GitHubError> {
+    let Some(holder) = holder(state, task, pull_requests, reference).await? else {
+        return Ok(None);
+    };
+    state.github().project(state.db(), &holder).await
+}
+
+/// The task's project that holds the pull request's repository, chosen as a
+/// checkout chooses it. A project of another repository is never a candidate.
+async fn holder(
+    state: &AppState,
+    task: &tasks::TaskRow,
+    pull_requests: &PullRequestService,
+    reference: &PullRequestReference,
+) -> Result<Option<projects::ProjectRow>, sqlx::Error> {
     let mut candidates = Vec::new();
     for project_id in &task.project_ids {
         let Some(project) = projects::get_project(state.db(), *project_id).await? else {
@@ -876,14 +907,10 @@ pub(crate) async fn access_token(
         candidates.push((Hosted::from(&repository), project));
     }
     let requested = Hosted::from(reference.repository());
-    let Ok(Some((_, Some(holder)))) = Repository::select(Some(requested), candidates) else {
-        return Ok(None);
-    };
-    Ok(state
-        .github()
-        .project(state.db(), &holder)
-        .await?
-        .map(Credential::into_secret))
+    Ok(match Repository::select(Some(requested), candidates) {
+        Ok(Some((_, holder))) => holder,
+        _ => None,
+    })
 }
 
 /// A repository as GitHub identifies it: by owner and name, whatever their
@@ -1991,6 +2018,12 @@ mod publication_tests {
         crate::db::github_installations::mark_revoked(fixture.state.db(), installation)
             .await
             .unwrap();
+        sqlx::query("UPDATE tasks SET pr_url=$2 WHERE id=$1")
+            .bind(fixture.execution.task)
+            .bind("https://github.com/owner/repository/pull/1")
+            .execute(fixture.state.db())
+            .await
+            .unwrap();
         let task = tasks::get_task(fixture.state.db(), fixture.execution.task)
             .await
             .unwrap()
@@ -2194,11 +2227,59 @@ mod publication_tests {
 
         let token = access_token(&state, &task, &service, &reference).await;
         let synced = sync_reception(&state, fixture.execution.run, task.id).await;
+        let repair = repair_conflicts_for_task(&state, task.id).await;
 
         fixture.cleanup().await;
         assert!(matches!(token, Ok(None)), "{token:?}");
         assert_eq!(synced, ReceptionSyncResult::NoCredentials);
+        assert!(
+            matches!(&repair, RepairOutcome::Failed(reason) if reason == NO_HOLDER),
+            "{repair:?}"
+        );
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_repair_reads_the_pull_request_with_the_project_that_holds_its_repository() {
+        const SECOND_TOKEN: &str = "ghp_secondtoken";
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        refusing(&server, "fixture-token").await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/second/pulls/1"))
+            .and(header("authorization", format!("Bearer {SECOND_TOKEN}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"mergeable": true})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let state = reading_from(&fixture, &server, "owner/second").await;
+        let second = projects::create_project(state.db(), "Second", None, Some(fixture.workspace))
+            .await
+            .unwrap()
+            .id;
+        projects::link_github(
+            state.db(),
+            second,
+            &format!("{}/owner/second.git", server.uri()),
+            Some(SECOND_TOKEN),
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO task_projects(task_id, project_id) VALUES($1, $2)")
+            .bind(fixture.execution.task)
+            .bind(second)
+            .execute(state.db())
+            .await
+            .unwrap();
+
+        let repair = repair_conflicts_for_task(&state, fixture.execution.task).await;
+
+        fixture.cleanup().await;
+        assert!(matches!(repair, RepairOutcome::NotConflicted), "{repair:?}");
+        server.verify().await;
     }
 
     #[tokio::test]
