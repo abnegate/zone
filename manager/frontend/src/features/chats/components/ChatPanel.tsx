@@ -12,7 +12,9 @@ import {
 } from 'react';
 import { useBoxOrder } from '../hooks/useBoxOrder';
 import type { ChatPullRequests } from '../hooks/useChatPullRequests';
+import type { ChatSubagents } from '../hooks/useChatSubagents';
 import type { ChatTasks } from '../hooks/useChatTasks';
+import type { SubagentRequest } from '../subagentTypes';
 import type { PanelBoxId } from '../utils/boxes';
 import type { GalleryItem } from '../utils/gallery';
 import {
@@ -29,6 +31,7 @@ import { ChangesBox } from './ChangesBox';
 import { GalleryBox } from './GalleryBox';
 import { PanelIcon } from './PanelIcon';
 import { SourcesBox } from './SourcesBox';
+import { SubagentsBox } from './SubagentsBox';
 import { TasksBox } from './TasksBox';
 import './ChatPanel.css';
 
@@ -36,17 +39,20 @@ export interface ChatPanelProps {
   chatId: string;
   userId: string | null;
   changes: ChatPullRequests;
+  subagents: ChatSubagents;
   tasks: ChatTasks;
   media: readonly GalleryItem[];
   sources: ChatSources;
   shownSources?: SourceRequest | null;
   onSourcesShown?: () => void;
+  shownSubagent?: SubagentRequest | null;
+  onSubagentShown?: () => void;
   onShowMessage: (messageId: string) => void;
 }
 
 type Placement = 'panel' | 'sheet';
 
-const PANEL_LABEL = 'Changes, tasks, media and sources';
+const PANEL_LABEL = 'Changes, agents, tasks, media and sources';
 const RESIZING = 'chat-panel-resizing';
 /** The most of the chat's width the panel may take, leaving the rest to the transcript. */
 const MAX_SHARE = 0.5;
@@ -61,7 +67,7 @@ function placement(panel: HTMLElement | null): Placement {
 }
 
 /**
- * The chat's pull requests, tasks, media and sources, beside the transcript at the top right
+ * The chat's pull requests, agents, tasks, media and sources, beside the transcript at the top right
  * of the chat. It can be resized, hidden to a rail, and on a phone opens as a
  * sheet instead, so it never sits over the conversation.
  */
@@ -69,11 +75,14 @@ export function ChatPanel({
   chatId,
   userId,
   changes,
+  subagents,
   tasks,
   media,
   sources,
   shownSources = null,
   onSourcesShown,
+  shownSubagent = null,
+  onSubagentShown,
   onShowMessage,
 }: ChatPanelProps) {
   const widthKey = panelKey(userId, 'width');
@@ -107,12 +116,20 @@ export function ChatPanel({
   }
 
   const showingIn = shownSources ? placement(panel.current) : null;
+  const showingSubagentIn = shownSubagent ? placement(panel.current) : null;
 
-  useEffect(() => {
-    if (!shownSources) return;
+  const bringIntoView = useCallback(() => {
     if (placement(panel.current) === 'sheet') openSheet();
     else setCollapsed(false);
-  }, [shownSources, openSheet]);
+  }, [openSheet]);
+
+  useEffect(() => {
+    if (shownSources) bringIntoView();
+  }, [shownSources, bringIntoView]);
+
+  useEffect(() => {
+    if (shownSubagent) bringIntoView();
+  }, [shownSubagent, bringIntoView]);
 
   useEffect(() => {
     if (!toggled.current) return;
@@ -166,10 +183,13 @@ export function ChatPanel({
   }, [resizing, resize, widthKey]);
 
   const showsChanges = changes.pullRequests.length > 0 || changes.dismissed !== null;
+  const showsSubagents = subagents.subagents.length > 0 || subagents.error !== null;
   const showsTasks = tasks.tasks.length > 0 || tasks.error !== null;
   const showsGallery = media.length > 0;
   const showsSources = sources.all.length > 0;
-  if (!showsChanges && !showsTasks && !showsGallery && !showsSources) return null;
+  if (!showsChanges && !showsSubagents && !showsTasks && !showsGallery && !showsSources) {
+    return null;
+  }
 
   const startDrag = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -199,6 +219,7 @@ export function ChatPanel({
 
   const summary = [
     showsChanges ? counted(changes.pullRequests.length, 'change', 'changes') : null,
+    showsSubagents ? counted(subagents.subagents.length, 'agent', 'agents') : null,
     showsTasks ? counted(tasks.tasks.length, 'task', 'tasks') : null,
     showsGallery ? counted(media.length, 'media item', 'media items') : null,
     showsSources ? counted(sources.all.length, 'source', 'sources') : null,
@@ -209,6 +230,15 @@ export function ChatPanel({
   const boxes = (target: Placement) => {
     const rendered: Record<PanelBoxId, ReactNode> = {
       changes: showsChanges && <ChangesBox chatId={chatId} userId={userId} changes={changes} />,
+      subagents: showsSubagents && (
+        <SubagentsBox
+          key={chatId}
+          userId={userId}
+          subagents={subagents}
+          shown={showingSubagentIn === target ? shownSubagent : null}
+          onShown={onSubagentShown}
+        />
+      ),
       tasks: showsTasks && <TasksBox userId={userId} tasks={tasks} />,
       sources: showsSources && (
         <SourcesBox

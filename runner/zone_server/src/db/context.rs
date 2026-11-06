@@ -12,6 +12,7 @@ use uuid::Uuid;
 use zone_chat::history::{self, Entry, Evidence, History, NewEntry, ReplayMessage, Summary};
 use zone_chat::store;
 
+use super::chat_subagents;
 use super::chats::typed;
 
 pub use zone_chat::store::{Guard, Lease, StoredMessage};
@@ -54,7 +55,7 @@ impl From<Error> for store::Error {
 }
 
 const PAGE_CHARS: u64 = 8_000;
-const RUNNING: &str = "running";
+pub(crate) const RUNNING: &str = "running";
 const INTERRUPTED: &str = "interrupted";
 
 #[derive(Clone)]
@@ -273,21 +274,22 @@ impl Store {
 
     /// Explicit deletion removes private evidence with its visible owner and invalidates
     /// checkpoints and the agent session that saw it. The remaining visible companion is
-    /// retained at its original position.
-    pub async fn delete_message(&self, lease: &Lease, id: Uuid) -> Result<bool, Error> {
+    /// retained at its original position. The subagents the message started go with it.
+    ///
+    /// Returns the ids of the subagents it removed, or `None` when the chat has no such
+    /// message.
+    pub async fn delete_message(
+        &self,
+        lease: &Lease,
+        id: Uuid,
+    ) -> Result<Option<Vec<Uuid>>, Error> {
         let mut transaction = self.pool.begin().await?;
         self.lock(&mut transaction, lease).await?;
+        if !crate::db::chat_subagents::seize_turn(&mut transaction, self.chat_id, id).await? {
+            return Ok(None);
+        }
         self.materialize(&mut transaction).await?;
         self.recover_in(&mut transaction).await?;
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id=$1 AND id=$2)")
-                .bind(self.chat_id)
-                .bind(id)
-                .fetch_one(&mut *transaction)
-                .await?;
-        if !exists {
-            return Ok(false);
-        }
         let turn=sqlx::query("SELECT id,user_message_id FROM chat_turns WHERE chat_id=$1 AND (id=$2 OR user_message_id=$2)").bind(self.chat_id).bind(id).fetch_optional(&mut *transaction).await?;
         if let Some(turn) = turn {
             let owner: Uuid = turn.get("id");
@@ -330,6 +332,8 @@ impl Store {
             .bind(id.to_string())
             .execute(&mut *transaction)
             .await?;
+        let subagents =
+            crate::db::chat_subagents::remove(&mut *transaction, self.chat_id, id).await?;
         sqlx::query("DELETE FROM messages WHERE chat_id=$1 AND id=$2")
             .bind(self.chat_id)
             .bind(id)
@@ -337,7 +341,7 @@ impl Store {
             .await?;
         self.lock(&mut transaction, lease).await?;
         transaction.commit().await?;
-        Ok(true)
+        Ok(Some(subagents))
     }
 
     pub async fn consumed(&self, lease: &Lease, ids: &[String]) -> Result<(), Error> {
@@ -950,6 +954,9 @@ impl Store {
     }
 
     /// Returns the recovery entries it appended, which the model has not seen yet.
+    ///
+    /// The turn's running subagents stop with it, so no later turn has to
+    /// report one before they stop showing as running.
     async fn interrupt_in(
         &self,
         connection: &mut PgConnection,
@@ -975,6 +982,7 @@ impl Store {
         }
         sqlx::query("UPDATE chat_turns SET status = 'interrupted', completed_at = clock_timestamp() WHERE chat_id = $1 AND id = $2")
             .bind(self.chat_id).bind(turn_id).execute(&mut *connection).await?;
+        chat_subagents::stop(&mut *connection, self.chat_id, turn_id).await?;
         self.consume_turn_in(connection, turn_id, &recovery).await?;
         Ok(recovery)
     }
@@ -1230,6 +1238,7 @@ impl store::ContextStore for Store {
     async fn delete_message(&self, lease: &Lease, id: Uuid) -> Result<bool, store::Error> {
         Store::delete_message(self, lease, id)
             .await
+            .map(|removed| removed.is_some())
             .map_err(Into::into)
     }
 

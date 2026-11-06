@@ -108,8 +108,10 @@ fn refuse_tools(tools: Option<&[ToolDefinition]>, agent: AgentKind) -> Result<()
 /// would run each a second time -- but a turn that spends ten minutes reading
 /// and editing files should not look to the reader like a turn doing nothing,
 /// so what the agent reached for is listed as the thinking it was. Zone's own
-/// tools reach the reader as cards when the agent calls them over MCP.
-fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, Error> {
+/// tools reach the reader as cards when the agent calls them over MCP. A
+/// subagent's calls are listed the same way when no observer took them, and
+/// any other news of it is no chunk at all.
+fn chunk(event: AgentEvent, provider: &str) -> Result<Option<ChatStreamChunk>, Error> {
     let mut delta = StreamDelta::default();
     let mut finished = false;
     let mut usage = None;
@@ -121,11 +123,16 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, Error> {
         AgentEvent::Tool(call) => {
             delta.reasoning_content = activity(&call);
         }
-        AgentEvent::Output(_) => {}
+        AgentEvent::Subagent(subagent) => {
+            let Some(line) = subagent.activity() else {
+                return Ok(None);
+            };
+            delta.reasoning_content = Some(line);
+        }
+        AgentEvent::Output(_) | AgentEvent::Occupancy(_) => {}
         AgentEvent::Usage(counts) => usage = Some(counts),
         AgentEvent::Window(reported) => window = Some(reported),
         AgentEvent::Session(announced) => session = Some(announced),
-        AgentEvent::Occupancy(_) => {}
         AgentEvent::Finished {
             finish_reason: reported,
         } => {
@@ -150,7 +157,7 @@ fn chunk(event: AgentEvent, provider: &str) -> Result<ChatStreamChunk, Error> {
     chunk.usage = usage;
     chunk.window = window;
     chunk.session = session;
-    Ok(chunk)
+    Ok(Some(chunk))
 }
 
 fn chunks(
@@ -171,7 +178,8 @@ fn chunks(
                 Err(error) => Err(Error::from(error)),
             };
             match translated {
-                Ok(chunk) => yield Ok(chunk),
+                Ok(Some(chunk)) => yield Ok(chunk),
+                Ok(None) => {}
                 Err(error) => {
                     yield Err(error);
                     break;

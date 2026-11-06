@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
-import { structFields } from '../../test/rust';
+import { rustVariants, structFields } from '../../test/rust';
 import {
   ActionReceiptSchema,
   ChatTaskPublicationSchema,
@@ -70,16 +70,6 @@ const RECEIPTS_RS = join(
 );
 
 const REASONED_TOOLS_RS = 'REASONED_TOOLS';
-
-function rustVariants(source: string, enumName: string): string[] {
-  const body = source.match(new RegExp(`pub enum ${enumName} \\{([^}]*)\\}`))?.[1];
-  if (!body) throw new Error(`${enumName} not found in the Rust source`);
-  return body
-    .split('\n')
-    .map((line) => line.trim().replace(/,$/, ''))
-    .filter((line) => line.length > 0 && !line.startsWith('//'))
-    .map((variant) => variant.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase());
-}
 
 /// Reads a `const NAME: [&str; N] = [..]` literal. The declared length is part
 /// of the match, so a list that grew without its count being updated — which

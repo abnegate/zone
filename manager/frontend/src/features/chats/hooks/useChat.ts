@@ -33,6 +33,7 @@ import {
 } from '../types';
 import { automated } from '../utils/automation';
 import { mergeCitations } from '../utils/citations';
+import { publishFrame } from '../utils/frames';
 import { appendHandover } from '../utils/handover';
 import { requestedModel } from '../utils/providerOptions';
 
@@ -1130,6 +1131,7 @@ export function useChat(
         } catch {
           return;
         }
+        if (publishFrame(chatId, payload)) return;
         if (payload.type === 'init') {
           announced = true;
           reconnectAttempt = 0;

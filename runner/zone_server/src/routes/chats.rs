@@ -2,6 +2,7 @@
 
 pub(super) mod provider;
 pub(super) mod pull_requests;
+pub(super) mod subagents;
 pub(super) mod tasks;
 
 use axum::{
@@ -1049,12 +1050,14 @@ pub async fn delete_message(
         .store
         .delete_message(&session.lease, message_id)
         .await;
+    if let Ok(Some(subagents)) = &result {
+        crate::ws::chat::announce_removed_subagents(chat_id, subagents.clone()).await;
+    }
     if let Err(error) = session.close().await {
         return ServerError::Conflict(error.to_string()).into_response();
     }
     match result {
-        Ok(true) => {
-            // Clean up embedding
+        Ok(Some(_)) => {
             if let Err(e) =
                 message_embeddings::delete_message_embedding(state.db(), message_id).await
             {
@@ -1074,7 +1077,7 @@ pub async fn delete_message(
             }
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => (
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Message not found")),
         )

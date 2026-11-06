@@ -12,6 +12,7 @@ pub mod auto_projects;
 pub mod chat_attached_sources;
 pub mod chat_pull_requests;
 pub mod chat_sources;
+pub mod chat_subagents;
 pub mod chat_tasks;
 pub mod chats;
 pub mod context;

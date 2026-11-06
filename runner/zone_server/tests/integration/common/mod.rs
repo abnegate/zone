@@ -6,8 +6,11 @@
 #![allow(dead_code)]
 
 pub mod context;
+pub mod database;
 pub mod mail;
 pub mod transcript;
+
+pub use database::Database;
 
 use axum::Router;
 use axum::body::Body;

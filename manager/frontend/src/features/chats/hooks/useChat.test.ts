@@ -12,6 +12,7 @@ import {
   type Waiting,
 } from '../types';
 import { renderAnswers } from '../utils/answers';
+import { subscribeFrames } from '../utils/frames';
 
 const mockGetChat = mock();
 const mockPreviewContext = mock();
@@ -2014,6 +2015,43 @@ describe('useChat', () => {
     await waitFor(() => {
       expect(result.current.chat?.messages.at(-1)?.content).toBe('The whole reply');
     });
+    unmount();
+  });
+
+  it('hands subagent frames to subscribers without holding them for the loading chat', async () => {
+    let resolve: (chat: ChatWithMessages) => void = () => {};
+    mockGetChat.mockImplementation(
+      () =>
+        new Promise<ChatWithMessages>((done) => {
+          resolve = done;
+        })
+    );
+    const published: unknown[] = [];
+    const unsubscribe = subscribeFrames('1', (frame) => published.push(frame));
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    const subagent = { type: 'subagent', chat_id: '1', subagent: { id: 'agent-1' } };
+    const chunks = 999;
+
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'live', role: 'assistant' });
+      for (let index = 0; index < chunks; index += 1) {
+        lastSocket?.emit({ type: 'chunk', content: 'x', index });
+        if (index % 10 === 0) lastSocket?.emit(subagent);
+      }
+    });
+
+    await act(async () => {
+      resolve(mockChat);
+    });
+
+    await waitFor(() => {
+      const live = result.current.chat?.messages.find((message) => message.id === 'live');
+      expect(live?.content).toBe('x'.repeat(chunks));
+    });
+    expect(published.filter((frame) => (frame as { type?: unknown }).type === 'subagent')).toEqual(
+      Array.from({ length: 100 }, () => subagent)
+    );
+    unsubscribe();
     unmount();
   });
 
