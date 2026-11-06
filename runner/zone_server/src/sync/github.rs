@@ -1,12 +1,20 @@
 //! GitHub Issues synchronization provider
 
 use abnegate_secret::MasterKey;
+use abnegate_secret::SecretValue;
+use abnegate_vcs::IssueReference;
+use abnegate_vcs::IssueState as GitHubState;
+use abnegate_vcs::IssueUpdate;
+use abnegate_vcs::PullRequestError;
+use abnegate_vcs::PullRequestService;
+use abnegate_vcs::Repository;
+use abnegate_vcs::WebhookSignature;
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use super::{
@@ -17,9 +25,15 @@ use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
 use crate::secret::Unseal;
 
-const SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
 const TOKEN_UNOPENABLE: &str =
     "the GitHub token is sealed under a key this deployment does not hold";
+const CLIENT_UNAVAILABLE: &str = "a client for GitHub's own API";
+const GITHUB_REFUSED: &str =
+    "GitHub API error: GitHub refused the request or sent an answer that could not be read";
+const ISSUE_NUMBER_INVALID: &str = "the linked GitHub issue ID is not an issue number";
+const INVALID_SIGNATURE: &str = "Invalid signature";
+const CRITERIA_HEADING: &str = "\n\n## Acceptance Criteria\n\n";
+const CLOSING_STATUSES: [&str; 2] = ["complete", "blocked"];
 const EVENT_HEADER: &str = "X-GitHub-Event";
 const DELIVERY_HEADER: &str = "X-GitHub-Delivery";
 const ISSUES_EVENT: &str = "issues";
@@ -34,10 +48,18 @@ pub struct GitHubConfig {
     /// Repository name
     pub repo: String,
     /// GitHub API token
-    pub token: String,
+    pub token: SecretValue,
     /// Optional: Custom field mappings
     #[serde(default)]
     pub field_mappings: HashMap<String, String>,
+}
+
+impl GitHubConfig {
+    /// The repository its owner and name address, refused when GitHub would not accept either
+    fn repository(&self) -> SyncResult<Repository> {
+        Repository::new(&self.owner, &self.repo)
+            .map_err(|error| SyncError::InvalidConfig(format!("Invalid GitHub config: {error}")))
+    }
 }
 
 /// GitHub issue response
@@ -45,7 +67,7 @@ pub struct GitHubConfig {
 struct GitHubIssue {
     number: i64,
     html_url: String,
-    state: String,
+    state: GitHubState,
     title: String,
     body: Option<String>,
     #[serde(default)]
@@ -142,8 +164,7 @@ pub fn repository_name(url: &str) -> Option<String> {
 /// GitHub sync provider
 #[derive(Debug, Clone)]
 pub struct GitHubSyncProvider {
-    client: reqwest::Client,
-    base_url: String,
+    service: PullRequestService,
     master_key: Arc<MasterKey>,
 }
 
@@ -151,8 +172,7 @@ impl GitHubSyncProvider {
     /// Create a new GitHub sync provider that opens stored tokens under `master_key`
     pub fn new(master_key: Arc<MasterKey>) -> Self {
         Self {
-            client: reqwest::Client::new(),
-            base_url: "https://api.github.com".to_string(),
+            service: PullRequestService::new().expect(CLIENT_UNAVAILABLE),
             master_key,
         }
     }
@@ -160,9 +180,10 @@ impl GitHubSyncProvider {
     /// Create with custom base URL (for testing)
     #[cfg(test)]
     pub fn with_base_url(base_url: String, master_key: Arc<MasterKey>) -> Self {
+        const GITHUB_HOST: &str = "github.com";
         Self {
-            client: reqwest::Client::new(),
-            base_url,
+            service: PullRequestService::standing_in_for(GITHUB_HOST, &base_url)
+                .expect("a stand-in for GitHub's API"),
             master_key,
         }
     }
@@ -173,56 +194,52 @@ impl GitHubSyncProvider {
             .map_err(|error| SyncError::InvalidConfig(format!("Invalid GitHub config: {error}")))?;
         parsed.token = self
             .master_key
-            .open_lenient(&parsed.token)
-            .map_err(|_| SyncError::InvalidConfig(TOKEN_UNOPENABLE.to_string()))?
-            .expose()
-            .to_string();
+            .open_lenient(parsed.token.expose())
+            .map_err(|_| SyncError::InvalidConfig(TOKEN_UNOPENABLE.to_string()))?;
         Ok(parsed)
     }
 
-    /// Verify HMAC-SHA256 signature for GitHub webhooks
-    fn verify_signature(secret: &str, body: &[u8], signature: &str) -> bool {
-        use hmac::{Hmac, KeyInit, Mac};
-        use subtle::ConstantTimeEq;
-        type HmacSha256 = Hmac<Sha256>;
+    /// The issue `external_id` numbers in `repository`, refused before anything is sent when
+    /// it is not a positive number
+    fn issue(repository: Repository, external_id: &str) -> SyncResult<IssueReference> {
+        external_id
+            .parse::<NonZeroU64>()
+            .map(|number| IssueReference::new(repository, number))
+            .map_err(|_| SyncError::ExternalApiError(ISSUE_NUMBER_INVALID.to_string()))
+    }
 
-        // GitHub sends signature as "sha256=<hex>"
-        if !signature.starts_with("sha256=") {
-            return false;
+    /// An issue's body: the task's description, followed by its acceptance criteria if any
+    fn body(task: &TaskRow) -> String {
+        match &task.acceptance_criteria {
+            Some(criteria) => format!("{}{CRITERIA_HEADING}{criteria}", task.description),
+            None => task.description.clone(),
         }
+    }
 
-        let expected_sig = &signature[7..]; // Skip "sha256=" prefix
-
-        // Compute HMAC-SHA256
-        let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-
-        mac.update(body);
-        let result = mac.finalize();
-        let computed_sig = hex::encode(result.into_bytes());
-
-        // Constant-time comparison to prevent timing attacks
-        computed_sig
-            .as_bytes()
-            .ct_eq(expected_sig.as_bytes())
-            .into()
+    /// The sync error for what GitHub answered, never repeating GitHub's own words
+    fn refused(error: PullRequestError) -> SyncError {
+        match error {
+            PullRequestError::Http(error) => SyncError::HttpError(error),
+            PullRequestError::GitHubApi(_) => {
+                SyncError::ExternalApiError(GITHUB_REFUSED.to_string())
+            }
+            other => SyncError::ExternalApiError(other.to_string()),
+        }
     }
 
     /// Map Zone task status to GitHub issue state
-    fn map_task_status_to_github_state(status: &str) -> &str {
-        match status {
-            "complete" | "blocked" => "closed",
-            _ => "open",
+    fn map_task_status_to_github_state(status: &str) -> GitHubState {
+        if CLOSING_STATUSES.contains(&status) {
+            GitHubState::Closed
+        } else {
+            GitHubState::Open
         }
     }
 
     /// Map GitHub issue state to Zone IssueState
-    fn map_github_state_to_issue_state(state: &str) -> IssueState {
+    fn map_github_state_to_issue_state(state: GitHubState) -> IssueState {
         match state {
-            "closed" => IssueState::Closed,
-            "open" => IssueState::Open,
+            GitHubState::Closed => IssueState::Closed,
             _ => IssueState::Open,
         }
     }
@@ -235,52 +252,22 @@ impl SyncProvider for GitHubSyncProvider {
     }
 
     async fn create_issue(&self, config: &SyncConfig, task: &TaskRow) -> SyncResult<ExternalIssue> {
-        let gh_config = self.parse_config(config)?;
-
-        // Build issue body from task description and acceptance criteria
-        let mut body = task.description.clone();
-        if let Some(ref criteria) = task.acceptance_criteria {
-            body.push_str("\n\n## Acceptance Criteria\n\n");
-            body.push_str(criteria);
-        }
-
-        // Create issue payload
-        let payload = serde_json::json!({
-            "title": task.title,
-            "body": body,
-        });
-
-        // Make API request
-        let url = format!(
-            "{}/repos/{}/{}/issues",
-            self.base_url, gh_config.owner, gh_config.repo
-        );
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", gh_config.token))
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "zone-sync")
-            .json(&payload)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(SyncError::ExternalApiError(format!(
-                "GitHub API error {}: {}",
-                status, error_text
-            )));
-        }
-
-        let issue: GitHubIssue = response.json().await?;
+        let github = self.parse_config(config)?;
+        let issue = self
+            .service
+            .create_issue(
+                &github.repository()?,
+                &github.token,
+                &task.title,
+                &Self::body(task),
+            )
+            .await
+            .map_err(Self::refused)?;
 
         Ok(ExternalIssue {
-            external_id: issue.number.to_string(),
-            url: issue.html_url,
-            state: Self::map_github_state_to_issue_state(&issue.state),
+            external_id: issue.reference.number().to_string(),
+            url: issue.url,
+            state: Self::map_github_state_to_issue_state(issue.state),
             metadata: HashMap::new(),
         })
     }
@@ -291,87 +278,27 @@ impl SyncProvider for GitHubSyncProvider {
         task: &TaskRow,
         external_id: &str,
     ) -> SyncResult<()> {
-        let gh_config = self.parse_config(config)?;
+        let github = self.parse_config(config)?;
+        let reference = Self::issue(github.repository()?, external_id)?;
+        let update = IssueUpdate::default()
+            .with_title(task.title.as_str())
+            .with_body(Self::body(task))
+            .with_state(Self::map_task_status_to_github_state(&task.status));
 
-        // Build issue body
-        let mut body = task.description.clone();
-        if let Some(ref criteria) = task.acceptance_criteria {
-            body.push_str("\n\n## Acceptance Criteria\n\n");
-            body.push_str(criteria);
-        }
-
-        // Determine GitHub state from task status
-        let state = Self::map_task_status_to_github_state(&task.status);
-
-        // Update issue payload
-        let payload = serde_json::json!({
-            "title": task.title,
-            "body": body,
-            "state": state,
-        });
-
-        // Make API request
-        let url = format!(
-            "{}/repos/{}/{}/issues/{}",
-            self.base_url, gh_config.owner, gh_config.repo, external_id
-        );
-
-        let response = self
-            .client
-            .patch(&url)
-            .header("Authorization", format!("Bearer {}", gh_config.token))
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "zone-sync")
-            .json(&payload)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(SyncError::ExternalApiError(format!(
-                "GitHub API error {}: {}",
-                status, error_text
-            )));
-        }
-
-        Ok(())
+        self.service
+            .update_issue(&reference, &github.token, &update)
+            .await
+            .map_err(Self::refused)
     }
 
     async fn close_issue(&self, config: &SyncConfig, external_id: &str) -> SyncResult<()> {
-        let gh_config = self.parse_config(config)?;
+        let github = self.parse_config(config)?;
+        let reference = Self::issue(github.repository()?, external_id)?;
 
-        // Close issue payload
-        let payload = serde_json::json!({
-            "state": "closed",
-        });
-
-        // Make API request
-        let url = format!(
-            "{}/repos/{}/{}/issues/{}",
-            self.base_url, gh_config.owner, gh_config.repo, external_id
-        );
-
-        let response = self
-            .client
-            .patch(&url)
-            .header("Authorization", format!("Bearer {}", gh_config.token))
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "zone-sync")
-            .json(&payload)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(SyncError::ExternalApiError(format!(
-                "GitHub API error {}: {}",
-                status, error_text
-            )));
-        }
-
-        Ok(())
+        self.service
+            .close_issue(&reference, &github.token)
+            .await
+            .map_err(Self::refused)
     }
 
     fn parse_webhook(
@@ -381,21 +308,24 @@ impl SyncProvider for GitHubSyncProvider {
         secret: &str,
     ) -> SyncResult<Delivery> {
         let signature = headers
-            .get(SIGNATURE_HEADER)
-            .and_then(|v| v.to_str().ok())
+            .get(WebhookSignature::HEADER)
+            .and_then(|value| value.to_str().ok())
             .ok_or_else(|| {
-                SyncError::WebhookVerificationFailed(format!("Missing {SIGNATURE_HEADER} header"))
+                SyncError::WebhookVerificationFailed(format!(
+                    "Missing {} header",
+                    WebhookSignature::HEADER
+                ))
             })?;
 
-        if !Self::verify_signature(secret, body, signature) {
+        if !WebhookSignature::verify(signature, &SecretValue::new(secret), body) {
             return Err(SyncError::WebhookVerificationFailed(
-                "Invalid signature".to_string(),
+                INVALID_SIGNATURE.to_string(),
             ));
         }
 
         let event = headers
             .get(EVENT_HEADER)
-            .and_then(|v| v.to_str().ok())
+            .and_then(|value| value.to_str().ok())
             .ok_or_else(|| {
                 SyncError::InvalidWebhookPayload(format!("Missing {EVENT_HEADER} header"))
             })?;
@@ -444,7 +374,7 @@ impl SyncProvider for GitHubSyncProvider {
             payload: WebhookPayload {
                 title: Some(payload.issue.title),
                 description: payload.issue.body,
-                state: Some(Self::map_github_state_to_issue_state(&payload.issue.state)),
+                state: Some(Self::map_github_state_to_issue_state(payload.issue.state)),
                 updated_at: payload.issue.updated_at,
                 raw: Some(raw),
             },
@@ -457,11 +387,19 @@ mod tests {
     use super::*;
     use crate::secret::fixture;
     use crate::utils::crypto::generate_token;
+    use hmac::Hmac;
+    use hmac::KeyInit;
+    use hmac::Mac;
+    use serde_json::json;
+    use sha2::Sha256;
+    use std::net::TcpListener;
     use std::sync::LazyLock;
     use uuid::Uuid;
     use wiremock::Mock;
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
+    use wiremock::matchers::any;
+    use wiremock::matchers::body_json;
     use wiremock::matchers::header;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
@@ -470,6 +408,66 @@ mod tests {
     const OWNER: &str = "test-owner";
     const REPOSITORY: &str = "test-repo";
     const ISSUE: &str = "42";
+    const ISSUE_URL: &str = "https://github.com/test-owner/test-repo/issues/42";
+    const TITLE: &str = "Add a cart";
+    const DESCRIPTION: &str = "Shoppers need a cart.";
+    const CRITERIA: &str = "- A shopper can add an item";
+    const LEAKED: &str = "test-secret";
+    const PREFIX: &str = "sha256=";
+
+    fn task(criteria: Option<&str>, status: &str) -> TaskRow {
+        TaskRow {
+            id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            created_by: None,
+            project_ids: Vec::new(),
+            title: TITLE.to_string(),
+            title_pending: false,
+            description: DESCRIPTION.to_string(),
+            acceptance_criteria: criteria.map(str::to_string),
+            status: status.to_string(),
+            priority: None,
+            model_name: None,
+            dependencies: None,
+            is_agentic: false,
+            require_plan_approval: false,
+            github_repo_url: None,
+            source_id: None,
+            source_ids: None,
+            worker_id: None,
+            queued_at: None,
+            started_at: None,
+            completed_at: None,
+            created_at: None,
+            updated_at: None,
+            pr_url: None,
+            branch_name: None,
+            pr_status: None,
+            pr_created_at: None,
+        }
+    }
+
+    fn created_issue() -> serde_json::Value {
+        json!({
+            "number": 42,
+            "title": TITLE,
+            "body": DESCRIPTION,
+            "state": "open",
+            "html_url": ISSUE_URL,
+            "labels": [],
+            "comments": 0,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        })
+    }
+
+    fn issue_path() -> String {
+        format!("/repos/{OWNER}/{REPOSITORY}/issues/{ISSUE}")
+    }
+
+    fn stand_in(server: &MockServer) -> GitHubSyncProvider {
+        GitHubSyncProvider::with_base_url(server.uri(), key())
+    }
 
     fn key() -> Arc<MasterKey> {
         Arc::new(MasterKey::generate().expect("a key"))
@@ -501,7 +499,11 @@ mod tests {
             fixture::seal_legacy(TOKEN, &key),
         ] {
             let parsed = provider.parse_config(&sync_config(&stored)).unwrap();
-            assert_eq!(parsed.token, TOKEN, "{stored} did not parse to the token");
+            assert_eq!(
+                parsed.token.expose(),
+                TOKEN,
+                "{stored} did not parse to the token"
+            );
         }
     }
 
@@ -543,81 +545,29 @@ mod tests {
         assert_eq!(provider.provider_name(), "github");
     }
 
-    #[test]
-    fn test_verify_signature_valid() {
-        let secret = generate_token();
-        let body = b"test payload";
-
-        use hmac::{Hmac, KeyInit, Mac};
-        use sha2::Sha256;
-        type HmacSha256 = Hmac<Sha256>;
-
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body);
-        let result = mac.finalize();
-        let sig = format!("sha256={}", hex::encode(result.into_bytes()));
-
-        assert!(GitHubSyncProvider::verify_signature(&secret, body, &sig));
-    }
-
-    #[test]
-    fn test_verify_signature_invalid() {
-        let secret = generate_token();
-        let body = b"test payload";
-        let invalid_sig = "sha256=invalid";
-
-        assert!(!GitHubSyncProvider::verify_signature(
-            &secret,
-            body,
-            invalid_sig
-        ));
-    }
-
-    #[test]
-    fn test_verify_signature_wrong_secret() {
-        let secret = generate_token();
-        let body = b"test payload";
-
-        use hmac::{Hmac, KeyInit, Mac};
-        use sha2::Sha256;
-        type HmacSha256 = Hmac<Sha256>;
-
-        let mut mac = HmacSha256::new_from_slice(generate_token().as_bytes()).unwrap();
-        mac.update(body);
-        let result = mac.finalize();
-        let sig = format!("sha256={}", hex::encode(result.into_bytes()));
-
-        assert!(!GitHubSyncProvider::verify_signature(&secret, body, &sig));
-    }
-
-    #[test]
-    fn test_verify_signature_missing_prefix() {
-        let secret = generate_token();
-        let body = b"test payload";
-        let sig_no_prefix = "abcdef1234567890";
-
-        assert!(!GitHubSyncProvider::verify_signature(
-            &secret,
-            body,
-            sig_no_prefix
-        ));
-    }
-
     static SECRET: LazyLock<String> = LazyLock::new(generate_token);
 
-    fn signed_headers(body: &[u8], event: Option<&str>) -> HeaderMap {
-        use hmac::{Hmac, KeyInit, Mac};
-        type HmacSha256 = Hmac<Sha256>;
-
-        let mut mac = HmacSha256::new_from_slice(SECRET.as_bytes()).unwrap();
+    fn digest(secret: &str, body: &[u8]) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(body);
-        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn signature(secret: &str, body: &[u8]) -> String {
+        format!("{PREFIX}{}", digest(secret, body))
+    }
+
+    fn headers_signed(signature: &str, event: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(SIGNATURE_HEADER, signature.parse().unwrap());
+        headers.insert(WebhookSignature::HEADER, signature.parse().unwrap());
         if let Some(event) = event {
             headers.insert(EVENT_HEADER, event.parse().unwrap());
         }
         headers
+    }
+
+    fn signed_headers(body: &[u8], event: Option<&str>) -> HeaderMap {
+        headers_signed(&signature(&SECRET, body), event)
     }
 
     fn parse_signed(event: Option<&str>, body: &serde_json::Value) -> SyncResult<Delivery> {
@@ -916,31 +866,35 @@ mod tests {
     fn test_map_task_status_to_github_state() {
         assert_eq!(
             GitHubSyncProvider::map_task_status_to_github_state("complete"),
-            "closed"
+            GitHubState::Closed
         );
         assert_eq!(
             GitHubSyncProvider::map_task_status_to_github_state("blocked"),
-            "closed"
+            GitHubState::Closed
         );
         assert_eq!(
             GitHubSyncProvider::map_task_status_to_github_state("created"),
-            "open"
+            GitHubState::Open
         );
         assert_eq!(
             GitHubSyncProvider::map_task_status_to_github_state("in_progress"),
-            "open"
+            GitHubState::Open
         );
     }
 
     #[test]
     fn test_map_github_state_to_issue_state() {
         assert_eq!(
-            GitHubSyncProvider::map_github_state_to_issue_state("open"),
+            GitHubSyncProvider::map_github_state_to_issue_state(GitHubState::Open),
             IssueState::Open
         );
         assert_eq!(
-            GitHubSyncProvider::map_github_state_to_issue_state("closed"),
+            GitHubSyncProvider::map_github_state_to_issue_state(GitHubState::Closed),
             IssueState::Closed
+        );
+        assert_eq!(
+            GitHubSyncProvider::map_github_state_to_issue_state(GitHubState::Unknown),
+            IssueState::Open
         );
     }
 
@@ -952,10 +906,10 @@ mod tests {
         let secret = generate_token();
 
         let result = provider.parse_webhook(&headers, body, &secret);
-        assert!(result.is_err());
         assert!(matches!(
             result,
-            Err(SyncError::WebhookVerificationFailed(_))
+            Err(SyncError::WebhookVerificationFailed(message))
+                if message == "Missing X-Hub-Signature-256 header"
         ));
     }
 
@@ -988,7 +942,7 @@ mod tests {
         let gh_config = provider.parse_config(&config).unwrap();
         assert_eq!(gh_config.owner, "test-owner");
         assert_eq!(gh_config.repo, "test-repo");
-        assert_eq!(gh_config.token, "ghp_test123");
+        assert_eq!(gh_config.token.expose(), "ghp_test123");
     }
 
     #[test]
@@ -1008,5 +962,282 @@ mod tests {
         let result = provider.parse_config(&config);
         assert!(result.is_err());
         assert!(matches!(result, Err(SyncError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn existing_sync_json_deserialises_with_a_secret_token() {
+        let stored = json!({
+            "owner": OWNER,
+            "repo": REPOSITORY,
+            "token": TOKEN,
+            "field_mappings": { "priority": "labels" }
+        });
+
+        let config: GitHubConfig = serde_json::from_value(stored.clone()).unwrap();
+
+        assert_eq!(config.token.expose(), TOKEN);
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            stored,
+            "a config writes back the shape it was read from"
+        );
+    }
+
+    #[test]
+    fn a_github_config_never_prints_its_token() {
+        let config = GitHubSyncProvider::new(key())
+            .parse_config(&sync_config(TOKEN))
+            .unwrap();
+
+        assert!(!format!("{config:?}").contains(TOKEN));
+    }
+
+    #[tokio::test]
+    async fn an_invalid_owner_or_repository_is_refused_before_any_request() {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(201).set_body_json(created_issue()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let mut config = sync_config(TOKEN);
+        config.config = json!({ "owner": "test owner", "repo": "..", "token": TOKEN });
+
+        let result = stand_in(&server)
+            .create_issue(&config, &task(None, "created"))
+            .await;
+
+        assert!(
+            matches!(result, Err(SyncError::InvalidConfig(_))),
+            "{result:?}"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn create_posts_the_title_and_the_body_with_its_acceptance_criteria() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{REPOSITORY}/issues")))
+            .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+            .and(body_json(json!({
+                "title": TITLE,
+                "body": format!("{DESCRIPTION}\n\n## Acceptance Criteria\n\n{CRITERIA}"),
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(created_issue()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let issue = stand_in(&server)
+            .create_issue(&sync_config(TOKEN), &task(Some(CRITERIA), "created"))
+            .await
+            .unwrap();
+
+        assert_eq!(issue.external_id, ISSUE);
+        assert_eq!(issue.url, ISSUE_URL);
+        assert_eq!(issue.state, IssueState::Open);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn update_sends_title_body_and_state() {
+        for (status, state) in [("in_progress", "open"), ("complete", "closed")] {
+            let server = MockServer::start().await;
+            Mock::given(method("PATCH"))
+                .and(path(issue_path()))
+                .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+                .and(body_json(json!({
+                    "title": TITLE,
+                    "body": DESCRIPTION,
+                    "state": state,
+                })))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            stand_in(&server)
+                .update_issue(&sync_config(TOKEN), &task(None, status), ISSUE)
+                .await
+                .unwrap_or_else(|error| panic!("{status} did not update: {error}"));
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn close_sends_a_closed_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path(issue_path()))
+            .and(body_json(json!({ "state": "closed" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        stand_in(&server)
+            .close_issue(&sync_config(TOKEN), ISSUE)
+            .await
+            .unwrap();
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_github_error_body_is_never_echoed() {
+        for status in [201, 401, 403, 404, 422, 500] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(json!({ "message": LEAKED })),
+                )
+                .mount(&server)
+                .await;
+
+            let error = stand_in(&server)
+                .create_issue(&sync_config(TOKEN), &task(None, "created"))
+                .await
+                .expect_err("GitHub's answer is refused");
+
+            assert!(
+                matches!(&error, SyncError::ExternalApiError(_)),
+                "{status}: {error:?}"
+            );
+            assert!(!format!("{error} {error:?}").contains(LEAKED), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unclassified_refusal_reads_as_one_fixed_text() {
+        for status in [409, 422, 500, 503] {
+            let server = MockServer::start().await;
+            Mock::given(method("PATCH"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(json!({ "message": LEAKED })),
+                )
+                .mount(&server)
+                .await;
+
+            let result = stand_in(&server)
+                .close_issue(&sync_config(TOKEN), ISSUE)
+                .await;
+
+            assert!(
+                matches!(&result, Err(SyncError::ExternalApiError(message)) if message == GITHUB_REFUSED),
+                "{status}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_is_an_http_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let provider = GitHubSyncProvider::with_base_url(format!("http://{address}"), key());
+
+        let result = provider.close_issue(&sync_config(TOKEN), ISSUE).await;
+
+        assert!(matches!(result, Err(SyncError::HttpError(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_non_numeric_external_id_is_refused_before_any_request() {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let provider = stand_in(&server);
+        let config = sync_config(TOKEN);
+
+        for external_id in ["", "abc", "0", "-1", "4 2", "42/comments"] {
+            for result in [
+                provider
+                    .update_issue(&config, &task(None, "created"), external_id)
+                    .await,
+                provider.close_issue(&config, external_id).await,
+            ] {
+                assert!(
+                    matches!(&result, Err(SyncError::ExternalApiError(message)) if message == ISSUE_NUMBER_INVALID),
+                    "{external_id:?}: {result:?}"
+                );
+            }
+        }
+        server.verify().await;
+    }
+
+    #[test]
+    fn a_wrong_signature_is_refused_as_invalid() {
+        let body = serde_json::to_vec(&ping()).unwrap();
+        let provider = GitHubSyncProvider::new(key());
+
+        for signature in [
+            signature(&generate_token(), &body),
+            signature(&SECRET, b"another payload"),
+            digest(&SECRET, &body),
+            format!("{PREFIX}invalid"),
+        ] {
+            let result = provider.parse_webhook(
+                &headers_signed(&signature, Some(PING_EVENT)),
+                &body,
+                &SECRET,
+            );
+
+            assert!(
+                matches!(&result, Err(SyncError::WebhookVerificationFailed(message)) if message == INVALID_SIGNATURE),
+                "{signature}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_uppercase_hex_signature_verifies() {
+        let body = serde_json::to_vec(&ping()).unwrap();
+        let signature = format!("{PREFIX}{}", digest(&SECRET, &body).to_uppercase());
+
+        let delivery = GitHubSyncProvider::new(key())
+            .parse_webhook(
+                &headers_signed(&signature, Some(PING_EVENT)),
+                &body,
+                &SECRET,
+            )
+            .expect("an uppercase digest verifies");
+
+        assert!(matches!(delivery, Delivery::Ignored(IgnoredDelivery::Ping)));
+    }
+
+    #[test]
+    fn an_empty_webhook_secret_refuses_every_delivery() {
+        let body = serde_json::to_vec(&ping()).unwrap();
+        let result = GitHubSyncProvider::new(key()).parse_webhook(
+            &headers_signed(&signature("", &body), Some(PING_EVENT)),
+            &body,
+            "",
+        );
+
+        assert!(
+            matches!(&result, Err(SyncError::WebhookVerificationFailed(message)) if message == INVALID_SIGNATURE),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn sync_addresses_github_com_and_nothing_else() {
+        let provider = GitHubSyncProvider::new(key());
+
+        assert!(
+            provider
+                .service
+                .parse_github_url("https://github.com/acme/widgets")
+                .is_ok()
+        );
+        assert!(
+            provider
+                .service
+                .parse_github_url("https://github.example.com/acme/widgets")
+                .is_err()
+        );
     }
 }
