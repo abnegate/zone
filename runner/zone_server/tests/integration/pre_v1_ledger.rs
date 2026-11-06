@@ -1,32 +1,76 @@
-use sqlx::migrate::MigrateError;
+use sqlx::migrate::{MigrateError, Migrator};
 use uuid::Uuid;
 use zone_server::db::migrations;
+use zone_server::db::migrations::legacy::BASELINE;
 use zone_server::db::migrations::legacy::unfinished::Unfinished;
-use zone_server::db::migrations::legacy::{BASELINE, HISTORY};
 
 use crate::common::Database;
 
 const PREFIX: &str = "pre_v1_ledger";
 
-async fn forge(database: &Database, history: &[(i64, &str)]) {
+/// `_sqlx_migrations` as recorded by a database migrated through 024 from
+/// commit 218739e7, kept apart from `legacy::HISTORY` so a typo there fails here.
+const PRE_V1_LEDGER: &str = include_str!("../fixtures/pre_v1_ledger.tsv");
+
+type Row = (i64, String, Vec<u8>);
+
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+fn pre_v1() -> Vec<Row> {
+    PRE_V1_LEDGER
+        .lines()
+        .map(|line| {
+            let mut fields = line.split('\t');
+            let mut field = || fields.next().expect("a version, description and checksum");
+            let version = field().parse().expect("a numeric version");
+            let description = field().to_string();
+            let checksum = hex::decode(field()).expect("a hex checksum");
+            (version, description, checksum)
+        })
+        .collect()
+}
+
+fn embedded() -> Vec<Row> {
+    MIGRATOR
+        .iter()
+        .map(|migration| {
+            (
+                migration.version,
+                migration.description.to_string(),
+                migration.checksum.to_vec(),
+            )
+        })
+        .collect()
+}
+
+/// A database whose schema is the baseline's and nothing later, as every
+/// database that ran the pre-v1 history is.
+async fn at_baseline() -> Database {
+    let database = Database::new(PREFIX).await;
+    MIGRATOR.run_to(BASELINE, &database.pool).await.unwrap();
+    database
+}
+
+async fn forge(database: &Database, ledger: &[Row]) {
     sqlx::query("DELETE FROM _sqlx_migrations")
         .execute(&database.pool)
         .await
         .unwrap();
-    for (version, checksum) in history {
+    for (version, description, checksum) in ledger {
         sqlx::query(
             "INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) \
-             VALUES($1,'pre-v1',TRUE,$2,1)",
+             VALUES($1,$2,TRUE,$3,1)",
         )
         .bind(version)
-        .bind(hex::decode(checksum).unwrap())
+        .bind(description)
+        .bind(checksum)
         .execute(&database.pool)
         .await
         .unwrap();
     }
 }
 
-async fn ledger(database: &Database) -> Vec<(i64, String, Vec<u8>)> {
+async fn ledger(database: &Database) -> Vec<Row> {
     sqlx::query_as("SELECT version, description, checksum FROM _sqlx_migrations ORDER BY version")
         .fetch_all(&database.pool)
         .await
@@ -45,21 +89,18 @@ async fn chat(database: &Database) -> Uuid {
 
 #[tokio::test]
 async fn a_database_migrated_through_the_last_pre_v1_migration_moves_onto_the_baseline() {
-    let database = Database::new(PREFIX).await;
-    migrations::run(&database.pool).await.unwrap();
-    let baseline = ledger(&database).await;
-    forge(&database, HISTORY).await;
+    let database = at_baseline().await;
+    forge(&database, &pre_v1()).await;
     let kept = chat(&database).await;
 
     migrations::run(&database.pool).await.unwrap();
 
+    let upgraded = ledger(&database).await;
     assert_eq!(
-        ledger(&database).await,
-        baseline,
-        "the pre-v1 ledger collapses into the baseline's single row"
+        upgraded,
+        embedded(),
+        "the pre-v1 ledger collapses into the baseline's row, then every later migration applies"
     );
-    assert_eq!(baseline.len(), 1);
-    assert_eq!(baseline[0].0, BASELINE);
     let title: String = sqlx::query_scalar("SELECT title FROM chats WHERE id=$1")
         .bind(kept)
         .fetch_one(&database.pool)
@@ -70,7 +111,7 @@ async fn a_database_migrated_through_the_last_pre_v1_migration_moves_onto_the_ba
     migrations::run(&database.pool).await.unwrap();
     assert_eq!(
         ledger(&database).await,
-        baseline,
+        upgraded,
         "a second boot changes nothing"
     );
     database.cleanup().await;
@@ -78,10 +119,10 @@ async fn a_database_migrated_through_the_last_pre_v1_migration_moves_onto_the_ba
 
 #[tokio::test]
 async fn a_database_short_of_the_last_pre_v1_migration_is_refused_untouched() {
-    let database = Database::new(PREFIX).await;
-    migrations::run(&database.pool).await.unwrap();
-    let short = &HISTORY[..HISTORY.len() - 1];
-    forge(&database, short).await;
+    let database = at_baseline().await;
+    let mut short = pre_v1();
+    short.pop();
+    forge(&database, &short).await;
     let before = ledger(&database).await;
 
     let error = migrations::run(&database.pool)
@@ -111,9 +152,8 @@ async fn a_database_short_of_the_last_pre_v1_migration_is_refused_untouched() {
 async fn an_index_an_interrupted_pre_v1_migration_left_invalid_is_rebuilt() {
     const VALID: &str =
         "SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_messages_typed'::regclass";
-    let database = Database::new(PREFIX).await;
-    migrations::run(&database.pool).await.unwrap();
-    forge(&database, HISTORY).await;
+    let database = at_baseline().await;
+    forge(&database, &pre_v1()).await;
     sqlx::query(
         "UPDATE pg_index SET indisvalid = FALSE WHERE indexrelid = 'idx_messages_typed'::regclass",
     )
@@ -133,9 +173,8 @@ async fn an_index_an_interrupted_pre_v1_migration_left_invalid_is_rebuilt() {
 
 #[tokio::test]
 async fn a_database_holding_a_branch_only_migration_is_refused_untouched() {
-    let database = Database::new(PREFIX).await;
-    migrations::run(&database.pool).await.unwrap();
-    forge(&database, HISTORY).await;
+    let database = at_baseline().await;
+    forge(&database, &pre_v1()).await;
     sqlx::query(
         "INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) \
          VALUES(16,'branch only',TRUE,'\\x00'::bytea,1)",
