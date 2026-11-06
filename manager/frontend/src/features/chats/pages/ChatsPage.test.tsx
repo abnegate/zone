@@ -4137,6 +4137,46 @@ describe('ChatsPage', () => {
       await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('4K'));
     });
 
+    it('fits a context larger than the default to the full window of the model it moves to', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 262144 } },
+        { name: 'qwen3', size: 1, modified_at: '', details: { context_length: 131072 } },
+      ];
+      const local = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'qwen3', label: 'qwen3', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ default: local, selected: selection(local, 'llama2') })
+      );
+      await openChat({
+        model_name: 'qwen3',
+        provider: 'self_hosted',
+        provider_model: 'llama2',
+        context_tokens: 262144,
+      });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toBeInTheDocument());
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen3',
+        context_tokens: 262144,
+      });
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen3',
+        context_tokens: 131072,
+      });
+
+      chooseSelectOption('chat-provider', 'Default (Self-Hosted)');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 131072 })
+      );
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
+    });
+
     it('fits the context to the model a chat returns to on its self-hosted default', async () => {
       listedModels = [
         { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },

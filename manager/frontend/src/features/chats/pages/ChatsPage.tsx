@@ -697,25 +697,28 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return false;
     }
+    const runs = provider === null ? modelName : model;
     const problems: string[] = [];
     try {
       const offer = offerFor(provider);
-      if (offer) await settleEffort(effortsFor(offer, provider === null ? modelName : model));
+      if (offer) await settleEffort(effortsFor(offer, runs));
     } catch (error) {
       problems.push(failure(PROVIDER_EFFORT_RESET_FAILED, error));
     }
     try {
-      const runs = provider === null ? modelName : (model ?? AUTO_MODEL);
-      await fitContext(provider ?? chatDefaultProvider, contextTokens, runs);
+      await fitContext(provider ?? chatDefaultProvider, contextTokens, runs ?? AUTO_MODEL);
     } catch (error) {
       problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
       reportAll(chatId, problems);
-      await Promise.all([
-        refreshChats(),
-        latestSelectedChatId.current === chatId ? refreshChat() : undefined,
-      ]);
-      markChanging(chatId, false);
+      try {
+        await Promise.all([
+          refreshChats(),
+          latestSelectedChatId.current === chatId ? refreshChat() : undefined,
+        ]);
+      } finally {
+        markChanging(chatId, false);
+      }
     }
     return true;
   };
