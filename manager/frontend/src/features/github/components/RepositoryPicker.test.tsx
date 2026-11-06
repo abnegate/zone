@@ -355,6 +355,26 @@ describe('RepositoryPicker listbox and selection', () => {
     expect(screen.queryByRole('option', { name: /^acme\/api/ })).not.toBeInTheDocument();
   });
 
+  it('keeps an Escape that closes the popup from reaching document listeners', async () => {
+    const documentEscape = mock((_event: KeyboardEvent) => {});
+    document.addEventListener('keydown', documentEscape);
+    try {
+      const { user } = renderPicker();
+      await waitForOptions(user);
+
+      await user.keyboard('{Escape}');
+
+      expect(combobox()).toHaveAttribute('aria-expanded', 'false');
+      expect(documentEscape).not.toHaveBeenCalled();
+
+      await user.keyboard('{Escape}');
+
+      expect(documentEscape).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener('keydown', documentEscape);
+    }
+  });
+
   it('reopens the popup on ArrowDown after Escape', async () => {
     const { user } = renderPicker();
     await waitForOptions(user);

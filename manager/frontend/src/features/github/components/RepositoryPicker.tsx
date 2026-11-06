@@ -254,10 +254,11 @@ export function RepositoryPicker({
         }
         break;
       case 'Escape':
-        if (open) {
+        if (expanded) {
           event.preventDefault();
-          close();
+          event.stopPropagation();
         }
+        close();
         break;
     }
   }
