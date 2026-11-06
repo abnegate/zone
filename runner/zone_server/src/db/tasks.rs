@@ -12,6 +12,10 @@ use super::{
     workspace_members::{self, WorkspaceRole},
 };
 
+mod origin;
+
+pub use origin::Origin;
+
 /// Result of a tenant-scoped mutation without exposing resource existence.
 #[derive(Debug)]
 pub enum Mutation<T> {
@@ -116,6 +120,7 @@ pub struct Create<'a> {
     pub created_by: Option<Uuid>,
     /// The chat whose agent created the task; kept only when that chat is in the task's workspace.
     pub chat_id: Option<Uuid>,
+    pub origin: Origin,
 }
 
 /// Sparse values accepted by an atomic task update.
@@ -561,6 +566,7 @@ pub async fn create_task(
         source_id,
         created_by: None,
         chat_id: None,
+        origin: Origin::Automation,
     };
     let mut transaction = pool.begin().await?;
     let task = create_in(&mut transaction, &input).await?;
@@ -637,8 +643,8 @@ async fn insert_task(connection: &mut PgConnection, input: &Create<'_>) -> DbRes
     let (title, title_pending) = stored_title(input.title, input.description);
     let row = sqlx::query!(
         r#"
-        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by, title_pending, chat_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (SELECT id FROM chats WHERE id = $11 AND workspace_id = $1))
+        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by, title_pending, chat_id, origin)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (SELECT id FROM chats WHERE id = $11 AND workspace_id = $1), $12)
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
@@ -654,7 +660,8 @@ async fn insert_task(connection: &mut PgConnection, input: &Create<'_>) -> DbRes
         input.source_id,
         input.created_by,
         title_pending,
-        input.chat_id
+        input.chat_id,
+        input.origin.as_str()
     )
     .fetch_one(&mut *connection)
     .await?;
@@ -1111,6 +1118,7 @@ pub async fn create_task_as(
         source_id,
         created_by: actor,
         chat_id: None,
+        origin: actor.map_or(Origin::Automation, |_| Origin::Member),
     };
     let Some(actor) = actor else {
         let mut transaction = pool.begin().await?;

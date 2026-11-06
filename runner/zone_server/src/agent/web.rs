@@ -382,6 +382,7 @@ mod tests {
             chat_id: chat,
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         }
     }
 

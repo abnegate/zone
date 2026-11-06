@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use super::DbResult;
 use super::actions::invalid;
-use super::tasks::{self, Create, MutationError};
+use super::tasks::{self, Create, MutationError, Origin};
 
 /// The project-level switch and everything the driver needs to run it.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -1057,6 +1057,7 @@ pub async fn finalize(
                 source_id: None,
                 created_by: Some(actor),
                 chat_id: None,
+                origin: Origin::Member,
             },
         )
         .await
@@ -1124,6 +1125,7 @@ pub async fn insert_auto_task(
             source_id: None,
             created_by: Some(actor),
             chat_id: None,
+            origin: Origin::Automation,
         },
     )
     .await

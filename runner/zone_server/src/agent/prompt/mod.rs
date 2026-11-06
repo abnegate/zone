@@ -324,6 +324,7 @@ mod tests {
                     chat_id: Some(Uuid::nil()),
                     user_id: Uuid::nil(),
                     offline: false,
+                    origin: crate::db::tasks::Origin::Member,
                 })
                 .await;
                 catalog

@@ -3037,6 +3037,7 @@ async fn prepare_chat(
             resolved,
             session: previous.clone(),
             directory: directory.clone(),
+            origin: db::tasks::Origin::of_turn(metadata),
         }),
         endpoint,
         driver,
@@ -3292,6 +3293,7 @@ async fn handle_chat_generation(
         driver,
     } = preparation;
     let offline = tools.offline();
+    let origin = tools.origin();
     let directory = tools.working_directory().to_path_buf();
     let mut replay = context.clone();
     let definitions = agentic.then(|| tools.definitions().to_vec());
@@ -3984,6 +3986,7 @@ async fn handle_chat_generation(
             chat_id: Some(chat_id),
             user_id,
             offline,
+            origin,
         })
         .await
         .starting_in(Some(directory.clone()))
@@ -4407,6 +4410,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         })
         .await;
         let character = ChatCharacter {

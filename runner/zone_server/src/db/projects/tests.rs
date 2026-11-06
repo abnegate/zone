@@ -3,6 +3,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::*;
+use crate::db::actions::{self, StartTask};
+use crate::db::tasks::Origin;
+use crate::db::workspace_members::{self, WorkspaceRole};
 
 async fn pool() -> PgPool {
     PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
@@ -97,12 +100,13 @@ impl Fixture {
         .expect("a message");
     }
 
-    async fn task(&self, project: Uuid, created_by: Option<Uuid>, at: &str) -> Uuid {
+    async fn task(&self, project: Uuid, origin: Origin, at: &str) -> Uuid {
         let task: Uuid = sqlx::query_scalar(
-            "INSERT INTO tasks (workspace_id, title, description, created_by, created_at) VALUES ($1, 'Task', 'Do it', $2, $3::timestamp) RETURNING id",
+            "INSERT INTO tasks (workspace_id, title, description, created_by, origin, created_at) VALUES ($1, 'Task', 'Do it', $2, $3, $4::timestamp) RETURNING id",
         )
         .bind(self.workspace)
-        .bind(created_by)
+        .bind(self.user)
+        .bind(origin.as_str())
         .bind(at)
         .fetch_one(&self.pool)
         .await
@@ -114,6 +118,38 @@ impl Fixture {
             .await
             .expect("a task in the project");
         task
+    }
+
+    async fn start(&self, project: Uuid, origin: Origin) -> Uuid {
+        let started = actions::start_task(
+            &self.pool,
+            self.workspace,
+            self.user,
+            None,
+            origin,
+            StartTask {
+                title: Some("Task".into()),
+                description: "Do it".into(),
+                acceptance_criteria: None,
+                project_ids: vec![project],
+                source_id: None,
+                priority: None,
+            },
+        )
+        .await
+        .expect("a started task");
+        started["task_id"]
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .expect("the started task's id")
+    }
+
+    async fn created(&self, task: Uuid) -> NaiveDateTime {
+        sqlx::query_scalar("SELECT created_at FROM tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&self.pool)
+            .await
+            .expect("the task's creation time")
     }
 }
 
@@ -280,7 +316,7 @@ async fn a_message_a_member_typed_marks_the_project_used() {
 }
 
 #[tokio::test]
-async fn a_task_a_member_added_marks_the_project_used_but_a_planned_one_does_not() {
+async fn a_task_a_member_added_marks_the_project_used_but_an_automated_one_does_not() {
     let fixture = fixture().await;
     let project = fixture.project("Busy").await;
     let chat = fixture.chat(project).await;
@@ -288,22 +324,46 @@ async fn a_task_a_member_added_marks_the_project_used_but_a_planned_one_does_not
         .message(chat, "user", serde_json::json!({}), "2026-11-01 09:00:00")
         .await;
     fixture
-        .task(project, Some(fixture.user), "2026-11-02 09:00:00")
+        .task(project, Origin::Member, "2026-11-02 09:00:00")
         .await;
-    let planned = fixture
-        .task(project, Some(fixture.user), "2026-11-03 09:00:00")
+    fixture
+        .task(project, Origin::Automation, "2026-11-03 09:00:00")
         .await;
-    sqlx::query(
-        "INSERT INTO task_automation (task_id, project_id, auto_created) VALUES ($1, $2, TRUE)",
-    )
-    .bind(planned)
-    .bind(project)
-    .execute(&fixture.pool)
-    .await
-    .expect("a planned task");
-    fixture.task(project, None, "2026-11-04 09:00:00").await;
+    fixture
+        .task(project, Origin::Reminder, "2026-11-04 09:00:00")
+        .await;
 
     assert_eq!(fixture.last_used(project).await, at("2026-11-02 09:00:00"));
+}
+
+#[tokio::test]
+async fn a_task_a_reminder_started_does_not_mark_the_project_used() {
+    let fixture = fixture().await;
+    workspace_members::add_member(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.user,
+        WorkspaceRole::Member,
+        None,
+    )
+    .await
+    .expect("a member of the workspace");
+    let reminded = fixture.project("Reminded").await;
+    let worked = fixture.project("Worked").await;
+
+    fixture.start(reminded, Origin::Reminder).await;
+    let started = fixture.start(worked, Origin::Member).await;
+
+    assert_eq!(
+        fixture.last_used(reminded).await,
+        None,
+        "a task a reminder turn started is not a member using the project"
+    );
+    assert_eq!(
+        fixture.last_used(worked).await,
+        Some(fixture.created(started).await),
+        "a task a member's turn started marks the project used"
+    );
 }
 
 #[tokio::test]

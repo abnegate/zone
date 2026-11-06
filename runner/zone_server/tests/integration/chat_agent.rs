@@ -185,6 +185,7 @@ async fn chat_catalog(chat_id: Uuid) -> ChatTools {
         workspace_id: Uuid::new_v4(),
         chat_id: Some(chat_id),
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await
 }
@@ -2361,6 +2362,7 @@ async fn memory_catalog(fixture: &Fixture) -> ChatTools {
         workspace_id: fixture.workspace,
         chat_id: Some(fixture.chat),
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await
 }
