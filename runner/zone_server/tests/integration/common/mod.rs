@@ -152,6 +152,10 @@ pub struct TestClient {
 }
 
 impl TestClient {
+    pub async fn sign_in_with_role(&self, role: &str) -> String {
+        sign_in_with_role(&self.router, role).await
+    }
+
     /// Create a new test client
     pub fn new(router: Router) -> Self {
         Self {
@@ -414,6 +418,50 @@ impl TestResponse {
             self.text()
         );
     }
+}
+
+async fn post_auth(router: &Router, uri: &str, body: Value) -> Value {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert!(status.is_success(), "{uri} answered {status}: {json}");
+    json
+}
+
+/// Registers through the API, grants a seeded global role, and signs in again
+/// so the access token carries the permissions that role holds.
+pub async fn sign_in_with_role(router: &Router, role: &str) -> String {
+    let email = test_email();
+    let credentials = serde_json::json!({
+        "email": &email,
+        "password": test_password(),
+    });
+    post_auth(router, "/api/auth/register", credentials.clone()).await;
+    let pool = create_test_pool().await;
+    let user = zone_server::db::users::get_user_by_email(&pool, &email)
+        .await
+        .unwrap()
+        .expect("the registered user exists");
+    zone_server::db::users::assign_user_role(&pool, user.id, role)
+        .await
+        .unwrap();
+    let signed_in = post_auth(router, "/api/auth/login", credentials).await;
+    signed_in["access_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("login must return an access token, got {signed_in}"))
+        .to_string()
 }
 
 /// Helper to generate a unique test email

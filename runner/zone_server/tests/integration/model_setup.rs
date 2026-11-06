@@ -119,7 +119,7 @@ async fn setup_rejects_unknown_features() {
 #[tokio::test]
 async fn setup_post_chat_on_8gb_is_allowed() {
     let router = router().await;
-    let token = token(&router).await;
+    let token = common::sign_in_with_role(&router, "admin").await;
     let response = router
         .oneshot(
             Request::builder()
@@ -164,7 +164,7 @@ async fn setup_post_all_on_tiny_ram_is_conflict() {
         std::env::set_var("ZONE_SETUP_DISK_FREE_BYTES", "500000000000");
     }
     let router = router().await;
-    let token = token(&router).await;
+    let token = common::sign_in_with_role(&router, "admin").await;
     let response = router
         .oneshot(
             Request::builder()
@@ -186,4 +186,70 @@ async fn setup_post_all_on_tiny_ram_is_conflict() {
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["code"], "all-ram");
     assert!(body["error"].as_str().unwrap().contains("16 GB"));
+}
+
+async fn post_setup(router: axum::Router, token: &str) -> (StatusCode, Value) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/setup")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({ "features": ["chat"], "chat_preset": "8gb" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+        .unwrap_or(Value::Null);
+    (status, body)
+}
+
+#[tokio::test]
+async fn setup_post_is_refused_to_a_user_who_cannot_install_models() {
+    let router = router().await;
+    let token = token(&router).await;
+    let (status, body) = post_setup(router, &token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let message = body["error"].as_str().unwrap();
+    assert!(message.contains("models:create"), "{message}");
+}
+
+#[tokio::test]
+async fn setup_post_is_refused_to_a_read_only_viewer() {
+    let router = router().await;
+    let token = common::sign_in_with_role(&router, "viewer").await;
+    let (status, body) = post_setup(router, &token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+}
+
+#[tokio::test]
+async fn setup_plan_stays_readable_to_a_user_who_cannot_install_models() {
+    let router = router().await;
+    let token = token(&router).await;
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/models/setup?features=chat&chat_preset=8gb")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn setup_post_is_allowed_for_the_global_admin_role() {
+    let router = router().await;
+    let token = common::sign_in_with_role(&router, "admin").await;
+    let (status, body) = post_setup(router, &token).await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
 }

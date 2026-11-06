@@ -25,13 +25,22 @@ use std::sync::{
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tower::ServiceExt;
-use zone_server::auth::create_session_access_token;
+use zone_server::auth::{Permission, create_session_access_token};
 use zone_server::config::DEFAULT_HUGGINGFACE_MODELS_URL;
 use zone_server::db::{sessions, users};
 use zone_server::routes::models::{BrowseQuery, HuggingFaceProvider, ModelMediumFilter, ModelSort};
 use zone_server::services::comfy::{policy, settings};
 
 async fn token(pool: &PgPool, secret: &str) -> String {
+    token_with(
+        pool,
+        secret,
+        &[Permission::ModelsCreate, Permission::ModelsDelete],
+    )
+    .await
+}
+
+async fn token_with(pool: &PgPool, secret: &str, permissions: &[Permission]) -> String {
     let user = users::create_user(
         pool,
         &common::test_email(),
@@ -57,7 +66,10 @@ async fn token(pool: &PgPool, secret: &str) -> String {
         user.id,
         "lora@example.com",
         vec![],
-        vec![],
+        permissions
+            .iter()
+            .map(|permission| permission.name().to_string())
+            .collect(),
         false,
         session.id,
         secret,
@@ -2164,4 +2176,78 @@ async fn train_language_rejects_an_unknown_base() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert_eq!(response["error"], "unknown training base");
     let _ = fs::remove_dir_all(models_directory);
+}
+
+async fn send(router: axum::Router, token: &str, method: &str, uri: &str) -> (StatusCode, Value) {
+    let request = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn training_writes_are_refused_to_a_user_who_cannot_install_models() {
+    let models_directory = tempfile::tempdir().unwrap();
+    let mut config = common::test_config_with_ollama_host(common::REFUSED_URL);
+    config.comfyui.models_directory = models_directory.path().to_path_buf();
+    config.comfyui.train_command = Some("true".into());
+    let pool = common::create_test_pool().await;
+    let token = token_with(&pool, config.jwt_secret(), &[Permission::ModelsDelete]).await;
+    let router = common::create_test_router(common::create_test_state(config, pool));
+    let upload = format!("/api/models/train/uploads/{}", uuid::Uuid::new_v4());
+
+    for (method, uri) in [
+        ("POST", "/api/models/train"),
+        ("DELETE", "/api/models/train"),
+        ("POST", "/api/models/train/uploads"),
+        ("POST", upload.as_str()),
+        ("DELETE", upload.as_str()),
+        ("POST", "/api/models/train/captions"),
+        ("POST", "/api/models/train/frames"),
+    ] {
+        let (status, body) = send(router.clone(), &token, method, uri).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {body}");
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("models:create"),
+            "{method} {uri}: {message}"
+        );
+    }
+    assert_eq!(
+        fs::read_dir(models_directory.path()).unwrap().count(),
+        0,
+        "a refused upload must stage nothing on the server"
+    );
+
+    let (status, _) = get_json(router.clone(), &token, "/api/models/train").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "the job stays readable");
+    let (status, _) = get_json(router, &token, "/api/models/train/bases").await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "the bases stay readable");
+}
+
+#[tokio::test]
+async fn removing_a_lora_is_refused_to_a_user_who_cannot_remove_models() {
+    let models_directory = tempfile::tempdir().unwrap();
+    let mut config = common::test_config_with_ollama_host(common::REFUSED_URL);
+    config.comfyui.models_directory = models_directory.path().to_path_buf();
+    let pool = common::create_test_pool().await;
+    let token = token_with(&pool, config.jwt_secret(), &[Permission::ModelsCreate]).await;
+    let router = common::create_test_router(common::create_test_state(config, pool));
+
+    let (status, body) = delete_json(router, &token, "/api/models/some-lora.safetensors").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("models:delete"),
+        "{body}"
+    );
 }

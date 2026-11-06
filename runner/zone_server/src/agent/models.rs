@@ -2,6 +2,7 @@
 
 use super::PREVIEW_TITLE_CHARS;
 use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
+use crate::auth::permission::{self, Permission};
 use crate::db::workspace_members::{self, WorkspaceRole};
 use crate::pull::Pull;
 use crate::routes::models::{
@@ -53,6 +54,18 @@ enum Operation {
     GetTrain,
     StartTrain,
     DismissTrain,
+}
+
+impl Operation {
+    fn permission(self) -> Option<Permission> {
+        match self {
+            Self::Install | Self::CancelInstall | Self::StartTrain | Self::DismissTrain => {
+                Some(Permission::ModelsCreate)
+            }
+            Self::Delete => Some(Permission::ModelsDelete),
+            Self::List | Self::Get | Self::InstallStatus | Self::ListBases | Self::GetTrain => None,
+        }
+    }
 }
 
 struct ModelTool {
@@ -309,6 +322,18 @@ impl ModelTool {
                 }
                 Err(error) => {
                     tracing::warn!(tool = self.name(), %error, "Model tool authorization failed");
+                    return ToolResult::error(
+                        "The model operation failed. Check current state before retrying a write.",
+                    );
+                }
+            }
+        }
+        if let Some(permission) = self.operation.permission() {
+            match permission::holds(self.scope.state.db(), self.scope.user_id, permission).await {
+                Ok(true) => {}
+                Ok(false) => return ToolResult::error(permission.refusal()),
+                Err(error) => {
+                    tracing::warn!(tool = self.name(), %error, "Model permission check failed");
                     return ToolResult::error(
                         "The model operation failed. Check current state before retrying a write.",
                     );
@@ -866,6 +891,42 @@ mod tests {
             Some("Install model llama3.2:3b.".into())
         );
         assert!(!install.description().contains("wait_for"));
+    }
+
+    #[tokio::test]
+    async fn every_write_needs_a_model_permission_and_no_read_does() {
+        let operations = [
+            Operation::List,
+            Operation::Get,
+            Operation::Install,
+            Operation::InstallStatus,
+            Operation::CancelInstall,
+            Operation::Delete,
+            Operation::ListBases,
+            Operation::GetTrain,
+            Operation::StartTrain,
+            Operation::DismissTrain,
+        ];
+        for operation in operations {
+            let tool = ModelTool {
+                scope: scope(),
+                operation,
+            };
+            assert_eq!(
+                operation.permission().is_some(),
+                tool.tier() == Tier::Write,
+                "{} must need a permission exactly when it writes",
+                tool.name()
+            );
+        }
+        assert_eq!(
+            Operation::Delete.permission(),
+            Some(Permission::ModelsDelete)
+        );
+        assert_eq!(
+            Operation::Install.permission(),
+            Some(Permission::ModelsCreate)
+        );
     }
 
     #[test]

@@ -1,7 +1,9 @@
 import { Button, Checkbox, Select } from '@zone/ui';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { modelsApi, SetupError, type SetupPlan } from '../../../api/models';
+import { useModelAccess } from '../hooks/useModelAccess';
 import type { PullApi } from '../hooks/usePull';
+import ModelAccessNotice from './ModelAccessNotice';
 import './FeaturesPanel.css';
 
 type FeatureRow = SetupPlan['features'][number];
@@ -70,6 +72,7 @@ export default function FeaturesPanel({
   const [error, setError] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
   const notified = useRef(false);
+  const { canInstall } = useModelAccess();
 
   const load = useCallback(async (features: string[], chatPreset?: string) => {
     setError(null);
@@ -120,6 +123,7 @@ export default function FeaturesPanel({
   );
 
   const toggle = (id: string, on: boolean) => {
+    if (!canInstall) return;
     const feature = plan?.features.find((item) => item.id === id);
     if (!feature || feature.required || (on && feature.blocked)) return;
     const next = on ? [...selected, id] : selected.filter((item) => item !== id);
@@ -134,7 +138,7 @@ export default function FeaturesPanel({
   };
 
   const install = async () => {
-    if (!plan || plan.gate || installing) return;
+    if (!canInstall || !plan || plan.gate || installing) return;
     setInstalling(true);
     setError(null);
     try {
@@ -234,6 +238,7 @@ export default function FeaturesPanel({
         label="Chat models"
         value={preset || undefined}
         onValueChange={changePreset}
+        disabled={!canInstall}
         options={plan.chat_presets.map((option) => ({
           value: option.id,
           label: option.label,
@@ -249,7 +254,11 @@ export default function FeaturesPanel({
                 label={feature.label}
                 helpText={feature.block_reason ?? feature.description}
                 checked={selected.includes(feature.id)}
-                disabled={feature.required || (feature.blocked && !selected.includes(feature.id))}
+                disabled={
+                  !canInstall ||
+                  feature.required ||
+                  (feature.blocked && !selected.includes(feature.id))
+                }
                 onCheckedChange={(checked) => toggle(feature.id, checked)}
               />
               <span
@@ -319,7 +328,9 @@ export default function FeaturesPanel({
         </section>
       )}
 
-      {!(variant === 'setup' && upToDate) && (
+      {!canInstall && <ModelAccessNotice />}
+
+      {canInstall && !(variant === 'setup' && upToDate) && (
         <div className="models-setup-actions">
           <Button
             size={variant === 'setup' ? 'lg' : undefined}

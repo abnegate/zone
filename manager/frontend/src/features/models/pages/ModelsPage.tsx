@@ -6,10 +6,12 @@ import { modelsApi } from '../../../api/models';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import Capabilities from '../components/Capabilities';
 import DownloadOptions from '../components/DownloadOptions';
+import ModelAccessNotice from '../components/ModelAccessNotice';
 import PullJobs from '../components/PullJobs';
 import TrainPanel from '../components/TrainPanel';
 import VirtualBrowseList from '../components/VirtualBrowseList';
 import { useBrowse } from '../hooks/useBrowse';
+import { useModelAccess } from '../hooks/useModelAccess';
 import { useModels } from '../hooks/useModels';
 import { usePull } from '../hooks/usePull';
 import type { BrowseModel, InstalledModel, ModelSort } from '../types';
@@ -58,6 +60,7 @@ export default function ModelsPage() {
   const browse = useBrowse();
   const pull = usePull();
   const navigate = useNavigate();
+  const { canInstall, canRemove } = useModelAccess();
 
   const [activeTab, setActiveTab] = useState<Tab>('installed');
   const [modelInput, setModelInput] = useState('');
@@ -244,34 +247,38 @@ export default function ModelsPage() {
 
         {activeTab === 'installed' && (
           <>
-            <section className="models-install-panel" aria-label="Add model">
-              <form className="models-install-form" onSubmit={handlePull}>
-                <input
-                  type="text"
-                  placeholder="Model name..."
-                  aria-label="Model name"
-                  value={modelInput}
-                  onChange={(e) => setModelInput(e.target.value)}
-                  disabled={pull.activeCount >= MAX_PARALLEL_PULLS}
-                />
-                <Button
-                  type="submit"
-                  loading={Boolean(currentJob)}
-                  disabled={!currentName || !pull.canStart(currentName)}
-                >
-                  {currentJob
-                    ? 'Installing...'
-                    : pull.activeCount >= MAX_PARALLEL_PULLS
-                      ? 'Slots full'
-                      : 'Install'}
-                </Button>
-              </form>
-              <p className="help-text">
-                An Ollama model:tag (llama3.2:3b) or a HuggingFace GGUF reference
-                (hf.co/owner/Model-GGUF). Downloads continue in the background if you leave this
-                page.
-              </p>
-            </section>
+            {canInstall ? (
+              <section className="models-install-panel" aria-label="Add model">
+                <form className="models-install-form" onSubmit={handlePull}>
+                  <input
+                    type="text"
+                    placeholder="Model name..."
+                    aria-label="Model name"
+                    value={modelInput}
+                    onChange={(e) => setModelInput(e.target.value)}
+                    disabled={pull.activeCount >= MAX_PARALLEL_PULLS}
+                  />
+                  <Button
+                    type="submit"
+                    loading={Boolean(currentJob)}
+                    disabled={!currentName || !pull.canStart(currentName)}
+                  >
+                    {currentJob
+                      ? 'Installing...'
+                      : pull.activeCount >= MAX_PARALLEL_PULLS
+                        ? 'Slots full'
+                        : 'Install'}
+                  </Button>
+                </form>
+                <p className="help-text">
+                  An Ollama model:tag (llama3.2:3b) or a HuggingFace GGUF reference
+                  (hf.co/owner/Model-GGUF). Downloads continue in the background if you leave this
+                  page.
+                </p>
+              </section>
+            ) : (
+              <ModelAccessNotice />
+            )}
 
             <section className="models-list-panel">
               <div className="models-section-head">
@@ -329,9 +336,11 @@ export default function ModelsPage() {
                   title="No models installed"
                   description="Pick the product features in workspace settings, or browse the catalog."
                   action={
-                    <Button onClick={() => navigate('/settings?tab=features')}>
-                      Install features
-                    </Button>
+                    canInstall ? (
+                      <Button onClick={() => navigate('/settings?tab=features')}>
+                        Install features
+                      </Button>
+                    ) : undefined
                   }
                 />
               ) : (
@@ -395,29 +404,31 @@ export default function ModelsPage() {
                             <Capabilities capabilities={model.capabilities} />
                           </div>
                         </div>
-                        <div className="model-actions">
-                          <button
-                            className="btn btn-danger-icon"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setDeleteConfirm(model.name);
-                            }}
-                            title="Delete model"
-                            type="button"
-                          >
-                            <svg
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              width="16"
-                              height="16"
-                              aria-hidden="true"
+                        {canRemove && (
+                          <div className="model-actions">
+                            <button
+                              className="btn btn-danger-icon"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteConfirm(model.name);
+                              }}
+                              title="Delete model"
+                              type="button"
                             >
-                              <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                          </button>
-                        </div>
+                              <svg
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                width="16"
+                                height="16"
+                                aria-hidden="true"
+                              >
+                                <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -429,6 +440,7 @@ export default function ModelsPage() {
 
         {activeTab === 'browse' && (
           <section className="models-browse-panel">
+            {!canInstall && <ModelAccessNotice />}
             <div className="browse-toolbar">
               <Tabs
                 value={browse.source}
@@ -528,7 +540,7 @@ export default function ModelsPage() {
               <VirtualBrowseList
                 models={browse.models}
                 onItemClick={handleShowDetails}
-                onInstall={handleInstall}
+                onInstall={canInstall ? handleInstall : undefined}
                 hasMore={browse.hasMore}
                 loadingMore={browse.loadingMore}
                 onLoadMore={browse.loadMore}
@@ -537,7 +549,8 @@ export default function ModelsPage() {
           </section>
         )}
 
-        {activeTab === 'train' && <TrainPanel onTrained={refresh} />}
+        {activeTab === 'train' &&
+          (canInstall ? <TrainPanel onTrained={refresh} /> : <ModelAccessNotice />)}
       </div>
 
       <Modal
@@ -624,15 +637,17 @@ export default function ModelsPage() {
                 <Button variant="ghost" onClick={() => setDetailsModel(null)}>
                   Close
                 </Button>
-                <Button
-                  variant="destructive"
-                  onClick={() => {
-                    setDetailsModel(null);
-                    setDeleteConfirm(detailsModel.name);
-                  }}
-                >
-                  Delete Model
-                </Button>
+                {canRemove && (
+                  <Button
+                    variant="destructive"
+                    onClick={() => {
+                      setDetailsModel(null);
+                      setDeleteConfirm(detailsModel.name);
+                    }}
+                  >
+                    Delete Model
+                  </Button>
+                )}
               </div>
             </>
           ) : (
@@ -749,7 +764,7 @@ export default function ModelsPage() {
                 <Capabilities capabilities={detailsModel.capabilities} tags={detailsModel.tags} />
               </div>
 
-              {download?.name && (
+              {canInstall && download?.name && (
                 <DownloadOptions
                   model={detailsModel}
                   options={modelDownloadSizes(detailsModel)}
@@ -812,14 +827,19 @@ export default function ModelsPage() {
                   <Button variant="ghost" onClick={() => setDetailsModel(null)}>
                     Close
                   </Button>
-                  <Button
-                    disabled={!download?.name || !pull.canStart(download.name)}
-                    onClick={() =>
-                      handleInstall(detailsModel, selectedSize || defaultDownloadName(detailsModel))
-                    }
-                  >
-                    {download?.name ? 'Install Model' : download?.label}
-                  </Button>
+                  {canInstall && (
+                    <Button
+                      disabled={!download?.name || !pull.canStart(download.name)}
+                      onClick={() =>
+                        handleInstall(
+                          detailsModel,
+                          selectedSize || defaultDownloadName(detailsModel)
+                        )
+                      }
+                    >
+                      {download?.name ? 'Install Model' : download?.label}
+                    </Button>
+                  )}
                 </div>
               )}
             </>

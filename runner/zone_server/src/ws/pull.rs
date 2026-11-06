@@ -14,7 +14,8 @@ use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use uuid::Uuid;
 
-use crate::auth::validate_access_token;
+use crate::auth::middleware::require_permission;
+use crate::auth::{Permission, validate_access_token};
 use crate::db::{self, sessions};
 use crate::pull::{Event, Pull, PullRegistry, PullStart};
 use crate::state::AppState;
@@ -88,6 +89,11 @@ async fn handle(socket: WebSocket, state: AppState) {
         },
         _ => None,
     };
+    let refusal = access.as_ref().and_then(|access| {
+        require_permission(&access.claims, Permission::ModelsCreate)
+            .err()
+            .map(|error| error.message)
+    });
     let authorization = access.and_then(|access| {
         Some(Authorization {
             expires_at: access.claims.exp,
@@ -114,6 +120,11 @@ async fn handle(socket: WebSocket, state: AppState) {
             },
         )
         .await;
+        let _ = sender.close().await;
+        return;
+    }
+    if let Some(message) = refusal {
+        let _ = emit_handshake(&mut sender, Handshake::Error { message }).await;
         let _ = sender.close().await;
         return;
     }

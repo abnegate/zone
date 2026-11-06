@@ -903,7 +903,7 @@ async fn test_get_model_unauthorized() {
 #[tokio::test]
 async fn get_and_delete_reject_invalid_model_names_before_ollama() {
     let router = create_test_router_with_ollama("http://127.0.0.1:59999").await;
-    let token = get_auth_token(&router).await;
+    let token = common::sign_in_with_role(&router, "admin").await;
     for (method, name, expected) in [
         ("GET", "bad%20model".to_string(), "Invalid characters"),
         ("DELETE", "bad%20model".to_string(), "Invalid characters"),
@@ -1009,7 +1009,7 @@ async fn test_get_model_invalid_json_response() {
 async fn test_delete_model_success() {
     let ollama_addr = start_mock_ollama_server().await;
     let router = create_test_router_with_ollama(&format!("http://{}", ollama_addr)).await;
-    let token = get_auth_token(&router).await;
+    let token = common::sign_in_with_role(&router, "admin").await;
 
     let request = Request::builder()
         .method("DELETE")
@@ -1026,7 +1026,7 @@ async fn test_delete_model_success() {
 async fn test_delete_model_not_found() {
     let ollama_addr = start_mock_ollama_server().await;
     let router = create_test_router_with_ollama(&format!("http://{}", ollama_addr)).await;
-    let token = get_auth_token(&router).await;
+    let token = common::sign_in_with_role(&router, "admin").await;
 
     let request = Request::builder()
         .method("DELETE")
@@ -1041,6 +1041,29 @@ async fn test_delete_model_not_found() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(error["error"].as_str().unwrap().contains("not found"));
+}
+
+#[tokio::test]
+async fn test_delete_model_is_refused_to_a_user_who_cannot_remove_models() {
+    let ollama_addr = start_mock_ollama_server().await;
+    let router = create_test_router_with_ollama(&format!("http://{}", ollama_addr)).await;
+    let token = get_auth_token(&router).await;
+
+    let request = Request::builder()
+        .method("DELETE")
+        .uri("/api/models/llama2:latest")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        error["error"].as_str().unwrap().contains("models:delete"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -1060,7 +1083,7 @@ async fn test_delete_model_unauthorized() {
 #[tokio::test]
 async fn test_delete_model_connection_error() {
     let router = create_test_router_with_ollama("http://127.0.0.1:59999").await;
-    let token = get_auth_token(&router).await;
+    let token = common::sign_in_with_role(&router, "admin").await;
 
     let request = Request::builder()
         .method("DELETE")
@@ -1086,7 +1109,7 @@ async fn test_delete_model_connection_error() {
 async fn test_delete_model_service_error() {
     let ollama_addr = start_error_ollama_server().await;
     let router = create_test_router_with_ollama(&format!("http://{}", ollama_addr)).await;
-    let token = get_auth_token(&router).await;
+    let token = common::sign_in_with_role(&router, "admin").await;
 
     let request = Request::builder()
         .method("DELETE")
