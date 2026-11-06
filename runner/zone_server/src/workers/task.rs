@@ -6,43 +6,72 @@
 use abnegate_http::Backoff;
 use abnegate_http::RetryAfter;
 use abnegate_http::contains_standalone_status;
-use abnegate_llm::{Limit, Message as LlmMessage};
+use abnegate_llm::Limit;
+use abnegate_llm::Message as LlmMessage;
 use futures::StreamExt;
 use reqwest::StatusCode;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::AcquireError;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
-use zone_core::llm::provider::{OUTGROWN, UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient};
+use zone_core::llm::BuiltinTools;
+use zone_core::llm::LlmBackend;
+use zone_core::llm::LlmClient;
+use zone_core::llm::provider::OUTGROWN;
+use zone_core::llm::provider::UNFUNDED;
+use zone_core::llm::provider::UNFUNDED_CONTEXT;
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
 
+use crate::agent;
+use crate::agent::AgentEvent;
+use crate::agent::AgentRun;
+use crate::agent::ApprovalPolicy;
+use crate::agent::ChatTools;
+use crate::agent::LoopBudget;
+use crate::agent::Spend;
 use crate::agent::plan;
-use crate::agent::prompt::{self, Environment, Vcs};
-use crate::agent::question::{self, Question};
-use crate::agent::wait::{self, Waited, Waiting};
-use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
+use crate::agent::prompt;
+use crate::agent::prompt::Environment;
+use crate::agent::prompt::Vcs;
+use crate::agent::question;
+use crate::agent::question::Question;
+use crate::agent::wait;
+use crate::agent::wait::Waited;
+use crate::agent::wait::Waiting;
 use crate::config::ModelBackend;
-use crate::db::{task_tool_calls, tasks};
-use crate::services::backend::{self, Resolved};
-use crate::services::chat::session::{self, RunContext};
+use crate::db::task_tool_calls;
+use crate::db::tasks;
+use crate::services::backend;
+use crate::services::backend::Resolved;
+use crate::services::chat::session;
+use crate::services::chat::session::RunContext;
 use crate::services::endpoint::Endpoint;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
-use crate::services::route::{Reason, Route, Unusable};
+use crate::services::route::Reason;
+use crate::services::route::Route;
+use crate::services::route::Unusable;
 use crate::services::stages;
 use crate::state::AppState;
-use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
+use crate::workers::evaluation::EvaluationSettings;
+use crate::workers::evaluation::Evaluator;
+use crate::workers::evaluation::Verdict;
 use crate::workers::instructions;
-use crate::workers::pr::{PrCreationResult, create_pr_for_task};
+use crate::workers::pr::PrCreationResult;
+use crate::workers::pr::create_pr_for_task;
 use zone_context::context::SearchResultWithAnalysis;
 
 mod halt;
@@ -54,7 +83,8 @@ mod unprepared;
 use halt::Halt;
 use handover::Handover;
 use meter::Meter;
-use seat::{Seat, Seated};
+use seat::Seat;
+use seat::Seated;
 use unprepared::Unprepared;
 
 // Max concurrent task executions
@@ -422,7 +452,7 @@ impl Decision {
     }
 }
 
-const DOUBLING: u32 = 2;
+const FACTOR: u32 = 2;
 
 const JITTER: f64 = 0.25;
 
@@ -442,18 +472,16 @@ impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
             attempts: 4,
-            transient: Backoff::new(
-                Duration::from_secs(2),
-                DOUBLING,
-                Duration::from_secs(60),
-                JITTER,
-            ),
-            rate_limit: Backoff::new(
-                Duration::from_secs(15),
-                DOUBLING,
-                Duration::from_secs(300),
-                JITTER,
-            ),
+            transient: Backoff::default()
+                .with_base(Duration::from_secs(2))
+                .with_maximum(Duration::from_secs(60))
+                .with_factor(FACTOR)
+                .with_jitter(JITTER),
+            rate_limit: Backoff::default()
+                .with_base(Duration::from_secs(15))
+                .with_maximum(Duration::from_secs(300))
+                .with_factor(FACTOR)
+                .with_jitter(JITTER),
         }
     }
 }
@@ -630,15 +658,13 @@ const TERMINAL_MARKERS: &[&str] = &[
     "unsupported",
 ];
 
-const TERMINAL_STATUSES: &[u16] = &[
-    StatusCode::BAD_REQUEST.as_u16(),
-    StatusCode::UNAUTHORIZED.as_u16(),
-    StatusCode::FORBIDDEN.as_u16(),
-    StatusCode::NOT_FOUND.as_u16(),
-    StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+const TERMINAL_STATUSES: &[StatusCode] = &[
+    StatusCode::BAD_REQUEST,
+    StatusCode::UNAUTHORIZED,
+    StatusCode::FORBIDDEN,
+    StatusCode::NOT_FOUND,
+    StatusCode::UNPROCESSABLE_ENTITY,
 ];
-
-const TOO_MANY_REQUESTS: u16 = StatusCode::TOO_MANY_REQUESTS.as_u16();
 
 /// Rate limits are matched first: a throttled request is recoverable even when
 /// the provider dresses it up in the same vocabulary as a rejected one.
@@ -647,10 +673,10 @@ fn classify(message: &str) -> Failure {
     if RATE_LIMIT_MARKERS
         .iter()
         .any(|marker| lowered.contains(marker))
-        || contains_standalone_status(&lowered, TOO_MANY_REQUESTS)
+        || contains_standalone_status(&lowered, StatusCode::TOO_MANY_REQUESTS.as_u16())
     {
         return Failure::RateLimited {
-            retry_after: RetryAfter::from_text(message),
+            retry_after: RetryAfter::from_text(&lowered),
         };
     }
     if TERMINAL_MARKERS
@@ -658,7 +684,7 @@ fn classify(message: &str) -> Failure {
         .any(|marker| lowered.contains(marker))
         || TERMINAL_STATUSES
             .iter()
-            .any(|status| contains_standalone_status(&lowered, *status))
+            .any(|status| contains_standalone_status(&lowered, status.as_u16()))
     {
         return Failure::Terminal;
     }
@@ -4798,7 +4824,7 @@ mod retry_tests {
     #[test]
     fn an_agents_hint_is_read_from_its_own_words() {
         assert_eq!(
-            classify_agent("You've hit your session limit · retry in 30s"),
+            classify_agent(&format!("{SESSION_LIMIT} · retry in 30s")),
             Failure::RateLimited {
                 retry_after: Some(Duration::from_secs(30)),
             }
