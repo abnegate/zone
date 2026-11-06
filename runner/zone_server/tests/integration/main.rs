@@ -56,6 +56,7 @@ mod devices;
 mod email_verification;
 mod gathering_worker;
 mod github_connection;
+mod github_connection_routes;
 mod github_sources;
 mod host_directories;
 mod indexing;
