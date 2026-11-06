@@ -371,12 +371,12 @@ async fn prepared(state: &AppState, rows: Vec<sources::SourceRow>) -> Vec<Source
 /// Forgets the cached token of every installation `rows` reach GitHub through, so each is minted
 /// afresh for the gathering rather than handed one that may expire partway through it.
 async fn refresh(state: &AppState, rows: &[sources::SourceRow]) {
-    let installations: HashSet<Uuid> = rows
+    let installations: HashSet<(Uuid, Uuid)> = rows
         .iter()
-        .filter_map(|row| row.github_installation_id)
+        .filter_map(|row| row.workspace_id.zip(row.github_installation_id))
         .collect();
-    for installation in installations {
-        match github_installations::credential(state.db(), installation).await {
+    for (workspace, installation) in installations {
+        match github_installations::credential(state.db(), workspace, installation).await {
             Ok(Some(credential)) => {
                 if let Ok(number) = u64::try_from(credential.installation_id) {
                     state.github().invalidate(InstallationId::new(number));
@@ -543,12 +543,10 @@ mod tests {
         assert_eq!(source.config["owner"], json!("acme"));
     }
 
-    async fn minting(github: &MockServer, token: &str, lifetime: Duration) {
+    async fn minting(github: &MockServer, number: u64, token: &str, lifetime: Duration) {
         let expires_at = (Utc::now() + lifetime).to_rfc3339_opts(SecondsFormat::Secs, true);
         Mock::given(method("POST"))
-            .and(path(format!(
-                "/app/installations/{INSTALLATION_ID}/access_tokens"
-            )))
+            .and(path(format!("/app/installations/{number}/access_tokens")))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "token": token,
                 "expires_at": expires_at,
@@ -564,11 +562,18 @@ mod tests {
         let harness = Harness::new().await;
         minting(
             &harness.github,
+            harness.number,
             "ghs_throwaway_expiring",
             Duration::minutes(6),
         )
         .await;
-        minting(&harness.github, MINTED_TOKEN, Duration::hours(1)).await;
+        minting(
+            &harness.github,
+            harness.number,
+            MINTED_TOKEN,
+            Duration::hours(1),
+        )
+        .await;
         let installation = harness.installation().await;
         let row = harness.source(None, Some(installation)).await;
         harness
@@ -587,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn sources_sharing_an_installation_are_gathered_with_one_mint() {
         let harness = Harness::new().await;
-        issuing(&harness.github, INSTALLATION_ID, MINTED_TOKEN, 1).await;
+        issuing(&harness.github, harness.number, MINTED_TOKEN, 1).await;
         let installation = harness.installation().await;
         let first = harness.source(None, Some(installation)).await;
         let second = harness.source(None, Some(installation)).await;
