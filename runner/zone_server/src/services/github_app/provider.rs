@@ -366,7 +366,7 @@ mod tests {
 
         let rendered = format!("{provider:?}");
         assert!(!rendered.contains("ghs_installationtokenvalue"));
-        assert!(!rendered.contains("BEGIN RSA PRIVATE key()"));
+        assert!(!rendered.contains("BEGIN RSA PRIVATE KEY"));
         assert!(rendered.contains("[REDACTED]"));
     }
 }
