@@ -14,6 +14,7 @@ import InvitationAcceptPage from './features/auth/pages/InvitationAcceptPage';
 import LoginPage from './features/auth/pages/LoginPage';
 import RegisterPage from './features/auth/pages/RegisterPage';
 import ResetPasswordPage from './features/auth/pages/ResetPasswordPage';
+import GitHubCallbackOrganization from './features/github/components/GitHubCallbackOrganization';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import { loaders } from './routes';
 import ProtectedRoute from './shared/components/ProtectedRoute';
@@ -197,12 +198,14 @@ function App({
                         <Route
                           path="org-settings"
                           element={
-                            <ProtectedRoute
-                              requiredPermission={PERMISSIONS.ORGANIZATIONS.UPDATE}
-                              requiredOrganizationRole="admin"
-                            >
-                              <OrgSettingsPage />
-                            </ProtectedRoute>
+                            <GitHubCallbackOrganization>
+                              <ProtectedRoute
+                                requiredPermission={PERMISSIONS.ORGANIZATIONS.UPDATE}
+                                requiredOrganizationRole="admin"
+                              >
+                                <OrgSettingsPage />
+                              </ProtectedRoute>
+                            </GitHubCallbackOrganization>
                           }
                         />
                         <Route

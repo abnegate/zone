@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   SERVICE_WORKER_FILE,
   SERVICE_WORKER_IDLE_TIMEOUT_MILLISECONDS,
+  SERVICE_WORKER_NAVIGATION_DENYLIST,
   setUpServiceWorker,
 } from './serviceWorker';
 
@@ -100,5 +103,25 @@ describe('setUpServiceWorker', () => {
       expect(idleCallbacks).toHaveLength(0);
       expect(registered).toEqual([]);
     }
+  });
+});
+
+describe('SERVICE_WORKER_NAVIGATION_DENYLIST', () => {
+  const denied = (path: string) =>
+    SERVICE_WORKER_NAVIGATION_DENYLIST.some((pattern) => pattern.test(path));
+
+  it('lets GitHub callback navigations reach the server', () => {
+    expect(denied('/api/github/callbacks/manifest?code=x&state=y')).toBe(true);
+    expect(denied('/api/github/callbacks/setup?installation_id=1')).toBe(true);
+  });
+
+  it('keeps serving app routes from the cached shell', () => {
+    expect(denied('/org-settings?tab=github')).toBe(false);
+    expect(denied('/sources')).toBe(false);
+  });
+
+  it('is the navigation fallback denylist the worker is built with', () => {
+    const config = readFileSync(join(import.meta.dir, '..', '..', 'vite.config.ts'), 'utf8');
+    expect(config).toContain('navigateFallbackDenylist: SERVICE_WORKER_NAVIGATION_DENYLIST');
   });
 });
