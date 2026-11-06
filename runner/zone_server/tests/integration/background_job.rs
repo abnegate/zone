@@ -62,6 +62,13 @@ fn chat_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// Whether job `id` wrote its log under [`chat_root`]. Asked per job because
+/// the chat agent suite shares this binary and legitimately runs jobs in that
+/// root, so a log tree standing there proves nothing about these tests.
+fn strayed(id: &str) -> bool {
+    job::log_path(&chat_root(), id).exists()
+}
+
 fn directory() -> TempDir {
     TempDir::new().expect("a temporary working directory")
 }
@@ -387,7 +394,7 @@ async fn a_job_is_readable_through_tail_job_only_from_the_session_that_started_i
         .expect("the working directory is removable");
     assert!(!log.exists(), "a job log outlived its test");
     assert!(
-        !chat_root().join(EXCLUDED).exists(),
+        !strayed(&started.id),
         "a job wrote its log into the server's own working directory"
     );
 }
@@ -470,10 +477,12 @@ async fn a_chat_spawn_leaves_the_exclude_file_alone_and_a_task_spawn_writes_it_o
     for log in &logs {
         assert!(!log.exists(), "a job log outlived its test: {log:?}");
     }
-    assert!(
-        !chat_root().join(EXCLUDED).exists(),
-        "a job wrote its log into the server's own working directory"
-    );
+    for id in [&by_chat.id, &first.id, &second.id] {
+        assert!(
+            !strayed(id),
+            "a job wrote its log into the server's own working directory"
+        );
+    }
 }
 
 /// Whatever directory a call names, a spawn writes into the session's own
@@ -542,7 +551,7 @@ async fn a_task_spawn_naming_another_checkout_writes_only_into_its_own() {
         "the emptied log directory is still in the checkout"
     );
     assert!(
-        !chat_root().join(EXCLUDED).exists(),
+        !strayed(&started.id),
         "a job wrote its log into the server's own working directory"
     );
 }
@@ -611,7 +620,7 @@ async fn a_job_a_run_started_is_dead_once_the_run_reaches_a_terminal_status() {
         .expect("the working directory is removable");
     assert!(!log.exists(), "a job log outlived its run");
     assert!(
-        !chat_root().join(EXCLUDED).exists(),
+        !strayed(&started.id),
         "a job wrote its log into the server's own working directory"
     );
 }
@@ -712,7 +721,7 @@ async fn a_job_a_chat_turn_started_is_dead_once_the_turn_ends() {
         .expect("the working directory is removable");
     assert!(!log.exists(), "a job log outlived its turn");
     assert!(
-        !chat_root().join(EXCLUDED).exists(),
+        !strayed(&started.id),
         "a job wrote its log into the server's own working directory"
     );
 }
