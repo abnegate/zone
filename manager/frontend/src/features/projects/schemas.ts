@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { GitHubInstallationStatusSchema } from '../github/installationStatus';
 
 export const ProjectStatusSchema = z.enum(['active', 'on_hold', 'cancelled']);
 
@@ -13,6 +14,9 @@ export const ProjectSchema = z.object({
   auto: z.boolean().default(false),
   auto_paused_reason: z.string().nullish(),
   auto_completed_at: z.string().nullish(),
+  github_installation_id: z.string().nullish(),
+  github_installation_status: GitHubInstallationStatusSchema.nullish(),
+  github_account_login: z.string().nullish(),
   created_at: z.string(),
   updated_at: z.string(),
 });
