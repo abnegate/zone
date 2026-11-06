@@ -53,6 +53,8 @@ afterAll(() => {
   mock.restore();
 });
 
+let nextRepositoryId = 1;
+
 function repository(
   owner: string,
   name: string,
@@ -60,7 +62,7 @@ function repository(
 ): GitHubRepository {
   return {
     installation_id: owner === 'acme' ? 'installation-1' : 'installation-2',
-    id: `${owner}/${name}`.length,
+    id: nextRepositoryId++,
     owner,
     name,
     full_name: `${owner}/${name}`,
