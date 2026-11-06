@@ -431,6 +431,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use abnegate_agent_cli::login::claude::Tokens;
     use abnegate_llm::Limit;
     use abnegate_secret::SecretValue;
     use chrono::{DateTime, SecondsFormat, TimeDelta, TimeZone};
@@ -445,7 +446,7 @@ mod tests {
     use crate::db::agent_logins::Insert;
     use crate::db::organizations;
     use crate::services::chat::session::{Generation, Pinned};
-    use crate::services::login::claude::Tokens;
+    use crate::services::login::claude::Sealed;
     use crate::services::login::router::Chosen;
     use crate::services::stages::Preferences;
 
@@ -695,14 +696,14 @@ mod tests {
         }
 
         async fn claude(&self, label: &str) -> LoginIdentity {
-            let tokens = Tokens {
-                access: SecretValue::new(format!("fake-claude-access-token-{label}")),
-                refresh: None,
-                expires_at: Utc::now() + TimeDelta::days(30),
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            };
+            let tokens = Tokens::new(
+                SecretValue::new(format!("fake-claude-access-token-{label}")),
+                None,
+                Utc::now() + TimeDelta::days(30),
+                None,
+                "user:inference",
+                None,
+            );
             let sealed = tokens
                 .seal(self.state.master_key())
                 .expect("tokens to seal");

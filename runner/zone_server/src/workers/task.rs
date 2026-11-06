@@ -6949,7 +6949,8 @@ mod cli_tests {
     use crate::db::agent_logins::{self, Insert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, users, workspace_members, workspaces};
-    use crate::services::login::claude::Tokens;
+    use crate::services::login::claude::Sealed;
+    use abnegate_agent_cli::login::claude::Tokens;
     use abnegate_llm::{Credential, LlmConfig};
     use abnegate_secret::SecretValue;
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -7824,14 +7825,14 @@ mod cli_tests {
 
     /// Claude tokens on `access`, sealed as zone stores a sign-in.
     fn sealed(state: &AppState, access: &str) -> String {
-        Tokens {
-            access: SecretValue::new(access),
-            refresh: None,
-            expires_at: Utc::now() + TimeDelta::hours(8),
-            issued_at: None,
-            scope: "user:inference".to_string(),
-            subscription: None,
-        }
+        Tokens::new(
+            SecretValue::new(access),
+            None,
+            Utc::now() + TimeDelta::hours(8),
+            None,
+            "user:inference",
+            None,
+        )
         .seal(state.master_key())
         .expect("the tokens to seal")
     }

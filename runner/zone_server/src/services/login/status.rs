@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::MasterKey;
 use abnegate_secret::redact;
 use chrono::{DateTime, SubsecRound, Utc};
@@ -29,7 +30,7 @@ pub use state::State;
 pub use usage::UsageStatus;
 pub use viewer::Viewer;
 
-use super::claude::Tokens;
+use super::claude::Sealed;
 use super::probe::{self, Probe};
 use super::router::Chosen;
 use super::usage::{Availability, Snapshot, refresh};
@@ -219,7 +220,12 @@ fn read(
         Some(AgentKind::Claude) => {
             let tokens = opened(state.master_key(), login);
             let (judged, expires_at) = judged(tokens.as_ref(), now);
-            (judged, expires_at, tokens.and_then(|tokens| tokens.label()))
+            let plan = tokens.and_then(|tokens| tokens.plan());
+            (
+                judged,
+                expires_at,
+                plan.map(|plan| plan.label().to_string()),
+            )
         }
         Some(AgentKind::Codex) => {
             let (saved, plan) = saved(state.config(), login, held);
@@ -398,14 +404,14 @@ mod tests {
     }
 
     fn seal(key: &MasterKey, expires_at: DateTime<Utc>, refresh: Option<&str>) -> SecretValue {
-        let tokens = Tokens {
-            access: SecretValue::new("fake-access-token"),
-            refresh: refresh.map(SecretValue::new),
+        let tokens = Tokens::new(
+            SecretValue::new("fake-access-token"),
+            refresh.map(SecretValue::new),
             expires_at,
-            issued_at: None,
-            scope: "user:inference".to_string(),
-            subscription: None,
-        };
+            None,
+            "user:inference",
+            None,
+        );
         SecretValue::new(tokens.seal(key).expect("seal"))
     }
 
@@ -433,14 +439,14 @@ mod tests {
     }
 
     fn subscribed(key: &MasterKey, expires_at: DateTime<Utc>, refresh: Option<&str>) -> String {
-        let tokens = Tokens {
-            access: SecretValue::new("fake-access-token"),
-            refresh: refresh.map(SecretValue::new),
+        let tokens = Tokens::new(
+            SecretValue::new("fake-access-token"),
+            refresh.map(SecretValue::new),
             expires_at,
-            issued_at: None,
-            scope: "user:inference user:profile".to_string(),
-            subscription: Some("max".to_string()),
-        };
+            None,
+            "user:inference user:profile",
+            Some("max".to_string()),
+        );
         tokens.seal(key).expect("seal")
     }
 

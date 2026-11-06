@@ -19,6 +19,7 @@ use crate::common::{
     test_email, test_password,
 };
 
+use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::SecretValue;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -41,7 +42,7 @@ use zone_server::db::ai_settings;
 use zone_server::db::chats::{self, ChatSession};
 use zone_server::services::agent::sessions;
 use zone_server::services::backend;
-use zone_server::services::login::claude::Tokens;
+use zone_server::services::login::claude::Sealed;
 use zone_server::services::login::router::unfunded;
 use zone_server::state::AppState;
 
@@ -668,14 +669,14 @@ impl Harness {
             })))
             .mount(&self.services)
             .await;
-        let sealed = Tokens {
-            access: SecretValue::new(account.token),
-            refresh: None,
-            expires_at: Utc::now() + TimeDelta::days(30),
-            issued_at: None,
-            scope: "user:inference".to_string(),
-            subscription: None,
-        }
+        let sealed = Tokens::new(
+            SecretValue::new(account.token),
+            None,
+            Utc::now() + TimeDelta::days(30),
+            None,
+            "user:inference",
+            None,
+        )
         .seal(self.state.master_key())
         .expect("the tokens to seal");
         self.insert(AgentKind::Claude, account.label, Some(&sealed))

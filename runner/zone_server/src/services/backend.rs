@@ -420,6 +420,7 @@ fn homed(settings: CliSettings, agent: AgentKind, home: &Path) -> Result<CliSett
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_agent_cli::login::claude::Tokens;
     use abnegate_secret::{SecretValue, redact};
     use chrono::{TimeDelta, Utc};
     use sqlx::PgPool;
@@ -433,7 +434,7 @@ mod tests {
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, workspaces};
     use crate::services::endpoint::testing::settings;
-    use crate::services::login::claude::Tokens;
+    use crate::services::login::claude::Sealed;
     use crate::services::route::Route;
     use crate::workers::auto_project::review::model::Venue;
 
@@ -524,14 +525,14 @@ mod tests {
 
         /// A Claude login on `access`, beside any the organization has.
         async fn add_claude(&self, state: &AppState, access: &str, expires_in: TimeDelta) -> Uuid {
-            let tokens = Tokens {
-                access: SecretValue::new(access),
-                refresh: None,
-                expires_at: Utc::now() + expires_in,
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            };
+            let tokens = Tokens::new(
+                SecretValue::new(access),
+                None,
+                Utc::now() + expires_in,
+                None,
+                "user:inference",
+                None,
+            );
             let sealed = tokens.seal(state.master_key()).expect("tokens to seal");
             self.store(AgentKind::Claude, Some(&sealed)).await
         }

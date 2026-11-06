@@ -6,6 +6,8 @@ mod kind;
 mod receipt_request;
 mod status_query;
 
+use abnegate_agent_cli::login::claude::Flow;
+use abnegate_agent_cli::login::claude::Scope;
 use abnegate_secret::SecretValue;
 use axum::{
     Json,
@@ -23,7 +25,6 @@ use crate::auth::{AuthSession, AuthUser};
 use crate::db::ai_settings::{self, AccessError};
 use crate::db::organization_members::OrgRole;
 use crate::services::login::caller::Caller;
-use crate::services::login::claude::{Flow, Scope};
 use crate::services::login::status::{AgentStatus, Viewer};
 use crate::services::login::{devices, oauth};
 use crate::state::AppState;
@@ -131,8 +132,15 @@ pub async fn start(
                 email: session.claims.email.clone(),
                 session: session.session_id,
             };
-            let started =
-                oauth::start(organization, &caller, request.scope, redirect, console).await;
+            let started = oauth::start(
+                state.config(),
+                organization,
+                &caller,
+                request.scope,
+                redirect,
+                console,
+            )
+            .await?;
             Login::Claude {
                 authorize_url: started.url,
                 expires_at: started.expires_at,

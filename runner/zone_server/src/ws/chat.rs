@@ -5445,16 +5445,16 @@ mod tests {
             access: &str,
             headroom: f64,
         ) -> Uuid {
-            let sealed = crate::services::login::claude::Tokens {
-                access: abnegate_secret::SecretValue::new(access),
-                refresh: None,
-                expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(8),
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            }
-            .seal(state.master_key())
-            .expect("tokens to seal");
+            let tokens = abnegate_agent_cli::login::claude::Tokens::new(
+                abnegate_secret::SecretValue::new(access),
+                None,
+                chrono::Utc::now() + chrono::TimeDelta::hours(8),
+                None,
+                "user:inference",
+                None,
+            );
+            let sealed = crate::services::login::claude::Sealed::seal(&tokens, state.master_key())
+                .expect("tokens to seal");
             let login = db::agent_logins::insert(
                 &organization.pool,
                 &db::agent_logins::Insert {

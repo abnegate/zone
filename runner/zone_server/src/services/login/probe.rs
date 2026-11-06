@@ -5,10 +5,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use abnegate_agent_cli::login::claude::Plan;
 use serde_json::Value;
 use zone_core::llm::AgentKind;
 
-use super::claude;
 use super::codex::{Error, Output, command};
 
 const CLAUDE: &[&str] = &["auth", "status"];
@@ -71,8 +71,8 @@ fn claude(output: &Output, executable: &Path) -> Result<Probe, Error> {
         .and_then(Value::as_str)
         .filter(|_| signed_in)
         .map(str::trim)
-        .and_then(claude::label)
-        .map(str::to_string);
+        .and_then(Plan::named)
+        .map(|plan| plan.label().to_string());
     Ok(Probe { signed_in, label })
 }
 

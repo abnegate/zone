@@ -3,11 +3,13 @@
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use abnegate_agent_cli::login::claude::Flow;
+use abnegate_agent_cli::login::claude::Redirect;
+use abnegate_agent_cli::login::claude::Scope;
 use abnegate_secret::SecretValue;
 use dashmap::DashMap;
 use uuid::Uuid;
 
-use super::claude::{Flow, Redirect, Scope};
 use super::console::Console;
 
 pub const WINDOW: Duration = Duration::from_secs(600);

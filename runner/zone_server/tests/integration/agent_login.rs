@@ -14,6 +14,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_agent_cli::login::claude::AUTHORIZE_URL;
+use abnegate_agent_cli::login::claude::CLIENT_ID;
+use abnegate_agent_cli::login::claude::REDIRECT_URL;
+use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::MasterKey;
 use abnegate_secret::SecretValue;
 use axum::body::Body;
@@ -34,7 +38,7 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::llm::AgentKind;
 use zone_server::config::{AgentConfig, Callback, Config, ModelBackend};
-use zone_server::services::login::claude::{AUTHORIZE_URL, CLIENT_ID, REDIRECT_URL, Tokens};
+use zone_server::services::login::claude::Sealed;
 use zone_server::services::login::{callback, devices};
 
 use crate::common::{TestClient, test_email, test_password};
@@ -1593,14 +1597,14 @@ async fn a_claude_login_zone_cannot_open_has_expired() {
     let owner = person(&stage.client).await;
     let organization = organization(&stage.client, &owner).await;
     let another_key = MasterKey::generate().expect("another key");
-    let tokens = Tokens {
-        access: SecretValue::new(ACCESS),
-        refresh: Some(SecretValue::new(REFRESH)),
-        expires_at: Utc::now() + TimeDelta::seconds(YEAR),
-        issued_at: None,
-        scope: INFERENCE_SCOPE.to_string(),
-        subscription: Some("max".to_string()),
-    };
+    let tokens = Tokens::new(
+        SecretValue::new(ACCESS),
+        Some(SecretValue::new(REFRESH)),
+        Utc::now() + TimeDelta::seconds(YEAR),
+        None,
+        INFERENCE_SCOPE,
+        Some("max".to_string()),
+    );
     let (login,): (Uuid,) = sqlx::query_as(
         "INSERT INTO agent_logins (organization_id, agent, credential, label, expires_at) \
          VALUES ($1, 'claude', $2, 'Claude Max', $3) RETURNING id",
@@ -1745,7 +1749,7 @@ async fn a_state_finishes_once_and_only_for_the_admin_and_organization_that_star
 }
 
 #[tokio::test]
-async fn claude_refusing_the_code_is_a_bad_gateway_that_carries_its_reason() {
+async fn claude_refusing_the_code_is_a_bad_gateway_worded_by_its_refusal() {
     let claude = token_endpoint(
         400,
         json!({ "error": "invalid_grant", "error_description": "Invalid authorization code" }),
@@ -1764,10 +1768,8 @@ async fn claude_refusing_the_code_is_a_bad_gateway_that_carries_its_reason() {
     response.assert_status(StatusCode::BAD_GATEWAY);
     assert_eq!(
         response.json_value(),
-        json!({
-            "error": "Claude refused the sign-in (HTTP 400): Invalid authorization code",
-            "kind": START_AGAIN,
-        })
+        json!({ "error": NOT_APPROVED, "kind": START_AGAIN }),
+        "Zone words the refusal itself and repeats nothing Claude's service said"
     );
     assert!(stage.login_row(organization, "claude").await.is_none());
     assert_eq!(
@@ -2307,7 +2309,7 @@ async fn claudes_refusal_of_a_returned_code_reaches_the_console_and_its_admins_s
 
     let response = stage.redeem(organization, &receipt, &owner).await;
 
-    let refusal = "Claude refused the sign-in (HTTP 400): Invalid <b>authorization</b> code";
+    let refusal = NOT_APPROVED;
     response.assert_status(StatusCode::BAD_GATEWAY);
     assert_eq!(
         response.json_value(),
@@ -3507,14 +3509,14 @@ async fn a_member_reads_every_login_and_never_a_token() {
     let organization = organization(&stage.client, &owner).await;
     seat(&stage.client, organization, &owner, &member, "member").await;
     let key = Arc::clone(stage.client.state().master_key());
-    let tokens = Tokens {
-        access: SecretValue::new(ACCESS),
-        refresh: Some(SecretValue::new(REFRESH)),
-        expires_at: Utc::now() + TimeDelta::seconds(YEAR),
-        issued_at: None,
-        scope: INFERENCE_SCOPE.to_string(),
-        subscription: Some("max".to_string()),
-    };
+    let tokens = Tokens::new(
+        SecretValue::new(ACCESS),
+        Some(SecretValue::new(REFRESH)),
+        Utc::now() + TimeDelta::seconds(YEAR),
+        None,
+        INFERENCE_SCOPE,
+        Some("max".to_string()),
+    );
     let mut sealed = Vec::new();
     let mut ids = Vec::new();
     for account in ["jake@example.com", "ada@example.com"] {
@@ -3952,14 +3954,14 @@ async fn a_status_refreshes_a_stale_snapshot_and_keeps_a_fresh_one() {
     let organization = organization(&stage.client, &owner).await;
     let key = Arc::clone(stage.client.state().master_key());
     let stored = |access: &str, used: f64, fetched_at: DateTime<Utc>| {
-        let tokens = Tokens {
-            access: SecretValue::new(access),
-            refresh: Some(SecretValue::new(REFRESH)),
-            expires_at: now + TimeDelta::seconds(YEAR),
-            issued_at: None,
-            scope: INFERENCE_SCOPE.to_string(),
-            subscription: Some("max".to_string()),
-        };
+        let tokens = Tokens::new(
+            SecretValue::new(access),
+            Some(SecretValue::new(REFRESH)),
+            now + TimeDelta::seconds(YEAR),
+            None,
+            INFERENCE_SCOPE,
+            Some("max".to_string()),
+        );
         let windows = json!([{
             "name": "5h",
             "used_percent": used,

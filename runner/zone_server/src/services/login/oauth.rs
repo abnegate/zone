@@ -3,6 +3,14 @@
 use std::future::Future;
 use std::time::Duration;
 
+use abnegate_agent_cli::login::LoginError;
+use abnegate_agent_cli::login::claude::Authorization;
+use abnegate_agent_cli::login::claude::Code;
+use abnegate_agent_cli::login::claude::Flow;
+use abnegate_agent_cli::login::claude::Redirect;
+use abnegate_agent_cli::login::claude::Reply;
+use abnegate_agent_cli::login::claude::Scope;
+use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::redact;
 use aiusg::provider::claude::{Profile, profile_at};
 use aiusg::provider::is_signed_out;
@@ -13,7 +21,7 @@ use zone_core::llm::AgentKind;
 
 use super::attempts::{self, Attempt};
 use super::caller::Caller;
-use super::claude::{self, Authorization, Client, Code, Flow, Redirect, Reply, Scope, Tokens};
+use super::claude::{self, Explained, Sealed};
 use super::console::Console;
 use super::error::Error;
 use super::pending::{self, Pending, WINDOW};
@@ -81,25 +89,29 @@ pub fn redirect(
         (Some(Flow::Loopback) | None, Some(callback), Some(console)) => {
             Ok((Redirect::Loopback(callback.port), Some(console)))
         }
+        (Some(_), _, _) => Ok((Redirect::Paste, None)),
     }
 }
 
 /// Starts a sign-in to `organization` that only `caller` can finish, whose code claude.com hands
 /// back through `redirect`. It ends the caller's earlier sign-in to the organization.
 pub async fn start(
+    config: &Config,
     organization: Uuid,
     caller: &Caller,
     scope: Scope,
     redirect: Redirect,
     console: Option<Console>,
-) -> Started {
+) -> Result<Started, Error> {
+    let endpoints = claude::endpoints(&config.agents).map_err(internal)?;
     let Authorization {
         url,
         state,
         verifier,
         scope,
         redirect,
-    } = Authorization::new(scope, redirect);
+        ..
+    } = Authorization::new(&endpoints, scope, redirect).map_err(internal)?;
     let attempt = Attempt {
         id: Uuid::new_v4(),
         organization,
@@ -123,12 +135,12 @@ pub async fn start(
         },
     );
     let window = TimeDelta::from_std(WINDOW).expect("the sign-in window fits a TimeDelta");
-    Started {
+    Ok(Started {
         url,
         expires_at: (Utc::now() + window).trunc_subsecs(0),
         flow: redirect.flow(),
         attempt: attempt.id,
-    }
+    })
 }
 
 /// Finishes the sign-in `user` started to `organization` with the code claude.com showed them,
@@ -139,7 +151,8 @@ pub async fn finish(
     user: Uuid,
     pasted: &str,
 ) -> Result<(), Error> {
-    let code: Code = pasted.parse().map_err(unreadable)?;
+    let endpoints = claude::endpoints(&state.config().agents).map_err(internal)?;
+    let code = Code::parse(&endpoints, pasted).map_err(unreadable)?;
     let pending = pending::claim(&code.state).ok_or(Error::Invalid(UNKNOWN))?;
     if (pending.organization, pending.user) != (organization, user) {
         let _ = tokio::spawn(abandon(pending.organization, pending.attempt)).await;
@@ -226,6 +239,7 @@ async fn park(reply: Reply) -> Result<String, Error> {
             attempts::fail(pending.attempt, refusal.explained().to_string());
             Err(Error::Invalid(refusal.explained()))
         }
+        _ => Err(Error::Invalid(UNKNOWN_CALLBACK)),
     }
 }
 
@@ -276,18 +290,11 @@ async fn grant(state: &AppState, pending: &Pending, code: &Code) -> Result<Token
     let mut connection = state.db().acquire().await?;
     authorize(state, &mut connection, pending).await?;
     drop(connection);
-    let endpoint = claude::token_endpoint(&state.config().agents.claude_token_url)
-        .map_err(|error| Error::Internal(error.to_string()))?;
-    Client::new(endpoint)
+    claude::client(&state.config().agents)
+        .map_err(ungranted)?
         .exchange(code, &pending.verifier, pending.scope, pending.redirect)
         .await
-        .map_err(|error| match error {
-            claude::Error::Transport(_) => Error::Unreachable(error.to_string()),
-            claude::Error::Sealing => Error::Internal(error.to_string()),
-            claude::Error::Malformed(_) | claude::Error::Rejected { .. } => {
-                Error::Refused(error.to_string())
-            }
-        })
+        .map_err(ungranted)
 }
 
 /// The Claude account `tokens` were granted for, as its profile names it, or `None` when Claude
@@ -337,7 +344,7 @@ fn label(tokens: &Tokens, profile: Option<&Profile>) -> Option<String> {
     profile
         .and_then(Profile::label)
         .map(str::to_string)
-        .or_else(|| tokens.label())
+        .or_else(|| tokens.plan().map(|plan| plan.label().to_string()))
 }
 
 /// Seals `tokens` as one of the organization's Claude logins, checking again, in the transaction
@@ -453,17 +460,34 @@ fn report(organization: Uuid, error: &Error) {
     }
 }
 
-fn unreadable(error: claude::Error) -> Error {
+/// Why claude.com's token endpoint granted no tokens, as the admin is told it.
+fn ungranted(error: LoginError) -> Error {
+    let described = claude::described(&error);
     match error {
-        claude::Error::Malformed(reason) => Error::Unreadable(reason),
-        error => Error::Internal(error.to_string()),
+        LoginError::Transport(_) => Error::Unreachable(described),
+        LoginError::Malformed(_) | LoginError::Rejected { .. } => Error::Refused(described),
+        _ => Error::Internal(described),
     }
+}
+
+fn unreadable(error: LoginError) -> Error {
+    match error {
+        LoginError::Malformed(reason) => Error::Unreadable(reason),
+        error => internal(error),
+    }
+}
+
+fn internal(error: LoginError) -> Error {
+    Error::Internal(claude::described(&error))
 }
 
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    use abnegate_agent_cli::login::claude::Endpoints;
+    use abnegate_agent_cli::login::claude::REDIRECT_URL;
+    use abnegate_agent_cli::login::claude::Refusal;
     use abnegate_secret::SecretValue;
     use aiusg::provider::claude::{ProfileAccount, ProfileOrganization};
     use base64::Engine as _;
@@ -473,10 +497,11 @@ mod tests {
 
     use super::*;
     use crate::config::{AgentConfig, Callback};
-    use crate::services::login::claude::{REDIRECT_URL, Refusal};
     use crate::services::login::console::{ORGANIZATION, RECEIPT, handed};
+    use crate::services::login::error::UNSAVED;
 
     const EMAIL: &str = "admin@example.com";
+    const METADATA_TOKEN_URL: &str = "http://169.254.169.254/v1/oauth/token";
     const PORT: u16 = 54_545;
     const CONSOLE: &str = "http://localhost:3000";
     /// A console the operator listed that runs on another machine.
@@ -523,6 +548,7 @@ mod tests {
 
     async fn looping(organization: Uuid, caller: &Caller) -> Started {
         start(
+            &crate::state::test_config(),
             organization,
             caller,
             Scope::Inference,
@@ -530,10 +556,12 @@ mod tests {
             console(),
         )
         .await
+        .expect("a started sign-in")
     }
 
     async fn pasting(organization: Uuid, caller: &Caller) -> Started {
         start(
+            &crate::state::test_config(),
             organization,
             caller,
             Scope::Inference,
@@ -541,6 +569,7 @@ mod tests {
             None,
         )
         .await
+        .expect("a started sign-in")
     }
 
     fn state_of(started: &Started) -> String {
@@ -548,28 +577,44 @@ mod tests {
     }
 
     fn approved(state: &str) -> Reply {
-        Reply::Approved(Code {
-            value: SecretValue::new("fake-code"),
-            state: state.to_string(),
-        })
+        Reply::Approved(Code::new("fake-code", state).expect("a code"))
     }
 
+    /// The reply claude.com sends a browser back with when it does not approve a sign-in for
+    /// `refusal`'s reason.
     fn refused(state: &str, refusal: Refusal) -> Reply {
-        Reply::Refused {
-            state: state.to_string(),
-            refusal,
-        }
+        let (error, description) = match refusal {
+            Refusal::Scope => ("invalid_scope", None),
+            Refusal::OnHold => ("access_denied", Some("account_on_hold")),
+            Refusal::Unavailable => ("server_error", None),
+            _ => ("access_denied", None),
+        };
+        let pairs: Vec<(String, String)> = [
+            Some(("state", state)),
+            Some(("error", error)),
+            description.map(|description| ("error_description", description)),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        let reply = Reply::read(&pairs).expect("a refusal claude.com sends");
+        assert!(
+            matches!(&reply, Reply::Refused { refusal: read, .. } if *read == refusal),
+            "{reply:?}"
+        );
+        reply
     }
 
     fn tokens(subscription: Option<&str>) -> Tokens {
-        Tokens {
-            access: SecretValue::new("fake-access-token"),
-            refresh: None,
-            expires_at: Utc::now(),
-            issued_at: None,
-            scope: "user:inference user:profile".to_string(),
-            subscription: subscription.map(str::to_string),
-        }
+        Tokens::new(
+            SecretValue::new("fake-access-token"),
+            None,
+            Utc::now(),
+            None,
+            "user:inference user:profile",
+            subscription.map(str::to_string),
+        )
     }
 
     fn profile(uuid: Option<&str>, email: Option<&str>) -> Profile {
@@ -695,13 +740,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_token_endpoint_zone_refuses_to_reach_is_zones_own_failure() {
+        let refused = Endpoints::default()
+            .with_token(METADATA_TOKEN_URL)
+            .expect_err("a cloud metadata token URL");
+
+        let error = ungranted(refused);
+
+        assert!(error.internal(), "{error:?}");
+        assert_eq!(error.shown(), UNSAVED);
+    }
+
+    #[test]
+    fn a_failed_exchange_is_shown_in_zones_words() {
+        let error = ungranted(LoginError::Transport("connection refused".to_string()));
+
+        assert!(
+            matches!(&error, Error::Unreachable(reason)
+                if reason == "Could not reach Claude's sign-in service: connection refused"),
+            "{error:?}"
+        );
+        let error = ungranted(LoginError::Malformed("an unreadable grant"));
+        assert!(
+            matches!(&error, Error::Refused(reason) if reason == "an unreadable grant"),
+            "{error:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_started_sign_in_is_held_for_whoever_started_it_with_the_verifier_its_link_challenges()
      {
         let (organization, caller) = (Uuid::new_v4(), caller());
         let before = Utc::now();
 
-        let started = start(organization, &caller, Scope::Full, Redirect::Paste, None).await;
+        let started = start(
+            &crate::state::test_config(),
+            organization,
+            &caller,
+            Scope::Full,
+            Redirect::Paste,
+            None,
+        )
+        .await
+        .expect("a started sign-in");
 
         let held = pending::claim(&state_of(&started)).expect("a held sign-in");
         assert_eq!(

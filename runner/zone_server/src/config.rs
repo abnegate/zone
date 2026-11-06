@@ -9,13 +9,15 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use abnegate_agent_cli::login::claude::LOOPBACK_HOST;
+use abnegate_agent_cli::login::claude::LOOPBACK_SCHEME;
 use abnegate_vcs::pull_request::PullRequestResult;
 use abnegate_vcs::{PullRequestError, PullRequestService};
 use uuid::Uuid;
 use zone_core::llm::{AgentKind, CodexSandbox};
 
 use crate::services::hosts::Hosts;
-use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME, ROOT_PATH};
+use crate::services::login::claude::ROOT_PATH;
 
 pub use abnegate_comfy::Config as ComfyUiConfig;
 pub use abnegate_llm::catalog::DEFAULT_GPT4ALL_MODELS_URL;

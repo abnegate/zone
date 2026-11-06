@@ -16,6 +16,7 @@ use crate::common::{
     test_email, test_password,
 };
 
+use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::SecretValue;
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -33,7 +34,7 @@ use zone_server::config::{AgentConfig, Config, ModelBackend};
 use zone_server::db::agent_logins::{self, Insert};
 use zone_server::db::ai_settings;
 use zone_server::db::chats::{self, ChatSession};
-use zone_server::services::login::claude::Tokens;
+use zone_server::services::login::claude::Sealed;
 use zone_server::state::AppState;
 
 const FIRST: &str = "Remember the word heliotrope.";
@@ -378,14 +379,14 @@ impl Harness {
     async fn sign_in(&self, agent: AgentKind) -> Uuid {
         let sealed = match agent {
             AgentKind::Claude => Some(
-                Tokens {
-                    access: SecretValue::new("fake-claude-access-token"),
-                    refresh: None,
-                    expires_at: Utc::now() + TimeDelta::days(30),
-                    issued_at: None,
-                    scope: "user:inference".to_string(),
-                    subscription: None,
-                }
+                Tokens::new(
+                    SecretValue::new("fake-claude-access-token"),
+                    None,
+                    Utc::now() + TimeDelta::days(30),
+                    None,
+                    "user:inference",
+                    None,
+                )
                 .seal(self.state.master_key())
                 .expect("the tokens to seal"),
             ),
