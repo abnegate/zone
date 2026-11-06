@@ -165,7 +165,7 @@ export const UpdateAiSettingsRequestSchema = z.object({
   bedrock_region: z.string().optional(),
   bedrock_access_key: z.string().optional(),
   bedrock_secret_key: z.string().optional(),
-  bedrock_use_iam_role: z.boolean().optional(),
+  bedrock_use_iam_role: z.boolean().nullable().optional(),
   model_fast: z.string().optional(),
   model_reasoning: z.string().optional(),
   model_embedding: z.string().optional(),
@@ -213,6 +213,7 @@ export const OrganizationKeysSchema = z.object({
 
 export const WorkspaceAiSettingsResponseSchema = AiSettingsResponseSchema.extend({
   overrides: z.boolean(),
+  inherits_provider: z.boolean(),
   organization_keys: OrganizationKeysSchema,
 });
 

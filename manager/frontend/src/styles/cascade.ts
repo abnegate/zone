@@ -21,6 +21,7 @@ import '../features/models/components/TrainPanel.css';
 import '../features/models/pages/ModelsPage.css';
 import '../features/settings/workspace/components/ConnectDevicesSection.css';
 import '../features/settings/workspace/components/HostFoldersPanel.css';
+import '../features/settings/workspace/components/InheritedField.css';
 import '../features/settings/organization/components/OrgMembersSection.css';
 import '../features/models/pages/SetupPage.css';
 import '../features/chats/components/ContextUsage.css';

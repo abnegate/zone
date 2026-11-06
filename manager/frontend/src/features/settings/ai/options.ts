@@ -137,6 +137,27 @@ export function comfyImageOptions(installed: InstalledModelOption[], current: st
   return Array.from(new Set([...IMAGE_MODEL_OPTIONS, ...fromDisk, current].filter(Boolean)));
 }
 
+export interface ModelOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+export function imageModelOptions(
+  installed: InstalledModelOption[],
+  current: string
+): ModelOption[] {
+  return comfyImageOptions(installed, current).map((name) => {
+    const row = installed.find((item) => item.name === name);
+    const missing = row?.ready === false;
+    return {
+      value: name,
+      disabled: missing,
+      label: missing ? `${name} (requires ${row?.required_files?.[0] || 'base'})` : name,
+    };
+  });
+}
+
 export function withCurrent(options: string[], current: string): string[] {
   return Array.from(new Set([...options, current].filter(Boolean)));
 }
@@ -320,21 +341,12 @@ function endpointUrl(entered: string, saved: string | null): string | undefined 
   return saved?.trim() ? '' : undefined;
 }
 
-export function buildAiSettingsRequest(
+export function credentialFields(
   provider: AiProvider,
   credentials: ProviderCredentials,
-  models: ModelSelection,
   saved: AiSettings | null = null
 ): UpdateAiSettingsRequest {
-  const request: UpdateAiSettingsRequest = {
-    provider,
-    model_fast: models.fast,
-    model_reasoning: models.reasoning,
-    model_embedding: models.embedding,
-    model_image: models.image,
-    model_video: models.video,
-    model_audio: models.audio,
-  };
+  const request: UpdateAiSettingsRequest = {};
   if (credentials.runpodApiKey) request.runpod_api_key = credentials.runpodApiKey;
   if (isAgentProvider(provider)) {
     return request;
@@ -363,4 +375,22 @@ export function buildAiSettingsRequest(
     }
   }
   return request;
+}
+
+export function buildAiSettingsRequest(
+  provider: AiProvider,
+  credentials: ProviderCredentials,
+  models: ModelSelection,
+  saved: AiSettings | null = null
+): UpdateAiSettingsRequest {
+  return {
+    provider,
+    model_fast: models.fast,
+    model_reasoning: models.reasoning,
+    model_embedding: models.embedding,
+    model_image: models.image,
+    model_video: models.video,
+    model_audio: models.audio,
+    ...credentialFields(provider, credentials, saved),
+  };
 }

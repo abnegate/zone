@@ -123,6 +123,7 @@ export interface OrganizationKeys {
 
 export interface WorkspaceAiSettings extends AiSettings {
   overrides: boolean;
+  inherits_provider: boolean;
   organization_keys: OrganizationKeys;
 }
 
@@ -138,7 +139,7 @@ export interface UpdateAiSettingsRequest {
   bedrock_region?: string;
   bedrock_access_key?: string;
   bedrock_secret_key?: string;
-  bedrock_use_iam_role?: boolean;
+  bedrock_use_iam_role?: boolean | null;
   model_fast?: string;
   model_reasoning?: string;
   model_embedding?: string;
