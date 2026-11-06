@@ -12,6 +12,8 @@ use uuid::Uuid;
 use zone_chat::history::{self, Entry, Evidence, History, NewEntry, ReplayMessage, Summary};
 use zone_chat::store;
 
+use super::chat_subagents;
+
 pub use zone_chat::store::{Guard, Lease, StoredMessage};
 
 /// Postgres failures the conversation store can hit.
@@ -948,6 +950,9 @@ impl Store {
     }
 
     /// Returns the recovery entries it appended, which the model has not seen yet.
+    ///
+    /// The turn's running subagents stop with it, so no later turn has to
+    /// report one before they stop showing as running.
     async fn interrupt_in(
         &self,
         connection: &mut PgConnection,
@@ -973,6 +978,7 @@ impl Store {
         }
         sqlx::query("UPDATE chat_turns SET status = 'interrupted', completed_at = clock_timestamp() WHERE chat_id = $1 AND id = $2")
             .bind(self.chat_id).bind(turn_id).execute(&mut *connection).await?;
+        chat_subagents::stop(&mut *connection, self.chat_id, turn_id).await?;
         self.consume_turn_in(connection, turn_id, &recovery).await?;
         Ok(recovery)
     }

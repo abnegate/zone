@@ -318,9 +318,11 @@ where
 /// Stops the subagents any turn of `chat_id` other than `message_id` left
 /// running, fails their running steps, and returns them oldest first.
 ///
-/// A turn whose server died keeps its `chat_turns` row running until the
-/// chat's next turn settles it, so [`abandon`] cannot see its subagents at
-/// boot. The next turn calls this before it records a subagent of its own.
+/// A turn that is interrupted, or recovered after its server died, stops its
+/// own subagents as it settles. A turn that completed can still leave some
+/// running when its keeper's final [`stop`] fails. Every turn calls this as it
+/// starts, so those stop at the chat's next turn rather than the server's next
+/// boot.
 ///
 /// Safe only because a chat runs one turn at a time: a turn holds the chat's
 /// `chat_leases` row until it ends, and no other turn can take it while the

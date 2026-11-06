@@ -71,7 +71,7 @@ mod tests {
             .expect("a chat")
             .id;
         let state = AppState::new(crate::state::test_config(), pool.clone(), None);
-        let (tracker, mut tracked) = Tracker::listening(state.clone());
+        let (tracker, mut tracked) = Tracker::listening();
         let observers = Observers::new(Recorder::new(state, chat_id, Uuid::new_v4()), tracker);
 
         observers.track(&Subagent::new("toolu_01Agent"));

@@ -1,7 +1,8 @@
 //! The subagents a chat's coding agent started: listed in the order they
 //! started, their steps read one subagent at a time, out of reach of anyone
 //! outside the chat's workspace, removed with the message that started them,
-//! and stopped at boot once the turn that started them is gone.
+//! stopped with the turn that started them when it is interrupted, and stopped
+//! at boot once the turn that started them is gone.
 
 use crate::common::{
     Database, TestClient, create_test_router, create_test_state, test_config, test_email,
@@ -20,6 +21,7 @@ use uuid::Uuid;
 use zone_core::llm::{StepStatus, SubagentStatus, SubagentStep};
 use zone_server::db::chat_subagents::{self, SubagentChange};
 use zone_server::db::chats::{self, create_chat};
+use zone_server::db::context::Store;
 use zone_server::state::AppState;
 
 const TURN_RUNNING: &str = "running";
@@ -662,4 +664,82 @@ async fn boot_stops_the_subagents_of_every_turn_that_is_not_still_running() {
         0
     );
     database.cleanup().await;
+}
+
+#[tokio::test]
+async fn recovering_a_crashed_turn_stops_its_subagents_and_fails_their_running_steps() {
+    let pool = PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("a test database"))
+        .await
+        .expect("the test database");
+    let chat = create_chat(&pool, None, "Subagents", "sonnet", false, true)
+        .await
+        .expect("a chat")
+        .id;
+    let crashed = turn(&pool, chat, TURN_RUNNING).await;
+    let completed = turn(&pool, chat, TURN_COMPLETED).await;
+    let orphan = chat_subagents::record(
+        &pool,
+        &SubagentChange {
+            chat_id: chat,
+            message_id: Some(crashed),
+            external_id: "crashed",
+            background: Some(true),
+            ..SubagentChange::default()
+        },
+    )
+    .await
+    .expect("the crashed turn's subagent");
+    chat_subagents::record_steps(
+        &pool,
+        orphan.id,
+        &[
+            step("toolu_done", StepStatus::Succeeded),
+            step("toolu_open", StepStatus::Running),
+        ],
+    )
+    .await
+    .expect("its steps");
+    started(&pool, chat, "completed", Some(completed)).await;
+    let before = chat_subagents::list(&pool, chat)
+        .await
+        .expect("the list")
+        .into_iter()
+        .find(|row| row.id == orphan.id)
+        .expect("the crashed turn's subagent");
+
+    let store = Store::new(pool.clone(), chat, None);
+    let lease = store
+        .acquire(Uuid::new_v4(), Duration::from_secs(30))
+        .await
+        .expect("the chat's lease");
+    let recovered = store.recover(&lease).await.expect("the recovery");
+
+    assert_eq!(recovered, 1);
+    let rows = chat_subagents::list(&pool, chat).await.expect("the list");
+    let stopped = rows
+        .iter()
+        .find(|row| row.id == orphan.id)
+        .expect("the crashed turn's subagent");
+    assert_eq!(stopped.status, SubagentStatus::Stopped.as_str());
+    assert!(stopped.finished_at.is_some());
+    assert!(stopped.revision > before.revision);
+    assert_eq!(
+        chat_subagents::steps(&pool, chat, orphan.id)
+            .await
+            .expect("a read")
+            .expect("the subagent"),
+        [
+            step("toolu_done", StepStatus::Succeeded),
+            step("toolu_open", StepStatus::Failed),
+        ]
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.external_id == "completed")
+            .expect("the completed turn's subagent")
+            .status,
+        SubagentStatus::Running.as_str(),
+        "a completed turn's subagents are its keeper's or the next turn's to stop"
+    );
+    store.release(&lease).await.expect("the lease's release");
 }
