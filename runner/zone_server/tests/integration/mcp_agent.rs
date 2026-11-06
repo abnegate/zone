@@ -69,6 +69,7 @@ async fn the_host_agent_connects_to_zone_and_is_shown_zones_tools() {
             BuiltinTools::Withheld,
             CodexSandbox::default(),
             None,
+            &[],
         ))
         .env(Toolset::TOKEN_VARIABLE, toolset.token.expose())
         .stdin(std::process::Stdio::piped())
@@ -80,7 +81,10 @@ async fn the_host_agent_connects_to_zone_and_is_shown_zones_tools() {
 
     let mut stdin = child.stdin.take().expect("stdin");
     stdin
-        .write_all(b"Say the word ready and stop.\n")
+        .write_all(
+            br#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Say the word ready and stop."}]}}
+"#,
+        )
         .await
         .expect("the agent reads its prompt from stdin");
     drop(stdin);

@@ -1,6 +1,8 @@
 //! What an agent is handed for a turn: what goes to its stdin, and the image
 //! files its command line names.
 
+mod undeliverable;
+
 use std::path::PathBuf;
 
 use base64::Engine as _;
@@ -9,36 +11,24 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use super::agent::AgentKind;
-use super::image::{Image, extension};
-use super::transcript::{Part, Transcript};
+use super::image::{Image, Rejection};
+use super::transcript::{Part, SEPARATOR, Transcript};
+
+pub use undeliverable::Undeliverable;
 
 /// Stands in for an earlier image the agent cannot be shown, so the transcript
 /// still says one was there.
 const OMITTED: &str = "[An image was attached here, but it cannot be shown to you.]";
 
-const UNSUPPORTED: &str = "only PNG, JPEG, GIF and WebP images can be given to";
-const LINKED: &str = "codex can only be given images as files, not links";
-const UNREADABLE: &str = "the attached image could not be decoded for";
+/// The Claude API's limits: base64 bytes in one image, and images in one
+/// request on its smallest context window.
+const CLAUDE_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const CLAUDE_IMAGES: usize = 100;
 
-/// Why an image on the message being answered cannot reach the agent.
-#[derive(Debug, thiserror::Error)]
-pub enum Undeliverable {
-    #[error("{UNSUPPORTED} {0}")]
-    Unsupported(AgentKind),
-    #[error("{LINKED}")]
-    Linked,
-    #[error("{UNREADABLE} {0}")]
-    Unreadable(AgentKind),
-    #[error("the attached image could not be saved for codex: {0}")]
-    Unsaved(#[from] std::io::Error),
-}
-
-/// A turn's input, ready for the agent.
 #[derive(Debug)]
 pub struct Input {
     pub stdin: String,
     pub images: Vec<PathBuf>,
-    /// Holds the image files until the agent has read them.
     pub directory: Option<TempDir>,
 }
 
@@ -58,25 +48,43 @@ impl Input {
     }
 }
 
+/// An earlier image the agent cannot take is noted rather than sent: one the
+/// API would refuse fails every turn that resends the history, and a link may
+/// have died since it was attached.
 fn claude(transcript: &Transcript) -> Result<String, Undeliverable> {
+    let refused = |rejection| Undeliverable::Refused {
+        agent: AgentKind::Claude,
+        rejection,
+    };
+    let count = transcript
+        .parts()
+        .iter()
+        .filter(|part| matches!(part, Part::Image { .. }))
+        .count();
+    let mut excess = count.saturating_sub(CLAUDE_IMAGES);
     let mut content = Vec::new();
+
     for part in transcript.parts() {
-        match part {
-            Part::Text(text) => content.push(text_block(text)),
-            Part::Image { url, current } => match Image::parse(url) {
-                Some(Image::Inline { media_type, data }) => content.push(json!({
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": media_type, "data": data},
-                })),
-                Some(Image::Linked(url)) => content.push(json!({
-                    "type": "image",
-                    "source": {"type": "url", "url": url},
-                })),
-                None if *current => return Err(Undeliverable::Unsupported(AgentKind::Claude)),
-                None => content.push(text_block(OMITTED)),
-            },
+        let (url, current) = match part {
+            Part::Text(text) => {
+                content.push(text_block(text));
+                continue;
+            }
+            Part::Image { url, current } => (url, *current),
+        };
+        let block = if excess > 0 {
+            excess -= 1;
+            Err(Rejection::Excess)
+        } else {
+            Image::parse(url).and_then(|image| claude_block(image, current))
+        };
+        match block {
+            Ok(block) => content.push(block),
+            Err(rejection) if current => return Err(refused(rejection)),
+            Err(_) => content.push(text_block(OMITTED)),
         }
     }
+
     let message = json!({
         "type": "user",
         "message": {"role": "user", "content": content},
@@ -84,48 +92,75 @@ fn claude(transcript: &Transcript) -> Result<String, Undeliverable> {
     Ok(format!("{message}\n"))
 }
 
+fn claude_block(image: Image<'_>, current: bool) -> Result<Value, Rejection> {
+    match image {
+        Image::Inline {
+            media_type, bytes, ..
+        } => {
+            let data = BASE64.encode(bytes);
+            if data.len() > CLAUDE_IMAGE_BYTES {
+                return Err(Rejection::Oversized);
+            }
+            Ok(json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            }))
+        }
+        Image::Linked(url) if current => Ok(json!({
+            "type": "image",
+            "source": {"type": "url", "url": url},
+        })),
+        Image::Linked(_) => Err(Rejection::Linked),
+    }
+}
+
 fn text_block(text: &str) -> Value {
     json!({"type": "text", "text": text})
 }
 
+/// Codex attaches every image to the prompt as a whole, so the text marks
+/// where each one was sent.
 fn codex(transcript: &Transcript) -> Result<Input, Undeliverable> {
-    let mut texts: Vec<&str> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
     let mut images = Vec::new();
     let mut directory: Option<TempDir> = None;
 
     for part in transcript.parts() {
         match part {
-            Part::Text(text) => texts.push(text),
+            Part::Text(text) => texts.push(text.clone()),
             Part::Image { url, current } => match saved(url, &mut directory, images.len()) {
-                Ok(path) => images.push(path),
+                Ok(path) => {
+                    images.push(path);
+                    texts.push(format!("[Image {}]", images.len()));
+                }
                 Err(error) if *current => return Err(error),
-                Err(_) => texts.push(OMITTED),
+                Err(_) => texts.push(OMITTED.to_string()),
             },
         }
     }
 
     Ok(Input {
-        stdin: texts.join("\n\n"),
+        stdin: texts.join(SEPARATOR),
         images,
         directory,
     })
 }
 
-/// Write the image `url` carries to a file of its own in `directory`.
 fn saved(
     url: &str,
     directory: &mut Option<TempDir>,
     index: usize,
 ) -> Result<PathBuf, Undeliverable> {
-    let (media_type, data) = match Image::parse(url) {
-        Some(Image::Inline { media_type, data }) => (media_type, data),
-        Some(Image::Linked(_)) => return Err(Undeliverable::Linked),
-        None => return Err(Undeliverable::Unsupported(AgentKind::Codex)),
+    let refused = |rejection| Undeliverable::Refused {
+        agent: AgentKind::Codex,
+        rejection,
     };
-    let extension = extension(media_type).ok_or(Undeliverable::Unsupported(AgentKind::Codex))?;
-    let bytes = BASE64
-        .decode(data)
-        .map_err(|_| Undeliverable::Unreadable(AgentKind::Codex))?;
+    let (extension, bytes) = match Image::parse(url).map_err(refused)? {
+        Image::Inline {
+            extension, bytes, ..
+        } => (extension, bytes),
+        Image::Linked(_) => return Err(refused(Rejection::Linked)),
+    };
     let directory = match directory {
         Some(directory) => directory,
         None => directory.insert(tempfile::Builder::new().prefix("zone-images-").tempdir()?),
@@ -143,96 +178,179 @@ mod tests {
 
     const PNG: &str = "data:image/png;base64,iVBORw0KGgo=";
     const ARTIFACT: &str = "/api/artifacts/w/c/m/generated.png";
+    const LINK: &str = "https://example.test/review.webp";
 
     fn with_images(mut message: Message, images: &[&str]) -> Message {
         message.images = images.iter().map(|url| (*url).to_string()).collect();
         message
     }
 
-    fn claude_message(transcript: &Transcript) -> Value {
+    fn claude_content(transcript: &Transcript) -> Value {
         let input = Input::new(AgentKind::Claude, transcript).expect("deliverable");
         assert!(
             input.stdin.ends_with('\n'),
             "stream-json is one message a line"
         );
         assert_eq!(input.stdin.trim_end().lines().count(), 1);
-        serde_json::from_str(input.stdin.trim_end()).expect("one json message")
+        let message: Value =
+            serde_json::from_str(input.stdin.trim_end()).expect("one json message");
+        assert_eq!(message["type"], "user");
+        assert_eq!(message["message"]["role"], "user");
+        message["message"]["content"].clone()
+    }
+
+    fn png_block() -> Value {
+        json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}})
+    }
+
+    fn rejection(result: Result<Input, Undeliverable>) -> Rejection {
+        match result {
+            Err(Undeliverable::Refused { rejection, .. }) => rejection,
+            other => panic!("expected a refused image: {other:?}"),
+        }
     }
 
     #[test]
     fn claude_is_shown_the_images_a_message_was_sent_with() {
         let transcript = render(&[
             Message::system("Be terse."),
-            with_images(
-                Message::user("here's the comments"),
-                &[PNG, "https://example.test/review.webp"],
-            ),
+            with_images(Message::user("here's the comments"), &[PNG, LINK]),
         ]);
 
-        let message = claude_message(&transcript);
-
-        assert_eq!(message["type"], "user");
-        assert_eq!(message["message"]["role"], "user");
         assert_eq!(
-            message["message"]["content"],
+            claude_content(&transcript),
             json!([
                 {"type": "text", "text": "System:\nBe terse.\n\nUser:\nhere's the comments"},
-                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
-                {"type": "image", "source": {"type": "url", "url": "https://example.test/review.webp"}},
+                png_block(),
+                {"type": "image", "source": {"type": "url", "url": LINK}},
             ])
         );
     }
 
     #[test]
     fn claude_reads_a_conversation_without_images_as_one_text_block() {
-        let message = claude_message(&render(&[Message::user("ping")]));
-
         assert_eq!(
-            message["message"]["content"],
+            claude_content(&render(&[Message::user("ping")])),
             json!([{"type": "text", "text": "User:\nping"}])
         );
     }
 
     #[test]
-    fn an_earlier_image_the_agent_cannot_be_shown_is_noted_rather_than_failing_the_turn() {
+    fn claude_is_given_the_lowercase_media_type_and_canonical_base64() {
+        let transcript = render(&[with_images(
+            Message::user("Look."),
+            &["data:IMAGE/PNG;base64,iVBORw0K\nGgo"],
+        )]);
+
+        assert_eq!(
+            claude_content(&transcript),
+            json!([{"type": "text", "text": "User:\nLook."}, png_block()])
+        );
+    }
+
+    #[test]
+    fn an_earlier_image_claude_cannot_take_is_noted_rather_than_failing_every_turn() {
         let transcript = render(&[
             with_images(Message::assistant("Here it is."), &[ARTIFACT]),
-            Message::user("Thanks."),
+            with_images(
+                Message::user("And these?"),
+                &["data:image/png;base64,!!!!", LINK],
+            ),
+            Message::assistant("Seen."),
+            with_images(Message::user("Thanks."), &[PNG]),
         ]);
 
-        let message = claude_message(&transcript);
         assert_eq!(
-            message["message"]["content"],
+            claude_content(&transcript),
             json!([
                 {"type": "text", "text": "Assistant:\nHere it is."},
                 {"type": "text", "text": OMITTED},
-                {"type": "text", "text": "User:\nThanks."},
+                {"type": "text", "text": "User:\nAnd these?"},
+                {"type": "text", "text": OMITTED},
+                {"type": "text", "text": OMITTED},
+                {"type": "text", "text": "Assistant:\nSeen.\n\nUser:\nThanks."},
+                png_block(),
             ])
         );
+    }
 
-        let input = Input::new(AgentKind::Codex, &transcript).expect("deliverable");
-        assert!(input.images.is_empty());
+    #[test]
+    fn a_conversation_with_no_user_message_notes_every_image_it_cannot_send() {
+        let transcript = render(&[with_images(Message::assistant("Drawn."), &[ARTIFACT])]);
+
         assert_eq!(
-            input.stdin,
-            format!("Assistant:\nHere it is.\n\n{OMITTED}\n\nUser:\nThanks.")
+            claude_content(&transcript),
+            json!([
+                {"type": "text", "text": "Assistant:\nDrawn."},
+                {"type": "text", "text": OMITTED},
+            ])
+        );
+    }
+
+    #[test]
+    fn claude_is_sent_no_more_images_than_a_request_may_carry_keeping_the_newest() {
+        let earlier = vec![PNG; CLAUDE_IMAGES];
+        let transcript = render(&[
+            with_images(Message::user("Many."), &earlier),
+            Message::assistant("Seen."),
+            with_images(Message::user("One more."), &[PNG]),
+        ]);
+
+        let content = claude_content(&transcript);
+        let blocks = content.as_array().expect("blocks");
+        let images = blocks
+            .iter()
+            .filter(|block| block["type"] == "image")
+            .count();
+        assert_eq!(images, CLAUDE_IMAGES);
+        assert_eq!(blocks[1], json!({"type": "text", "text": OMITTED}));
+        assert_eq!(
+            blocks.last(),
+            Some(&png_block()),
+            "the current image is kept"
+        );
+    }
+
+    #[test]
+    fn an_image_larger_than_claude_takes_fails_the_turn_that_sent_it() {
+        let large = format!(
+            "data:image/png;base64,{}",
+            BASE64.encode(vec![0_u8; CLAUDE_IMAGE_BYTES])
+        );
+        let transcript = render(&[with_images(Message::user("Look."), &[&large])]);
+
+        assert_eq!(
+            rejection(Input::new(AgentKind::Claude, &transcript)),
+            Rejection::Oversized
         );
     }
 
     #[test]
     fn an_image_this_turn_was_sent_with_that_cannot_be_shown_fails_the_turn() {
-        let transcript = render(&[with_images(Message::user("Look."), &[ARTIFACT])]);
-
-        for agent in AgentKind::ALL {
-            let error = Input::new(agent, &transcript).expect_err("undeliverable");
-            assert!(
-                error.to_string().contains(agent.as_str()),
-                "the error names the agent: {error}"
-            );
+        for (url, expected) in [
+            (ARTIFACT, Rejection::Unreachable),
+            ("data:image/png;base64,!!!!", Rejection::Malformed),
+            ("data:image/svg+xml;base64,PHN2Zz4=", Rejection::Unsupported),
+        ] {
+            let transcript = render(&[with_images(Message::user("Look."), &[url])]);
+            for agent in AgentKind::ALL {
+                let result = Input::new(agent, &transcript);
+                let message = result.as_ref().expect_err("undeliverable").to_string();
+                assert!(
+                    message.contains(agent.as_str()),
+                    "names the agent: {message}"
+                );
+                assert!(
+                    message.contains(&expected.to_string()),
+                    "says why: {message}"
+                );
+                assert_eq!(rejection(result), expected, "{agent} {url}");
+            }
         }
     }
 
     #[test]
-    fn codex_is_handed_each_image_as_a_file_and_the_text_on_stdin() {
+    fn codex_is_handed_each_image_as_a_file_marked_where_it_was_sent() {
         let transcript = render(&[with_images(
             Message::user("here's the comments"),
             &[PNG, "data:image/jpeg;base64,/9j/4AAQ"],
@@ -240,7 +358,10 @@ mod tests {
 
         let input = Input::new(AgentKind::Codex, &transcript).expect("deliverable");
 
-        assert_eq!(input.stdin, "User:\nhere's the comments");
+        assert_eq!(
+            input.stdin,
+            "User:\nhere's the comments\n\n[Image 1]\n\n[Image 2]"
+        );
         assert_eq!(input.images.len(), 2);
         assert!(input.images[0].extension().is_some_and(|e| e == "png"));
         assert!(input.images[1].extension().is_some_and(|e| e == "jpg"));
@@ -258,16 +379,29 @@ mod tests {
     }
 
     #[test]
-    fn codex_cannot_be_given_a_linked_image() {
-        let transcript = render(&[with_images(
-            Message::user("Look."),
-            &["https://example.test/a.png"],
-        )]);
+    fn an_earlier_image_codex_cannot_open_is_noted() {
+        let transcript = render(&[
+            with_images(Message::assistant("Here it is."), &[ARTIFACT, LINK]),
+            Message::user("Thanks."),
+        ]);
 
-        assert!(matches!(
-            Input::new(AgentKind::Codex, &transcript),
-            Err(Undeliverable::Linked)
-        ));
+        let input = Input::new(AgentKind::Codex, &transcript).expect("deliverable");
+
+        assert!(input.images.is_empty());
+        assert_eq!(
+            input.stdin,
+            format!("Assistant:\nHere it is.\n\n{OMITTED}\n\n{OMITTED}\n\nUser:\nThanks.")
+        );
+    }
+
+    #[test]
+    fn codex_cannot_be_given_a_linked_image() {
+        let transcript = render(&[with_images(Message::user("Look."), &[LINK])]);
+
+        assert_eq!(
+            rejection(Input::new(AgentKind::Codex, &transcript)),
+            Rejection::Linked
+        );
     }
 
     #[test]

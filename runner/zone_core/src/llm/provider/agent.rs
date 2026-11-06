@@ -133,7 +133,7 @@ const CLAUDE_STREAMING: &[&str] = &[
     "--output-format",
     "stream-json",
 ];
-const CODEX_STREAMING: &[&str] = &["exec", "--json", "--skip-git-repo-check"];
+const CODEX_EXEC: &[&str] = &["exec", "--json", "--skip-git-repo-check"];
 const CODEX_IMAGE: &str = "--image";
 
 const CODEX_RESUME: &str = "resume";
@@ -366,10 +366,11 @@ impl AgentKind {
         builtin_tools: BuiltinTools,
         sandbox: CodexSandbox,
         session: Option<&Session>,
+        images: &[PathBuf],
     ) -> Vec<String> {
         let mut arguments: Vec<String> = match self {
             Self::Claude => CLAUDE_STREAMING,
-            Self::Codex => CODEX_STREAMING,
+            Self::Codex => CODEX_EXEC,
         }
         .iter()
         .map(|argument| (*argument).to_string())
@@ -423,6 +424,16 @@ impl AgentKind {
             }
         }
 
+        // Codex's --image takes any number of values, so each is joined to
+        // its flag: a bare path would swallow the `-` prompt that follows.
+        if self == Self::Codex {
+            arguments.extend(
+                images
+                    .iter()
+                    .map(|path| format!("{CODEX_IMAGE}={}", path.display())),
+            );
+        }
+
         arguments.push(
             match self {
                 Self::Claude => CLAUDE_PROMPT,
@@ -432,21 +443,6 @@ impl AgentKind {
         );
 
         arguments
-    }
-
-    /// The flags naming the image files a turn attaches, to go before the
-    /// prompt argument. Claude reads its images from stdin, so needs none.
-    ///
-    /// Codex's `--image` takes any number of values, so each is joined to its
-    /// flag with `=`: a bare path would swallow the `-` that follows it.
-    pub fn image_arguments(self, images: &[PathBuf]) -> Vec<String> {
-        match self {
-            Self::Claude => Vec::new(),
-            Self::Codex => images
-                .iter()
-                .map(|path| format!("{CODEX_IMAGE}={}", path.display()))
-                .collect(),
-        }
     }
 
     /// The flag setting `effort`, or nothing when `model` does not take it.
@@ -730,6 +726,7 @@ mod tests {
                 BuiltinTools::Granted,
                 CodexSandbox::default(),
                 None,
+                &[],
             )
         }
     }
@@ -1060,6 +1057,7 @@ mod tests {
                         builtin_tools,
                         CodexSandbox::default(),
                         None,
+                        &[],
                     );
 
                     assert_eq!(
@@ -1091,6 +1089,7 @@ mod tests {
                     builtin_tools,
                     CodexSandbox::default(),
                     None,
+                    &[],
                 );
                 assert!(
                     !arguments
@@ -1128,6 +1127,7 @@ mod tests {
                         builtin_tools,
                         sandbox,
                         None,
+                        &[],
                     );
                     let codex = codex(served, builtin_tools, sandbox);
                     for arguments in [&claude, &codex] {
@@ -1205,6 +1205,7 @@ mod tests {
             builtin_tools,
             sandbox,
             None,
+            &[],
         )
     }
 
@@ -1218,6 +1219,7 @@ mod tests {
             BuiltinTools::Withheld,
             CodexSandbox::default(),
             None,
+            &[],
         );
 
         assert!(
@@ -1258,6 +1260,7 @@ mod tests {
                             builtin_tools,
                             sandbox,
                             None,
+                            &[],
                         )
                         .join(" ");
 
@@ -1284,6 +1287,7 @@ mod tests {
             BuiltinTools::Granted,
             CodexSandbox::default(),
             None,
+            &[],
         );
 
         assert!(
@@ -1303,6 +1307,7 @@ mod tests {
             BuiltinTools::Withheld,
             CodexSandbox::default(),
             None,
+            &[],
         );
 
         assert!(
@@ -1571,6 +1576,7 @@ mod tests {
                     builtin_tools,
                     CodexSandbox::default(),
                     None,
+                    &[],
                 );
                 let new = AgentKind::Claude.arguments_with(
                     Some("opus"),
@@ -1579,6 +1585,7 @@ mod tests {
                     builtin_tools,
                     CodexSandbox::default(),
                     Some(&pinned(id)),
+                    &[],
                 );
                 let resume = AgentKind::Claude.arguments_with(
                     Some("opus"),
@@ -1587,6 +1594,7 @@ mod tests {
                     builtin_tools,
                     CodexSandbox::default(),
                     Some(&resumed(id)),
+                    &[],
                 );
 
                 assert!(
@@ -1607,6 +1615,62 @@ mod tests {
     }
 
     #[test]
+    fn codex_names_each_image_just_before_its_prompt_whether_or_not_it_resumes() {
+        let images = [
+            PathBuf::from("/tmp/zone-images-a/1.png"),
+            PathBuf::from("/tmp/zone-images-a/2.jpg"),
+        ];
+        for session in [None, Some(resumed("thread-1"))] {
+            let arguments = AgentKind::Codex.arguments_with(
+                Some("gpt-6-sol"),
+                None,
+                None,
+                BuiltinTools::Granted,
+                CodexSandbox::default(),
+                session.as_ref(),
+                &images,
+            );
+
+            assert_eq!(
+                arguments[arguments.len() - 3..],
+                [
+                    "--image=/tmp/zone-images-a/1.png",
+                    "--image=/tmp/zone-images-a/2.jpg",
+                    "-",
+                ],
+                "{arguments:?}"
+            );
+            if session.is_some() {
+                let resume = arguments.iter().position(|argument| argument == "resume");
+                assert!(
+                    resume < arguments.iter().position(|a| a.starts_with("--image=")),
+                    "a resumed turn's images belong to resume: {arguments:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_is_never_handed_an_image_flag() {
+        let arguments = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            None,
+            None,
+            BuiltinTools::Granted,
+            CodexSandbox::default(),
+            None,
+            &[PathBuf::from("/tmp/zone-images-a/1.png")],
+        );
+
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.contains("--image")),
+            "{arguments:?}"
+        );
+    }
+
+    #[test]
     fn a_codex_resume_reads_the_prompt_from_stdin() {
         let id = "019b2c41-0000-7000-8000-000000000001";
         let arguments = AgentKind::Codex.arguments_with(
@@ -1616,6 +1680,7 @@ mod tests {
             BuiltinTools::Granted,
             CodexSandbox::WorkspaceWrite,
             Some(&resumed(id)),
+            &[],
         );
 
         assert_eq!(
@@ -1641,6 +1706,7 @@ mod tests {
             BuiltinTools::Granted,
             CodexSandbox::WorkspaceWrite,
             Some(&pinned(id)),
+            &[],
         );
         assert_eq!(
             new,
@@ -1665,6 +1731,7 @@ mod tests {
                         builtin_tools,
                         sandbox,
                         Some(&resumed(id)),
+                        &[],
                     );
                     let confinement = match builtin_tools {
                         BuiltinTools::Withheld => READ_ONLY,
@@ -1776,6 +1843,7 @@ mod tests {
             BuiltinTools::Granted,
             CodexSandbox::default(),
             session,
+            &[],
         )
     }
 

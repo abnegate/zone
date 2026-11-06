@@ -2,8 +2,6 @@
 
 mod part;
 
-use std::fmt::Write;
-
 use abnegate_llm::{Message, Role};
 
 pub use part::Part;
@@ -13,7 +11,7 @@ const USER: &str = "User";
 const ASSISTANT: &str = "Assistant";
 const TOOL: &str = "Tool result";
 
-const SEPARATOR: &str = "\n\n";
+pub const SEPARATOR: &str = "\n\n";
 
 /// A conversation rendered for an agent: its text, with each message's images
 /// following the message they were attached to.
@@ -80,9 +78,7 @@ pub fn render_tail(messages: &[Message], from: usize) -> Transcript {
             Role::User => USER,
             _ => USER,
         };
-        let mut text = String::new();
-        let _ = write!(text, "{label}:\n{content}");
-        transcript.write(text.trim_end());
+        transcript.write(format!("{label}:\n{content}").trim_end());
         transcript
             .parts
             .extend(message.images.iter().map(|url| Part::Image {

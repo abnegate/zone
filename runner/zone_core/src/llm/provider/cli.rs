@@ -102,20 +102,17 @@ impl CliProvider {
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from(self.agent.executable()));
 
-        let mut arguments = self.agent.arguments_with(
-            Some(model),
-            self.settings.effort,
-            self.settings.toolset.as_deref(),
-            self.settings.builtin_tools,
-            self.settings.sandbox,
-            self.settings.session.as_ref(),
-        );
-        let prompt = arguments.len().saturating_sub(1);
-        arguments.splice(prompt..prompt, self.agent.image_arguments(images));
-
         let mut command = Command::new(executable);
         command
-            .args(arguments)
+            .args(self.agent.arguments_with(
+                Some(model),
+                self.settings.effort,
+                self.settings.toolset.as_deref(),
+                self.settings.builtin_tools,
+                self.settings.sandbox,
+                self.settings.session.as_ref(),
+                images,
+            ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -806,7 +803,10 @@ done
             !std::path::Path::new(path).exists(),
             "the image file outlived the turn"
         );
-        assert_eq!(recorded_stdin(&directory), "User:\nhere's the comments");
+        assert_eq!(
+            recorded_stdin(&directory),
+            "User:\nhere's the comments\n\n[Image 1]"
+        );
     }
 
     #[tokio::test]
