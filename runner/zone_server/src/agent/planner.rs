@@ -984,10 +984,7 @@ mod tests {
         let connected = Connected::new().await;
         let number = number();
         issuing(&connected.github, number, MINTED_TOKEN, 0).await;
-        let installation = connected.revoked(number).await;
-        let source = connected
-            .source(Some(installation), Some(STORED_TOKEN))
-            .await;
+        let source = connected.revoked_source(number, Some(STORED_TOKEN)).await;
 
         let result = FinalizeProjectTool(connected.scope())
             .execute(finalizing(&source), &ToolContext::default())

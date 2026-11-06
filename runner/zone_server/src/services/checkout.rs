@@ -26,7 +26,6 @@
 //! started on and the commit the service pushed — never from refs in the
 //! clone, which a run could move to make its commits look published.
 
-use abnegate_secret::SecretValue;
 use abnegate_vcs::Checkout as GitCheckout;
 use abnegate_vcs::worktree;
 use abnegate_vcs::{BranchFormat, BranchName, CommitSha, GitError, GitService, RepositoryUrl};
@@ -103,7 +102,7 @@ async fn restore(base: &Path, origin: &RepositoryUrl) -> Result<(), String> {
 
 pub struct Repository {
     pub url: RepositoryUrl,
-    pub token: Option<SecretValue>,
+    pub token: Option<Credential>,
 }
 
 impl Repository {
@@ -146,8 +145,7 @@ impl Repository {
                 .map_err(|error| match error {
                     GitHubError::Credential => PROJECT_TOKEN_UNOPENABLE.to_string(),
                     error => error.to_string(),
-                })?
-                .map(Credential::into_secret),
+                })?,
             None => None,
         };
         Ok(Some(Self { url, token }))
@@ -367,7 +365,7 @@ impl Checkout {
     /// branch, never `origin/HEAD`, which a run's git commands share.
     async fn refresh(base: &Path, repository: &Repository) -> Result<CommitSha, String> {
         let git = git();
-        let token = repository.token.as_ref();
+        let token = repository.token.as_ref().map(Credential::secret);
         let fresh = !base.join(".git").is_dir();
         if fresh {
             let directory = base.to_path_buf();
@@ -1920,7 +1918,10 @@ mod tests {
             url("https://github.com/owner/installed.git")
         );
         assert_eq!(
-            repository.token.as_ref().map(SecretValue::expose),
+            repository
+                .token
+                .as_ref()
+                .map(|credential| credential.secret().expose()),
             Some("ghs_checkouttoken")
         );
     }

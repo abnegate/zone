@@ -31,7 +31,7 @@ use zone_core::context::Entry;
 use zone_core::tools::job::{JobExited, Jobs};
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
-use super::integrations::{Configuration, Github, SETTLED_ASSESSMENTS, source_token};
+use super::integrations::{Configuration, Github, SETTLED_ASSESSMENTS, authenticated};
 use super::tools::WorkspaceScope;
 use crate::db::{sources, task_access, tasks, workspace_members};
 use crate::services::chat::session::RunContext;
@@ -951,8 +951,13 @@ impl WaitForTool {
     ) -> Result<(String, Option<String>, Subscription), String> {
         let scope = self.scope.as_ref().ok_or(WORKSPACE_REQUIRED)?;
         let source = Uuid::parse_str(&request.id).map_err(|_| SOURCE_ID_INVALID.to_string())?;
-        let github = self.github(scope, source).await?;
-        let (reference, sha, assessment) = github.settled(request.reference.as_deref()).await?;
+        let requested = request.reference.as_deref();
+        let (github, (reference, sha, assessment)) = self
+            .authenticated(scope, source, |github| async move {
+                let settled = github.settled(requested).await?;
+                Ok((github, settled))
+            })
+            .await?;
         Ok((
             check_subject(&reference, &sha),
             Some(reference.clone()),
@@ -965,7 +970,16 @@ impl WaitForTool {
         ))
     }
 
-    async fn github(&self, scope: &WorkspaceScope, source: Uuid) -> Result<Github, String> {
+    async fn authenticated<T, F, Fut>(
+        &self,
+        scope: &WorkspaceScope,
+        source: Uuid,
+        operation: F,
+    ) -> Result<T, String>
+    where
+        F: Fn(Github) -> Fut,
+        Fut: Future<Output = Result<T, String>>,
+    {
         let database = scope.state.db();
         if !workspace_members::can_read(database, scope.workspace_id, scope.user_id)
             .await
@@ -981,10 +995,9 @@ impl WaitForTool {
         if source.source_type != sources::GITHUB {
             return Err(SOURCE_NOT_GITHUB.to_string());
         }
-        let mut configuration = Configuration::deserialize(&source.config)
+        let configuration = Configuration::deserialize(&source.config)
             .map_err(|_| SOURCE_CONFIGURATION_INVALID.to_string())?;
-        configuration.token = source_token(&scope.state, &source).await?;
-        Github::new(configuration)?.at(scope.state.config())
+        authenticated(&scope.state, &source, configuration, operation).await
     }
 }
 
@@ -2217,12 +2230,69 @@ mod tests {
         let scope = tool.scope.as_ref().expect("a workspace scope");
 
         let (reference, sha, _) = tool
-            .github(scope, source.id)
-            .await
-            .expect("the source resolves to a GitHub client")
-            .settled(None)
+            .authenticated(scope, source.id, |github| async move {
+                github.settled(None).await
+            })
             .await
             .expect("the checks are read with the installation's token");
+
+        assert_eq!((reference.as_str(), sha.as_str()), ("main", HEAD));
+    }
+
+    /// GitHub mints `token` for installation `number` the next time it is asked, and only then.
+    async fn minting_once(connected: &Connected, number: u64, token: &str) {
+        Mock::given(method("POST"))
+            .and(path(format!("/app/installations/{number}/access_tokens")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "token": token,
+                "expires_at": (Utc::now() + chrono::Duration::hours(1))
+                    .to_rfc3339_opts(SecondsFormat::Secs, true),
+            })))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_check_wait_github_refuses_the_minted_token_for_mints_again_and_reads_the_checks() {
+        const REFUSED_TOKEN: &str = "ghs_refusedinstallationtoken";
+        let connected = Connected::new().await;
+        let number = number();
+        minting_once(&connected, number, REFUSED_TOKEN).await;
+        minting_once(&connected, number, MINTED_TOKEN).await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPOSITORY}/commits/main")))
+            .and(header("Authorization", format!("Bearer {REFUSED_TOKEN}")))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        for (endpoint, body) in [
+            ("commits/main".to_string(), json!({"sha": HEAD})),
+            (
+                "actions/runs".to_string(),
+                json!({"workflow_runs": [], "total_count": 0}),
+            ),
+            (
+                format!("commits/{HEAD}/check-runs"),
+                json!({"check_runs": []}),
+            ),
+            (format!("commits/{HEAD}/statuses"), json!([])),
+        ] {
+            answering(&connected, MINTED_TOKEN, &endpoint, body).await;
+        }
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let scope = tool.scope.as_ref().expect("a workspace scope");
+
+        let (reference, sha, _) = tool
+            .authenticated(scope, source.id, |github| async move {
+                github.settled(None).await
+            })
+            .await
+            .expect("the checks are read with a freshly minted token");
 
         assert_eq!((reference.as_str(), sha.as_str()), ("main", HEAD));
     }
@@ -2250,7 +2320,12 @@ mod tests {
         let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
         let scope = tool.scope.as_ref().expect("a workspace scope");
 
-        let refusal = tool.github(scope, source.id).await.err();
+        let refusal = tool
+            .authenticated(scope, source.id, |github| async move {
+                github.settled(None).await
+            })
+            .await
+            .err();
 
         assert_eq!(refusal.as_deref(), Some(SOURCE_DISCONNECTED));
     }

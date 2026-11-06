@@ -70,13 +70,15 @@ impl Connected {
         installed(&self.pool, self.state.github(), self.organization, number).await
     }
 
-    /// An installation GitHub has since removed.
-    pub(crate) async fn revoked(&self, number: u64) -> Uuid {
+    /// A source connected through installation `number`, holding `token`,
+    /// whose installation GitHub has since removed.
+    pub(crate) async fn revoked_source(&self, number: u64, token: Option<&str>) -> SourceRow {
         let installation = self.installation(number).await;
+        let source = self.source(Some(installation), token).await;
         github_installations::mark_revoked(&self.pool, installation)
             .await
             .expect("revoke the installation");
-        installation
+        source
     }
 
     /// A GitHub source on `owner/repository`'s main branch, connected through

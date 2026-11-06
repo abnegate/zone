@@ -295,13 +295,17 @@ impl Harness {
 
     async fn revoked_installation(&self, tenant: &Tenant) -> Seeded {
         let seeded = self.installation(tenant).await;
+        self.revoke(&seeded).await;
+        seeded
+    }
+
+    async fn revoke(&self, seeded: &Seeded) {
         assert!(
             github_installations::mark_revoked(self.pool(), seeded.installation)
                 .await
                 .expect("the installation is marked revoked"),
             "the seeded installation exists"
         );
-        seeded
     }
 
     async fn suspended_installation(&self, tenant: &Tenant) -> Seeded {
@@ -1186,10 +1190,11 @@ async fn a_source_reports_its_installation_suspended_then_revoked() {
 async fn verifying_a_source_on_a_revoked_installation_asks_to_reconnect() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
-    let revoked = harness.revoked_installation(&tenant).await;
+    let installation = harness.installation(&tenant).await;
     let source = harness
-        .installation_source(&tenant, revoked.installation)
+        .installation_source(&tenant, installation.installation)
         .await;
+    harness.revoke(&installation).await;
 
     let refused = harness
         .client

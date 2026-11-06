@@ -5,6 +5,7 @@ use abnegate_secret::MasterKey;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const PURPOSE: &[u8] = b"zone planner repository grant";
 const SEPARATOR: &[u8] = &[0];
@@ -12,7 +13,7 @@ const SEPARATOR: &[u8] = &[0];
 type Signer = Hmac<Sha256>;
 
 pub(super) struct Grant {
-    key: [u8; 32],
+    key: Zeroizing<[u8; 32]>,
     workspace: Uuid,
     source: Uuid,
 }
@@ -23,7 +24,7 @@ impl Grant {
             .expect("HMAC takes any key");
         purpose.update(PURPOSE);
         Self {
-            key: purpose.finalize().into_bytes().into(),
+            key: Zeroizing::new(purpose.finalize().into_bytes().into()),
             workspace,
             source,
         }
@@ -41,7 +42,7 @@ impl Grant {
     }
 
     fn signer(&self, repository: &str) -> Signer {
-        let mut signer = Signer::new_from_slice(&self.key).expect("HMAC takes any key");
+        let mut signer = Signer::new_from_slice(self.key.as_slice()).expect("HMAC takes any key");
         signer.update(self.workspace.as_bytes());
         signer.update(SEPARATOR);
         signer.update(self.source.as_bytes());
