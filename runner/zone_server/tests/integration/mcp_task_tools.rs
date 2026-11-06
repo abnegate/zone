@@ -80,6 +80,7 @@ async fn a_task_run_is_handed_the_attached_mcp_tools() {
         user_id: user,
         chat_id: Some(Uuid::new_v4()),
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await;
     assert!(chat.has("stub_delegate"));

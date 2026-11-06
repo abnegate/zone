@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by, title_pending, chat_id)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (SELECT id FROM chats WHERE id = $11 AND workspace_id = $1))\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending\n        ",
+  "query": "\n        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by, title_pending, chat_id, origin)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (SELECT id FROM chats WHERE id = $11 AND workspace_id = $1), $12)\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending\n        ",
   "describe": {
     "columns": [
       {
@@ -302,7 +302,8 @@
         "Uuid",
         "Uuid",
         "Bool",
-        "Uuid"
+        "Uuid",
+        "Text"
       ]
     },
     "nullable": [
@@ -334,5 +335,5 @@
       false
     ]
   },
-  "hash": "1c4cce61028c609135be97b7f0ca589bf750d28b7bc456be6c2b34181b503fbb"
+  "hash": "d8c147d22c8f1a3d6e2ee348b2159ca678321f5f6b4d6f0533ae023529c5ec20"
 }

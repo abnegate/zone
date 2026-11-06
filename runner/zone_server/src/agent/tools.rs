@@ -29,7 +29,7 @@ use super::identifier::{self, Kind};
 use super::receipts::{self, ActionReceipt};
 use crate::db::{
     DbResult, chat_attached_sources, chat_sources, knowledge, message_embeddings, projects,
-    sources, users, workspace_members,
+    sources, tasks::Origin, users, workspace_members,
 };
 use crate::state::AppState;
 
@@ -88,6 +88,8 @@ pub struct WorkspaceScope {
     pub user_id: Uuid,
     /// When true, this chat never uses public web search, page fetch, or curl/wget.
     pub offline: bool,
+    /// Recorded on every task the turn's agent creates.
+    pub origin: Origin,
 }
 
 /// Whether `actor` may act on the workspace as a task initiator: an active
@@ -359,6 +361,13 @@ impl ChatTools {
         self.context.offline
     }
 
+    /// The origin a task this tool set's agent creates is recorded with.
+    pub fn origin(&self) -> Origin {
+        self.scope
+            .as_ref()
+            .map_or(Origin::Member, |scope| scope.origin)
+    }
+
     /// No tools at all, for a chat that answers from the server's own context.
     ///
     /// Built directly rather than through `assemble`, which would
@@ -490,6 +499,7 @@ impl ChatTools {
     }
 
     /// Sandboxed tools and workspace tools authorized as the initiating task actor.
+    /// A task the run creates is the run's doing, not a member's, so it is automation.
     pub async fn for_task(
         state: &AppState,
         cwd: std::path::PathBuf,
@@ -504,6 +514,7 @@ impl ChatTools {
                     user_id,
                     chat_id: None,
                     offline: false,
+                    origin: Origin::Automation,
                 })
             }
             _ => None,
@@ -2379,6 +2390,7 @@ mod tests {
             chat_id: chat,
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         })
     }
 
@@ -2760,6 +2772,7 @@ mod tests {
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         }
     }
 
@@ -3300,6 +3313,7 @@ mod tests {
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         };
         (scope, home)
     }
@@ -3568,6 +3582,7 @@ mod tests {
             chat_id: Some(chat),
             user_id: user.id,
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         };
         let tools = ChatTools::build(scope.clone()).await;
         // The workspace reads a viewer can serve without a connected provider,

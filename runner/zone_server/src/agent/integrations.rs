@@ -2880,6 +2880,7 @@ mod tests {
                 chat_id: None,
                 user_id: Uuid::new_v4(),
                 offline: false,
+                origin: crate::db::tasks::Origin::Member,
             },
             operation,
         }
@@ -5150,6 +5151,7 @@ mod tests {
                 chat_id: Some(Uuid::new_v4()),
                 user_id: user.id,
                 offline: false,
+                origin: crate::db::tasks::Origin::Member,
             },
         };
         let denied = tool.run(json!({"source_id":source.id})).await.unwrap_err();

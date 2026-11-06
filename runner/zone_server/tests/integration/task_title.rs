@@ -207,6 +207,7 @@ async fn a_title_edited_while_one_is_generated_is_not_overwritten() {
             source_id: None,
             created_by: Some(fixture.user),
             chat_id: None,
+            origin: tasks::Origin::Member,
         },
     )
     .await
@@ -258,6 +259,7 @@ async fn a_placeholder_whose_generation_was_lost_is_kept() {
         fixture.workspace,
         fixture.user,
         None,
+        zone_server::db::tasks::Origin::Member,
         actions::Task {
             title: None,
             description: DESCRIPTION.to_string(),
@@ -271,6 +273,7 @@ async fn a_placeholder_whose_generation_was_lost_is_kept() {
         fixture.workspace,
         fixture.user,
         None,
+        zone_server::db::tasks::Origin::Member,
         actions::Task {
             title: None,
             description: DESCRIPTION.to_string(),
@@ -360,6 +363,7 @@ async fn a_task_an_agent_creates_without_a_title_is_titled_the_same_way() {
         fixture.workspace,
         fixture.user,
         None,
+        zone_server::db::tasks::Origin::Member,
         actions::Task {
             title: None,
             description: DESCRIPTION.to_string(),
@@ -373,6 +377,7 @@ async fn a_task_an_agent_creates_without_a_title_is_titled_the_same_way() {
         fixture.workspace,
         fixture.user,
         None,
+        zone_server::db::tasks::Origin::Member,
         serde_json::from_value(json!({"description": DESCRIPTION})).unwrap(),
     )
     .await
@@ -393,6 +398,7 @@ async fn a_task_an_agent_creates_without_a_title_is_titled_the_same_way() {
         fixture.workspace,
         fixture.user,
         None,
+        zone_server::db::tasks::Origin::Member,
         actions::Task {
             title: None,
             description: "  ".to_string(),

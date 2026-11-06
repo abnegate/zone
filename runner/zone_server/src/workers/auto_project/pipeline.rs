@@ -2195,6 +2195,7 @@ mod tests {
                 workspace.id,
                 user.id,
                 None,
+                crate::db::tasks::Origin::Member,
                 &ProjectPlan {
                     name: "Shop",
                     description: None,

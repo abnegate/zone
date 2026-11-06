@@ -53,9 +53,8 @@ pub async fn list_projects(
 /// When a member last worked in each of a workspace's projects: the latest
 /// message one typed into a project chat, or the latest task one added.
 ///
-/// Reminder, tool and automation posts carry a `source`, and tasks automation
-/// planned are `auto_created`, so neither counts. A project nobody worked in is
-/// left out.
+/// Reminder, tool and automation posts carry a `source`, and only a task whose
+/// origin is a member counts. A project nobody worked in is left out.
 pub async fn last_used(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -86,11 +85,7 @@ pub async fn last_used(
             FROM task_projects link
             JOIN tasks task ON task.id = link.task_id
             WHERE link.project_id = project.id
-              AND task.created_by IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM task_automation automation
-                  WHERE automation.task_id = task.id AND automation.auto_created
-              )
+              AND task.origin = 'member'
         ) added ON TRUE
         WHERE project.workspace_id = $1
         "#,
