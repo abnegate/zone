@@ -168,7 +168,7 @@ impl GitHubSyncProvider {
     /// Parse GitHub config from sync config, opening its token when it is sealed
     fn parse_config(&self, config: &SyncConfig) -> SyncResult<GitHubConfig> {
         let mut parsed: GitHubConfig = serde_json::from_value(config.config.clone())
-            .map_err(|e| SyncError::InvalidConfig(format!("Invalid GitHub config: {}", e)))?;
+            .map_err(|error| SyncError::InvalidConfig(format!("Invalid GitHub config: {error}")))?;
         parsed.token = self
             .master_key
             .open_lenient(&parsed.token)
@@ -456,8 +456,12 @@ mod tests {
     use crate::utils::crypto::generate_token;
     use std::sync::LazyLock;
     use uuid::Uuid;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     const TOKEN: &str = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
     const OWNER: &str = "test-owner";
