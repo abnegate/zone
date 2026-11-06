@@ -1371,21 +1371,34 @@ impl Github {
             return Err("That review comment does not belong to this pull request.".into());
         }
         let body = comment["body"].as_str().unwrap_or_default();
-        let (text, total, next) = text_page(body, offset, FILE_PAGE_CHARS)
-            .map_err(|_| "offset is past the end of the comment.".to_string())?;
-        Ok(json!({
+        let total = body.chars().count() as u64;
+        if offset > total {
+            return Err("offset is past the end of the comment.".into());
+        }
+        let mut page = json!({
             "assessment": REVIEW_THREADS_ASSESSMENT,
             "number": number,
             "comment": id,
             "author": comment["user"]["login"].as_str().unwrap_or("unknown"),
             "path": comment["path"],
             "url": comment["html_url"],
-            "body": text,
+            "body": "",
             "offset": offset,
-            "next": next,
+            "next": total,
             "total": total,
-            "complete": next.is_none(),
-        }))
+            "complete": false,
+        });
+        let room = MAX_TOOL_MESSAGE_CHARS
+            .saturating_sub(RESULT_ENVELOPE_CHARS)
+            .saturating_sub(json_chars(&page));
+        let rest: String = body.chars().skip(offset as usize).collect();
+        let taken = escaped_fit(&rest, room).min(FILE_PAGE_CHARS as usize);
+        let end = offset + taken as u64;
+        let next = (end < total).then_some(end);
+        page["body"] = json!(rest.chars().take(taken).collect::<String>());
+        page["next"] = json!(next);
+        page["complete"] = json!(next.is_none());
+        Ok(page)
     }
 
     async fn review(&self, number: u64) -> Result<Review, String> {
@@ -2144,13 +2157,31 @@ fn located(thread: &Value, current: &str, original: &str) -> Value {
     }
 }
 
+/// How many leading characters of `text` fit in `budget` once serialized as a
+/// JSON string, so a body of newlines or quotes cannot double past the cap.
+fn escaped_fit(text: &str, budget: usize) -> usize {
+    let mut cost = 0;
+    for (count, character) in text.chars().enumerate() {
+        cost += match character {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            control if control < ' ' => 6,
+            _ => 1,
+        };
+        if cost > budget {
+            return count;
+        }
+    }
+    text.chars().count()
+}
+
 fn review_comment_row(comment: &Value) -> Value {
     let body = comment["body"].as_str().unwrap_or_default();
+    let kept = escaped_fit(body, REVIEW_BODY_CHARS);
     json!({
         "id": comment["databaseId"],
         "author": comment["author"]["login"].as_str().unwrap_or("unknown"),
-        "body": truncate(body, REVIEW_BODY_CHARS),
-        "truncated": body.chars().count() > REVIEW_BODY_CHARS,
+        "body": truncate(body, kept),
+        "truncated": kept < body.chars().count(),
         "url": comment["url"],
         "created_at": comment["createdAt"],
     })
@@ -3914,8 +3945,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn review_threads_do_not_advertise_a_ref() {
+    #[tokio::test]
+    async fn review_threads_do_not_advertise_a_ref() {
         let schema = tool(Operation::ReviewThreads).parameters_schema();
         assert!(
             schema["properties"].get("ref").is_none(),
@@ -3976,6 +4007,90 @@ mod tests {
             (1..=20).collect::<Vec<_>>(),
             "every comment arrives exactly once, in order"
         );
+    }
+
+    #[test]
+    fn escaped_fit_counts_what_json_adds() {
+        assert_eq!(escaped_fit("plain", 10), 5);
+        assert_eq!(
+            escaped_fit("\n\n\n", 4),
+            2,
+            "a newline costs two once escaped"
+        );
+        assert_eq!(escaped_fit("\u{1}", 5), 0, "a bare control costs six");
+        assert_eq!(
+            json_chars(&json!("\"\\\n\r\t\u{8}\u{c}\u{1}é")),
+            2 + 2 * 7 + 6 + 1,
+            "the costs mirror serde_json's own escaping"
+        );
+        assert_eq!(escaped_fit("\"\\\n\r\t\u{8}\u{c}\u{1}é", 21), 9);
+        assert_eq!(escaped_fit("\"\\\n\r\t\u{8}\u{c}\u{1}é", 20), 8);
+    }
+
+    #[tokio::test]
+    async fn an_escape_heavy_comment_still_fits_one_message() {
+        let server = MockServer::start().await;
+        let mut payload = long_thread_payload(1, 0);
+        payload["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["nodes"]
+            [0]["body"] = json!("\u{1}".repeat(REVIEW_BODY_CHARS));
+        mock_graphql(&server, payload).await;
+
+        let mut read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+        read["repository"] = json!("https://github.com/owner/repository");
+
+        assert!(
+            json_chars(&read) <= MAX_TOOL_MESSAGE_CHARS,
+            "a body that escapes to six times its length must still fit, got {}",
+            json_chars(&read)
+        );
+        assert_eq!(read["threads"][0]["comments"][0]["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn an_escape_heavy_comment_reads_whole_across_pages() {
+        let server = MockServer::start().await;
+        let body = "line\n\"quoted\"\n".repeat(2_000);
+        mock(
+            &server,
+            "pulls/comments/1",
+            json!({
+                "id": 1,
+                "body": body,
+                "html_url": "https://github.com/owner/repository/pull/7#discussion_r1",
+                "pull_request_url": "https://api.github.com/repos/owner/repository/pulls/7",
+                "user": {"login": "coderabbitai"}
+            }),
+        )
+        .await;
+        let github = github(&server);
+        let mut read = String::new();
+        let mut offset = Some(0);
+        let mut pages = 0;
+
+        while let Some(next) = offset {
+            let mut arguments = readiness_args(Some(7));
+            arguments.comment = Some(1);
+            arguments.offset = Some(next);
+            let mut page = github
+                .review_threads(&arguments)
+                .await
+                .expect("each page is readable");
+            page["repository"] = json!("https://github.com/owner/repository");
+            assert!(
+                json_chars(&page) <= MAX_TOOL_MESSAGE_CHARS,
+                "an escaped page must survive the transcript cap whole, got {}",
+                json_chars(&page)
+            );
+            read.push_str(page["body"].as_str().expect("a body page"));
+            offset = page["next"].as_u64();
+            pages += 1;
+            assert!(pages <= 50, "following next must finish");
+        }
+
+        assert_eq!(read, body, "the pages join back into the whole comment");
     }
 
     #[tokio::test]
