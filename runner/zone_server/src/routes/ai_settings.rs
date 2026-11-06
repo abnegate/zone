@@ -7,7 +7,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
 
@@ -132,7 +132,20 @@ pub struct WorkspaceAiSettingsResponse {
     #[serde(flatten)]
     pub settings: AiSettingsResponse,
     pub overrides: bool,
+    pub inherits_provider: bool,
     pub organization_keys: OrganizationKeysResponse,
+}
+
+fn workspace_response(
+    settings: Option<ai_settings::WorkspaceAiSettingsRow>,
+    keys: ai_settings::OrganizationKeys,
+) -> WorkspaceAiSettingsResponse {
+    WorkspaceAiSettingsResponse {
+        overrides: settings.is_some(),
+        inherits_provider: settings.as_ref().is_none_or(|row| row.provider.is_none()),
+        settings: settings.map_or_else(AiSettingsResponse::unsaved, AiSettingsResponse::from),
+        organization_keys: keys.into(),
+    }
 }
 
 impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
@@ -243,6 +256,14 @@ fn is_scheme(candidate: &str) -> bool {
         })
 }
 
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 /// Update AI settings request
 #[derive(Debug, Deserialize)]
 pub struct UpdateAiSettingsRequest {
@@ -257,7 +278,8 @@ pub struct UpdateAiSettingsRequest {
     pub bedrock_region: Option<String>,
     pub bedrock_access_key: Option<SecretValue>,
     pub bedrock_secret_key: Option<SecretValue>,
-    pub bedrock_use_iam_role: Option<bool>,
+    #[serde(default, deserialize_with = "present")]
+    pub bedrock_use_iam_role: Option<Option<bool>>,
     pub model_fast: Option<String>,
     pub model_reasoning: Option<String>,
     pub model_embedding: Option<String>,
@@ -280,7 +302,8 @@ impl UpdateAiSettingsRequest {
             bedrock_region: self.bedrock_region.as_deref(),
             bedrock_access_key: self.bedrock_access_key.expose_as_deref(),
             bedrock_secret_key: self.bedrock_secret_key.expose_as_deref(),
-            bedrock_use_iam_role: self.bedrock_use_iam_role,
+            bedrock_use_iam_role: self.bedrock_use_iam_role.flatten(),
+            clear_bedrock_use_iam_role: self.bedrock_use_iam_role == Some(None),
             model_fast: self.model_fast.as_deref(),
             model_reasoning: self.model_reasoning.as_deref(),
             model_embedding: self.model_embedding.as_deref(),
@@ -441,14 +464,9 @@ pub async fn get_workspace(
     };
     match ai_settings::get_workspace_authorized(state.db(), path.org_id, path.ws_id, user_id).await
     {
-        Ok(saved) => Json(WorkspaceAiSettingsResponse {
-            overrides: saved.settings.is_some(),
-            settings: saved
-                .settings
-                .map_or_else(AiSettingsResponse::unsaved, AiSettingsResponse::from),
-            organization_keys: saved.organization_keys.into(),
-        })
-        .into_response(),
+        Ok(saved) => {
+            Json(workspace_response(saved.settings, saved.organization_keys)).into_response()
+        }
         Err(error) => *access_error(error),
     }
 }
@@ -475,7 +493,7 @@ pub async fn upsert_workspace(
     .await
     {
         Ok(saved) => {
-            let response = AiSettingsResponse::from(saved.settings);
+            let response = workspace_response(Some(saved.settings), saved.organization_keys);
             audit(
                 state.db(),
                 AuditEvent {
@@ -487,16 +505,11 @@ pub async fn upsert_workspace(
                     resource_type: resources::AI_SETTINGS,
                     resource_id: Some(path.ws_id),
                     old_values: None,
-                    new_values: serde_json::to_value(&response).ok(),
+                    new_values: serde_json::to_value(&response.settings).ok(),
                 },
             )
             .await;
-            Json(WorkspaceAiSettingsResponse {
-                settings: response,
-                overrides: true,
-                organization_keys: saved.organization_keys.into(),
-            })
-            .into_response()
+            Json(response).into_response()
         }
         Err(error) => *access_error(error),
     }
@@ -562,6 +575,109 @@ pub async fn get_effective(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn organization_keys() -> ai_settings::OrganizationKeys {
+        ai_settings::OrganizationKeys {
+            litellm: false,
+            openai: false,
+            anthropic: false,
+        }
+    }
+
+    fn workspace_row(provider: Option<&str>) -> ai_settings::WorkspaceAiSettingsRow {
+        ai_settings::WorkspaceAiSettingsRow {
+            id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            provider: provider.map(str::to_string),
+            litellm_host: None,
+            litellm_key: None,
+            openai_api_key: None,
+            openai_base_url: None,
+            anthropic_api_key: None,
+            anthropic_base_url: None,
+            runpod_api_key: None,
+            bedrock_region: None,
+            bedrock_access_key: None,
+            bedrock_secret_key: None,
+            bedrock_use_iam_role: None,
+            model_fast: Some("workspace-fast".to_string()),
+            model_reasoning: None,
+            model_embedding: None,
+            model_image: None,
+            model_video: None,
+            model_audio: None,
+            completions_routed: true,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    fn update_request(body: &str) -> UpdateAiSettingsRequest {
+        serde_json::from_str(body).expect("the request deserialises")
+    }
+
+    #[test]
+    fn a_workspace_without_saved_settings_inherits_the_provider() {
+        let response = workspace_response(None, organization_keys());
+        assert!(response.inherits_provider);
+        assert!(!response.overrides);
+    }
+
+    #[test]
+    fn a_workspace_that_saved_no_provider_inherits_it() {
+        let response = workspace_response(Some(workspace_row(None)), organization_keys());
+        assert!(response.inherits_provider);
+        assert!(response.overrides);
+        assert_eq!(response.settings.provider, PROVIDER_SELF_HOSTED);
+    }
+
+    #[test]
+    fn a_workspace_that_saved_self_hosted_overrides_the_provider() {
+        let response = workspace_response(
+            Some(workspace_row(Some(PROVIDER_SELF_HOSTED))),
+            organization_keys(),
+        );
+        assert!(!response.inherits_provider);
+        assert!(response.overrides);
+    }
+
+    #[test]
+    fn workspace_response_serialises_inherits_provider_beside_overrides() {
+        let body = serde_json::to_value(workspace_response(None, organization_keys()))
+            .expect("the response serialises");
+        assert_eq!(body["inherits_provider"], true);
+        assert_eq!(body["overrides"], false);
+        assert_eq!(body["provider"], PROVIDER_SELF_HOSTED);
+    }
+
+    #[test]
+    fn an_omitted_bedrock_use_iam_role_keeps_the_saved_value() {
+        let request = update_request("{}");
+        assert_eq!(request.bedrock_use_iam_role, None);
+        let update = request.update();
+        assert_eq!(update.bedrock_use_iam_role, None);
+        assert!(!update.clear_bedrock_use_iam_role);
+    }
+
+    #[test]
+    fn a_null_bedrock_use_iam_role_clears_the_saved_value() {
+        let request = update_request(r#"{ "bedrock_use_iam_role": null }"#);
+        assert_eq!(request.bedrock_use_iam_role, Some(None));
+        let update = request.update();
+        assert_eq!(update.bedrock_use_iam_role, None);
+        assert!(update.clear_bedrock_use_iam_role);
+    }
+
+    #[test]
+    fn a_boolean_bedrock_use_iam_role_sets_the_saved_value() {
+        for value in [false, true] {
+            let request = update_request(&format!(r#"{{ "bedrock_use_iam_role": {value} }}"#));
+            assert_eq!(request.bedrock_use_iam_role, Some(Some(value)), "{value}");
+            let update = request.update();
+            assert_eq!(update.bedrock_use_iam_role, Some(value), "{value}");
+            assert!(!update.clear_bedrock_use_iam_role, "{value}");
+        }
+    }
 
     #[test]
     fn without_credentials_keeps_a_clean_url_exactly_as_saved() {

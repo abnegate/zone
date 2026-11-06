@@ -1476,6 +1476,154 @@ async fn test_workspace_settings_say_whether_the_workspace_overrides() {
 }
 
 #[tokio::test]
+async fn test_workspace_settings_say_whether_the_workspace_inherits_the_provider() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let effective = format!("{workspace}/effective");
+
+    client
+        .put_json_auth(&organization, &json!({ "provider": "anthropic" }), &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    let unsaved = client.get_auth(&workspace, &token).await;
+    unsaved.assert_status(StatusCode::OK);
+    assert_eq!(unsaved.json_value()["inherits_provider"], true);
+    assert_eq!(unsaved.json_value()["overrides"], false);
+
+    let model_only = client
+        .put_json_auth(&workspace, &json!({ "model_fast": "x" }), &token)
+        .await;
+    model_only.assert_status(StatusCode::OK);
+    assert_eq!(model_only.json_value()["inherits_provider"], true);
+
+    let stored = client.get_auth(&workspace, &token).await;
+    stored.assert_status(StatusCode::OK);
+    let body = stored.json_value();
+    assert_eq!(
+        body["inherits_provider"], true,
+        "a workspace that saved only a model leaves the provider to its organization"
+    );
+    assert_eq!(body["overrides"], true);
+    assert_eq!(body["provider"], "self_hosted");
+    let merged = client.get_auth(&effective, &token).await;
+    merged.assert_status(StatusCode::OK);
+    assert_eq!(merged.json_value()["provider"], "anthropic");
+    assert_eq!(merged.json_value()["model_fast"], "x");
+
+    let explicit = client
+        .put_json_auth(&workspace, &json!({ "provider": "self_hosted" }), &token)
+        .await;
+    explicit.assert_status(StatusCode::OK);
+    assert_eq!(explicit.json_value()["inherits_provider"], false);
+    let stored = client.get_auth(&workspace, &token).await;
+    stored.assert_status(StatusCode::OK);
+    assert_eq!(
+        stored.json_value()["inherits_provider"],
+        false,
+        "a workspace that saved self_hosted overrides an organization on anthropic"
+    );
+    assert_eq!(stored.json_value()["provider"], "self_hosted");
+
+    client
+        .delete_auth(&workspace, &token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let reset = client.get_auth(&workspace, &token).await;
+    reset.assert_status(StatusCode::OK);
+    assert_eq!(reset.json_value()["inherits_provider"], true);
+    assert_eq!(reset.json_value()["overrides"], false);
+}
+
+#[tokio::test]
+async fn test_workspace_bedrock_settings_clear_back_to_the_organization() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+    let effective = format!("{workspace}/effective");
+
+    client
+        .put_json_auth(
+            &organization,
+            &json!({
+                "provider": "bedrock",
+                "bedrock_region": "eu-west-1",
+                "bedrock_use_iam_role": true,
+            }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    client
+        .put_json_auth(
+            &workspace,
+            &json!({
+                "provider": "bedrock",
+                "bedrock_region": "us-east-1",
+                "bedrock_access_key": "AKIA",
+                "bedrock_secret_key": "s",
+                "bedrock_use_iam_role": false,
+            }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let overridden = client.get_auth(&effective, &token).await;
+    overridden.assert_status(StatusCode::OK);
+    assert_eq!(overridden.json_value()["bedrock_region"], "us-east-1");
+    assert_eq!(
+        overridden.json_value()["bedrock_use_iam_role"],
+        false,
+        "a saved false overrides an organization on an IAM role"
+    );
+    assert_eq!(overridden.json_value()["has_bedrock_credentials"], true);
+
+    let cleared = client
+        .put_json_auth(
+            &workspace,
+            &json!({
+                "provider": "bedrock",
+                "bedrock_region": "",
+                "bedrock_access_key": "",
+                "bedrock_secret_key": "",
+                "bedrock_use_iam_role": null,
+            }),
+            &token,
+        )
+        .await;
+    cleared.assert_status(StatusCode::OK);
+
+    let stored = client.get_auth(&workspace, &token).await;
+    stored.assert_status(StatusCode::OK);
+    let body = stored.json_value();
+    assert!(
+        body["bedrock_region"].is_null(),
+        "a blank region clears the workspace's own"
+    );
+    assert_eq!(body["has_bedrock_credentials"], false);
+    assert_eq!(body["bedrock_use_iam_role"], false);
+    assert_eq!(body["overrides"], true);
+    assert_eq!(body["inherits_provider"], false);
+
+    let inherited = client.get_auth(&effective, &token).await;
+    inherited.assert_status(StatusCode::OK);
+    assert_eq!(inherited.json_value()["bedrock_region"], "eu-west-1");
+    assert_eq!(
+        inherited.json_value()["bedrock_use_iam_role"],
+        true,
+        "a null clears the saved false so the organization's IAM role applies again"
+    );
+}
+
+#[tokio::test]
 async fn test_credentials_not_exposed_in_response() {
     let client = TestClient::with_db().await;
     let token = get_auth_token(&client).await;

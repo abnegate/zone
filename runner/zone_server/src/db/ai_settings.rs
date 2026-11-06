@@ -75,6 +75,7 @@ pub struct Update<'a> {
     pub bedrock_access_key: Option<&'a str>,
     pub bedrock_secret_key: Option<&'a str>,
     pub bedrock_use_iam_role: Option<bool>,
+    pub clear_bedrock_use_iam_role: bool,
     pub model_fast: Option<&'a str>,
     pub model_reasoning: Option<&'a str>,
     pub model_embedding: Option<&'a str>,
@@ -933,7 +934,8 @@ where
             $1, $2,
             NULLIF(BTRIM($3), ''), NULLIF(BTRIM($4), ''), NULLIF(BTRIM($5), ''),
             NULLIF(BTRIM($6), ''), NULLIF(BTRIM($7), ''), NULLIF(BTRIM($8), ''),
-            $9, $10, $11, $12,
+            NULLIF(BTRIM($9), ''), NULLIF(BTRIM($10), ''), NULLIF(BTRIM($11), ''),
+            CASE WHEN $20 THEN NULL ELSE $12 END,
             NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), ''),
             NULLIF(BTRIM($19), ''),
@@ -972,10 +974,25 @@ where
                 WHEN BTRIM($8) = '' THEN NULL
                 ELSE BTRIM($8)
             END,
-            bedrock_region = COALESCE($9, workspace_ai_settings.bedrock_region),
-            bedrock_access_key = COALESCE($10, workspace_ai_settings.bedrock_access_key),
-            bedrock_secret_key = COALESCE($11, workspace_ai_settings.bedrock_secret_key),
-            bedrock_use_iam_role = COALESCE($12, workspace_ai_settings.bedrock_use_iam_role),
+            bedrock_region = CASE
+                WHEN $9 IS NULL THEN workspace_ai_settings.bedrock_region
+                WHEN BTRIM($9) = '' THEN NULL
+                ELSE BTRIM($9)
+            END,
+            bedrock_access_key = CASE
+                WHEN $10 IS NULL THEN workspace_ai_settings.bedrock_access_key
+                WHEN BTRIM($10) = '' THEN NULL
+                ELSE BTRIM($10)
+            END,
+            bedrock_secret_key = CASE
+                WHEN $11 IS NULL THEN workspace_ai_settings.bedrock_secret_key
+                WHEN BTRIM($11) = '' THEN NULL
+                ELSE BTRIM($11)
+            END,
+            bedrock_use_iam_role = CASE
+                WHEN $20 THEN NULL
+                ELSE COALESCE($12, workspace_ai_settings.bedrock_use_iam_role)
+            END,
             -- NULL keeps the saved model; an empty string clears it to NULL.
             model_fast = CASE
                 WHEN $13 IS NULL THEN workspace_ai_settings.model_fast
@@ -1041,6 +1058,7 @@ where
     .bind(update.model_video)
     .bind(update.model_audio)
     .bind(update.runpod_api_key)
+    .bind(update.clear_bedrock_use_iam_role)
     .fetch_one(executor)
     .await?;
 
