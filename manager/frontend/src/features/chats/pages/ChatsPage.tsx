@@ -606,6 +606,10 @@ export default function ChatsPage() {
     if (latestSelectedChatId.current === chatId) setChatOperationError(message);
   };
 
+  const reportAll = (chatId: string, problems: string[]) => {
+    if (problems.length > 0) reportForChat(chatId, problems.join('. '));
+  };
+
   const handleToggleAgent = async () => {
     if (!isAuthenticated || !displayedChat) return;
     const chatId = displayedChat.id;
@@ -680,6 +684,7 @@ export default function ChatsPage() {
     if (!isAuthenticated || !displayedChat) return false;
     const chatId = displayedChat.id;
     const modelName = displayedChat.model_name;
+    const contextTokens = displayedChat.context_tokens;
     setChatOperationError(null);
     markChanging(chatId, true);
     try {
@@ -692,12 +697,21 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return false;
     }
+    const problems: string[] = [];
     try {
       const offer = offerFor(provider);
       if (offer) await settleEffort(effortsFor(offer, provider === null ? modelName : model));
     } catch (error) {
-      reportForChat(chatId, failure(PROVIDER_EFFORT_RESET_FAILED, error));
+      problems.push(failure(PROVIDER_EFFORT_RESET_FAILED, error));
+    }
+    try {
+      if (model && offersContextOn(provider, chatDefaultProvider, models, model)) {
+        await fitContext(contextTokens, model);
+      }
+    } catch (error) {
+      problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
+      reportAll(chatId, problems);
       if (latestSelectedChatId.current === chatId) await refreshChat();
       markChanging(chatId, false);
     }
@@ -724,16 +738,18 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return;
     }
+    const problems: string[] = [];
     try {
       await settleEffort(effortsFor(chatProviders.default, name));
     } catch (error) {
-      reportForChat(chatId, failure(MODEL_EFFORT_RESET_FAILED, error));
+      problems.push(failure(MODEL_EFFORT_RESET_FAILED, error));
     }
     try {
       await fitContext(contextTokens, name);
     } catch (error) {
-      reportForChat(chatId, failure(MODEL_CONTEXT_RESET_FAILED, error));
+      problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
+      reportAll(chatId, problems);
       try {
         if (latestSelectedChatId.current === chatId) {
           await Promise.all([refreshProviders(), refreshChat()]);

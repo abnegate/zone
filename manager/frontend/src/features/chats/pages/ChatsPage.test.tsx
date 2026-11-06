@@ -4047,6 +4047,13 @@ describe('ChatsPage', () => {
         context_tokens: update.context_tokens ?? 32768,
       }));
 
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        reasoning_effort: 'high',
+        context_tokens: 4096,
+      });
+
       chooseSelectOption('chat-provider-model', 'tinyllama');
 
       await waitFor(() =>
@@ -4054,6 +4061,83 @@ describe('ChatsPage', () => {
       );
       expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { model_name: 'tinyllama' });
       expect(mockClient.updateChat).toHaveBeenCalledTimes(2);
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('4K'));
+      expect(screen.queryByTestId('chat-operation-error')).not.toBeInTheDocument();
+    });
+
+    it('fits the context to a smaller model chosen on a Self-Hosted provider', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const local = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS },
+        ],
+      });
+      const chosen = { provider: 'self_hosted' as const, provider_model: 'llama2' };
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(local, 'llama2') })
+      );
+      await openChat({ ...chosen, context_tokens: 32768, reasoning_effort: 'high' });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        ...chosen,
+        provider_model: 'tinyllama',
+        context_tokens: 32768,
+      });
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        ...chosen,
+        provider_model: 'tinyllama',
+        context_tokens: 4096,
+      });
+
+      chooseSelectOption('chat-provider-model', 'tinyllama');
+
+      await waitFor(() =>
+        expect(mockSetChatProvider).toHaveBeenCalledWith('chat-1', {
+          provider: 'self_hosted',
+          model: 'tinyllama',
+        })
+      );
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 4096 })
+      );
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports every fix-up that fails after a model change', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const served = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: ['off', 'low'] },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+      await openChat({ model_name: 'llama2', context_tokens: 32768, reasoning_effort: 'high' });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockClient.updateChat.mockImplementation(async (_id: string, update: UpdateChatRequest) => {
+        if (update.reasoning_effort) throw new Error('Effort refused');
+        if (update.context_tokens) throw new Error('Context refused');
+        return { ...mockChatWithMessages, model_name: 'tinyllama' };
+      });
+
+      chooseSelectOption('chat-provider-model', 'tinyllama');
+
+      const error = await screen.findByTestId('chat-operation-error');
+      expect(error).toHaveTextContent(
+        'Model changed, but its reasoning effort could not be reset: Effort refused'
+      );
+      expect(error).toHaveTextContent(
+        'Model changed, but its context size could not be fitted to it: Context refused'
+      );
     });
 
     it('changes the model of a chat on a self-hosted default mid-chat', async () => {
