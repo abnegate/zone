@@ -24,13 +24,16 @@ use super::readiness::{
 use super::releases::{self, Lookup, ReleaseIdentity, ReleasePipeline, RunEvidence};
 use super::tools::{WorkspaceScope, apply_record_cap, json_chars, take_array, truncate};
 use crate::config::{Config, github_graphql_url};
-use crate::db::{sources, workspace_members};
+use crate::db::sources::{self, SourceRow};
+use crate::db::workspace_members;
 use crate::services::chat::pull_request::{self as chat_pull_request, Opened};
 use crate::services::checkout;
+use crate::services::github_app::{Credential, Error as GithubError};
 use crate::services::prioritisation::{
     Configuration as Prioritisation, Prioritiser, RiskSignal, pull_request,
 };
 use crate::services::project_directory::{self, Origin, Start};
+use crate::state::AppState;
 
 const ORIGIN: &str = "https://api.github.com/";
 const API_HOST_LABEL: &str = "api.";
@@ -95,6 +98,10 @@ pub const SETTLED_ASSESSMENTS: [&str; 4] = [
     TERMINAL_ASSESSMENTS[0],
     TERMINAL_ASSESSMENTS[1],
 ];
+pub(crate) const SOURCE_DISCONNECTED: &str =
+    "This source's GitHub connection was removed or suspended. Reconnect GitHub.";
+pub(crate) const SOURCE_CREDENTIALS_INVALID: &str =
+    "The source credentials could not be decrypted.";
 const RATE_LIMIT_EXHAUSTED: &str = "GitHub's API rate limit is exhausted for this source's credential. Retrying now will not help; wait for the limit to reset.";
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 const RETRY_AFTER_HEADER: &str = "Retry-After";
@@ -181,6 +188,26 @@ pub(crate) struct Configuration {
     /// Which review bots count as review evidence for this source. Absent
     /// means every bot this build recognises.
     pub(crate) review_signals: Option<Vec<String>>,
+}
+
+/// The bearer token `source` reaches GitHub with: a token minted for its
+/// GitHub App installation, or the personal access token stored on a source
+/// connected before installations existed. A removed or suspended
+/// installation is refused outright rather than answered with a stored token.
+pub(crate) async fn source_token(
+    state: &AppState,
+    source: &SourceRow,
+) -> Result<Option<SecretValue>, &'static str> {
+    match state.github().source(state.db(), source).await {
+        Ok(credential) => Ok(credential.map(Credential::into_secret)),
+        Err(GithubError::Revoked | GithubError::Suspended | GithubError::NotConnected) => {
+            Err(SOURCE_DISCONNECTED)
+        }
+        Err(error) => {
+            tracing::warn!(%error, source = %source.id, "GitHub source credential could not be resolved");
+            Err(SOURCE_CREDENTIALS_INVALID)
+        }
+    }
 }
 
 #[async_trait]
@@ -399,14 +426,11 @@ impl Integration {
                 "Live integrations currently support connected GitHub sources only.".to_string(),
             );
         }
-        let mut configuration: Configuration = serde_json::from_value(source.config)
+        let mut configuration = Configuration::deserialize(&source.config)
             .map_err(|_| "The GitHub source configuration is invalid.".to_string())?;
-        if let Some(encrypted) = source.credentials_encrypted {
-            configuration.token = Some(
-                crate::crypto::decrypt(self.scope.state.encryption_key(), &encrypted)
-                    .map_err(|_| "The source credentials could not be decrypted.".to_string())?,
-            );
-        }
+        configuration.token = source_token(&self.scope.state, &source)
+            .await?
+            .map(|token| token.expose().to_string());
         let github = Github::new(configuration)?.at(self.scope.state.config())?;
         let mut result = if matches!(self.operation, Operation::CreatePull) {
             self.open_pull(&github, &arguments).await?
@@ -2498,6 +2522,8 @@ fn readiness_citation(record: &Value, observed_at: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::testing::{Connected, MINTED_TOKEN, OWNER, REPOSITORY, STORED_TOKEN, number};
+    use crate::services::github_app::testing::issuing;
     use crate::state::AppState;
     use std::time::Instant;
     use wiremock::matchers::{header, method, path, query_param};
@@ -5086,5 +5112,71 @@ mod tests {
             None,
             "a date past the cap is not honoured"
         );
+    }
+
+    fn connected_tool(connected: &Connected, operation: Operation) -> Integration {
+        Integration {
+            scope: connected.scope(),
+            operation,
+        }
+    }
+
+    async fn issues(connected: &Connected, token: &str, calls: u64) {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPOSITORY}/issues")))
+            .and(header("Authorization", format!("Bearer {token}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(calls)
+            .mount(&connected.github)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_installation_source_reads_github_with_a_minted_token() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 1).await;
+        issues(&connected, MINTED_TOKEN, 1).await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+
+        let result = connected_tool(&connected, Operation::Issues)
+            .run(json!({"source_id": source.id}))
+            .await
+            .expect("the issues are read with the installation's token");
+
+        assert_eq!(result["source_id"], json!(source.id));
+    }
+
+    #[tokio::test]
+    async fn a_source_with_only_a_stored_token_still_reads_github_with_it() {
+        let connected = Connected::new().await;
+        issues(&connected, STORED_TOKEN, 1).await;
+        let source = connected.source(None, Some(STORED_TOKEN)).await;
+
+        connected_tool(&connected, Operation::Issues)
+            .run(json!({"source_id": source.id}))
+            .await
+            .expect("the issues are read with the stored token");
+    }
+
+    #[tokio::test]
+    async fn a_revoked_installation_is_refused_and_the_stored_token_is_never_sent() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 0).await;
+        issues(&connected, STORED_TOKEN, 0).await;
+        let installation = connected.revoked(number).await;
+        let source = connected
+            .source(Some(installation), Some(STORED_TOKEN))
+            .await;
+
+        let refusal = connected_tool(&connected, Operation::Issues)
+            .run(json!({"source_id": source.id}))
+            .await
+            .unwrap_err();
+
+        assert_eq!(refusal, SOURCE_DISCONNECTED);
+        assert!(!refusal.contains(STORED_TOKEN));
     }
 }
