@@ -1,17 +1,20 @@
 import { describe, expect, it } from 'bun:test';
-import type { ChatSubagent } from '../subagentTypes';
+import type { ChatSubagent, SubagentStep } from '../subagentTypes';
 import {
   formatDuration,
+  groupByMessage,
   instant,
+  mergeSteps,
   mergeSubagent,
   mergeSubagents,
-  startedIn,
   stepStatusLabel,
   subagentActive,
   subagentDuration,
+  subagentLabel,
   subagentName,
   subagentStatusLabel,
   subagentStatusTint,
+  withoutSubagents,
 } from './subagents';
 
 const REVIEWER: ChatSubagent = {
@@ -30,7 +33,8 @@ const REVIEWER: ChatSubagent = {
   last_tool: 'Bash',
   summary: null,
   error: null,
-  steps: [],
+  step_count: 0,
+  revision: 2,
   started_at: '2026-11-05T10:00:00Z',
   finished_at: null,
   updated_at: '2026-11-05T10:00:05Z',
@@ -68,56 +72,32 @@ describe('mergeSubagent', () => {
     expect(mergeSubagent([TESTER], REVIEWER)).toEqual([REVIEWER, TESTER]);
   });
 
-  it('replaces an agent with a copy written later', () => {
-    const finished: ChatSubagent = {
-      ...REVIEWER,
-      status: 'completed',
-      updated_at: '2026-11-05T10:00:09Z',
-    };
+  it('replaces an agent with a copy of a higher revision', () => {
+    const finished: ChatSubagent = { ...REVIEWER, status: 'completed', revision: 3 };
     expect(mergeSubagent([REVIEWER, TESTER], finished)).toEqual([finished, TESTER]);
   });
 
-  it('keeps the copy it has when the incoming one was written earlier', () => {
+  it('keeps the copy it has when the incoming one has a lower revision', () => {
     const list = [REVIEWER, TESTER];
-    const stale: ChatSubagent = { ...REVIEWER, tool_uses: 1, updated_at: '2026-11-05T10:00:01Z' };
+    const stale: ChatSubagent = { ...REVIEWER, tool_uses: 1, revision: 1 };
     expect(mergeSubagent(list, stale)).toBe(list);
   });
 
-  it('compares written times, not strings, across offsets', () => {
-    const held: ChatSubagent = { ...REVIEWER, updated_at: '2026-11-05T10:30:00Z' };
-    const stringLater: ChatSubagent = {
-      ...REVIEWER,
-      status: 'failed',
-      updated_at: '2026-11-05T12:15:00+02:00',
-    };
-    expect(stringLater.updated_at > held.updated_at).toBe(true);
-    expect(mergeSubagent([held], stringLater)).toEqual([held]);
-
-    const stringEarlier: ChatSubagent = { ...REVIEWER, updated_at: '2026-11-05T11:00:00+02:00' };
-    expect(held.updated_at < stringEarlier.updated_at).toBe(true);
-    expect(mergeSubagent([stringEarlier], held)).toEqual([held]);
+  it('takes the incoming copy when the revisions tie', () => {
+    const twin: ChatSubagent = { ...REVIEWER, last_tool: 'Read' };
+    expect(mergeSubagent([REVIEWER], twin)).toEqual([twin]);
   });
 
-  it('compares written times, not strings, across fractional digits', () => {
-    const whole: ChatSubagent = { ...REVIEWER, updated_at: '2026-11-05T10:00:05Z' };
-    const fraction: ChatSubagent = {
+  it('orders copies by revision alone, whatever their written times say', () => {
+    const later: ChatSubagent = {
       ...REVIEWER,
       status: 'completed',
-      updated_at: '2026-11-05T10:00:05.000001Z',
+      revision: 3,
+      updated_at: '2026-11-05T09:00:00Z',
     };
-    expect(fraction.updated_at < whole.updated_at).toBe(true);
-    expect(mergeSubagent([whole], fraction)).toEqual([fraction]);
-    expect(mergeSubagent([fraction], whole)).toEqual([fraction]);
-
-    const short: ChatSubagent = { ...REVIEWER, updated_at: '2026-11-05T10:00:05.5Z' };
-    const long: ChatSubagent = {
-      ...REVIEWER,
-      status: 'completed',
-      updated_at: '2026-11-05T10:00:05.500001Z',
-    };
-    expect(long.updated_at < short.updated_at).toBe(true);
-    expect(mergeSubagent([short], long)).toEqual([long]);
-    expect(mergeSubagent([long], short)).toEqual([long]);
+    const earlier: ChatSubagent = { ...REVIEWER, updated_at: '2026-11-05T11:00:00Z' };
+    expect(mergeSubagent([later], earlier)).toEqual([later]);
+    expect(mergeSubagent([earlier], later)).toEqual([later]);
   });
 
   it('orders by start time, not by string, and then by id', () => {
@@ -137,12 +117,8 @@ describe('mergeSubagent', () => {
 });
 
 describe('mergeSubagents', () => {
-  it('folds a loaded list in by the same keep-newer rule', () => {
-    const live: ChatSubagent = {
-      ...REVIEWER,
-      status: 'completed',
-      updated_at: '2026-11-05T10:00:09Z',
-    };
+  it('folds a loaded list in by the same higher-revision rule', () => {
+    const live: ChatSubagent = { ...REVIEWER, status: 'completed', revision: 5 };
     const merged = mergeSubagents([live], [REVIEWER, TESTER]);
     expect(merged).toEqual([live, TESTER]);
   });
@@ -159,17 +135,63 @@ describe('mergeSubagents', () => {
   });
 });
 
+describe('withoutSubagents', () => {
+  it('drops the agents named, and hands back the same list when none were held', () => {
+    const list = [REVIEWER, TESTER];
+    expect(withoutSubagents(list, new Set([REVIEWER.id, 'unknown']))).toEqual([TESTER]);
+    expect(withoutSubagents(list, new Set(['unknown']))).toBe(list);
+  });
+});
+
+describe('mergeSteps', () => {
+  const READ: SubagentStep = { id: 'toolu_1', name: 'Read', subject: 'a.rs', status: 'succeeded' };
+  const BASH: SubagentStep = {
+    id: 'toolu_2',
+    name: 'Bash',
+    subject: 'cargo test',
+    status: 'running',
+  };
+  const GREP: SubagentStep = { id: 'toolu_3', name: 'Grep', subject: null, status: 'running' };
+
+  it('updates a step in place and appends new ones in arrival order', () => {
+    const passed: SubagentStep = { ...BASH, status: 'succeeded' };
+    const listed: SubagentStep = { ...GREP, id: 'toolu_4', name: 'Glob' };
+    expect(mergeSteps([READ, BASH], [GREP, passed, listed])).toEqual([READ, passed, GREP, listed]);
+  });
+
+  it('never moves a settled step back to running', () => {
+    const failed: SubagentStep = { ...BASH, status: 'failed' };
+    const list = [READ, failed];
+    expect(mergeSteps(list, [BASH, { ...READ, status: 'running' }])).toBe(list);
+  });
+
+  it('hands back the same list when nothing changed', () => {
+    const list = [READ, BASH];
+    expect(mergeSteps(list, [])).toBe(list);
+    expect(mergeSteps(list, list)).toBe(list);
+  });
+});
+
 describe('subagent readings', () => {
-  it('finds the agents a message started', () => {
+  it('groups the agents by the message that started them, in list order', () => {
     const other: ChatSubagent = { ...TESTER, message_id: 'message-2' };
     const orphan: ChatSubagent = { ...TESTER, id: 'subagent-4', message_id: null };
-    expect(startedIn([REVIEWER, other, orphan], 'message-1')).toEqual([REVIEWER]);
-    expect(startedIn([REVIEWER, other, orphan], 'message-3')).toEqual([]);
+    const sibling: ChatSubagent = { ...TESTER, id: 'subagent-5' };
+    const grouped = groupByMessage([REVIEWER, other, orphan, sibling]);
+    expect([...grouped.keys()]).toEqual(['message-1', 'message-2']);
+    expect(grouped.get('message-1')).toEqual([REVIEWER, sibling]);
+    expect(grouped.get('message-2')).toEqual([other]);
+    expect(grouped.get('message-3')).toBeUndefined();
   });
 
   it('names an agent by its description, or plainly when it has none', () => {
     expect(subagentName(REVIEWER)).toBe('Ask for a review');
     expect(subagentName({ ...REVIEWER, description: '  ' })).toBe('Agent');
+  });
+
+  it('labels an agent by its description, or plainly when it has none', () => {
+    expect(subagentLabel(REVIEWER)).toBe('Agent: Ask for a review');
+    expect(subagentLabel({ ...REVIEWER, description: '' })).toBe('Agent');
   });
 
   it('counts only a running agent as active', () => {

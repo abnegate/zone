@@ -20,7 +20,8 @@ const RUNNING: ChatSubagent = {
   last_tool: 'Read',
   summary: null,
   error: null,
-  steps: [],
+  step_count: 0,
+  revision: 1,
   started_at: '2026-11-05T10:00:00Z',
   finished_at: null,
   updated_at: '2026-11-05T10:00:00Z',
@@ -34,32 +35,43 @@ const DONE: ChatSubagent = {
 };
 
 describe('SubagentChip', () => {
-  it('names the agent and its status, with an icon hidden from assistive technology', () => {
+  it('names the agent and its status, with decoration hidden from assistive technology', () => {
     render(<SubagentChip subagent={RUNNING} onShow={mock()} />);
 
     const chip = screen.getByRole('button', {
-      name: 'Show agent Review the cart change (Running)',
+      name: 'Agent: Review the cart change, Running. Show in the agents box',
     });
     expect(chip).toHaveTextContent('Agent: Review the cart change');
     expect(within(chip).getByText('Running')).toHaveClass('ui-badge-info');
     expect(chip.querySelector('svg')).toHaveAttribute('aria-hidden', 'true');
-    expect(chip.querySelector('.chat-subagent-chip-pulse')).not.toBeNull();
+    expect(chip.querySelector('.chat-subagent-pulse')).toHaveAttribute('aria-hidden', 'true');
+  });
+
+  it('is named by the text it shows, so a spoken command can find it', () => {
+    render(<SubagentChip subagent={RUNNING} onShow={mock()} />);
+
+    const chip = screen.getByRole('button');
+    const visible = chip.textContent ?? '';
+    expect(visible).toBe('Agent: Review the cart changeRunning');
+    expect(chip.getAttribute('aria-label')).toStartWith('Agent: Review the cart change, Running');
   });
 
   it('stops pulsing once the agent is done', () => {
     render(<SubagentChip subagent={DONE} onShow={mock()} />);
 
-    const chip = screen.getByRole('button', { name: 'Show agent Run the tests (Completed)' });
+    const chip = screen.getByRole('button', {
+      name: 'Agent: Run the tests, Completed. Show in the agents box',
+    });
     expect(within(chip).getByText('Completed')).toHaveClass('ui-badge-success');
-    expect(chip.querySelector('.chat-subagent-chip-pulse')).toBeNull();
+    expect(chip.querySelector('.chat-subagent-pulse')).toBeNull();
   });
 
   it('names an agent with no description plainly', () => {
     render(<SubagentChip subagent={{ ...DONE, description: '' }} onShow={mock()} />);
 
-    expect(screen.getByRole('button', { name: 'Show agent Agent (Completed)' })).toHaveTextContent(
-      'Agent: Agent'
-    );
+    const chip = screen.getByRole('button', { name: 'Agent, Completed. Show in the agents box' });
+    expect(within(chip).getByText('Agent')).toHaveClass('chat-subagent-chip-name');
+    expect(chip).not.toHaveTextContent('Agent: Agent');
   });
 
   it('asks to show the agent it names when chosen', () => {
@@ -79,8 +91,8 @@ describe('SubagentChips', () => {
 
     const chips = within(screen.getByRole('list', { name: 'Agents' })).getAllByRole('button');
     expect(chips.map((chip) => chip.getAttribute('aria-label'))).toEqual([
-      'Show agent Review the cart change (Running)',
-      'Show agent Run the tests (Completed)',
+      'Agent: Review the cart change, Running. Show in the agents box',
+      'Agent: Run the tests, Completed. Show in the agents box',
     ]);
     fireEvent.click(chips[1]);
     expect(onShow).toHaveBeenCalledWith(DONE.id);

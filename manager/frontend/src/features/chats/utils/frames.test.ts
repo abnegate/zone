@@ -1,5 +1,5 @@
 import { describe, expect, it, mock } from 'bun:test';
-import { publishFrame, subscribeFrames } from './frames';
+import { frameType, publishFrame, subscribeFrames } from './frames';
 
 describe('chat frame bus', () => {
   it("hands a frame to every subscriber of that chat, and only that chat's", () => {
@@ -32,11 +32,21 @@ describe('chat frame bus', () => {
 
   it('claims subagent frames for subscribers and leaves every other frame to the socket', () => {
     expect(publishFrame('chat-1', { type: 'subagent', chat_id: 'chat-1' })).toBe(true);
+    expect(publishFrame('chat-1', { type: 'subagents_removed', ids: [] })).toBe(true);
     expect(publishFrame('chat-1', { type: 'init' })).toBe(false);
     expect(publishFrame('chat-1', { type: 'message_start', resumed: true })).toBe(false);
     expect(publishFrame('chat-1', { type: 'token', content: 'subagent' })).toBe(false);
     expect(publishFrame('chat-1', 'subagent')).toBe(false);
     expect(publishFrame('chat-1', null)).toBe(false);
+    expect(publishFrame('chat-1', { type: ['subagent'] })).toBe(false);
+  });
+
+  it('reads the type of a frame, or nothing when it has no string type', () => {
+    expect(frameType({ type: 'chunk', content: 'x' })).toBe('chunk');
+    expect(frameType({ type: 7 })).toBeNull();
+    expect(frameType({})).toBeNull();
+    expect(frameType('subagent')).toBeNull();
+    expect(frameType(null)).toBeNull();
   });
 
   it('claims a subagent frame even when nobody is listening yet', () => {

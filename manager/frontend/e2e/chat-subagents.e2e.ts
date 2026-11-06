@@ -120,13 +120,22 @@ function subagent(overrides: Record<string, unknown>) {
     last_tool: null,
     summary: null,
     error: null,
-    steps: [],
+    step_count: 0,
+    revision: 1,
     started_at: sentAt,
     finished_at: null,
     updated_at: sentAt,
     ...overrides,
   };
 }
+
+const REVIEW_SUMMARY = [
+  'No blocking issues. Two naming nits in filter.rs: `matches_all` reads better as `matches_every`,',
+  'and `Filter::new` takes its options in a different order from `Search::new`.',
+  'The catalogue tests cover search, paging and the empty state; the price filter has no test',
+  'for a range whose bounds are equal, which the query builder turns into an empty set.',
+  'Everything else follows the existing patterns in the crate.',
+].join(' ');
 
 const REVIEW = subagent({
   id: 'agent-review',
@@ -136,12 +145,9 @@ const REVIEW = subagent({
   duration_ms: 42_000,
   tokens: 18_000,
   last_tool: 'Grep',
-  summary: 'No blocking issues. Two naming nits in filter.rs.',
-  steps: [
-    { id: 'toolu_r1', name: 'Read', subject: 'src/catalogue.rs', status: 'succeeded' },
-    { id: 'toolu_r2', name: 'Bash', subject: 'cargo test -p widgets', status: 'succeeded' },
-    { id: 'toolu_r3', name: 'Grep', subject: 'fn matches', status: 'succeeded' },
-  ],
+  summary: REVIEW_SUMMARY,
+  step_count: 3,
+  revision: 4,
   started_at: '2026-11-05T09:30:05.000Z',
   finished_at: '2026-11-05T09:30:47.000Z',
   updated_at: '2026-11-05T09:30:47.000Z',
@@ -158,10 +164,8 @@ const BENCHMARK = subagent({
   status: 'running',
   tool_uses: 2,
   last_tool: 'Bash',
-  steps: [
-    { id: 'toolu_b1', name: 'Read', subject: 'benches/resize.rs', status: 'succeeded' },
-    { id: 'toolu_b2', name: 'Bash', subject: 'cargo bench resize', status: 'running' },
-  ],
+  step_count: 2,
+  revision: 2,
   started_at: benchmarkStarted,
   updated_at: benchmarkStarted,
 });
@@ -180,27 +184,43 @@ const NOTES = subagent({
   updated_at: '2026-11-05T09:30:18.000Z',
 });
 
+const STEPS: Record<string, unknown[]> = {
+  'agent-review': [
+    { id: 'toolu_r1', name: 'Read', subject: 'src/catalogue.rs', status: 'succeeded' },
+    { id: 'toolu_r2', name: 'Bash', subject: 'cargo test -p widgets', status: 'succeeded' },
+    { id: 'toolu_r3', name: 'Grep', subject: 'fn matches', status: 'succeeded' },
+  ],
+  'agent-benchmark': [
+    { id: 'toolu_b1', name: 'Read', subject: 'benches/resize.rs', status: 'succeeded' },
+    { id: 'toolu_b2', name: 'Bash', subject: 'cargo bench resize', status: 'running' },
+  ],
+};
+
 const BENCHMARK_FINISHED = {
   ...BENCHMARK,
   status: 'completed',
   tool_uses: 3,
   duration_ms: 101_000,
   summary: 'Thumbnails render 38% faster with the new resize path.',
-  steps: [
-    BENCHMARK.steps[0],
-    { id: 'toolu_b2', name: 'Bash', subject: 'cargo bench resize', status: 'succeeded' },
-    { id: 'toolu_b3', name: 'Write', subject: 'benches/RESULTS.md', status: 'succeeded' },
-  ],
+  step_count: 3,
+  revision: 3,
   last_tool: 'Write',
   finished_at: new Date().toISOString(),
   updated_at: new Date(Date.now() + 1_000).toISOString(),
 };
 
+const BENCHMARK_FINISHED_STEPS = [
+  { id: 'toolu_b2', name: 'Bash', subject: 'cargo bench resize', status: 'succeeded' },
+  { id: 'toolu_b3', name: 'Write', subject: 'benches/RESULTS.md', status: 'succeeded' },
+];
+
+const STEPS_PATH = new RegExp(`/api/chats/${CHAT_ID}/subagents/([^/]+)/steps$`);
+
 function json(body: unknown) {
   return { status: 200, contentType: 'application/json', body: JSON.stringify(body) };
 }
 
-async function mockChat(page: Page) {
+async function mockChat(page: Page, stepReads: string[]) {
   await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
     if (CHAT_PROVIDERS.test(route.request().url())) return route.fallback();
     if (route.request().method() !== 'GET') return route.continue();
@@ -218,20 +238,27 @@ async function mockChat(page: Page) {
   await routeApi(page, `**/api/chats/${CHAT_ID}/subagents`, (route) =>
     route.fulfill(json({ subagents: [REVIEW, BENCHMARK, NOTES] }))
   );
+  await routeApi(page, STEPS_PATH, (route) => {
+    const id = decodeURIComponent(STEPS_PATH.exec(new URL(route.request().url()).pathname)?.[1] ?? '');
+    stepReads.push(id);
+    return route.fulfill(json({ steps: STEPS[id] ?? [] }));
+  });
 }
 
 function chipName(description: string, status: string): string {
-  return `Show agent ${description} (${status})`;
+  return `Agent: ${description}, ${status}. Show in the agents box`;
 }
 
 test.describe('Chat subagents', () => {
   let socket: ChatSocketController;
+  let stepReads: string[];
 
   test.beforeEach(async ({ context, page }) => {
+    stepReads = [];
     socket = await installChatSocketMock(page);
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
-    await mockChat(page);
+    await mockChat(page, stepReads);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto('/');
     await setupAuth(page);
@@ -286,8 +313,22 @@ test.describe('Chat subagents', () => {
     await expect(notes.getByRole('button', { expanded: false })).toHaveCount(0);
     await message.scrollIntoViewIfNeeded();
     await capture('chats-agent-chip');
+    expect(stepReads).toEqual([]);
 
-    await socket.emit({ type: 'subagent', chat_id: CHAT_ID, subagent: BENCHMARK_FINISHED });
+    const benchmarkTitle = benchmark.getByRole('button', { name: 'Benchmark the image pipeline' });
+    await benchmarkTitle.click();
+    await expect(benchmarkTitle).toHaveAttribute('aria-expanded', 'true');
+    const benchmarkSteps = benchmark.locator('.chat-subagent-step');
+    await expect(benchmarkSteps).toHaveCount(2);
+    await expect(benchmarkSteps.nth(1)).toHaveClass(/chat-subagent-step--running/);
+    expect(stepReads).toEqual(['agent-benchmark']);
+
+    await socket.emit({
+      type: 'subagent',
+      chat_id: CHAT_ID,
+      subagent: BENCHMARK_FINISHED,
+      steps: BENCHMARK_FINISHED_STEPS,
+    });
     await expect(
       chips.getByRole('button', { name: chipName('Benchmark the image pipeline', 'Completed') })
     ).toBeVisible();
@@ -296,6 +337,12 @@ test.describe('Chat subagents', () => {
     await expect(benchmark.locator('.chat-subagent-summary')).toHaveText(
       'Thumbnails render 38% faster with the new resize path.'
     );
+    await expect(benchmarkSteps).toHaveCount(3);
+    await expect(benchmarkSteps.nth(1)).toHaveClass(/chat-subagent-step--succeeded/);
+    await expect(benchmarkSteps.nth(2)).toContainText('benches/RESULTS.md');
+    expect(stepReads).toEqual(['agent-benchmark']);
+    await benchmarkTitle.click();
+    await expect(benchmarkTitle).toHaveAttribute('aria-expanded', 'false');
 
     await panel.getByRole('button', { name: 'Agents, 3' }).click();
     await expect(panel.getByRole('button', { name: 'Agents, 3' })).toHaveAttribute(
@@ -320,12 +367,24 @@ test.describe('Chat subagents', () => {
     await expect(steps).toHaveCount(3);
     await expect(steps.nth(1)).toContainText('Bash');
     await expect(steps.nth(1)).toContainText('cargo test -p widgets');
-    await expect(reviewed.locator('.chat-subagent-summary')).toHaveText(
-      'No blocking issues. Two naming nits in filter.rs.'
-    );
+    expect(stepReads).toEqual(['agent-benchmark', 'agent-review']);
+    const summary = reviewed.locator('.chat-subagent-summary');
+    await expect(summary).toHaveText(REVIEW_SUMMARY);
+    await expect(summary).toHaveAttribute('data-clamped', 'true');
+    const more = reviewed.getByRole('button', { name: 'Show more' });
+    await expect(more).toBeVisible();
     for (const box of ['Changes, 1', 'Tasks, 1', 'Sources, 1', 'Gallery, 1']) {
       await expect(panel.getByRole('button', { name: box })).toBeVisible();
     }
     await capture('chats-panel-agents');
+
+    await more.click();
+    await expect(summary).toHaveAttribute('data-clamped', 'false');
+    await expect(reviewed.getByRole('button', { name: 'Show less' })).toBeVisible();
+
+    await socket.emit({ type: 'subagents_removed', chat_id: CHAT_ID, ids: ['agent-notes'] });
+    await expect(chips.getByRole('button')).toHaveCount(2);
+    await expect(panel.getByRole('button', { name: 'Agents, 2' })).toBeVisible();
+    await expect(notes).toHaveCount(0);
   });
 });

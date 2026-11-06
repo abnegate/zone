@@ -1,0 +1,27 @@
+:root {
+  --chat-subagent-pulse-duration: 1.2s;
+}
+
+.chat-subagent-pulse {
+  width: var(--ui-space-1-5);
+  height: var(--ui-space-1-5);
+  border-radius: 50%;
+  background: currentColor;
+  animation: chat-subagent-pulse var(--chat-subagent-pulse-duration) ease-in-out infinite;
+}
+
+@keyframes chat-subagent-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-subagent-pulse {
+    animation: none;
+  }
+}

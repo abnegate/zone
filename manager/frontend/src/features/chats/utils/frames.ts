@@ -1,14 +1,16 @@
-import { SUBAGENT_FRAME } from '../subagentSchemas';
+import { SUBAGENT_FRAME, SUBAGENTS_REMOVED_FRAME } from '../subagentSchemas';
 
 export type FrameListener = (frame: unknown) => void;
 
 /** Frame types only bus subscribers read, so the chat socket neither applies nor holds them. */
-const SUBSCRIBER_FRAMES: ReadonlySet<unknown> = new Set([SUBAGENT_FRAME]);
+const SUBSCRIBER_FRAMES: ReadonlySet<string> = new Set([SUBAGENT_FRAME, SUBAGENTS_REMOVED_FRAME]);
 
 const listeners = new Map<string, Set<FrameListener>>();
 
-function frameType(frame: unknown): unknown {
-  return typeof frame === 'object' && frame !== null ? (frame as { type?: unknown }).type : null;
+export function frameType(frame: unknown): string | null {
+  if (typeof frame !== 'object' || frame === null) return null;
+  const type = (frame as { type?: unknown }).type;
+  return typeof type === 'string' ? type : null;
 }
 
 /**
@@ -29,7 +31,8 @@ export function publishFrame(chatId: string, frame: unknown): boolean {
       }
     }
   }
-  return SUBSCRIBER_FRAMES.has(frameType(frame));
+  const type = frameType(frame);
+  return type !== null && SUBSCRIBER_FRAMES.has(type);
 }
 
 export function subscribeFrames(chatId: string, listener: FrameListener): () => void {

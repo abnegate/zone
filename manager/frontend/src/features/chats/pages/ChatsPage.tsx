@@ -125,7 +125,6 @@ import {
   writeChatGroupBy,
   writeChatSort,
 } from '../utils';
-import { startedIn } from '../utils/subagents';
 import './ChatsPage.css';
 
 const UNTITLED_CHAT_TITLE = 'Untitled chat';
@@ -1601,7 +1600,7 @@ export default function ChatsPage() {
                             onAnswer={handleAnswerQuestions}
                           />
                           <SubagentChips
-                            subagents={startedIn(subagents.subagents, message.id)}
+                            subagents={subagents.byMessage.get(message.id) ?? []}
                             onShow={showSubagent}
                           />
                           {receipts.length > 0 && <ActionReceipts receipts={receipts} />}

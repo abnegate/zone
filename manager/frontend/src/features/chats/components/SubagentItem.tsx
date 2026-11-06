@@ -1,6 +1,7 @@
 import { Badge } from '@zone/ui';
-import { useEffect, useId, useRef, useState } from 'react';
-import type { ChatSubagent } from '../subagentTypes';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { STEPS_LOAD_FAILED } from '../subagentSchemas';
+import type { ChatSubagent, SubagentStep } from '../subagentTypes';
 import {
   formatDuration,
   stepStatusLabel,
@@ -10,9 +11,14 @@ import {
   subagentStatusLabel,
   subagentStatusTint,
 } from '../utils/subagents';
+import { SubagentSummary } from './SubagentSummary';
+import './SubagentPulse.css';
 
 export interface SubagentItemProps {
   subagent: ChatSubagent;
+  /** The agent's steps once read; nothing until they have been. */
+  steps: SubagentStep[] | undefined;
+  onLoadSteps: (id: string) => Promise<void>;
   /** Expands the item, scrolls to it and focuses it whenever it changes to anything but zero. */
   reveal?: number;
 }
@@ -37,20 +43,35 @@ function toolCount(count: number): string {
   return `${count} ${count === 1 ? 'tool' : 'tools'}`;
 }
 
-export function SubagentItem({ subagent, reveal = 0 }: SubagentItemProps) {
+export function SubagentItem({ subagent, steps, onLoadSteps, reveal = 0 }: SubagentItemProps) {
   const [expanded, setExpanded] = useState(false);
+  const [stepsError, setStepsError] = useState<string | null>(null);
   const row = useRef<HTMLLIElement>(null);
   const handled = useRef(reveal);
-  const steps = useId();
+  const region = useId();
   const active = subagentActive(subagent);
   const now = useNow(active);
   const name = subagentName(subagent);
-  const expandable = subagent.steps.length > 0;
+  const expandable = subagent.step_count > 0;
+  const wanted = expanded && expandable && steps === undefined;
   const duration = subagentDuration(subagent, now);
   const described =
     Boolean(subagent.kind || subagent.model || subagent.last_tool) ||
     subagent.tool_uses !== null ||
     duration !== null;
+
+  const requestSteps = useCallback(async () => {
+    setStepsError(null);
+    try {
+      await onLoadSteps(subagent.id);
+    } catch (failure) {
+      setStepsError(failure instanceof Error ? failure.message : STEPS_LOAD_FAILED);
+    }
+  }, [onLoadSteps, subagent.id]);
+
+  useEffect(() => {
+    if (wanted) void requestSteps();
+  }, [wanted, requestSteps]);
 
   useEffect(() => {
     if (reveal === handled.current) return;
@@ -72,7 +93,7 @@ export function SubagentItem({ subagent, reveal = 0 }: SubagentItemProps) {
             type="button"
             className="chat-subagent-title"
             aria-expanded={expanded}
-            aria-controls={steps}
+            aria-controls={region}
             title={name}
             onClick={() => setExpanded((current) => !current)}
           >
@@ -114,19 +135,43 @@ export function SubagentItem({ subagent, reveal = 0 }: SubagentItemProps) {
       {subagent.error ? (
         <p className="chat-subagent-error">{subagent.error}</p>
       ) : (
-        subagent.summary && <p className="chat-subagent-summary">{subagent.summary}</p>
+        subagent.summary && <SubagentSummary key={subagent.summary} text={subagent.summary} />
       )}
       {expandable && (
-        <ol id={steps} className="chat-subagent-steps" hidden={!expanded}>
-          {subagent.steps.map((step) => (
-            <li key={step.id} className={`chat-subagent-step chat-subagent-step--${step.status}`}>
-              <span className="chat-subagent-step-status" aria-hidden="true" />
-              <span className="sr-only">{stepStatusLabel(step.status)}</span>
-              <span className="chat-subagent-step-name">{step.name}</span>
-              {step.subject && <code className="chat-subagent-step-subject">{step.subject}</code>}
-            </li>
-          ))}
-        </ol>
+        <div id={region} className="chat-subagent-steps-region" hidden={!expanded}>
+          {steps ? (
+            <ol className="chat-subagent-steps">
+              {steps.map((step) => (
+                <li
+                  key={step.id}
+                  className={`chat-subagent-step chat-subagent-step--${step.status}`}
+                >
+                  <span className="chat-subagent-step-status" aria-hidden="true" />
+                  <span className="sr-only">{stepStatusLabel(step.status)}</span>
+                  <span className="chat-subagent-step-name">{step.name}</span>
+                  {step.subject && (
+                    <code className="chat-subagent-step-subject">{step.subject}</code>
+                  )}
+                </li>
+              ))}
+            </ol>
+          ) : stepsError ? (
+            <p className="chat-subagent-steps-note chat-subagent-steps-error" role="alert">
+              {stepsError}
+              <button
+                type="button"
+                className="chat-subagent-steps-retry"
+                onClick={() => void requestSteps()}
+              >
+                Retry
+              </button>
+            </p>
+          ) : (
+            <p className="chat-subagent-steps-note" role="status">
+              Loading steps...
+            </p>
+          )}
+        </div>
       )}
     </li>
   );

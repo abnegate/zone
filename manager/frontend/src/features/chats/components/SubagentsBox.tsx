@@ -38,6 +38,8 @@ export function SubagentsBox({ userId, subagents, shown = null, onShown }: Subag
           <SubagentItem
             key={subagent.id}
             subagent={subagent}
+            steps={subagents.steps[subagent.id]}
+            onLoadSteps={subagents.loadSteps}
             reveal={focus?.id === subagent.id ? focus.nonce : 0}
           />
         ))}

@@ -2,11 +2,14 @@ import { badgeVariants } from '@zone/ui';
 import type { ChatSubagent } from '../subagentTypes';
 import {
   subagentActive,
-  subagentName,
+  subagentLabel,
   subagentStatusLabel,
   subagentStatusTint,
 } from '../utils/subagents';
 import './SubagentChip.css';
+import './SubagentPulse.css';
+
+const SHOW_HINT = 'Show in the agents box';
 
 export interface SubagentChipProps {
   subagent: ChatSubagent;
@@ -37,7 +40,7 @@ function RobotIcon() {
 
 /** One subagent the message's turn started, which opens it in the panel's Agents box. */
 export function SubagentChip({ subagent, onShow }: SubagentChipProps) {
-  const name = subagentName(subagent);
+  const label = subagentLabel(subagent);
   const status = subagentStatusLabel(subagent.status);
   const pill = badgeVariants({ variant: subagentStatusTint(subagent.status) });
 
@@ -45,14 +48,14 @@ export function SubagentChip({ subagent, onShow }: SubagentChipProps) {
     <button
       type="button"
       className="chat-subagent-chip"
-      aria-label={`Show agent ${name} (${status})`}
-      title={name}
+      aria-label={`${label}, ${status}. ${SHOW_HINT}`}
+      title={label}
       onClick={() => onShow(subagent.id)}
     >
       <RobotIcon />
-      <span className="chat-subagent-chip-name">Agent: {name}</span>
+      <span className="chat-subagent-chip-name">{label}</span>
       <span className={`${pill} chat-subagent-chip-status`}>
-        {subagentActive(subagent) && <span className="chat-subagent-chip-pulse" />}
+        {subagentActive(subagent) && <span className="chat-subagent-pulse" aria-hidden="true" />}
         {status}
       </span>
     </button>
