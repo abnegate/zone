@@ -12,6 +12,8 @@ use uuid::Uuid;
 use zone_chat::history::{self, Entry, Evidence, History, NewEntry, ReplayMessage, Summary};
 use zone_chat::store;
 
+use super::chats::typed;
+
 pub use zone_chat::store::{Guard, Lease, StoredMessage};
 
 /// Postgres failures the conversation store can hit.
@@ -162,10 +164,13 @@ impl Store {
         self.lock(&mut transaction, lease).await?;
         self.materialize(&mut transaction).await?;
         self.recover_in(&mut transaction).await?;
-        sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
-            .bind(self.chat_id)
-            .execute(&mut *transaction)
-            .await?;
+        sqlx::query(
+            "UPDATE chats SET updated_at = NOW(), used_at = CASE WHEN $2 THEN NOW() ELSE used_at END WHERE id = $1",
+        )
+        .bind(self.chat_id)
+        .bind(typed("user", metadata.as_ref()))
+        .execute(&mut *transaction)
+        .await?;
         let title_claimed = sqlx::query("UPDATE chats SET title_message_id = $2 WHERE id = $1 AND automatic_title
             AND title_message_id IS NULL AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = $1 AND role = 'user')")
             .bind(self.chat_id).bind(user_message_id).execute(&mut *transaction).await?.rows_affected() == 1;
@@ -237,6 +242,12 @@ impl Store {
         self.lock(&mut transaction, lease).await?;
         self.materialize(&mut transaction).await?;
         self.recover_in(&mut transaction).await?;
+        if typed(role, metadata.as_ref()) {
+            sqlx::query("UPDATE chats SET used_at = NOW() WHERE id = $1")
+                .bind(self.chat_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
         let id = Uuid::new_v4();
         let title_claimed = if role == "user" {
             sqlx::query("UPDATE chats SET title_message_id=$2 WHERE id=$1 AND automatic_title AND title_message_id IS NULL AND NOT EXISTS(SELECT 1 FROM messages WHERE chat_id=$1 AND role='user')").bind(self.chat_id).bind(id).execute(&mut *transaction).await?.rows_affected()==1

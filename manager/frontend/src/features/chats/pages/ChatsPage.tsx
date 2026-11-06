@@ -16,7 +16,9 @@ import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import SubNav from '../../../shared/components/SubNav/SubNav';
+import TransferChip from '../../../shared/components/TransferChip/TransferChip';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import { useTransfers } from '../../../shared/hooks/useTransfers';
 import { useModels } from '../../models';
 import { useProjects } from '../../projects/hooks';
 import type { AiProvider } from '../../settings/workspace/types';
@@ -68,6 +70,7 @@ import {
   AUTO_MODEL,
   arrangeChats,
   asksModelName,
+  attachmentId,
   attachmentMetadata,
   audioAttachments,
   automated,
@@ -81,6 +84,7 @@ import {
   chatShowsReasoning,
   chatSources,
   contextTokenOptions,
+  DEFAULT_NEW_CHAT,
   DEFAULT_PROVIDER,
   defaultContextTokens,
   effectiveOffer,
@@ -100,6 +104,8 @@ import {
   MODEL_PLACEHOLDER,
   modelLabel,
   modelSelectOptions,
+  type NewChatSettings,
+  newChatSettings,
   observationKey,
   offersAgent,
   offersAgentOn,
@@ -157,6 +163,7 @@ export default function ChatsPage() {
   const [newChatProject, setNewChatProject] = useState(NO_PROJECT);
   const [newChatOffline, setNewChatOffline] = useState(false);
   const [newChatContext, setNewChatContext] = useState(String(defaultContextTokens()));
+  const [newChatEdited, setNewChatEdited] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -180,6 +187,16 @@ export default function ChatsPage() {
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
+
+  const attaching = useTransfers<Attachment>({
+    run: (file, { signal, onProgress }) => readAttachment(file, { signal, onProgress }),
+    identify: attachmentId,
+    onDone: (attachment) => {
+      setAttachments((prev) =>
+        prev.some((item) => item.id === attachment.id) ? prev : [...prev, attachment]
+      );
+    },
+  });
 
   const addStartingImage = (image: { name: string; mime: string; url: string }) => {
     const next = sourceAttachment(image);
@@ -495,16 +512,31 @@ export default function ChatsPage() {
     setSearchParams({}, { replace: true });
   };
 
-  const resetNewChat = () => {
-    setNewChatProvider(DEFAULT_PROVIDER);
-    setNewChatModel(AUTO_MODEL);
-    setNewChatAgent(false);
+  const applyNewChat = (settings: NewChatSettings) => {
+    setNewChatProvider(settings.provider);
+    setNewChatModel(settings.model);
+    setNewChatAgent(settings.agent);
     setNewChatAutoApprove(false);
-    setNewChatReasoning(AUTO_EFFORT);
-    setNewChatProject(NO_PROJECT);
-    setNewChatOffline(false);
-    setNewChatContext(String(defaultContextTokens()));
+    setNewChatReasoning(settings.reasoning);
+    setNewChatOffline(settings.offline);
+    setNewChatContext(settings.context);
   };
+
+  const resetNewChat = () => {
+    setNewChatEdited(false);
+    applyNewChat(DEFAULT_NEW_CHAT);
+    setNewChatProject(NO_PROJECT);
+  };
+
+  const editNewChat = () => {
+    setNewChatEdited(true);
+  };
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: an open, untouched new chat follows the workspace's recent chat as it loads
+  useEffect(() => {
+    if (!showNewChatModal || newChatEdited) return;
+    applyNewChat(newChatSettings(workspaceProviders, models));
+  }, [showNewChatModal, newChatEdited, workspaceProviders, models]);
 
   const workspaceId = currentWorkspace?.id ?? null;
   const [newChatWorkspace, setNewChatWorkspace] = useState(workspaceId);
@@ -527,6 +559,7 @@ export default function ChatsPage() {
   };
 
   const handleNewChatProvider = (provider: string) => {
+    editNewChat();
     const offer = newChatOfferFor(provider);
     const model = offer?.requires_model ? '' : AUTO_MODEL;
     keepNewChatAgent(offer, model);
@@ -542,6 +575,7 @@ export default function ChatsPage() {
   };
 
   const handleNewChatModel = (name: string) => {
+    editNewChat();
     setNewChatModel(name);
     keepNewChatAgent(newChatOffer, name);
     const installed = findInstalledModel(models, name);
@@ -773,12 +807,8 @@ export default function ChatsPage() {
       }
       leftover.push(file);
     }
-    if (leftover.length === 0) return;
-    const read = await Promise.all(leftover.map(readAttachment));
-    setAttachments((prev) => {
-      const seen = new Set(prev.map((a) => a.id));
-      return [...prev, ...read.filter((a) => !seen.has(a.id))];
-    });
+    const attached = new Set(attachments.map((attachment) => attachment.id));
+    attaching.start(leftover.filter((file) => !attached.has(attachmentId(file))));
   };
 
   const handleSaveCharacter = async (event: FormEvent) => {
@@ -864,6 +894,7 @@ export default function ChatsPage() {
     e.preventDefault();
     const sendable = attachments.filter(isSendable);
     if (!isAuthenticated || !displayedChat || sending || streaming) return;
+    if (attaching.pending > 0) return;
     if (!messageInput.trim() && sendable.length === 0) return;
 
     const chatId = displayedChat.id;
@@ -1660,8 +1691,16 @@ export default function ChatsPage() {
                       void handleIncomingFiles(e.dataTransfer.files);
                     }}
                   >
-                    {attachments.length > 0 && (
+                    {attachments.length + attaching.transfers.length > 0 && (
                       <div className="message-attachments">
+                        {attaching.transfers.map((transfer) => (
+                          <TransferChip
+                            key={transfer.id}
+                            transfer={transfer}
+                            onCancel={attaching.cancel}
+                            onRetry={attaching.retry}
+                          />
+                        ))}
                         {attachments.map((attachment) => (
                           <span
                             key={attachment.id}
@@ -1706,6 +1745,13 @@ export default function ChatsPage() {
                         ))}
                       </div>
                     )}
+                    {attaching.pending > 0 ? (
+                      <p className="message-form-hint" role="status">
+                        {attaching.pending === 1
+                          ? 'Send is ready once the file finishes attaching.'
+                          : `Send is ready once ${attaching.pending} files finish attaching.`}
+                      </p>
+                    ) : null}
                     {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
                       <p className="message-form-hint">
                         Ask to generate, edit, remove an object, change the setting, or animate and
@@ -1778,7 +1824,15 @@ export default function ChatsPage() {
                           variant="primary"
                           size="sm"
                           loading={sending}
-                          disabled={!messageInput.trim() && !attachments.some(isSendable)}
+                          disabled={
+                            attaching.pending > 0 ||
+                            (!messageInput.trim() && !attachments.some(isSendable))
+                          }
+                          title={
+                            attaching.pending > 0
+                              ? 'Wait for attachments to finish before sending'
+                              : undefined
+                          }
                         >
                           Send
                         </Button>
@@ -1926,6 +1980,7 @@ export default function ChatsPage() {
               label="Context"
               value={newChatContext}
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                editNewChat();
                 setNewChatContext(event.target.value);
               }}
               helpText={
@@ -1940,7 +1995,10 @@ export default function ChatsPage() {
             label="Offline"
             helpText="Never use web search, page fetch, or curl/wget. Connected sources still work."
             checked={newChatOffline}
-            onCheckedChange={setNewChatOffline}
+            onCheckedChange={(checked) => {
+              editNewChat();
+              setNewChatOffline(checked);
+            }}
           />
           {showNewChatAgent && (
             <Checkbox
@@ -1948,6 +2006,7 @@ export default function ChatsPage() {
               helpText="Search workspace content, use connected GitHub data and run tools when asked. Needs a tool-calling model."
               checked={newChatAgent}
               onCheckedChange={(checked) => {
+                editNewChat();
                 setNewChatAgent(checked);
                 if (!checked) setNewChatAutoApprove(false);
               }}
@@ -1958,7 +2017,10 @@ export default function ChatsPage() {
               label="Auto-approve writes and commands"
               helpText="Skip the confirmation prompt for write_file, apply_patch, run_command and run_shell. You can change this later on the chat."
               checked={newChatAutoApprove}
-              onCheckedChange={setNewChatAutoApprove}
+              onCheckedChange={(checked) => {
+                editNewChat();
+                setNewChatAutoApprove(checked);
+              }}
             />
           )}
           {showNewChatReasoning && (
@@ -1966,6 +2028,7 @@ export default function ChatsPage() {
               label="Reasoning"
               value={newChatEffort}
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                editNewChat();
                 setNewChatReasoning(event.target.value as ReasoningEffort);
               }}
               helpText={

@@ -1,0 +1,139 @@
+.transfer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-width: 10rem;
+  max-width: 18rem;
+  min-height: var(--ui-control-height);
+  padding: var(--ui-space-1) var(--ui-space-0-5) var(--ui-space-1) var(--ui-space-2-5);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-bg-surface);
+  font-size: var(--ui-text-xs);
+}
+
+.transfer-chip--failed {
+  border-color: color-mix(in srgb, var(--ui-error) 40%, transparent);
+  background: var(--ui-error-muted);
+}
+
+.transfer-chip-spinner {
+  width: var(--ui-icon-size-sm);
+  height: var(--ui-icon-size-sm);
+}
+
+.transfer-chip-alert {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--ui-icon-size);
+  height: var(--ui-icon-size);
+  border-radius: 50%;
+  background: var(--ui-error);
+  color: var(--ui-bg-surface);
+  font-size: var(--ui-text-2xs);
+  font-weight: 700;
+}
+
+.transfer-chip-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.transfer-chip-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ui-space-2);
+  min-width: 0;
+}
+
+.transfer-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.transfer-chip-status {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--ui-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.transfer-chip--failed .transfer-chip-line {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+.transfer-chip--failed .transfer-chip-status {
+  margin-left: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-error);
+}
+
+.transfer-chip-bar {
+  display: block;
+  width: 100%;
+  height: 3px;
+  overflow: hidden;
+  border-radius: var(--ui-radius-full);
+  background: var(--ui-border);
+}
+
+.transfer-chip-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ui-accent);
+  transition: width var(--ui-duration-fast) linear;
+}
+
+.transfer-chip--processing .transfer-chip-fill {
+  animation: transfer-chip-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes transfer-chip-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.transfer-chip-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: var(--ui-control-height-sm);
+  height: var(--ui-control-height-sm);
+  padding: 0 var(--ui-space-1-5);
+  border: none;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+  cursor: pointer;
+  line-height: 1;
+}
+
+.transfer-chip-dismiss {
+  padding: 0;
+}
+
+.transfer-chip-action:hover {
+  background: var(--ui-bg-hover);
+  color: var(--ui-text-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transfer-chip--processing .transfer-chip-fill {
+    animation: none;
+  }
+}

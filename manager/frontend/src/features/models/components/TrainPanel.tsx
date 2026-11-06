@@ -1,5 +1,5 @@
 import { Button, Checkbox, Input, Select } from '@zone/ui';
-import { type FormEvent, type ReactElement, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, type ReactElement, useEffect, useMemo, useRef, useState } from 'react';
 import { List, type RowComponentProps } from 'react-window';
 import { client } from '../../../api/client';
 import {
@@ -7,13 +7,16 @@ import {
   type DatasetFinding,
   type DropReason,
   modelsApi,
+  type TrainClip,
   type TrainJob,
   type TrainQuality,
   type TrainRemediation,
   type TrainResult,
   type TrainScreening,
 } from '../../../api/models';
+import TransferChip from '../../../shared/components/TransferChip/TransferChip';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import { useTransfers } from '../../../shared/hooks/useTransfers';
 import { isDocumentFile, isImageFile, isVideoFile } from '../dropFiles';
 import { useTrain } from '../hooks/useTrain';
 import {
@@ -22,7 +25,6 @@ import {
   FRAME_UPLOADS,
   PAIR_LIST_MAX,
   PAIR_ROW_HEIGHT,
-  poolMap,
   prepareImage,
 } from '../trainMedia';
 import {
@@ -555,8 +557,49 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [progress, setProgress] = useState<TrainJob | null>(null);
   const [captioning, setCaptioning] = useState(false);
   const [focusRequested, setFocusRequested] = useState(false);
-  const [sampling, setSampling] = useState<Array<{ key: string; name: string }>>([]);
   const [clips, setClips] = useState<Clip[]>([]);
+  const mirrorAtDrop = useRef(new WeakMap<File, boolean>());
+  const sampling = useTransfers<TrainClip>({
+    run: (file, { signal, onProgress }) =>
+      modelsApi.frames({
+        filename: file.name,
+        blob: file,
+        mirror: mirrorAtDrop.current.get(file) ?? mirror,
+        signal,
+        onProgress: ({ loaded, total }) => onProgress(loaded / total),
+      }),
+    identify: () => nextKey('training-clip'),
+    limit: FRAME_UPLOADS,
+    onDone: (clip, file, key) => {
+      setImages((current) => {
+        const offset = nextGroup(current);
+        return [
+          ...current,
+          ...clip.frames.map((frame) => ({
+            key: nextKey(),
+            filename: frame.filename,
+            caption: '',
+            captionRevision: 0,
+            instruction: '',
+            blob: blobFromBase64(frame.bytes_base64),
+            group: offset + frame.group,
+            source: file.name,
+            clip: key,
+            mirrored: frame.mirrored,
+          })),
+        ];
+      });
+      setClips((current) => [
+        ...current,
+        {
+          key,
+          name: file.name,
+          summary: `${clip.sampled} frames read at ${clip.sampled_fps.toFixed(1)}/s, ${clip.frames.length} kept`,
+        },
+      ]);
+    },
+  });
+  const clearSampling = sampling.clear;
 
   useEffect(() => {
     modelsApi
@@ -637,6 +680,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           setProgress(null);
           setImages([]);
           setClips([]);
+          clearSampling();
           onTrained();
         } else if (job.status === 'succeeded') {
           setResult({
@@ -750,6 +794,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     if (leavingLanguage || enteringLanguage) {
       setImages([]);
       setClips([]);
+      sampling.clear();
     }
     if (value === 'person') {
       setSubject('person');
@@ -822,54 +867,12 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     if (!edit) setFocusRequested(true);
   };
 
-  const handleVideos = async (files: File[]) => {
+  const handleVideos = (files: File[]) => {
     const clipsToRead = files.filter(isVideoFile);
     if (busy || clipsToRead.length === 0) return;
     setError(null);
-    const jobs = clipsToRead.map((file) => ({ file, key: nextKey('training-clip') }));
-    setSampling((current) => [
-      ...current,
-      ...jobs.map(({ key, file }) => ({ key, name: file.name })),
-    ]);
-    await poolMap(jobs, FRAME_UPLOADS, async ({ file, key }) => {
-      try {
-        const clip = await modelsApi.frames({
-          filename: file.name,
-          blob: file,
-          mirror,
-        });
-        setImages((current) => {
-          const offset = nextGroup(current);
-          return [
-            ...current,
-            ...clip.frames.map((frame) => ({
-              key: nextKey(),
-              filename: frame.filename,
-              caption: '',
-              captionRevision: 0,
-              instruction: '',
-              blob: blobFromBase64(frame.bytes_base64),
-              group: offset + frame.group,
-              source: file.name,
-              clip: key,
-              mirrored: frame.mirrored,
-            })),
-          ];
-        });
-        setClips((current) => [
-          ...current,
-          {
-            key,
-            name: file.name,
-            summary: `${clip.sampled} frames read at ${clip.sampled_fps.toFixed(1)}/s, ${clip.frames.length} kept`,
-          },
-        ]);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : `Could not read ${file.name}`);
-      } finally {
-        setSampling((current) => current.filter((item) => item.key !== key));
-      }
-    });
+    for (const file of clipsToRead) mirrorAtDrop.current.set(file, mirror);
+    sampling.start(clipsToRead);
   };
 
   const handleDrop = (files: File[]) => {
@@ -878,7 +881,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       return;
     }
     handleTargets(files);
-    if (!edit) void handleVideos(files);
+    if (!edit) handleVideos(files);
   };
 
   const removeClip = (key: string) => {
@@ -998,6 +1001,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       setProgress(null);
       setImages([]);
       setClips([]);
+      sampling.clear();
       setName('');
       onTrained();
     } catch (caught) {
@@ -1227,7 +1231,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                   disabled={busy}
                   onFiles={handleDrop}
                 >
-                  {(clips.length > 0 || sampling.length > 0) && (
+                  {(clips.length > 0 || sampling.transfers.length > 0) && (
                     <ul className="train-clips" aria-label="Accepted clips">
                       {clips.map((clip) => (
                         <li key={clip.key} className="train-clip">
@@ -1246,12 +1250,16 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                           </Button>
                         </li>
                       ))}
-                      {sampling.length === 1 && (
-                        <li className="train-clip">Reading {sampling[0].name}…</li>
-                      )}
-                      {sampling.length > 1 && (
-                        <li className="train-clip">Reading {sampling.length} clips…</li>
-                      )}
+                      {sampling.transfers.map((transfer) => (
+                        <li key={transfer.id} className="train-clip">
+                          <TransferChip
+                            transfer={transfer}
+                            processingLabel="Extracting frames…"
+                            onCancel={sampling.cancel}
+                            onRetry={sampling.retry}
+                          />
+                        </li>
+                      ))}
                     </ul>
                   )}
                 </DropZone>
@@ -1313,7 +1321,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           <Button
             type="submit"
             loading={busy}
-            disabled={busy || !ready || sampling.length > 0}
+            disabled={busy || !ready || sampling.pending > 0}
             aria-describedby={edit ? 'train-pairs-status' : undefined}
           >
             Train

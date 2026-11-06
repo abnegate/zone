@@ -36,6 +36,7 @@ pub const EMBEDDED: &[Source] = &[
     source!("013_chat_agent_context.sql"),
     source!("014_chat_pull_requests.sql"),
     source!("015_task_chat.sql"),
+    source!("017_chat_used_at.sql"),
     source!("019_chat_pull_request_auto_fix.sql"),
     source!("020_chat_pull_request_auto_fix_validation.sql"),
 ];
