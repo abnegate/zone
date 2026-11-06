@@ -1,12 +1,12 @@
-import { Button, buttonVariants } from '@zone/ui';
+import { buttonVariants } from '@zone/ui';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { usePageRestore } from '../../../../shared/hooks';
 import { type GitHubApp, type GitHubInstallation, useGitHubConnection } from '../../../github';
 import { GitHubOutcome, GitHubSearchParameter, isGitHubOutcome } from '../../../github/callback';
 import { redirectTo } from '../../../github/utils/redirectTo';
-import { GitHubAccountRow } from './GitHubAccountRow';
-import { GitHubConnectForm } from './GitHubConnectForm';
 import { GitHubRemoveDialog } from './GitHubRemoveDialog';
+import { GitHubSectionBody } from './GitHubSectionBody';
 import './GitHubSection.css';
 
 const OUTCOME_NOTICES: Readonly<Record<GitHubOutcome, string>> = {
@@ -50,6 +50,7 @@ export function GitHubSection({ organizationId, canManage }: GitHubSectionProps)
     apps,
     installations,
     loading,
+    fetching,
     error,
     refresh,
     registerApp,
@@ -68,6 +69,19 @@ export function GitHubSection({ organizationId, canManage }: GitHubSectionProps)
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<GitHubApp | null>(null);
   const [removedApps, setRemovedApps] = useState<GitHubApp[]>([]);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const connectAnotherRef = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef(false);
+
+  usePageRestore(() => setInstallingId(null));
+
+  useEffect(() => {
+    if (!returnFocus.current) {
+      return;
+    }
+    returnFocus.current = false;
+    (connectAnotherRef.current ?? headingRef.current)?.focus();
+  });
 
   useEffect(() => {
     if (outcome === null || handledOutcome.current) {
@@ -97,7 +111,7 @@ export function GitHubSection({ organizationId, canManage }: GitHubSectionProps)
     syncInstallations().then(
       () => setNotice(OUTCOME_NOTICES[GitHubOutcome.Sync]),
       (syncFailure: unknown) => {
-        setFailure(`Couldn't refresh GitHub accounts: ${messageOf(syncFailure, 'Unknown error')}`);
+        setFailure(messageOf(syncFailure, "Couldn't refresh GitHub accounts"));
         void refresh();
       }
     );
@@ -131,76 +145,21 @@ export function GitHubSection({ organizationId, canManage }: GitHubSectionProps)
       }
     }
     await deleteApp(app.id);
+    returnFocus.current = true;
     setRemovedApps((current) => [...current, app]);
     setRemoveTarget(null);
   };
 
-  const showConnectForm = canManage && (visibleApps.length === 0 || addingAccount);
-  const connectingAnother = addingAccount && visibleApps.length > 0;
-
-  const body = () => {
-    if (loading) {
-      return (
-        <div className="loading-state" role="status">
-          Loading GitHub connection…
-        </div>
-      );
-    }
-    if (error !== null) {
-      return (
-        <div className="alert alert-error alert-inline">
-          <span role="alert">{error}</span>
-          <Button variant="ghost" size="sm" onClick={() => void refresh()}>
-            Retry
-          </Button>
-        </div>
-      );
-    }
-    return (
-      <>
-        {!canManage && (
-          <p className="github-read-only">Only organization admins can change GitHub settings.</p>
-        )}
-        {!canManage && visibleApps.length === 0 && (
-          <p className="github-empty">No GitHub account is connected.</p>
-        )}
-        {visibleApps.length > 0 && (
-          <ul className="github-accounts" aria-label="Connected GitHub accounts">
-            {visibleApps.map((app) => (
-              <GitHubAccountRow
-                key={app.id}
-                app={app}
-                installations={installationsOf(app)}
-                canManage={canManage}
-                installing={installingId === app.id}
-                onFinishInstalling={() => finishInstalling(app)}
-                onRemove={() => setRemoveTarget(app)}
-              />
-            ))}
-          </ul>
-        )}
-        {showConnectForm && (
-          <GitHubConnectForm
-            onRegister={registerApp}
-            onCancel={connectingAnother ? () => setAddingAccount(false) : undefined}
-          />
-        )}
-        {canManage && visibleApps.length > 0 && !addingAccount && (
-          <div className="github-section-actions">
-            <Button variant="secondary" size="sm" onClick={() => setAddingAccount(true)}>
-              Connect another account
-            </Button>
-          </div>
-        )}
-      </>
-    );
+  const cancelConnect = () => {
+    returnFocus.current = true;
+    setAddingAccount(false);
   };
 
   return (
     <section className="github-section" aria-labelledby={headingId}>
       <div className="section-row">
         <div className="section-row-copy">
-          <h2 id={headingId} className="section-title">
+          <h2 id={headingId} ref={headingRef} className="section-title" tabIndex={-1}>
             GitHub
           </h2>
           <p className="section-description">
@@ -209,17 +168,17 @@ export function GitHubSection({ organizationId, canManage }: GitHubSectionProps)
         </div>
       </div>
       {notice && (
-        <div className="alert alert-success" role="status">
+        <div className="github-notice github-notice-success" role="status">
           {notice}
         </div>
       )}
       {failure && (
-        <div className="alert alert-error" role="alert">
+        <div className="github-notice github-notice-error" role="alert">
           {failure}
         </div>
       )}
       {removedApps.map((app) => (
-        <div key={app.id} className="alert alert-warning alert-inline">
+        <div key={app.id} className="github-notice github-notice-warning github-notice-inline">
           <span role="status">
             {`${app.owner_login} was removed from Zone. Delete the app on GitHub to finish.`}
           </span>
@@ -233,7 +192,23 @@ export function GitHubSection({ organizationId, canManage }: GitHubSectionProps)
           </a>
         </div>
       ))}
-      {body()}
+      <GitHubSectionBody
+        loading={loading}
+        error={error}
+        fetching={fetching}
+        canManage={canManage}
+        apps={visibleApps}
+        installationsOf={installationsOf}
+        installingId={installingId}
+        addingAccount={addingAccount}
+        connectAnotherRef={connectAnotherRef}
+        onRetry={() => void refresh()}
+        onRegister={registerApp}
+        onFinishInstalling={finishInstalling}
+        onRemove={setRemoveTarget}
+        onConnectAnother={() => setAddingAccount(true)}
+        onCancelConnect={cancelConnect}
+      />
       {removeTarget && (
         <GitHubRemoveDialog
           key={removeTarget.id}

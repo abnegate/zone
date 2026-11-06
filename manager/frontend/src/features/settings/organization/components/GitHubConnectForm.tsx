@@ -1,6 +1,7 @@
 import { Button, Input } from '@zone/ui';
-import { type FormEvent, useId, useState } from 'react';
+import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import { ApiError } from '../../../../api/ApiError';
+import { usePageRestore } from '../../../../shared/hooks';
 import type { GitHubAppRegistration } from '../../../github';
 import { submitManifest } from '../../../github/utils/submitManifest';
 
@@ -29,17 +30,31 @@ function registrationError(error: unknown): string {
 }
 
 interface GitHubConnectFormProps {
+  focusOnMount?: boolean;
   onRegister: (owner: string | null) => Promise<GitHubAppRegistration>;
   onCancel?: () => void;
 }
 
-export function GitHubConnectForm({ onRegister, onCancel }: GitHubConnectFormProps) {
+export function GitHubConnectForm({
+  focusOnMount = false,
+  onRegister,
+  onCancel,
+}: GitHubConnectFormProps) {
   const targetName = useId();
   const loginId = useId();
   const [target, setTarget] = useState<ConnectTarget>(ConnectTarget.Account);
   const [login, setLogin] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const firstTargetRef = useRef<HTMLInputElement>(null);
+
+  usePageRestore(() => setPending(false));
+
+  useEffect(() => {
+    if (focusOnMount) {
+      firstTargetRef.current?.focus();
+    }
+  }, [focusOnMount]);
 
   const owner = target === ConnectTarget.Organization ? login.trim() : null;
   const blank = owner === '';
@@ -60,20 +75,21 @@ export function GitHubConnectForm({ onRegister, onCancel }: GitHubConnectFormPro
   };
 
   return (
-    <form className="settings-card github-connect" onSubmit={submit}>
+    <form className="github-connect" onSubmit={submit}>
       <fieldset className="github-connect-target" disabled={pending}>
         <legend className="github-connect-legend">Connect to</legend>
-        <div className="radio-group">
-          {Object.values(ConnectTarget).map((value) => (
-            <label key={value} className="radio-option">
+        <div className="github-connect-options">
+          {Object.values(ConnectTarget).map((value, index) => (
+            <label key={value} className="github-connect-option">
               <input
+                ref={index === 0 ? firstTargetRef : undefined}
                 type="radio"
                 name={targetName}
                 value={value}
                 checked={target === value}
                 onChange={() => setTarget(value)}
               />
-              <span className="radio-label">{TARGET_LABELS[value]}</span>
+              <span className="github-connect-option-label">{TARGET_LABELS[value]}</span>
             </label>
           ))}
         </div>
@@ -91,7 +107,7 @@ export function GitHubConnectForm({ onRegister, onCancel }: GitHubConnectFormPro
         />
       )}
       {error && (
-        <div className="alert alert-error" role="alert">
+        <div className="github-notice github-notice-error" role="alert">
           {error}
         </div>
       )}

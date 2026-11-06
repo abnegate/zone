@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentType } from 'react';
 import { StrictMode } from 'react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -129,6 +129,12 @@ function findByRoleContaining(role: 'alert' | 'status', text: string): Promise<H
   });
 }
 
+function restorePageFromHistory() {
+  act(() => {
+    window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+  });
+}
+
 function connectButton(): HTMLElement {
   return screen.getByRole('button', { name: 'Connect GitHub' });
 }
@@ -191,6 +197,34 @@ describe('GitHubSection', () => {
 
       expect(await findRow('acme')).toBeTruthy();
       expect(screen.queryByText('Failed to load the GitHub connection: 503')).toBeNull();
+    });
+
+    it('shows Retry as busy while retrying a failed reload of loaded accounts', async () => {
+      connection = { apps: [acme], installations: [] };
+      renderSection();
+      await findRow('acme');
+      githubApi.getConnection.mockRejectedValueOnce(
+        new Error('Failed to load the GitHub connection: 503')
+      );
+
+      try {
+        act(() => {
+          focusManager.setFocused(false);
+          focusManager.setFocused(true);
+        });
+        await findByRoleContaining('alert', 'Failed to load the GitHub connection: 503');
+      } finally {
+        focusManager.setFocused(undefined);
+      }
+      const retry = screen.getByRole('button', { name: 'Retry' });
+      expect(retry).toBeEnabled();
+      githubApi.getConnection.mockImplementation(() => new Promise(() => {}));
+
+      fireEvent.click(retry);
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Retry' })).toBeDisabled();
+      });
     });
   });
 
@@ -323,6 +357,24 @@ describe('GitHubSection', () => {
 
       await findByRoleContaining('alert', 'Failed to connect GitHub: 502');
       expect(submitManifest).not.toHaveBeenCalled();
+    });
+
+    it('enables Connect GitHub again when the page comes back from GitHub through history', async () => {
+      renderSection();
+      await screen.findByRole('radio', { name: 'Your account' });
+
+      fireEvent.click(connectButton());
+      await waitFor(() => {
+        expect(submitManifest).toHaveBeenCalledTimes(1);
+      });
+      expect(connectButton()).toBeDisabled();
+
+      restorePageFromHistory();
+
+      await waitFor(() => {
+        expect(connectButton()).toBeEnabled();
+      });
+      expect(screen.getByRole('radio', { name: 'Your account' })).toBeEnabled();
     });
   });
 
@@ -475,6 +527,27 @@ describe('GitHubSection', () => {
       expect(redirectTo).toHaveBeenCalledTimes(1);
     });
 
+    it('enables Finish installing again when the page comes back from GitHub through history', async () => {
+      githubApi.createInstallation.mockResolvedValue(
+        'https://github.com/apps/zone-acme/installations/new?state=install-state'
+      );
+      connection = { apps: [acme], installations: [] };
+      renderSection();
+
+      const row = await findRow('acme');
+      fireEvent.click(within(row).getByRole('button', { name: 'Finish installing' }));
+      await waitFor(() => {
+        expect(redirectTo).toHaveBeenCalledTimes(1);
+      });
+      expect(within(row).getByRole('button', { name: 'Finish installing' })).toBeDisabled();
+
+      restorePageFromHistory();
+
+      await waitFor(() => {
+        expect(within(row).getByRole('button', { name: 'Finish installing' })).toBeEnabled();
+      });
+    });
+
     it('reveals the connect form for another account and hides it on Cancel', async () => {
       connection = {
         apps: [acme],
@@ -493,6 +566,38 @@ describe('GitHubSection', () => {
       expect(screen.queryByRole('radio', { name: 'Your account' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Connect GitHub' })).toBeNull();
       expect(screen.getByRole('button', { name: 'Connect another account' })).toBeTruthy();
+    });
+
+    it('moves focus into the revealed form and back to its trigger on Cancel', async () => {
+      connection = {
+        apps: [acme],
+        installations: [installation('inst-acme', acme.id, '2026-10-02T00:00:00Z')],
+      };
+      renderSection();
+      await findRow('acme');
+
+      const trigger = screen.getByRole('button', { name: 'Connect another account' });
+      trigger.focus();
+      fireEvent.click(trigger);
+
+      await waitFor(() => {
+        expect(document.activeElement).toBe(screen.getByRole('radio', { name: 'Your account' }));
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+      await waitFor(() => {
+        expect(document.activeElement).toBe(
+          screen.getByRole('button', { name: 'Connect another account' })
+        );
+      });
+    });
+
+    it('leaves focus alone when the form shows because nothing is connected', async () => {
+      renderSection();
+
+      const radio = await screen.findByRole('radio', { name: 'Your account' });
+      expect(document.activeElement).not.toBe(radio);
     });
 
     it('connects another account from the revealed form', async () => {
@@ -632,6 +737,47 @@ describe('GitHubSection', () => {
       expect(link).toHaveAttribute('target', '_blank');
     });
 
+    async function removeAcme() {
+      const dialog = await openRemoveDialog();
+      const confirm = within(dialog).getByRole('button', { name: 'Remove account' });
+      confirm.focus();
+      fireEvent.click(confirm);
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).toBeNull();
+      });
+      await waitFor(() => {
+        expect(screen.queryByRole('listitem', { name: 'acme' })).toBeNull();
+      });
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    }
+
+    it('moves focus to Connect another account once the removed row is gone', async () => {
+      githubApi.deleteApp.mockImplementation(async () => {
+        connection = { apps: [jake], installations: [otherApp] };
+      });
+      renderSection();
+
+      await removeAcme();
+
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: 'Connect another account' })
+      );
+    });
+
+    it('moves focus to the section heading once the last account is removed', async () => {
+      connection = { apps: [acme], installations: [active] };
+      githubApi.deleteApp.mockImplementation(async () => {
+        connection = { apps: [], installations: [] };
+      });
+      renderSection();
+
+      await removeAcme();
+
+      expect(document.activeElement).toBe(
+        screen.getByRole('heading', { level: 2, name: 'GitHub' })
+      );
+    });
+
     it('keeps the dialog open with an alert when the removal fails', async () => {
       githubApi.deleteApp.mockRejectedValue(new Error('Failed to remove the GitHub App: 500'));
       renderSection();
@@ -717,10 +863,8 @@ describe('GitHubSection', () => {
       );
       renderSection({ entry: `${SETTINGS_ENTRY}&github=sync` });
 
-      await findByRoleContaining(
-        'alert',
-        "Couldn't refresh GitHub accounts: Failed to refresh GitHub accounts: 502"
-      );
+      const alert = await findByRoleContaining('alert', 'Failed to refresh GitHub accounts: 502');
+      expect(alert).toHaveTextContent(/^Failed to refresh GitHub accounts: 502$/);
       expect(screen.queryByText('GitHub accounts refreshed.')).toBeNull();
     });
 
@@ -732,7 +876,9 @@ describe('GitHubSection', () => {
       renderSection({ entry: `${SETTINGS_ENTRY}&github=sync`, canManage: false });
 
       await findRow('acme');
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await waitFor(() => {
+        expect(location()).toBe(SETTINGS_ENTRY);
+      });
       expect(githubApi.syncInstallations).not.toHaveBeenCalled();
       expect(screen.queryByText('GitHub accounts refreshed.')).toBeNull();
     });
