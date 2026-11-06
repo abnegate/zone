@@ -10,7 +10,7 @@
 
 use crate::common;
 
-use crate::common::context::{Socket, finish, next, send};
+use crate::common::context::{Socket, finish, next, send, successful};
 use crate::common::stand_in::{MCP_CONFIGURATION, MCP_TOKEN};
 use crate::common::{
     TestClient, context_database_url, create_test_router, create_test_state, test_config,
@@ -33,7 +33,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_core::llm::{LlmBackend, Toolset};
 use zone_server::agent::ASK_USER;
 use zone_server::agent::wait::WAIT_FOR;
-use zone_server::config::ModelBackend;
+use zone_server::config::{AgentConfig, ModelBackend};
+use zone_server::db::agent_logins;
+use zone_server::db::ai_settings;
 use zone_server::db::chats;
 use zone_server::db::chats::occupancy;
 use zone_server::services::chat::session::{self, Mode};
@@ -50,6 +52,24 @@ const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
 const ANSWER: &str = "Written.";
+
+/// Where the server keeps its organizations' agent homes, under the test's directory.
+const AGENTS: &str = "agents";
+
+/// What a Codex login holds in its home once signed in.
+const CODEX_CREDENTIALS: &str = r#"{"tokens":{"access_token":"fake-codex-access-token","refresh_token":"fake-codex-refresh-token","account_id":"fake-codex-account"}}"#;
+const CODEX_CREDENTIALS_FILE: &str = "auth.json";
+
+/// The thread a stand-in Codex announces, and the day its rollout is kept under.
+const THREAD: &str = "019b2c41-0000-7000-8000-0000000000c8";
+const SESSIONS: &str = "sessions/2026/11/07";
+
+/// The window Codex's rollout reports for [`THREAD`], and how much of it the turn filled.
+const CODEX_WINDOW: u64 = 475_000;
+const CODEX_FILLED: u64 = 24_638;
+
+/// How long a stand-in Codex lingers after the line that finished its turn before it exits.
+const LINGER: Duration = Duration::from_secs(1);
 
 /// A stand-in for the host's `claude`.
 ///
@@ -155,6 +175,41 @@ impl Agent {
             format!("#!/bin/sh\ncat > /dev/null\necho '{assistant}'\necho '{result}'\n"),
         )
         .expect("the reporting stand-in");
+    }
+
+    /// Turns the stand-in into a Codex that answers at once, lingers after the line that finishes
+    /// its turn, and keeps its window in the rollout under its home, as Codex does: read only
+    /// once the agent has exited, after that line.
+    fn reporting_once_it_exits(&self) {
+        let rollout = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"total_tokens": CODEX_FILLED},
+                    "model_context_window": CODEX_WINDOW,
+                },
+            },
+        });
+        let lines = [
+            json!({"type": "thread.started", "thread_id": THREAD}),
+            json!({"type": "turn.started"}),
+            json!({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": ANSWER}}),
+            json!({"type": "turn.completed", "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}}),
+        ]
+        .iter()
+        .map(|line| format!("echo '{line}'\n"))
+        .collect::<String>();
+        std::fs::write(
+            &self.executable,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\nmkdir -p \"$CODEX_HOME/{SESSIONS}\"\necho \
+                 '{rollout}' > \"$CODEX_HOME/{SESSIONS}/rollout-2026-11-07T10-00-00-{THREAD}.jsonl\"\n\
+                 {lines}sleep {linger}\n",
+                linger = LINGER.as_secs(),
+            ),
+        )
+        .expect("the reporting codex stand-in");
     }
 
     /// Turns the stand-in into one that forks a child of its own before it
@@ -280,6 +335,8 @@ async fn rpc(endpoint: &str, token: &str, method: &str, params: Value) -> (Statu
 
 struct Harness {
     pool: PgPool,
+    agents: AgentConfig,
+    organization: Uuid,
     workspace: String,
     token: String,
     chat: Uuid,
@@ -315,6 +372,15 @@ impl Harness {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
             .mount(&provider)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/backend-api/wham/usage"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"rate_limit": {"primary_window": {"used_percent": 10.0}}}),
+                ),
+            )
+            .mount(&provider)
+            .await;
 
         let directory = TempDir::new().expect("a temporary directory");
         let agent = Agent::write(directory.path());
@@ -335,6 +401,12 @@ impl Harness {
             agent: kind,
             executable: Some(agent.executable.clone()),
         };
+        config.agents = AgentConfig {
+            state: directory.path().join(AGENTS),
+            codex_api_url: provider.uri(),
+            ..config.agents
+        };
+        let agents = config.agents.clone();
 
         let router = create_test_router(create_test_state(config, pool.clone()));
         let client = TestClient::new(router.clone());
@@ -353,7 +425,7 @@ impl Harness {
             .expect("registration returns an access token")
             .to_string();
         let suffix = Uuid::new_v4();
-        let organization = client
+        let organization: Uuid = client
             .post_json_auth(
                 "/api/organizations",
                 &json!({"name": "Agent tools", "slug": format!("agent-{suffix}")}),
@@ -363,7 +435,8 @@ impl Harness {
             .json_value()["organization"]["id"]
             .as_str()
             .expect("an organization")
-            .to_string();
+            .parse()
+            .expect("an organization id");
         let workspace = client
             .post_json_auth(
                 &format!("/api/organizations/{organization}/workspaces"),
@@ -399,6 +472,8 @@ impl Harness {
 
         Self {
             pool,
+            agents,
+            organization,
             workspace,
             token,
             chat,
@@ -443,6 +518,40 @@ impl Harness {
             .execute(&self.pool)
             .await
             .expect("the chat in the project");
+    }
+
+    /// Runs the organization's turns on Codex, signed in once with a home of its own, as the
+    /// stand-in, which the instance names as its codex.
+    async fn sign_in_to_codex(&self) {
+        sqlx::query(
+            "INSERT INTO organization_ai_settings (organization_id, provider) VALUES ($1, $2) \
+             ON CONFLICT (organization_id) DO UPDATE SET provider = EXCLUDED.provider",
+        )
+        .bind(self.organization)
+        .bind(ai_settings::provider(AgentKind::Codex))
+        .execute(&self.pool)
+        .await
+        .expect("the organization's AI settings");
+        let login = agent_logins::insert(
+            &self.pool,
+            &agent_logins::Insert {
+                organization_id: self.organization,
+                agent: AgentKind::Codex.as_str(),
+                account: Some("codex"),
+                credential: None,
+                label: Some("codex"),
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("a stored login")
+        .id;
+        let home = self
+            .agents
+            .create_login_home(self.organization, AgentKind::Codex, login)
+            .expect("the login's home");
+        std::fs::write(home.join(CODEX_CREDENTIALS_FILE), CODEX_CREDENTIALS)
+            .expect("the codex login's credentials");
     }
 
     async fn socket(&self) -> Socket {
@@ -1028,4 +1137,37 @@ async fn a_cli_turn_keeps_the_window_its_agent_reported_and_shows_it_as_it_ends(
         kept.occupancy,
         Occupancy::reported(200_000, Some(3 + 120 + 16_500 + 9)).expect("a reported window")
     );
+}
+
+/// Codex reports its window only once it has exited, after the line that finished its turn, so
+/// a chat that stopped reading at the finish would keep nothing. The chat reads the turn to its
+/// end, and the window is kept, and shown, all the same.
+#[tokio::test]
+async fn the_chat_reads_the_agent_stream_to_its_end() {
+    let harness = Harness::start_on(AgentKind::Codex, false, true).await;
+    harness.sign_in_to_codex().await;
+    harness.agent.reporting_once_it_exits();
+
+    let frames = harness
+        .turn("How large is your window?")
+        .await
+        .await
+        .expect("the turn ends");
+
+    successful(&frames);
+    let kept = occupancy::get(&harness.pool, harness.chat)
+        .await
+        .expect("the chat's report is readable")
+        .expect("the turn kept the window codex reported once it exited");
+    assert_eq!(kept.agent, AgentKind::Codex);
+    assert_eq!(
+        kept.occupancy,
+        Occupancy::reported(CODEX_WINDOW, Some(CODEX_FILLED)).expect("a reported window")
+    );
+    let usage = &frames
+        .iter()
+        .rev()
+        .find(|frame| frame["type"] == "context")
+        .unwrap_or_else(|| panic!("no context frame in {frames:?}"))["usage"];
+    assert_eq!(usage["limit"], json!(CODEX_WINDOW), "{usage}");
 }
