@@ -38,7 +38,7 @@ rmcp = { version = "=3.4.0", default-features = false }
 abnegate-comfy = "0.2.1"
 abnegate-config = "0.1.6"
 abnegate-exec = "0.1.9"
-abnegate-http = "0.1.4"
+abnegate-http = "0.1.5"
 abnegate-index = "0.1"
 abnegate-llm = "0.1.9"
 abnegate-notify = "0.1.6"

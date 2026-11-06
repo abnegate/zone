@@ -3,42 +3,75 @@
 //! Executes agentic tasks in the background using the same streaming agent
 //! loop as chat, with a task budget and a sandboxed tool context.
 
-use abnegate_llm::{Limit, Message as LlmMessage};
+use abnegate_http::Backoff;
+use abnegate_http::RetryAfter;
+use abnegate_http::contains_standalone_status;
+use abnegate_llm::Limit;
+use abnegate_llm::Message as LlmMessage;
 use futures::StreamExt;
+use reqwest::StatusCode;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::AcquireError;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 use zone_core::agent::AgentPhase;
 use zone_core::context::Entry;
-use zone_core::llm::provider::{OUTGROWN, UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient};
+use zone_core::llm::BuiltinTools;
+use zone_core::llm::LlmBackend;
+use zone_core::llm::LlmClient;
+use zone_core::llm::provider::OUTGROWN;
+use zone_core::llm::provider::UNFUNDED;
+use zone_core::llm::provider::UNFUNDED_CONTEXT;
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
 
+use crate::agent;
+use crate::agent::AgentEvent;
+use crate::agent::AgentRun;
+use crate::agent::ApprovalPolicy;
+use crate::agent::ChatTools;
+use crate::agent::LoopBudget;
+use crate::agent::Spend;
 use crate::agent::plan;
-use crate::agent::prompt::{self, Environment, Vcs};
-use crate::agent::question::{self, Question};
-use crate::agent::wait::{self, Waited, Waiting};
-use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
+use crate::agent::prompt;
+use crate::agent::prompt::Environment;
+use crate::agent::prompt::Vcs;
+use crate::agent::question;
+use crate::agent::question::Question;
+use crate::agent::wait;
+use crate::agent::wait::Waited;
+use crate::agent::wait::Waiting;
 use crate::config::ModelBackend;
-use crate::db::{task_tool_calls, tasks};
-use crate::services::backend::{self, Resolved};
-use crate::services::chat::session::{self, RunContext};
+use crate::db::task_tool_calls;
+use crate::db::tasks;
+use crate::services::backend;
+use crate::services::backend::Resolved;
+use crate::services::chat::session;
+use crate::services::chat::session::RunContext;
 use crate::services::endpoint::Endpoint;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
-use crate::services::route::{Reason, Route, Unusable};
+use crate::services::route::Reason;
+use crate::services::route::Route;
+use crate::services::route::Unusable;
 use crate::services::stages;
 use crate::state::AppState;
-use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
+use crate::workers::evaluation::EvaluationSettings;
+use crate::workers::evaluation::Evaluator;
+use crate::workers::evaluation::Verdict;
 use crate::workers::instructions;
-use crate::workers::pr::{PrCreationResult, create_pr_for_task};
+use crate::workers::pr::PrCreationResult;
+use crate::workers::pr::create_pr_for_task;
 use zone_context::context::SearchResultWithAnalysis;
 
 mod halt;
@@ -50,7 +83,8 @@ mod unprepared;
 use halt::Halt;
 use handover::Handover;
 use meter::Meter;
-use seat::{Seat, Seated};
+use seat::Seat;
+use seat::Seated;
 use unprepared::Unprepared;
 
 // Max concurrent task executions
@@ -418,30 +452,36 @@ impl Decision {
     }
 }
 
+const FACTOR: u32 = 2;
+
+const JITTER: f64 = 0.25;
+
 /// Bounded exponential backoff for a background task run.
 ///
 /// `attempts` counts the initial attempt, so three retries follow the first
-/// try. Rate limits start from their own base because a provider window
+/// try. Rate limits follow their own curve because a provider window
 /// outlasts a network blip, and a provider hint replaces the curve entirely.
 #[derive(Debug, Clone, Copy)]
 struct RetryPolicy {
     attempts: u32,
-    base: Duration,
-    ceiling: Duration,
-    rate_limit_base: Duration,
-    rate_limit_ceiling: Duration,
-    jitter: f64,
+    transient: Backoff,
+    rate_limit: Backoff,
 }
 
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
             attempts: 4,
-            base: Duration::from_secs(2),
-            ceiling: Duration::from_secs(60),
-            rate_limit_base: Duration::from_secs(15),
-            rate_limit_ceiling: Duration::from_secs(300),
-            jitter: 0.25,
+            transient: Backoff::default()
+                .with_base(Duration::from_secs(2))
+                .with_maximum(Duration::from_secs(60))
+                .with_factor(FACTOR)
+                .with_jitter(JITTER),
+            rate_limit: Backoff::default()
+                .with_base(Duration::from_secs(15))
+                .with_maximum(Duration::from_secs(300))
+                .with_factor(FACTOR)
+                .with_jitter(JITTER),
         }
     }
 }
@@ -460,24 +500,18 @@ impl RetryPolicy {
         Decision::Retry(self.delay(attempt, failure, sample))
     }
 
-    /// Jitter only ever subtracts, so `ceiling` stays a true upper bound and a
-    /// provider's own hint is never shortened into another rejection.
+    /// A provider's own hint is never shortened by jitter into another
+    /// rejection.
     fn delay(&self, attempt: u32, failure: Failure, sample: f64) -> Duration {
         if let Some(hint) = failure.retry_after() {
-            return hint.min(self.rate_limit_ceiling);
+            return hint.min(self.rate_limit.maximum);
         }
-        let (base, ceiling) = match failure {
-            Failure::RateLimited { .. } => (self.rate_limit_base, self.rate_limit_ceiling),
-            Failure::Terminal | Failure::Transient | Failure::Rerouted => (self.base, self.ceiling),
+        let backoff = match failure {
+            Failure::RateLimited { .. } => self.rate_limit,
+            Failure::Terminal | Failure::Transient | Failure::Rerouted => self.transient,
         };
-        let span = backoff(base, ceiling, attempt);
-        span.mul_f64(1.0 - self.jitter.clamp(0.0, 1.0) * sample.clamp(0.0, 1.0))
+        backoff.delay_with(attempt.saturating_sub(1), sample)
     }
-}
-
-fn backoff(base: Duration, ceiling: Duration, attempt: u32) -> Duration {
-    base.saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)))
-        .min(ceiling)
 }
 
 fn sample() -> f64 {
@@ -624,14 +658,12 @@ const TERMINAL_MARKERS: &[&str] = &[
     "unsupported",
 ];
 
-const TERMINAL_STATUSES: &[u16] = &[400, 401, 403, 404, 422];
-
-const RETRY_AFTER_LABELS: &[&str] = &[
-    "retry-after",
-    "retry_after",
-    "retry after",
-    "retry in",
-    "try again in",
+const TERMINAL_STATUSES: &[StatusCode] = &[
+    StatusCode::BAD_REQUEST,
+    StatusCode::UNAUTHORIZED,
+    StatusCode::FORBIDDEN,
+    StatusCode::NOT_FOUND,
+    StatusCode::UNPROCESSABLE_ENTITY,
 ];
 
 /// Rate limits are matched first: a throttled request is recoverable even when
@@ -641,10 +673,10 @@ fn classify(message: &str) -> Failure {
     if RATE_LIMIT_MARKERS
         .iter()
         .any(|marker| lowered.contains(marker))
-        || standalone_status(&lowered, 429)
+        || contains_standalone_status(&lowered, StatusCode::TOO_MANY_REQUESTS.as_u16())
     {
         return Failure::RateLimited {
-            retry_after: retry_after(&lowered),
+            retry_after: hint(&lowered),
         };
     }
     if TERMINAL_MARKERS
@@ -652,11 +684,17 @@ fn classify(message: &str) -> Failure {
         .any(|marker| lowered.contains(marker))
         || TERMINAL_STATUSES
             .iter()
-            .any(|status| standalone_status(&lowered, *status))
+            .any(|status| contains_standalone_status(&lowered, status.as_u16()))
     {
         return Failure::Terminal;
     }
     Failure::Transient
+}
+
+/// The wait `text` asks for. A zero wait is still a rate limit, so it takes
+/// the rate-limit curve rather than retrying at once.
+fn hint(text: &str) -> Option<Duration> {
+    RetryAfter::from_text(text).filter(|delay| !delay.is_zero())
 }
 
 /// [`classify`] for a coding agent's own words, where a failure no retry
@@ -673,64 +711,10 @@ fn classify_agent(words: &str) -> Failure {
     }
     if Limit::worded(words) {
         return Failure::RateLimited {
-            retry_after: retry_after(&words.to_ascii_lowercase()),
+            retry_after: hint(words),
         };
     }
     classify(words)
-}
-
-/// A status code only counts when it stands alone: not inside a longer number,
-/// a request id, or a JSON value such as `"tokens":429`.
-fn standalone_status(lowered: &str, status: u16) -> bool {
-    let needle = status.to_string();
-    let bytes = lowered.as_bytes();
-    let mut from = 0;
-    while let Some(offset) = lowered[from..].find(needle.as_str()) {
-        let start = from + offset;
-        let end = start + needle.len();
-        let bounded = (start == 0 || !bytes[start - 1].is_ascii_alphanumeric())
-            && (end >= bytes.len() || !bytes[end].is_ascii_alphanumeric());
-        if bounded && !json_value(bytes, start) {
-            return true;
-        }
-        from = start + 1;
-    }
-    false
-}
-
-fn json_value(bytes: &[u8], start: usize) -> bool {
-    let colon = if start > 0 && bytes[start - 1] == b':' {
-        start - 1
-    } else if start > 1 && bytes[start - 1] == b' ' && bytes[start - 2] == b':' {
-        start - 2
-    } else {
-        return false;
-    };
-    colon > 0 && bytes[colon - 1] == b'"'
-}
-
-fn retry_after(lowered: &str) -> Option<Duration> {
-    RETRY_AFTER_LABELS
-        .iter()
-        .find_map(|label| lowered.split(label).nth(1).and_then(leading_duration))
-}
-
-fn leading_duration(tail: &str) -> Option<Duration> {
-    let tail = tail.trim_start_matches([':', '=', ' ', '"', '\t']);
-    let end = tail
-        .find(|character: char| !character.is_ascii_digit() && character != '.')
-        .unwrap_or(tail.len());
-    let value: f64 = tail[..end].parse().ok()?;
-    if !value.is_finite() || value <= 0.0 {
-        return None;
-    }
-    let unit = tail[end..].trim_start();
-    let seconds = if unit.starts_with("ms") || unit.starts_with("millis") {
-        value / 1000.0
-    } else {
-        value
-    };
-    Duration::try_from_secs_f64(seconds).ok()
 }
 
 /// Callback that persists task execution events to the database
@@ -4714,7 +4698,7 @@ mod retry_tests {
         let throttled = classify("HTTP 429 Too Many Requests");
         assert_eq!(throttled, Failure::RateLimited { retry_after: None });
         let delay = retry_delay(&policy, 1, throttled, 0.0);
-        assert_eq!(delay, policy.rate_limit_base);
+        assert_eq!(delay, policy.rate_limit.base);
         assert!(delay > retry_delay(&policy, 1, Failure::Transient, 0.0));
     }
 
@@ -4746,7 +4730,7 @@ mod retry_tests {
                 classify("rate limit hit, retry-after: 86400"),
                 0.0
             ),
-            policy.rate_limit_ceiling
+            policy.rate_limit.maximum
         );
         assert_eq!(
             classify("rate limit hit, retry-after: 500ms"),
@@ -4757,16 +4741,139 @@ mod retry_tests {
     }
 
     #[test]
+    fn a_hint_ending_a_sentence_is_honoured() {
+        assert_eq!(
+            classify("rate limited, retry in 1.5."),
+            Failure::RateLimited {
+                retry_after: Some(Duration::from_millis(1_500)),
+            }
+        );
+        assert_eq!(
+            classify("rate limit hit, retry-after: 0.5."),
+            Failure::RateLimited {
+                retry_after: Some(Duration::from_millis(500)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_hint_too_long_to_hold_waits_the_rate_limit_maximum() {
+        let policy = RetryPolicy::default();
+        let overflowing = classify("rate limit hit, retry-after: 18446744073709551616");
+        assert_eq!(
+            overflowing,
+            Failure::RateLimited {
+                retry_after: Some(Duration::MAX),
+            }
+        );
+        assert_eq!(
+            retry_delay(&policy, 1, overflowing, 0.0),
+            policy.rate_limit.maximum
+        );
+        let attempt = Attempt {
+            number: 1,
+            failure: overflowing,
+            decision: policy.decide(1, overflowing, 0.0),
+            message: String::new(),
+            handover: None,
+        };
+        assert_eq!(
+            attempt.metadata(policy.attempts)["retry_after_ms"],
+            u64::MAX
+        );
+        assert_eq!(
+            classify(&format!("rate limit hit, retry-after: {}", "9".repeat(400))),
+            Failure::RateLimited {
+                retry_after: Some(Duration::MAX),
+            }
+        );
+    }
+
+    #[test]
+    fn a_hint_too_small_to_hold_takes_the_rate_limit_curve() {
+        let policy = RetryPolicy::default();
+        let unhinted = Failure::RateLimited { retry_after: None };
+        let hints = [
+            (
+                "underflowing",
+                classify(&format!("rate limited, retry in 0.{}1", "0".repeat(400))),
+            ),
+            (
+                "sub-nanosecond",
+                classify("rate limited, retry in 0.0000000001"),
+            ),
+            (
+                "an agent's sub-nanosecond",
+                classify_agent(&format!("{SESSION_LIMIT} · retry in 0.0000000001")),
+            ),
+        ];
+        let held: Vec<_> = hints
+            .iter()
+            .filter(|(_, failure)| *failure != unhinted)
+            .collect();
+        assert!(held.is_empty(), "zero hints held the retry: {held:?}");
+        for (hint, failure) in hints {
+            assert_eq!(
+                retry_delay(&policy, 1, failure, 0.0),
+                policy.rate_limit.base,
+                "{hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_undelayed_fault_still_retries_at_once() {
+        let policy = RetryPolicy::default();
+        let fault = Fault::reported("rate limited, retry in 0.0000000001".to_string()).undelayed();
+        assert_eq!(retry_delay(&policy, 1, fault.failure, 0.0), Duration::ZERO);
+    }
+
+    #[test]
+    fn fractional_and_millisecond_hints_parse() {
+        assert_eq!(
+            classify("429 slow down, try again in 1.5s"),
+            Failure::RateLimited {
+                retry_after: Some(Duration::from_millis(1_500)),
+            }
+        );
+        assert_eq!(
+            classify("retry_after: 200ms"),
+            Failure::RateLimited {
+                retry_after: Some(Duration::from_millis(200)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_sample_that_is_not_a_number_takes_no_jitter() {
+        let policy = RetryPolicy::default();
+        assert_eq!(
+            policy.decide(1, Failure::Transient, f64::NAN),
+            Decision::Retry(policy.transient.base)
+        );
+    }
+
+    #[test]
+    fn an_agents_hint_is_read_from_its_own_words() {
+        assert_eq!(
+            classify_agent(&format!("{SESSION_LIMIT} · retry in 30s")),
+            Failure::RateLimited {
+                retry_after: Some(Duration::from_secs(30)),
+            }
+        );
+    }
+
+    #[test]
     fn backoff_grows_exponentially_within_its_bounds() {
         let policy = RetryPolicy::default();
-        let floor = policy.base.mul_f64(1.0 - policy.jitter);
+        let floor = policy.transient.base.mul_f64(1.0 - policy.transient.jitter);
         for sample in [0.0, 0.5, 1.0] {
             let mut previous = Duration::ZERO;
             for attempt in 1..policy.attempts {
                 let delay = retry_delay(&policy, attempt, Failure::Transient, sample);
                 assert!(delay >= floor, "attempt {attempt} fell below the floor");
                 assert!(
-                    delay <= policy.ceiling,
+                    delay <= policy.transient.maximum,
                     "attempt {attempt} broke the ceiling"
                 );
                 assert!(delay >= previous, "attempt {attempt} did not grow");
@@ -4775,15 +4882,15 @@ mod retry_tests {
         }
         assert_eq!(
             retry_delay(&policy, 1, Failure::Transient, 0.0),
-            policy.base
+            policy.transient.base
         );
         assert_eq!(
             retry_delay(&policy, 2, Failure::Transient, 0.0),
-            policy.base * 2
+            policy.transient.base * 2
         );
         assert_eq!(
             retry_delay(&policy, 1, Failure::Transient, 1.0),
-            policy.base.mul_f64(1.0 - policy.jitter)
+            policy.transient.base.mul_f64(1.0 - policy.transient.jitter)
         );
         let long = RetryPolicy {
             attempts: 32,
@@ -4791,7 +4898,7 @@ mod retry_tests {
         };
         assert_eq!(
             retry_delay(&long, 31, Failure::Transient, 0.0),
-            long.ceiling,
+            long.transient.maximum,
             "an unbounded curve must still be capped"
         );
     }
@@ -5053,7 +5160,7 @@ mod retry_tests {
         assert_eq!(unknown.failure, Failure::RateLimited { retry_after: None });
         assert_eq!(
             policy.decide(1, unknown.failure, 0.0),
-            Decision::Retry(policy.rate_limit_base)
+            Decision::Retry(policy.rate_limit.base)
         );
 
         let unfunded = Fault::limited(&backend, limit(None, true))
@@ -8393,7 +8500,7 @@ mod cli_tests {
         );
         assert_eq!(agent.lines(TOKENS), ["first-access", "second-access"]);
         assert!(
-            elapsed < RetryPolicy::default().rate_limit_base,
+            elapsed < RetryPolicy::default().rate_limit.base,
             "the run backed off for {elapsed:?}"
         );
         let [rerouted] = logs.as_slice() else {
@@ -8675,7 +8782,7 @@ mod cli_tests {
         let retried = logs[1].metadata.as_ref().expect("the retry's metadata");
         assert_eq!(retried["delay_ms"], 0);
         assert!(
-            elapsed < RetryPolicy::default().rate_limit_base * 2,
+            elapsed < RetryPolicy::default().rate_limit.base * 2,
             "the run waited out the second login's limit: {elapsed:?}"
         );
     }
