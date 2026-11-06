@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn provider_failures_keep_their_kind() {
         assert_eq!(
-            Error::from(github_app::Error::Database(sqlx::Error::RowNotFound)),
+            Error::from(github_app::Error::from(sqlx::Error::RowNotFound)),
             Error::Storage
         );
         assert_eq!(

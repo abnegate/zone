@@ -46,7 +46,7 @@ mod tests {
         }
         for error in [
             github_app::Error::Credential,
-            github_app::Error::Database(sqlx::Error::RowNotFound),
+            github_app::Error::from(sqlx::Error::RowNotFound),
         ] {
             assert_eq!(Connection::from(error), Connection::Uncredentialed);
         }

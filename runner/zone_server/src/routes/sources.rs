@@ -1425,7 +1425,7 @@ mod tests {
                 CREDENTIALS_UNREADABLE,
             ),
             (
-                github_app::Error::Database(sqlx::Error::PoolTimedOut),
+                github_app::Error::from(sqlx::Error::PoolTimedOut),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 INTERNAL_ERROR,
             ),

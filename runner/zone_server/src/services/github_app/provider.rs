@@ -1,8 +1,6 @@
-use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::num::{NonZeroU8, NonZeroU32};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use abnegate_secret::{MasterKey, SecretValue, decrypt_value, encrypt_value, is_encrypted};
@@ -21,6 +19,7 @@ use crate::db::sources::SourceRow;
 
 use super::credential::Credential;
 use super::error::Error;
+use super::flight::Flights;
 use super::scope::Scope;
 use super::unauthenticated::Unauthenticated;
 
@@ -59,7 +58,7 @@ enum Standing {
 pub struct Provider {
     github: Result<GitHub, ApplicationError>,
     cache: TokenCache,
-    minting: Mutex<HashMap<InstallationId, Arc<tokio::sync::Mutex<()>>>>,
+    flights: Flights,
     master_key: MasterKey,
     encryption_key: [u8; 32],
 }
@@ -77,7 +76,7 @@ impl Provider {
         Self {
             github,
             cache: TokenCache::new(),
-            minting: Mutex::default(),
+            flights: Flights::default(),
             master_key: MasterKey::new(encryption_key),
             encryption_key,
         }
@@ -124,8 +123,19 @@ impl Provider {
             return Ok(secret);
         }
 
-        let gate = self.gate(installation);
-        let _minting = gate.lock().await;
+        self.flights
+            .board(installation)
+            .minted(|| self.issued(issuer, application, sealed_key, installation))
+            .await
+    }
+
+    async fn issued(
+        &self,
+        issuer: &InstallationIssuer,
+        application: ApplicationId,
+        sealed_key: &str,
+        installation: InstallationId,
+    ) -> Result<SecretValue, Error> {
         if let Some(secret) = self.cached(installation) {
             return Ok(secret);
         }
@@ -142,15 +152,6 @@ impl Provider {
         self.cache
             .get(installation, SystemTime::now())
             .map(|token| token.secret().clone())
-    }
-
-    fn gate(&self, installation: InstallationId) -> Arc<tokio::sync::Mutex<()>> {
-        self.minting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(installation)
-            .or_default()
-            .clone()
     }
 
     pub fn invalidate(&self, installation: InstallationId) {
@@ -294,11 +295,20 @@ impl Provider {
             .map(ApplicationId::new)
             .map_err(|_| Error::NotConnected)?;
 
-        match self.mint(application, &row.private_key, installation).await {
+        let issuer = &self.github()?.issuer;
+        if let Some(secret) = self.cached(installation) {
+            return Ok(Credential::installed(secret, scope));
+        }
+
+        let flight = self.flights.board(installation);
+        match flight
+            .minted(|| self.issued(issuer, application, &row.private_key, installation))
+            .await
+        {
             Ok(secret) => Ok(Credential::installed(secret, scope)),
             Err(Error::Application(refusal @ ApplicationError::Status(FORBIDDEN | NOT_FOUND))) => {
-                Err(self
-                    .confirmed(db, row, application, installation, refusal)
+                Err(flight
+                    .confirmed(|| self.confirmed(db, row, application, installation, refusal))
                     .await)
             }
             Err(error) => Err(error),
@@ -944,6 +954,73 @@ mod tests {
                 "ghs_sharedtoken"
             );
         }
+        assert_eq!(connected.provider.flights.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_resolutions_share_one_failed_mint() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        Mock::given(method("POST"))
+            .and(path(tokens_path(connected.number)))
+            .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_millis(300)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (first, second, third) = tokio::join!(
+            connected.resolve(),
+            connected.resolve(),
+            connected.resolve()
+        );
+
+        for outcome in [first, second, third] {
+            let error = outcome.expect_err("the one mint failed");
+            assert!(
+                matches!(error, Error::Application(ApplicationError::Status(500))),
+                "{error:?}"
+            );
+        }
+        assert_eq!(connected.provider.flights.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_mint_leaves_no_flight_behind() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        Mock::given(method("POST"))
+            .and(path(tokens_path(connected.number)))
+            .respond_with(issued("ghs_late").set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+
+        tokio::time::timeout(Duration::from_millis(200), connected.resolve())
+            .await
+            .expect_err("the mint outlives the caller's patience");
+
+        assert_eq!(connected.provider.flights.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_resolutions_share_one_confirmed_refusal() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        Mock::given(method("POST"))
+            .and(path(tokens_path(connected.number)))
+            .respond_with(ResponseTemplate::new(404).set_delay(Duration::from_millis(300)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        uninstalled(&server, connected.number).await;
+
+        let (first, second) = tokio::join!(connected.resolve(), connected.resolve());
+
+        for outcome in [first, second] {
+            let error = outcome.expect_err("GitHub no longer knows the installation");
+            assert!(matches!(error, Error::Revoked), "{error:?}");
+        }
+        assert_eq!(connected.status().await, InstallationStatus::Revoked);
+        assert_eq!(connected.provider.flights.len(), 0);
     }
 
     #[tokio::test]

@@ -1,5 +1,7 @@
 //! Failures on the GitHub App path, worded so none can carry a credential.
 
+use std::sync::Arc;
+
 use abnegate_vcs::pull_request::ApplicationError;
 use thiserror::Error as ThisError;
 
@@ -24,7 +26,42 @@ pub enum Error {
     #[error("The GitHub connection this was using no longer exists. Reconnect GitHub.")]
     NotConnected,
     #[error("The GitHub connection could not be read: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[source] Arc<sqlx::Error>),
+}
+
+impl From<sqlx::Error> for Error {
+    fn from(fault: sqlx::Error) -> Self {
+        Self::Database(Arc::new(fault))
+    }
+}
+
+impl Error {
+    pub(super) fn duplicate(&self) -> Self {
+        match self {
+            Self::Application(fault) => Self::Application(Self::application(fault)),
+            Self::Sealing => Self::Sealing,
+            Self::Unsealing => Self::Unsealing,
+            Self::Credential => Self::Credential,
+            Self::Revoked => Self::Revoked,
+            Self::Suspended => Self::Suspended,
+            Self::NotConnected => Self::NotConnected,
+            Self::Database(fault) => Self::Database(Arc::clone(fault)),
+        }
+    }
+
+    fn application(fault: &ApplicationError) -> ApplicationError {
+        match fault {
+            ApplicationError::InvalidOrigin => ApplicationError::InvalidOrigin,
+            ApplicationError::Client => ApplicationError::Client,
+            ApplicationError::PrivateKey => ApplicationError::PrivateKey,
+            ApplicationError::Signing => ApplicationError::Signing,
+            ApplicationError::Transport(cause) => ApplicationError::Transport(cause.clone()),
+            ApplicationError::Status(status) => ApplicationError::Status(*status),
+            ApplicationError::Response => ApplicationError::Response,
+            ApplicationError::InvalidCode => ApplicationError::InvalidCode,
+            unknown => ApplicationError::Transport(unknown.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -50,5 +87,43 @@ mod tests {
         ] {
             assert!(!error.to_string().contains("BEGIN"), "{error}");
         }
+    }
+
+    #[test]
+    fn a_duplicate_is_the_same_failure() {
+        for error in [
+            Error::Sealing,
+            Error::Unsealing,
+            Error::Credential,
+            Error::Revoked,
+            Error::Suspended,
+            Error::NotConnected,
+            Error::from(ApplicationError::InvalidOrigin),
+            Error::from(ApplicationError::Client),
+            Error::from(ApplicationError::PrivateKey),
+            Error::from(ApplicationError::Signing),
+            Error::from(ApplicationError::Transport(
+                "connection refused".to_string(),
+            )),
+            Error::from(ApplicationError::Status(503)),
+            Error::from(ApplicationError::Response),
+            Error::from(ApplicationError::InvalidCode),
+            Error::from(sqlx::Error::PoolTimedOut),
+        ] {
+            let duplicate = error.duplicate();
+            assert_eq!(duplicate.to_string(), error.to_string());
+            assert_eq!(
+                std::mem::discriminant(&duplicate),
+                std::mem::discriminant(&error)
+            );
+        }
+    }
+
+    #[test]
+    fn a_duplicate_status_keeps_its_variant() {
+        assert!(matches!(
+            Error::from(ApplicationError::Status(404)).duplicate(),
+            Error::Application(ApplicationError::Status(404))
+        ));
     }
 }

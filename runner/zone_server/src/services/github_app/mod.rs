@@ -4,6 +4,7 @@
 pub mod access;
 pub mod credential;
 pub mod error;
+mod flight;
 pub mod login;
 pub mod manifest;
 pub mod permissions;
