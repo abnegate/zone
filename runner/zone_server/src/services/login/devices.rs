@@ -43,6 +43,8 @@ const STOPPED: &str = "The codex sign-in stopped before it finished";
 const UNSAVED: &str = "Codex signed in, but Zone could not record the sign-in. Start again.";
 const CANCELLED: &str = "The sign-in was cancelled. Start again.";
 const EXPIRED: &str = "The sign-in code expired before anyone entered it. Start again.";
+const AUTOUPDATER: &str = "DISABLE_AUTOUPDATER";
+const DISABLED: &str = "1";
 
 static DEVICES: LazyLock<Devices> = LazyLock::new(Devices::default);
 
@@ -168,12 +170,6 @@ pub fn failure(organization: Uuid) -> Option<String> {
         .get(&organization)
         .map(|failure| failure.value().clone())
 }
-
-/// The variable that stops Claude Code updating itself while a sign-in command runs.
-const AUTOUPDATER: &str = "DISABLE_AUTOUPDATER";
-
-/// What [`AUTOUPDATER`] is set to.
-const DISABLED: &str = "1";
 
 /// The environment every sign-in command for `agent` runs with: what any child that is not an
 /// agent inherits from the server, and for Claude, no update of itself. It names no home, so a
@@ -804,9 +800,9 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
     use crate::services::login::caller::Caller;
-    use crate::services::login::codex::testing::{PROMPT, capture, environment, fake, script};
     use crate::services::login::console::Console;
     use crate::services::login::credential;
+    use crate::services::login::testing::{PROMPT, capture, environment, fake, script};
 
     const EMAIL: &str = "admin@example.com";
     const CALLBACK_PORT: u16 = 54_545;

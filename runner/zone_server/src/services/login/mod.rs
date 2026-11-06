@@ -3,8 +3,6 @@ pub mod audit;
 pub mod callback;
 pub mod caller;
 pub mod claude;
-#[cfg(test)]
-mod codex;
 pub mod console;
 pub mod credential;
 pub mod devices;
@@ -17,4 +15,6 @@ pub mod pending;
 mod receipts;
 pub mod router;
 pub mod status;
+#[cfg(test)]
+mod testing;
 pub mod usage;
