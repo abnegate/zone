@@ -21,6 +21,32 @@ use zone_core::tools::ToolResult;
 
 use super::scope::Scope;
 use crate::agent::{AgentEvent, ChatTools};
+use zone_core::tools::PERMISSION_TOOL;
+
+/// What the agent asks about one of its own tools.
+#[derive(serde::Deserialize)]
+struct Question {
+    tool_name: String,
+    #[serde(default)]
+    input: serde_json::Value,
+}
+
+const UNREADABLE: &str = "Zone could not read that permission request.";
+const UNATTENDED: &str = "Nobody is listening to this chat to answer for it.";
+const REFUSED: &str = "The reader refused it.";
+
+/// The answer, in the shape the agent reads it in.
+///
+/// Always a successful result: the question was answered either way, and
+/// returning an error would read to the agent as zone failing to answer
+/// rather than as a refusal it should respect.
+fn verdict(allowed: Option<&serde_json::Value>, refusal: &str) -> CallToolResult {
+    let body = match allowed {
+        Some(input) => serde_json::json!({"behavior": "allow", "updatedInput": input}),
+        None => serde_json::json!({"behavior": "deny", "message": refusal}),
+    };
+    CallToolResult::success(vec![ContentBlock::text(body.to_string())])
+}
 use crate::utils::crypto::{generate_token, hash_token};
 
 /// What a call past the turn's budget is told instead of being run.
@@ -110,9 +136,52 @@ impl Turn {
         &self.tools
     }
 
+    /// Answer an agent's question about one of *its own* tools.
+    ///
+    /// Claude asks here before running a tool its own permission rules would
+    /// stop. Zone answers under the chat's approval policy: at once when the
+    /// chat auto-approves, otherwise as the same card zone's own confirmed
+    /// tools raise. Nothing is bypassed; the decision moves to the one place
+    /// the reader can see and answer it.
+    ///
+    /// Spends no budget. The agent asking whether a call may run is not the
+    /// call, and charging for the question would halve what a turn can do.
+    pub(crate) async fn permission(&self, arguments: &str) -> CallToolResult {
+        let Ok(asked) = serde_json::from_str::<Question>(arguments) else {
+            return verdict(None, UNREADABLE);
+        };
+        let approval = &self.scope.approval;
+        if approval.is_auto() {
+            return verdict(Some(&asked.input), "");
+        }
+        let id = format!("{CALL_PREFIX}{}", Uuid::new_v4().simple());
+        let pending = approval.expect_decision(&id);
+        let stated = asked.input.to_string();
+        let raised = self.publish(AgentEvent::ToolApprovalRequired {
+            id: id.clone(),
+            name: asked.tool_name.clone(),
+            arguments: stated.clone(),
+            reason: crate::agent::reason(&stated),
+            // Zone renders an effect for its own tools; it knows nothing about
+            // what the agent's own tool would do beyond what the agent said.
+            preview: None,
+        });
+        if !raised {
+            approval.decide(&id, false);
+            return verdict(None, UNATTENDED);
+        }
+        match approval.awaited_decision(&id, pending).await {
+            true => verdict(Some(&asked.input), ""),
+            false => verdict(None, REFUSED),
+        }
+    }
+
     /// Run one tool call for this turn, gated by the chat's approval policy
     /// and held to the turn's budget.
     pub(crate) async fn run(&self, name: &str, arguments: &str) -> CallToolResult {
+        if name == PERMISSION_TOOL {
+            return self.permission(arguments).await;
+        }
         let made = self.made.fetch_add(1, Ordering::Relaxed);
         if made >= self.scope.calls {
             return self.refuse(made);
@@ -252,6 +321,90 @@ fn detail(message: &str) -> String {
     match line.char_indices().nth(DETAIL_CHARS) {
         Some((cut, _)) => format!("{}…", &line[..cut]),
         None => line.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::super::testing::{next_card, open};
+    use super::*;
+    use crate::agent::{ApprovalGate, ApprovalPolicy};
+    use serde_json::json;
+
+    fn asked() -> String {
+        json!({"tool_name": "Bash", "input": {"command": "ls"}}).to_string()
+    }
+
+    fn body(result: &CallToolResult) -> serde_json::Value {
+        let text = result
+            .content
+            .iter()
+            .find_map(|block| block.as_text())
+            .expect("the answer is a text block")
+            .text
+            .clone();
+        serde_json::from_str(&text).expect("the answer is a JSON envelope")
+    }
+
+    #[tokio::test]
+    async fn an_auto_approving_chat_answers_the_agent_at_once() {
+        let opened = open(ApprovalPolicy::auto()).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        let answer = turn.run(PERMISSION_TOOL, &asked()).await;
+
+        assert_eq!(
+            answer.is_error,
+            Some(false),
+            "the question was answered, so the result is not an error"
+        );
+        assert_eq!(body(&answer)["behavior"], "allow", "{:?}", answer.content);
+    }
+
+    #[tokio::test]
+    async fn a_refused_card_reaches_the_agent_as_a_denial() {
+        let mut opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        let asking = tokio::spawn(async move { turn.run(PERMISSION_TOOL, &asked()).await });
+
+        let card = next_card(&mut opened.events).await;
+        assert_eq!(
+            card.name, "Bash",
+            "the card names the agent's own tool, not zone's"
+        );
+        assert!(opened.approval.decide(&card.id, false), "the refusal lands");
+
+        let answer = asking.await.expect("the question is answered");
+        assert_eq!(answer.is_error, Some(false));
+        assert_eq!(body(&answer)["behavior"], "deny", "{:?}", answer.content);
+    }
+
+    #[tokio::test]
+    async fn a_question_nobody_is_listening_to_is_denied_rather_than_held() {
+        let opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+        drop(opened.events);
+
+        let answer = turn.run(PERMISSION_TOOL, &asked()).await;
+
+        assert_eq!(body(&answer)["behavior"], "deny", "{:?}", answer.content);
+    }
+
+    #[tokio::test]
+    async fn asking_spends_none_of_the_turns_budget() {
+        let opened = open(ApprovalPolicy::auto()).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        for _ in 0..3 {
+            turn.run(PERMISSION_TOOL, &asked()).await;
+        }
+
+        assert_eq!(
+            turn.made.load(Ordering::Relaxed),
+            0,
+            "asking whether a call may run is not the call"
+        );
     }
 }
 

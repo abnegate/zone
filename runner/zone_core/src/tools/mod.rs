@@ -30,6 +30,14 @@ use uuid::Uuid;
 
 /// Budget a tool spends on output it pages or trims for itself: a `read_file`
 /// page, a captured command log.
+/// The tool an agent asks before running one of its own.
+///
+/// Served by zone over the same MCP endpoint as every other tool, and named
+/// to the agent on its command line. It is not a workspace tool: nothing in a
+/// prompt teaches it, and it spends none of a turn's call budget, because the
+/// agent asking whether a call may run is not the call.
+pub const PERMISSION_TOOL: &str = "approve_tool_call";
+
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
 
 /// Headroom between a tool's own budget and the transcript cap, for the

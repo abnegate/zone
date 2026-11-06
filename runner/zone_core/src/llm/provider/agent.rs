@@ -10,6 +10,7 @@ use super::event::AgentEvent;
 use super::parser;
 use super::session::Session;
 use super::settings::{BuiltinTools, CodexSandbox, DEFAULT_TIMEOUT, Toolset};
+use crate::tools::PERMISSION_TOOL;
 
 const MODEL: &str = "--model";
 const EFFORT: &str = "--effort";
@@ -130,6 +131,12 @@ const STRICT_MCP_CONFIG: &str = "--strict-mcp-config";
 const MCP_CONFIG: &str = "--mcp-config";
 const ALLOWED_TOOLS: &str = "--allowedTools";
 const BUILTIN_TOOLS: &str = "--tools";
+/// Where claude asks before running one of its own tools. This is the opposite
+/// of a bypass: rather than switching claude's permission checks off, it sends
+/// each decision to zone, which answers it under the chat's approval policy --
+/// at once when the chat auto-approves, and otherwise as a card the reader
+/// answers, the same one zone's own confirmed tools raise.
+const PERMISSION_PROMPT_TOOL: &str = "--permission-prompt-tool";
 
 const IGNORE_USER_CONFIG: &str = "--ignore-user-config";
 const DISABLE: &str = "--disable";
@@ -500,6 +507,14 @@ fn claude_tool_arguments(toolset: Option<&Toolset>, builtin_tools: BuiltinTools)
         if !allowed.is_empty() {
             arguments.push(ALLOWED_TOOLS.to_string());
             arguments.push(allowed);
+        }
+
+        if !withheld {
+            // Only with its own tools in hand does claude have anything to ask
+            // about, and only with zone's server configured is there anywhere
+            // for the question to go.
+            arguments.push(PERMISSION_PROMPT_TOOL.to_string());
+            arguments.push(Toolset::qualified(Toolset::SERVER, PERMISSION_TOOL));
         }
     }
 
@@ -1069,6 +1084,75 @@ mod tests {
                     "{arguments:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn claude_asks_zone_before_running_its_own_tools() {
+        let toolset = toolset();
+
+        let asks = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            None,
+            Some(&toolset),
+            BuiltinTools::Granted,
+            CodexSandbox::default(),
+            None,
+        );
+        assert_eq!(
+            value_after(&asks, PERMISSION_PROMPT_TOOL),
+            Some("mcp__zone__approve_tool_call"),
+            "{asks:?}"
+        );
+
+        let withheld = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            None,
+            Some(&toolset),
+            BuiltinTools::Withheld,
+            CodexSandbox::default(),
+            None,
+        );
+        assert_eq!(
+            value_after(&withheld, PERMISSION_PROMPT_TOOL),
+            None,
+            "an agent holding none of its own tools has nothing to ask about: {withheld:?}"
+        );
+
+        let unserved = AgentKind::Claude.arguments_with(
+            Some("opus"),
+            None,
+            None,
+            BuiltinTools::Granted,
+            CodexSandbox::default(),
+            None,
+        );
+        assert_eq!(
+            value_after(&unserved, PERMISSION_PROMPT_TOOL),
+            None,
+            "without zone's server there is nowhere for the question to go: {unserved:?}"
+        );
+    }
+
+    #[test]
+    fn routing_a_permission_question_is_not_bypassing_one() {
+        let toolset = toolset();
+        let arguments = AgentKind::Claude
+            .arguments_with(
+                Some("opus"),
+                None,
+                Some(&toolset),
+                BuiltinTools::Granted,
+                CodexSandbox::default(),
+                None,
+            )
+            .join(" ");
+
+        for bypass in PERMISSION_BYPASSES {
+            assert!(
+                !arguments.contains(bypass),
+                "{bypass} would switch the checks off rather than route them: {arguments}"
+            );
         }
     }
 

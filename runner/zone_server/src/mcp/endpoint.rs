@@ -12,6 +12,7 @@ use rmcp::model::{CallToolRequestParams, ErrorCode, ErrorData, ProtocolVersion, 
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 use zone_core::llm::Toolset;
+use zone_core::tools::PERMISSION_TOOL;
 
 use super::protocol::{self, Request, Response};
 use super::turn::Turn;
@@ -140,13 +141,40 @@ fn initialize(params: Option<&Value>) -> Value {
 }
 
 fn catalog(turn: &Turn) -> Vec<McpTool> {
-    turn.tools()
+    let mut tools: Vec<McpTool> = turn
+        .tools()
         .all_definitions()
         .iter()
         .filter(|definition| turn.serves(&definition.function.name))
         .map(describe)
-        .collect()
+        .collect();
+    // Not a workspace tool, so it comes from here rather than the registry:
+    // no prompt teaches it and nothing else should offer it. The agent only
+    // calls it because its command line names it.
+    tools.push(permission_tool());
+    tools
 }
+
+/// The tool an agent asks before running one of its own.
+fn permission_tool() -> McpTool {
+    let schema: Map<String, Value> = serde_json::from_str(PERMISSION_SCHEMA)
+        .expect("the permission tool's schema is valid JSON");
+    McpTool::new(
+        PERMISSION_TOOL,
+        "Ask zone whether one of your own tools may run. Zone answers under this chat's approval policy: allowed at once when the chat auto-approves, otherwise once the reader has answered. Answers with an allow or deny envelope; a deny is a refusal to respect, not an error to retry.",
+        Arc::new(schema),
+    )
+}
+
+const PERMISSION_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "tool_name": {"type": "string", "description": "The tool you are asking about."},
+    "input": {"type": "object", "description": "The input you would call it with."}
+  },
+  "required": ["tool_name", "input"],
+  "additionalProperties": false
+}"#;
 
 fn describe(definition: &ToolDefinition) -> McpTool {
     let schema = match &definition.function.parameters {
