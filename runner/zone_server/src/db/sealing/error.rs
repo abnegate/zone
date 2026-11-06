@@ -2,6 +2,7 @@ use std::io;
 use std::path::PathBuf;
 
 use super::column::Column;
+use super::table::Table;
 
 /// Why sealing refused to run, or stopped.
 #[derive(Debug, thiserror::Error)]
@@ -24,8 +25,8 @@ pub enum SealingError {
     PgRestore(io::Error),
     #[error("The backup is of database {found:?}, not {expected:?}")]
     DatabaseMismatch { expected: String, found: String },
-    #[error("The backup holds no data for table {table}")]
-    TableMissing { table: String },
+    #[error("The backup does not hold both the definition and the rows of table {table}")]
+    TableMissing { table: Table },
     #[error("The backup at {} cannot be read in full: {stderr}", path.display())]
     Unreadable { path: PathBuf, stderr: String },
     #[error(

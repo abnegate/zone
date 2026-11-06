@@ -8,6 +8,7 @@ use tokio::process::Command;
 use super::error::SealingError;
 use super::listing::CUSTOM_FORMAT;
 use super::listing::Listing;
+use super::table::Table;
 
 /// The client that reads a `pg_dump -Fc` archive's table of contents.
 pub const PG_RESTORE: &str = "pg_restore";
@@ -19,7 +20,8 @@ const END_OF_OPTIONS: &str = "--";
 const LOCALE: &str = "LC_ALL";
 const UNTRANSLATED: &str = "C";
 
-/// A readable `pg_dump -Fc` archive of one database that holds the data of every one of its tables.
+/// A readable `pg_dump -Fc` archive of one database that holds every one of its tables, defined
+/// and with their rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Backup {
     path: PathBuf,
@@ -28,11 +30,12 @@ pub struct Backup {
 
 impl Backup {
     /// The archive at `path`, once it is shown to be a non-empty `pg_dump -Fc` archive of
-    /// `database` holding the rows of every one of `tables`, all of which `pg_restore` reads.
+    /// `database` holding the definition and the rows of every one of `tables`, all of which
+    /// `pg_restore` reads.
     pub async fn verify(
         path: &Path,
         database: &str,
-        tables: &[&str],
+        tables: &[Table],
     ) -> Result<Self, SealingError> {
         let metadata =
             tokio::fs::metadata(path)
@@ -73,9 +76,9 @@ impl Backup {
                 found: listing.database().to_string(),
             });
         }
-        if let Some(table) = tables.iter().find(|table| !listing.holds_data_for(table)) {
+        if let Some(table) = tables.iter().find(|table| !listing.holds(table)) {
             return Err(SealingError::TableMissing {
-                table: table.to_string(),
+                table: table.clone(),
             });
         }
 

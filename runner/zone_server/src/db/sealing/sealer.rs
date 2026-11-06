@@ -16,21 +16,24 @@ use super::error::SealingError;
 use super::options::Options;
 use super::outcome::Outcome;
 use super::report::Report;
+use super::table::Table;
 
 /// How many rows of a column are read, and written in one transaction, at a time.
 pub const BATCH_SIZE: usize = 100;
 
 const CURRENT_DATABASE: &str = "SELECT current_database()";
 
-/// Every table of the public schema whose rows `pg_dump` dumps: ordinary tables, and not those an
-/// extension owns.
-const PUBLIC_TABLES: &str = "SELECT class.relname::text FROM pg_class class \
+/// Every table `pg_dump` dumps the rows of: ordinary tables in every schema but the system's,
+/// and not those an extension owns.
+const TABLES: &str = "SELECT namespace.nspname::text AS schema, class.relname::text AS name \
+     FROM pg_class class \
      JOIN pg_namespace namespace ON namespace.oid = class.relnamespace \
-     WHERE namespace.nspname = 'public' AND class.relkind = 'r' \
+     WHERE class.relkind = 'r' \
+     AND namespace.nspname <> 'information_schema' AND namespace.nspname NOT LIKE 'pg\\_%' \
      AND NOT EXISTS (SELECT 1 FROM pg_depend dependency \
          WHERE dependency.classid = 'pg_class'::regclass \
          AND dependency.objid = class.oid AND dependency.deptype = 'e') \
-     ORDER BY class.relname";
+     ORDER BY namespace.nspname, class.relname";
 
 /// Seals every credential column of one database under one key.
 pub struct Sealer {
@@ -56,10 +59,7 @@ impl Sealer {
         let database: String = sqlx::query_scalar(CURRENT_DATABASE)
             .fetch_one(&self.pool)
             .await?;
-        let tables: Vec<String> = sqlx::query_scalar(PUBLIC_TABLES)
-            .fetch_all(&self.pool)
-            .await?;
-        let tables: Vec<&str> = tables.iter().map(String::as_str).collect();
+        let tables: Vec<Table> = sqlx::query_as(TABLES).fetch_all(&self.pool).await?;
         let backup = Backup::verify(self.options.backup(), &database, &tables).await?;
 
         let survey = self.pass(backup.clone(), false).await?;

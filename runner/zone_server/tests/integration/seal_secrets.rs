@@ -31,6 +31,7 @@ use zone_server::db::sealing::Outcome;
 use zone_server::db::sealing::Report;
 use zone_server::db::sealing::Sealer;
 use zone_server::db::sealing::SealingError;
+use zone_server::db::sealing::Table;
 use zone_server::services::github_app::ApplicationId;
 use zone_server::services::github_app::InstallationId;
 use zone_server::services::github_app::StoredConfiguration;
@@ -41,6 +42,7 @@ static DATABASES: Semaphore = Semaphore::const_new(4);
 const PG_DUMP: &str = "pg_dump";
 const CUSTOM_FORMAT: &str = "-Fc";
 const TAR_FORMAT: &str = "-Ft";
+const DATA_ONLY: &str = "--data-only";
 const ENVELOPE_OPENING: &str = "ENC[v1:";
 const ENVELOPE_CLOSING: char = ']';
 const SNAPSHOT_TABLES: &[&str] = &[
@@ -114,22 +116,25 @@ impl Scratch {
     }
 
     async fn backup(&self, excluded: &[&str]) -> NamedTempFile {
-        self.dump(CUSTOM_FORMAT, excluded).await
+        let mut options = vec![CUSTOM_FORMAT.to_string()];
+        options.extend(
+            excluded
+                .iter()
+                .map(|table| format!("--exclude-table-data={table}")),
+        );
+        self.dump(&options).await
     }
 
-    async fn dump(&self, format: &str, excluded: &[&str]) -> NamedTempFile {
+    async fn dump(&self, options: &[String]) -> NamedTempFile {
         let archive = NamedTempFile::new().unwrap();
         let mut command = tokio::process::Command::new(PG_DUMP);
         command
-            .arg(format)
+            .args(options)
             .arg("-f")
             .arg(archive.path())
             .arg("-d")
             .arg(self.url())
             .env("LC_ALL", "C");
-        for table in excluded {
-            command.arg(format!("--exclude-table-data={table}"));
-        }
         let output = command.output().await.expect("pg_dump is installed");
         assert!(
             output.status.success(),
@@ -994,7 +999,10 @@ async fn the_backup_gate_refuses_anything_but_a_full_archive_of_this_database() 
     tokio::fs::write(&truncated, &archived[..archived.len() - TRUNCATED_BYTES])
         .await
         .unwrap();
-    let tar = scratch.dump(TAR_FORMAT, &[]).await;
+    let tar = scratch.dump(&[TAR_FORMAT.to_string()]).await;
+    let data_only = scratch
+        .dump(&[CUSTOM_FORMAT.to_string(), DATA_ONLY.to_string()])
+        .await;
 
     for dry_run in [true, false] {
         assert!(matches!(
@@ -1027,11 +1035,15 @@ async fn the_backup_gate_refuses_anything_but_a_full_archive_of_this_database() 
             result => panic!("an archive of another database is refused: {result:?}"),
         }
         match scratch.attempt(&key, dry_run, partial.path()).await {
-            Err(SealingError::TableMissing { table }) => assert_eq!(table, "agent_logins"),
+            Err(SealingError::TableMissing { table }) => {
+                assert_eq!(table, Table::new("public", "agent_logins"))
+            }
             result => panic!("an archive without agent_logins rows is refused: {result:?}"),
         }
         match scratch.attempt(&key, dry_run, incomplete.path()).await {
-            Err(SealingError::TableMissing { table }) => assert_eq!(table, "organizations"),
+            Err(SealingError::TableMissing { table }) => {
+                assert_eq!(table, Table::new("public", "organizations"))
+            }
             result => panic!(
                 "an archive without the rows of a table sealing never writes is refused: {result:?}"
             ),
@@ -1043,6 +1055,29 @@ async fn the_backup_gate_refuses_anything_but_a_full_archive_of_this_database() 
             ),
             "an archive whose contents list but whose data stops short is refused"
         );
+        assert!(
+            matches!(
+                scratch.attempt(&key, dry_run, data_only.path()).await,
+                Err(SealingError::TableMissing { .. })
+            ),
+            "a data-only archive, which defines no table, is refused"
+        );
+    }
+
+    sqlx::raw_sql("CREATE SCHEMA archive; CREATE TABLE archive.notes (body text);")
+        .execute(&scratch.pool)
+        .await
+        .unwrap();
+    let outside_public = scratch.backup(&["archive.notes"]).await;
+    for dry_run in [true, false] {
+        match scratch.attempt(&key, dry_run, outside_public.path()).await {
+            Err(SealingError::TableMissing { table }) => {
+                assert_eq!(table, Table::new("archive", "notes"))
+            }
+            result => panic!(
+                "an archive without the rows of a table outside public is refused: {result:?}"
+            ),
+        }
     }
 
     assert_eq!(

@@ -18,6 +18,7 @@ mod outcome;
 mod policy;
 mod report;
 mod sealer;
+mod table;
 
 pub use ai_key::AiKey;
 pub use ai_scope::AiScope;
@@ -33,3 +34,4 @@ pub use policy::Policy;
 pub use report::Report;
 pub use sealer::BATCH_SIZE;
 pub use sealer::Sealer;
+pub use table::Table;

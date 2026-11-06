@@ -1,9 +1,15 @@
 use std::collections::BTreeSet;
 
+use super::table::Table;
+
 const COMMENT: char = ';';
 const DATABASE_HEADER: &str = "dbname:";
 const FORMAT_HEADER: &str = "Format:";
-const TABLE_DATA: [&str; 3] = ["TABLE", "DATA", "public"];
+const TABLE: &str = "TABLE";
+const DATA: &str = "DATA";
+
+/// Where an entry's description starts, after its dump id, catalog id and object id.
+const DESCRIPTION: usize = 3;
 
 /// The format `pg_restore --list` names a `pg_dump -Fc` archive by.
 pub const CUSTOM_FORMAT: &str = "CUSTOM";
@@ -13,7 +19,8 @@ pub const CUSTOM_FORMAT: &str = "CUSTOM";
 pub struct Listing {
     database: String,
     format: String,
-    tables: BTreeSet<String>,
+    defined: BTreeSet<Table>,
+    filled: BTreeSet<Table>,
 }
 
 impl Listing {
@@ -21,7 +28,8 @@ impl Listing {
     pub fn parse(listing: &str) -> Self {
         let mut database = String::new();
         let mut format = String::new();
-        let mut tables = BTreeSet::new();
+        let mut defined = BTreeSet::new();
+        let mut filled = BTreeSet::new();
         for line in listing.lines() {
             if let Some(comment) = line.strip_prefix(COMMENT) {
                 let comment = comment.trim();
@@ -33,18 +41,21 @@ impl Listing {
                 continue;
             }
             let tokens: Vec<&str> = line.split_whitespace().collect();
-            tables.extend(
-                tokens
-                    .windows(TABLE_DATA.len() + 1)
-                    .filter_map(|window| window.split_last())
-                    .filter(|(_, kind)| *kind == TABLE_DATA)
-                    .map(|(table, _)| table.to_string()),
-            );
+            match tokens.get(DESCRIPTION..) {
+                Some([TABLE, DATA, schema, name, ..]) => {
+                    filled.insert(Table::new(*schema, *name));
+                }
+                Some([TABLE, schema, name, ..]) => {
+                    defined.insert(Table::new(*schema, *name));
+                }
+                _ => {}
+            }
         }
         Self {
             database,
             format,
-            tables,
+            defined,
+            filled,
         }
     }
 
@@ -58,9 +69,10 @@ impl Listing {
         &self.format
     }
 
-    /// Whether the archive holds the rows of `public.<table>`.
-    pub fn holds_data_for(&self, table: &str) -> bool {
-        self.tables.contains(table)
+    /// Whether the archive holds both the definition and the rows of `table`, so restoring it
+    /// recreates the table with its data.
+    pub fn holds(&self, table: &Table) -> bool {
+        self.defined.contains(table) && self.filled.contains(table)
     }
 }
 
@@ -68,6 +80,11 @@ impl Listing {
 mod tests {
     use super::CUSTOM_FORMAT;
     use super::Listing;
+    use super::Table;
+
+    fn public(name: &str) -> Table {
+        Table::new("public", name)
+    }
 
     const LISTING: &str = ";
 ; Archive created at 2026-11-06 20:25:50 NZDT
@@ -114,22 +131,30 @@ mod tests {
     }
 
     #[test]
-    fn only_table_data_entries_count_as_holding_a_table() {
+    fn a_table_is_held_only_with_its_definition_and_its_rows() {
         let listing = Listing::parse(LISTING);
-        for table in ["projects", "sources", "sync_configs", "_sqlx_migrations"] {
-            assert!(listing.holds_data_for(table), "{table}");
+        for table in ["projects", "sources", "sync_configs"] {
+            assert!(listing.holds(&public(table)), "{table}");
         }
         assert!(
-            !listing.holds_data_for("agent_logins"),
+            !listing.holds(&public("agent_logins")),
             "a table whose data was excluded still has schema entries"
         );
-        assert!(!listing.holds_data_for("project"));
+        assert!(
+            !listing.holds(&public("_sqlx_migrations")),
+            "a table whose definition is missing, as in a data-only dump, is not held"
+        );
+        assert!(!listing.holds(&public("project")));
+        assert!(!listing.holds(&Table::new("archive", "projects")));
     }
 
     #[test]
     fn a_commented_out_entry_holds_nothing() {
-        let listing = Listing::parse(";4693; 0 16992 TABLE DATA public projects postgres\n");
-        assert!(!listing.holds_data_for("projects"));
+        let listing = Listing::parse(
+            ";248; 1259 16992 TABLE public projects postgres\n\
+             ;4693; 0 16992 TABLE DATA public projects postgres\n",
+        );
+        assert!(!listing.holds(&public("projects")));
         assert_eq!(listing.database(), "");
         assert_eq!(listing.format(), "");
     }
