@@ -42,3 +42,8 @@ pub use identifier::{ApplicationId, InstallationId};
 pub use issuer::{GITHUB_API_ORIGIN, Issuer};
 pub use provider::Provider;
 pub use token::{InstallationToken, SAFETY_MARGIN};
+
+pub mod access;
+pub mod login;
+pub mod manifest;
+pub mod permissions;
