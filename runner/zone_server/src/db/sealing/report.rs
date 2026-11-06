@@ -36,11 +36,6 @@ impl Report {
         *self.outcomes.entry((column, outcome)).or_default() += 1;
     }
 
-    /// The backup the run was verified against.
-    pub fn backup(&self) -> &Backup {
-        &self.backup
-    }
-
     /// Whether the run only counted.
     pub fn dry_run(&self) -> bool {
         self.dry_run
@@ -79,13 +74,13 @@ impl Report {
     }
 
     /// How many values look sealed and did not open: unopenable envelopes anywhere, and
-    /// ambiguous values in columns whose readers only ever stored sealed values.
+    /// ambiguous values in every column sealing writes to.
     pub fn unopened(&self) -> u64 {
         self.classes
             .iter()
             .filter(|((column, class), _)| match class {
                 Class::Unopenable => true,
-                Class::Ambiguous => matches!(column.policy(), Policy::Strict | Policy::Mixed),
+                Class::Ambiguous => column.policy().writes(),
                 _ => false,
             })
             .map(|(_, count)| count)

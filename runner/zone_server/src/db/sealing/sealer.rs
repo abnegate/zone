@@ -37,9 +37,10 @@ impl Sealer {
 
     /// Verify the backup, count every column, then, unless this is a dry run, seal.
     ///
-    /// Nothing is written when no value that looks sealed opens under the key, since that is
-    /// what the wrong `ENCRYPTION_KEY` looks like. Each batch commits on its own, so a run that
-    /// stops part way resumes where it stopped: what it committed is skipped as envelopes.
+    /// A run, dry or not, is refused when no value that looks sealed opens under the key,
+    /// since that is what the wrong `ENCRYPTION_KEY` looks like. Each batch commits on its
+    /// own, so a run that stops part way resumes where it stopped: what it committed is
+    /// skipped as envelopes.
     pub async fn run(&self) -> Result<Report, SealingError> {
         let database: String = sqlx::query_scalar(CURRENT_DATABASE)
             .fetch_one(&self.pool)
@@ -48,13 +49,13 @@ impl Sealer {
             Backup::verify(self.options.backup(), &database, Column::sealed_tables()).await?;
 
         let survey = self.pass(backup.clone(), false).await?;
-        if self.options.dry_run() {
-            return Ok(survey);
-        }
         if survey.opened() == 0 && survey.unopened() > 0 {
             return Err(SealingError::KeyMismatch {
                 unopened: survey.unopened(),
             });
+        }
+        if self.options.dry_run() {
+            return Ok(survey);
         }
         self.pass(backup, true).await
     }
@@ -140,7 +141,8 @@ fn verify(sealed: String, credential: &SecretValue, key: &MasterKey) -> Result<S
 mod tests {
     use abnegate_secret::MasterKey;
     use abnegate_secret::SecretValue;
-    use abnegate_secret::encrypt_value;
+
+    use crate::secret::fixture::seal;
 
     use super::Outcome;
     use super::verify;
@@ -152,36 +154,46 @@ mod tests {
     #[test]
     fn a_seal_that_reopens_as_the_credential_is_written() {
         let key = key();
-        let credential = SecretValue::new("ghp_token");
-        let sealed = encrypt_value(&credential, &key).expect("a seal");
-        assert_eq!(verify(sealed.clone(), &credential, &key), Ok(sealed));
+        let sealed = seal("ghp_token", &key);
+        assert_eq!(
+            verify(sealed.clone(), &SecretValue::new("ghp_token"), &key),
+            Ok(sealed)
+        );
     }
 
     #[test]
     fn a_seal_that_reopens_as_anything_else_is_mismatched() {
         let key = key();
-        let sealed = encrypt_value(&SecretValue::new("ghp_token"), &key).expect("a seal");
         assert_eq!(
-            verify(sealed, &SecretValue::new("ghp_other"), &key),
+            verify(
+                seal("ghp_token", &key),
+                &SecretValue::new("ghp_other"),
+                &key
+            ),
             Err(Outcome::Mismatched)
         );
     }
 
     #[test]
     fn a_seal_under_another_key_is_mismatched() {
-        let credential = SecretValue::new("ghp_token");
-        let sealed = encrypt_value(&credential, &key()).expect("a seal");
         assert_eq!(
-            verify(sealed, &credential, &key()),
+            verify(
+                seal("ghp_token", &key()),
+                &SecretValue::new("ghp_token"),
+                &key()
+            ),
             Err(Outcome::Mismatched)
         );
     }
 
     #[test]
     fn text_that_is_not_an_envelope_is_mismatched() {
-        let credential = SecretValue::new("ghp_token");
         assert_eq!(
-            verify("ghp_token".to_string(), &credential, &key()),
+            verify(
+                "ghp_token".to_string(),
+                &SecretValue::new("ghp_token"),
+                &key()
+            ),
             Err(Outcome::Mismatched)
         );
     }

@@ -24,17 +24,23 @@ use zone_server::db::sealing::AiKey;
 use zone_server::db::sealing::AiScope;
 use zone_server::db::sealing::BATCH_SIZE;
 use zone_server::db::sealing::Class;
+use zone_server::db::sealing::Classified;
 use zone_server::db::sealing::Column;
 use zone_server::db::sealing::Options;
 use zone_server::db::sealing::Outcome;
 use zone_server::db::sealing::Report;
 use zone_server::db::sealing::Sealer;
 use zone_server::db::sealing::SealingError;
+use zone_server::services::github_app::ApplicationId;
+use zone_server::services::github_app::InstallationId;
+use zone_server::services::github_app::StoredConfiguration;
 
 /// Every test replays the whole migration chain into an empty database and dumps it.
 static DATABASES: Semaphore = Semaphore::const_new(4);
 
 const PG_DUMP: &str = "pg_dump";
+const CUSTOM_FORMAT: &str = "-Fc";
+const TAR_FORMAT: &str = "-Ft";
 const ENVELOPE_OPENING: &str = "ENC[v1:";
 const ENVELOPE_CLOSING: char = ']';
 const SNAPSHOT_TABLES: &[&str] = &[
@@ -48,6 +54,9 @@ const SNAPSHOT_TABLES: &[&str] = &[
 const GITHUB: &str = "github";
 const LINEAR: &str = "linear";
 const PASSPHRASE: &str = "a-sealing-test-passphrase-of-at-least-32-bytes";
+const MISTAKEN_PASSPHRASE: &str = "a-mistaken-sealing-passphrase-of-at-least-32-bytes";
+const QUERY_LOG_TARGET: &str = "sqlx::query";
+const REPORT_OPENING: &str = "Database ";
 const BINARY_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct Scratch {
@@ -103,10 +112,14 @@ impl Scratch {
     }
 
     async fn backup(&self, excluded: &[&str]) -> NamedTempFile {
+        self.dump(CUSTOM_FORMAT, excluded).await
+    }
+
+    async fn dump(&self, format: &str, excluded: &[&str]) -> NamedTempFile {
         let archive = NamedTempFile::new().unwrap();
         let mut command = tokio::process::Command::new(PG_DUMP);
         command
-            .arg("-Fc")
+            .arg(format)
             .arg("-f")
             .arg(archive.path())
             .arg("-d")
@@ -622,6 +635,9 @@ async fn an_ambiguous_value_is_reported_and_unchanged() {
     let scratch = Scratch::new().await;
     let key = key();
     let tenant = scratch.tenant().await;
+    scratch
+        .source(&tenant, Some(&envelope("ghp_source", &key)), &json!({}))
+        .await;
     let base64 = ambiguous();
     let shaped = scratch.project(&tenant, Some(&base64)).await;
     let unclosed = scratch.project(&tenant, Some("ENC[v1:abc")).await;
@@ -957,6 +973,7 @@ async fn the_backup_gate_refuses_anything_but_a_full_archive_of_this_database() 
     tokio::fs::write(&text, b"not an archive").await.unwrap();
     let foreign = other.backup(&[]).await;
     let partial = scratch.backup(&["agent_logins"]).await;
+    let tar = scratch.dump(TAR_FORMAT, &[]).await;
 
     for dry_run in [true, false] {
         assert!(matches!(
@@ -977,6 +994,10 @@ async fn the_backup_gate_refuses_anything_but_a_full_archive_of_this_database() 
             scratch.attempt(&key, dry_run, &text).await,
             Err(SealingError::NotAnArchive { .. })
         ));
+        match scratch.attempt(&key, dry_run, tar.path()).await {
+            Err(SealingError::NotCustomFormat { format, .. }) => assert_eq!(format, "TAR"),
+            result => panic!("a pg_dump -Ft archive is refused: {result:?}"),
+        }
         match scratch.attempt(&key, dry_run, foreign.path()).await {
             Err(SealingError::DatabaseMismatch { expected, found }) => {
                 assert_eq!(expected, scratch.name);
@@ -1015,12 +1036,15 @@ async fn a_key_that_opens_nothing_writes_nothing() {
     let backup = scratch.backup(&[]).await;
     let before = scratch.snapshot().await;
 
-    let survey = scratch.run(&mistaken, true, backup.path()).await;
-    assert_eq!(survey.count(Column::SourceCredentials, Class::Ambiguous), 1);
-    assert!(matches!(
-        scratch.attempt(&mistaken, false, backup.path()).await,
-        Err(SealingError::KeyMismatch { unopened: 1 })
-    ));
+    for dry_run in [true, false] {
+        assert!(
+            matches!(
+                scratch.attempt(&mistaken, dry_run, backup.path()).await,
+                Err(SealingError::KeyMismatch { unopened: 1 })
+            ),
+            "a run under the wrong key is refused, dry or not: {dry_run}"
+        );
+    }
     assert_eq!(scratch.snapshot().await, before);
 
     let sealed = scratch.run(&deployment, false, backup.path()).await;
@@ -1056,6 +1080,7 @@ async fn the_seal_mode_runs_from_the_binary() {
 
     let dry = finished(
         binary(&scratch.url(), PASSPHRASE)
+            .env("RUST_LOG", "sqlx=debug")
             .arg("--seal-secrets")
             .arg("--dry-run")
             .arg("--backup")
@@ -1063,12 +1088,17 @@ async fn the_seal_mode_runs_from_the_binary() {
     )
     .await;
     let stdout = String::from_utf8_lossy(&dry.stdout);
-    assert!(
-        dry.status.success(),
-        "{stdout}{}",
-        String::from_utf8_lossy(&dry.stderr)
-    );
+    let stderr = String::from_utf8_lossy(&dry.stderr);
+    assert!(dry.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains("Dry run"), "{stdout}");
+    assert!(
+        stdout.starts_with(REPORT_OPENING) && !stdout.contains(QUERY_LOG_TARGET),
+        "the report is alone on stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains(QUERY_LOG_TARGET),
+        "logs go to stderr: {stderr}"
+    );
     assert!(stdout.contains("projects.github_access_token"), "{stdout}");
     assert!(
         stdout.contains("organization_ai_settings.litellm_key"),
@@ -1128,6 +1158,149 @@ async fn the_seal_mode_refuses_a_short_encryption_key() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("at least 32 characters"), "{stderr}");
+    assert!(
+        stderr.contains("ENCRYPTION_KEY must be at least 32 bytes"),
+        "{stderr}"
+    );
+    scratch.cleanup().await;
+}
+
+#[tokio::test]
+async fn legacy_project_tokens_that_open_under_no_key_refuse_the_run() {
+    let scratch = Scratch::new().await;
+    let deployment = key();
+    let mistaken = key();
+    let tenant = scratch.tenant().await;
+    let sealed = scratch
+        .project(&tenant, Some(&legacy("ghp_legacy_project", &deployment)))
+        .await;
+    let plaintext = scratch
+        .project(&tenant, Some("ghp_plaintext_project"))
+        .await;
+    let backup = scratch.backup(&[]).await;
+    let before = scratch.snapshot().await;
+
+    for dry_run in [true, false] {
+        assert!(
+            matches!(
+                scratch.attempt(&mistaken, dry_run, backup.path()).await,
+                Err(SealingError::KeyMismatch { unopened: 1 })
+            ),
+            "plaintext is not sealed under a key the legacy token does not open under: {dry_run}"
+        );
+    }
+    assert_eq!(scratch.snapshot().await, before, "nothing was written");
+
+    let report = scratch.run(&deployment, false, backup.path()).await;
+    assert_eq!(report.written(), 2);
+    for (id, credential) in [
+        (sealed, "ghp_legacy_project"),
+        (plaintext, "ghp_plaintext_project"),
+    ] {
+        let stored = scratch
+            .text(Column::ProjectToken, id)
+            .await
+            .expect("a token");
+        assert_eq!(opened(&stored, &deployment), credential);
+    }
+    scratch.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_unopenable_envelope_in_a_written_column_is_reported_and_unchanged() {
+    let scratch = Scratch::new().await;
+    let key = key();
+    let foreign = envelope("ghp_foreign_source", &self::key());
+    let tenant = scratch.tenant().await;
+    let source = scratch.source(&tenant, Some(&foreign), &json!({})).await;
+    let project = scratch
+        .project(&tenant, Some(&legacy("ghp_project", &key)))
+        .await;
+    let backup = scratch.backup(&[]).await;
+
+    let report = scratch.run(&key, false, backup.path()).await;
+
+    assert_eq!(
+        scratch.text(Column::SourceCredentials, source).await,
+        Some(foreign)
+    );
+    assert_eq!(
+        report.count(Column::SourceCredentials, Class::Unopenable),
+        1
+    );
+    assert_eq!(
+        report.outcome(Column::SourceCredentials, Outcome::Reported),
+        1
+    );
+    let token = scratch
+        .text(Column::ProjectToken, project)
+        .await
+        .expect("a token");
+    assert_eq!(opened(&token, &key), "ghp_project");
+    assert_eq!(report.written(), 1);
+    assert!(report.is_clean());
+    scratch.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_github_app_key_is_read_from_a_stored_configuration() {
+    let scratch = Scratch::new().await;
+    let key = key();
+    let tenant = scratch.tenant().await;
+    let private_key = SecretValue::new("-----BEGIN PRIVATE KEY-----");
+    let stored = StoredConfiguration::seal(
+        ApplicationId::new(1),
+        InstallationId::new(2),
+        &private_key,
+        &key,
+    )
+    .expect("a sealed configuration");
+    let mut config = json!({"owner": "abnegate"});
+    stored.write(&mut config).expect("a written configuration");
+    let source = scratch.source(&tenant, None, &config).await;
+
+    let rows = Column::GithubAppPrivateKey
+        .page(&scratch.pool, None, BATCH_SIZE)
+        .await
+        .unwrap();
+
+    match rows.as_slice() {
+        [(id, value)] => {
+            assert_eq!(*id, source);
+            assert_eq!(Classified::of(value, &key).class(), Class::Envelope);
+            assert_eq!(opened(value, &key), private_key.expose());
+        }
+        rows => panic!("one private key is read: {} rows", rows.len()),
+    }
+    scratch.cleanup().await;
+}
+
+#[tokio::test]
+async fn the_seal_mode_fails_under_the_wrong_key() {
+    let scratch = Scratch::new().await;
+    let deployment = zone_server::secret::derive(PASSPHRASE).expect("a key");
+    let tenant = scratch.tenant().await;
+    scratch
+        .project(&tenant, Some(&legacy("ghp_legacy_project", &deployment)))
+        .await;
+    scratch
+        .project(&tenant, Some("ghp_plaintext_project"))
+        .await;
+    let backup = scratch.backup(&[]).await;
+    let before = scratch.snapshot().await;
+
+    for dry_run in [true, false] {
+        let mut command = binary(&scratch.url(), MISTAKEN_PASSPHRASE);
+        command.arg("--seal-secrets");
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        let output = finished(command.arg("--backup").arg(backup.path())).await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{dry_run}: {stderr}");
+        assert!(stderr.contains("ENCRYPTION_KEY"), "{dry_run}: {stderr}");
+        assert!(output.stdout.is_empty(), "{dry_run}: no report is printed");
+    }
+    assert_eq!(scratch.snapshot().await, before, "nothing was written");
     scratch.cleanup().await;
 }
