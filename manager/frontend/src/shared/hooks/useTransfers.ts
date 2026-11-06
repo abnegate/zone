@@ -71,8 +71,9 @@ export function useTransfers<T>(options: TransferOptions<T>): Transfers {
 
   const pump = useCallback(() => {
     const limit = latest.current.limit ?? Number.POSITIVE_INFINITY;
-    while (controllers.current.size < limit && queue.current.length > 0) {
-      const id = queue.current.shift() as string;
+    while (controllers.current.size < limit) {
+      const id = queue.current.shift();
+      if (id === undefined) return;
       const file = files.current.get(id);
       if (!file) continue;
 
@@ -99,7 +100,11 @@ export function useTransfers<T>(options: TransferOptions<T>): Transfers {
             latest.current.onDone(result, file, id);
           },
           (error: unknown) => {
-            if (controller.signal.aborted || isCancelled(error)) return;
+            if (controller.signal.aborted) return;
+            if (isCancelled(error)) {
+              forget(id);
+              return;
+            }
             controllers.current.delete(id);
             update(id, { status: TransferStatus.Failed, error: reason(error) });
           }
@@ -108,12 +113,26 @@ export function useTransfers<T>(options: TransferOptions<T>): Transfers {
     }
   }, [forget, update]);
 
+  const retry = useCallback(
+    (id: string) => {
+      if (!files.current.has(id) || controllers.current.has(id)) return;
+      if (queue.current.includes(id)) return;
+      queue.current.push(id);
+      update(id, { status: TransferStatus.Queued, progress: 0, error: undefined });
+      pump();
+    },
+    [pump, update]
+  );
+
   const start = useCallback(
     (incoming: File[]) => {
       const added: Transfer[] = [];
       for (const file of incoming) {
         const id = latest.current.identify?.(file) ?? crypto.randomUUID();
-        if (files.current.has(id)) continue;
+        if (files.current.has(id)) {
+          retry(id);
+          continue;
+        }
         files.current.set(id, file);
         queue.current.push(id);
         added.push({
@@ -128,7 +147,7 @@ export function useTransfers<T>(options: TransferOptions<T>): Transfers {
       setTransfers((current) => [...current, ...added]);
       pump();
     },
-    [pump]
+    [pump, retry]
   );
 
   const cancel = useCallback(
@@ -138,17 +157,6 @@ export function useTransfers<T>(options: TransferOptions<T>): Transfers {
       pump();
     },
     [forget, pump]
-  );
-
-  const retry = useCallback(
-    (id: string) => {
-      if (!files.current.has(id) || controllers.current.has(id)) return;
-      if (queue.current.includes(id)) return;
-      queue.current.push(id);
-      update(id, { status: TransferStatus.Queued, progress: 0, error: undefined });
-      pump();
-    },
-    [pump, update]
   );
 
   const clear = useCallback(() => {

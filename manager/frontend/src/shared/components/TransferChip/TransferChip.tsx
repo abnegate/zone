@@ -4,19 +4,19 @@ import './TransferChip.css';
 
 type TransferChipProps = {
   transfer: Transfer;
-  processing?: string;
+  processingLabel?: string;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
 };
 
-function describe(transfer: Transfer, percent: number, processing: string): string {
+function describe(transfer: Transfer, percent: number, processingLabel: string): string {
   switch (transfer.status) {
     case TransferStatus.Queued:
       return 'Waiting';
     case TransferStatus.Uploading:
       return `${percent}%`;
     case TransferStatus.Processing:
-      return processing;
+      return processingLabel;
     case TransferStatus.Failed:
       return transfer.error ?? 'The upload failed';
   }
@@ -24,13 +24,13 @@ function describe(transfer: Transfer, percent: number, processing: string): stri
 
 export default function TransferChip({
   transfer,
-  processing = 'Processing…',
+  processingLabel = 'Processing…',
   onCancel,
   onRetry,
 }: TransferChipProps): ReactElement {
   const failed = transfer.status === TransferStatus.Failed;
   const percent = Math.round(transfer.progress * 100);
-  const status = describe(transfer, percent, processing);
+  const status = describe(transfer, percent, processingLabel);
 
   return (
     <div
@@ -61,7 +61,7 @@ export default function TransferChip({
           <span
             className="transfer-chip-bar"
             role="progressbar"
-            aria-label={`Uploading ${transfer.name}`}
+            aria-label={`${transfer.name} progress`}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={percent}

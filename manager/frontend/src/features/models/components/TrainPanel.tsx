@@ -1,5 +1,5 @@
 import { Button, Checkbox, Input, Select } from '@zone/ui';
-import { type FormEvent, type ReactElement, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, type ReactElement, useEffect, useMemo, useRef, useState } from 'react';
 import { List, type RowComponentProps } from 'react-window';
 import { client } from '../../../api/client';
 import {
@@ -558,12 +558,13 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [captioning, setCaptioning] = useState(false);
   const [focusRequested, setFocusRequested] = useState(false);
   const [clips, setClips] = useState<Clip[]>([]);
+  const mirrorAtDrop = useRef(new WeakMap<File, boolean>());
   const sampling = useTransfers<TrainClip>({
     run: (file, { signal, onProgress }) =>
       modelsApi.frames({
         filename: file.name,
         blob: file,
-        mirror,
+        mirror: mirrorAtDrop.current.get(file) ?? mirror,
         signal,
         onProgress: ({ loaded, total }) => onProgress(loaded / total),
       }),
@@ -598,6 +599,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       ]);
     },
   });
+  const clearSampling = sampling.clear;
 
   useEffect(() => {
     modelsApi
@@ -678,6 +680,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           setProgress(null);
           setImages([]);
           setClips([]);
+          clearSampling();
           onTrained();
         } else if (job.status === 'succeeded') {
           setResult({
@@ -791,6 +794,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     if (leavingLanguage || enteringLanguage) {
       setImages([]);
       setClips([]);
+      sampling.clear();
     }
     if (value === 'person') {
       setSubject('person');
@@ -867,6 +871,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     const clipsToRead = files.filter(isVideoFile);
     if (busy || clipsToRead.length === 0) return;
     setError(null);
+    for (const file of clipsToRead) mirrorAtDrop.current.set(file, mirror);
     sampling.start(clipsToRead);
   };
 
@@ -996,6 +1001,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       setProgress(null);
       setImages([]);
       setClips([]);
+      sampling.clear();
       setName('');
       onTrained();
     } catch (caught) {
@@ -1248,7 +1254,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                         <li key={transfer.id} className="train-clip">
                           <TransferChip
                             transfer={transfer}
-                            processing="Extracting frames…"
+                            processingLabel="Extracting frames…"
                             onCancel={sampling.cancel}
                             onRetry={sampling.retry}
                           />

@@ -231,7 +231,7 @@ describe('TrainPanel', () => {
     expect(field.contains(uploading)).toBe(true);
     const onProgress = mockFrames.mock.calls[0]?.[0].onProgress;
     act(() => onProgress?.({ loaded: 40, total: 100 }));
-    expect(screen.getByRole('progressbar', { name: 'Uploading subject.mp4' })).toHaveAttribute(
+    expect(screen.getByRole('progressbar', { name: 'subject.mp4 progress' })).toHaveAttribute(
       'aria-valuenow',
       '40'
     );
@@ -844,6 +844,69 @@ describe('TrainPanel', () => {
     expect(mockFrames.mock.calls[0]?.[0].signal.aborted).toBe(true);
     expect(screen.queryByTestId('transfer-chip')).toBeNull();
     expect(screen.queryByText(/frames read at/)).toBeNull();
+  });
+
+  it('drops clips still uploading when switching to a language LoRA', async () => {
+    mockTrainBases.mockImplementation(() => Promise.resolve(languageBases()));
+    const pending = deferred<Awaited<ReturnType<typeof mockFrames>>>();
+    mockFrames.mockImplementationOnce(() => pending.promise);
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectBase('FLUX.1 Schnell');
+    fireEvent.change(screen.getByLabelText('Video'), {
+      target: { files: [new File(['clip'], 'walk.mp4', { type: 'video/mp4' })] },
+    });
+    await screen.findByRole('button', { name: 'Cancel walk.mp4' });
+
+    await selectSubject('Language');
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('qwen2.5 32B'));
+    expect(mockFrames.mock.calls[0]?.[0].signal.aborted).toBe(true);
+
+    await act(async () => {
+      pending.resolve({
+        sampled: 8,
+        sampled_fps: 4,
+        frames: [
+          {
+            filename: 'frame-0000.png',
+            bytes_base64: 'YWFh',
+            timestamp_ms: 0,
+            mirrored: false,
+            group: 0,
+          },
+        ],
+      });
+    });
+    expect(screen.queryByTestId('transfer-chip')).toBeNull();
+    expect(screen.queryByText(/frames read at/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
+  });
+
+  it('extracts a queued clip with the mirror setting it was dropped with', async () => {
+    const held = Array.from({ length: 5 }, () =>
+      deferred<Awaited<ReturnType<typeof mockFrames>>>()
+    );
+    for (const entry of held) mockFrames.mockImplementationOnce(() => entry.promise);
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectBase('FLUX.1 Schnell');
+    fireEvent.change(screen.getByLabelText('Video'), {
+      target: {
+        files: held.map(
+          (_, index) => new File(['clip'], `clip-${index}.mp4`, { type: 'video/mp4' })
+        ),
+      },
+    });
+    await waitFor(() => expect(mockFrames).toHaveBeenCalledTimes(4));
+    expect(screen.getByRole('group', { name: 'clip-4.mp4: Waiting' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Mirror half the frames of each second'));
+    await act(async () => {
+      held[0].resolve({ sampled: 1, sampled_fps: 1, frames: [] });
+    });
+
+    await waitFor(() => expect(mockFrames).toHaveBeenCalledTimes(5));
+    expect(mockFrames.mock.calls[4]?.[0]).toMatchObject({ filename: 'clip-4.mp4', mirror: true });
   });
 
   it('extracts several clips at once and leaves the video zone enabled', async () => {

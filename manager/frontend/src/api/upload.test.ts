@@ -54,6 +54,22 @@ describe('upload', () => {
     expect(await result.json()).toEqual({ error: 'too large' });
   });
 
+  it('hands back an empty body for a bodyless status', async () => {
+    const response = upload('/api/files', { body: 'x' });
+    xhr.requests[0].respond(204, {});
+
+    const result = await response;
+    expect(result.status).toBe(204);
+    expect(await result.text()).toBe('');
+  });
+
+  it('rejects a load that never reached the server', async () => {
+    const response = upload('/api/files', { body: 'x' });
+    xhr.requests[0].respond(0, {});
+
+    await expect(response).rejects.toThrow('The upload could not reach the server');
+  });
+
   it('rejects when the server cannot be reached', async () => {
     const response = upload('/api/files', { body: 'x' });
     xhr.requests[0].fail();

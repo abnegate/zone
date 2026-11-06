@@ -2061,7 +2061,7 @@ describe('ChatsPage', () => {
       expect(composer).toBeEnabled();
 
       act(() => HeldReader.readers[0].progress(3, 4));
-      expect(screen.getByRole('progressbar', { name: 'Uploading notes.md' })).toHaveAttribute(
+      expect(screen.getByRole('progressbar', { name: 'notes.md progress' })).toHaveAttribute(
         'aria-valuenow',
         '75'
       );

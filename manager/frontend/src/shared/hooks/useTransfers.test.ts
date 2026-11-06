@@ -119,6 +119,63 @@ describe('useTransfers', () => {
     expect(result.current.transfers).toHaveLength(1);
   });
 
+  it('cancels a queued upload before it starts and while it is processing', async () => {
+    const { held, run } = heldRun();
+    const onDone = mock();
+    const { result } = renderHook(() => useTransfers({ run, onDone, limit: 1 }));
+
+    act(() => result.current.start([file('a.txt'), file('b.txt')]));
+    act(() => result.current.cancel(result.current.transfers[1].id));
+    expect(result.current.transfers.map((transfer) => transfer.name)).toEqual(['a.txt']);
+
+    act(() => held[0].context.onProgress(1));
+    act(() => result.current.cancel(result.current.transfers[0].id));
+    await act(async () => held[0].resolve('late'));
+
+    expect(held).toHaveLength(1);
+    expect(result.current.transfers).toEqual([]);
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it('clears every upload and aborts the ones in flight', () => {
+    const { held, run } = heldRun();
+    const { result } = renderHook(() => useTransfers({ run, onDone: () => {}, limit: 1 }));
+
+    act(() => result.current.start([file('a.txt'), file('b.txt')]));
+    act(() => result.current.clear());
+
+    expect(held[0].context.signal.aborted).toBe(true);
+    expect(result.current.transfers).toEqual([]);
+    expect(result.current.pending).toBe(0);
+  });
+
+  it('retries a failed upload when the same file is dropped again', async () => {
+    const { held, run } = heldRun();
+    const { result } = renderHook(() =>
+      useTransfers({ run, onDone: () => {}, identify: (dropped) => dropped.name })
+    );
+
+    act(() => result.current.start([file('a.txt')]));
+    await act(async () => held[0].reject(new Error('offline')));
+    act(() => result.current.start([file('a.txt')]));
+
+    expect(held).toHaveLength(2);
+    expect(result.current.transfers).toMatchObject([
+      { name: 'a.txt', status: TransferStatus.Uploading },
+    ]);
+  });
+
+  it('forgets an upload whose work was cancelled from elsewhere', async () => {
+    const { held, run } = heldRun();
+    const { result } = renderHook(() => useTransfers({ run, onDone: () => {} }));
+
+    act(() => result.current.start([file('a.txt')]));
+    await act(async () => held[0].reject(cancelled()));
+
+    expect(result.current.transfers).toEqual([]);
+    expect(result.current.pending).toBe(0);
+  });
+
   it('aborts every upload in flight when the owner unmounts', () => {
     const { held, run } = heldRun();
     const { result, unmount } = renderHook(() => useTransfers({ run, onDone: () => {} }));
