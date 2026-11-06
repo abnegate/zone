@@ -851,6 +851,7 @@ done
 
         let answer = completion.message.content.unwrap_or_default();
         assert!(answer.to_uppercase().contains("ZEBRA"), "{answer}");
+        assert!(answer.contains("42"), "{answer}");
     }
 
     #[tokio::test]

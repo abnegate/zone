@@ -9,10 +9,10 @@ pub enum Rejection {
     Unreachable,
     #[error("it is a link, and codex opens images only from files")]
     Linked,
-    #[error("it is larger than the 10 MB an image may be")]
+    #[error("it is larger than one image may be")]
     Oversized,
-    #[error("the conversation already carries the 100 images a turn may hold")]
+    #[error("the conversation already carries as many images as a turn may hold")]
     Excess,
-    #[error("the conversation's images together pass the 128 MB a turn may carry")]
+    #[error("the conversation's images together pass what one turn may carry")]
     Crowded,
 }

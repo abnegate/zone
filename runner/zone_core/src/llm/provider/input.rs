@@ -47,19 +47,13 @@ impl Input {
 
 /// An earlier image the agent cannot take is noted rather than sent: one the
 /// API would refuse fails every turn that resends the history, and a link may
-/// have died since it was attached. The newest images are the ones kept within
-/// a request's limits.
+/// have died since it was attached. Images are kept newest first until one
+/// passes a request's limits, and every older one is noted.
 fn claude(transcript: &Transcript, limits: Limits) -> Result<String, Undeliverable> {
     let parts = transcript.parts();
-    let text: usize = parts
-        .iter()
-        .map(|part| match part {
-            Part::Text(text) => text.len(),
-            Part::Image { .. } => 0,
-        })
-        .sum();
-    let mut room = limits.request_bytes.saturating_sub(text);
+    let mut room = limits.request_bytes.saturating_sub(text_bytes(parts));
     let mut allowed = limits.images;
+    let mut crowded = false;
     let mut images: Vec<Option<Result<Value, Rejection>>> = vec![None; parts.len()];
 
     for (index, part) in parts.iter().enumerate().rev() {
@@ -73,7 +67,8 @@ fn claude(transcript: &Transcript, limits: Limits) -> Result<String, Undeliverab
                     if allowed == 0 {
                         return Err(Rejection::Excess);
                     }
-                    if size > room {
+                    if crowded || size > room {
+                        crowded = true;
                         return Err(Rejection::Crowded);
                     }
                     allowed -= 1;
@@ -137,6 +132,17 @@ fn claude_block(
         )),
         Image::Linked(_) => Err(Rejection::Linked),
     }
+}
+
+/// The bytes the text of `parts` takes once escaped into JSON.
+fn text_bytes(parts: &[Part]) -> usize {
+    parts
+        .iter()
+        .map(|part| match part {
+            Part::Text(text) => serde_json::to_string(text).map_or(text.len(), |json| json.len()),
+            Part::Image { .. } => 0,
+        })
+        .sum()
 }
 
 fn text_block(text: &str) -> Value {
@@ -360,7 +366,7 @@ mod tests {
 
     #[test]
     fn claude_is_sent_no_more_image_bytes_than_a_request_may_carry_keeping_the_newest() {
-        let text = three_turns_of_images().text().len();
+        let text = text_bytes(three_turns_of_images().parts());
         let limits = Limits {
             request_bytes: text + 2 * PNG_DATA.len(),
             ..Limits::CLAUDE
@@ -382,10 +388,64 @@ mod tests {
         assert_eq!(claude_within(&transcript, fewer), Err(Rejection::Excess));
 
         let smaller = Limits {
-            request_bytes: transcript.text().len() + PNG_DATA.len(),
+            request_bytes: text_bytes(transcript.parts()) + 2 * PNG_DATA.len() - 1,
             ..Limits::CLAUDE
         };
         assert_eq!(claude_within(&transcript, smaller), Err(Rejection::Crowded));
+    }
+
+    #[test]
+    fn images_that_exactly_fill_the_request_are_all_sent() {
+        let transcript = render(&[with_images(Message::user("Look."), &[PNG, PNG])]);
+        let limits = Limits {
+            request_bytes: text_bytes(transcript.parts()) + 2 * PNG_DATA.len(),
+            images: 2,
+            ..Limits::CLAUDE
+        };
+
+        let content = claude_within(&transcript, limits).expect("deliverable");
+
+        assert_eq!(sent_images(&content), [true, true]);
+    }
+
+    #[test]
+    fn once_an_image_is_crowded_out_every_older_one_is_noted() {
+        let large = format!(
+            "data:image/png;base64,{}",
+            BASE64.encode([BASE64.decode(PNG_DATA).expect("png"), vec![0; 30]].concat())
+        );
+        let transcript = render(&[
+            with_images(Message::user("Oldest."), &[PNG]),
+            Message::assistant("Seen."),
+            with_images(Message::user("Large."), &[&large]),
+            Message::assistant("Seen."),
+            with_images(Message::user("Newest."), &[PNG]),
+        ]);
+        let limits = Limits {
+            request_bytes: text_bytes(transcript.parts()) + 2 * PNG_DATA.len(),
+            ..Limits::CLAUDE
+        };
+
+        let content = claude_within(&transcript, limits).expect("deliverable");
+
+        assert_eq!(sent_images(&content), [false, false, true]);
+    }
+
+    #[test]
+    fn an_earlier_image_that_cannot_be_sent_leaves_its_place_to_an_older_one() {
+        let transcript = render(&[
+            with_images(Message::user("Oldest."), &[PNG]),
+            with_images(Message::assistant("Linked."), &[LINK]),
+            with_images(Message::user("Newest."), &[PNG]),
+        ]);
+        let limits = Limits {
+            images: 2,
+            ..Limits::CLAUDE
+        };
+
+        let content = claude_within(&transcript, limits).expect("deliverable");
+
+        assert_eq!(sent_images(&content), [true, false, true]);
     }
 
     #[test]

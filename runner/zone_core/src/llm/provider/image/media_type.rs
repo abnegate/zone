@@ -1,6 +1,5 @@
 use super::signature::Signature;
 
-/// An image type every agent opens.
 pub struct MediaType {
     pub name: &'static str,
     pub extension: &'static str,
