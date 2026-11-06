@@ -1,5 +1,6 @@
-import { Badge, Button, buttonVariants } from '@zone/ui';
+import { Button, buttonVariants } from '@zone/ui';
 import type { GitHubApp, GitHubAppOwnerType, GitHubInstallation } from '../../../github';
+import { InstallationState } from './InstallationState';
 
 const OWNER_TYPE_LABELS: Readonly<Record<GitHubAppOwnerType, string>> = {
   User: 'Personal account',
@@ -13,20 +14,6 @@ interface GitHubAccountRowProps {
   installing: boolean;
   onFinishInstalling: () => void;
   onRemove: () => void;
-}
-
-function InstallationState({ installations }: { installations: GitHubInstallation[] }) {
-  const [latest] = installations;
-  if (latest === undefined) {
-    return <span className="github-account-pending">Installation not finished</span>;
-  }
-  if (latest.revoked_at !== null) {
-    return <Badge variant="destructive">Revoked</Badge>;
-  }
-  if (latest.suspended_at !== null) {
-    return <Badge variant="warning">Suspended</Badge>;
-  }
-  return null;
 }
 
 export function GitHubAccountRow({
