@@ -1023,10 +1023,13 @@ pub async fn finalize(
             Some(None) => {}
         }
     }
+    super::projects::lock_order(&mut transaction, workspace_id).await?;
     let project_id: Uuid = sqlx::query_scalar(
         "INSERT INTO projects (name, description, workspace_id, status, auto, auto_actor_id, brief, \
-           github_repo_url, github_access_token) \
-         VALUES ($1, $2, $3, 'active', TRUE, $4, $5, $6, $7) RETURNING id",
+           github_repo_url, github_access_token, \"position\") \
+         VALUES ($1, $2, $3, 'active', TRUE, $4, $5, $6, $7, \
+           COALESCE((SELECT MIN(\"position\") FROM projects WHERE workspace_id = $3), 1) - 1) \
+         RETURNING id",
     )
     .bind(plan.name)
     .bind(plan.description)

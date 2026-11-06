@@ -38,7 +38,7 @@ use axum::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::auth::require_auth;
+use crate::auth::{ModelInstaller, require_auth};
 use crate::config::AllowedOrigins;
 use crate::state::AppState;
 use crate::ws;
@@ -75,6 +75,8 @@ pub fn create_router(state: AppState) -> Router {
     let one_at_a_time =
         middleware::from_fn_with_state(state.clone(), models::one_training_upload_at_a_time);
     let queue_frames = middleware::from_fn_with_state(state.clone(), models::queue_frame_extract);
+    // Outermost on the queued routes so a refused caller never takes a permit.
+    let installer = middleware::from_extractor_with_state::<ModelInstaller, _>(state.clone());
 
     // Public routes (no auth required)
     // Note: WebSocket routes use in-message auth, not middleware
@@ -208,6 +210,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/projects/auto",
             post(projects::start_auto),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/projects/order",
+            put(projects::reorder),
         )
         .route("/api/projects", get(projects::list).post(projects::create))
         .route(
@@ -345,11 +351,13 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/models/train",
-            get(models::train_job)
-                .post(models::train)
-                .delete(models::dismiss_train)
-                .layer(uploads)
-                .layer(one_at_a_time),
+            get(models::train_job).merge(
+                post(models::train)
+                    .delete(models::dismiss_train)
+                    .layer(uploads)
+                    .layer(one_at_a_time)
+                    .route_layer(installer.clone()),
+            ),
         )
         .route(
             "/api/models/train/uploads",
@@ -368,7 +376,10 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/models/train/frames",
-            post(models::frames).layer(uploads).layer(queue_frames),
+            post(models::frames)
+                .layer(uploads)
+                .layer(queue_frames)
+                .route_layer(installer),
         )
         .route(
             "/api/models/train/previews/{name}",

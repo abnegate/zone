@@ -29,6 +29,11 @@
   max-width: 16rem;
 }
 
+.projects-sort {
+  flex: none;
+  width: 11.5rem;
+}
+
 .projects-list-pane {
   display: flex;
   flex-direction: column;
@@ -43,7 +48,108 @@
   gap: var(--ui-space-1);
 }
 
+.project-slot {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.project-slot[data-dragging] {
+  opacity: 0.45;
+}
+
+.project-slot[data-drop]::before {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 2px;
+  content: '';
+  border-radius: var(--ui-radius-full);
+  background: var(--ui-border-focus);
+  pointer-events: none;
+}
+
+.project-slot[data-drop='before']::before {
+  top: -3px;
+}
+
+.project-slot[data-drop='after']::before {
+  bottom: -3px;
+}
+
+.project-card-handle {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: var(--ui-space-6);
+  height: var(--ui-space-6);
+  padding: 0 0 0 var(--ui-space-1);
+  border: none;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--ui-text-muted);
+  cursor: grab;
+  opacity: 0;
+  touch-action: none;
+  transform: translateY(-50%);
+  transition: opacity var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.project-card-handle svg {
+  width: 0.5rem;
+  height: 0.75rem;
+}
+
+.project-slot:hover .project-card-handle,
+.project-card-handle:focus-visible,
+.project-slot[data-dragging] .project-card-handle {
+  opacity: 1;
+}
+
+.project-card-handle:hover {
+  color: var(--ui-text-primary);
+}
+
+.project-card-handle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-border-focus);
+}
+
+@media (pointer: coarse) {
+  .project-card-handle {
+    opacity: 1;
+  }
+}
+
+.project-card-ghost {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--ui-control-height);
+  padding: 0 var(--ui-space-3);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-card);
+  background: var(--ui-bg-elevated);
+  box-shadow: var(--ui-shadow-lg);
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: grabbing;
+}
+
+.projects-order-error {
+  padding: var(--ui-space-2) var(--ui-space-3);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-error-muted);
+  color: var(--ui-error);
+  font-size: var(--ui-text-sm);
+}
+
 .project-card.card--list {
+  position: relative;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;

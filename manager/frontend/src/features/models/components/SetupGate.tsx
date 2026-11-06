@@ -18,8 +18,8 @@ function Loading() {
 export default function SetupGate({ children }: { children: ReactNode }) {
   const { user, hasPermission } = useAuth();
   const userId = user?.id;
-  const canReadModels = hasPermission(PERMISSIONS.MODELS.READ);
-  const skip = !userId || !canReadModels || isSetupComplete(userId);
+  const canInstallModels = hasPermission(PERMISSIONS.MODELS.CREATE);
+  const skip = !userId || !canInstallModels || isSetupComplete(userId);
   const [needed, setNeeded] = useState<boolean | null>(skip ? false : null);
 
   useEffect(() => {
