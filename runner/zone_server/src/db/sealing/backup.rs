@@ -30,12 +30,13 @@ pub struct Backup {
 
 impl Backup {
     /// The archive at `path`, once it is shown to be a non-empty `pg_dump -Fc` archive of
-    /// `database` holding the definition and the rows of every one of `tables`, all of which
-    /// `pg_restore` reads.
+    /// `database` holding the definition and the rows of every one of `tables` and every one of
+    /// `extensions`, all of which `pg_restore` reads.
     pub async fn verify(
         path: &Path,
         database: &str,
         tables: &[Table],
+        extensions: &[String],
     ) -> Result<Self, SealingError> {
         let metadata =
             tokio::fs::metadata(path)
@@ -79,6 +80,15 @@ impl Backup {
         if let Some(table) = tables.iter().find(|table| !listing.holds(table)) {
             return Err(SealingError::TableMissing {
                 table: table.clone(),
+            });
+        }
+
+        if let Some(extension) = extensions
+            .iter()
+            .find(|extension| !listing.holds_extension(extension))
+        {
+            return Err(SealingError::ExtensionMissing {
+                extension: extension.clone(),
             });
         }
 

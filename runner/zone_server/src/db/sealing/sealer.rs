@@ -35,6 +35,11 @@ const TABLES: &str = "SELECT namespace.nspname::text AS schema, class.relname::t
          AND dependency.objid = class.oid AND dependency.deptype = 'e') \
      ORDER BY namespace.nspname, class.relname";
 
+/// Every extension `pg_dump` creates: those installed after `initdb`, whose ids start at
+/// PostgreSQL's first normal object id.
+const EXTENSIONS: &str =
+    "SELECT extname::text FROM pg_extension WHERE oid >= 16384 ORDER BY extname";
+
 /// Seals every credential column of one database under one key.
 pub struct Sealer {
     pool: PgPool,
@@ -60,7 +65,8 @@ impl Sealer {
             .fetch_one(&self.pool)
             .await?;
         let tables: Vec<Table> = sqlx::query_as(TABLES).fetch_all(&self.pool).await?;
-        let backup = Backup::verify(self.options.backup(), &database, &tables).await?;
+        let extensions: Vec<String> = sqlx::query_scalar(EXTENSIONS).fetch_all(&self.pool).await?;
+        let backup = Backup::verify(self.options.backup(), &database, &tables, &extensions).await?;
 
         let survey = self.pass(backup.clone(), false).await?;
         if let Some(unopened) = survey.wrong_key() {

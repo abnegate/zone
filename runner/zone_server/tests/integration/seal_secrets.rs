@@ -43,6 +43,7 @@ const PG_DUMP: &str = "pg_dump";
 const CUSTOM_FORMAT: &str = "-Fc";
 const TAR_FORMAT: &str = "-Ft";
 const DATA_ONLY: &str = "--data-only";
+const VECTOR_EXTENSION: &str = "vector";
 const ENVELOPE_OPENING: &str = "ENC[v1:";
 const ENVELOPE_CLOSING: char = ']';
 const SNAPSHOT_TABLES: &[&str] = &[
@@ -1003,6 +1004,12 @@ async fn the_backup_gate_refuses_anything_but_a_full_archive_of_this_database() 
     let data_only = scratch
         .dump(&[CUSTOM_FORMAT.to_string(), DATA_ONLY.to_string()])
         .await;
+    let extensionless = scratch
+        .dump(&[
+            CUSTOM_FORMAT.to_string(),
+            format!("--exclude-extension={VECTOR_EXTENSION}"),
+        ])
+        .await;
 
     for dry_run in [true, false] {
         assert!(matches!(
@@ -1062,6 +1069,12 @@ async fn the_backup_gate_refuses_anything_but_a_full_archive_of_this_database() 
             ),
             "a data-only archive, which defines no table, is refused"
         );
+        match scratch.attempt(&key, dry_run, extensionless.path()).await {
+            Err(SealingError::ExtensionMissing { extension }) => {
+                assert_eq!(extension, VECTOR_EXTENSION)
+            }
+            result => panic!("an archive that leaves out an extension is refused: {result:?}"),
+        }
     }
 
     sqlx::raw_sql("CREATE SCHEMA archive; CREATE TABLE archive.notes (body text);")

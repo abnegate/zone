@@ -7,6 +7,8 @@ const DATABASE_HEADER: &str = "dbname:";
 const FORMAT_HEADER: &str = "Format:";
 const TABLE: &str = "TABLE";
 const DATA: &str = "DATA";
+const EXTENSION: &str = "EXTENSION";
+const UNQUALIFIED: &str = "-";
 
 /// Where an entry's description starts, after its dump id, catalog id and object id.
 const DESCRIPTION: usize = 3;
@@ -21,6 +23,7 @@ pub struct Listing {
     format: String,
     defined: BTreeSet<Table>,
     filled: BTreeSet<Table>,
+    extensions: BTreeSet<String>,
 }
 
 impl Listing {
@@ -30,6 +33,7 @@ impl Listing {
         let mut format = String::new();
         let mut defined = BTreeSet::new();
         let mut filled = BTreeSet::new();
+        let mut extensions = BTreeSet::new();
         for line in listing.lines() {
             if let Some(comment) = line.strip_prefix(COMMENT) {
                 let comment = comment.trim();
@@ -48,6 +52,9 @@ impl Listing {
                 Some([TABLE, schema, name, ..]) => {
                     defined.insert(Table::new(*schema, *name));
                 }
+                Some([EXTENSION, UNQUALIFIED, name, ..]) => {
+                    extensions.insert(name.to_string());
+                }
                 _ => {}
             }
         }
@@ -56,6 +63,7 @@ impl Listing {
             format,
             defined,
             filled,
+            extensions,
         }
     }
 
@@ -73,6 +81,11 @@ impl Listing {
     /// recreates the table with its data.
     pub fn holds(&self, table: &Table) -> bool {
         self.defined.contains(table) && self.filled.contains(table)
+    }
+
+    /// Whether the archive creates the extension `name`.
+    pub fn holds_extension(&self, name: &str) -> bool {
+        self.extensions.contains(name)
     }
 }
 
@@ -146,6 +159,18 @@ mod tests {
         );
         assert!(!listing.holds(&public("project")));
         assert!(!listing.holds(&Table::new("archive", "projects")));
+    }
+
+    #[test]
+    fn an_extension_is_held_only_by_its_own_entry() {
+        let listing = Listing::parse(LISTING);
+        assert!(listing.holds_extension("vector"));
+        assert!(!listing.holds_extension("pgcrypto"));
+        let without = Listing::parse(&LISTING.replace("2; 3079 16393 EXTENSION - vector", ""));
+        assert!(
+            !without.holds_extension("vector"),
+            "the extension's comment is not the extension"
+        );
     }
 
     #[test]

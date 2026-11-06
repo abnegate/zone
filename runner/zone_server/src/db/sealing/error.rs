@@ -27,6 +27,8 @@ pub enum SealingError {
     DatabaseMismatch { expected: String, found: String },
     #[error("The backup does not hold both the definition and the rows of table {table}")]
     TableMissing { table: Table },
+    #[error("The backup does not create extension {extension}")]
+    ExtensionMissing { extension: String },
     #[error("The backup at {} cannot be read in full: {stderr}", path.display())]
     Unreadable { path: PathBuf, stderr: String },
     #[error(
