@@ -1,7 +1,7 @@
 import { Button } from '@zone/ui';
 import { useId, useState } from 'react';
 import { githubApi } from '../../../api/github';
-import { GITHUB_SETTINGS_PATH } from '../../github/callback';
+import { ConnectGitHubPrompt } from '../../github/components/ConnectGitHubPrompt';
 import type { GitHubConfig, Source, UpdateSourceRequest } from '../types';
 import { GitHubSourceState, reachableRepository, resolveGitHubSourceState } from '../utils';
 
@@ -19,7 +19,6 @@ const TOKEN_REMOVAL_HINT = 'Your access token will be removed.';
 interface GitHubSourceConnectionProps {
   source: Source;
   organizationId: string | null;
-  canManage: boolean;
   updateSource: (request: UpdateSourceRequest) => Promise<Source>;
   onSaved: () => Promise<void> | void;
   onError: (message: string | null) => void;
@@ -63,7 +62,6 @@ function repositoryFullName(source: Source): string {
 export function GitHubSourceConnection({
   source,
   organizationId,
-  canManage,
   updateSource,
   onSaved,
   onError,
@@ -130,12 +128,7 @@ export function GitHubSourceConnection({
       <div className="source-github-connection-unreachable" role="status">
         {unreachable && (
           <>
-            <span>No connected GitHub account can reach {fullName}.</span>{' '}
-            {canManage ? (
-              <a href={GITHUB_SETTINGS_PATH}>Connect GitHub</a>
-            ) : (
-              <span>Ask an organization admin to connect GitHub.</span>
-            )}
+            <span>No connected GitHub account can reach {fullName}.</span> <ConnectGitHubPrompt />
           </>
         )}
       </div>

@@ -1,9 +1,8 @@
 import { Button } from '@zone/ui';
 import { useCallback, useMemo, useState } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import { canManageOrganization } from '../../../shared/roles';
 import { getErrors } from '../../../validation';
-import { formStateFromConfig, getSourceById, getSourceLabel } from '../config';
+import { formStateFromConfig, GITHUB_SOURCE_TYPE, getSourceById, getSourceLabel } from '../config';
 import { type SourceVerifyResponse, UpdateSourceRequestSchema } from '../schemas';
 import type { Source, UpdateSourceRequest } from '../types';
 import { isAppBacked } from '../utils';
@@ -36,7 +35,6 @@ export function SourceDetail({
   const definition = getSourceById(source.source_type);
   const { currentOrganization } = useWorkspace();
   const organizationId = currentOrganization?.id ?? null;
-  const canManage = canManageOrganization(currentOrganization?.role);
   const baseline = useMemo(
     () => formStateFromConfig(source.source_type, source.config),
     [source.source_type, source.config]
@@ -157,11 +155,10 @@ export function SourceDetail({
           <label htmlFor="source-url">URL</label>
           <input id="source-url" className="input-mono" value={source.url} readOnly disabled />
         </div>
-        {source.source_type === 'github' && (
+        {source.source_type === GITHUB_SOURCE_TYPE && (
           <GitHubSourceConnection
             source={source}
             organizationId={organizationId}
-            canManage={canManage}
             updateSource={updateSource}
             onSaved={onSaved}
             onError={setError}

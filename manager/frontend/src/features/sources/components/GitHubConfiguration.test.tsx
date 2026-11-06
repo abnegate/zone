@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { type ReactNode, useState } from 'react';
+import { MemoryRouter } from 'react-router-dom';
 import type { GitHubRepositorySearch } from '../../../api/github';
 import type { GitHubRepositoriesResponse, GitHubRepository } from '../../github';
 import type { CreateSourceRequest, Source } from '../types';
@@ -94,7 +95,11 @@ function withQueryClient(children: ReactNode) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
-  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>{children}</MemoryRouter>
+    </QueryClientProvider>
+  );
 }
 
 function Harness() {

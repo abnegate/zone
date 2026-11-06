@@ -13,10 +13,6 @@ export function meetsOrganizationRole(role: OrgRole, required: OrgRole): boolean
   return ORGANIZATION_RANK[role] >= ORGANIZATION_RANK[required];
 }
 
-export function canManageOrganization(role: OrgRole | undefined): boolean {
-  return role !== undefined && meetsOrganizationRole(role, 'admin');
-}
-
 export function meetsWorkspaceRole(role: WorkspaceRole, required: WorkspaceRole): boolean {
   return WORKSPACE_RANK[role] >= WORKSPACE_RANK[required];
 }

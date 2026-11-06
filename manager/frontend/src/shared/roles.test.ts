@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type { OrgRole, WorkspaceRole } from '../types';
 import {
-  canManageOrganization,
   meetsOrganizationRole,
   meetsWorkspaceRole,
   ORGANIZATION_RANK,
@@ -47,17 +46,5 @@ describe('meetsWorkspaceRole', () => {
         );
       }
     }
-  });
-});
-
-describe('canManageOrganization', () => {
-  it('lets owners and admins manage the organization', () => {
-    expect(canManageOrganization('owner')).toBe(true);
-    expect(canManageOrganization('admin')).toBe(true);
-  });
-
-  it('keeps members and an unresolved role from managing it', () => {
-    expect(canManageOrganization('member')).toBe(false);
-    expect(canManageOrganization(undefined)).toBe(false);
   });
 });
