@@ -7,13 +7,12 @@
 mod comfy_reference;
 
 use abnegate_llm::download::{self, Checksum, DownloadError, DownloadProgress};
-use comfy_reference::ComfyReference;
+use comfy_reference::{ComfyReference, is_hub_character};
 use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 use tokio::time::MissedTickBehavior;
@@ -423,13 +422,14 @@ fn parse_comfy_ref(model: &str) -> Result<ComfyReference, String> {
         || repository.contains("..")
         || repository.contains('\\')
         || !filename.ends_with(".safetensors")
+        || !filename.chars().all(is_hub_character)
     {
         return Err("Invalid image weight filename".to_string());
     }
     if repository.split('/').count() != 2
-        || repository
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
+        || repository.split('/').any(|part| {
+            part.is_empty() || part == "." || part == ".." || !part.chars().all(is_hub_character)
+        })
     {
         return Err("Image weights need an owner/repo HuggingFace id".to_string());
     }
@@ -448,6 +448,15 @@ async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
             return;
         }
     };
+    let Some(url) = reference.url(&comfy.hub_origin) else {
+        job.publish(Event::Error {
+            message: format!(
+                "{DOWNLOAD_FAILED}: {} is not a usable HuggingFace origin",
+                comfy.hub_origin
+            ),
+        });
+        return;
+    };
     job.publish(Event::Step {
         status: "downloading image weights".to_string(),
     });
@@ -459,8 +468,7 @@ async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
         return;
     }
     let target = directory.join(reference.filename());
-    if let Err(message) = fetch_weights(&reference.url(&comfy.hub_origin), &target, None, job).await
-    {
+    if let Err(message) = fetch_weights(url.as_str(), &target, None, job).await {
         job.publish(Event::Error { message });
         return;
     }
@@ -714,19 +722,23 @@ mod tests {
         ManifestFile, PullRegistry, PullStart, describe, retryable,
     };
     use abnegate_llm::download::{Checksum, DownloadError};
-    use axum::Router;
-    use axum::body::{Body, Bytes};
-    use axum::http::{HeaderMap, StatusCode, header};
-    use axum::response::Response;
-    use axum::routing::get;
+    use axum::{
+        Router,
+        body::{Body, Bytes},
+        http::{HeaderMap, StatusCode, header},
+        response::Response,
+        routing::get,
+    };
     use futures::StreamExt;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::net::TcpListener;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
     const BODY: &[u8] = b"zone-setup-weight-bytes-for-a-resumable-transfer";
     const HEAD_LENGTH: usize = 16;
@@ -863,13 +875,66 @@ mod tests {
             )
         );
         assert_eq!(
-            reference.url("https://huggingface.co/"),
+            reference.url("https://huggingface.co/").unwrap().as_str(),
             "https://huggingface.co/ScottzillaSystems/qwen-image-edit-plus-nsfw-lora/resolve/main/qwen-image-edit-plus-nsfw-lora.safetensors"
         );
         assert!(super::parse_comfy_ref("llama3.2:3b").is_err());
         assert!(super::parse_comfy_ref("../evil:model.safetensors").is_err());
         assert!(super::parse_comfy_ref("owner/repo:../model.safetensors").is_err());
         assert!(super::parse_comfy_ref("owner/repo/extra:model.safetensors").is_err());
+    }
+
+    #[test]
+    fn a_reference_keeps_the_hub_origins_path_and_ends_in_its_file() {
+        let reference =
+            super::parse_comfy_ref(" Owner-1/style_v2.0:style_v2.0-fp8.safetensors ").unwrap();
+        assert_eq!(
+            reference.url("https://mirror.example/hf").unwrap().as_str(),
+            "https://mirror.example/hf/Owner-1/style_v2.0/resolve/main/style_v2.0-fp8.safetensors"
+        );
+        assert_eq!(reference.url("not a url"), None);
+        assert_eq!(reference.url("mailto:hub@example.com"), None);
+    }
+
+    #[test]
+    fn a_reference_outside_huggingface_id_characters_is_refused() {
+        const FILENAME: &str = "Invalid image weight filename";
+        const REPOSITORY: &str = "Image weights need an owner/repo HuggingFace id";
+        for character in [
+            '?', '#', '%', ' ', '\t', '\n', '&', '=', '+', ';', '@', '~', 'é',
+        ] {
+            assert_eq!(
+                super::parse_comfy_ref(&format!("owner/repo:evil{character}.safetensors")),
+                Err(FILENAME.to_string()),
+                "{character:?} in the filename"
+            );
+            assert_eq!(
+                super::parse_comfy_ref(&format!("own{character}er/repo:style.safetensors")),
+                Err(REPOSITORY.to_string()),
+                "{character:?} in the owner"
+            );
+            assert_eq!(
+                super::parse_comfy_ref(&format!("owner/re{character}po:style.safetensors")),
+                Err(REPOSITORY.to_string()),
+                "{character:?} in the repository"
+            );
+        }
+        assert_eq!(
+            super::parse_comfy_ref("owner/repo:evil#.safetensors"),
+            Err(FILENAME.to_string())
+        );
+        assert_eq!(
+            super::parse_comfy_ref("own:er/repo:style.safetensors"),
+            Err(REPOSITORY.to_string())
+        );
+        assert_eq!(
+            super::parse_comfy_ref("owner//repo:style.safetensors"),
+            Err(REPOSITORY.to_string())
+        );
+        assert_eq!(
+            super::parse_comfy_ref("./repo:style.safetensors"),
+            Err(REPOSITORY.to_string())
+        );
     }
 
     #[test]
