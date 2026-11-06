@@ -756,35 +756,33 @@ pub async fn verify(
 
     let mut config = source_row.config.clone();
 
-    // Decrypt and inject credentials if present
     if let Some(encrypted_credentials) = &source_row.credentials_encrypted {
         match state.master_key().open_strict(encrypted_credentials) {
             Ok(decrypted) => {
-                if let Some(config_obj) = config.as_object_mut() {
-                    // Use source-type-specific credential field names
-                    let cred_field = match source_row.source_type.as_str() {
+                if let Some(config_object) = config.as_object_mut() {
+                    let credential_field = match source_row.source_type.as_str() {
                         "github" | "gitlab" => "token",
                         "notion" => "api_key",
                         _ => "token",
                     };
-                    config_obj.insert(
-                        cred_field.to_string(),
+                    config_object.insert(
+                        credential_field.to_string(),
                         serde_json::Value::String(decrypted.expose().to_string()),
                     );
                 }
             }
-            Err(e) => {
-                tracing::error!(source_id = %id, error = %e, "Failed to decrypt credentials");
-                let error_msg = "Failed to decrypt credentials";
-                if let Err(db_err) =
-                    sources::update_verification(state.db(), id, workspace_id, Some(error_msg))
+            Err(error) => {
+                tracing::error!(source_id = %id, error = %error, "Failed to decrypt credentials");
+                let error_message = "Failed to decrypt credentials";
+                if let Err(database_error) =
+                    sources::update_verification(state.db(), id, workspace_id, Some(error_message))
                         .await
                 {
-                    tracing::error!(source_id = %id, error = %db_err, "Failed to update verification status");
+                    tracing::error!(source_id = %id, error = %database_error, "Failed to update verification status");
                 }
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new(error_msg)),
+                    Json(ErrorResponse::new(error_message)),
                 )
                     .into_response();
             }

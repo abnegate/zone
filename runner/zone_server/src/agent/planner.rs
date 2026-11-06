@@ -12,6 +12,7 @@
 //! without a way to ship is refused with the reason, and the model plans again.
 
 use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use abnegate_vcs::{GitService, PullRequestError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -561,10 +562,7 @@ impl Tool for FinalizeProjectTool {
                 };
                 // Stored the way the source keeps it: encrypted at rest, opened
                 // by the checkout and pull request code that uses it.
-                let sealed = match abnegate_secret::encrypt_value(
-                    &credential.token,
-                    self.0.state.master_key(),
-                ) {
+                let sealed = match encrypt_value(&credential.token, self.0.state.master_key()) {
                     Ok(sealed) => sealed,
                     Err(_) => {
                         return Ok(ToolResult::error(

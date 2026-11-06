@@ -55,14 +55,13 @@ mod tests {
     use abnegate_secret::is_encrypted;
 
     use super::*;
+    use crate::secret::fixture::seal_legacy;
 
     const ACCESS: &str = "fake-access-token-for-tests";
     const REFRESH: &str = "fake-refresh-token-for-tests";
     const LIFETIME: TimeDelta = TimeDelta::hours(8);
     /// Tokens as Zone sealed them before it recorded their lifetime.
     const UNTIMED: &str = r#"{"access":"fake-access-token-for-tests","refresh":"fake-refresh-token-for-tests","expires_at":"2026-09-21T14:13:20Z","scope":"user:inference","subscription":"max"}"#;
-    const ENVELOPE_PREFIX: &str = "ENC[v1:";
-    const ENVELOPE_SUFFIX: &str = "]";
 
     fn expiry() -> DateTime<Utc> {
         DateTime::from_timestamp(1_790_000_000, 0).expect("a valid timestamp")
@@ -81,16 +80,6 @@ mod tests {
 
     fn key() -> MasterKey {
         MasterKey::generate().expect("a key")
-    }
-
-    /// `value` sealed the way Zone sealed credentials before the envelope existed.
-    fn legacy(value: &str, key: &MasterKey) -> String {
-        encrypt_value(&SecretValue::new(value), key)
-            .expect("seal")
-            .strip_prefix(ENVELOPE_PREFIX)
-            .and_then(|sealed| sealed.strip_suffix(ENVELOPE_SUFFIX))
-            .expect("an envelope")
-            .to_string()
     }
 
     #[test]
@@ -127,7 +116,7 @@ mod tests {
         let tokens = tokens();
         let serialised = serde_json::to_string(&tokens).expect("serialise");
 
-        let opened = Tokens::open(&key, &legacy(&serialised, &key)).expect("a legacy body");
+        let opened = Tokens::open(&key, &seal_legacy(&serialised, &key)).expect("a legacy body");
 
         assert_eq!(opened, tokens);
     }
@@ -135,7 +124,7 @@ mod tests {
     #[test]
     fn tokens_sealed_before_their_lifetime_was_recorded_open_with_it_unknown() {
         let key = key();
-        let sealed = legacy(UNTIMED, &key);
+        let sealed = seal_legacy(UNTIMED, &key);
 
         let opened = Tokens::open(&key, &sealed).expect("tokens sealed in the earlier form");
 

@@ -36,8 +36,8 @@ const GITHUB_EVENT_HEADER: &str = "X-GitHub-Event";
 const GITHUB_ISSUES_EVENT: &str = "issues";
 const GITHUB_DELIVERY_HEADER: &str = "X-GitHub-Delivery";
 const GITHUB_PING_EVENT: &str = "ping";
-const ENVELOPE_PREFIX: &str = "ENC[v1:";
-const ENVELOPE_SUFFIX: &str = "]";
+const V1_ENVELOPE_OPENING: &str = "ENC[v1:";
+const ENVELOPE_CLOSING: &str = "]";
 const LINEAR_SIGNATURE_HEADER: &str = "Linear-Signature";
 const LINEAR_DELIVERY_HEADER: &str = "Linear-Delivery";
 
@@ -712,8 +712,8 @@ async fn deliver_to(
 /// `sealed` as Zone stored it before envelopes existed: the bare body the envelope wraps.
 fn legacy_body(sealed: &str) -> String {
     sealed
-        .strip_prefix(ENVELOPE_PREFIX)
-        .and_then(|body| body.strip_suffix(ENVELOPE_SUFFIX))
+        .strip_prefix(V1_ENVELOPE_OPENING)
+        .and_then(|body| body.strip_suffix(ENVELOPE_CLOSING))
         .expect("a v1 envelope")
         .to_string()
 }
