@@ -251,6 +251,7 @@ mod tests {
                 unavailable: None,
             },
             draft_unavailable: None,
+            threads: None,
             observed_at: Utc::now(),
         }
     }

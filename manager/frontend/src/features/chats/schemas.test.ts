@@ -9,6 +9,7 @@ import {
   HandoverSchema,
   MessageMetadataSchema,
   MessageSchema,
+  PullRequestStatusSchema,
   WorkspaceChatProvidersSchema,
 } from './schemas';
 import { ACTION_TARGETS } from './types';
@@ -360,5 +361,32 @@ describe('the providers a chat can run on', () => {
     });
     expect(parsed.default.models.map((model) => model.name)).toEqual(['gpt-6-sol', 'gpt-5.5']);
     expect(parsed.providers).toHaveLength(2);
+  });
+});
+
+describe('a pull request status', () => {
+  const status = {
+    title: 'Add widgets',
+    state: 'open',
+    draft: false,
+    additions: 1,
+    deletions: 1,
+    changed_files: 1,
+    checks: 'passing',
+    mergeable: 'clean',
+    auto_merge: { enabled: false, unavailable: null },
+    draft_unavailable: null,
+    observed_at: '2026-11-05T10:00:00Z',
+  };
+
+  it('keeps the review thread counts the server sent', () => {
+    const parsed = PullRequestStatusSchema.parse({ ...status, threads: { open: 2, resolved: 3 } });
+    expect(parsed.threads).toEqual({ open: 2, resolved: 3 });
+  });
+
+  it('reads counts no server could send, or none at all, as unknown', () => {
+    for (const threads of [{ open: -1, resolved: 0 }, { open: 1.5, resolved: 0 }, undefined]) {
+      expect(PullRequestStatusSchema.parse({ ...status, threads }).threads).toBeNull();
+    }
   });
 });
