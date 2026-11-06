@@ -87,7 +87,7 @@
       "expect_identifiers": [],
       "expect_uri_contains": ["secret/derivation.rs"],
       "judgments": [
-        {"uri_contains": "secret/derivation.rs", "grade": 3, "must_contain": ["derive"]},
+        {"uri_contains": "secret/derivation.rs", "grade": 3, "must_contain": ["derive", "MasterKey"]},
         {"uri_contains": "state.rs", "grade": 2}
       ]
     },

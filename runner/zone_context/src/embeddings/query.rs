@@ -764,8 +764,8 @@ mod tests {
 
         let derive = rewrite_query("Where is the AES-256 encryption key derived?");
         assert!(
-            derive.keyword.contains("derive_key"),
-            "keyword {}",
+            derive.keyword.split(" OR ").any(|term| term == "derive"),
+            "the stem names secret::derive: {}",
             derive.keyword
         );
 
