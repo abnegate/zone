@@ -1,5 +1,8 @@
 //! Project database queries
 
+use std::fmt;
+
+use abnegate_secret::REDACTED;
 use chrono::NaiveDateTime;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -7,7 +10,7 @@ use uuid::Uuid;
 use super::DbResult;
 
 /// Project row from database
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub struct ProjectRow {
     pub id: Uuid,
     pub workspace_id: Option<Uuid>,
@@ -20,6 +23,28 @@ pub struct ProjectRow {
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
     pub github_installation_id: Option<Uuid>,
+}
+
+impl fmt::Debug for ProjectRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProjectRow")
+            .field("id", &self.id)
+            .field("workspace_id", &self.workspace_id)
+            .field("source_id", &self.source_id)
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("status", &self.status)
+            .field("github_repo_url", &self.github_repo_url)
+            .field(
+                "github_access_token",
+                &self.github_access_token.as_ref().map(|_| REDACTED),
+            )
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("github_installation_id", &self.github_installation_id)
+            .finish()
+    }
 }
 
 /// List projects with workspace and optional status filter
@@ -353,5 +378,28 @@ mod tests {
             .expect("the update")
             .expect("the project");
         assert_eq!(unsourced.github_installation_id, expected);
+    }
+
+    #[test]
+    fn debug_redacts_the_access_token() {
+        let row = ProjectRow {
+            id: Uuid::new_v4(),
+            workspace_id: None,
+            source_id: None,
+            name: "Widgets".to_string(),
+            description: None,
+            status: "active".to_string(),
+            github_repo_url: Some("https://github.com/acme/widgets".to_string()),
+            github_access_token: Some("ghp_legacy_plaintext".to_string()),
+            created_at: None,
+            updated_at: None,
+            github_installation_id: None,
+        };
+
+        let rendered = format!("{row:?}");
+
+        assert!(!rendered.contains("ghp_legacy_plaintext"), "{rendered}");
+        assert!(rendered.contains(REDACTED), "{rendered}");
+        assert!(rendered.contains("acme/widgets"), "{rendered}");
     }
 }

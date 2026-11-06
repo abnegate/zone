@@ -1,7 +1,9 @@
 //! Project endpoints
 
 use std::collections::HashMap;
+use std::fmt;
 
+use abnegate_secret::REDACTED;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -25,6 +27,8 @@ use super::common::Timestamps;
 
 /// The statuses `projects.status` accepts.
 pub const PROJECT_STATUSES: [&str; 3] = ["active", "on_hold", "cancelled"];
+
+const INTERNAL_ERROR: &str = "Internal server error";
 
 const CONFLICTING_CREDENTIALS: &str =
     "Send either access_token or github_installation_id, not both.";
@@ -297,11 +301,25 @@ pub struct LinkSourceRequest {
 }
 
 /// Link GitHub request
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct LinkGitHubRequest {
     repo_url: String,
     access_token: Option<String>,
     github_installation_id: Option<Uuid>,
+}
+
+impl fmt::Debug for LinkGitHubRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LinkGitHubRequest")
+            .field("repo_url", &self.repo_url)
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| REDACTED),
+            )
+            .field("github_installation_id", &self.github_installation_id)
+            .finish()
+    }
 }
 
 /// Start an auto project: the brief the interview opens with.
@@ -331,19 +349,19 @@ pub async fn start_auto(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
-    Json(req): Json<AutoProjectRequest>,
+    Json(request): Json<AutoProjectRequest>,
 ) -> Result<Response, ServerError> {
     let user_id = user_id(&auth)?;
     refuse_unless_writable(&state, workspace_id, user_id).await?;
     refuse_unless_driven(&state)?;
-    let brief = req.brief.trim();
+    let brief = request.brief.trim();
     if brief.is_empty() {
         return Err(ServerError::BadRequest("A brief is required".to_string()));
     }
     if brief.chars().count() > BRIEF_CHARS {
         return Err(ServerError::BadRequest("The brief is too long".to_string()));
     }
-    let model = req
+    let model = request
         .model_name
         .as_deref()
         .map(str::trim)
@@ -446,27 +464,29 @@ pub async fn list(
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(req): Json<CreateProjectRequest>,
+    Json(request): Json<CreateProjectRequest>,
 ) -> Result<Response, ServerError> {
     let user_id = user_id(&auth)?;
-    if !workspace_members::can_write(state.db(), req.workspace_id, user_id).await? {
+    if !workspace_members::can_write(state.db(), request.workspace_id, user_id).await? {
         return Err(ServerError::Forbidden(
             "Workspace write access required".to_string(),
         ));
     }
 
-    let status = req.status.as_deref().map(known_status).transpose()?;
-    let source_id = match req.source_id {
-        Some(source_id) => Some(source_in_workspace(&state, source_id, req.workspace_id).await?),
+    let status = request.status.as_deref().map(known_status).transpose()?;
+    let source_id = match request.source_id {
+        Some(source_id) => {
+            Some(source_in_workspace(&state, source_id, request.workspace_id).await?)
+        }
         None => None,
     };
 
     let project = projects::create(
         state.db(),
         NewProject {
-            name: &req.name,
-            description: req.description.as_deref(),
-            workspace_id: Some(req.workspace_id),
+            name: &request.name,
+            description: request.description.as_deref(),
+            workspace_id: Some(request.workspace_id),
             source_id,
             status,
         },
@@ -490,13 +510,13 @@ pub async fn update(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-    Json(req): Json<UpdateProjectRequest>,
+    Json(request): Json<UpdateProjectRequest>,
 ) -> Result<Response, ServerError> {
     let (_, workspace_id) = writable(&state, &auth, id).await?;
     let user_id = user_id(&auth)?;
-    let status = req.status.as_deref().map(known_status).transpose()?;
+    let status = request.status.as_deref().map(known_status).transpose()?;
 
-    if let Some(auto) = req.auto {
+    if let Some(auto) = request.auto {
         if auto {
             refuse_unless_driven(&state)?;
         }
@@ -524,8 +544,8 @@ pub async fn update(
         projects::update_project(
             state.db(),
             id,
-            req.name.as_deref(),
-            req.description.as_deref(),
+            request.name.as_deref(),
+            request.description.as_deref(),
             status,
         )
         .await?,
@@ -555,10 +575,10 @@ pub async fn link_source(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-    Json(req): Json<LinkSourceRequest>,
+    Json(request): Json<LinkSourceRequest>,
 ) -> Result<Response, ServerError> {
     let (_, workspace_id) = writable(&state, &auth, id).await?;
-    let source_id = source_in_workspace(&state, req.source_id, workspace_id).await?;
+    let source_id = source_in_workspace(&state, request.source_id, workspace_id).await?;
 
     respond(
         &state,
@@ -583,34 +603,34 @@ pub async fn link_github(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-    Json(req): Json<LinkGitHubRequest>,
+    Json(request): Json<LinkGitHubRequest>,
 ) -> Result<Response, ServerError> {
     let (_, workspace_id) = writable(&state, &auth, id).await?;
-    if req.access_token.is_some() && req.github_installation_id.is_some() {
+    if request.access_token.is_some() && request.github_installation_id.is_some() {
         return Err(ServerError::BadRequest(CONFLICTING_CREDENTIALS.to_string()));
     }
-    let installation = match req.github_installation_id {
+    let installation = match request.github_installation_id {
         Some(installation_id) => {
             Some(attachable_installation(&state, workspace_id, installation_id).await?)
         }
         None => None,
     };
 
-    let sealed = req
+    let sealed = request
         .access_token
         .as_deref()
         .map(|token| crate::crypto::encrypt(state.encryption_key(), token))
         .transpose()
         .map_err(|error| {
             tracing::error!(%error, "Could not encrypt the repository token");
-            ServerError::Internal("Internal server error".to_string())
+            ServerError::Internal(INTERNAL_ERROR.to_string())
         })?;
     respond(
         &state,
         projects::link_github(
             state.db(),
             id,
-            &req.repo_url,
+            &request.repo_url,
             sealed.as_deref(),
             installation,
         )
@@ -858,5 +878,20 @@ mod tests {
 
         assert_eq!(request.github_installation_id, Some(installation_id));
         assert_eq!(request.access_token, None);
+    }
+
+    #[test]
+    fn debug_redacts_the_access_token() {
+        let request: LinkGitHubRequest = serde_json::from_value(json!({
+            "repo_url": "https://github.com/abnegate/zone",
+            "access_token": "ghp_plaintext_token",
+        }))
+        .unwrap();
+
+        let rendered = format!("{request:?}");
+
+        assert!(!rendered.contains("ghp_plaintext_token"), "{rendered}");
+        assert!(rendered.contains(REDACTED), "{rendered}");
+        assert!(rendered.contains("abnegate/zone"), "{rendered}");
     }
 }
