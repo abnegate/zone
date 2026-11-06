@@ -366,6 +366,43 @@ describe('RepositoryPicker listbox and selection', () => {
     expect(option(/^acme\/api/)).toBeInTheDocument();
   });
 
+  it('lists every repository again when reopened after selecting a searched one', async () => {
+    listRepositories.mockImplementation(async (_organizationId, parameters) =>
+      parameters?.query === 'zon' ? page([zone]) : firstPage
+    );
+    const { user } = renderPicker();
+    await waitForOptions(user);
+    await user.type(combobox(), 'zon');
+    await waitFor(() =>
+      expect(screen.queryByRole('option', { name: /^acme\/api/ })).not.toBeInTheDocument()
+    );
+
+    await user.click(option(/^abnegate\/zone/));
+    expect(combobox()).toHaveValue('abnegate/zone');
+    await openPopup(user);
+
+    expect(await screen.findByRole('option', { name: /^acme\/api/ })).toBeInTheDocument();
+    expect(option(/^abnegate\/zone/)).toBeInTheDocument();
+    expect(queries().at(-1)).toBe('');
+  });
+
+  it('points aria-controls at the listbox only while it is rendered', async () => {
+    const { user } = renderPicker();
+    await waitFor(() => expect(listRepositories).toHaveBeenCalled());
+    expect(combobox()).not.toHaveAttribute('aria-controls');
+
+    await waitForOptions(user);
+
+    const controls = combobox().getAttribute('aria-controls') ?? '';
+    expect(document.getElementById(controls)).toBe(
+      screen.getByRole('listbox', { name: 'Repositories' })
+    );
+
+    await user.keyboard('{Escape}');
+
+    expect(combobox()).not.toHaveAttribute('aria-controls');
+  });
+
   it('clears the selection when the user types after selecting', async () => {
     const { user, onChange } = renderPicker();
     await waitForOptions(user);
@@ -452,6 +489,42 @@ describe('RepositoryPicker popup controls', () => {
     expect(screen.getByText(/^Couldn['’]t reach GitHub for offline-org\.$/)).toBeInTheDocument();
     expect(screen.queryByText(/GitHub access for acme/)).not.toBeInTheDocument();
     expect(screen.queryByText(/reach GitHub for acme/)).not.toBeInTheDocument();
+  });
+
+  it('drops a revoked installation error once the same account is installed again', async () => {
+    listRepositories.mockImplementation(async () =>
+      page([api], {
+        installations: [
+          installation('acme', { id: 'installation-old', error: 'revoked' }),
+          installation('acme'),
+          installation('offline-org', { id: 'installation-5', error: 'unavailable' }),
+        ],
+      })
+    );
+    const { user } = renderPicker();
+    await waitForOptions(user);
+
+    expect(screen.queryByText('GitHub access for acme was revoked.')).not.toBeInTheDocument();
+    expect(screen.getByText(/^Couldn['’]t reach GitHub for offline-org\.$/)).toBeInTheDocument();
+    expect(option(/^acme\/api/)).toBeInTheDocument();
+  });
+
+  it('announces a failed refresh as an alert', async () => {
+    listRepositories.mockImplementation(async (_organizationId, parameters) => {
+      if (parameters?.refresh) {
+        throw new Error('GitHub is down');
+      }
+      return firstPage;
+    });
+    const { user } = renderPicker();
+    await waitForOptions(user);
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toBe('');
+
+    await user.click(screen.getByRole('button', { name: 'Refresh list' }));
+
+    await waitFor(() => expect(alert).toHaveTextContent(/^Couldn['’]t refresh repositories\.$/));
+    expect(screen.getByRole('alert')).toBe(alert);
   });
 
   it('links a single healthy installation as Adjust access on GitHub', async () => {
@@ -551,6 +624,20 @@ describe('RepositoryPicker empty and error states', () => {
     const loading = await screen.findByText('Loading repositories…');
     expect(loading.closest('[role="status"]')).not.toBeNull();
     expect(screen.queryByText('No GitHub account is connected.')).not.toBeInTheDocument();
+  });
+
+  it('keeps the loading status region mounted and swaps only its text', async () => {
+    const response = deferred<GitHubRepositoriesResponse>();
+    listRepositories.mockImplementation(() => response.promise);
+    renderPicker();
+
+    const status = await screen.findByRole('status');
+    await waitFor(() => expect(status).toHaveTextContent('Loading repositories…'));
+
+    response.resolve(firstPage);
+
+    await waitFor(() => expect(status.textContent).toBe(''));
+    expect(screen.getByRole('status')).toBe(status);
   });
 
   it('shows the error instead of the empty state and refetches on Retry', async () => {

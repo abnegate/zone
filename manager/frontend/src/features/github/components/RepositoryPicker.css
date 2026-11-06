@@ -123,6 +123,10 @@
   font-size: inherit;
 }
 
+.repository-picker-live:empty {
+  margin: 0;
+}
+
 .repository-picker-warning {
   color: var(--ui-warning);
 }
