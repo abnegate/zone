@@ -1,6 +1,6 @@
 import { Button } from '@zone/ui';
 import { type KeyboardEvent, type ReactNode, useId } from 'react';
-import { meetsOrganizationRole } from '../../../shared/components/ProtectedRoute';
+import { canManageOrganization } from '../../../shared/components/ProtectedRoute';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { BranchSelect, type GitHubRepository, RepositoryPicker } from '../../github';
 import { GitHubConnectionMode } from './GitHubConnectionMode';
@@ -33,8 +33,7 @@ export function GitHubConfiguration({
   const tokenFieldsId = useId();
   const { currentOrganization } = useWorkspace();
   const organizationId = currentOrganization?.id ?? null;
-  const role = currentOrganization?.role;
-  const canManage = role !== undefined && meetsOrganizationRole(role, 'admin');
+  const canManage = canManageOrganization(currentOrganization?.role);
   const tokenMode = mode === GitHubConnectionMode.Token;
 
   return (

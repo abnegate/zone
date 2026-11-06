@@ -32,7 +32,7 @@ export function GitHubRemoveDialog({ app, onConfirm, onClose }: GitHubRemoveDial
       title={`Remove ${app.owner_login}?`}
       size="sm"
     >
-      <div className="confirm-modal github-remove">
+      <div className="github-remove">
         <p>Sources using this account stop working until they are reconnected.</p>
         <Checkbox
           id={uninstallId}

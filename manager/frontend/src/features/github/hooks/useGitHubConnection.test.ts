@@ -137,6 +137,42 @@ describe('useGitHubConnection', () => {
     expect(getConnection.mock.calls.length).toBeGreaterThan(reads);
   });
 
+  it('reports that it is fetching while a refresh is in flight', async () => {
+    const { result } = await renderLoaded();
+    expect(result.current.fetching).toBe(false);
+    getConnection.mockImplementation(() => new Promise(() => {}));
+
+    void result.current.refresh();
+
+    await waitFor(() => {
+      expect(result.current.fetching).toBe(true);
+    });
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('rejects every action without an organization instead of throwing', async () => {
+    const { result } = renderHook(() => useGitHubConnection(null), { wrapper: createWrapper() });
+    const actions: [string, () => Promise<unknown>][] = [
+      ['registerApp', () => result.current.registerApp(null)],
+      ['createInstallation', () => result.current.createInstallation('app-1')],
+      ['syncInstallations', () => result.current.syncInstallations()],
+      ['removeInstallation', () => result.current.removeInstallation('inst-1', true)],
+      ['deleteApp', () => result.current.deleteApp('app-1')],
+    ];
+
+    for (const [name, action] of actions) {
+      let pending: Promise<unknown> | undefined;
+      expect(() => {
+        pending = action();
+      }, `${name} threw synchronously`).not.toThrow();
+      await expect(pending, `${name} did not reject`).rejects.toThrow(
+        'An organization is required to manage GitHub'
+      );
+    }
+    expect(registerApp).not.toHaveBeenCalled();
+    expect(createInstallation).not.toHaveBeenCalled();
+  });
+
   it('registers an app and hands back the registration', async () => {
     const registration = {
       action: 'https://github.com/organizations/acme/settings/apps/new?state=state-1',

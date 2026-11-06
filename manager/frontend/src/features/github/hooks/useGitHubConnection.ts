@@ -17,7 +17,7 @@ function requireOrganization(organizationId: string | null): string {
 export function useGitHubConnection(organizationId: string | null) {
   const queryClient = useQueryClient();
 
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: githubQueryKeys.connection(organizationId),
     queryFn: organizationId === null ? skipToken : () => githubApi.getConnection(organizationId),
   });
@@ -35,13 +35,13 @@ export function useGitHubConnection(organizationId: string | null) {
   }, [organizationId, refetch]);
 
   const registerApp = useCallback(
-    (owner: string | null): Promise<GitHubAppRegistration> =>
+    async (owner: string | null): Promise<GitHubAppRegistration> =>
       githubApi.registerApp(requireOrganization(organizationId), owner),
     [organizationId]
   );
 
   const createInstallation = useCallback(
-    (appId: string): Promise<string> =>
+    async (appId: string): Promise<string> =>
       githubApi.createInstallation(requireOrganization(organizationId), appId),
     [organizationId]
   );
@@ -75,6 +75,7 @@ export function useGitHubConnection(organizationId: string | null) {
     apps: data?.apps ?? NO_APPS,
     installations: data?.installations ?? NO_INSTALLATIONS,
     loading: isLoading,
+    fetching: isFetching,
     error: error ? error.message : null,
     refresh,
     registerApp,

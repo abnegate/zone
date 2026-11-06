@@ -15,6 +15,10 @@ export function meetsOrganizationRole(
   return ORGANIZATION_RANK[role] >= ORGANIZATION_RANK[required];
 }
 
+export function canManageOrganization(role: OrgRole | undefined): boolean {
+  return role !== undefined && meetsOrganizationRole(role, 'admin');
+}
+
 function Loading() {
   return (
     <div className="loading-container">

@@ -1,6 +1,6 @@
 import { Button } from '@zone/ui';
 import { useCallback, useMemo, useState } from 'react';
-import { meetsOrganizationRole } from '../../../shared/components/ProtectedRoute';
+import { canManageOrganization } from '../../../shared/components/ProtectedRoute';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { getErrors } from '../../../validation';
 import { formStateFromConfig, getSourceById, getSourceLabel } from '../config';
@@ -36,8 +36,7 @@ export function SourceDetail({
   const definition = getSourceById(source.source_type);
   const { currentOrganization } = useWorkspace();
   const organizationId = currentOrganization?.id ?? null;
-  const role = currentOrganization?.role;
-  const canManage = role !== undefined && meetsOrganizationRole(role, 'admin');
+  const canManage = canManageOrganization(currentOrganization?.role);
   const baseline = useMemo(
     () => formStateFromConfig(source.source_type, source.config),
     [source.source_type, source.config]

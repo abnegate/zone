@@ -2,9 +2,10 @@ import { Button, TabsContent, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { client } from '../../../../api/client';
-import { meetsOrganizationRole } from '../../../../shared/components/ProtectedRoute';
+import { canManageOrganization } from '../../../../shared/components/ProtectedRoute';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
+import { GITHUB_TAB, GitHubSearchParameter } from '../../../github/callback';
 import { useModels } from '../../../models';
 import {
   AgentSignIn,
@@ -36,7 +37,7 @@ import {
 } from '../components';
 import type { AiProvider, AiSettings, Workspace } from '../types';
 
-const TABS = ['ai', 'members', 'devices', 'invitations', 'billing', 'audit', 'github'] as const;
+const TABS = ['ai', 'members', 'devices', 'invitations', 'billing', 'audit', GITHUB_TAB] as const;
 
 type TabType = (typeof TABS)[number];
 
@@ -52,7 +53,7 @@ export default function OrgSettingsPage() {
   const { models: installedModels } = useModels();
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const requestedTab = searchParams.get('tab');
+  const requestedTab = searchParams.get(GitHubSearchParameter.Tab);
   const [activeTab, setActiveTab] = useState<TabType>(() =>
     isTab(requestedTab) ? requestedTab : 'ai'
   );
@@ -168,7 +169,7 @@ export default function OrgSettingsPage() {
       <TabsTrigger value="invitations">Invitations</TabsTrigger>
       <TabsTrigger value="billing">Billing</TabsTrigger>
       <TabsTrigger value="audit">Audit Logs</TabsTrigger>
-      <TabsTrigger value="github">GitHub</TabsTrigger>
+      <TabsTrigger value={GITHUB_TAB}>GitHub</TabsTrigger>
     </TabsList>
   );
 
@@ -186,7 +187,7 @@ export default function OrgSettingsPage() {
     }
     setActiveTab(value);
     const next = new URLSearchParams(searchParams);
-    next.set('tab', value);
+    next.set(GitHubSearchParameter.Tab, value);
     setSearchParams(next, { replace: true });
   };
 
@@ -219,14 +220,11 @@ export default function OrgSettingsPage() {
       <TabsContent value="audit">
         <AuditLogsSection orgId={currentOrganization.id} />
       </TabsContent>
-      <TabsContent value="github">
+      <TabsContent value={GITHUB_TAB}>
         <GitHubSection
           key={currentOrganization.id}
           organizationId={currentOrganization.id}
-          canManage={
-            currentOrganization.role !== undefined &&
-            meetsOrganizationRole(currentOrganization.role, 'admin')
-          }
+          canManage={canManageOrganization(currentOrganization.role)}
         />
       </TabsContent>
       <TabsContent value="ai">
