@@ -285,11 +285,11 @@ impl Store {
     ) -> Result<Option<Vec<Uuid>>, Error> {
         let mut transaction = self.pool.begin().await?;
         self.lock(&mut transaction, lease).await?;
-        self.materialize(&mut transaction).await?;
-        self.recover_in(&mut transaction).await?;
         if !crate::db::chat_subagents::seize_turn(&mut transaction, self.chat_id, id).await? {
             return Ok(None);
         }
+        self.materialize(&mut transaction).await?;
+        self.recover_in(&mut transaction).await?;
         let turn=sqlx::query("SELECT id,user_message_id FROM chat_turns WHERE chat_id=$1 AND (id=$2 OR user_message_id=$2)").bind(self.chat_id).bind(id).fetch_optional(&mut *transaction).await?;
         if let Some(turn) = turn {
             let owner: Uuid = turn.get("id");

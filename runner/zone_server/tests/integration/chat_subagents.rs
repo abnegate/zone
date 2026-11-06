@@ -607,6 +607,48 @@ async fn deleting_a_message_through_its_chats_store_removes_a_subagent_written_w
 }
 
 #[tokio::test]
+async fn deleting_a_running_turns_message_while_its_keeper_writes_does_not_deadlock() {
+    let pool = PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("a test database"))
+        .await
+        .expect("the test database");
+    let chat = create_chat(&pool, None, "Subagents", "sonnet", false, true)
+        .await
+        .expect("a chat")
+        .id;
+    let message = turn(&pool, chat, TURN_RUNNING).await;
+    sqlx::query(
+        "INSERT INTO messages (id, chat_id, role, content) VALUES ($1, $2, 'assistant', 'Working')",
+    )
+    .bind(message)
+    .bind(chat)
+    .execute(&pool)
+    .await
+    .expect("the turn's reply");
+    started(&pool, chat, "toolu_01Agent", Some(message)).await;
+    let store = Store::new(pool.clone(), chat, None);
+    let lease = store
+        .acquire(Uuid::new_v4(), Duration::from_secs(30))
+        .await
+        .expect("the chat's lease");
+
+    let (removed, written, left) = delete_during_a_write(&pool, chat, message, {
+        let store = store.clone();
+        let lease = lease.clone();
+        async move {
+            store
+                .delete_message(&lease, message)
+                .await
+                .expect("the deletion, which waits for the keeper instead of deadlocking with it")
+        }
+    })
+    .await;
+
+    assert_eq!(removed, Some(vec![written]));
+    assert_eq!(left, Vec::<Uuid>::new(), "no subagent outlives its message");
+    store.release(&lease).await.expect("the lease's release");
+}
+
+#[tokio::test]
 async fn another_workspaces_member_cannot_see_a_chats_subagents() {
     let workspace = Workspace::new().await;
     chat_subagents::record(
