@@ -1,13 +1,8 @@
-use std::time::Duration;
-
-use abnegate_llm::catalog::CatalogError;
-use abnegate_llm::catalog::ModelEntry;
-use futures::stream;
-use futures::stream::StreamExt;
-use reqwest::Client;
-use reqwest::Proxy;
-use reqwest::header::ACCEPT;
+use abnegate_llm::catalog::{CatalogError, ModelEntry};
+use futures::stream::{self, StreamExt};
+use reqwest::{Client, Proxy, header::ACCEPT};
 use serde_json::Value;
+use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -43,11 +38,6 @@ pub(super) async fn attach(
     stream::iter(models)
         .map(|mut model| async move {
             model.size = fetch(&model.name, client, registry_url).await;
-            if let Some(sizes) = model.sizes.as_mut() {
-                for variant in sizes.iter_mut() {
-                    variant.size = fetch(&variant.name, client, registry_url).await;
-                }
-            }
             model
         })
         .buffered(LOOKUP_CONCURRENCY)
@@ -89,15 +79,14 @@ fn reference(name: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::Json;
-    use axum::Router;
-    use axum::http::HeaderMap;
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    use axum::routing::get;
+    use axum::{
+        Json, Router,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::get,
+    };
     use serde_json::json;
-    use std::sync::Arc;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn a_reference_defaults_its_tag() {
