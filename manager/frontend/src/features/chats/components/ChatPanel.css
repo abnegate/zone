@@ -425,6 +425,8 @@
 .chat-change-threads-icon {
   width: 0.75rem;
   height: 0.75rem;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .chat-change-threads-open {
