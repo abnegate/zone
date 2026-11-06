@@ -43,6 +43,7 @@ pub(crate) async fn tools(chat: Uuid) -> Arc<ChatTools> {
             chat_id: Some(chat),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         })
         .await,
     )

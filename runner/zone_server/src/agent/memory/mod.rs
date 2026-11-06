@@ -1041,6 +1041,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         }
     }
 
@@ -1501,6 +1502,7 @@ mod tests {
                 chat_id: Some(Uuid::new_v4()),
                 user_id: user,
                 offline: false,
+                origin: crate::db::tasks::Origin::Member,
             },
             pool,
             organization,

@@ -6,6 +6,8 @@ use sqlx::{PgConnection, PgPool};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use super::tasks::Origin;
+
 /// The last thing a model reads before it decides what to do while a runner
 /// runs, which is why the waiting section pins this one too.
 pub(crate) const RUNNER_STARTED: &str = "Runner started. Wait for it with wait_for, then read get_task_run and tail_task_log; do not claim the work finished.";
@@ -117,6 +119,7 @@ pub async fn create_task(
     workspace_id: Uuid,
     user_id: Uuid,
     chat_id: Option<Uuid>,
+    origin: Origin,
     input: Task,
 ) -> DbResult<Value> {
     let (title, title_pending) = super::tasks::stored_title(
@@ -131,8 +134,8 @@ pub async fn create_task(
     if let Some(assignee) = input.assignee_id {
         authorize(&mut transaction, workspace_id, assignee, false).await?;
     }
-    let result = sqlx::query_scalar("INSERT INTO tasks (workspace_id, title, description, assignee_id, created_by, title_pending, chat_id) VALUES ($1, $2, $3, $4, $5, $6, (SELECT id FROM chats WHERE id = $7 AND workspace_id = $1)) RETURNING to_jsonb(tasks.*)")
-        .bind(workspace_id).bind(title).bind(input.description).bind(input.assignee_id).bind(user_id).bind(title_pending).bind(chat_id).fetch_one(&mut *transaction).await?;
+    let result = sqlx::query_scalar("INSERT INTO tasks (workspace_id, title, description, assignee_id, created_by, title_pending, chat_id, origin) VALUES ($1, $2, $3, $4, $5, $6, (SELECT id FROM chats WHERE id = $7 AND workspace_id = $1), $8) RETURNING to_jsonb(tasks.*)")
+        .bind(workspace_id).bind(title).bind(input.description).bind(input.assignee_id).bind(user_id).bind(title_pending).bind(chat_id).bind(origin.as_str()).fetch_one(&mut *transaction).await?;
     transaction.commit().await?;
     Ok(result)
 }
@@ -297,6 +300,7 @@ pub async fn start_task(
     workspace_id: Uuid,
     user_id: Uuid,
     chat_id: Option<Uuid>,
+    origin: Origin,
     input: StartTask,
 ) -> DbResult<Value> {
     if input.description.trim().is_empty() {
@@ -323,6 +327,7 @@ pub async fn start_task(
             source_id: input.source_id,
             created_by: Some(user_id),
             chat_id,
+            origin,
         },
     )
     .await
@@ -589,6 +594,7 @@ mod tests {
             workspace,
             user,
             None,
+            Origin::Member,
             Task {
                 title: Some("Ship".into()),
                 description: "Keep".into(),
@@ -720,6 +726,7 @@ mod tests {
                 workspace,
                 user,
                 None,
+                Origin::Member,
                 Task {
                     title: Some("No".into()),
                     description: String::new(),
@@ -1691,6 +1698,7 @@ mod tests {
             workspace,
             user,
             None,
+            Origin::Member,
             serde_json::from_value(
                 json!({"title":"atomic admission","description":"Inject a run failure"}),
             )
@@ -1920,6 +1928,7 @@ mod tests {
                 source_id: None,
                 created_by: Some(user),
                 chat_id: None,
+                origin: super::super::tasks::Origin::Member,
             },
         )
         .await

@@ -176,6 +176,7 @@ mod tests {
             fixture.workspace,
             fixture.user,
             Some(fixture.chat),
+            crate::db::tasks::Origin::Member,
             created("Write the notes"),
         )
         .await
@@ -185,6 +186,7 @@ mod tests {
             fixture.workspace,
             fixture.user,
             Some(fixture.chat),
+            crate::db::tasks::Origin::Member,
             started("Fix the build"),
         )
         .await
@@ -228,6 +230,7 @@ mod tests {
             fixture.workspace,
             fixture.user,
             Some(fixture.chat),
+            crate::db::tasks::Origin::Member,
             started("Retry"),
         )
         .await
@@ -270,6 +273,7 @@ mod tests {
             fixture.workspace,
             fixture.user,
             Some(other),
+            crate::db::tasks::Origin::Member,
             created("Elsewhere"),
         )
         .await
@@ -279,6 +283,7 @@ mod tests {
             fixture.workspace,
             fixture.user,
             None,
+            crate::db::tasks::Origin::Member,
             created("Unattached"),
         )
         .await
@@ -301,6 +306,7 @@ mod tests {
             fixture.workspace,
             fixture.user,
             Some(foreign),
+            crate::db::tasks::Origin::Member,
             created("Kept apart"),
         )
         .await
@@ -310,6 +316,7 @@ mod tests {
             fixture.workspace,
             fixture.user,
             Some(foreign),
+            crate::db::tasks::Origin::Member,
             started("Kept apart"),
         )
         .await
@@ -334,6 +341,7 @@ mod tests {
             fixture.workspace,
             fixture.user,
             Some(fixture.chat),
+            crate::db::tasks::Origin::Member,
             created("Members only"),
         )
         .await
@@ -368,6 +376,7 @@ mod tests {
             fixture.workspace,
             fixture.user,
             Some(fixture.chat),
+            crate::db::tasks::Origin::Member,
             created("Survivor"),
         )
         .await

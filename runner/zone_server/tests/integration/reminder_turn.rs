@@ -11,8 +11,8 @@
 //! through.
 use crate::common;
 
-use crate::common::context::{Harness, answer};
-use serde_json::Value;
+use crate::common::context::{Harness, answer, calls, successful, tool};
+use serde_json::{Value, json};
 use sqlx::Connection;
 use std::time::Duration;
 use uuid::Uuid;
@@ -341,4 +341,81 @@ async fn a_due_prompt_is_answered_in_its_chat_by_the_worker_that_claimed_it() {
             .unwrap();
     assert_eq!(status, "delivered", "a one-shot is finished when it fires");
     assert_eq!(fired, 1);
+}
+
+async fn origins(harness: &Harness) -> Vec<String> {
+    sqlx::query_scalar("SELECT origin FROM tasks WHERE chat_id = $1 ORDER BY created_at")
+        .bind(harness.chat)
+        .fetch_all(&harness.pool)
+        .await
+        .expect("the chat's tasks")
+}
+
+fn filing(id: &str) -> wiremock::ResponseTemplate {
+    calls(
+        "",
+        vec![tool(
+            id,
+            "create_task",
+            json!({"title": "Dependency sweep", "description": "Bump what is red"}),
+        )],
+    )
+}
+
+/// A task the agent files during a firing is the reminder's doing, so the
+/// project it lands in is not one a member used; one filed during a typed
+/// turn is the member's.
+#[tokio::test]
+async fn a_task_a_firing_files_is_recorded_as_the_reminders() {
+    let _dispatch = dispatching().await;
+    let harness = Harness::new(
+        Some(200_000),
+        true,
+        vec![filing("typed"), answer("Filed it.")],
+    )
+    .await;
+    successful(&harness.turn("File a dependency sweep").await);
+    assert_eq!(origins(&harness).await, ["member"]);
+
+    let user: Uuid = sqlx::query_scalar(
+        "SELECT user_id FROM workspace_members WHERE workspace_id = $1 AND role = 'owner' \
+         AND is_active LIMIT 1",
+    )
+    .bind(harness.workspace)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the harness workspace has an owner");
+    let created = zone_server::db::reminders::create(
+        &harness.pool,
+        harness.workspace,
+        user,
+        harness.chat,
+        zone_server::db::reminders::Reminder {
+            content: "Dependency sweep".into(),
+            due_at: (chrono::Utc::now() + chrono::Duration::hours(1)).fixed_offset(),
+            rrule: None,
+            prompt: Some("File a dependency sweep.".into()),
+            timing_mode: None,
+            time_zone: None,
+        },
+    )
+    .await
+    .expect("a prompt-bearing reminder is storable");
+    let reminder: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+    harness.script.push(filing("fired"));
+    harness.script.push(answer("Filed another."));
+    make_due(&harness, reminder).await;
+
+    let worker = zone_server::workers::reminders::spawn(common::create_test_state(
+        harness.config.clone(),
+        harness.pool.clone(),
+    ));
+    until_stored(&harness, reminder, 4).await;
+    worker.abort();
+
+    assert_eq!(
+        origins(&harness).await,
+        ["member", "reminder"],
+        "the firing's task carries the reminder as its origin"
+    );
 }
