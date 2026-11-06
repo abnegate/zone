@@ -443,6 +443,7 @@ mod tests {
             source_id: None,
             created_by: Some(watched.user),
             chat_id: None,
+            origin: tasks::Origin::Automation,
         }
     }
 

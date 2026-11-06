@@ -21,7 +21,7 @@ use super::mergeable::Mergeable;
 use super::status::Status;
 use crate::db::chat_pull_requests::{self, Claim, PullRequestRow};
 use crate::db::projects;
-use crate::db::tasks::Create;
+use crate::db::tasks::{Create, Origin};
 use crate::state::AppState;
 
 /// Why a pull request wants fixing, in the words the run is asked to act on.
@@ -180,6 +180,7 @@ async fn start(
         source_id: row.source_id,
         created_by: Some(fix.actor),
         chat_id: Some(row.chat_id),
+        origin: Origin::Automation,
     };
     let claim = Claim {
         id: row.id,
