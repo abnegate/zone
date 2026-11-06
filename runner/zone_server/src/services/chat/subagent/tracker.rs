@@ -68,6 +68,7 @@ mod tests {
     use crate::db::chats::create_chat;
     use crate::db::context::RUNNING as TURN_RUNNING;
     use crate::services::chat::subagent::ChatSubagent;
+    use crate::services::chat::subagent::keeper::FINISH_ATTEMPTS;
 
     const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -116,6 +117,16 @@ mod tests {
         /// A held tracker whose first `failures` writes fail as an outage
         /// would, and the count of those still to fail.
         fn failing(&self, failures: usize) -> (Tracker, Announced, Arc<Notify>, Arc<AtomicUsize>) {
+            self.deadlocking(failures, 0)
+        }
+
+        /// A failing tracker whose first `deadlocks` final transactions are
+        /// aborted as deadlock victims just before their stop.
+        fn deadlocking(
+            &self,
+            failures: usize,
+            deadlocks: usize,
+        ) -> (Tracker, Announced, Arc<Notify>, Arc<AtomicUsize>) {
             let (announce, announced) = mpsc::unbounded_channel();
             let mut keeper = Keeper::new(
                 self.state.clone(),
@@ -126,6 +137,7 @@ mod tests {
             let hold = Arc::new(Notify::new());
             keeper.hold = Some(hold.clone());
             keeper.outage.store(failures, Ordering::SeqCst);
+            keeper.deadlocks.store(deadlocks, Ordering::SeqCst);
             let outage = keeper.outage.clone();
             (Tracker::kept(keeper), announced, hold, outage)
         }
@@ -613,12 +625,14 @@ mod tests {
 
     /// A turn whose subagent `toolu_01Agent` was announced running with step
     /// `toolu_open` open, and then finished while the first `failures`
-    /// transactions after that fail as an outage would.
+    /// transactions after that fail as an outage would, and the first
+    /// `deadlocks` of its final transactions deadlock.
     async fn finished_in_an_outage(
         turn: &Turn,
         failures: usize,
+        deadlocks: usize,
     ) -> (ChatSubagent, Vec<(ChatSubagent, Vec<SubagentStep>)>) {
-        let (tracker, mut announced, hold, outage) = turn.failing(0);
+        let (tracker, mut announced, hold, outage) = turn.deadlocking(0, deadlocks);
         hold.notify_one();
         tracker.track(&stepped(
             "toolu_01Agent",
@@ -642,7 +656,7 @@ mod tests {
     async fn an_outcome_whose_last_retry_failed_is_written_with_the_turns_final_stop() {
         let turn = Turn::new().await;
 
-        let (started, announcements) = finished_in_an_outage(&turn, 2).await;
+        let (started, announcements) = finished_in_an_outage(&turn, 2, 0).await;
 
         assert_eq!(announcements.len(), 1, "{announcements:?}");
         let (subagent, steps) = &announcements[0];
@@ -668,7 +682,8 @@ mod tests {
     async fn a_final_stop_that_fails_leaves_the_outcome_and_the_stop_to_the_sweep() {
         let turn = Turn::new().await;
 
-        let (started, announcements) = finished_in_an_outage(&turn, 3).await;
+        let every_try = 2 + usize::try_from(FINISH_ATTEMPTS).expect("a few tries");
+        let (started, announcements) = finished_in_an_outage(&turn, every_try, 0).await;
 
         assert_eq!(announcements, [], "nothing was written to announce");
         assert_eq!(
@@ -679,6 +694,74 @@ mod tests {
         assert_eq!(
             turn.steps(&started).await,
             [step("toolu_open", StepStatus::Running)]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_outcome_whose_final_stop_deadlocked_is_written_when_it_is_tried_again() {
+        let turn = Turn::new().await;
+
+        let (started, announcements) = finished_in_an_outage(&turn, 2, 1).await;
+
+        assert_eq!(announcements.len(), 1, "{announcements:?}");
+        let (subagent, steps) = &announcements[0];
+        assert_eq!(subagent.id, started.id);
+        assert_eq!(
+            subagent.status,
+            SubagentStatus::Completed,
+            "the deadlock victim's retry still writes the outcome"
+        );
+        assert_eq!(subagent.summary.as_deref(), Some("Looks good"));
+        assert_eq!(steps, &[step("toolu_open", StepStatus::Failed)]);
+        assert_eq!(
+            turn.status(turn.chat_id, "toolu_01Agent").await,
+            SubagentStatus::Completed.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_outcome_the_database_refuses_drops_alone_from_the_turns_final_stop() {
+        let turn = Turn::new().await;
+        turn.running(turn.chat_id, "toolu_refused", Some(turn.message_id))
+            .await;
+        let (tracker, announced, hold, outage) = turn.failing(4);
+
+        tracker.track(&Subagent {
+            summary: Some("Looks good".to_string()),
+            ..finished("toolu_kept")
+        });
+        tracker.track(&Subagent {
+            summary: Some("Nul\0byte".to_string()),
+            ..finished("toolu_refused")
+        });
+        drop(tracker);
+        hold.notify_one();
+
+        let heard: Vec<(String, SubagentStatus, Option<String>)> = rest(announced)
+            .await
+            .into_iter()
+            .map(|(subagent, _)| (subagent.external_id, subagent.status, subagent.summary))
+            .collect();
+        assert_eq!(outage.load(Ordering::SeqCst), 0, "every failure was met");
+        assert_eq!(
+            heard,
+            [
+                (
+                    "toolu_kept".to_string(),
+                    SubagentStatus::Completed,
+                    Some("Looks good".to_string())
+                ),
+                ("toolu_refused".to_string(), SubagentStatus::Stopped, None),
+            ]
+        );
+        assert_eq!(
+            turn.status(turn.chat_id, "toolu_kept").await,
+            SubagentStatus::Completed.as_str()
+        );
+        assert_eq!(
+            turn.status(turn.chat_id, "toolu_refused").await,
+            SubagentStatus::Stopped.as_str(),
+            "the turn's stop lands without the update it could not write"
         );
     }
 

@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
-use sqlx::PgConnection;
+use sqlx::{Acquire, PgConnection, Postgres, Transaction};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 use zone_core::llm::{Subagent, SubagentStatus, SubagentStep};
@@ -17,6 +18,14 @@ use crate::state::AppState;
 /// later try: connection exceptions, rolled-back transactions, insufficient
 /// resources and operator intervention.
 const TRANSIENT_CLASSES: [&str; 4] = ["08", "40", "53", "57"];
+
+/// How many times a turn's final transaction is tried before what it left
+/// running is left to the sweep. Another stop of the same rows can abort it
+/// as a deadlock, and an outage can outlast a single try.
+pub(super) const FINISH_ATTEMPTS: u32 = 3;
+
+/// How much longer each try of a turn's final transaction waits than the last.
+const FINISH_BACKOFF: Duration = Duration::from_millis(100);
 
 /// A subagent as a write left it, with the steps that write changed.
 type Written = (SubagentRow, Vec<SubagentStep>);
@@ -38,6 +47,10 @@ pub(super) struct Keeper {
     /// How many transactions a test has made fail as an outage would.
     #[cfg(test)]
     pub(super) outage: Arc<std::sync::atomic::AtomicUsize>,
+    /// How many final transactions a test has made deadlock just before
+    /// their stop.
+    #[cfg(test)]
+    pub(super) deadlocks: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Keeper {
@@ -58,6 +71,8 @@ impl Keeper {
             hold: None,
             #[cfg(test)]
             outage: Arc::default(),
+            #[cfg(test)]
+            deadlocks: Arc::default(),
         }
     }
 
@@ -146,18 +161,36 @@ impl Keeper {
     /// Writes the updates still retained and stops the subagents the turn left
     /// running, all in one transaction, and returns every subagent it changed
     /// in the order it changed them. A reported outcome is written before the
-    /// stop, so the stop never hides it, and when the transaction fails neither
-    /// lands: the turn's subagents stay running for the sweep to stop.
+    /// stop, so the stop never hides it. A transaction that fails on what a
+    /// later try can get past is tried again, up to [`FINISH_ATTEMPTS`] in
+    /// all; when the last fails, neither lands, and the turn's subagents stay
+    /// running for the sweep to stop.
     async fn finish(&self) -> DbResult<Vec<Written>> {
+        let mut attempt = 1;
+        loop {
+            match self.finish_once().await {
+                Err(error) if attempt < FINISH_ATTEMPTS && transient(&error) => {
+                    tracing::warn!(chat = %self.chat_id, attempt, %error, "could not finish a turn's subagents yet");
+                    tokio::time::sleep(FINISH_BACKOFF * attempt).await;
+                    attempt += 1;
+                }
+                finished => return finished,
+            }
+        }
+    }
+
+    async fn finish_once(&self) -> DbResult<Vec<Written>> {
         #[cfg(test)]
         self.outage()?;
         let mut transaction = self.state.db().begin().await?;
         let mut written = Vec::with_capacity(self.retained.len());
         if chat_subagents::hold_turn(&mut *transaction, self.chat_id, self.message_id).await? {
             for pending in &self.retained {
-                written.push(self.store(&mut transaction, pending).await?);
+                written.extend(self.store_alone(&mut transaction, pending).await?);
             }
         }
+        #[cfg(test)]
+        self.deadlock(&mut transaction).await?;
         let stopped =
             chat_subagents::stop(&mut *transaction, self.chat_id, self.message_id).await?;
         transaction.commit().await?;
@@ -167,6 +200,29 @@ impl Keeper {
                 .map(|Stopped { subagent, failed }| (subagent, failed.0)),
         );
         Ok(written)
+    }
+
+    /// Stores `pending` in a savepoint of `transaction`, so an update the
+    /// database refuses for good is dropped alone, and returns what it wrote,
+    /// or `None` when it was dropped.
+    async fn store_alone(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        pending: &Pending,
+    ) -> DbResult<Option<Written>> {
+        let mut savepoint = transaction.begin().await?;
+        match self.store(&mut savepoint, pending).await {
+            Ok(written) => {
+                savepoint.commit().await?;
+                Ok(Some(written))
+            }
+            Err(error) if transient(&error) => Err(error),
+            Err(error) => {
+                savepoint.rollback().await?;
+                tracing::warn!(chat = %self.chat_id, subagent = %pending.update.id, %error, "could not record a subagent's update");
+                Ok(None)
+            }
+        }
     }
 
     async fn store(&self, connection: &mut PgConnection, pending: &Pending) -> DbResult<Written> {
@@ -210,6 +266,23 @@ impl Keeper {
             Ok(_) => Err(sqlx::Error::PoolTimedOut),
             Err(_) => Ok(()),
         }
+    }
+
+    #[cfg(test)]
+    async fn deadlock(&self, connection: &mut PgConnection) -> DbResult<()> {
+        let due = self.deadlocks.try_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |left| left.checked_sub(1),
+        );
+        if due.is_ok() {
+            sqlx::query(
+                "DO $$ BEGIN RAISE EXCEPTION 'deadlock detected' USING ERRCODE = 'deadlock_detected'; END $$",
+            )
+            .execute(connection)
+            .await?;
+        }
+        Ok(())
     }
 
     async fn settled(&mut self, stopped: DbResult<Vec<Stopped>>, failure: &'static str) {
