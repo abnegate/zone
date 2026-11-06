@@ -54,10 +54,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::services::github_app::tenant::Tenant;
 
     fn scope() -> Scope {
         Scope {
-            workspace_id: Uuid::new_v4(),
+            tenant: Tenant::Workspace(Uuid::new_v4()),
             installation: Uuid::new_v4(),
         }
     }

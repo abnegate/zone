@@ -1,6 +1,9 @@
 //! Which failures mean GitHub stopped accepting the credential a call was given.
 
 use abnegate_vcs::PullRequestError;
+use abnegate_vcs::pull_request::ApplicationError;
+
+const UNAUTHORIZED: u16 = 401;
 
 /// A failure that may mean the credential was refused, so a freshly minted
 /// one could succeed where it did not.
@@ -11,6 +14,12 @@ pub trait Unauthenticated {
 impl Unauthenticated for PullRequestError {
     fn unauthenticated(&self) -> bool {
         matches!(self, Self::AuthenticationFailed)
+    }
+}
+
+impl Unauthenticated for ApplicationError {
+    fn unauthenticated(&self) -> bool {
+        matches!(self, Self::Status(UNAUTHORIZED))
     }
 }
 
@@ -27,6 +36,26 @@ mod tests {
             PullRequestError::NotFound,
             PullRequestError::RateLimited,
             PullRequestError::GitHubApi("server error".to_string()),
+        ] {
+            assert!(!error.unauthenticated(), "{error}");
+        }
+    }
+
+    #[test]
+    fn only_a_401_counts_as_an_unauthenticated_application_call() {
+        assert!(ApplicationError::Status(401).unauthenticated());
+
+        for error in [
+            ApplicationError::Status(403),
+            ApplicationError::Status(404),
+            ApplicationError::Status(500),
+            ApplicationError::InvalidOrigin,
+            ApplicationError::Client,
+            ApplicationError::PrivateKey,
+            ApplicationError::Signing,
+            ApplicationError::Transport("connection refused".to_string()),
+            ApplicationError::Response,
+            ApplicationError::InvalidCode,
         ] {
             assert!(!error.unauthenticated(), "{error}");
         }
