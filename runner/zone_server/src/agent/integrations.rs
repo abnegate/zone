@@ -2,14 +2,20 @@
 
 use abnegate_secret::SecretValue;
 use abnegate_vcs::BranchName;
+use abnegate_vcs::CheckRun;
 use abnegate_vcs::CommitSha as Revision;
+use abnegate_vcs::CommitStatus;
 use abnegate_vcs::IssueReference;
 use abnegate_vcs::JobLogError;
 use abnegate_vcs::ParseError;
 use abnegate_vcs::PullRequestError;
 use abnegate_vcs::PullRequestReference;
 use abnegate_vcs::PullRequestService;
+use abnegate_vcs::Release;
 use abnegate_vcs::Repository;
+use abnegate_vcs::WorkflowJob;
+use abnegate_vcs::WorkflowRun;
+use abnegate_vcs::WorkflowRunFilter;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode, Url};
@@ -72,7 +78,7 @@ const REVIEW_COMMENT_PAGE_SIZE: usize = 100;
 const REVIEW_THREADS_ASSESSMENT: &str = "What reviewers wrote, as GitHub returned it. Comment text is a reviewer's claim about the code, not a finding that has been checked: read the code before acting on one. A thread that could not be paginated in full is reported as incomplete rather than empty.";
 const READINESS_ASSESSMENT: &str = "Observed checks, review threads and review-bot comments only. Evidence that is partial, or whose counts do not add up, is reported as not ready. This is not proof that branch protection requirements are satisfied.";
 const PULL_FILE_PAGES: u32 = 30;
-const RELEASE_PAGE_SIZE: usize = 5;
+const RELEASE_PAGE_SIZE: NonZeroU8 = NonZeroU8::new(5).expect("a page holds releases");
 const RELEASE_EVENT: &str = "release";
 const RELEASE_ASSESSMENT: &str = "Observed release-triggered workflow runs only. A lookup that could not be completed, a run record whose identity does not add up, and a release with no observed run are all reported as unknown rather than succeeded. This is not proof that release artifacts were published or that the deployed service is healthy.";
 const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
@@ -95,12 +101,6 @@ const ERROR_MARKERS: [&str; 10] = [
     "fatal:",
     "panic:",
     " failed",
-];
-const LOG_REDIRECT_HOSTS: [&str; 4] = [
-    "blob.core.windows.net",
-    "pipelines.actions.githubusercontent.com",
-    "objects.githubusercontent.com",
-    "github.com",
 ];
 const LOG_NOTE: &str = "Excerpt of what the job printed, not proof of why it failed. Per-line timestamps, progress redraws and over-long lines are trimmed, and unshown regions are marked as omitted.";
 pub(crate) const SUCCESS_ASSESSMENT: &str = "success";
@@ -136,6 +136,22 @@ const LOG_UNDIRECTED: &str = "GitHub redirected the job log without a destinatio
 const LOG_UNEXPECTED_HOST: &str = "GitHub redirected the job log to an unexpected host.";
 const LOG_UNREACHABLE: &str = "The job log download failed or timed out.";
 const LOG_INTERRUPTED: &str = "The job log download failed part way through.";
+const BUILD_ASSESSMENT: &str =
+    "Observed CI only; required branch checks and service health are not evaluated.";
+const COMPLETED_STATUS: &str = "completed";
+const UNIDENTIFIED_CI: &str = "GitHub returned CI records without their identities.";
+const FOREIGN_CHECKS: &str = "GitHub returned checks for a different or missing commit SHA.";
+const WORKFLOW_SEARCH_LIMIT: &str =
+    "GitHub's 1,000-result workflow search limit prevents a complete build assessment.";
+const INVALID_TAG: &str = "tag is invalid.";
+const UNUSABLE_RELEASE: &str = "GitHub returned a release without a usable identity.";
+const FOREIGN_DEPLOYMENT: &str =
+    "GitHub returned a deployment for a different or missing commit SHA.";
+const DIFFERENT_PULL: &str = "GitHub returned a different pull request.";
+const MISSING_PULL_HEAD: &str = "GitHub did not return an immutable pull request head SHA.";
+const JOB_WITHOUT_COMMIT: &str = "GitHub returned a job without a commit SHA.";
+const FOREIGN_JOB: &str =
+    "That job does not belong to the pull request or commit being asked about.";
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 const RETRY_AFTER_HEADER: &str = "Retry-After";
 const RATE_LIMIT_REMAINING_HEADER: &str = "X-RateLimit-Remaining";
@@ -987,8 +1003,8 @@ impl Github {
         reference: Option<&str>,
     ) -> Result<(String, String, &'static str), String> {
         let (reference, sha) = self.resolve(reference).await?;
-        let (workflows, checks, statuses) = self.ci_rows(&sha).await?;
-        let state = assessment(&conclusions(&workflows, &checks, &statuses));
+        let (workflows, checks, statuses, complete) = self.ci_rows(&sha).await?;
+        let state = assessed(&conclusions(&workflows, &checks, &statuses), complete);
         Ok((reference, sha, state))
     }
 
@@ -1131,102 +1147,72 @@ impl Github {
         }))
     }
 
-    async fn pages(
+    async fn ci_rows(
         &self,
-        parts: &[&str],
-        key: Option<&str>,
-        query: &[(&str, String)],
-    ) -> Result<Vec<Value>, String> {
-        let mut page = 1;
-        let mut records = Vec::new();
-        loop {
-            let mut query = query.to_vec();
-            query.extend([
-                ("per_page", PAGE_SIZE.to_string()),
-                ("page", page.to_string()),
-            ]);
-            let response = self.get(parts, &query).await?;
-            let rows = array(key.map_or(&response, |key| &response[key]))?;
-            let next = next_page(rows.len(), page)?;
-            records.extend(rows.iter().cloned());
-            // Workflow searches are capped by GitHub at 1,000 records.
-            if key == Some("workflow_runs") && response["total_count"].as_u64().unwrap_or(0) > 1000
-            {
-                return Err("GitHub's 1,000-result workflow search limit prevents a complete build assessment.".into());
-            }
-            match next {
-                Some(next) => page = next,
-                None => return Ok(records),
-            }
+        sha: &str,
+    ) -> Result<(Vec<WorkflowRun>, Vec<CheckRun>, Vec<CommitStatus>, bool), String> {
+        let commit = revision(sha)?;
+        let filter = WorkflowRunFilter::new().with_head_sha(commit.clone());
+        let (workflows, checks, statuses) = tokio::join!(
+            self.service
+                .collect_workflow_runs(&self.repository, &self.token, &filter),
+            self.service
+                .collect_check_runs(&self.repository, &self.token, &commit),
+            self.service
+                .collect_statuses(&self.repository, &self.token, &commit),
+        );
+        let workflows = workflows.map_err(ci_described)?;
+        if !workflows.complete {
+            return Err(WORKFLOW_SEARCH_LIMIT.to_string());
         }
-    }
-
-    async fn ci_rows(&self, sha: &str) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>), String> {
-        let workflows = self
-            .pages(
-                &["actions", "runs"],
-                Some("workflow_runs"),
-                &[("head_sha", sha.into())],
-            )
-            .await?;
-        let checks = self
-            .pages(
-                &["commits", sha, "check-runs"],
-                Some("check_runs"),
-                &[("filter", "latest".into())],
-            )
-            .await?;
-        let statuses = self.pages(&["commits", sha, "statuses"], None, &[]).await?;
-        if workflows
+        let checks = checks.map_err(ci_described)?;
+        let statuses = statuses.map_err(ci_described)?;
+        if statuses
+            .items
             .iter()
-            .any(|row| row["workflow_id"].as_u64().is_none())
-            || statuses
-                .iter()
-                .any(|row| row["context"].as_str().is_none_or(str::is_empty))
+            .any(|status| status.context.is_empty())
         {
-            return Err("GitHub returned CI records without their identities.".into());
+            return Err(UNIDENTIFIED_CI.to_string());
         }
         let mut identities = std::collections::HashSet::new();
-        let workflows: Vec<Value> = workflows
+        let workflows: Vec<WorkflowRun> = workflows
+            .items
             .into_iter()
-            .filter(|row| {
-                identities.insert((
-                    row["workflow_id"].to_string(),
-                    row["event"].to_string(),
-                    row["head_branch"].to_string(),
-                ))
+            .filter(|run| {
+                identities.insert((run.workflow_id, run.event.clone(), run.head_branch.clone()))
             })
             .collect();
-        let statuses = latest(statuses, "context");
-        if workflows
-            .iter()
-            .chain(checks.iter())
-            .any(|row| row["head_sha"].as_str() != Some(sha))
+        if workflows.iter().any(|run| run.head_sha != commit)
+            || checks
+                .items
+                .iter()
+                .any(|check| check.head_sha.as_ref() != Some(&commit))
         {
-            return Err("GitHub returned checks for a different or missing commit SHA.".into());
+            return Err(FOREIGN_CHECKS.to_string());
         }
-        Ok((workflows, checks, statuses))
+        let complete = checks.complete && statuses.complete;
+        Ok((workflows, checks.items, statuses.items, complete))
     }
 
     async fn build(&self, sha: &str) -> Result<Value, String> {
-        let (workflows, checks, statuses) = self.ci_rows(sha).await?;
-        let state = assessment(&conclusions(&workflows, &checks, &statuses));
-        Ok(bound_build(json!({"state": state, "complete": true,
-            "assessment": "Observed CI only; required branch checks and service health are not evaluated.",
-            "workflows": workflows.iter().map(|row| project(row, &["id", "name", "head_sha", "status", "conclusion", "html_url", "updated_at"])).collect::<Vec<_>>(),
-            "checks": checks.iter().map(|row| project(row, &["id", "name", "head_sha", "status", "conclusion", "html_url", "details_url", "completed_at"])).collect::<Vec<_>>(),
-            "statuses": statuses.iter().map(|row| project(row, &["context", "state", "description", "target_url", "created_at"])).collect::<Vec<_>>() })))
+        let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
+        let state = assessed(&conclusions(&workflows, &checks, &statuses), complete);
+        Ok(bound_build(json!({
+            "state": state,
+            "complete": complete,
+            "assessment": BUILD_ASSESSMENT,
+            "workflows": workflows.iter().map(workflow_record).collect::<Vec<_>>(),
+            "checks": checks.iter().map(check_record).collect::<Vec<_>>(),
+            "statuses": statuses.iter().map(status_record).collect::<Vec<_>>(),
+        })))
     }
 
     async fn check_evidence(&self, sha: &str) -> Result<CheckEvidence, String> {
-        let (workflows, checks, statuses) = self.ci_rows(sha).await?;
-        Ok(tally(
-            workflows
-                .iter()
-                .chain(checks.iter())
-                .chain(statuses.iter())
-                .map(ci_token),
-        ))
+        let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
+        Ok(CheckEvidence {
+            complete,
+            ..tally(conclusions(&workflows, &checks, &statuses).into_iter())
+        })
     }
 
     async fn readiness(&self, arguments: &Arguments) -> Result<Value, String> {
@@ -1566,32 +1552,39 @@ impl Github {
     }
 
     async fn release_pipelines(&self, arguments: &Arguments) -> Result<Value, String> {
-        let page = arguments.page.unwrap_or(1);
-        let (rows, next) = match arguments.tag.as_deref() {
+        let (listed, next) = match arguments.tag.as_deref() {
             Some(tag) => {
                 if !segment(tag) {
-                    return Err("tag is invalid.".to_string());
+                    return Err(INVALID_TAG.to_string());
                 }
-                (vec![self.get(&["releases", "tags", tag], &[]).await?], None)
+                let release = self
+                    .service
+                    .fetch_release(&self.repository, &self.token, tag)
+                    .await
+                    .map_err(|error| match error {
+                        PullRequestError::Parse(ParseError::Tag(_))
+                        | PullRequestError::InvalidRepositoryUrl => INVALID_TAG.to_string(),
+                        error => described(error),
+                    })?;
+                (vec![release], None)
             }
             None => {
-                let response = self
-                    .get(
-                        &["releases"],
-                        &[
-                            ("per_page", RELEASE_PAGE_SIZE.to_string()),
-                            ("page", page.to_string()),
-                        ],
+                let listed = self
+                    .service
+                    .list_releases(
+                        &self.repository,
+                        &self.token,
+                        page(arguments.page.unwrap_or(1))?,
+                        RELEASE_PAGE_SIZE,
                     )
-                    .await?;
-                let records = array(&response)?.clone();
-                let next = next_page_of(records.len(), page, RELEASE_PAGE_SIZE)?;
-                (records, next)
+                    .await
+                    .map_err(described)?;
+                (listed.items, listed.next)
             }
         };
-        let releases: Vec<ReleaseIdentity> = rows
+        let releases: Vec<ReleaseIdentity> = listed
             .iter()
-            .map(|row| self.release_identity(row))
+            .map(|release| self.release_identity(release))
             .collect::<Result<_, _>>()?;
         let checked_at = Utc::now().to_rfc3339();
         let sweep = self.pipeline_sweep(&releases).await;
@@ -1615,7 +1608,7 @@ impl Github {
             json!({
                 "assessed": assessed.len(),
                 "succeeded": assessed.iter().filter(|row| row["succeeded"] == true).count(),
-                "next_page": next,
+                "next_page": next.map(NonZeroU32::get),
                 "complete": next.is_none(),
                 "assessment": RELEASE_ASSESSMENT,
             }),
@@ -1624,18 +1617,18 @@ impl Github {
         ))
     }
 
-    fn release_identity(&self, row: &Value) -> Result<ReleaseIdentity, String> {
-        let release = ReleaseIdentity {
+    fn release_identity(&self, release: &Release) -> Result<ReleaseIdentity, String> {
+        let identity = ReleaseIdentity {
             repository: self.full_name(),
-            id: row["id"].as_u64().unwrap_or_default(),
-            tag: text(row, "tag_name"),
-            published_at: text(row, "published_at"),
-            url: text(row, "html_url"),
+            id: release.id,
+            tag: release.tag.clone(),
+            published_at: release.published_at.clone().unwrap_or_default(),
+            url: release.url.clone(),
         };
-        release
+        identity
             .valid()
-            .then_some(release)
-            .ok_or_else(|| "GitHub returned a release without a usable identity.".to_string())
+            .then_some(identity)
+            .ok_or_else(|| UNUSABLE_RELEASE.to_string())
     }
 
     /// One pass over the repository's release-triggered runs, bounded to the
@@ -1649,108 +1642,88 @@ impl Github {
             .iter()
             .min_by_key(|release| release.published())
             .map(|release| release.published_at.as_str())?;
-        self.pipeline_runs(&[("created", format!(">={earliest}"))])
+        self.pipeline_runs(WorkflowRunFilter::new().with_created(format!(">={earliest}")))
             .await
             .ok()
     }
 
     /// The runs GitHub itself attributes to one release's tag.
     async fn exact_pipeline(&self, release: &ReleaseIdentity, checked_at: &str) -> ReleasePipeline {
-        match self.pipeline_runs(&[("branch", release.tag.clone())]).await {
+        let runs = match BranchName::parse(&release.tag) {
+            Ok(branch) => {
+                self.pipeline_runs(WorkflowRunFilter::new().with_branch(branch))
+                    .await
+            }
+            Err(_) => Err(INVALID_TAG.to_string()),
+        };
+        match runs {
             Ok(records) => ReleasePipeline::observe(release.clone(), &records, checked_at),
             Err(_) => ReleasePipeline::unavailable(release.clone(), checked_at),
         }
     }
 
-    async fn pipeline_runs(&self, query: &[(&str, String)]) -> Result<Vec<RunEvidence>, String> {
-        let mut query = query.to_vec();
-        query.push(("event", RELEASE_EVENT.to_string()));
-        Ok(self
-            .pages(&["actions", "runs"], Some("workflow_runs"), &query)
-            .await?
-            .iter()
-            .map(|row| self.run_evidence(row))
-            .collect())
-    }
-
-    fn run_evidence(&self, row: &Value) -> RunEvidence {
-        RunEvidence {
-            id: row["id"].as_u64().unwrap_or_default(),
-            workflow_id: row["workflow_id"].as_u64().unwrap_or_default(),
-            attempt: row["run_attempt"]
-                .as_u64()
-                .and_then(|attempt| u32::try_from(attempt).ok())
-                .unwrap_or_default(),
-            name: text(row, "name"),
-            path: text(row, "path"),
-            event: text(row, "event"),
-            status: text(row, "status"),
-            conclusion: row["conclusion"].as_str().map(str::to_string),
-            head_branch: text(row, "head_branch"),
-            head_sha: text(row, "head_sha"),
-            created_at: text(row, "created_at"),
-            started_at: row["run_started_at"].as_str().map(str::to_string),
-            updated_at: text(row, "updated_at"),
-            url: text(row, "html_url"),
-            repository: text(&row["repository"], "full_name"),
-        }
-    }
-
-    async fn deployments(&self, sha: &str, page: u32) -> Result<Value, String> {
-        let records = self
-            .get(
-                &["deployments"],
-                &[
-                    ("sha", sha.into()),
-                    ("per_page", PAGE_SIZE.to_string()),
-                    ("page", page.to_string()),
-                ],
+    async fn pipeline_runs(&self, filter: WorkflowRunFilter) -> Result<Vec<RunEvidence>, String> {
+        let runs = self
+            .service
+            .collect_workflow_runs(
+                &self.repository,
+                &self.token,
+                &filter.with_event(RELEASE_EVENT),
             )
-            .await?;
-        let records = array(&records)?;
-        let mut deployments = Vec::new();
-        for row in records {
-            if row["sha"].as_str() != Some(sha) {
-                return Err(
-                    "GitHub returned a deployment for a different or missing commit SHA.".into(),
-                );
-            }
-            let id = row["id"]
-                .as_u64()
-                .ok_or("GitHub returned an invalid deployment ID.")?
-                .to_string();
-            let response = self
-                .get(
-                    &["deployments", &id, "statuses"],
-                    &[("per_page", "1".into())],
-                )
-                .await?;
-            let status = array(&response)?.first().cloned().unwrap_or(Value::Null);
-            let mut deployment = project(
-                row,
-                &[
-                    "id",
-                    "sha",
-                    "ref",
-                    "environment",
-                    "created_at",
-                    "updated_at",
-                ],
-            );
-            deployment["status"] = project(
-                &status,
-                &[
-                    "state",
-                    "description",
-                    "environment_url",
-                    "log_url",
-                    "created_at",
-                ],
-            );
-            deployment["url"] = json!(self.url(&["deployments", &id]).to_string());
-            deployments.push(deployment);
+            .await
+            .map_err(described)?;
+        if !runs.complete {
+            return Err(WORKFLOW_SEARCH_LIMIT.to_string());
         }
-        Ok(json!({"deployments": deployments, "next_page": next_page(records.len(), page)?}))
+        Ok(runs.items.iter().map(run_evidence).collect())
+    }
+
+    async fn deployments(&self, sha: &str, number: u32) -> Result<Value, String> {
+        let commit = revision(sha)?;
+        let listed = self
+            .service
+            .list_deployments(
+                &self.repository,
+                &self.token,
+                &commit,
+                page(number)?,
+                PER_PAGE,
+            )
+            .await
+            .map_err(|error| match error {
+                PullRequestError::Parse(_) => FOREIGN_DEPLOYMENT.to_string(),
+                error => described(error),
+            })?;
+        if listed
+            .items
+            .iter()
+            .any(|deployment| deployment.sha != commit)
+        {
+            return Err(FOREIGN_DEPLOYMENT.to_string());
+        }
+        let deployments: Vec<Value> = listed
+            .items
+            .iter()
+            .map(|deployment| {
+                json!({
+                    "id": deployment.id,
+                    "sha": deployment.sha.as_str(),
+                    "ref": deployment.reference,
+                    "environment": deployment.environment,
+                    "created_at": deployment.created_at,
+                    "updated_at": deployment.updated_at,
+                    "status": deployment.status.as_ref().map_or_else(|| json!({}), |status| json!({
+                        "state": status.state,
+                        "description": status.description,
+                        "environment_url": status.environment_url,
+                        "log_url": status.log_url,
+                        "created_at": status.created_at,
+                    })),
+                    "url": deployment.api_url,
+                })
+            })
+            .collect();
+        Ok(json!({"deployments": deployments, "next_page": listed.next.map(NonZeroU32::get)}))
     }
 
     async fn file(&self, sha: &str, path: &str, offset: u64, limit: u64) -> Result<Value, String> {
@@ -1809,24 +1782,36 @@ impl Github {
     }
     async fn check_logs(&self, arguments: &Arguments) -> Result<Value, String> {
         let job_id = arguments.job_id.ok_or("job_id is required.")?;
-        if job_id == 0 {
-            return Err("job_id must be positive.".to_string());
-        }
+        let job_id = NonZeroU64::new(job_id).ok_or("job_id must be positive.")?;
         let (reference, sha, pull) = self.log_target(arguments).await?;
         let job = self
-            .get(&["actions", "jobs", &job_id.to_string()], &[])
-            .await?;
-        let run_id = self.verify_job(&job, job_id, &sha)?;
-        let (bytes, capped) = self.collect_log(self.log_response(job_id).await?).await?;
-        let lines = log_lines(&String::from_utf8_lossy(&bytes));
+            .service
+            .fetch_workflow_job(&self.repository, &self.token, job_id)
+            .await
+            .map_err(|error| match error {
+                PullRequestError::Parse(_) => JOB_WITHOUT_COMMIT.to_string(),
+                error => described(error),
+            })?;
+        let run_id = self.verify_job(&job, job_id.get(), &sha)?;
+        let downloaded = self
+            .service
+            .fetch_job_log(
+                &self.repository,
+                &self.token,
+                job_id,
+                self.log_bytes as usize,
+            )
+            .await
+            .map_err(described)?;
+        let lines = log_lines(&String::from_utf8_lossy(&downloaded.content));
         let log = JobLog {
             job,
             run_id,
             sha,
             reference,
             pull,
-            downloaded: bytes.len(),
-            capped,
+            downloaded: downloaded.content.len(),
+            capped: downloaded.truncated,
             observed_at: Utc::now().to_rfc3339(),
         };
         let mut budget = arguments
@@ -1853,152 +1838,49 @@ impl Github {
         };
         let reference = self.reference(number)?;
         let pull = self
-            .get(&["pulls", &reference.number().to_string()], &[])
-            .await?;
-        if pull["number"].as_u64() != Some(number) {
-            return Err("GitHub returned a different pull request.".to_string());
+            .service
+            .fetch_pull(&reference, &self.token)
+            .await
+            .map_err(|error| match error {
+                PullRequestError::Parse(_) => MISSING_PULL_HEAD.to_string(),
+                error => described(error),
+            })?;
+        if pull.number != reference.number() {
+            return Err(DIFFERENT_PULL.to_string());
         }
-        let sha = pull["head"]["sha"]
-            .as_str()
-            .filter(|value| valid_sha(value))
-            .ok_or("GitHub did not return an immutable pull request head SHA.")?
-            .to_ascii_lowercase();
-        let reference = pull["head"]["ref"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("refs/pull/{number}/head"));
         Ok((
-            reference,
-            sha,
-            Some(project(
-                &pull,
-                &["number", "title", "state", "draft", "html_url"],
-            )),
+            pull.head.to_string(),
+            pull.head_sha.to_string(),
+            Some(json!({
+                "number": pull.number,
+                "title": pull.title,
+                "state": pull.state,
+                "draft": pull.draft,
+                "html_url": pull.url,
+            })),
         ))
     }
 
-    fn verify_job(&self, job: &Value, job_id: u64, sha: &str) -> Result<u64, String> {
-        let run_id = job["run_id"]
-            .as_u64()
-            .filter(|value| *value > 0)
-            .ok_or("GitHub returned a job without its workflow run identity.")?;
-        let head_sha = job["head_sha"]
-            .as_str()
-            .filter(|value| valid_sha(value))
-            .ok_or("GitHub returned a job without a commit SHA.")?;
-        if job["id"].as_u64() != Some(job_id)
-            || !head_sha.eq_ignore_ascii_case(sha)
+    fn verify_job(&self, job: &WorkflowJob, job_id: u64, sha: &str) -> Result<u64, String> {
+        let run_id = job.run_id.get();
+        if job.id.get() != job_id
+            || !job.head_sha.as_str().eq_ignore_ascii_case(sha)
             || !is_job_url(
-                job["html_url"].as_str().unwrap_or_default(),
+                job.url.as_deref().unwrap_or_default(),
                 &self.configuration.owner,
                 &self.configuration.repo,
                 run_id,
                 job_id,
             )
         {
-            return Err(
-                "That job does not belong to the pull request or commit being asked about."
-                    .to_string(),
-            );
+            return Err(FOREIGN_JOB.to_string());
         }
         Ok(run_id)
-    }
-
-    async fn log_response(&self, job_id: u64) -> Result<reqwest::Response, String> {
-        let mut request = self
-            .client
-            .get(self.url(&["actions", "jobs", &job_id.to_string(), "logs"]))
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", API_VERSION);
-        if let Some(token) = &self.configuration.token {
-            request = request.bearer_auth(token);
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| REQUEST_FAILED.to_string())?;
-        if response.status().is_success() {
-            return Ok(response);
-        }
-        if !response.status().is_redirection() {
-            return Err(format!(
-                "GitHub returned HTTP {}. Check source access, permissions, rate limits and the requested resource.",
-                response.status().as_u16()
-            ));
-        }
-        let location = response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or(LOG_UNDIRECTED)?;
-        let target = self.log_redirect(location)?;
-        // The signed destination carries its own authorization; forwarding the
-        // source token off the API origin would hand it to storage.
-        let redirected = self
-            .client
-            .get(target)
-            .send()
-            .await
-            .map_err(|_| LOG_UNREACHABLE.to_string())?;
-        if !redirected.status().is_success() {
-            return Err(format!(
-                "The job log download returned HTTP {}.",
-                redirected.status().as_u16()
-            ));
-        }
-        Ok(redirected)
-    }
-
-    fn log_redirect(&self, location: &str) -> Result<Url, String> {
-        let unexpected = LOG_UNEXPECTED_HOST;
-        let target = self
-            .origin
-            .join(location)
-            .map_err(|_| unexpected.to_string())?;
-        let Some(host) = target.host_str() else {
-            return Err(unexpected.to_string());
-        };
-        if !target.username().is_empty() || target.password().is_some() {
-            return Err(unexpected.to_string());
-        }
-        let same_origin = target.scheme() == self.origin.scheme()
-            && Some(host) == self.origin.host_str()
-            && target.port_or_known_default() == self.origin.port_or_known_default();
-        let published = target.scheme() == "https"
-            && LOG_REDIRECT_HOSTS
-                .iter()
-                .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")));
-        if same_origin || published {
-            Ok(target)
-        } else {
-            Err(unexpected.to_string())
-        }
-    }
-
-    async fn collect_log(
-        &self,
-        mut response: reqwest::Response,
-    ) -> Result<(Vec<u8>, bool), String> {
-        let mut collected: Vec<u8> = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| LOG_INTERRUPTED.to_string())?
-        {
-            let room = (self.log_bytes as usize).saturating_sub(collected.len());
-            if chunk.len() > room {
-                collected.extend_from_slice(&chunk[..room]);
-                return Ok((collected, true));
-            }
-            collected.extend_from_slice(&chunk);
-        }
-        Ok((collected, false))
     }
 }
 
 struct JobLog {
-    job: Value,
+    job: WorkflowJob,
     run_id: u64,
     sha: String,
     reference: String,
@@ -2014,7 +1896,16 @@ impl JobLog {
         let selected = select(lines, budget as usize, error_line);
         let complete = !self.capped && selected.len() == lines.len();
         let mut result = json!({
-            "job": project(&self.job, &["id", "run_id", "name", "status", "conclusion", "html_url", "started_at", "completed_at"]),
+            "job": {
+                "id": self.job.id,
+                "run_id": self.job.run_id,
+                "name": self.job.name,
+                "status": self.job.status,
+                "conclusion": self.job.conclusion,
+                "html_url": self.job.url,
+                "started_at": self.job.started_at,
+                "completed_at": self.job.completed_at,
+            },
             "run_id": self.run_id,
             "ref": self.reference,
             "sha": self.sha,
@@ -2037,15 +1928,15 @@ impl JobLog {
     }
 
     fn citation(&self, complete: bool) -> Value {
-        let conclusion = if self.job["status"].as_str() == Some("completed") {
-            self.job["conclusion"].as_str().unwrap_or("unknown")
+        let conclusion = if self.job.status == COMPLETED_STATUS {
+            self.job.conclusion.as_deref().unwrap_or(UNKNOWN_ASSESSMENT)
         } else {
-            "pending"
+            PENDING_ASSESSMENT
         };
         json!({
             "kind": "github_build",
-            "title": format!("{} job log excerpt", self.job["name"].as_str().unwrap_or("Check")),
-            "url": self.job["html_url"].as_str().unwrap_or_default(),
+            "title": format!("{} job log excerpt", self.job.name),
+            "url": self.job.url.as_deref().unwrap_or_default(),
             "revision": self.sha,
             "observed_at": self.observed_at,
             "complete": complete,
@@ -2061,19 +1952,9 @@ impl JobLog {
 }
 
 fn is_job_url(value: &str, owner: &str, repo: &str, run_id: u64, job_id: u64) -> bool {
-    let Ok(url) = Url::parse(value) else {
-        return false;
-    };
-    url.scheme() == "https"
-        && url.host_str() == Some("github.com")
-        && url.port().is_none()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && url.path().eq_ignore_ascii_case(&format!(
-            "/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}"
-        ))
+    value.eq_ignore_ascii_case(&format!(
+        "https://github.com/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}"
+    ))
 }
 
 /// Strip the RFC 3339 stamp GitHub prefixes to every line of a job log.
@@ -2566,17 +2447,89 @@ fn status_error(status: StatusCode) -> String {
     )
 }
 
+fn ci_described(error: PullRequestError) -> String {
+    match error {
+        PullRequestError::Parse(_) => FOREIGN_CHECKS.to_string(),
+        error => described(error),
+    }
+}
+
 fn conclusions<'a>(
-    workflows: &'a [Value],
-    checks: &'a [Value],
-    statuses: &'a [Value],
+    workflows: &'a [WorkflowRun],
+    checks: &'a [CheckRun],
+    statuses: &'a [CommitStatus],
 ) -> Vec<&'a str> {
     workflows
         .iter()
-        .chain(checks.iter())
-        .chain(statuses.iter())
-        .map(ci_token)
+        .map(run_token)
+        .chain(checks.iter().map(check_token))
+        .chain(statuses.iter().map(|status| status.state.as_str()))
         .collect()
+}
+
+/// A read that did not reach every check can still prove a failure, never a
+/// pass or a settled non-pass.
+fn assessed(conclusions: &[&str], complete: bool) -> &'static str {
+    match assessment(conclusions) {
+        FAILURE_ASSESSMENT => FAILURE_ASSESSMENT,
+        _ if !complete => PENDING_ASSESSMENT,
+        state => state,
+    }
+}
+
+fn workflow_record(run: &WorkflowRun) -> Value {
+    json!({
+        "id": run.id,
+        "name": run.name,
+        "head_sha": run.head_sha.as_str(),
+        "status": run.status,
+        "conclusion": run.conclusion,
+        "html_url": run.url,
+        "updated_at": run.updated_at,
+    })
+}
+
+fn check_record(check: &CheckRun) -> Value {
+    json!({
+        "id": check.id,
+        "name": check.name,
+        "head_sha": check.head_sha.as_ref().map(Revision::as_str),
+        "status": check.status,
+        "conclusion": check.conclusion,
+        "html_url": check.url,
+        "details_url": check.details_url,
+        "completed_at": check.completed_at,
+    })
+}
+
+fn status_record(status: &CommitStatus) -> Value {
+    json!({
+        "context": status.context,
+        "state": status.state,
+        "description": status.description,
+        "target_url": status.target_url,
+        "created_at": status.created_at,
+    })
+}
+
+fn run_evidence(run: &WorkflowRun) -> RunEvidence {
+    RunEvidence {
+        id: run.id.get(),
+        workflow_id: run.workflow_id.get(),
+        attempt: run.attempt.unwrap_or_default(),
+        name: run.name.clone().unwrap_or_default(),
+        path: run.path.clone(),
+        event: run.event.clone(),
+        status: run.status.clone().unwrap_or_default(),
+        conclusion: run.conclusion.clone(),
+        head_branch: run.head_branch.clone().unwrap_or_default(),
+        head_sha: run.head_sha.to_string(),
+        created_at: run.created_at.clone(),
+        started_at: run.started_at.clone(),
+        updated_at: run.updated_at.clone(),
+        url: run.url.clone(),
+        repository: run.repository.clone(),
+    }
 }
 
 fn next_page(length: usize, page: u32) -> Result<Option<u32>, String> {
@@ -2609,13 +2562,6 @@ fn project(value: &Value, keys: &[&str]) -> Value {
         }
     }
     Value::Object(result)
-}
-
-fn latest(rows: Vec<Value>, key: &str) -> Vec<Value> {
-    let mut seen = std::collections::HashSet::new();
-    rows.into_iter()
-        .filter(|row| seen.insert(row[key].to_string()))
-        .collect()
 }
 
 /// What a commit's checks add up to, in one word a wait can act on.
@@ -2758,20 +2704,27 @@ fn bound_releases(mut result: Value, pipelines: &[Value], observed_at: &str) -> 
     }
 }
 
-fn ci_token(row: &Value) -> &str {
-    if row.get("status").is_some() {
-        if row["status"].as_str() == Some("completed") {
-            row["conclusion"].as_str().unwrap_or("unknown")
-        } else {
-            row["status"].as_str().unwrap_or("pending")
-        }
-    } else {
-        row["state"].as_str().unwrap_or("unknown")
+fn ci_token<'a>(status: Option<&'a str>, conclusion: Option<&'a str>) -> &'a str {
+    match status {
+        Some(COMPLETED_STATUS) => conclusion.unwrap_or(UNKNOWN_ASSESSMENT),
+        Some(status) => status,
+        None => UNKNOWN_ASSESSMENT,
     }
 }
 
+fn run_token(run: &WorkflowRun) -> &str {
+    ci_token(run.status.as_deref(), run.conclusion.as_deref())
+}
+
+fn check_token(check: &CheckRun) -> &str {
+    ci_token(Some(&check.status), check.conclusion.as_deref())
+}
+
 fn ci_priority(row: &Value) -> u8 {
-    match assessment(&[ci_token(row)]) {
+    let token = row["state"]
+        .as_str()
+        .unwrap_or_else(|| ci_token(row["status"].as_str(), row["conclusion"].as_str()));
+    match assessment(&[token]) {
         FAILURE_ASSESSMENT => 0,
         PENDING_ASSESSMENT => 1,
         SUCCESS_ASSESSMENT => 3,
@@ -3270,10 +3223,16 @@ mod tests {
     async fn resolves_ref_once_and_observes_exact_commit() {
         let server = MockServer::start().await;
         mock(&server, "commits/main", json!({"sha": COMMIT})).await;
-        Mock::given(path("/repos/owner/repository/actions/runs")).and(query_param("head_sha", COMMIT))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"workflow_runs": [{"workflow_id": 1,"head_sha": COMMIT,"status": "completed","conclusion":"success"}], "total_count":1}))).expect(1).mount(&server).await;
+        Mock::given(path("/repos/owner/repository/actions/runs"))
+            .and(query_param("head_sha", COMMIT))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"workflow_runs": [workflow_run(11, 1, "success")], "total_count":1}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
         mock(&server, &format!("commits/{COMMIT}/check-runs"), json!({"check_runs": [{"head_sha": COMMIT,"status":"completed","conclusion":"success"}]})).await;
-        mock(&server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
+        mock_statuses(&server, json!([])).await;
         let result = github(&server)
             .observe(
                 Operation::Build,
@@ -3323,7 +3282,7 @@ mod tests {
             json!({"workflow_runs": [], "total_count":0}),
         )
         .await;
-        let checks: Vec<Value> = (0..100)
+        let checks: Vec<Value> = (1..=100)
             .map(
                 |id| json!({"id":id,"head_sha":COMMIT,"status":"completed","conclusion":"success"}),
             )
@@ -3340,13 +3299,14 @@ mod tests {
         )))
         .and(query_param("page", "2"))
         .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"check_runs":[{"head_sha":COMMIT,"status":"completed","conclusion":"failure"}]}),
+            json!({"check_runs":[{"id":101,"head_sha":COMMIT,"status":"completed","conclusion":"failure"}]}),
         ))
         .mount(&server)
         .await;
-        mock(&server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
+        mock_statuses(&server, json!([])).await;
         let result = github(&server).build(COMMIT).await.unwrap();
         let checks = result["checks"].as_array().unwrap();
+        assert_eq!(result["complete"], true);
         assert_eq!(result["state"], "failure");
         assert!(
             checks.iter().any(|check| check["conclusion"] == "failure"),
@@ -3386,7 +3346,7 @@ mod tests {
             json!({"check_runs":[{"head_sha":BLOB,"status":"completed","conclusion":"success"}]}),
         )
         .await;
-        mock(&server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
+        mock_statuses(&server, json!([])).await;
         assert!(
             github(&server)
                 .build(COMMIT)
@@ -3411,7 +3371,7 @@ mod tests {
             json!({"check_runs":[]}),
         )
         .await;
-        mock(&server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
+        mock_statuses(&server, json!([])).await;
         let empty = github(&server).build(COMMIT).await.unwrap();
         assert_eq!(empty["state"], "unknown");
         let citation = crate::agent::citations::from_tool_at(
@@ -3430,16 +3390,44 @@ mod tests {
         .remove(0);
         assert!(!citation.passing());
         assert_eq!(citation.outcome, crate::agent::CitationOutcome::Incomplete);
+
+        let recovered = MockServer::start().await;
+        mock(
+            &recovered,
+            "actions/runs",
+            json!({"workflow_runs":[],"total_count":0}),
+        )
+        .await;
+        mock(
+            &recovered,
+            &format!("commits/{COMMIT}/check-runs"),
+            json!({"check_runs":[]}),
+        )
+        .await;
+        mock(
+            &recovered,
+            &format!("commits/{COMMIT}/statuses"),
+            json!([
+                {"context":"test","state":"success"},
+                {"context":"test","state":"failure"}
+            ]),
+        )
+        .await;
+        mock_statuses(&recovered, json!([{"context":"test","state":"success"}])).await;
+        let build = github(&recovered).build(COMMIT).await.unwrap();
         assert_eq!(
-            latest(
-                vec![
-                    json!({"context":"test","state":"success"}),
-                    json!({"context":"test","state":"failure"})
-                ],
-                "context"
-            )
-            .len(),
-            1
+            build["state"], "success",
+            "the combined status keeps only each context's latest state"
+        );
+        assert_eq!(build["statuses"].as_array().unwrap().len(), 1);
+        assert!(
+            recovered
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| !request.url.path().ends_with("/statuses")),
+            "every status a context ever reported is never read"
         );
     }
 
@@ -3793,20 +3781,24 @@ mod tests {
         mock(
             &server,
             "deployments",
-            json!([{"id":7,"sha":COMMIT,"environment":"production"}]),
+            json!([{"id":7,"sha":COMMIT,"ref":"main","environment":"production",
+                    "created_at":"2026-09-05T00:00:00Z","updated_at":"2026-09-05T00:00:00Z"}]),
         )
         .await;
         Mock::given(path("/repos/owner/repository/deployments/7/statuses"))
             .and(query_param("per_page", "1"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    json!([{"state":"pending","created_at":"2026-09-05T00:00:00Z"}]),
-                ),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!([{"state":"pending","description":"","created_at":"2026-09-05T00:00:00Z"}]),
+            ))
             .mount(&server)
             .await;
         let result = github(&server).deployments(COMMIT, 1).await.unwrap();
         assert_eq!(result["deployments"][0]["status"]["state"], "pending");
+        assert_eq!(result["deployments"][0]["ref"], "main");
+        assert_eq!(
+            result["deployments"][0]["url"],
+            format!("{}/repos/owner/repository/deployments/7", server.uri())
+        );
         assert_eq!(result["next_page"], Value::Null);
     }
 
@@ -5356,17 +5348,40 @@ mod tests {
 
     #[test]
     fn ci_tokens_come_from_the_record_that_carries_them() {
+        let commit = Revision::parse(COMMIT).unwrap();
+        let run = WorkflowRun::new(
+            NonZeroU64::new(11).unwrap(),
+            NonZeroU64::new(1).unwrap(),
+            ".github/workflows/ci.yml",
+            "push",
+            commit.clone(),
+            "2026-09-05T00:00:00Z",
+            "2026-09-05T00:05:00Z",
+            "https://github.com/owner/repository/actions/runs/11",
+            "owner/repository",
+        );
         assert_eq!(
-            ci_token(&json!({"status": "completed", "conclusion": "failure"})),
+            run_token(
+                &run.clone()
+                    .with_status("completed")
+                    .with_conclusion("failure")
+            ),
             "failure"
         );
-        assert_eq!(ci_token(&json!({"status": "queued"})), "queued");
-        assert_eq!(ci_token(&json!({"status": "in_progress"})), "in_progress");
+        assert_eq!(run_token(&run.clone().with_status("completed")), "unknown");
         assert_eq!(
-            ci_token(&json!({"context": "lint", "state": "pending"})),
-            "pending"
+            run_token(&run),
+            "unknown",
+            "a run without a status has not said anything"
         );
-        assert_eq!(ci_token(&json!({"context": "lint"})), "unknown");
+        assert_eq!(check_token(&CheckRun::new("queued")), "queued");
+        assert_eq!(check_token(&CheckRun::new("in_progress")), "in_progress");
+        assert_eq!(
+            check_token(&CheckRun::new("completed").with_conclusion("success")),
+            "success"
+        );
+        let statuses = [CommitStatus::new("lint", "pending")];
+        assert_eq!(conclusions(&[run], &[], &statuses), ["unknown", "pending"]);
         assert_eq!(ci_priority(&json!({"status": "queued"})), 1);
         assert_eq!(
             ci_priority(&json!({"status": "completed", "conclusion": "failure"})),
@@ -5590,9 +5605,11 @@ mod tests {
         mock(
             server,
             &format!("pulls/{number}"),
-            json!({"number": number, "title": "Fix", "state": "open", "draft": false,
+            json!({"number": number, "node_id": format!("PR_{number}"), "title": "Fix",
+                   "state": "open", "draft": false,
                    "html_url": format!("https://github.com/owner/repository/pull/{number}"),
-                   "head": {"sha": head_sha, "ref": "feature"}}),
+                   "head": {"sha": head_sha, "ref": "feature"},
+                   "base": {"sha": COMMIT, "ref": "main"}}),
         )
         .await;
     }
@@ -5652,33 +5669,96 @@ mod tests {
     #[tokio::test]
     async fn job_identity_must_match_the_repository_and_the_requested_job() {
         let server = MockServer::start().await;
-        let foreign_repository = json!({
-            "id": JOB_ID, "run_id": RUN_ID, "head_sha": COMMIT, "status": "completed",
-            "conclusion": "failure", "name": "build",
-            "html_url": format!("https://github.com/attacker/private/actions/runs/{RUN_ID}/job/{JOB_ID}")
-        });
-        let renumbered = json!({
-            "id": JOB_ID + 1, "run_id": RUN_ID, "head_sha": COMMIT, "status": "completed",
-            "conclusion": "failure", "name": "build",
-            "html_url": format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}")
-        });
-        for metadata in [foreign_repository, renumbered, job(BLOB)] {
-            assert!(
-                github(&server)
-                    .verify_job(&metadata, JOB_ID, COMMIT)
-                    .unwrap_err()
-                    .contains("does not belong")
+        let at = |run: u64, job: u64| -> String {
+            format!("https://github.com/owner/repository/actions/runs/{run}/job/{job}")
+        };
+        let fetched = |id: u64, head_sha: &str, url: String| {
+            WorkflowJob::new(
+                NonZeroU64::new(id).unwrap(),
+                NonZeroU64::new(RUN_ID).unwrap(),
+                "build",
+                "completed",
+                Revision::parse(head_sha).unwrap(),
+            )
+            .with_conclusion("failure")
+            .with_url(url)
+        };
+        let foreign_repository = fetched(
+            JOB_ID,
+            COMMIT,
+            format!("https://github.com/attacker/private/actions/runs/{RUN_ID}/job/{JOB_ID}"),
+        );
+        let renumbered = fetched(JOB_ID + 1, COMMIT, at(RUN_ID, JOB_ID));
+        let elsewhere = fetched(JOB_ID, BLOB, at(RUN_ID, JOB_ID));
+        let unlinked = WorkflowJob::new(
+            NonZeroU64::new(JOB_ID).unwrap(),
+            NonZeroU64::new(RUN_ID).unwrap(),
+            "build",
+            "completed",
+            Revision::parse(COMMIT).unwrap(),
+        );
+        for metadata in [foreign_repository, renumbered, elsewhere, unlinked] {
+            assert_eq!(
+                github(&server).verify_job(&metadata, JOB_ID, COMMIT),
+                Err(FOREIGN_JOB.to_string())
             );
         }
         assert_eq!(
-            github(&server).verify_job(&job(COMMIT), JOB_ID, COMMIT),
+            github(&server).verify_job(
+                &fetched(JOB_ID, COMMIT, at(RUN_ID, JOB_ID)),
+                JOB_ID,
+                COMMIT
+            ),
             Ok(RUN_ID)
         );
         assert!(
             github(&server)
-                .verify_job(&json!({"id": JOB_ID, "head_sha": COMMIT}), JOB_ID, COMMIT)
-                .unwrap_err()
-                .contains("workflow run identity")
+                .verify_job(
+                    &fetched(JOB_ID, COMMIT, at(RUN_ID, JOB_ID).to_uppercase()),
+                    JOB_ID,
+                    COMMIT
+                )
+                .is_ok()
+        );
+
+        mock(&server, "commits/main", json!({"sha": COMMIT})).await;
+        mock_log(&server, "secret log".into()).await;
+        for (metadata, expected) in [
+            (
+                json!({"id": JOB_ID, "head_sha": COMMIT}),
+                UNEXPECTED_RESPONSE,
+            ),
+            (
+                json!({"id": JOB_ID, "run_id": RUN_ID, "name": "build",
+                       "status": "completed", "head_sha": "abc123"}),
+                JOB_WITHOUT_COMMIT,
+            ),
+        ] {
+            let thin = Mock::given(method("GET"))
+                .and(path(format!(
+                    "/repos/owner/repository/actions/jobs/{JOB_ID}"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(metadata.clone()))
+                .mount_as_scoped(&server)
+                .await;
+            assert_eq!(
+                github(&server)
+                    .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
+                    .await
+                    .unwrap_err(),
+                expected,
+                "{metadata}"
+            );
+            drop(thin);
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| !request.url.path().ends_with("/logs")),
+            "a job that cannot be read is never followed to its log"
         );
         assert!(!is_job_url(
             &format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}?x=1"),
@@ -6084,6 +6164,8 @@ mod tests {
                 "tag_name": RELEASE_TAG,
                 "published_at": "2026-09-05T00:00:00Z",
                 "html_url": "https://github.com/owner/repository/releases/tag/v1.4.0",
+                "draft": false,
+                "prerelease": false,
             }]),
         )
         .await;
@@ -6244,6 +6326,8 @@ mod tests {
                 "tag_name": RELEASE_TAG,
                 "published_at": "2026-09-05T00:00:00Z",
                 "html_url": "https://github.com/owner/repository/releases/tag/v1.4.0",
+                "draft": false,
+                "prerelease": false,
             }),
         )
         .await;
@@ -6298,7 +6382,9 @@ mod tests {
         mock(
             &server,
             "releases",
-            json!([{"id": 90, "tag_name": "", "published_at": "2026-09-05T00:00:00Z"}]),
+            json!([{"id": 90, "tag_name": "", "published_at": "2026-09-05T00:00:00Z",
+                    "html_url": "https://github.com/owner/repository/releases/tag/",
+                    "draft": false, "prerelease": false}]),
         )
         .await;
         assert_eq!(
@@ -6306,7 +6392,7 @@ mod tests {
                 .observe(Operation::ReleasePipelines, &release_args(None))
                 .await
                 .unwrap_err(),
-            "GitHub returned a release without a usable identity."
+            UNUSABLE_RELEASE
         );
     }
 
@@ -6322,12 +6408,16 @@ mod tests {
                     "tag_name": RELEASE_TAG,
                     "published_at": "2026-09-05T00:00:00Z",
                     "html_url": "https://github.com/owner/repository/releases/tag/v1.4.0",
+                    "draft": false,
+                    "prerelease": false,
                 },
                 {
                     "id": 89,
                     "tag_name": "v1.3.0",
                     "published_at": "2026-09-01T00:00:00Z",
                     "html_url": "https://github.com/owner/repository/releases/tag/v1.3.0",
+                    "draft": false,
+                    "prerelease": false,
                 },
             ]),
         )
@@ -6364,7 +6454,17 @@ mod tests {
             json!({"workflow_runs": [], "total_count": 0}),
         )
         .await;
-        mock(server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
+        mock_statuses(server, json!([])).await;
+    }
+
+    async fn mock_statuses(server: &MockServer, statuses: Value) {
+        let total = statuses.as_array().map_or(0, Vec::len);
+        mock(
+            server,
+            &format!("commits/{COMMIT}/status"),
+            json!({"statuses": statuses, "total_count": total}),
+        )
+        .await;
     }
 
     async fn check_runs(server: &MockServer, rows: Value) {
@@ -6494,6 +6594,51 @@ mod tests {
                 .unwrap_err()
                 .contains("different")
         );
+    }
+
+    #[tokio::test]
+    async fn check_rows_that_shift_between_pages_never_settle_as_success() {
+        let server = MockServer::start().await;
+        commit_and_empty_ci(&server).await;
+        let first: Vec<Value> = (1..=100)
+            .map(|id| {
+                json!({"id": id, "head_sha": COMMIT, "status": "completed", "conclusion": "success"})
+            })
+            .collect();
+        Mock::given(path(format!(
+            "/repos/owner/repository/commits/{COMMIT}/check-runs"
+        )))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"check_runs": first})))
+        .mount(&server)
+        .await;
+        Mock::given(path(format!(
+            "/repos/owner/repository/commits/{COMMIT}/check-runs"
+        )))
+        .and(query_param("page", "2"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"check_runs": [
+                {"id": 100, "head_sha": COMMIT, "status": "completed", "conclusion": "success"}
+            ]})),
+        )
+        .mount(&server)
+        .await;
+        let github = github(&server);
+
+        let (_, _, state) = github.settled(None).await.unwrap();
+        assert_eq!(state, PENDING_ASSESSMENT);
+        assert!(
+            !SETTLED_ASSESSMENTS.contains(&state),
+            "a check read twice may have pushed another past the pages read"
+        );
+
+        let build = github.build(COMMIT).await.unwrap();
+        assert_eq!(build["complete"], false);
+        assert_ne!(build["state"], SUCCESS_ASSESSMENT);
+
+        let evidence = github.check_evidence(COMMIT).await.unwrap();
+        assert!(!evidence.complete);
+        assert_ne!(evidence.normalize().state, readiness::CheckState::Success);
     }
 
     async fn rate_limited(server: &MockServer, response: ResponseTemplate) {
