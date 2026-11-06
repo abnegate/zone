@@ -1127,6 +1127,7 @@ mod tests {
             BuiltinTools::Granted,
             CodexSandbox::default(),
             None,
+            &[],
         );
         assert_eq!(
             value_after(&asks, PERMISSION_PROMPT_TOOL),
@@ -1141,6 +1142,7 @@ mod tests {
             BuiltinTools::Withheld,
             CodexSandbox::default(),
             None,
+            &[],
         );
         assert_eq!(
             value_after(&withheld, PERMISSION_PROMPT_TOOL),
@@ -1155,6 +1157,7 @@ mod tests {
             BuiltinTools::Granted,
             CodexSandbox::default(),
             None,
+            &[],
         );
         assert_eq!(
             value_after(&unserved, PERMISSION_PROMPT_TOOL),
@@ -1174,6 +1177,7 @@ mod tests {
                 BuiltinTools::Granted,
                 CodexSandbox::default(),
                 None,
+                &[],
             )
             .join(" ");
 
