@@ -1,11 +1,15 @@
 //! Databases migrated before the v1 baseline, moved onto it in place.
 
+pub mod entry;
+pub mod unfinished;
+
 use std::collections::BTreeSet;
 
 use sqlx::migrate::{MigrateError, Migrator};
-use sqlx::{Connection, PgConnection};
+use sqlx::{AssertSqlSafe, Connection, PgConnection};
 
-use super::unfinished::Unfinished;
+use entry::Entry;
+use unfinished::Unfinished;
 
 pub const BASELINE: i64 = 1;
 
@@ -112,41 +116,66 @@ const SELECT_LEDGER: &str =
 const DELETE_SUPERSEDED: &str = "DELETE FROM _sqlx_migrations WHERE version <> $1";
 const RECORD_BASELINE: &str = "UPDATE _sqlx_migrations \
      SET description = $2, checksum = $3, execution_time = 0 WHERE version = $1";
+const INVALID_INDEXES: &str = "SELECT format('%I.%I', namespace.nspname, class.relname) \
+     FROM pg_index JOIN pg_class class ON class.oid = pg_index.indexrelid \
+     JOIN pg_namespace namespace ON namespace.oid = class.relnamespace \
+     WHERE NOT pg_index.indisvalid AND namespace.nspname = current_schema()";
 
-/// Whether `ledger` is the complete pre-v1 history, which the baseline's schema
-/// matches exactly. A ledger holding none of it is left to sqlx. One holding
-/// only part of it, or more besides, is refused rather than guessed at.
-pub fn superseded(ledger: &[(i64, Vec<u8>, bool)]) -> Result<bool, Unfinished> {
-    let history: BTreeSet<(i64, Vec<u8>)> = HISTORY
+fn decoded(checksum: &str) -> Vec<u8> {
+    hex::decode(checksum).expect("pre-v1 checksums are hex")
+}
+
+/// Whether `ledger` is the complete pre-v1 history, whose schema the baseline
+/// matches exactly. Only a ledger whose first row is the pre-v1 initial schema
+/// is pre-v1; any other is left to sqlx. A pre-v1 ledger that stops short of
+/// the last migration, or records one `main` never had, is refused rather than
+/// guessed at.
+pub fn superseded(ledger: &[Entry]) -> Result<bool, Unfinished> {
+    let (_, initial) = HISTORY[0];
+    let pre_v1 = ledger
         .iter()
-        .map(|(version, checksum)| {
-            let checksum = hex::decode(checksum).expect("pre-v1 checksums are hex");
-            (*version, checksum)
-        })
-        .collect();
-    let (recorded, unexpected): (Vec<_>, Vec<_>) =
-        ledger.iter().partition(|(version, checksum, success)| {
-            *success && history.contains(&(*version, checksum.clone()))
-        });
-    if recorded.is_empty() {
+        .any(|entry| entry.version == BASELINE && entry.checksum == decoded(initial));
+    if !pre_v1 {
         return Ok(false);
     }
-    if recorded.len() == history.len() && unexpected.is_empty() {
-        return Ok(true);
-    }
-    let applied: BTreeSet<i64> = recorded.iter().map(|(version, _, _)| *version).collect();
-    Err(Unfinished {
-        missing: history
+    let history: BTreeSet<(i64, Vec<u8>)> = HISTORY
+        .iter()
+        .map(|(version, checksum)| (*version, decoded(checksum)))
+        .collect();
+    let recorded: BTreeSet<i64> = ledger.iter().map(|entry| entry.version).collect();
+    let unfinished = Unfinished {
+        missing: HISTORY
             .iter()
             .map(|(version, _)| *version)
-            .filter(|version| !applied.contains(version))
+            .filter(|version| !recorded.contains(version))
             .collect(),
-        unexpected: unexpected.iter().map(|(version, _, _)| *version).collect(),
-    })
+        failed: ledger
+            .iter()
+            .filter(|entry| !entry.success)
+            .map(|entry| entry.version)
+            .collect(),
+        unexpected: ledger
+            .iter()
+            .filter(|entry| {
+                entry.success && !history.contains(&(entry.version, entry.checksum.clone()))
+            })
+            .map(|entry| entry.version)
+            .collect(),
+    };
+    if unfinished.missing.is_empty()
+        && unfinished.failed.is_empty()
+        && unfinished.unexpected.is_empty()
+    {
+        return Ok(true);
+    }
+    Err(unfinished)
 }
 
 /// Collapse a complete pre-v1 ledger into the single baseline row, keeping the
-/// schema and every row of data as they are.
+/// schema and every row of data as they are. The one pre-v1 migration that ran
+/// outside a transaction built its index concurrently, and an interrupted build
+/// left that index invalid while still recording success, so any invalid index
+/// is rebuilt to make the schema the baseline's.
 pub async fn rebase(
     connection: &mut PgConnection,
     migrator: &Migrator,
@@ -157,7 +186,7 @@ pub async fn rebase(
     if !exists {
         return Ok(());
     }
-    let ledger: Vec<(i64, Vec<u8>, bool)> = sqlx::query_as(SELECT_LEDGER)
+    let ledger: Vec<Entry> = sqlx::query_as(SELECT_LEDGER)
         .fetch_all(&mut *connection)
         .await?;
     if !superseded(&ledger).map_err(|error| MigrateError::Source(Box::new(error)))? {
@@ -168,16 +197,36 @@ pub async fn rebase(
         .find(|migration| migration.version == BASELINE)
         .ok_or(MigrateError::VersionNotPresent(BASELINE))?;
     let mut transaction = connection.begin().await?;
-    sqlx::query(DELETE_SUPERSEDED)
+    let invalid: Vec<String> = sqlx::query_scalar(INVALID_INDEXES)
+        .fetch_all(&mut *transaction)
+        .await?;
+    for index in &invalid {
+        sqlx::query(AssertSqlSafe(format!("REINDEX INDEX {index}")))
+            .execute(&mut *transaction)
+            .await?;
+        tracing::warn!("rebuilt the invalid index {index} left by an interrupted migration");
+    }
+    let deleted = sqlx::query(DELETE_SUPERSEDED)
         .bind(BASELINE)
         .execute(&mut *transaction)
-        .await?;
-    sqlx::query(RECORD_BASELINE)
+        .await?
+        .rows_affected();
+    let recorded = sqlx::query(RECORD_BASELINE)
         .bind(BASELINE)
         .bind(baseline.description.as_ref())
         .bind(baseline.checksum.as_ref())
         .execute(&mut *transaction)
-        .await?;
+        .await?
+        .rows_affected();
+    if deleted != (HISTORY.len() - 1) as u64 || recorded != 1 {
+        return Err(MigrateError::Source(
+            format!(
+                "the pre-v1 ledger changed while it was moved onto the v1 baseline: \
+                 removed {deleted} rows and recorded {recorded}"
+            )
+            .into(),
+        ));
+    }
     transaction.commit().await?;
     tracing::info!("moved the pre-v1 migration ledger onto the v1 baseline");
     Ok(())
@@ -187,14 +236,24 @@ pub async fn rebase(
 mod tests {
     use sha2::{Digest, Sha384};
 
-    use super::{HISTORY, Unfinished, superseded};
+    use super::entry::Entry;
+    use super::unfinished::Unfinished;
+    use super::{HISTORY, decoded, superseded};
 
     const BASELINE_CHECKSUM: &str = "2dfdc59a18685543a92caee401199580da07b3cfb448d54a67c9f2e382f81059d56cd76bac7b9ce214e04b750f6854de";
 
-    fn history() -> Vec<(i64, Vec<u8>, bool)> {
+    fn entry(version: i64, checksum: &str) -> Entry {
+        Entry {
+            version,
+            checksum: decoded(checksum),
+            success: true,
+        }
+    }
+
+    fn history() -> Vec<Entry> {
         HISTORY
             .iter()
-            .map(|(version, checksum)| (*version, hex::decode(checksum).unwrap(), true))
+            .map(|(version, checksum)| entry(*version, checksum))
             .collect()
     }
 
@@ -215,19 +274,21 @@ mod tests {
         let expected: Vec<i64> = (1..=24).filter(|version| *version != 16).collect();
         assert_eq!(versions, expected);
         for (version, checksum) in HISTORY {
-            assert_eq!(
-                hex::decode(checksum).unwrap().len(),
-                48,
-                "checksum of {version}"
-            );
+            assert_eq!(decoded(checksum).len(), 48, "checksum of {version}");
         }
     }
 
     #[test]
     fn a_fresh_or_baselined_ledger_is_left_to_sqlx() {
         assert_eq!(superseded(&[]), Ok(false));
-        let baselined = [(1, hex::decode(BASELINE_CHECKSUM).unwrap(), true)];
-        assert_eq!(superseded(&baselined), Ok(false));
+        assert_eq!(superseded(&[entry(1, BASELINE_CHECKSUM)]), Ok(false));
+    }
+
+    #[test]
+    fn a_later_migration_identical_to_a_pre_v1_one_is_left_to_sqlx() {
+        let (version, checksum) = HISTORY[4];
+        let ledger = [entry(1, BASELINE_CHECKSUM), entry(version, checksum)];
+        assert_eq!(superseded(&ledger), Ok(false));
     }
 
     #[test]
@@ -243,6 +304,7 @@ mod tests {
             superseded(&ledger),
             Err(Unfinished {
                 missing: vec![24],
+                failed: vec![],
                 unexpected: vec![],
             })
         );
@@ -251,12 +313,17 @@ mod tests {
     #[test]
     fn a_ledger_with_a_migration_from_outside_main_is_refused() {
         let mut ledger = history();
-        ledger.push((25, vec![0; 48], true));
+        ledger.push(Entry {
+            version: 16,
+            checksum: vec![0; 48],
+            success: true,
+        });
         assert_eq!(
             superseded(&ledger),
             Err(Unfinished {
                 missing: vec![],
-                unexpected: vec![25],
+                failed: vec![],
+                unexpected: vec![16],
             })
         );
     }
@@ -264,13 +331,26 @@ mod tests {
     #[test]
     fn a_ledger_with_a_failed_pre_v1_migration_is_refused() {
         let mut ledger = history();
-        ledger[3].2 = false;
+        ledger[3].success = false;
         assert_eq!(
             superseded(&ledger),
             Err(Unfinished {
-                missing: vec![4],
-                unexpected: vec![4],
+                missing: vec![],
+                failed: vec![4],
+                unexpected: vec![],
             })
         );
+    }
+
+    #[test]
+    fn the_refusal_tells_the_operator_which_build_finishes_the_history() {
+        let message = Unfinished {
+            missing: vec![24],
+            failed: vec![],
+            unexpected: vec![],
+        }
+        .to_string();
+        assert!(message.contains("missing [24]"), "{message}");
+        assert!(message.contains("218739e7"), "{message}");
     }
 }

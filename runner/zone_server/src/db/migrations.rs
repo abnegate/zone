@@ -1,7 +1,6 @@
 //! Schema upgrades.
 
 pub mod legacy;
-pub mod unfinished;
 
 use sqlx::PgPool;
 use sqlx::migrate::{Migrate, MigrateError};
@@ -38,10 +37,11 @@ pub async fn run(pool: &PgPool) -> Result<(), MigrateError> {
         .await?;
     let mut migrator = sqlx::migrate!("./migrations");
     migrator.set_locking(false);
-    let result = match legacy::rebase(&mut connection, &migrator).await {
-        Ok(()) => migrator.run_direct(None, &mut *connection, false).await,
-        Err(error) => Err(error),
-    };
+    let result = async {
+        legacy::rebase(&mut connection, &migrator).await?;
+        migrator.run_direct(None, &mut *connection, false).await
+    }
+    .await;
     let unlocked = connection.unlock().await;
     result.and(unlocked)?;
     connection.close().await?;

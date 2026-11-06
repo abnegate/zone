@@ -1,8 +1,8 @@
 use sqlx::migrate::MigrateError;
 use uuid::Uuid;
 use zone_server::db::migrations;
+use zone_server::db::migrations::legacy::unfinished::Unfinished;
 use zone_server::db::migrations::legacy::{BASELINE, HISTORY};
-use zone_server::db::migrations::unfinished::Unfinished;
 
 use crate::common::Database;
 
@@ -95,8 +95,63 @@ async fn a_database_short_of_the_last_pre_v1_migration_is_refused_untouched() {
         source.downcast_ref::<Unfinished>(),
         Some(&Unfinished {
             missing: vec![24],
+            failed: vec![],
             unexpected: vec![],
         })
+    );
+    assert_eq!(
+        ledger(&database).await,
+        before,
+        "a refused rebase writes nothing"
+    );
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_index_an_interrupted_pre_v1_migration_left_invalid_is_rebuilt() {
+    const VALID: &str =
+        "SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_messages_typed'::regclass";
+    let database = Database::new(PREFIX).await;
+    migrations::run(&database.pool).await.unwrap();
+    forge(&database, HISTORY).await;
+    sqlx::query(
+        "UPDATE pg_index SET indisvalid = FALSE WHERE indexrelid = 'idx_messages_typed'::regclass",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+
+    migrations::run(&database.pool).await.unwrap();
+
+    let valid: bool = sqlx::query_scalar(VALID)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert!(valid, "the rebase rebuilds what 019 left invalid");
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_database_holding_a_branch_only_migration_is_refused_untouched() {
+    let database = Database::new(PREFIX).await;
+    migrations::run(&database.pool).await.unwrap();
+    forge(&database, HISTORY).await;
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) \
+         VALUES(16,'branch only',TRUE,'\\x00'::bytea,1)",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let before = ledger(&database).await;
+
+    let error = migrations::run(&database.pool)
+        .await
+        .expect_err("a migration main never had cannot be rebased");
+
+    assert!(
+        error.to_string().contains("unrecognised [16]"),
+        "the refusal names the branch's migration: {error}"
     );
     assert_eq!(
         ledger(&database).await,
