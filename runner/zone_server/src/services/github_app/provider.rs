@@ -2,19 +2,19 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use abnegate_secret::MasterKey;
-use chrono::Utc;
+use abnegate_vcs::ApplicationClaims;
+use abnegate_vcs::InstallationIssuer;
+use abnegate_vcs::TokenCache;
 
 use crate::db::sources::SourceCredentialRow;
 use crate::secret::Unseal;
 
-use super::cache::TokenCache;
 use super::configuration::StoredConfiguration;
 use super::credential::Credential;
 use super::error::GithubAppError;
-use super::issuer::Issuer;
-use super::jwt;
 
 /// Resolves a source row into the credential its requests should carry.
 ///
@@ -23,18 +23,18 @@ use super::jwt;
 /// personal access token stored against it. Callers see [`Credential`] either
 /// way.
 pub struct Provider {
-    issuer: Issuer,
+    issuer: InstallationIssuer,
     cache: TokenCache,
     master_key: Arc<MasterKey>,
 }
 
 impl Provider {
     pub fn new(master_key: Arc<MasterKey>) -> Result<Self, GithubAppError> {
-        Ok(Self::with_issuer(master_key, Issuer::new()?))
+        Ok(Self::with_issuer(master_key, InstallationIssuer::new()?))
     }
 
     /// A provider talking to `issuer`, for GitHub Enterprise and for tests.
-    pub fn with_issuer(master_key: Arc<MasterKey>, issuer: Issuer) -> Self {
+    pub fn with_issuer(master_key: Arc<MasterKey>, issuer: InstallationIssuer) -> Self {
         Self {
             issuer,
             cache: TokenCache::new(),
@@ -70,13 +70,15 @@ impl Provider {
         configuration: &StoredConfiguration,
     ) -> Result<Credential, GithubAppError> {
         let installation = configuration.installation_id();
-        let now = Utc::now();
+        let now = SystemTime::now();
 
         if let Some(cached) = self.cache.get(installation, now) {
             return Ok(Credential::new(cached.secret().clone()));
         }
 
-        let signed = jwt::sign(&configuration.open(&self.master_key)?, now)?;
+        let opened = configuration.open(&self.master_key)?;
+        let signed =
+            ApplicationClaims::issue(opened.application_id(), now).sign(opened.private_key())?;
         let token = self.issuer.issue(&signed, installation).await?;
         let credential = Credential::new(token.secret().clone());
         self.cache.insert(installation, token);
@@ -112,17 +114,23 @@ mod tests {
     use abnegate_secret::SecretValue;
 
     use super::*;
-    use chrono::{Duration, SecondsFormat};
+    use chrono::Duration;
+    use chrono::SecondsFormat;
+    use chrono::Utc;
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::secret::fixture::seal;
     use crate::secret::fixture::seal_legacy;
-    use crate::services::github_app::identifier::{ApplicationId, InstallationId};
+    use crate::services::github_app::ApplicationId;
+    use crate::services::github_app::InstallationId;
     use crate::services::github_app::testing::TEST_PRIVATE_KEY;
 
     const PERSONAL_TOKEN: &str = "ghp_personalaccesstoken";
+    const UNREACHABLE_ORIGIN: &str = "http://127.0.0.1:1";
+    const PLAIN_HTTP_ORIGIN: &str = "http://github.example.com/api/v3";
+    const HTTPS_ORIGIN: &str = "https://github.example.com/api/v3";
 
     /// One arbitrary key per run. Seal and open must agree; the value itself
     /// is irrelevant, and a test that passes with any key proves more than one
@@ -178,7 +186,10 @@ mod tests {
     }
 
     fn provider(server: &MockServer) -> Provider {
-        Provider::with_issuer(key(), Issuer::at(&server.uri()).expect("issuer"))
+        Provider::with_issuer(
+            key(),
+            InstallationIssuer::standing_in_for(&server.uri()).expect("issuer"),
+        )
     }
 
     #[tokio::test]
@@ -357,5 +368,49 @@ mod tests {
         assert!(!rendered.contains("ghs_installationtokenvalue"));
         assert!(!rendered.contains("BEGIN RSA PRIVATE KEY"));
         assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn an_installation_token_answer_without_a_token_is_unreadable() {
+        let server = MockServer::start().await;
+        issuing(&server, "", 1).await;
+
+        let error = provider(&server)
+            .credential(&app_source(&key()))
+            .await
+            .expect_err("an empty token is no credential");
+
+        assert!(matches!(error, GithubAppError::Response));
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_issuer_fails_without_the_credentialed_url() {
+        let provider = Provider::with_issuer(
+            key(),
+            InstallationIssuer::standing_in_for(UNREACHABLE_ORIGIN).expect("issuer"),
+        );
+
+        let error = provider
+            .credential(&app_source(&key()))
+            .await
+            .expect_err("a closed port is a failure");
+
+        let rendered = error.to_string();
+        assert!(matches!(error, GithubAppError::Transport(_)));
+        assert!(
+            !rendered.contains("127.0.0.1") && !rendered.contains("access_tokens"),
+            "the request URL survived into the error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_installation_issuer_on_plain_http_is_a_configuration_error() {
+        let error = InstallationIssuer::configured(PLAIN_HTTP_ORIGIN)
+            .map(|issuer| Provider::with_issuer(key(), issuer))
+            .map_err(GithubAppError::from)
+            .expect_err("an App JWT must not travel over plain HTTP");
+
+        assert!(matches!(error, GithubAppError::Configuration));
+        assert!(InstallationIssuer::configured(HTTPS_ORIGIN).is_ok());
     }
 }
