@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { type ComponentType, useState } from 'react';
+import { ApiError } from '../../../api/ApiError';
 import type { GitHubBranch, GitHubBranchesResponse, GitHubRepository } from '../types';
 
 const listBranches =
@@ -141,6 +142,44 @@ describe('BranchSelect', () => {
     expect(input).toHaveAttribute('placeholder', 'main');
     await new Promise((settle) => setTimeout(settle, 50));
     expect(listBranches).not.toHaveBeenCalled();
+  });
+
+  it('lists branches from every page, not just the first', async () => {
+    listBranches.mockImplementation(
+      async (_organizationId, _installationId, _owner, _name, page) =>
+        page === 1 ? { ...branches('main', 'develop'), next_page: 2 } : branches('release')
+    );
+    renderSelect();
+
+    await waitFor(() => expect(datalistOptions()).toEqual(['trunk', 'main', 'develop', 'release']));
+    expect(listBranches).toHaveBeenCalledWith('org-1', 'installation-1', 'acme', 'api', 2);
+  });
+
+  it('says the branches could not load and still accepts a typed branch', async () => {
+    listBranches.mockImplementation(async () => {
+      throw new ApiError('Failed to load branches: 502', 502);
+    });
+    const { user, onChange } = renderSelect();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/^Couldn['’]t load branches\. Type the branch name instead\.$/);
+    expect(branchInput()).toHaveAttribute('aria-describedby', alert.id);
+
+    await user.type(branchInput(), 'hotfix');
+    expect(onChange).toHaveBeenLastCalledWith('hotfix');
+  });
+
+  it('falls back to free text without an error when the installation was revoked', async () => {
+    listBranches.mockImplementation(async () => {
+      throw new ApiError('Failed to load branches: 404', 404);
+    });
+    renderSelect();
+
+    await waitFor(() => expect(listBranches).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(branchInput()).toHaveAttribute('aria-busy', 'false'));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(branchInput()).toBeEnabled();
+    expect(datalistOptions()).toEqual(['trunk']);
   });
 
   it('loads the first page of branches for the repository installation', async () => {
