@@ -1,371 +1,484 @@
-//! Integration tests for Ollama embedding provider
+//! The embedding adapter over abnegate-llm's Ollama and OpenAI-compatible
+//! providers, against a mocked server.
 
-use wiremock::matchers::{header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_context::embeddings::EmbeddingService;
-use zone_context::embeddings::providers::{AiSettings, EmbeddingProviderFactory, OllamaProvider};
+use std::sync::Arc;
+
+use abnegate_llm::modality::vendor::{OllamaEmbeddingConfig, OllamaEmbeddingProvider};
+use serde_json::{Value, json};
+use wiremock::matchers::{body_json, header, method, path};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+use zone_context::embeddings::providers::{
+    AiSettings, Batching, EMBEDDING_ENGINE_OPENAI_COMPATIBLE, EmbeddingAdapter,
+    EmbeddingProviderFactory, PROVIDER_SELF_HOSTED,
+};
+use zone_context::embeddings::{EmbeddingService, VECTOR_DIMENSION};
 use zone_context::error::ContextError;
+
+const OLLAMA_PATH: &str = "/api/embeddings";
+const OPENAI_COMPATIBLE_PATH: &str = "/v1/embeddings";
+const MODEL: &str = "nomic-embed-text";
+const KEY: &str = "zone-fixture-key-0123456789abcdef";
+const CONCURRENCY: usize = 10;
+const CONTEXT_LIMIT_CHARACTERS: usize = 1000;
+const LONG_TEXT_CHARACTERS: usize = 5000;
+const LONG_BODY_CHARACTERS: usize = 500;
+const OPENAI_CONTEXT_LENGTH: &str = r#"{"error":{"message":"This model's maximum context length is 512 tokens, however you requested 2250 tokens. Please reduce your prompt.","type":"invalid_request_error","param":null,"code":null}}"#;
+
+fn adapter(config: OllamaEmbeddingConfig) -> EmbeddingAdapter {
+    EmbeddingAdapter::new(
+        Arc::new(OllamaEmbeddingProvider::new(config).expect("valid config")),
+        Batching::PerText {
+            concurrency: CONCURRENCY,
+        },
+    )
+}
+
+fn ollama(server: &MockServer, model: &str, dimensions: u32) -> EmbeddingAdapter {
+    adapter(OllamaEmbeddingConfig::new(server.uri(), model).with_dimensions(dimensions))
+}
+
+fn embedding(values: &[f32]) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({ "embedding": values }))
+}
+
+async fn ollama_answering(response: ResponseTemplate) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(OLLAMA_PATH))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    server
+}
+
+fn self_hosted(host: String, engine: Option<&str>, key: Option<&str>) -> AiSettings {
+    AiSettings {
+        provider: PROVIDER_SELF_HOSTED.to_string(),
+        litellm_host: Some(host),
+        litellm_key: key.map(str::to_string),
+        model_embedding: Some(MODEL.to_string()),
+        embedding_engine: engine.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+async fn embed_error(server: &MockServer) -> ContextError {
+    ollama(server, MODEL, 768)
+        .embed("test text")
+        .await
+        .expect_err("the embed should fail")
+}
 
 #[tokio::test]
 async fn test_ollama_embed_single() {
-    let mock_server = MockServer::start().await;
-
-    // Mock the embeddings endpoint
-    Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "embedding": [0.1, 0.2, 0.3, 0.4]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let provider = OllamaProvider::new(&mock_server.uri(), "nomic-embed-text", 4, None).unwrap();
-
-    let result = provider.embed("test text").await;
-    assert!(result.is_ok());
-
-    let embedding = result.unwrap();
-    assert_eq!(embedding.len(), 4);
-    assert_eq!(embedding, vec![0.1, 0.2, 0.3, 0.4]);
+    let server = ollama_answering(embedding(&[0.1, 0.2, 0.3, 0.4])).await;
+    let vector = ollama(&server, MODEL, 4).embed("test text").await.unwrap();
+    assert_eq!(vector, vec![0.1, 0.2, 0.3, 0.4]);
 }
 
 #[tokio::test]
 async fn test_ollama_embed_batch() {
-    let mock_server = MockServer::start().await;
-
-    // Mock the embeddings endpoint - will be called twice
+    let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "embedding": [0.1, 0.2, 0.3]
-        })))
+        .and(path(OLLAMA_PATH))
+        .respond_with(embedding(&[0.1, 0.2, 0.3]))
         .expect(2)
-        .mount(&mock_server)
+        .mount(&server)
         .await;
-
-    let provider = OllamaProvider::new(&mock_server.uri(), "nomic-embed-text", 3, None).unwrap();
-
-    let texts = vec!["text 1", "text 2"];
-    let result = provider.embed_batch(&texts).await;
-    assert!(result.is_ok());
-
-    let embeddings = result.unwrap();
-    assert_eq!(embeddings.len(), 2);
-    assert_eq!(embeddings[0], vec![0.1, 0.2, 0.3]);
-    assert_eq!(embeddings[1], vec![0.1, 0.2, 0.3]);
+    let vectors = ollama(&server, MODEL, 3)
+        .embed_batch(&["text 1", "text 2"])
+        .await
+        .unwrap();
+    assert_eq!(vectors, vec![vec![0.1, 0.2, 0.3], vec![0.1, 0.2, 0.3]]);
 }
 
 #[tokio::test]
 async fn test_ollama_handles_api_error() {
-    let mock_server = MockServer::start().await;
-
-    // Mock server error
-    Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(500).set_body_string("Internal server error"))
-        .mount(&mock_server)
-        .await;
-
-    let provider = OllamaProvider::new(&mock_server.uri(), "nomic-embed-text", 768, None).unwrap();
-
-    let result = provider.embed("test text").await;
-    assert!(result.is_err());
-
-    match result {
-        Err(ContextError::Embedding(msg)) => {
-            assert!(msg.contains("500"));
-        }
-        _ => panic!("Expected Embedding error"),
+    let server =
+        ollama_answering(ResponseTemplate::new(500).set_body_string("Internal server error")).await;
+    match embed_error(&server).await {
+        ContextError::Embedding(message) => assert!(message.contains("500"), "{message}"),
+        other => panic!("Expected Embedding error, got {other:?}"),
     }
 }
 
 #[tokio::test]
 async fn test_ollama_handles_timeout() {
-    // Use an invalid URL that will timeout
-    let provider =
-        OllamaProvider::new("http://192.0.2.1:1234", "nomic-embed-text", 768, None).unwrap();
-
+    let provider = adapter(OllamaEmbeddingConfig::new("http://192.0.2.1:1234", MODEL));
     let result = tokio::time::timeout(
         tokio::time::Duration::from_millis(100),
         provider.embed("test text"),
     )
     .await;
-
-    // Should timeout or fail with network error
     assert!(result.is_err() || result.unwrap().is_err());
 }
 
 #[tokio::test]
 async fn test_ollama_factory_creates_provider() {
-    let mock_server = MockServer::start().await;
-
-    let settings = AiSettings {
-        provider: "self_hosted".to_string(),
-        litellm_host: Some(mock_server.uri()),
-        litellm_key: Some("test-key".to_string()),
-        model_embedding: Some("nomic-embed-text".to_string()),
-        ..Default::default()
-    };
-
-    let provider = EmbeddingProviderFactory::create(&settings);
-    assert!(provider.is_ok());
-
-    let provider = provider.unwrap();
-    assert_eq!(provider.model(), "nomic-embed-text");
+    let server = MockServer::start().await;
+    let provider =
+        EmbeddingProviderFactory::create(&self_hosted(server.uri(), None, Some("test-key")))
+            .unwrap();
+    assert_eq!(provider.model(), MODEL);
     assert_eq!(provider.dimension(), 768);
 }
 
 #[tokio::test]
 async fn test_ollama_embed_empty_text() {
-    let mock_server = MockServer::start().await;
-
-    // Mock the embeddings endpoint
-    Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "embedding": [0.0, 0.0, 0.0]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let provider = OllamaProvider::new(&mock_server.uri(), "nomic-embed-text", 3, None).unwrap();
-
-    let result = provider.embed("").await;
-    assert!(result.is_ok());
-
-    let embedding = result.unwrap();
-    assert_eq!(embedding.len(), 3);
+    let server = ollama_answering(embedding(&[0.0, 0.0, 0.0])).await;
+    let vector = ollama(&server, MODEL, 3).embed("").await.unwrap();
+    assert_eq!(vector.len(), 3);
 }
 
 #[tokio::test]
 async fn test_ollama_with_api_key() {
-    let mock_server = MockServer::start().await;
-
-    // Mock the embeddings endpoint with authorization check
+    let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
+        .and(path(OLLAMA_PATH))
         .and(header("Authorization", "Bearer my-secret-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "embedding": [0.1, 0.2]
-        })))
-        .mount(&mock_server)
+        .respond_with(embedding(&[0.1, 0.2]))
+        .mount(&server)
         .await;
-
-    let provider = OllamaProvider::new(
-        &mock_server.uri(),
-        "nomic-embed-text",
-        2,
-        Some("my-secret-key".to_string()),
-    )
-    .unwrap();
-
-    let result = provider.embed("test").await;
-    assert!(result.is_ok());
+    let provider = adapter(
+        OllamaEmbeddingConfig::new(server.uri(), MODEL)
+            .with_dimensions(2)
+            .with_api_key("my-secret-key"),
+    );
+    assert!(provider.embed("test").await.is_ok());
 }
 
 #[tokio::test]
 async fn test_ollama_different_models() {
-    let mock_server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "embedding": vec![0.1; 1024]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let provider =
-        OllamaProvider::new(&mock_server.uri(), "mxbai-embed-large", 1024, None).unwrap();
-
+    let server = ollama_answering(embedding(&[0.1; 1024])).await;
+    let provider = adapter(OllamaEmbeddingConfig::new(
+        server.uri(),
+        "mxbai-embed-large",
+    ));
     assert_eq!(provider.dimension(), 1024);
     assert_eq!(provider.model(), "mxbai-embed-large");
-
-    let result = provider.embed("test").await;
-    assert!(result.is_ok());
+    assert!(provider.embed("test").await.is_ok());
 }
 
 #[tokio::test]
 async fn test_ollama_from_settings_with_default_model() {
     let settings = AiSettings {
-        provider: "self_hosted".to_string(),
-        litellm_host: Some("http://localhost:11434".to_string()),
-        model_embedding: None, // Should default to qwen3-embedding:0.6b
-        ..Default::default()
+        model_embedding: None,
+        ..self_hosted("http://localhost:11434".to_string(), None, None)
     };
-
-    let provider = OllamaProvider::from_settings(&settings).unwrap();
+    let provider = EmbeddingProviderFactory::create(&settings).unwrap();
     assert_eq!(provider.model(), "qwen3-embedding:0.6b");
     assert_eq!(provider.dimension(), 1024);
 }
 
 #[tokio::test]
 async fn test_ollama_handles_malformed_json() {
-    let mock_server = MockServer::start().await;
-
-    // Mock endpoint that returns invalid JSON
-    Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("not valid json"))
-        .mount(&mock_server)
-        .await;
-
-    let provider = OllamaProvider::new(&mock_server.uri(), "nomic-embed-text", 768, None).unwrap();
-
-    let result = provider.embed("test text").await;
-    assert!(result.is_err());
-
-    match result {
-        Err(ContextError::Embedding(msg)) => {
-            assert!(msg.contains("parse"));
-        }
-        _ => panic!("Expected Embedding error for malformed JSON"),
+    let server =
+        ollama_answering(ResponseTemplate::new(200).set_body_string("not valid json")).await;
+    match embed_error(&server).await {
+        ContextError::Embedding(message) => assert!(message.contains("parse"), "{message}"),
+        other => panic!("Expected Embedding error for malformed JSON, got {other:?}"),
     }
 }
 
 #[tokio::test]
 async fn test_ollama_validates_dimension() {
-    let mock_server = MockServer::start().await;
-
-    // Mock endpoint that returns wrong dimension
-    Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "embedding": [0.1, 0.2, 0.3] // 3 dimensions instead of expected 768
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let provider = OllamaProvider::new(&mock_server.uri(), "nomic-embed-text", 768, None).unwrap();
-
-    let result = provider.embed("test text").await;
-    assert!(result.is_err());
-
-    match result {
-        Err(ContextError::EmbeddingDimensionMismatch { expected, actual }) => {
+    let server = ollama_answering(embedding(&[0.1, 0.2, 0.3])).await;
+    match embed_error(&server).await {
+        ContextError::EmbeddingDimensionMismatch { expected, actual } => {
             assert_eq!(expected, 768);
             assert_eq!(actual, 3);
         }
-        _ => panic!("Expected EmbeddingDimensionMismatch error"),
+        other => panic!("Expected EmbeddingDimensionMismatch error, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn test_ollama_handles_auth_error() {
-    let mock_server = MockServer::start().await;
-
-    // Mock 401 unauthorized
-    Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
-        .mount(&mock_server)
-        .await;
-
-    let provider = OllamaProvider::new(&mock_server.uri(), "nomic-embed-text", 768, None).unwrap();
-
-    let result = provider.embed("test text").await;
-    assert!(result.is_err());
-
-    match result {
-        Err(ContextError::Auth(msg)) => {
-            assert!(msg.contains("401"));
+async fn test_ollama_handles_auth_errors() {
+    for (status, body) in [(401, "Unauthorized"), (403, "Forbidden")] {
+        let server = ollama_answering(ResponseTemplate::new(status).set_body_string(body)).await;
+        match embed_error(&server).await {
+            ContextError::Auth(message) => {
+                assert!(message.contains(&status.to_string()), "{message}");
+            }
+            other => panic!("Expected Auth error for {status}, got {other:?}"),
         }
-        _ => panic!("Expected Auth error for 401"),
-    }
-}
-
-#[tokio::test]
-async fn test_ollama_handles_auth_error_403() {
-    let mock_server = MockServer::start().await;
-
-    // Mock 403 forbidden
-    Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
-        .mount(&mock_server)
-        .await;
-
-    let provider = OllamaProvider::new(&mock_server.uri(), "nomic-embed-text", 768, None).unwrap();
-
-    let result = provider.embed("test text").await;
-    assert!(result.is_err());
-
-    match result {
-        Err(ContextError::Auth(msg)) => {
-            assert!(msg.contains("403"));
-        }
-        _ => panic!("Expected Auth error for 403"),
     }
 }
 
 #[tokio::test]
 async fn test_ollama_handles_rate_limit() {
-    let mock_server = MockServer::start().await;
-
-    // Mock 429 rate limited
-    Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(429).set_body_string("Rate limit exceeded"))
-        .mount(&mock_server)
-        .await;
-
-    let provider = OllamaProvider::new(&mock_server.uri(), "nomic-embed-text", 768, None).unwrap();
-
-    let result = provider.embed("test text").await;
-    assert!(result.is_err());
-
-    match result {
-        Err(ContextError::RateLimited { retry_after_secs }) => {
-            assert_eq!(retry_after_secs, 60);
-        }
-        _ => panic!("Expected RateLimited error for 429"),
+    let server =
+        ollama_answering(ResponseTemplate::new(429).set_body_string("Rate limit exceeded")).await;
+    match embed_error(&server).await {
+        ContextError::RateLimited { retry_after_secs } => assert_eq!(retry_after_secs, 60),
+        other => panic!("Expected RateLimited error for 429, got {other:?}"),
     }
 }
 
 #[tokio::test]
 async fn test_ollama_validates_url() {
-    // Test invalid scheme
-    let result = OllamaProvider::new("ftp://invalid.com", "nomic-embed-text", 768, None);
-    assert!(result.is_err());
-    match result {
-        Err(ContextError::InvalidSourceConfig(msg)) => {
-            assert!(msg.contains("ftp"));
-        }
-        _ => panic!("Expected InvalidSourceConfig for invalid scheme"),
-    }
+    let message = |host: &str| match EmbeddingProviderFactory::create(&self_hosted(
+        host.to_string(),
+        None,
+        None,
+    )) {
+        Err(ContextError::InvalidSourceConfig(message)) => message,
+        Err(other) => panic!("Expected InvalidSourceConfig for {host}, got {other:?}"),
+        Ok(_) => panic!("{host} should be refused"),
+    };
+    assert!(message("ftp://invalid.com").contains("ftp"));
+    assert!(message("not-a-url").contains("not-a-url"));
+}
 
-    // Test malformed URL
-    let result = OllamaProvider::new("not-a-url", "nomic-embed-text", 768, None);
-    assert!(result.is_err());
+#[tokio::test]
+async fn an_invalid_url_scheme_is_refused_in_the_crates_wording() {
+    let result =
+        EmbeddingProviderFactory::create(&self_hosted("ftp://invalid.com".to_string(), None, None));
     match result {
-        Err(ContextError::InvalidSourceConfig(_)) => {}
-        _ => panic!("Expected InvalidSourceConfig for malformed URL"),
+        Err(ContextError::InvalidSourceConfig(message)) => assert_eq!(
+            message, "invalid base URL ftp://invalid.com: the ftp scheme is not http or https",
+            "Zone said \"Invalid URL scheme 'ftp': only http and https are supported\""
+        ),
+        Err(other) => panic!("Expected InvalidSourceConfig, got {other:?}"),
+        Ok(_) => panic!("ftp should be refused"),
     }
 }
 
 #[tokio::test]
-async fn test_ollama_sanitizes_error_body() {
-    let mock_server = MockServer::start().await;
+async fn an_error_body_is_kept_whole_with_the_key_concealed() {
+    let body = format!("Error: {} rejected {KEY}", "a".repeat(LONG_BODY_CHARACTERS));
+    let server = ollama_answering(ResponseTemplate::new(500).set_body_string(body)).await;
+    let error = adapter(
+        OllamaEmbeddingConfig::new(server.uri(), MODEL)
+            .with_dimensions(768)
+            .with_api_key(KEY),
+    )
+    .embed("test text")
+    .await
+    .unwrap_err();
+    let ContextError::Embedding(message) = error else {
+        panic!("Expected Embedding error, got {error:?}");
+    };
+    assert!(
+        message.contains(&"a".repeat(LONG_BODY_CHARACTERS)),
+        "Zone cut the body at 200 characters; the crate keeps it whole: {message}"
+    );
+    assert!(!message.contains("truncated"), "{message}");
+    assert!(!message.contains(KEY), "the key leaked: {message}");
+}
 
-    // Mock endpoint with very long error message
-    let long_error = "Error: ".to_string() + &"a".repeat(500);
+#[tokio::test]
+async fn an_empty_key_sends_no_bearer() {
+    let server = ollama_answering(embedding(&[0.5; 768])).await;
+    let provider =
+        EmbeddingProviderFactory::create(&self_hosted(server.uri(), None, Some(""))).unwrap();
+    provider.embed("test").await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].headers.get("authorization").is_none(),
+        "Zone sent \"Bearer \" for an empty key; the crate sends no header"
+    );
+}
+
+#[tokio::test]
+async fn a_redirect_is_refused() {
+    let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/api/embeddings"))
-        .respond_with(ResponseTemplate::new(500).set_body_string(long_error))
-        .mount(&mock_server)
+        .and(path(OLLAMA_PATH))
+        .respond_with(ResponseTemplate::new(302).insert_header("Location", "/elsewhere"))
+        .mount(&server)
         .await;
+    Mock::given(path("/elsewhere"))
+        .respond_with(embedding(&[0.5; 768]))
+        .expect(0)
+        .mount(&server)
+        .await;
+    match embed_error(&server).await {
+        ContextError::Embedding(message) => assert!(message.contains("302"), "{message}"),
+        other => panic!("Expected Embedding error for a redirect, got {other:?}"),
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
 
-    let provider = OllamaProvider::new(&mock_server.uri(), "nomic-embed-text", 768, None).unwrap();
+#[tokio::test]
+async fn a_trailing_slash_base_posts_to_api_embeddings() {
+    let server = ollama_answering(embedding(&[0.5; 768])).await;
+    let provider =
+        EmbeddingProviderFactory::create(&self_hosted(format!("{}/", server.uri()), None, None))
+            .unwrap();
+    provider.embed("test").await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests[0].url.path(),
+        OLLAMA_PATH,
+        "Zone posted to //api/embeddings"
+    );
+}
 
-    let result = provider.embed("test text").await;
-    assert!(result.is_err());
+#[tokio::test]
+async fn an_empty_vector_is_an_embedding_failure() {
+    let server = ollama_answering(embedding(&[])).await;
+    match embed_error(&server).await {
+        ContextError::Embedding(message) => assert!(
+            message.contains("empty embedding"),
+            "Zone reported a dimension mismatch against 0: {message}"
+        ),
+        other => panic!("Expected Embedding error, got {other:?}"),
+    }
+}
 
-    match result {
-        Err(ContextError::Embedding(msg)) => {
-            // Should be truncated
-            assert!(msg.len() < 500);
-            assert!(msg.contains("truncated"));
+#[test]
+fn snowflake_size_tags_get_their_own_width_on_ollama() {
+    for (model, dimension) in [
+        ("snowflake-arctic-embed", 1024),
+        ("snowflake-arctic-embed:22m", 384),
+        ("snowflake-arctic-embed:33m", 384),
+        ("snowflake-arctic-embed:110m", 768),
+        ("snowflake-arctic-embed:137m", 768),
+        ("snowflake-arctic-embed:335m", 1024),
+    ] {
+        let provider = adapter(OllamaEmbeddingConfig::new("http://localhost:11434", model));
+        assert_eq!(
+            provider.dimension(),
+            dimension,
+            "{model}: Zone said 1024 for every tag"
+        );
+        assert_eq!(provider.max_tokens(), 512, "{model}");
+    }
+}
+
+struct OpenAiCompatibleResponder {
+    width: usize,
+    context_limit: Option<usize>,
+}
+
+impl Respond for OpenAiCompatibleResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).expect("JSON body");
+        let inputs: Vec<String> = body["input"]
+            .as_array()
+            .expect("input array")
+            .iter()
+            .map(|input| input.as_str().expect("string input").to_string())
+            .collect();
+        if self
+            .context_limit
+            .is_some_and(|limit| inputs.iter().any(|input| input.chars().count() > limit))
+        {
+            return ResponseTemplate::new(400).set_body_string(OPENAI_CONTEXT_LENGTH);
         }
-        _ => panic!("Expected Embedding error"),
+        let data: Vec<Value> = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                json!({
+                    "object": "embedding",
+                    "index": index,
+                    "embedding": vec![input.chars().count() as f32; self.width],
+                })
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "object": "list", "data": data }))
+    }
+}
+
+async fn openai_compatible(
+    responder: OpenAiCompatibleResponder,
+) -> (MockServer, Arc<dyn EmbeddingService>) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(OPENAI_COMPATIBLE_PATH))
+        .respond_with(responder)
+        .mount(&server)
+        .await;
+    let provider = EmbeddingProviderFactory::create(&self_hosted(
+        server.uri(),
+        Some(EMBEDDING_ENGINE_OPENAI_COMPATIBLE),
+        Some(KEY),
+    ))
+    .unwrap();
+    (server, provider)
+}
+
+#[tokio::test]
+async fn the_openai_compatible_engine_posts_the_batch_to_v1_embeddings() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(OPENAI_COMPATIBLE_PATH))
+        .and(header("Authorization", format!("Bearer {KEY}").as_str()))
+        .and(body_json(
+            json!({ "model": MODEL, "input": ["alpha", "bravo charlie"] }),
+        ))
+        .respond_with(OpenAiCompatibleResponder {
+            width: 768,
+            context_limit: None,
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = EmbeddingProviderFactory::create(&self_hosted(
+        format!("{}/", server.uri()),
+        Some(EMBEDDING_ENGINE_OPENAI_COMPATIBLE),
+        Some(KEY),
+    ))
+    .unwrap();
+    let vectors = provider
+        .embed_batch(&["alpha", "bravo charlie"])
+        .await
+        .unwrap();
+    assert_eq!(vectors, vec![vec![5.0; 768], vec![13.0; 768]]);
+    assert_eq!(provider.dimension(), 768);
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert!(body.get("dimensions").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn an_openai_compatible_batch_past_the_context_falls_back_per_text() {
+    let (server, provider) = openai_compatible(OpenAiCompatibleResponder {
+        width: 768,
+        context_limit: Some(CONTEXT_LIMIT_CHARACTERS / 2),
+    })
+    .await;
+    let long = "a".repeat(LONG_TEXT_CHARACTERS);
+    let vectors = provider.embed_batch(&["short", &long]).await.unwrap();
+    assert_eq!(vectors[0], vec![5.0; 768]);
+    assert_eq!(vectors[1], vec![384.0; 768]);
+    let inputs: Vec<Vec<usize>> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|input| input.as_str().unwrap().chars().count())
+                .collect()
+        })
+        .collect();
+    assert_eq!(inputs[0], [5, 768]);
+    let mut singles: Vec<usize> = inputs[1..].iter().flatten().copied().collect();
+    singles.sort_unstable();
+    assert_eq!(singles, [5, 384, 768]);
+}
+
+#[tokio::test]
+async fn an_openai_compatible_vector_wider_than_the_store_is_refused() {
+    let width = VECTOR_DIMENSION * 3 / 2;
+    let (_server, provider) = openai_compatible(OpenAiCompatibleResponder {
+        width,
+        context_limit: None,
+    })
+    .await;
+    match provider.embed_batch(&["alpha"]).await.unwrap_err() {
+        ContextError::EmbeddingDimensionMismatch { expected, actual } => {
+            assert_eq!(expected, VECTOR_DIMENSION);
+            assert_eq!(actual, width);
+        }
+        other => panic!("Expected EmbeddingDimensionMismatch, got {other:?}"),
     }
 }

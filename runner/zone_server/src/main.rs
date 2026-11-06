@@ -16,7 +16,7 @@ use zone_server::cache::Cache;
 use zone_server::config::Config;
 use zone_server::routes;
 use zone_server::services::embedding::{
-    create_embedding_service, default_embedding_model, embedding_engine_from_env,
+    create_embedding_service, default_embedding_model, embedding_engine_from_env, embedding_host,
 };
 use zone_server::services::login;
 use zone_server::services::mail;
@@ -101,12 +101,14 @@ async fn main() {
     // Try to initialize embedding service from config
     // In production, this would fetch from organization AI settings
     let embedding_service = {
-        use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+        use zone_context::embeddings::providers::{EMBEDDING_ENGINE_OLLAMA, PROVIDER_SELF_HOSTED};
         use zone_server::db::ai_settings::EffectiveAiSettings;
 
+        let engine = embedding_engine_from_env();
+        let host = embedding_host(engine.as_deref(), &config.ollama_host, &config.litellm_host);
         let default_settings = EffectiveAiSettings {
             provider: PROVIDER_SELF_HOSTED.to_string(),
-            litellm_host: Some(config.litellm_host.clone()),
+            litellm_host: Some(host.to_string()),
             litellm_key: Some(abnegate_secret::SecretValue::new(
                 config.litellm_key.clone(),
             )),
@@ -127,19 +129,11 @@ async fn main() {
             model_audio: None,
         };
 
-        let engine = embedding_engine_from_env();
-        // OllamaProvider uses the native /api/embeddings protocol. LiteLLM
-        // only exposes OpenAI /v1/embeddings, so ollama-engine traffic must
-        // go to OLLAMA_HOST or every embed 404s.
-        let mut default_settings = default_settings;
-        if !matches!(engine.as_deref(), Some("local")) {
-            default_settings.litellm_host = Some(config.ollama_host.clone());
-        }
         match create_embedding_service(&default_settings, engine.as_deref()) {
             Ok(service) => {
                 tracing::info!(
                     "Initialized embedding service: engine={}, model={}, dimension={}",
-                    engine.as_deref().unwrap_or("ollama"),
+                    engine.as_deref().unwrap_or(EMBEDDING_ENGINE_OLLAMA),
                     service.model(),
                     service.dimension()
                 );

@@ -105,6 +105,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "chrono",
+ "fastembed",
  "futures",
  "rand 0.10.2",
  "regex",
@@ -3189,6 +3190,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -5668,6 +5670,8 @@ dependencies = [
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
+ "quinn",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -5675,6 +5679,7 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
+ "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http 0.6.11",
@@ -5684,6 +5689,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -9439,6 +9445,7 @@ version = "0.1.0"
 dependencies = [
  "abnegate-http",
  "abnegate-index",
+ "abnegate-llm",
  "async-stream",
  "async-trait",
  "base64 0.23.1",
@@ -9448,6 +9455,7 @@ dependencies = [
  "fastembed",
  "futures",
  "glob",
+ "http",
  "mime",
  "percent-encoding",
  "regex",

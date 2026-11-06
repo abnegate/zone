@@ -3,8 +3,8 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -14,12 +14,12 @@ use zone_context::embeddings::providers::{
 };
 use zone_context::error::{ContextError, Result};
 
-type Provider = fn(&AiSettings) -> Result<Arc<dyn EmbeddingService>>;
+type Embedder = Arc<dyn EmbeddingService>;
+
+type Provider = fn(&AiSettings) -> Result<Embedder>;
 
 const PROVIDER: Provider = EmbeddingProviderFactory::create;
 
-const RECORD_ENVIRONMENT: &str = "ZONE_RECORD_EMBEDDING_FIXTURES";
-const RECORD_ENABLED: &str = "1";
 const FIXTURE_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/embeddings");
 
 const OLLAMA_REQUESTS_FIXTURE: &str = "ollama_requests.json";
@@ -32,6 +32,31 @@ const OLLAMA_DIMENSION: usize = 768;
 const API_KEY: &str = "fixture-key";
 const EMPTY_API_KEY: &str = "";
 const SERVER_PLACEHOLDER: &str = "{server}";
+const OLLAMA_PATH: &str = "/api/embeddings";
+const DOUBLED_SLASH_PATH: &str = "//api/embeddings";
+const EMPTY_BEARER: &str = "Bearer";
+const SERVER_ERROR_PREFIX: &str =
+    "Embedding generation failed: API returned error 500 Internal Server Error: ";
+const TRUNCATION_MARKER: &str = "... (truncated)";
+const ZONE_BODY_LIMIT: usize = 200;
+const MALFORMED_JSON_DISPLAY: &str = "Embedding generation failed: Failed to parse response: EOF while parsing a list at line 1 column 15";
+const CONNECTION_REFUSED_DISPLAY: &str =
+    "Embedding generation failed: Request failed: error sending request";
+const EMBEDDING_VARIANT: &str = "Embedding";
+const DIMENSION_MISMATCH_VARIANT: &str = "EmbeddingDimensionMismatch";
+const TRAILING_SLASH_SCENARIO: &str = "trailing_slash";
+const EMPTY_KEY_SCENARIO: &str = "empty_key";
+const LONG_BODY_SCENARIO: &str = "server_error_long_body";
+const EMPTY_VECTOR_SCENARIO: &str = "empty_vector";
+const MALFORMED_JSON_SCENARIO: &str = "malformed_json";
+const CONNECTION_REFUSED_SCENARIO: &str = "connection_refused";
+const SNOWFLAKE_LARGE_DIMENSION: usize = 1024;
+const SNOWFLAKE_SIZE_DIMENSIONS: [(&str, usize); 4] = [
+    ("snowflake-arctic-embed:22m", 384),
+    ("snowflake-arctic-embed:33m", 384),
+    ("snowflake-arctic-embed:110m", 768),
+    ("snowflake-arctic-embed:137m", 768),
+];
 const LOOPBACK_ADDRESS: &str = "127.0.0.1:0";
 
 const SHORT_TEXT: &str = "The quick brown fox";
@@ -61,7 +86,7 @@ const OLLAMA_MODEL_NAMES: [&str; 14] = [
     "unknown-model",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 struct RecordedRequest {
     path: String,
     authorization: Option<String>,
@@ -69,14 +94,14 @@ struct RecordedRequest {
     prompt_length: usize,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct OllamaExchange {
     scenario: String,
     requests: Vec<RecordedRequest>,
     vectors: Vec<Vec<f32>>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct OllamaFailure {
     scenario: String,
     variant: String,
@@ -86,7 +111,7 @@ struct OllamaFailure {
     prompt_lengths: Vec<usize>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct OllamaModel {
     name: String,
     model: String,
@@ -192,9 +217,13 @@ fn request_scenarios() -> Vec<RequestScenario> {
         },
         RequestScenario {
             trailing_slash: true,
-            ..single("trailing_slash", None, SHORT_TEXT.to_string())
+            ..single(TRAILING_SLASH_SCENARIO, None, SHORT_TEXT.to_string())
         },
-        single("empty_key", Some(EMPTY_API_KEY), SHORT_TEXT.to_string()),
+        single(
+            EMPTY_KEY_SCENARIO,
+            Some(EMPTY_API_KEY),
+            SHORT_TEXT.to_string(),
+        ),
     ]
 }
 
@@ -220,7 +249,7 @@ fn failure_scenarios() -> Vec<FailureScenario> {
             ResponseTemplate::new(429).set_body_string("slow down"),
         ),
         failing(
-            "server_error_long_body",
+            LONG_BODY_SCENARIO,
             ResponseTemplate::new(500).set_body_string("x".repeat(LONG_ERROR_BODY_CHARACTERS)),
         ),
         failing(
@@ -228,7 +257,7 @@ fn failure_scenarios() -> Vec<FailureScenario> {
             ResponseTemplate::new(500).set_body_string(CONTEXT_LENGTH_MESSAGE),
         ),
         failing(
-            "malformed_json",
+            MALFORMED_JSON_SCENARIO,
             ResponseTemplate::new(200).set_body_string("{\"embedding\": ["),
         ),
         failing(
@@ -237,11 +266,11 @@ fn failure_scenarios() -> Vec<FailureScenario> {
                 .set_body_json(json!({ "embedding": vec![0.0_f32; MISMATCHED_DIMENSION] })),
         ),
         failing(
-            "empty_vector",
+            EMPTY_VECTOR_SCENARIO,
             ResponseTemplate::new(200).set_body_json(json!({ "embedding": [] })),
         ),
         FailureScenario {
-            name: "connection_refused",
+            name: CONNECTION_REFUSED_SCENARIO,
             response: None,
         },
     ]
@@ -368,29 +397,106 @@ fn fixture_path(file: &str) -> PathBuf {
     PathBuf::from(FIXTURE_DIRECTORY).join(file)
 }
 
-fn recording() -> bool {
-    std::env::var(RECORD_ENVIRONMENT).is_ok_and(|value| value == RECORD_ENABLED)
-}
-
-fn record_fixture<T: Serialize>(file: &str, actual: &T) {
-    let mut contents = serde_json::to_string_pretty(actual).expect("fixture serialises");
-    contents.push('\n');
-    fs::create_dir_all(FIXTURE_DIRECTORY).expect("fixture directory");
-    fs::write(fixture_path(file), contents).expect("fixture written");
-}
-
 fn read_fixture<T: DeserializeOwned>(file: &str) -> T {
-    let contents = fs::read_to_string(fixture_path(file)).unwrap_or_else(|error| {
-        panic!("{file}: {error}; record it with {RECORD_ENVIRONMENT}={RECORD_ENABLED}")
-    });
+    let contents =
+        fs::read_to_string(fixture_path(file)).unwrap_or_else(|error| panic!("{file}: {error}"));
     serde_json::from_str(&contents).unwrap_or_else(|error| panic!("{file}: {error}"))
 }
 
-fn expected_fixture<T: Serialize + DeserializeOwned>(file: &str, actual: &T) -> T {
-    if recording() {
-        record_fixture(file, actual);
+fn scenario<'a, T>(fixtures: &'a mut [T], name: &str, scenario: impl Fn(&T) -> &str) -> &'a mut T {
+    fixtures
+        .iter_mut()
+        .find(|fixture| scenario(fixture) == name)
+        .unwrap_or_else(|| panic!("{name} is recorded"))
+}
+
+/// The recorded exchanges with the crate's request departures applied, each
+/// asserting what Zone sent before replacing it.
+fn departed_exchanges(mut exchanges: Vec<OllamaExchange>) -> Vec<OllamaExchange> {
+    let trailing_slash = scenario(&mut exchanges, TRAILING_SLASH_SCENARIO, |exchange| {
+        &exchange.scenario
+    });
+    assert_eq!(trailing_slash.requests[0].path, DOUBLED_SLASH_PATH);
+    trailing_slash.requests[0].path = OLLAMA_PATH.to_string();
+
+    let empty_key = scenario(&mut exchanges, EMPTY_KEY_SCENARIO, |exchange| {
+        &exchange.scenario
+    });
+    assert_eq!(
+        empty_key.requests[0].authorization.as_deref(),
+        Some(EMPTY_BEARER)
+    );
+    empty_key.requests[0].authorization = None;
+
+    exchanges
+}
+
+/// The recorded failures with the crate's wording departures applied, each
+/// asserting what Zone reported before replacing it.
+fn departed_failures(mut failures: Vec<OllamaFailure>) -> Vec<OllamaFailure> {
+    let long_body = scenario(&mut failures, LONG_BODY_SCENARIO, |failure| {
+        &failure.scenario
+    });
+    let whole = format!(
+        "{SERVER_ERROR_PREFIX}{}",
+        "x".repeat(LONG_ERROR_BODY_CHARACTERS)
+    );
+    assert_eq!(
+        long_body.display,
+        format!(
+            "{}{TRUNCATION_MARKER}",
+            &whole[..SERVER_ERROR_PREFIX.len() + ZONE_BODY_LIMIT]
+        )
+    );
+    long_body.display = whole;
+
+    let empty_vector = scenario(&mut failures, EMPTY_VECTOR_SCENARIO, |failure| {
+        &failure.scenario
+    });
+    assert_eq!(empty_vector.variant, DIMENSION_MISMATCH_VARIANT);
+    assert_eq!(
+        empty_vector.display,
+        format!("Unsupported embedding dimension: expected {OLLAMA_DIMENSION}, got 0")
+    );
+    empty_vector.variant = EMBEDDING_VARIANT.to_string();
+    empty_vector.display = format!(
+        "Embedding generation failed: Failed to parse response: Ollama sent an empty embedding, so {OLLAMA_MODEL} may not be an embedding model"
+    );
+
+    let malformed = scenario(&mut failures, MALFORMED_JSON_SCENARIO, |failure| {
+        &failure.scenario
+    });
+    assert_eq!(
+        malformed.display,
+        format!(
+            "Embedding generation failed: Failed to parse response: error decoding response body for url ({SERVER_PLACEHOLDER}{OLLAMA_PATH})"
+        )
+    );
+    malformed.display = MALFORMED_JSON_DISPLAY.to_string();
+
+    let refused = scenario(&mut failures, CONNECTION_REFUSED_SCENARIO, |failure| {
+        &failure.scenario
+    });
+    assert_eq!(
+        refused.display,
+        format!(
+            "Embedding generation failed: Request failed: error sending request for url ({SERVER_PLACEHOLDER}{OLLAMA_PATH})"
+        )
+    );
+    refused.display = CONNECTION_REFUSED_DISPLAY.to_string();
+
+    failures
+}
+
+/// The recorded model table with the crate's Snowflake size widths applied,
+/// asserting Zone's 1024 for each tag before replacing it.
+fn departed_models(mut models: Vec<OllamaModel>) -> Vec<OllamaModel> {
+    for (name, dimension) in SNOWFLAKE_SIZE_DIMENSIONS {
+        let model = scenario(&mut models, name, |model| &model.name);
+        assert_eq!(model.dimension, SNOWFLAKE_LARGE_DIMENSION, "{name}");
+        model.dimension = dimension;
     }
-    read_fixture(file)
+    models
 }
 
 async fn check_ollama_requests(provider: Provider) {
@@ -398,7 +504,7 @@ async fn check_ollama_requests(provider: Provider) {
     for scenario in request_scenarios() {
         actual.push(exchange(provider, &scenario).await);
     }
-    let expected: Vec<OllamaExchange> = expected_fixture(OLLAMA_REQUESTS_FIXTURE, &actual);
+    let expected = departed_exchanges(read_fixture(OLLAMA_REQUESTS_FIXTURE));
     assert_eq!(expected.len(), actual.len(), "scenario count");
     for (expected, actual) in expected.iter().zip(&actual) {
         assert_eq!(expected, actual, "{}", expected.scenario);
@@ -410,8 +516,11 @@ async fn check_ollama_errors(provider: Provider) {
     for scenario in failure_scenarios() {
         actual.push(failure(provider, scenario).await);
     }
-    let expected: Vec<OllamaFailure> = expected_fixture(OLLAMA_ERRORS_FIXTURE, &actual);
-    assert_eq!(expected, actual);
+    let expected = departed_failures(read_fixture(OLLAMA_ERRORS_FIXTURE));
+    assert_eq!(expected.len(), actual.len(), "scenario count");
+    for (expected, actual) in expected.iter().zip(&actual) {
+        assert_eq!(expected, actual, "{}", expected.scenario);
+    }
 }
 
 fn check_ollama_models(provider: Provider) {
@@ -419,7 +528,7 @@ fn check_ollama_models(provider: Provider) {
         .iter()
         .map(|name| ollama_model(provider, name))
         .collect();
-    let expected: Vec<OllamaModel> = expected_fixture(OLLAMA_MODELS_FIXTURE, &actual);
+    let expected = departed_models(read_fixture(OLLAMA_MODELS_FIXTURE));
     assert_eq!(expected, actual);
 }
 
@@ -440,20 +549,32 @@ fn ollama_models_match_fixture() {
 
 #[cfg(feature = "local-embeddings")]
 mod local {
-    use super::{PROVIDER, Provider, expected_fixture};
+    use super::{PROVIDER, Provider, read_fixture};
 
-    use serde::{Deserialize, Serialize};
+    use abnegate_llm::modality::vendor::FastembedConfig;
+    use fastembed::{EmbeddingModel, TextEmbedding};
+    use serde::Deserialize;
     use zone_context::embeddings::providers::{
         AiSettings, EMBEDDING_ENGINE_LOCAL, PROVIDER_SELF_HOSTED,
     };
 
     const LOCAL_FIXTURE: &str = "local_nomic_embed_text.json";
+    const LOCAL_MODELS_FIXTURE: &str = "local_models.json";
     const DEFAULT_LOCAL_MODEL: &str = "nomic-embed-text";
     const DEFAULT_LOCAL_DIMENSION: usize = 768;
     const DEFAULT_LOCAL_MAXIMUM_TOKENS: usize = 2048;
     const VECTOR_TOLERANCE: f32 = 1e-5;
     const LONG_PARAGRAPH_SENTENCES: usize = 90;
     const MEDIUM_PARAGRAPH_SENTENCES: usize = 22;
+    const SNOWFLAKE_LARGE_MODEL: &str = "SnowflakeArcticEmbedL";
+    const SNOWFLAKE_EXTRA_SMALL_TAG: &str = "snowflake-arctic-embed:22m";
+    const SNOWFLAKE_EXTRA_SMALL_DIMENSION: usize = 384;
+    const SNOWFLAKE_SIZE_MODELS: [(&str, &str); 4] = [
+        ("snowflake-arctic-embed:22m", "SnowflakeArcticEmbedXS"),
+        ("snowflake-arctic-embed:33m", "SnowflakeArcticEmbedS"),
+        ("snowflake-arctic-embed:110m", "SnowflakeArcticEmbedM"),
+        ("snowflake-arctic-embed:137m", "SnowflakeArcticEmbedMLong"),
+    ];
 
     const SUBJECTS: [&str; 7] = [
         "The indexer",
@@ -474,7 +595,7 @@ mod local {
         "a vector search result",
     ];
 
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, PartialEq, Deserialize)]
     struct LocalVectors {
         name: String,
         text: String,
@@ -482,12 +603,30 @@ mod local {
         single: Vec<f32>,
     }
 
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, PartialEq, Deserialize)]
     struct LocalFixture {
         model: String,
         dimension: usize,
         max_tokens: usize,
         texts: Vec<LocalVectors>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Deserialize)]
+    struct ResolvedModel {
+        name: String,
+        model: Option<String>,
+        dimension: Option<usize>,
+        max_tokens: Option<usize>,
+        error: Option<String>,
+    }
+
+    fn local_settings(model: Option<&str>) -> AiSettings {
+        AiSettings {
+            provider: PROVIDER_SELF_HOSTED.to_string(),
+            embedding_engine: Some(EMBEDDING_ENGINE_LOCAL.to_string()),
+            model_embedding: model.map(str::to_string),
+            ..Default::default()
+        }
     }
 
     fn paragraph(sentences: usize) -> String {
@@ -540,16 +679,71 @@ mod local {
         }
     }
 
-    async fn check_local_vectors(provider: Provider) {
-        let settings = AiSettings {
-            provider: PROVIDER_SELF_HOSTED.to_string(),
-            embedding_engine: Some(EMBEDDING_ENGINE_LOCAL.to_string()),
-            ..Default::default()
-        };
-        let embedder = tokio::task::spawn_blocking(move || provider(&settings))
+    /// The recorded resolutions with the crate's Snowflake size models
+    /// applied, asserting Zone's large model for each tag before replacing
+    /// it.
+    fn departed_resolutions(mut resolutions: Vec<ResolvedModel>) -> Vec<ResolvedModel> {
+        for (name, model) in SNOWFLAKE_SIZE_MODELS {
+            let resolution = resolutions
+                .iter_mut()
+                .find(|resolution| resolution.name == name)
+                .unwrap_or_else(|| panic!("{name} is recorded"));
+            assert_eq!(
+                resolution.model.as_deref(),
+                Some(SNOWFLAKE_LARGE_MODEL),
+                "{name}"
+            );
+            let variant: EmbeddingModel = model.parse().expect("a fastembed model");
+            resolution.model = Some(model.to_string());
+            resolution.dimension = Some(TextEmbedding::get_model_info(&variant).unwrap().dim);
+        }
+        resolutions
+    }
+
+    fn check_local_models(provider: Provider) {
+        let expected = departed_resolutions(read_fixture(LOCAL_MODELS_FIXTURE));
+        for resolution in expected {
+            let name = resolution.name.as_str();
+            let config = FastembedConfig::new().with_model(name);
+            match (&resolution.error, config.model_maximum_input_tokens()) {
+                (Some(error), Err(_)) => {
+                    let refused = provider(&local_settings(Some(name)))
+                        .err()
+                        .unwrap_or_else(|| panic!("{name} should be refused"));
+                    assert_eq!(&refused.to_string(), error, "{name}");
+                }
+                (None, Ok(maximum_input_tokens)) => {
+                    assert_eq!(
+                        resolution.max_tokens,
+                        Some(maximum_input_tokens as usize),
+                        "{name}"
+                    );
+                    let variant: EmbeddingModel = resolution
+                        .model
+                        .as_deref()
+                        .expect("a resolved model")
+                        .parse()
+                        .expect("a fastembed model");
+                    assert_eq!(
+                        resolution.dimension,
+                        Some(TextEmbedding::get_model_info(&variant).unwrap().dim),
+                        "{name}"
+                    );
+                }
+                (error, resolved) => panic!("{name}: recorded {error:?}, resolved {resolved:?}"),
+            }
+        }
+    }
+
+    async fn load(provider: Provider, model: Option<&'static str>) -> super::Embedder {
+        tokio::task::spawn_blocking(move || provider(&local_settings(model)))
             .await
             .expect("load task")
-            .expect("default local model loads");
+            .unwrap_or_else(|error| panic!("{model:?} loads: {error}"))
+    }
+
+    async fn check_local_vectors(provider: Provider) {
+        let embedder = load(provider, None).await;
 
         let texts = texts();
         let inputs: Vec<&str> = texts.iter().map(|(_, text)| text.as_str()).collect();
@@ -575,7 +769,7 @@ mod local {
         assert_eq!(actual.dimension, DEFAULT_LOCAL_DIMENSION);
         assert_eq!(actual.max_tokens, DEFAULT_LOCAL_MAXIMUM_TOKENS);
 
-        let expected: LocalFixture = expected_fixture(LOCAL_FIXTURE, &actual);
+        let expected: LocalFixture = read_fixture(LOCAL_FIXTURE);
         assert_eq!(expected.model, actual.model);
         assert_eq!(expected.dimension, actual.dimension);
         assert_eq!(expected.max_tokens, actual.max_tokens);
@@ -596,9 +790,28 @@ mod local {
         }
     }
 
+    #[test]
+    fn local_models_match_fixture() {
+        check_local_models(PROVIDER);
+    }
+
     #[tokio::test]
     #[ignore = "loads the nomic-embed-text weights, about 550 MB on a cold cache"]
     async fn local_nomic_embed_text_matches_fixture() {
         check_local_vectors(PROVIDER).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "loads the snowflake-arctic-embed-xs weights, about 90 MB on a cold cache"]
+    async fn snowflake_size_tags_load_their_own_model_locally() {
+        let embedder = load(PROVIDER, Some(SNOWFLAKE_EXTRA_SMALL_TAG)).await;
+        assert_eq!(embedder.model(), SNOWFLAKE_EXTRA_SMALL_TAG);
+        assert_eq!(
+            embedder.dimension(),
+            SNOWFLAKE_EXTRA_SMALL_DIMENSION,
+            "Zone loaded snowflake-arctic-embed-l at 1024 for every tag"
+        );
+        let vector = embedder.embed("hello").await.expect("embed");
+        assert_eq!(vector.len(), SNOWFLAKE_EXTRA_SMALL_DIMENSION);
     }
 }

@@ -3,6 +3,8 @@
 //! This module provides the `EmbeddingService` trait for generating embeddings
 //! and `VectorStore` for storing and searching embeddings in PostgreSQL with pgvector.
 
+#[cfg(feature = "local-embeddings")]
+pub mod cache;
 pub mod embed_cache;
 pub mod eval;
 pub mod hybrid;
