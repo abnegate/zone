@@ -72,6 +72,36 @@ macro_rules! fail_stopped_steps {
     };
 }
 
+/// Stops the subagents a `seen` CTE read as running, those still running for
+/// the turn they ran for when it read them. `$stopped` is the placeholder of
+/// the stopped subagent status.
+///
+/// Under Read Committed an `UPDATE` rechecks a row changed since its snapshot
+/// against the row's newest version but every other table as the snapshot saw
+/// it, so a sweep that began before a newer turn took a subagent over would
+/// otherwise judge the newer run by turns it cannot see, and stop it.
+macro_rules! stop_seen {
+    ($stopped:literal) => {
+        concat!(
+            "stopped AS (
+                 UPDATE chat_subagents s
+                    SET status = ",
+            $stopped,
+            "::text,
+                        finished_at = COALESCE(s.finished_at, clock_timestamp()),
+                        revision = s.revision + 1,
+                        updated_at = clock_timestamp()
+                   FROM seen
+                  WHERE s.id = seen.id AND s.message_id IS NOT DISTINCT FROM seen.message_id
+                    AND s.",
+            running!(),
+            "
+                 RETURNING s.*
+             ), "
+        )
+    };
+}
+
 /// Stops the running subagents of chat `$1` that match `$condition`, fails
 /// their running steps with them, and selects each as a [`Stopped`], oldest
 /// first. `$3` is the stopped subagent status, and `$4` and `$5` the failed and
@@ -79,19 +109,15 @@ macro_rules! fail_stopped_steps {
 macro_rules! stop_running {
     ($($condition:tt)+) => {
         concat!(
-            "WITH stopped AS (
-                 UPDATE chat_subagents
-                    SET status = $3::text,
-                        finished_at = COALESCE(finished_at, clock_timestamp()),
-                        revision = revision + 1,
-                        updated_at = clock_timestamp()
+            "WITH seen AS MATERIALIZED (
+                 SELECT id, message_id FROM chat_subagents
                   WHERE chat_id = $1 AND ",
             $($condition)+,
             " AND ",
             running!(),
             "
-                 RETURNING *
              ), ",
+            stop_seen!("$3"),
             fail_stopped_steps!("$4", "$5")
         )
     };
@@ -107,12 +133,8 @@ const STOP_OTHERS: &str = stop_running!(
 );
 
 const ABANDON: &str = concat!(
-    "WITH stopped AS (
-         UPDATE chat_subagents s
-            SET status = $1::text,
-                finished_at = COALESCE(s.finished_at, clock_timestamp()),
-                revision = s.revision + 1,
-                updated_at = clock_timestamp()
+    "WITH seen AS MATERIALIZED (
+         SELECT s.id, s.message_id FROM chat_subagents s
           WHERE s.",
     running!(),
     "
@@ -122,8 +144,8 @@ const ABANDON: &str = concat!(
                   JOIN chat_leases l ON l.chat_id = t.chat_id AND l.fence = t.fence
                  WHERE t.chat_id = s.chat_id AND t.id = s.message_id AND t.status = $2::text
                    AND l.expires_at > clock_timestamp())
-         RETURNING s.*
      ), ",
+    stop_seen!("$1"),
     fail_stopped_steps!("$3", "$4")
 );
 

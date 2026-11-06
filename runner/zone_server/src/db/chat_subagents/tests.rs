@@ -967,3 +967,98 @@ async fn the_running_sweeps_can_use_the_running_index_whatever_they_are_bound_to
         );
     }
 }
+
+/// Waits until some other session is waiting on a lock session `pid` holds.
+async fn blocking(pool: &PgPool, pid: i32) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .expect("the lock waits");
+            if blocked {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a session waiting on the lock in time");
+}
+
+#[tokio::test]
+async fn a_starting_turns_sweep_begun_before_a_newer_turn_took_a_subagent_leaves_that_run_alone() {
+    let pool = pool().await;
+    let chat_id = chat(&pool).await;
+    let sweeping = turn(&pool, chat_id, TURN_RUNNING).await;
+    let earlier = Uuid::new_v4();
+    let newer = Uuid::new_v4();
+    let subagent = running(&pool, chat_id, "thread-1", Some(earlier)).await;
+    let mut successor = pool.begin().await.expect("a transaction");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *successor)
+        .await
+        .expect("its session");
+    sqlx::query("SELECT 1 FROM chat_subagents WHERE id = $1 FOR UPDATE")
+        .bind(subagent)
+        .execute(&mut *successor)
+        .await
+        .expect("the subagent held");
+    let sweep = tokio::spawn({
+        let pool = pool.clone();
+        async move { stop_others(&pool, chat_id, sweeping).await }
+    });
+    blocking(&pool, pid).await;
+
+    record(
+        &mut *successor,
+        &SubagentChange {
+            message_id: Some(earlier),
+            status: Some(SubagentStatus::Completed),
+            ..named(chat_id, "thread-1")
+        },
+    )
+    .await
+    .expect("the earlier run's outcome");
+    sqlx::query("UPDATE chat_turns SET status = $2 WHERE id = $1")
+        .bind(sweeping)
+        .bind(TURN_COMPLETED)
+        .execute(&mut *successor)
+        .await
+        .expect("the sweeping turn over");
+    let resumed = record(
+        &mut *successor,
+        &SubagentChange {
+            message_id: Some(newer),
+            status: Some(SubagentStatus::Running),
+            ..named(chat_id, "thread-1")
+        },
+    )
+    .await
+    .expect("the newer turn's run");
+    record_steps(
+        &mut *successor,
+        subagent,
+        &[step("open", StepStatus::Running)],
+    )
+    .await
+    .expect("the newer run's step");
+    successor.commit().await.expect("the newer turn's commit");
+    let stopped = sweep.await.expect("the sweep ran").expect("the sweep");
+
+    assert_eq!(resumed.message_id, Some(newer));
+    assert_eq!(stopped, [], "the run the sweep saw had already ended");
+    assert_eq!(
+        statuses(&pool, chat_id).await,
+        [("thread-1".to_string(), "running".to_string())]
+    );
+    assert_eq!(
+        stored(&pool, chat_id, subagent).await,
+        [step("open", StepStatus::Running)],
+        "the newer run's steps run on"
+    );
+}

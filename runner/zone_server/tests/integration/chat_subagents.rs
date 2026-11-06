@@ -721,6 +721,139 @@ async fn the_sweep_stops_the_subagents_of_every_turn_that_no_longer_runs() {
     database.cleanup().await;
 }
 
+/// A transaction of its own and the session it runs in.
+async fn session(pool: &PgPool) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    let mut transaction = pool.begin().await.expect("a transaction");
+    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("its session");
+    (transaction, pid)
+}
+
+/// Waits until some other session is waiting on a lock session `pid` holds.
+async fn blocking(pool: &PgPool, pid: i32) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .expect("the lock waits");
+            if blocked {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a session waiting on the lock in time");
+}
+
+#[tokio::test]
+async fn the_periodic_sweep_begun_before_a_newer_turn_took_a_subagent_leaves_that_run_alone() {
+    let database = Database::new("chat_subagents").await;
+    sqlx::migrate!("./migrations")
+        .run(&database.pool)
+        .await
+        .expect("the schema");
+    let pool = &database.pool;
+    let chat = create_chat(pool, None, "Subagents", "sonnet", false, true)
+        .await
+        .expect("a chat")
+        .id;
+    let earlier = turn(pool, chat, TURN_COMPLETED).await;
+    started(pool, chat, "thread-1", Some(earlier)).await;
+    let subagent = chat_subagents::list(pool, chat).await.expect("the list")[0].id;
+    let (mut successor, pid) = session(pool).await;
+    sqlx::query("SELECT 1 FROM chat_subagents WHERE id = $1 FOR UPDATE")
+        .bind(subagent)
+        .execute(&mut *successor)
+        .await
+        .expect("the subagent held");
+    let sweep = tokio::spawn({
+        let pool = pool.clone();
+        async move { chat_subagents::abandon(&pool).await }
+    });
+    blocking(pool, pid).await;
+
+    chat_subagents::record(
+        &mut *successor,
+        &SubagentChange {
+            chat_id: chat,
+            message_id: Some(earlier),
+            external_id: "thread-1",
+            status: Some(SubagentStatus::Completed),
+            ..SubagentChange::default()
+        },
+    )
+    .await
+    .expect("the earlier run's outcome");
+    let newer = Uuid::new_v4();
+    sqlx::query(
+        "WITH asked AS (
+             INSERT INTO messages (chat_id, role, content) VALUES ($2, 'user', 'Again')
+             RETURNING id
+         )
+         INSERT INTO chat_turns (id, chat_id, user_message_id, fence, status)
+         SELECT $1, $2, id, 1, $3 FROM asked",
+    )
+    .bind(newer)
+    .bind(chat)
+    .bind(TURN_RUNNING)
+    .execute(&mut *successor)
+    .await
+    .expect("the newer turn");
+    sqlx::query(
+        "INSERT INTO chat_leases (chat_id, owner, fence, expires_at)
+         VALUES ($1, gen_random_uuid(), 1, clock_timestamp() + interval '1 minute')",
+    )
+    .bind(chat)
+    .execute(&mut *successor)
+    .await
+    .expect("the newer turn's lease");
+    chat_subagents::record(
+        &mut *successor,
+        &SubagentChange {
+            chat_id: chat,
+            message_id: Some(newer),
+            external_id: "thread-1",
+            status: Some(SubagentStatus::Running),
+            ..SubagentChange::default()
+        },
+    )
+    .await
+    .expect("the newer turn's run");
+    chat_subagents::record_steps(
+        &mut *successor,
+        subagent,
+        &[step("toolu_open", StepStatus::Running)],
+    )
+    .await
+    .expect("the newer run's step");
+    successor.commit().await.expect("the newer turn's commit");
+    let stopped = sweep.await.expect("the sweep ran").expect("the sweep");
+
+    assert_eq!(stopped, [], "the run the sweep saw had already ended");
+    let row = &chat_subagents::list(pool, chat).await.expect("the list")[0];
+    assert_eq!(
+        (row.message_id, row.status.as_str()),
+        (Some(newer), SubagentStatus::Running.as_str())
+    );
+    assert_eq!(
+        chat_subagents::steps(pool, chat, subagent)
+            .await
+            .expect("a read")
+            .expect("the subagent"),
+        [step("toolu_open", StepStatus::Running)],
+        "the newer run's steps run on"
+    );
+    database.cleanup().await;
+}
+
 #[tokio::test]
 async fn recovering_a_crashed_turn_stops_its_subagents_and_fails_their_running_steps() {
     let pool = PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("a test database"))
