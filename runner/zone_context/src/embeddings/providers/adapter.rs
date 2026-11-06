@@ -6,7 +6,7 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 
 use super::batching::Batching;
 use super::failure::context_error;
-use crate::content::{embed_char_budget, truncate_chars};
+use crate::content::truncate_chars;
 use crate::embeddings::{EmbeddingService, VECTOR_DIMENSION};
 use crate::error::{ContextError, Result};
 
@@ -36,7 +36,7 @@ impl EmbeddingAdapter {
     }
 
     fn character_budget(&self) -> usize {
-        embed_char_budget(self.max_tokens())
+        self.provider.maximum_input_characters()
     }
 
     fn checked(&self, vector: Vec<f32>) -> Result<Vec<f32>> {
@@ -200,8 +200,13 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use abnegate_llm::ProviderError;
+    use abnegate_llm::modality::vendor::{
+        OllamaEmbeddingConfig, OllamaEmbeddingProvider, OpenAiCompatibleEmbeddingConfig,
+        OpenAiCompatibleEmbeddingProvider,
+    };
 
     use super::*;
+    use crate::content::embed_char_budget;
 
     const MODEL: &str = "stub-embed";
     const DIMENSIONS: u32 = 4;
@@ -212,6 +217,16 @@ mod tests {
     const CONCURRENCY: usize = 3;
     const INTERNAL_SERVER_ERROR: u16 = 500;
     const UNAUTHORIZED: u16 = 401;
+    const PROVIDER_INPUT_CHARACTERS: usize = 1234;
+    const HOST: &str = "http://localhost:11434";
+    const TOKEN_LIMITS: [u32; 7] = [1, 256, 512, 1024, 2048, 8192, u32::MAX];
+    const OLLAMA_MODELS: [&str; 5] = [
+        "qwen3-embedding:0.6b",
+        "nomic-embed-text",
+        "all-minilm",
+        "mxbai-embed-large",
+        "unknown-embed",
+    ];
 
     #[derive(Default)]
     struct Calls {
@@ -224,6 +239,7 @@ mod tests {
         learns_dimensions: bool,
         width: usize,
         maximum_input_tokens: u32,
+        input_characters: Option<usize>,
         context_limit: Option<usize>,
         refusal: Option<u16>,
         calls: Mutex<Calls>,
@@ -236,6 +252,7 @@ mod tests {
                 learns_dimensions: false,
                 width: DIMENSIONS as usize,
                 maximum_input_tokens: MAXIMUM_INPUT_TOKENS,
+                input_characters: None,
                 context_limit: None,
                 refusal: None,
                 calls: Mutex::default(),
@@ -296,6 +313,11 @@ mod tests {
             self.maximum_input_tokens
         }
 
+        fn maximum_input_characters(&self) -> usize {
+            self.input_characters
+                .unwrap_or_else(|| embed_char_budget(self.maximum_input_tokens as usize))
+        }
+
         async fn embed(
             &self,
             texts: &[String],
@@ -333,20 +355,47 @@ mod tests {
         "a".repeat(LONG_TEXT)
     }
 
-    #[test]
-    fn the_character_budget_is_the_providers_input_budget() {
-        for tokens in [1, 256, 512, 1024, 2048, 8192, u32::MAX] {
+    #[tokio::test]
+    async fn texts_are_cut_to_the_providers_input_characters() {
+        for batching in [per_text(), batched()] {
             let (adapter, stub) = adapter(
                 Stub {
-                    maximum_input_tokens: tokens,
+                    maximum_input_tokens: 8192,
+                    input_characters: Some(PROVIDER_INPUT_CHARACTERS),
                     ..Stub::new()
                 },
-                per_text(),
+                batching,
             );
+            assert_eq!(adapter.character_budget(), PROVIDER_INPUT_CHARACTERS);
+            adapter.embed_batch(&[&long_text()]).await.unwrap();
+            let calls = stub.calls();
+            let sent = calls.singles.iter().chain(calls.batches.iter().flatten());
+            for prompt in sent {
+                assert_eq!(prompt.chars().count(), PROVIDER_INPUT_CHARACTERS);
+            }
+        }
+    }
+
+    #[test]
+    fn the_providers_input_characters_are_the_chunking_budget() {
+        for model in OLLAMA_MODELS {
+            let provider =
+                OllamaEmbeddingProvider::new(OllamaEmbeddingConfig::new(HOST, model)).unwrap();
             assert_eq!(
-                adapter.character_budget(),
-                stub.maximum_input_characters(),
-                "{tokens}"
+                provider.maximum_input_characters(),
+                embed_char_budget(provider.maximum_input_tokens() as usize),
+                "{model}"
+            );
+        }
+        for tokens in TOKEN_LIMITS {
+            let provider = OpenAiCompatibleEmbeddingProvider::new(
+                OpenAiCompatibleEmbeddingConfig::new(HOST, MODEL).with_maximum_input_tokens(tokens),
+            )
+            .unwrap();
+            assert_eq!(
+                provider.maximum_input_characters(),
+                embed_char_budget(tokens as usize),
+                "{tokens}: the crate's default budget, which fastembed also uses"
             );
         }
     }

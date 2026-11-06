@@ -10,8 +10,7 @@ const RATE_LIMIT_RETRY_SECONDS: u64 = 60;
 
 /// The [`ContextError`] an embedding provider's failure becomes, worded so
 /// [`ContextError::is_context_length`] and
-/// [`ContextError::is_fatal_embedding`] classify it as they did before the
-/// providers moved into `abnegate-llm`.
+/// [`ContextError::is_fatal_embedding`] classify it.
 pub(super) fn context_error(error: ProviderError) -> ContextError {
     match error {
         ProviderError::Api {
