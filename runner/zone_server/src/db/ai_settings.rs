@@ -1,5 +1,6 @@
 //! AI provider settings database queries
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_secret::SecretValue;
 use chrono::NaiveDateTime;
 use sqlx::{Executor, PgConnection, PgPool, Postgres};
@@ -7,7 +8,6 @@ use uuid::Uuid;
 use zone_context::embeddings::providers::{
     PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
 };
-use zone_core::llm::AgentKind;
 
 use crate::services::endpoint;
 use crate::services::hosts::Hosts;
@@ -44,6 +44,7 @@ pub fn provider(agent: AgentKind) -> &'static str {
     match agent {
         AgentKind::Claude => PROVIDER_CLAUDE_CODE,
         AgentKind::Codex => PROVIDER_CODEX,
+        _ => agent.as_str(),
     }
 }
 
@@ -1442,7 +1443,7 @@ mod tests {
     fn each_agent_provider_selects_its_agent_and_back() {
         assert_eq!(agent(PROVIDER_CLAUDE_CODE), Some(AgentKind::Claude));
         assert_eq!(agent(PROVIDER_CODEX), Some(AgentKind::Codex));
-        for kind in AgentKind::ALL {
+        for &kind in AgentKind::ALL {
             assert_eq!(agent(provider(kind)), Some(kind));
         }
     }

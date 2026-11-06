@@ -50,12 +50,7 @@ fn named(chat_id: Uuid, external_id: &str) -> SubagentChange<'_> {
 }
 
 fn step(id: &str, status: StepStatus) -> SubagentStep {
-    SubagentStep {
-        id: id.to_string(),
-        name: "Bash".to_string(),
-        subject: Some("cargo test".to_string()),
-        status,
-    }
+    SubagentStep::new(id, "Bash", status).with_subject("cargo test")
 }
 
 async fn running(pool: &PgPool, chat_id: Uuid, external_id: &str, turn: Option<Uuid>) -> Uuid {

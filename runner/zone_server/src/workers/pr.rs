@@ -906,14 +906,14 @@ mod tests {
 
     fn claude() -> LlmBackend {
         LlmBackend::cli(
-            zone_core::llm::AgentKind::Claude,
-            zone_core::llm::CliSettings::default(),
+            abnegate_agent_cli::AgentKind::Claude,
+            abnegate_agent_cli::CliSettings::default(),
         )
     }
 
     fn signed_out() -> Result<LlmBackend, backend::Error> {
         Err(backend::Error::SignedOut {
-            agent: zone_core::llm::AgentKind::Claude,
+            agent: abnegate_agent_cli::AgentKind::Claude,
         })
     }
 

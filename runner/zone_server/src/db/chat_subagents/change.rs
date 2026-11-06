@@ -1,5 +1,5 @@
+use abnegate_agent_cli::SubagentStatus;
 use uuid::Uuid;
-use zone_core::llm::SubagentStatus;
 
 /// What one update says about a chat's subagent. Every `None` leaves the
 /// stored value as it is, or the column's default when the row is new.

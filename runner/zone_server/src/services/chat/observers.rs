@@ -2,7 +2,8 @@
 
 use std::fmt;
 
-use zone_core::llm::{Observer, Output, Subagent};
+use abnegate_agent_cli::{Output, Subagent};
+use zone_core::llm::Observer;
 
 use super::pull_request::Recorder;
 use super::subagent::Tracker;

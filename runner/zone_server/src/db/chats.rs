@@ -13,7 +13,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::services::character::ChatCharacter;
-use zone_core::llm::AgentKind;
+use abnegate_agent_cli::AgentKind;
 
 use super::DbResult;
 

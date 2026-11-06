@@ -5,9 +5,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_agent_cli::login::codex::{self, CREDENTIALS};
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use super::devices;
 use super::error::Error;

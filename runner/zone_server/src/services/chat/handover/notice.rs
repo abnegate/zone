@@ -1,6 +1,6 @@
+use abnegate_agent_cli::AgentKind;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
-use zone_core::llm::AgentKind;
 
 use super::Reason;
 

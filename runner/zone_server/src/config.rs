@@ -11,10 +11,10 @@ use std::time::Duration;
 
 use abnegate_agent_cli::login::claude::LOOPBACK_HOST;
 use abnegate_agent_cli::login::claude::LOOPBACK_SCHEME;
+use abnegate_agent_cli::{AgentKind, CodexSandbox};
 use abnegate_vcs::pull_request::PullRequestResult;
 use abnegate_vcs::{PullRequestError, PullRequestService};
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, CodexSandbox};
 
 use crate::services::hosts::Hosts;
 use crate::services::login::claude::ROOT_PATH;
@@ -264,6 +264,15 @@ const DEFAULT_USAGE_TTL: Duration = Duration::from_secs(60);
 
 const DEFAULT_HOST_LOGIN: bool = true;
 
+/// The sandbox codex runs its own tools in on a turn that grants them, unless the operator names
+/// another.
+const DEFAULT_CODEX_SANDBOX: CodexSandbox = CodexSandbox::WorkspaceWrite;
+
+/// The sandboxes codex may run granted tools in. A turn that withholds them already runs
+/// read-only, so `read-only` names no choice an operator could make.
+const GRANTED_SANDBOXES: [CodexSandbox; 2] =
+    [CodexSandbox::WorkspaceWrite, CodexSandbox::DangerFullAccess];
+
 /// Owner-only access, for directories holding an agent's credentials and
 /// transcripts.
 #[cfg(unix)]
@@ -323,7 +332,7 @@ impl Default for AgentConfig {
             state: env::temp_dir().join(TEMPORARY_STATE_ROOT),
             host_login: DEFAULT_HOST_LOGIN,
             claude_token_url: DEFAULT_CLAUDE_TOKEN_URL.to_string(),
-            codex_sandbox: CodexSandbox::default(),
+            codex_sandbox: DEFAULT_CODEX_SANDBOX,
             callback: None,
             consoles: Vec::new(),
             usage_ttl: DEFAULT_USAGE_TTL,
@@ -547,10 +556,13 @@ fn codex_sandbox(value: Option<String>) -> Result<CodexSandbox, ConfigError> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        None => Ok(CodexSandbox::default()),
-        Some(value) => CodexSandbox::named(value).ok_or(ConfigError::Invalid(
-            "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access",
-        )),
+        None => Ok(DEFAULT_CODEX_SANDBOX),
+        Some(value) => GRANTED_SANDBOXES
+            .into_iter()
+            .find(|sandbox| sandbox.as_str() == value)
+            .ok_or(ConfigError::Invalid(
+                "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access",
+            )),
     }
 }
 
@@ -2331,7 +2343,7 @@ mod tests {
             "a loopback token endpoint stays configurable: it is operator configuration"
         );
 
-        for sandbox in CodexSandbox::ALL {
+        for sandbox in GRANTED_SANDBOXES {
             environment.set(CODEX_SANDBOX, sandbox.as_str());
             assert_eq!(
                 AgentConfig::from_env()
@@ -2678,7 +2690,7 @@ mod tests {
         let organization = Uuid::new_v4();
         let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
 
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let root = agents.home(organization, agent);
             let home = agents.login_home(organization, agent, first);
             assert_eq!(home, root.join("logins").join(first.to_string()));
@@ -2901,7 +2913,7 @@ mod tests {
     #[test]
     fn a_configured_binary_runs_only_the_agent_it_was_configured_for() {
         let mut config = create_test_config();
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             assert_eq!(
                 config.agent_executable(agent),
                 PathBuf::from(agent.executable())

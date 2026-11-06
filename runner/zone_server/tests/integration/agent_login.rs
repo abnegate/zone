@@ -14,6 +14,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_agent_cli::login::claude::AUTHORIZE_URL;
 use abnegate_agent_cli::login::claude::CLIENT_ID;
 use abnegate_agent_cli::login::claude::REDIRECT_URL;
@@ -36,7 +37,6 @@ use tempfile::TempDir;
 use uuid::Uuid;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::AgentKind;
 use zone_server::config::{AgentConfig, Callback, Config, ModelBackend};
 use zone_server::services::login::claude::Sealed;
 use zone_server::services::login::{callback, devices};

@@ -2,8 +2,9 @@
 
 use std::fmt;
 
+use abnegate_agent_cli::AgentKind;
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, LlmBackend};
+use zone_core::llm::LlmBackend;
 
 use crate::config::Config;
 use crate::db::ai_settings::{self, EffectiveAiSettings};
@@ -586,7 +587,7 @@ mod tests {
     use sqlx::PgPool;
     use tempfile::TempDir;
     use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
-    use zone_core::llm::provider::SignIn;
+    use zone_core::llm::SignIn;
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
@@ -1366,11 +1367,11 @@ mod tests {
         let backend = fixture.route(&chosen).await.backend(&fixture.state).await;
         fixture.remove().await;
 
-        let Ok(LlmBackend::Cli { agent, settings }) = backend else {
+        let Ok(LlmBackend::Cli { agent, sign_in, .. }) = backend else {
             panic!("expected the host's Claude sign-in, got {backend:?}");
         };
         assert_eq!(agent, AgentKind::Claude);
-        assert_eq!(settings.sign_in, SignIn::Host);
+        assert_eq!(sign_in, SignIn::Host);
     }
 
     fn agent(

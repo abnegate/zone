@@ -4,11 +4,12 @@
 //! a context a person chose for a self-hosted model does not bound one, so an
 //! agent chat's window is only ever what the agent itself last reported.
 
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::Occupancy;
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_chat::capacity::Capacity;
-use zone_core::llm::provider::Occupancy;
-use zone_core::llm::{AgentKind, LlmBackend};
+use zone_core::llm::LlmBackend;
 
 use crate::db::chats::occupancy::{self, Reported};
 

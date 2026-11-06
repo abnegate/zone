@@ -1082,6 +1082,7 @@ fn sanitize_rewritten_prompt(answer: &str, original: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    use abnegate_agent_cli::{AgentKind, CliSettings};
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -1089,7 +1090,6 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
-    use zone_core::llm::{AgentKind, CliSettings};
 
     fn enabled() -> ComfyUiConfig {
         let mut config = crate::services::comfy::settings::development();

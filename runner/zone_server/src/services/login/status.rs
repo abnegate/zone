@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_agent_cli::login::codex::{self, Account};
 use abnegate_agent_cli::login::{Cli, LoginError, Status};
@@ -23,7 +24,6 @@ use chrono::{DateTime, SubsecRound, Utc};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 pub use login::LoginStatus;
 pub use prompt::Prompt;
@@ -33,7 +33,6 @@ pub use usage::UsageStatus;
 pub use viewer::Viewer;
 
 use super::claude::Sealed;
-use super::error::Error;
 use super::router::Chosen;
 use super::usage::{Availability, Snapshot, refresh};
 use super::{credential, devices, oauth};
@@ -99,6 +98,7 @@ impl AgentStatus {
                 status.error = devices::failure(organization);
                 pending
             }
+            _ => None,
         };
         let logins = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
         let snapshots = refreshed(state, &logins).await;
@@ -233,7 +233,7 @@ fn read(
             let (saved, plan) = saved(state.config(), login, held);
             (saved, None, plan)
         }
-        None => (State::Expired, None, None),
+        _ => (State::Expired, None, None),
     };
     let availability = availability(snapshot.as_ref(), login.exhausted_until);
     Reading {
@@ -334,14 +334,7 @@ async fn ask(agent: AgentKind, executable: PathBuf) -> Option<Status> {
 
 /// What `cli` says of its sign-in, when it says it is signed in.
 async fn signed_in(agent: AgentKind, cli: &Cli) -> Option<Status> {
-    let kind = match kind(agent) {
-        Ok(kind) => kind,
-        Err(error) => {
-            tracing::warn!(%agent, %error, "could not ask the host's CLI whether it is signed in");
-            return None;
-        }
-    };
-    match Status::check(kind, cli).await {
+    match Status::check(agent, cli).await {
         Ok(status) => status.signed_in.then_some(status),
         Err(LoginError::Unavailable {
             executable, reason, ..
@@ -365,18 +358,11 @@ async fn signed_in(agent: AgentKind, cli: &Cli) -> Option<Status> {
     }
 }
 
-/// `agent` as abnegate-agent-cli names it.
-fn kind(agent: AgentKind) -> Result<abnegate_agent_cli::AgentKind, Error> {
-    abnegate_agent_cli::AgentKind::named(agent.as_str()).ok_or_else(|| {
-        Error::Internal(format!("{agent} is not an agent abnegate-agent-cli drives"))
-    })
-}
-
 /// An agent travels as its CLI's name.
 mod name {
+    use abnegate_agent_cli::AgentKind;
     use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serializer};
-    use zone_core::llm::AgentKind;
 
     pub(super) fn serialize<S: Serializer>(
         agent: &AgentKind,
@@ -785,7 +771,7 @@ mod tests {
             );
             assert_eq!(recorded(&record), given);
         }
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let missing = Cli::new(MISSING_CLI).with_environment(environment());
 
             assert_eq!(signed_in(agent, &missing).await, None, "{agent}");
@@ -1207,7 +1193,7 @@ mod tests {
 
     #[test]
     fn a_signed_out_status_offers_the_agents_own_models_and_nothing_else() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let status = AgentStatus::signed_out(agent);
 
             assert_eq!(
@@ -1230,7 +1216,7 @@ mod tests {
 
     #[test]
     fn a_status_with_no_sign_in_lists_no_logins() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let status = AgentStatus::signed_out(agent);
             let serialised = serde_json::to_value(&status).expect("serialise");
 

@@ -3,6 +3,9 @@
 //! Executes agentic tasks in the background using the same streaming agent
 //! loop as chat, with a task budget and a sandboxed tool context.
 
+use abnegate_agent_cli::CREDITS_REQUIRED;
+use abnegate_agent_cli::LONG_CONTEXT_CREDITS_REQUIRED;
+use abnegate_agent_cli::PROSE_EXCEEDED;
 use abnegate_http::Backoff;
 use abnegate_http::RetryAfter;
 use abnegate_http::contains_standalone_status;
@@ -28,9 +31,6 @@ use zone_core::context::Entry;
 use zone_core::llm::BuiltinTools;
 use zone_core::llm::LlmBackend;
 use zone_core::llm::LlmClient;
-use zone_core::llm::provider::OUTGROWN;
-use zone_core::llm::provider::UNFUNDED;
-use zone_core::llm::provider::UNFUNDED_CONTEXT;
 use zone_core::tools::Session;
 use zone_core::tools::ToolResult;
 use zone_core::tools::job::Jobs;
@@ -628,7 +628,11 @@ const RATE_LIMIT_MARKERS: &[&str] = &[
 /// How zone_core words a coding agent's failure that a retry of the same
 /// prompt meets again: an answer past the output cap, and a model or a
 /// context the signed-in account cannot spend usage credits on.
-const AGENT_TERMINAL_MARKERS: &[&str] = &[OUTGROWN, UNFUNDED, UNFUNDED_CONTEXT];
+const AGENT_TERMINAL_MARKERS: &[&str] = &[
+    PROSE_EXCEEDED,
+    CREDITS_REQUIRED,
+    LONG_CONTEXT_CREDITS_REQUIRED,
+];
 
 const TERMINAL_MARKERS: &[&str] = &[
     "access denied",
@@ -3288,8 +3292,8 @@ mod tests {
 
     fn claude() -> LlmBackend {
         LlmBackend::cli(
-            zone_core::llm::AgentKind::Claude,
-            zone_core::llm::CliSettings::default(),
+            abnegate_agent_cli::AgentKind::Claude,
+            abnegate_agent_cli::CliSettings::default(),
         )
     }
 
@@ -3342,7 +3346,7 @@ mod tests {
         assert!(matches!(
             backend,
             LlmBackend::Cli {
-                agent: zone_core::llm::AgentKind::Claude,
+                agent: abnegate_agent_cli::AgentKind::Claude,
                 ..
             }
         ));
@@ -3352,7 +3356,7 @@ mod tests {
     async fn a_run_whose_backend_cannot_be_resolved_does_not_start() {
         let fixture = AgentTask::new("haiku", "opus", "Rename the settings page").await;
         let signed_out = || backend::Error::SignedOut {
-            agent: zone_core::llm::AgentKind::Claude,
+            agent: abnegate_agent_cli::AgentKind::Claude,
         };
 
         let route = fixture.route().await;
@@ -3370,7 +3374,7 @@ mod tests {
             matches!(
                 prepared.as_ref().err(),
                 Some(Unprepared::Backend(backend::Error::SignedOut {
-                    agent: zone_core::llm::AgentKind::Claude
+                    agent: abnegate_agent_cli::AgentKind::Claude
                 }))
             ),
             "{:?}",
@@ -4017,12 +4021,10 @@ mod tests {
 #[cfg(test)]
 mod retry_tests {
     use super::*;
+    use abnegate_agent_cli::{AgentEvent, AgentKind, CREDITS_UNCONFIRMED, STDERR_HEADING};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use zone_core::llm::AgentKind;
-    use zone_core::llm::provider::{
-        STDERR_HEADING, SignIn, UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT,
-    };
+    use zone_core::llm::SignIn;
 
     const FABLE_REFUSAL: &str =
         "Fable 5.1 requires usage credits. Switch to another model to continue.";
@@ -4078,16 +4080,13 @@ mod retry_tests {
         }
     }
 
-    fn agent(agent: zone_core::llm::AgentKind, sign_in: SignIn) -> LlmBackend {
-        LlmBackend::cli(
-            agent,
-            zone_core::llm::CliSettings::default().with_sign_in(sign_in),
-        )
+    fn agent(agent: AgentKind, sign_in: SignIn) -> LlmBackend {
+        LlmBackend::cli(agent, abnegate_agent_cli::CliSettings::default()).with_sign_in(sign_in)
     }
 
     #[test]
     fn a_coding_agent_that_has_to_be_signed_in_again_is_not_retried() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         for sign_in in [SignIn::Organization, SignIn::Host, SignIn::Instance] {
             let fault = Fault::agent(
@@ -4103,7 +4102,7 @@ mod retry_tests {
     /// is the operator's, and no organization setting can renew it.
     #[test]
     fn the_servers_own_sign_in_failing_is_not_sent_to_the_organizations_settings() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         let fault = Fault::agent(
             &agent(AgentKind::Claude, SignIn::Instance),
@@ -4137,19 +4136,19 @@ mod retry_tests {
     /// from an endpoint are judged the way an endpoint's always were.
     #[test]
     fn only_a_coding_agent_stopped_at_the_output_cap_is_not_retried() {
-        let stopped = "Stream error: claude: the agent's answer grew past 4194304 bytes";
+        let stopped = format!("Stream error: claude: {PROSE_EXCEEDED} 4194304 bytes");
 
         assert_eq!(
             Fault::agent(
                 &agent(AgentKind::Claude, SignIn::Organization),
-                stopped.to_string()
+                stopped.clone()
             )
             .failure,
             Failure::Terminal
         );
         assert_eq!(
-            Fault::agent(&LlmBackend::Http, stopped.to_string()).failure,
-            classify(stopped)
+            Fault::agent(&LlmBackend::Http, stopped.clone()).failure,
+            classify(&stopped)
         );
     }
 
@@ -4160,8 +4159,10 @@ mod retry_tests {
     fn a_coding_agent_refused_for_want_of_usage_credits_is_not_retried() {
         for sign_in in [SignIn::Organization, SignIn::Host, SignIn::Instance] {
             for message in [
-                format!("Stream error: claude: {UNFUNDED}: {FABLE_REFUSAL}"),
-                format!("Stream error: claude: {UNFUNDED_CONTEXT}: {LONG_CONTEXT_REFUSAL}"),
+                format!("Stream error: claude: {CREDITS_REQUIRED}: {FABLE_REFUSAL}"),
+                format!(
+                    "Stream error: claude: {LONG_CONTEXT_CREDITS_REQUIRED}: {LONG_CONTEXT_REFUSAL}"
+                ),
             ] {
                 let fault = Fault::agent(&agent(AgentKind::Claude, sign_in), message.clone());
 
@@ -4179,7 +4180,7 @@ mod retry_tests {
             &agent(AgentKind::Claude, SignIn::Organization),
             format!(
                 "Stream error: claude: the agent exited without completing its event stream\
-                 {STDERR_HEADING}{UNFUNDED}: {FABLE_REFUSAL}"
+                 {STDERR_HEADING}{CREDITS_REQUIRED}: {FABLE_REFUSAL}"
             ),
         );
 
@@ -4197,7 +4198,8 @@ mod retry_tests {
                 Failure::RateLimited { retry_after: None },
             ),
         ] {
-            let message = format!("Stream error: claude: {UNCONFIRMED} (fetch_error): {words}");
+            let message =
+                format!("Stream error: claude: {CREDITS_UNCONFIRMED} (fetch_error): {words}");
             let fault = Fault::agent(&agent(AgentKind::Claude, SignIn::Organization), message);
 
             assert_eq!(fault.failure, judged, "{}", fault.message);
@@ -4215,7 +4217,7 @@ mod retry_tests {
             "You're out of usage credits · resets 5pm",
             "Your usage allocation has been disabled by your admin · ask your admin for a higher limit",
         ] {
-            let mut reader = AgentKind::Claude.reader();
+            let mut reader = AgentKind::Claude.turn();
             let mut events = Vec::new();
             for line in [
                 serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_208_000, "rateLimitType": "five_hour", "isUsingOverage": false}}),
@@ -4227,11 +4229,8 @@ mod retry_tests {
             let failure = events
                 .iter()
                 .find_map(|event| match event {
-                    zone_core::llm::provider::AgentEvent::Failed(message)
-                    | zone_core::llm::provider::AgentEvent::Limited(abnegate_llm::Limit {
-                        message,
-                        ..
-                    }) => Some(message),
+                    AgentEvent::Failed(message)
+                    | AgentEvent::Limited(abnegate_llm::Limit { message, .. }) => Some(message),
                     _ => None,
                 })
                 .expect("the refusal fails the turn");
@@ -4271,11 +4270,11 @@ mod retry_tests {
             .expect("the stand-in agent to be executable");
         LlmBackend::cli(
             AgentKind::Claude,
-            zone_core::llm::CliSettings::default()
-                .with_sign_in(SignIn::Organization)
+            abnegate_agent_cli::CliSettings::default()
                 .with_executable(executable)
                 .with_timeout(Duration::from_secs(20)),
         )
+        .with_sign_in(SignIn::Organization)
     }
 
     /// How a task's turn on `backend` stopped. Nothing it reaches for needs a
@@ -4401,7 +4400,7 @@ mod retry_tests {
         assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
         assert_eq!(
             fault.message,
-            format!("Stream error: claude: {UNFUNDED}: {FABLE_REFUSAL}")
+            format!("Stream error: claude: {CREDITS_REQUIRED}: {FABLE_REFUSAL}")
         );
     }
 
@@ -4425,8 +4424,8 @@ mod retry_tests {
                 Failure::RateLimited { retry_after: None },
             ),
             ("400 Bad Request: credits_required", Failure::Terminal),
-            (UNFUNDED, Failure::Transient),
-            (UNFUNDED_CONTEXT, Failure::Transient),
+            (CREDITS_REQUIRED, Failure::Transient),
+            (LONG_CONTEXT_CREDITS_REQUIRED, Failure::Terminal),
             (SESSION_LIMIT, Failure::Transient),
         ] {
             let fault = Fault::agent(&LlmBackend::Http, message.to_string());
@@ -4435,7 +4434,7 @@ mod retry_tests {
             assert_eq!(fault.failure, classify(message), "{message}");
             assert_eq!(fault.message, message);
         }
-        for message in [UNFUNDED, UNFUNDED_CONTEXT, SESSION_LIMIT] {
+        for message in [CREDITS_REQUIRED, SESSION_LIMIT] {
             assert_ne!(
                 classify_agent(message),
                 classify(message),
@@ -4450,7 +4449,7 @@ mod retry_tests {
     /// warning about some other server, must not decide whether it retries.
     #[test]
     fn a_coding_agents_stderr_does_not_decide_whether_its_turn_is_retried() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         for stderr in [
             "2026-09-23T07:43:43Z WARN codex_api: retrying after 429 Too Many Requests",
@@ -4474,7 +4473,7 @@ mod retry_tests {
     /// is not retried, whatever throttling its stderr logged after it.
     #[test]
     fn every_line_of_a_coding_agents_own_words_decides_whether_it_is_retried() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         let fault = Fault::agent(
             &agent(AgentKind::Codex, SignIn::Organization),
@@ -4493,7 +4492,7 @@ mod retry_tests {
     /// only a database read may succeed on the next attempt.
     #[test]
     fn a_backend_that_cannot_be_resolved_is_retried_only_for_a_database_read() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         let agent = AgentKind::Claude;
         assert_eq!(
@@ -4524,7 +4523,7 @@ mod retry_tests {
 
     #[test]
     fn a_renewal_codex_reports_only_on_stderr_is_still_not_retried() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         let fault = Fault::agent(
             &agent(AgentKind::Codex, SignIn::Organization),
@@ -6949,8 +6948,10 @@ mod cli_tests {
     use crate::db::agent_logins::{self, Insert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, users, workspace_members, workspaces};
+    use crate::services::agent::home::CLAUDE_CODE_OAUTH_TOKEN;
     use crate::services::login::claude::Sealed;
     use abnegate_agent_cli::login::claude::Tokens;
+    use abnegate_agent_cli::{AgentKind, CliSettings};
     use abnegate_llm::{Credential, LlmConfig};
     use abnegate_secret::SecretValue;
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -6960,14 +6961,20 @@ mod cli_tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
     use wiremock::MockServer;
-    use zone_core::llm::provider::SignIn;
-    use zone_core::llm::{AgentKind, CliSettings, Toolset};
+    use zone_core::llm::SignIn;
+    use zone_core::llm::Toolset;
 
     const ANSWER: &str = "Wrote it.";
     const EXECUTABLE: &str = "claude";
     const ARGUMENTS: &str = "arguments";
     const PROMPT: &str = "prompt";
     const TOKEN: &str = "token";
+
+    /// Prints the bearer token the stand-in was handed for Zone's MCP server. It arrives as the
+    /// whole `Authorization` header, in a variable abnegate-agent-cli generates and the agent's
+    /// MCP configuration names.
+    const MCP_TOKEN: &str =
+        "$(env | sed -n 's/^ABNEGATE_MCP_[A-Za-z0-9_]*=Bearer //p' | head -n 1)";
     const TOKENS: &str = "tokens";
     const INVOCATIONS: &str = "invocations";
     const FAILED: &str = "failed";
@@ -7018,7 +7025,7 @@ mod cli_tests {
         fn write() -> Self {
             Self::with(|agent| {
                 format!(
-                    "printf '%s' \"$ZONE_MCP_TOKEN\" > '{token}'\nfor argument in \"$@\"; do \
+                    "printf '%s' \"{MCP_TOKEN}\" > '{token}'\nfor argument in \"$@\"; do \
                      printf '%s\\n' \"$argument\"; done > '{arguments}.partial'\nmv \
                      '{arguments}.partial' '{arguments}'\nwhile [ ! -f '{release}' ]; do sleep \
                      0.05; done\n{answer}",
@@ -7134,7 +7141,7 @@ mod cli_tests {
         }
 
         fn prompt(&self) -> String {
-            zone_core::llm::provider::prompt(
+            zone_core::llm::cli::prompt(
                 &std::fs::read_to_string(self.path(PROMPT))
                     .expect("the prompt the agent was handed"),
             )
@@ -7482,8 +7489,11 @@ mod cli_tests {
 
         let (arguments, token) = agent.spawned().await;
         let definition: Value = serde_json::from_str(
-            flag(&arguments, "--mcp-config")
-                .expect("the agent is told where zone serves the run's tools"),
+            &std::fs::read_to_string(
+                flag(&arguments, "--mcp-config")
+                    .expect("the agent is told where zone serves the run's tools"),
+            )
+            .expect("the server definition the agent is pointed at"),
         )
         .expect("the server definition is JSON");
         assert_eq!(
@@ -7518,10 +7528,10 @@ mod cli_tests {
             .filter(|name| turn.serves(name))
             .map(|name| format!("mcp__{}__{name}", Toolset::SERVER))
             .collect();
-        let allowed: Vec<String> = flag(&arguments, "--allowedTools")
-            .expect("the agent is allowed the run's tools")
-            .split(',')
-            .map(str::to_string)
+        let allowed: Vec<String> = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "--allowedTools")
+            .map(|pair| pair[1].clone())
             .collect();
         assert_eq!(allowed, served);
         for tool in [
@@ -7841,10 +7851,9 @@ mod cli_tests {
     fn signed_in(token: &str) -> LlmBackend {
         LlmBackend::cli(
             AgentKind::Claude,
-            CliSettings::default()
-                .with_sign_in(SignIn::Organization)
-                .with_credential(Credential::key("CLAUDE_CODE_OAUTH_TOKEN", token)),
+            CliSettings::default().with_credential(Credential::key(CLAUDE_CODE_OAUTH_TOKEN, token)),
         )
+        .with_sign_in(SignIn::Organization)
     }
 
     /// A login that cannot be read may since have been renewed or signed out,
@@ -7915,7 +7924,10 @@ mod cli_tests {
         fixture.remove().await;
 
         assert_eq!(kept.login.as_ref(), Some(&login));
-        let LlmBackend::Cli { agent, settings } = kept.backend else {
+        let LlmBackend::Cli {
+            agent, settings, ..
+        } = kept.backend
+        else {
             panic!("the run left its coding agent");
         };
         assert_eq!(agent, AgentKind::Claude);
@@ -8691,7 +8703,9 @@ mod cli_tests {
         assert_eq!(failed.status, RUN_FAILED, "{:?}", failed.error_message);
         assert_eq!(
             failed.error_message,
-            Some(format!("Stream error: claude: {UNFUNDED}: {FABLE_REFUSAL}"))
+            Some(format!(
+                "Stream error: claude: {CREDITS_REQUIRED}: {FABLE_REFUSAL}"
+            ))
         );
         let artifacts = failed.artifacts.expect("a failed run's artifacts");
         assert_eq!(

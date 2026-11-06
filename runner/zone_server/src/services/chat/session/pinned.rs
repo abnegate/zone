@@ -1,5 +1,6 @@
+use abnegate_agent_cli::Session;
 use zone_chat::history::NewEntry;
-use zone_core::llm::{LlmBackend, Session};
+use zone_core::llm::LlmBackend;
 
 use super::{Generation, RunContext};
 use crate::db::chats::ChatSession;
@@ -150,24 +151,19 @@ impl Pinned {
     pub fn renew(&mut self, backend: LlmBackend) -> LlmBackend {
         self.session = Continuation::fresh(self.login.agent);
         self.announced = None;
-        match backend {
-            LlmBackend::Cli {
-                agent,
-                mut settings,
-            } => {
-                settings.session.clone_from(&self.session);
-                LlmBackend::Cli { agent, settings }
-            }
-            LlmBackend::Http => LlmBackend::Http,
-        }
+        let session = self.session.clone();
+        backend.configured(|mut settings| {
+            settings.session = session;
+            settings
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use abnegate_agent_cli::{AgentKind, CliSettings};
     use abnegate_llm::Message;
     use uuid::Uuid;
-    use zone_core::llm::{AgentKind, CliSettings};
 
     use super::*;
     use crate::services::backend::Resolved;
@@ -195,9 +191,9 @@ mod tests {
     }
 
     fn generation(login: &LoginIdentity, session: Option<Session>) -> Generation {
-        let settings = CliSettings {
-            session,
-            ..CliSettings::default()
+        let settings = match session {
+            Some(session) => CliSettings::default().with_session(session),
+            None => CliSettings::default(),
         };
         Generation {
             resolved: Resolved {
@@ -211,14 +207,8 @@ mod tests {
     }
 
     fn resuming(login: &LoginIdentity) -> Pinned {
-        let mut pinned = Pinned::of(&generation(
-            login,
-            Some(Session {
-                id: "previous".into(),
-                resume: true,
-            }),
-        ))
-        .expect("a session on a login");
+        let mut pinned = Pinned::of(&generation(login, Some(Session::resumed("previous"))))
+            .expect("a session on a login");
         pinned.sees("b".repeat(64), 6);
         pinned.keep(RunContext::from_messages(vec![Message::user("Hello")]));
         pinned
@@ -310,6 +300,7 @@ mod tests {
                     assert_eq!(session(&backend), None, "codex names its own thread");
                     assert_eq!(pinned.record(6), None);
                 }
+                other => panic!("no session test covers {other}"),
             }
             assert_eq!(pinned.resumed(), None);
             assert!(!pinned.refused(refusal), "{agent} restarted a second time");

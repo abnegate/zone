@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_agent_cli::login::Status;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
-use zone_core::llm::AgentKind;
 
 pub struct Host {
     lifetime: Duration,

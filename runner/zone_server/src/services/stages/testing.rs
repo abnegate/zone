@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use abnegate_agent_cli::AgentKind;
 use serde_json::json;
 use sqlx::PgPool;
 use tempfile::TempDir;
 use uuid::Uuid;
 use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
-use zone_core::llm::AgentKind;
 
 use crate::config::{Config, ModelBackend};
 use crate::db::{organizations, workspaces};

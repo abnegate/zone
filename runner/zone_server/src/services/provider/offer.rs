@@ -1,8 +1,8 @@
+use abnegate_agent_cli::AgentKind;
 use abnegate_llm::ReasoningEffort;
 use futures::future::try_join_all;
 use serde::Serialize;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use super::{Availability, Offered, Provider, Refusal};
 use crate::config::Config;
@@ -617,7 +617,7 @@ mod tests {
                 "{provider:?} with {model}"
             );
         }
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let provider = Provider::ALL
                 .into_iter()
                 .find(|provider| provider.agent() == Some(agent))

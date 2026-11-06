@@ -1,10 +1,10 @@
+use abnegate_agent_cli::AgentKind;
 use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::SecretValue;
 use chrono::{TimeDelta, Utc};
 use sqlx::PgPool;
 use tempfile::TempDir;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use crate::config::{AgentConfig, Config};
 use crate::db::agent_logins::{self, Insert};
