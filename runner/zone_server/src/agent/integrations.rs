@@ -610,6 +610,10 @@ impl Integration {
     /// source's token, so a chat whose agent holds no GitHub credential can
     /// still open a pull request. A fork's `owner:branch` head, and a chat with
     /// no checkout to push from, are left for GitHub to find already pushed.
+    ///
+    /// Git does not say why a push failed, so a failed push asks GitHub's API
+    /// about the same token: one it refuses fails as unauthorized, which mints
+    /// a fresh token and runs the whole operation, push included, again.
     async fn push_head(
         &self,
         github: &Github,
@@ -632,10 +636,16 @@ impl Integration {
             .map_err(|_| "The source does not name a GitHub repository.".to_string())?;
         let origin =
             Origin::parse(repository).ok_or("The source does not name a GitHub repository.")?;
-        chat_pull_request::push(&checkout::git(), &directory, &url, &origin, head, token)
-            .await
-            .map(drop)
-            .map_err(|error| format!("Could not push {head}: {error}"))
+        let Err(error) =
+            chat_pull_request::push(&checkout::git(), &directory, &url, &origin, head, token).await
+        else {
+            return Ok(());
+        };
+        let unauthorized = status_error(StatusCode::UNAUTHORIZED);
+        Err(match github.get(&[], &[]).await {
+            Err(refusal) if refusal == unauthorized => unauthorized,
+            _ => format!("Could not push {head}: {error}"),
+        })
     }
 
     /// The checkout to push from: the one the model names, which must be one
@@ -6475,6 +6485,73 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(refusal, SOURCE_UNREACHABLE);
+    }
+
+    /// GitHub answers `token` on the repository it reads with `answer`, once.
+    async fn repository_read(connected: &Connected, token: &str, answer: ResponseTemplate) {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPOSITORY}")))
+            .and(header("Authorization", format!("Bearer {token}")))
+            .respond_with(answer)
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+    }
+
+    /// GitHub mints `token` for installation `number` the next time it is
+    /// asked, and only then.
+    async fn minting_once(connected: &Connected, number: u64, token: &str) {
+        Mock::given(method("POST"))
+            .and(path(format!("/app/installations/{number}/access_tokens")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "token": token,
+                "expires_at": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            })))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_push_whose_token_github_refuses_mints_again_and_pushes_once_more() {
+        const EXPIRED: &str = "ghs_expiredinstallationtoken";
+        let connected = Connected::new().await;
+        let number = number();
+        minting_once(&connected, number, EXPIRED).await;
+        minting_once(&connected, number, MINTED_TOKEN).await;
+        repository_read(&connected, EXPIRED, ResponseTemplate::new(401)).await;
+        repository_read(
+            &connected,
+            MINTED_TOKEN,
+            ResponseTemplate::new(200).set_body_json(json!({"default_branch": "main"})),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&connected.github)
+            .await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let unpushable = connected
+            .state
+            .config()
+            .clones
+            .join(connected.workspace.as_hyphenated().to_string())
+            .join(Uuid::new_v4().simple().to_string());
+
+        let refusal = connected_tool(&connected, Operation::CreatePull)
+            .run(json!({
+                "source_id": source.id,
+                "title": "Fix",
+                "head": "feature",
+                "directory": unpushable,
+            }))
+            .await
+            .expect_err("a checkout that is not there cannot be pushed from");
+
+        assert!(refusal.starts_with("Could not push feature"), "{refusal}");
     }
 
     #[test]
