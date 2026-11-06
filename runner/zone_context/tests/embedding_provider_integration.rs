@@ -469,13 +469,13 @@ async fn a_host_ending_in_v1_posts_to_v1_embeddings_once() {
 async fn an_openai_compatible_batch_past_the_context_falls_back_per_text() {
     let (server, provider) = openai_compatible(OpenAiCompatibleResponder {
         width: 768,
-        context_limit: Some(CONTEXT_LIMIT_CHARACTERS / 2),
+        context_limit: Some(CONTEXT_LIMIT_CHARACTERS),
     })
     .await;
     let long = "a".repeat(LONG_TEXT_CHARACTERS);
     let vectors = provider.embed_batch(&["short", &long]).await.unwrap();
     assert_eq!(vectors[0], vec![5.0; 768]);
-    assert_eq!(vectors[1], vec![384.0; 768]);
+    assert_eq!(vectors[1], vec![750.0; 768]);
     let inputs: Vec<Vec<usize>> = server
         .received_requests()
         .await
@@ -491,10 +491,10 @@ async fn an_openai_compatible_batch_past_the_context_falls_back_per_text() {
                 .collect()
         })
         .collect();
-    assert_eq!(inputs[0], [5, 768]);
+    assert_eq!(inputs[0], [5, 3000]);
     let mut singles: Vec<usize> = inputs[1..].iter().flatten().copied().collect();
     singles.sort_unstable();
-    assert_eq!(singles, [5, 384, 768]);
+    assert_eq!(singles, [5, 750, 1500, 3000]);
 }
 
 #[tokio::test]

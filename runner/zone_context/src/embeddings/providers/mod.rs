@@ -14,7 +14,6 @@ mod mock;
 
 use std::sync::Arc;
 
-#[cfg(feature = "local-embeddings")]
 use abnegate_llm::EmbeddingProvider;
 #[cfg(feature = "local-embeddings")]
 use abnegate_llm::modality::vendor::{FastembedConfig, FastembedProvider};
@@ -145,11 +144,18 @@ impl EmbeddingProviderFactory {
         format!("{root}{OPENAI_COMPATIBLE_PATH}")
     }
 
+    fn ollama_maximum_input_tokens(base: &str, model: &str) -> Result<u32> {
+        OllamaEmbeddingProvider::new(OllamaEmbeddingConfig::new(base, model))
+            .map(|provider| provider.maximum_input_tokens())
+            .map_err(context_error)
+    }
+
     fn create_openai_compatible(settings: &AiSettings) -> Result<Arc<dyn EmbeddingService>> {
-        let mut config = OpenAiCompatibleEmbeddingConfig::new(
-            Self::openai_compatible_base(Self::host(settings)?),
-            Self::http_model(settings),
-        );
+        let base = Self::openai_compatible_base(Self::host(settings)?);
+        let model = Self::http_model(settings);
+        let maximum_input_tokens = Self::ollama_maximum_input_tokens(&base, model)?;
+        let mut config = OpenAiCompatibleEmbeddingConfig::new(base, model)
+            .with_maximum_input_tokens(maximum_input_tokens);
         if let Some(key) = &settings.litellm_key {
             config = config.with_api_key(key.as_str());
         }
@@ -296,6 +302,27 @@ mod tests {
         assert_eq!(provider.model(), "text-embedding-3-small");
         assert_eq!(provider.dimension(), 0);
         assert_eq!(provider.max_tokens(), 512);
+    }
+
+    #[test]
+    fn the_openai_compatible_engine_reads_known_models_at_their_full_input_length() {
+        for (model, tokens) in [
+            (None, 8192),
+            (Some("qwen3-embedding"), 8192),
+            (Some("qwen3-embedding:8b"), 8192),
+            (Some("nomic-embed-text"), 8192),
+            (Some("all-minilm"), 256),
+            (Some("unknown-embed"), 512),
+        ] {
+            let provider = EmbeddingProviderFactory::create(&self_hosted(
+                Some(EMBEDDING_ENGINE_OPENAI_COMPATIBLE),
+                model,
+            ))
+            .unwrap();
+            let ollama = EmbeddingProviderFactory::create(&self_hosted(None, model)).unwrap();
+            assert_eq!(provider.max_tokens(), tokens, "{model:?}");
+            assert_eq!(provider.max_tokens(), ollama.max_tokens(), "{model:?}");
+        }
     }
 
     #[test]
