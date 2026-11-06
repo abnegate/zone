@@ -3,7 +3,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { Wizard } from '../../../components';
 import { getErrors } from '../../../validation';
 import type { GitHubRepository } from '../../github';
-import { getSourceById, initializeFormState, sourceRegistry } from '../config';
+import { GITHUB_SOURCE_TYPE, getSourceById, initializeFormState, sourceRegistry } from '../config';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 import { useSourceKinds } from '../hooks/useSourceKinds';
 import { CreateSourceRequestSchema } from '../schemas';
@@ -29,7 +29,7 @@ function buildAppRequest(
 ): CreateSourceRequest {
   return {
     name: name || repository.full_name,
-    source_type: 'github',
+    source_type: GITHUB_SOURCE_TYPE,
     config: {
       owner: repository.owner,
       repo: repository.name,
@@ -66,9 +66,9 @@ export function CreateSourceWizard({
   createSource,
 }: CreateSourceWizardProps) {
   const [currentStep, setCurrentStep] = useState(0);
-  const [sourceType, setSourceType] = useState<SourceType>('github');
+  const [sourceType, setSourceType] = useState<SourceType>(GITHUB_SOURCE_TYPE);
   const [formState, setFormState] = useState<Record<string, unknown>>(() =>
-    initializeFormState('github')
+    initializeFormState(GITHUB_SOURCE_TYPE)
   );
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -85,7 +85,7 @@ export function CreateSourceWizard({
   useFocusTrap(dialog, isOpen);
 
   const currentSource = getSourceById(sourceType);
-  const appMode = sourceType === 'github' && connectionMode === GitHubConnectionMode.App;
+  const appMode = sourceType === GITHUB_SOURCE_TYPE && connectionMode === GitHubConnectionMode.App;
   const serverKinds = useSourceKinds(isOpen);
   const enabledSources = useMemo(
     () =>
@@ -150,8 +150,8 @@ export function CreateSourceWizard({
 
   const handleClose = useCallback(() => {
     setCurrentStep(0);
-    setSourceType('github');
-    setFormState(initializeFormState('github'));
+    setSourceType(GITHUB_SOURCE_TYPE);
+    setFormState(initializeFormState(GITHUB_SOURCE_TYPE));
     setName('');
     setDescription('');
     setCredentials('');
@@ -269,7 +269,7 @@ export function CreateSourceWizard({
                 <p className="wizard-step-intro">
                   Configure the connection settings for your {currentSource.name} source.
                 </p>
-                {sourceType === 'github' ? (
+                {sourceType === GITHUB_SOURCE_TYPE ? (
                   <GitHubConfiguration
                     mode={connectionMode}
                     onModeChange={setConnectionMode}
