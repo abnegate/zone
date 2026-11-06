@@ -7,7 +7,7 @@ use uuid::Uuid;
 use wiremock::MockServer;
 
 use super::WorkspaceScope;
-use crate::db::github_apps::tests::{pool, seed_organization, seed_user, seed_workspace};
+use crate::db::github_apps::testing::{pool, seed_organization, seed_user, seed_workspace};
 use crate::db::github_installations;
 use crate::db::sources::{self, NewSource, SourceRow};
 use crate::db::workspace_members::{self, WorkspaceRole};

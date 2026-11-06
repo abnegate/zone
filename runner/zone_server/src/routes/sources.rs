@@ -93,6 +93,7 @@ async fn validate_installation(
 /// Refuses an installation whose token cannot read the repository `config` names.
 async fn validate_reachable(
     state: &AppState,
+    workspace_id: Uuid,
     installation: Uuid,
     config: &serde_json::Value,
 ) -> Result<(), ServerError> {
@@ -104,7 +105,7 @@ async fn validate_reachable(
     })?;
     let credential = state
         .github()
-        .installation(state.db(), installation)
+        .installation(state.db(), workspace_id, installation)
         .await
         .map_err(|error| installation_refusal(installation, error))?;
 
@@ -740,6 +741,7 @@ pub async fn update(
         .await?;
         validate_reachable(
             &state,
+            workspace_id,
             installation,
             request.config.as_ref().unwrap_or(&previous.config),
         )

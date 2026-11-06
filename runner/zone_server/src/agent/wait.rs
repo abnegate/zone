@@ -996,7 +996,7 @@ mod tests {
 
     use crate::agent::integrations::{PENDING_ASSESSMENT, SOURCE_DISCONNECTED, SUCCESS_ASSESSMENT};
     use crate::agent::testing::{Connected, MINTED_TOKEN, OWNER, REPOSITORY, STORED_TOKEN, number};
-    use crate::services::github_app::testing::issuing;
+    use crate::services::github_app::testing::{issuing, uninstalled};
     use crate::state::{AppState, test_config};
     use abnegate_llm::Role;
     use std::collections::{HashMap, VecDeque};
@@ -2238,6 +2238,7 @@ mod tests {
             .expect(1)
             .mount(&connected.github)
             .await;
+        uninstalled(&connected.github, number).await;
         Mock::given(header("Authorization", format!("Bearer {STORED_TOKEN}")))
             .respond_with(ResponseTemplate::new(200))
             .expect(0)

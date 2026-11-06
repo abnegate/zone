@@ -2,9 +2,10 @@
 //! tests of the routes that attach sources and projects to an installation.
 
 use abnegate_secret::{MasterKey, SecretValue, encrypt_value};
-use abnegate_vcs::pull_request::InstallationIssuer;
+use serde_json::json;
 use uuid::Uuid;
-use wiremock::MockServer;
+use wiremock::matchers::{header_exists, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_server::config::Config;
 use zone_server::db::github_apps::{self, NewApp, OwnerType};
 use zone_server::db::github_installations::{
@@ -46,6 +47,12 @@ snLljJnOKrZGf+JfNkPul+la0f9cJo9Ka/oCy6X243y8VmzRG6/BX6eEfnWEJ+NB
 -----END RSA PRIVATE KEY-----";
 
 pub const APP_ID: i64 = 424_242;
+
+/// A GitHub installation number no other test uses, since the database holds
+/// each of GitHub's installations once.
+pub fn installation_id() -> i64 {
+    rand::random_range(1..i64::MAX)
+}
 
 pub struct Seeded {
     pub app: Uuid,
@@ -118,12 +125,28 @@ pub async fn seed_installation(
     }
 }
 
+/// `server` confirms, once, that installation `installation_id` no longer
+/// exists while the App itself is still answered for.
+pub async fn uninstalled(server: &MockServer, installation_id: i64) {
+    Mock::given(method("GET"))
+        .and(path(format!("/app/installations/{installation_id}")))
+        .and(header_exists("authorization"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/app/installations"))
+        .and(header_exists("authorization"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
 /// A provider that mints installation tokens from `server` instead of GitHub.
 pub fn issuer_provider(server: &MockServer, state: &AppState) -> Provider {
-    Provider::with_issuer(
-        InstallationIssuer::standing_in_for(&server.uri()).expect("a stand-in issuer"),
-        *state.encryption_key(),
-    )
+    Provider::new(&config_for(server), *state.encryption_key())
 }
 
 /// The test config with every GitHub API call sent to `server`.

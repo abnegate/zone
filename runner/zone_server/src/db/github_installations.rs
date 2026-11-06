@@ -178,8 +178,8 @@ const COLUMNS: &str = "id, organization_id, github_app_id, installation_id, acco
      created_at, updated_at";
 
 /// Fails with `RowNotFound` when `github_app_id` is not an app of
-/// `organization_id`, so an installation can never be filed under another
-/// organization's app.
+/// `organization_id`, or when GitHub's installation is already filed under
+/// another app, so an installation can never cross organizations.
 pub async fn upsert(
     pool: &PgPool,
     installation: &InstallationUpsert<'_>,
@@ -190,7 +190,7 @@ pub async fn upsert(
             repository_selection, html_url, suspended_at, created_by) \
          SELECT organization_id, id, $3, $4, $5, $6, $7, $8, $9 \
            FROM github_apps WHERE organization_id = $1 AND id = $2 \
-         ON CONFLICT (github_app_id, installation_id) DO UPDATE SET \
+         ON CONFLICT (installation_id) DO UPDATE SET \
            account_login = EXCLUDED.account_login, \
            account_type = EXCLUDED.account_type, \
            repository_selection = EXCLUDED.repository_selection, \
@@ -198,6 +198,7 @@ pub async fn upsert(
            suspended_at = EXCLUDED.suspended_at, \
            revoked_at = NULL, \
            updated_at = NOW() \
+         WHERE github_installations.github_app_id = EXCLUDED.github_app_id \
          RETURNING {COLUMNS}"
     )))
     .bind(installation.organization_id)
@@ -259,15 +260,24 @@ pub async fn attachable(
     .await
 }
 
-pub async fn credential(pool: &PgPool, id: Uuid) -> DbResult<Option<InstallationCredential>> {
+/// The installation and its app's key, if a source or project in
+/// `workspace_id` may mint from it: it belongs to the workspace's organization.
+pub async fn credential(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    id: Uuid,
+) -> DbResult<Option<InstallationCredential>> {
     sqlx::query_as::<_, InstallationCredential>(
         "SELECT installation.id, installation.organization_id, app.app_id, \
                 installation.installation_id, app.private_key, \
                 installation.suspended_at, installation.revoked_at \
          FROM github_installations installation \
          JOIN github_apps app ON app.id = installation.github_app_id \
-         WHERE installation.id = $1",
+           AND app.organization_id = installation.organization_id \
+         JOIN workspaces workspace ON workspace.organization_id = installation.organization_id \
+         WHERE workspace.id = $1 AND installation.id = $2",
     )
+    .bind(workspace_id)
     .bind(id)
     .fetch_optional(pool)
     .await
@@ -336,8 +346,8 @@ mod tests {
     use chrono::TimeDelta;
 
     use super::*;
-    use crate::db::github_apps::tests::{
-        pool, seed_app, seed_organization, seed_user, seed_workspace,
+    use crate::db::github_apps::testing::{
+        installation_id, pool, seed_app, seed_organization, seed_user, seed_workspace,
     };
     use crate::db::github_apps::{self, AppRow};
     use crate::db::github_connection_states::{self, Purpose};
@@ -356,14 +366,14 @@ mod tests {
         }
     }
 
-    async fn seed_installation(
-        pool: &PgPool,
-        app: &AppRow,
-        installation_id: i64,
-    ) -> InstallationRow {
-        upsert(pool, &installation(app, installation_id))
+    async fn seed_installation(pool: &PgPool, app: &AppRow, number: i64) -> InstallationRow {
+        upsert(pool, &installation(app, number))
             .await
             .expect("seed installation")
+    }
+
+    async fn seeded(pool: &PgPool, app: &AppRow) -> InstallationRow {
+        seed_installation(pool, app, installation_id()).await
     }
 
     async fn status(pool: &PgPool, row: &InstallationRow) -> InstallationStatus {
@@ -428,12 +438,13 @@ mod tests {
         let creator = seed_user(&pool).await;
         let later = seed_user(&pool).await;
         let app = seed_app(&pool, organization, "acme").await;
+        let number = installation_id();
 
         let first = upsert(
             &pool,
             &InstallationUpsert {
                 created_by: Some(creator),
-                ..installation(&app, 11)
+                ..installation(&app, number)
             },
         )
         .await
@@ -446,7 +457,7 @@ mod tests {
                 repository_selection: RepositorySelection::Selected,
                 html_url: "https://github.com/enterprises/acme",
                 created_by: Some(later),
-                ..installation(&app, 11)
+                ..installation(&app, number)
             },
         )
         .await
@@ -468,12 +479,12 @@ mod tests {
         let pool = pool().await;
         let organization = seed_organization(&pool).await;
         let app = seed_app(&pool, organization, "acme").await;
-        let row = seed_installation(&pool, &app, 21).await;
+        let row = seeded(&pool, &app).await;
 
         assert!(mark_revoked(&pool, row.id).await.unwrap());
         assert_eq!(status(&pool, &row).await, InstallationStatus::Revoked);
 
-        let restored = seed_installation(&pool, &app, 21).await;
+        let restored = seed_installation(&pool, &app, row.installation_id).await;
         assert_eq!(restored.id, row.id);
         assert_eq!(restored.revoked_at, None);
         assert_eq!(restored.status(), InstallationStatus::Active);
@@ -489,14 +500,14 @@ mod tests {
             &pool,
             &InstallationUpsert {
                 suspended_at: Some(Utc::now()),
-                ..installation(&app, 31)
+                ..installation(&app, installation_id())
             },
         )
         .await
         .unwrap();
         assert_eq!(suspended.status(), InstallationStatus::Suspended);
 
-        let lifted = seed_installation(&pool, &app, 31).await;
+        let lifted = seed_installation(&pool, &app, suspended.installation_id).await;
         assert_eq!(lifted.id, suspended.id);
         assert_eq!(lifted.suspended_at, None);
         assert_eq!(lifted.status(), InstallationStatus::Active);
@@ -513,7 +524,7 @@ mod tests {
             &pool,
             &InstallationUpsert {
                 organization_id: organization,
-                ..installation(&app, 41)
+                ..installation(&app, installation_id())
             },
         )
         .await
@@ -528,7 +539,7 @@ mod tests {
         let pool = pool().await;
         let organization = seed_organization(&pool).await;
         let app = seed_app(&pool, organization, "acme").await;
-        let row = seed_installation(&pool, &app, 51).await;
+        let row = seeded(&pool, &app).await;
 
         assert!(mark_suspended(&pool, row.id).await.unwrap());
         assert_eq!(status(&pool, &row).await, InstallationStatus::Suspended);
@@ -554,14 +565,15 @@ mod tests {
         let organization = seed_organization(&pool).await;
         let app = seed_app(&pool, organization, "acme").await;
         let neighbour = seed_app(&pool, organization, "globex").await;
-        let kept = seed_installation(&pool, &app, 61).await;
-        let gone = seed_installation(&pool, &app, 62).await;
-        let also_kept = seed_installation(&pool, &app, 63).await;
-        let already_revoked = seed_installation(&pool, &app, 64).await;
+        let kept = seeded(&pool, &app).await;
+        let gone = seeded(&pool, &app).await;
+        let also_kept = seeded(&pool, &app).await;
+        let already_revoked = seeded(&pool, &app).await;
         mark_revoked(&pool, already_revoked.id).await.unwrap();
-        let unrelated = seed_installation(&pool, &neighbour, 62).await;
+        let unrelated = seeded(&pool, &neighbour).await;
+        let present = [kept.installation_id, also_kept.installation_id];
 
-        assert_eq!(revoke_missing(&pool, app.id, &[61, 63]).await.unwrap(), 1);
+        assert_eq!(revoke_missing(&pool, app.id, &present).await.unwrap(), 1);
         assert_eq!(status(&pool, &kept).await, InstallationStatus::Active);
         assert_eq!(status(&pool, &gone).await, InstallationStatus::Revoked);
         assert_eq!(status(&pool, &also_kept).await, InstallationStatus::Active);
@@ -580,12 +592,12 @@ mod tests {
         let app = seed_app(&pool, organization, "acme").await;
         let foreign_app = seed_app(&pool, other, "acme").await;
 
-        let active = seed_installation(&pool, &app, 71).await;
-        let revoked = seed_installation(&pool, &app, 72).await;
+        let active = seeded(&pool, &app).await;
+        let revoked = seeded(&pool, &app).await;
         mark_revoked(&pool, revoked.id).await.unwrap();
-        let suspended = seed_installation(&pool, &app, 73).await;
+        let suspended = seeded(&pool, &app).await;
         mark_suspended(&pool, suspended.id).await.unwrap();
-        let foreign = seed_installation(&pool, &foreign_app, 74).await;
+        let foreign = seeded(&pool, &foreign_app).await;
 
         let attached = attachable(&pool, workspace, active.id).await.unwrap();
         assert_eq!(attached.map(|row| row.id), Some(active.id));
@@ -606,18 +618,18 @@ mod tests {
         let pool = pool().await;
         let organization = seed_organization(&pool).await;
         let app = seed_app(&pool, organization, "acme").await;
-        let active = seed_installation(&pool, &app, 81).await;
+        let active = seeded(&pool, &app).await;
         let revoked = upsert(
             &pool,
             &InstallationUpsert {
                 account_login: "globex",
-                ..installation(&app, 82)
+                ..installation(&app, installation_id())
             },
         )
         .await
         .unwrap();
         mark_revoked(&pool, revoked.id).await.unwrap();
-        let unrequested = seed_installation(&pool, &app, 83).await;
+        let unrequested = seeded(&pool, &app).await;
 
         let mut found = summaries(&pool, &[active.id, revoked.id, Uuid::new_v4()])
             .await
@@ -642,15 +654,16 @@ mod tests {
     async fn credential_carries_the_apps_key_and_never_prints_it() {
         let pool = pool().await;
         let organization = seed_organization(&pool).await;
+        let workspace = seed_workspace(&pool, organization).await;
         let app = seed_app(&pool, organization, "acme").await;
-        let row = seed_installation(&pool, &app, 91).await;
+        let row = seeded(&pool, &app).await;
         mark_suspended(&pool, row.id).await.unwrap();
 
-        let credential = credential(&pool, row.id).await.unwrap().unwrap();
+        let credential = credential(&pool, workspace, row.id).await.unwrap().unwrap();
         assert_eq!(credential.id, row.id);
         assert_eq!(credential.organization_id, organization);
         assert_eq!(credential.app_id, app.app_id);
-        assert_eq!(credential.installation_id, 91);
+        assert_eq!(credential.installation_id, row.installation_id);
         assert_eq!(credential.private_key, app.private_key);
         assert_eq!(credential.status(), InstallationStatus::Suspended);
 
@@ -659,11 +672,101 @@ mod tests {
         assert!(rendered.contains(REDACTED), "{rendered}");
 
         assert!(
-            super::credential(&pool, Uuid::new_v4())
+            super::credential(&pool, workspace, Uuid::new_v4())
                 .await
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn credential_is_refused_to_a_workspace_of_another_organization() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let stranger = seed_organization(&pool).await;
+        let theirs = seed_workspace(&pool, stranger).await;
+        let app = seed_app(&pool, organization, "acme").await;
+        let row = seeded(&pool, &app).await;
+
+        for workspace in [theirs, Uuid::new_v4()] {
+            assert!(
+                credential(&pool, workspace, row.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_github_installation_is_filed_under_one_app_only() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let stranger = seed_organization(&pool).await;
+        let app = seed_app(&pool, organization, "acme").await;
+        let theirs = seed_app(&pool, stranger, "acme").await;
+        let row = seeded(&pool, &app).await;
+
+        let refused = upsert(
+            &pool,
+            &InstallationUpsert {
+                account_login: "hijacked",
+                ..installation(&theirs, row.installation_id)
+            },
+        )
+        .await
+        .expect_err("another app must not claim the installation");
+        assert!(matches!(refused, sqlx::Error::RowNotFound), "{refused:?}");
+        let kept = get(&pool, organization, row.id).await.unwrap().unwrap();
+        assert_eq!(kept.account_login, "acme");
+        assert!(list(&pool, stranger).await.unwrap().is_empty());
+
+        let duplicate = sqlx::query(
+            "INSERT INTO github_installations (organization_id, github_app_id, installation_id, \
+               account_login, account_type, repository_selection, html_url) \
+             VALUES ($1, $2, $3, 'acme', 'Organization', 'all', 'https://github.com')",
+        )
+        .bind(stranger)
+        .bind(theirs.id)
+        .bind(row.installation_id)
+        .execute(&pool)
+        .await
+        .expect_err("the database holds each GitHub installation once");
+        assert_eq!(
+            constraint(&duplicate),
+            Some("github_installations_installation_id_key")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_installation_must_belong_to_its_apps_organization() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let stranger = seed_organization(&pool).await;
+        let app = seed_app(&pool, organization, "acme").await;
+
+        let refused = sqlx::query(
+            "INSERT INTO github_installations (organization_id, github_app_id, installation_id, \
+               account_login, account_type, repository_selection, html_url) \
+             VALUES ($1, $2, $3, 'acme', 'Organization', 'all', 'https://github.com')",
+        )
+        .bind(stranger)
+        .bind(app.id)
+        .bind(installation_id())
+        .execute(&pool)
+        .await
+        .expect_err("an installation cannot be filed under another organization's app");
+        assert_eq!(
+            constraint(&refused),
+            Some("github_installations_github_app_organization_fkey")
+        );
+        assert!(list(&pool, stranger).await.unwrap().is_empty());
+    }
+
+    fn constraint(error: &sqlx::Error) -> Option<&str> {
+        error
+            .as_database_error()
+            .and_then(|database| database.constraint())
     }
 
     #[tokio::test]
@@ -673,7 +776,7 @@ mod tests {
         let workspace = seed_workspace(&pool, organization).await;
         let other = seed_organization(&pool).await;
         let app = seed_app(&pool, organization, "acme").await;
-        let row = seed_installation(&pool, &app, 101).await;
+        let row = seeded(&pool, &app).await;
 
         let source = Uuid::new_v4();
         sqlx::query(
@@ -725,8 +828,8 @@ mod tests {
         let user = seed_user(&pool).await;
         let app = seed_app(&pool, organization, "acme").await;
         let neighbour = seed_app(&pool, organization, "globex").await;
-        let row = seed_installation(&pool, &app, 111).await;
-        let surviving = seed_installation(&pool, &neighbour, 111).await;
+        let row = seeded(&pool, &app).await;
+        let surviving = seeded(&pool, &neighbour).await;
         let issued = github_connection_states::issue(
             &pool,
             organization,
@@ -761,9 +864,10 @@ mod tests {
     async fn deleting_an_organization_removes_everything_it_owns() {
         let pool = pool().await;
         let organization = seed_organization(&pool).await;
+        let workspace = seed_workspace(&pool, organization).await;
         let user = seed_user(&pool).await;
         let app = seed_app(&pool, organization, "acme").await;
-        let row = seed_installation(&pool, &app, 121).await;
+        let row = seeded(&pool, &app).await;
         let issued =
             github_connection_states::issue(&pool, organization, user, Purpose::Registration, None)
                 .await
@@ -782,7 +886,12 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(credential(&pool, row.id).await.unwrap().is_none());
+        assert!(
+            credential(&pool, workspace, row.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let consumed =
             github_connection_states::consume(&pool, issued.state.expose(), Purpose::Registration)
                 .await

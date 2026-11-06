@@ -1839,8 +1839,6 @@ mod tests {
         );
     }
 
-    const GITHUB_INSTALLATION: u64 = 23_571_113;
-
     struct Connected {
         pool: PgPool,
         github: Provider,
@@ -1850,16 +1848,19 @@ mod tests {
     }
 
     async fn connected(token: &str, mints: u64) -> Connected {
-        use crate::db::github_apps::tests::{pool, seed_organization, seed_workspace};
-        use crate::services::github_app::testing::{installed, issuing, provider};
+        use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
+        use crate::services::github_app::testing::{
+            installation_number, installed, issuing, provider,
+        };
 
         let server = wiremock::MockServer::start().await;
-        issuing(&server, GITHUB_INSTALLATION, token, mints).await;
+        let number = installation_number();
+        issuing(&server, number, token, mints).await;
         let pool = pool().await;
         let github = provider(&server, rand::random());
         let organization = seed_organization(&pool).await;
         let workspace = seed_workspace(&pool, organization).await;
-        let installation = installed(&pool, &github, organization, GITHUB_INSTALLATION).await;
+        let installation = installed(&pool, &github, organization, number).await;
         let project = projects::create_project(&pool, "Installed", None, Some(workspace))
             .await
             .unwrap();

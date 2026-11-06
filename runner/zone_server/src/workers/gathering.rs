@@ -430,13 +430,12 @@ mod tests {
     use wiremock::MockServer;
 
     use super::*;
-    use crate::db::github_apps::tests::{pool, seed_organization, seed_workspace};
+    use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
     use crate::db::github_installations;
     use crate::db::sources::{GITHUB, NewSource, SourceRow};
-    use crate::services::github_app::testing::{installed, issuing, provider};
+    use crate::services::github_app::testing::{installation_number, installed, issuing, provider};
     use crate::state::test_config;
 
-    const INSTALLATION_ID: u64 = 61_000_001;
     const MINTED_TOKEN: &str = "ghs_throwaway_gathering";
     const STORED_TOKEN: &str = "ghp_throwaway_gathering";
 
@@ -445,6 +444,7 @@ mod tests {
         github: MockServer,
         organization: Uuid,
         workspace: Uuid,
+        number: u64,
     }
 
     impl Harness {
@@ -460,6 +460,7 @@ mod tests {
                 github,
                 organization,
                 workspace,
+                number: installation_number(),
             }
         }
 
@@ -468,7 +469,7 @@ mod tests {
                 self.state.db(),
                 self.state.github(),
                 self.organization,
-                INSTALLATION_ID,
+                self.number,
             )
             .await
         }
@@ -498,7 +499,7 @@ mod tests {
     #[tokio::test]
     async fn an_installation_source_is_gathered_with_a_minted_token() {
         let harness = Harness::new().await;
-        issuing(&harness.github, INSTALLATION_ID, MINTED_TOKEN, 1).await;
+        issuing(&harness.github, harness.number, MINTED_TOKEN, 1).await;
         let installation = harness.installation().await;
         let row = harness.source(None, Some(installation)).await;
 
@@ -537,7 +538,7 @@ mod tests {
     #[tokio::test]
     async fn a_source_on_a_revoked_installation_is_skipped() {
         let harness = Harness::new().await;
-        issuing(&harness.github, INSTALLATION_ID, MINTED_TOKEN, 0).await;
+        issuing(&harness.github, harness.number, MINTED_TOKEN, 0).await;
         let installation = harness.installation().await;
         let row = harness.source(None, Some(installation)).await;
         assert!(

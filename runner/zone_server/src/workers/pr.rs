@@ -1868,8 +1868,6 @@ mod publication_tests {
         );
     }
 
-    const GITHUB_INSTALLATION: u64 = 31_415_926;
-
     /// Moves the fixture's project from its stored token onto an installation
     /// that mints `token` `mints` times, and answers the installation's id.
     async fn installed_only(
@@ -1878,9 +1876,12 @@ mod publication_tests {
         token: &str,
         mints: u64,
     ) -> uuid::Uuid {
-        use crate::services::github_app::testing::{installed, issuing, provider};
+        use crate::services::github_app::testing::{
+            installation_number, installed, issuing, provider,
+        };
 
-        issuing(server, GITHUB_INSTALLATION, token, mints).await;
+        let number = installation_number();
+        issuing(server, number, token, mints).await;
         fixture
             .state
             .install_github(provider(server, *fixture.state.encryption_key()));
@@ -1888,7 +1889,7 @@ mod publication_tests {
             fixture.state.db(),
             fixture.state.github(),
             fixture.organization,
-            GITHUB_INSTALLATION,
+            number,
         )
         .await;
         sqlx::query(

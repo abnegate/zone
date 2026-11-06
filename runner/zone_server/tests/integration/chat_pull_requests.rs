@@ -168,7 +168,7 @@ impl Workspace {
 
     /// An installation of a GitHub App on the workspace's organization, with
     /// its tokens minted by `github`.
-    async fn install(&self, github: &MockServer, installation_id: i64) -> Seeded {
+    async fn install(&self, github: &MockServer) -> Seeded {
         self.state
             .install_github(github_app::issuer_provider(github, &self.state));
         let organization = workspaces::get_workspace(self.state.db(), self.workspace)
@@ -176,7 +176,8 @@ impl Workspace {
             .expect("the workspace reads")
             .expect("the workspace exists")
             .organization_id;
-        github_app::seed_installation(&self.state, organization, installation_id).await
+        github_app::seed_installation(&self.state, organization, github_app::installation_id())
+            .await
     }
 
     /// A source for acme/widgets connected only through `installation`, with
@@ -1239,7 +1240,7 @@ async fn a_source_connected_only_through_an_installation_reads_with_a_minted_tok
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
-    let seeded = workspace.install(&github, 81_001).await;
+    let seeded = workspace.install(&github).await;
     access_tokens(seeded.installation_id)
         .respond_with(minted(MINTED_TOKEN))
         .expect(1)
@@ -1279,7 +1280,7 @@ async fn a_revoked_installation_never_falls_back_to_a_personal_access_token() {
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
-    let seeded = workspace.install(&github, 81_002).await;
+    let seeded = workspace.install(&github).await;
     github_installations::mark_revoked(workspace.state.db(), seeded.installation)
         .await
         .expect("the installation is revoked");
@@ -1303,7 +1304,7 @@ async fn an_installation_token_github_refuses_is_minted_again_once() {
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
-    let seeded = workspace.install(&github, 81_003).await;
+    let seeded = workspace.install(&github).await;
     access_tokens(seeded.installation_id)
         .respond_with(minted("ghs_stale"))
         .up_to_n_times(1)

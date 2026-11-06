@@ -1,19 +1,3 @@
-//! Fixtures shared by this module's tests.
-
-use abnegate_secret::SecretValue;
-use abnegate_vcs::pull_request::InstallationIssuer;
-use chrono::{Duration, SecondsFormat, Utc};
-use serde_json::json;
-use sqlx::PgPool;
-use uuid::Uuid;
-use wiremock::matchers::{header_exists, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
-
-use crate::db::github_apps::{self, NewApp, OwnerType};
-use crate::db::github_installations::{self, AccountType, InstallationUpsert, RepositorySelection};
-
-use super::Provider;
-
 /// A throwaway RSA key, generated for these tests and used nowhere else.
 pub(crate) const TEST_PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAu5dqhjvoHZtbdSz9bGJAMp3r+1bqzy/9lhjVz5crI2yWhz7I
@@ -43,78 +27,8 @@ snLljJnOKrZGf+JfNkPul+la0f9cJo9Ka/oCy6X243y8VmzRG6/BX6eEfnWEJ+NB
 +ehfHUDVhe3oJRr15Rw1gt7CrSORoe46YkbnxO3H80of1gn9Vyw=
 -----END RSA PRIVATE KEY-----";
 
-pub(crate) fn provider(server: &MockServer, encryption_key: [u8; 32]) -> Provider {
-    Provider::with_issuer(
-        InstallationIssuer::standing_in_for(&server.uri()).expect("stand-in issuer"),
-        encryption_key,
-    )
-}
+#[cfg(test)]
+mod stand_in;
 
-pub(crate) async fn issuing(server: &MockServer, installation_id: u64, token: &str, calls: u64) {
-    let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
-
-    Mock::given(method("POST"))
-        .and(path(format!(
-            "/app/installations/{installation_id}/access_tokens"
-        )))
-        .and(header_exists("authorization"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "token": token,
-            "expires_at": expires_at,
-        })))
-        .expect(calls)
-        .mount(server)
-        .await;
-}
-
-/// An App of `organization_id` whose private key is [`TEST_PRIVATE_KEY`],
-/// sealed by `provider`, and an active installation of it numbered
-/// `installation_id` on GitHub. Returns the installation's id.
-pub(crate) async fn installed(
-    pool: &PgPool,
-    provider: &Provider,
-    organization_id: Uuid,
-    installation_id: u64,
-) -> Uuid {
-    let owner_login = format!("owner-{}", Uuid::new_v4().simple());
-    let private_key = provider
-        .seal(&SecretValue::new(TEST_PRIVATE_KEY))
-        .expect("seal the test private key");
-    let app = github_apps::insert(
-        pool,
-        &NewApp {
-            organization_id,
-            app_id: rand::random_range(1..i64::MAX),
-            slug: "zone-app",
-            name: "Zone",
-            owner_login: &owner_login,
-            owner_type: OwnerType::Organization,
-            html_url: "https://github.com/apps/zone-app",
-            client_id: "Iv1.client",
-            client_secret: "ENC[v1:client-secret]",
-            private_key: &private_key,
-            webhook_secret: None,
-            created_by: None,
-        },
-    )
-    .await
-    .expect("insert the test App");
-    let installation = github_installations::upsert(
-        pool,
-        &InstallationUpsert {
-            organization_id,
-            github_app_id: app.id,
-            installation_id: i64::try_from(installation_id).expect("a GitHub installation id"),
-            account_login: &owner_login,
-            account_type: AccountType::Organization,
-            repository_selection: RepositorySelection::All,
-            html_url: "https://github.com/organizations/acme/settings/installations/1",
-            suspended_at: None,
-            created_by: None,
-        },
-    )
-    .await
-    .expect("insert the test installation");
-
-    installation.id
-}
+#[cfg(test)]
+pub(crate) use stand_in::{installation_number, installed, issuing, provider, uninstalled};
