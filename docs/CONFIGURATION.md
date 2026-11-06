@@ -1979,7 +1979,11 @@ Publication, pull-request sync, conflict repair, auto-project reviews and merges
 
 ### `GITHUB_API_ALLOW_HTTP`
 - **Default**: `false`
-- **Description**: Accept a plain `http://` `GITHUB_API_URL`, such as a loopback or LAN host you run. The repository token then crosses the network unencrypted, so an `http://` origin is refused at startup unless this is `true`. Once it is, repository and pull request links on that origin's host may use `http://` too.
+- **Description**: Accept a plain `http://` `GITHUB_API_URL` or `GITHUB_WEB_URL`, such as a loopback or LAN host you run. The repository token then crosses the network unencrypted, so an `http://` origin is refused at startup unless this is `true`. Once it is, repository and pull request links on that origin's host may use `http://` too.
+
+### `GITHUB_WEB_URL`
+- **Default**: `https://github.com` when `GITHUB_API_URL` is `api.github.com`; otherwise `GITHUB_API_URL` with a trailing `/api/v3` removed, e.g. `https://github.example.com`.
+- **Description**: The GitHub web origin that **Connect GitHub** sends you to, to register Zone's GitHub App and install it. Set it only when the web UI does not live where the default puts it. It follows the same rules as `GITHUB_API_URL`: an absolute URL with a host and no credentials, query or fragment, and `http://` only with `GITHUB_API_ALLOW_HTTP=true`. Loopback and LAN hosts are allowed.
 
 ---
 

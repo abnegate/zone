@@ -17,8 +17,12 @@
 //!
 //! [`SecretValue`]: abnegate_secret::SecretValue
 
+pub mod access;
 pub mod credential;
 pub mod error;
+pub mod login;
+pub mod manifest;
+pub mod permissions;
 pub mod provider;
 
 #[cfg(test)]
