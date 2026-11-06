@@ -1,5 +1,6 @@
 //! Failures on the GitHub App path, worded so none can carry a credential.
 
+use abnegate_vcs::ApplicationError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -24,20 +25,25 @@ pub enum GithubAppError {
     Credential,
 }
 
-/// A `reqwest` failure as a [`GithubAppError::Transport`], with the URL removed.
-///
-/// `reqwest::Error` appends `for url (...)` to its `Display`. A GitHub App
-/// request carries its bearer credential in a header rather than the URL, but a
-/// redirect, a proxy or a future caller can put one in the URL, and an error
-/// string is copied into logs and handed back to users. Stripping the URL costs
-/// nothing and removes the whole class of leak.
-pub fn transport(error: reqwest::Error) -> GithubAppError {
-    GithubAppError::Transport(error.without_url().to_string())
+impl From<ApplicationError> for GithubAppError {
+    fn from(error: ApplicationError) -> Self {
+        match error {
+            ApplicationError::PrivateKey => Self::PrivateKey,
+            ApplicationError::Signing => Self::Signing,
+            ApplicationError::Transport(cause) => Self::Transport(cause),
+            ApplicationError::Status(status) => Self::Status(status),
+            ApplicationError::Response => Self::Response,
+            _ => Self::Configuration,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CAUSE: &str = "error sending request";
+    const STATUS: u16 = 403;
 
     #[test]
     fn no_variant_echoes_key_material() {
@@ -49,23 +55,50 @@ mod tests {
         assert!(!GithubAppError::Signing.to_string().contains("BEGIN"));
     }
 
-    #[tokio::test]
-    async fn transport_errors_drop_the_request_url() {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(50))
-            .build()
-            .expect("client");
+    #[test]
+    fn application_errors_keep_zones_variants() {
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::PrivateKey),
+            GithubAppError::PrivateKey
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::Signing),
+            GithubAppError::Signing
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::Transport(CAUSE.to_string())),
+            GithubAppError::Transport(cause) if cause == CAUSE
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::Status(STATUS)),
+            GithubAppError::Status(STATUS)
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::Response),
+            GithubAppError::Response
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::InvalidOrigin),
+            GithubAppError::Configuration
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::Client),
+            GithubAppError::Configuration
+        ));
 
-        let error = client
-            .post("http://127.0.0.1:1/app/installations/1/access_tokens?credential=leaked")
-            .send()
-            .await
-            .expect_err("a request to a closed port fails");
-
-        let rendered = transport(error).to_string();
-        assert!(
-            !rendered.contains("credential=leaked") && !rendered.contains("127.0.0.1"),
-            "the request URL survived into the error: {rendered}"
-        );
+        for error in [
+            ApplicationError::PrivateKey,
+            ApplicationError::Signing,
+            ApplicationError::Transport(CAUSE.to_string()),
+            ApplicationError::Status(STATUS),
+            ApplicationError::Response,
+        ] {
+            let expected = error.to_string();
+            assert_eq!(
+                GithubAppError::from(error).to_string(),
+                expected,
+                "a mapped variant must keep the crate's wording, which is Zone's"
+            );
+        }
     }
 }
