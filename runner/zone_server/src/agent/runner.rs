@@ -926,15 +926,19 @@ fn might_be_tool_text(text: &str) -> bool {
         || after.starts_with('[')
 }
 
-/// Match semantic arguments even when a provider changes JSON key ordering.
 fn signature(call: &LlmToolCall) -> (String, String) {
-    let arguments = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+    call_signature(&call.function.name, &call.function.arguments)
+}
+
+/// Match semantic arguments even when a provider changes JSON key ordering.
+pub(crate) fn call_signature(name: &str, arguments: &str) -> (String, String) {
+    let arguments = serde_json::from_str::<serde_json::Value>(arguments)
         .map(|mut value| {
             value.sort_all_objects();
             value.to_string()
         })
-        .unwrap_or_else(|_| call.function.arguments.clone());
-    (call.function.name.clone(), arguments)
+        .unwrap_or_else(|_| arguments.to_string());
+    (name.to_string(), arguments)
 }
 
 /// Longest tool outcome we show in the UI trace.
