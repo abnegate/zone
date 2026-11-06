@@ -23,6 +23,9 @@ import {
   withCurrent,
 } from '../../ai';
 import {
+  CHAT_MODEL_FIELDS,
+  credentialRemovals,
+  FIELD_LABELS,
   FieldSource,
   InheritableField,
   MODEL_FIELDS,
@@ -63,17 +66,6 @@ interface PendingReset {
   run: () => void;
 }
 
-const FIELD_LABELS: Record<InheritableField, string> = {
-  [InheritableField.Provider]: 'Provider',
-  [InheritableField.Fast]: 'Fast Model',
-  [InheritableField.Reasoning]: 'Reasoning Model',
-  [InheritableField.Embedding]: 'Embedding Model',
-  [InheritableField.Image]: 'Image Model',
-  [InheritableField.Video]: 'Video Model',
-  [InheritableField.Audio]: 'Audio Model',
-  [InheritableField.Runpod]: 'Runpod API key',
-};
-
 const ROW_ORDER: readonly InheritableField[] = [
   InheritableField.Provider,
   ...MODEL_FIELDS,
@@ -82,11 +74,7 @@ const ROW_ORDER: readonly InheritableField[] = [
 
 type ChatField = Extract<ModelField, 'fast' | 'reasoning' | 'embedding'>;
 
-const CHAT_FIELDS: readonly InheritableField[] = [
-  InheritableField.Fast,
-  InheritableField.Reasoning,
-  InheritableField.Embedding,
-];
+const CHAT_FIELDS: readonly InheritableField[] = CHAT_MODEL_FIELDS;
 
 const AUTOMATIC = 'Automatic';
 const SERVER_DEFAULT = 'Server default';
@@ -460,7 +448,7 @@ export default function WorkspaceAiSection({
     ).map((field) => FIELD_LABELS[field]);
     setPendingReset({
       title: 'Reset all AI settings to the organization?',
-      removals: [...overridden, ...providerResetRemovals(settings)],
+      removals: [...overridden, ...credentialRemovals(settings)],
       confirmLabel: 'Reset all',
       run: () => void resetAll(),
     });

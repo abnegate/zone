@@ -34,6 +34,7 @@ export interface SettingsAccess {
   organizationRole: OrgRole | undefined;
   workspace: boolean;
   workspaceRole: WorkspaceRole | undefined;
+  installsModels: boolean;
 }
 
 export interface SectionDefinition {
@@ -58,6 +59,8 @@ export const administersOrganization = (
   access: Pick<SettingsAccess, 'organization' | 'organizationRole'>
 ): boolean =>
   access.organization && allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE);
+
+const installsModels = (access: SettingsAccess): boolean => access.installsModels;
 
 const always = (): boolean => true;
 
@@ -120,7 +123,7 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Server,
     section: SettingsSection.Features,
     label: 'Features',
-    visible: administersOrganization,
+    visible: installsModels,
   },
   {
     group: SettingsGroup.Server,

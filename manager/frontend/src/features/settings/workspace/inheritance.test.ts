@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import { emptyCredentials, type ProviderCredentials } from '../ai/options';
 import {
+  credentialRemovals,
+  FIELD_LABELS,
   FieldSource,
   InheritableField,
   MODEL_FIELDS,
@@ -479,6 +481,50 @@ describe('providerResetRemovals', () => {
         })
       )
     ).toEqual(['AWS Bedrock region', 'AWS Bedrock access keys', 'AWS Bedrock IAM role choice']);
+  });
+
+  it('names each chat model the reset clears, with the value the workspace set', () => {
+    expect(
+      providerResetRemovals({
+        ...explicitOpenai,
+        model_fast: 'gpt-4o-mini',
+        model_embedding: 'text-embedding-3-small',
+      })
+    ).toEqual(['Fast Model: gpt-4o-mini', 'Embedding Model: text-embedding-3-small']);
+  });
+
+  it('names the chat models ahead of the credentials', () => {
+    expect(
+      providerResetRemovals({
+        ...explicitOpenai,
+        has_openai_api_key: true,
+        model_reasoning: 'o3-mini',
+      })
+    ).toEqual(['Reasoning Model: o3-mini', 'OpenAI API key']);
+  });
+
+  it('names no media model, which the reset keeps', () => {
+    expect(
+      providerResetRemovals({ ...explicitOpenai, model_image: 'sdxl', model_audio: 'ace' })
+    ).toEqual([]);
+  });
+});
+
+describe('credentialRemovals', () => {
+  it('names the saved credentials and none of the chat models', () => {
+    expect(
+      credentialRemovals({
+        ...explicitOpenai,
+        has_openai_api_key: true,
+        model_fast: 'gpt-4o-mini',
+      })
+    ).toEqual(['OpenAI API key']);
+  });
+});
+
+describe('FIELD_LABELS', () => {
+  it('labels every inheritable field', () => {
+    expect(Object.keys(FIELD_LABELS).sort()).toEqual(Object.values(InheritableField).sort());
   });
 });
 

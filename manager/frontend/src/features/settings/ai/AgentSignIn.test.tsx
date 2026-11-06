@@ -1302,7 +1302,7 @@ describe('AgentSignIn', () => {
       expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
     });
 
-    it('names the save button and the level it is given', () => {
+    it('names the save button it is given', () => {
       render(
         <Harness
           agent="claude"
@@ -1320,7 +1320,7 @@ describe('AgentSignIn', () => {
       expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
     });
 
-    it('asks a workspace to sign in for the workspace, and an organization for the organization', () => {
+    it('tells a workspace its sign-in covers the whole organization', () => {
       render(
         <Harness
           agent="claude"
@@ -1334,8 +1334,11 @@ describe('AgentSignIn', () => {
         />
       );
       expect(
-        screen.getByText('Sign in with a Claude subscription to use Claude Code in this workspace.')
+        screen.getByText(
+          'Sign in with a Claude subscription to use Claude Code. Signing in here signs in for every workspace in this organization.'
+        )
       ).toBeInTheDocument();
+      expect(screen.queryByText(/in this workspace/)).toBeNull();
       cleanup();
 
       renderPanel('claude', claudeSignedOut);

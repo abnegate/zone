@@ -143,6 +143,7 @@ describe('visibleSections', () => {
         organizationRole: 'member',
         workspace: true,
         workspaceRole: 'viewer',
+        installsModels: false,
       })
     ).toEqual([...pathsOf(SettingsGroup.Workspace), ORGANIZATION_MEMBERS, CONNECT, SESSIONS]);
   });
@@ -154,6 +155,7 @@ describe('visibleSections', () => {
         organizationRole: 'admin',
         workspace: false,
         workspaceRole: undefined,
+        installsModels: true,
       })
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
@@ -164,6 +166,7 @@ describe('visibleSections', () => {
       organizationRole: 'owner',
       workspace: true,
       workspaceRole: 'admin',
+      installsModels: true,
     });
 
     expect(visible).toHaveLength(12);
@@ -177,6 +180,7 @@ describe('visibleSections', () => {
         organizationRole: undefined,
         workspace: true,
         workspaceRole: undefined,
+        installsModels: true,
       })
     ).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
@@ -188,30 +192,52 @@ describe('visibleSections', () => {
         organizationRole: undefined,
         workspace: false,
         workspaceRole: undefined,
+        installsModels: false,
       })
     ).toEqual([CONNECT, SESSIONS]);
   });
 
-  it('shows the server-wide Features section only to organization admins', () => {
+  it('shows the server-wide Features section to whoever can install models, as the Models page does', () => {
     const features = (
-      organization: boolean,
-      organizationRole: SettingsAccess['organizationRole']
+      organizationRole: SettingsAccess['organizationRole'],
+      installsModels: boolean
     ) =>
-      paths({ organization, organizationRole, workspace: true, workspaceRole: 'member' }).includes(
-        FEATURES
-      );
+      paths({
+        organization: true,
+        organizationRole,
+        workspace: true,
+        workspaceRole: 'member',
+        installsModels,
+      }).includes(FEATURES);
 
-    expect(features(true, 'owner')).toBe(true);
-    expect(features(true, 'admin')).toBe(true);
-    expect(features(true, undefined)).toBe(true);
-    expect(features(true, 'member')).toBe(false);
-    expect(features(false, undefined)).toBe(false);
+    for (const organizationRole of ['owner', 'admin', 'member', undefined] as const) {
+      expect(features(organizationRole, true), String(organizationRole)).toBe(true);
+      expect(features(organizationRole, false), String(organizationRole)).toBe(false);
+    }
+  });
+
+  it('shows Features outside an organization when the user can install models', () => {
+    expect(
+      paths({
+        organization: false,
+        organizationRole: undefined,
+        workspace: false,
+        workspaceRole: undefined,
+        installsModels: true,
+      })
+    ).toEqual([FEATURES, CONNECT, SESSIONS]);
   });
 
   it('lets everyone connect a device', () => {
     for (const organizationRole of ['owner', 'admin', 'member', undefined] as const) {
       expect(
-        paths({ organization: true, organizationRole, workspace: false, workspaceRole: undefined }),
+        paths({
+          organization: true,
+          organizationRole,
+          workspace: false,
+          workspaceRole: undefined,
+          installsModels: false,
+        }),
         String(organizationRole)
       ).toContain(CONNECT);
     }
@@ -225,6 +251,7 @@ describe('visibleSections', () => {
           organizationRole: 'member',
           workspace: true,
           workspaceRole,
+          installsModels: false,
         }).filter((path) => path.startsWith(`${SETTINGS_ROOT}/${SettingsGroup.Workspace}/`)),
         workspaceRole
       ).toEqual(pathsOf(SettingsGroup.Workspace));

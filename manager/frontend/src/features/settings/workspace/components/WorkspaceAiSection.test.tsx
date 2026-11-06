@@ -137,6 +137,12 @@ const overridden: WorkspaceAiSettings = {
   organization_keys: noOrganizationKeys,
 };
 
+const providerOnly: WorkspaceAiSettings = {
+  ...inherited,
+  overrides: true,
+  inherits_provider: false,
+};
+
 const codexOnly: WorkspaceAiSettings = {
   ...inherited,
   provider: 'codex',
@@ -315,7 +321,7 @@ describe('WorkspaceAiSection', () => {
 
     it('keeps the key when the provider is reset', async () => {
       mockClient.getWorkspaceAiSettings.mockResolvedValue({
-        ...overridden,
+        ...providerOnly,
         has_runpod_api_key: true,
       });
       const user = await renderSection();
@@ -471,7 +477,11 @@ describe('WorkspaceAiSection', () => {
     expect(mockClient.updateWorkspaceAiSettings).not.toHaveBeenCalled();
   });
 
-  it('resets a provider that saved no credentials in one click', async () => {
+  it('resets a provider that saved no credentials and no chat models in one click', async () => {
+    mockClient.getWorkspaceAiSettings.mockResolvedValue({
+      ...providerOnly,
+      model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
+    });
     const user = await renderSection();
 
     await user.click(screen.getByRole('button', { name: 'Reset Provider' }));
@@ -482,6 +492,54 @@ describe('WorkspaceAiSection', () => {
       model_reasoning: '',
       model_embedding: '',
     });
+  });
+
+  it('asks before a provider reset clears a Fast Model the workspace set, naming it', async () => {
+    mockClient.getWorkspaceAiSettings.mockResolvedValue({
+      ...providerOnly,
+      model_fast: 'qwen2.5:7b',
+    });
+    const user = await renderSection();
+
+    await user.click(screen.getByRole('button', { name: 'Reset Provider' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Reset Provider to the organization?' });
+    expect(
+      within(dialog)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent)
+    ).toEqual(['Fast Model: qwen2.5:7b']);
+    expect(mockClient.updateWorkspaceAiSettings).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: 'Reset' }));
+
+    expect(await sentRequest()).toEqual({
+      model_fast: '',
+      model_reasoning: '',
+      model_embedding: '',
+    });
+  });
+
+  it('names both the saved key and the chat model a provider reset removes', async () => {
+    mockClient.getWorkspaceAiSettings.mockResolvedValue({
+      ...providerOnly,
+      provider: 'openai',
+      has_openai_api_key: true,
+      model_reasoning: 'o3-mini',
+    });
+    mockClient.getEffectiveAiSettings.mockResolvedValue({
+      ...organizationSettings,
+      provider: 'openai',
+    });
+    const user = await renderSection();
+
+    await user.click(screen.getByRole('button', { name: 'Reset Provider' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Reset Provider to the organization?' });
+    expect(
+      within(dialog)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent)
+    ).toEqual(['Reasoning Model: o3-mini', 'OpenAI API key']);
   });
 
   it('trusts the save to drop the workspace row once the last override is reset', async () => {
@@ -879,7 +937,7 @@ describe('WorkspaceAiSection', () => {
       expect(await screen.findByText('Save to use this provider.')).toBeInTheDocument();
     });
 
-    it('asks a signed-out organization to sign in for this workspace', async () => {
+    it('tells a signed-out organization the sign-in covers every workspace', async () => {
       organizationRole = 'owner';
       agentsApi.list.mockResolvedValue([
         { ...fixture.agents[0], state: 'signed_out', source: null, label: null, logins: [] },
@@ -893,7 +951,7 @@ describe('WorkspaceAiSection', () => {
 
       expect(
         await screen.findByText(
-          'Sign in with a Claude subscription to use Claude Code in this workspace.'
+          'Sign in with a Claude subscription to use Claude Code. Signing in here signs in for every workspace in this organization.'
         )
       ).toBeInTheDocument();
     });

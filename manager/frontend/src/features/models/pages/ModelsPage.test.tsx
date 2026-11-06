@@ -364,29 +364,14 @@ describe('ModelsPage', () => {
       expect(window.location.search).toBe('');
     });
 
-    it('offers organization admins the features section from the empty state', () => {
-      currentOrganization = { id: 'test-org', name: 'Test Org', role: 'admin' };
-      mockUseModels.mockReturnValue({ ...defaultModelsHook, models: [] });
-      renderModelsPage();
-      expect(screen.getByRole('button', { name: 'Install features' })).toBeInTheDocument();
-    });
-
-    it('does not send organization members to a features section they cannot open', () => {
+    it('offers the features section to an organization member who can open this page', () => {
       currentOrganization = { id: 'test-org', name: 'Test Org', role: 'member' };
       mockUseModels.mockReturnValue({ ...defaultModelsHook, models: [] });
       renderModelsPage();
-      expect(screen.getByText('No models installed')).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'Install features' })).not.toBeInTheDocument();
       expect(
-        screen.getByText('Browse the catalog, or ask an organization admin to install features.')
+        screen.getByText('Pick the product features in Settings, or browse the catalog.')
       ).toBeInTheDocument();
-    });
-
-    it('does not offer the features section without an organization', () => {
-      currentOrganization = null;
-      mockUseModels.mockReturnValue({ ...defaultModelsHook, models: [] });
-      renderModelsPage();
-      expect(screen.queryByRole('button', { name: 'Install features' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Install features' })).toBeInTheDocument();
     });
 
     it('displays installed models', () => {

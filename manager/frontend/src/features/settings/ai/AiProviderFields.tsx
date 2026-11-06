@@ -10,7 +10,7 @@ import {
   providerOptions,
   routingOf,
 } from './options';
-import type { SettingsLevel } from './types';
+import { SettingsLevel } from './types';
 
 interface AiProviderFieldsProps {
   level: SettingsLevel;
@@ -125,7 +125,7 @@ function EndpointHints({
 }: EndpointHintsProps) {
   const routing = routingOf(saved, provider);
   const keyless =
-    level === 'workspace' &&
+    level === SettingsLevel.Workspace &&
     organizationKeys !== undefined &&
     missesOrganizationKey(provider, credentials, configured, organizationKeys);
   return (
@@ -145,7 +145,7 @@ function EndpointHints({
       {provider === 'anthropic' && (
         <p className="form-hint">Completions go through Anthropic's OpenAI-compatible endpoint.</p>
       )}
-      {level === 'workspace' && (
+      {level === SettingsLevel.Workspace && (
         <p className="form-hint">
           A workspace host needs its own key; it never receives the organization's.
         </p>
@@ -326,7 +326,7 @@ export function AiProviderFields({
         </>
       )}
 
-      {level === 'organization' && (
+      {level === SettingsLevel.Organization && (
         <Field id="runpod-key" label="Runpod" configured={configured.runpod} optional>
           <input
             type="password"

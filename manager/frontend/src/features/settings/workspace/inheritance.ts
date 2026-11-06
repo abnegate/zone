@@ -39,6 +39,23 @@ function isModelField(field: InheritableField): field is ModelField {
 export const MODEL_FIELDS: readonly ModelField[] =
   Object.values(InheritableField).filter(isModelField);
 
+export const FIELD_LABELS: Record<InheritableField, string> = {
+  [InheritableField.Provider]: 'Provider',
+  [InheritableField.Fast]: 'Fast Model',
+  [InheritableField.Reasoning]: 'Reasoning Model',
+  [InheritableField.Embedding]: 'Embedding Model',
+  [InheritableField.Image]: 'Image Model',
+  [InheritableField.Video]: 'Video Model',
+  [InheritableField.Audio]: 'Audio Model',
+  [InheritableField.Runpod]: 'Runpod API key',
+};
+
+export const CHAT_MODEL_FIELDS = [
+  InheritableField.Fast,
+  InheritableField.Reasoning,
+  InheritableField.Embedding,
+] as const satisfies readonly ModelField[];
+
 const ENDPOINT_PAIRS = [
   {
     url: 'litellm_host',
@@ -222,6 +239,17 @@ export function providerResetRequest(saved: WorkspaceAiSettings): UpdateAiSettin
 }
 
 export function providerResetRemovals(saved: WorkspaceAiSettings): string[] {
+  return [...chatModelRemovals(saved), ...credentialRemovals(saved)];
+}
+
+function chatModelRemovals(saved: WorkspaceAiSettings): string[] {
+  return CHAT_MODEL_FIELDS.flatMap((field) => {
+    const model = saved[modelKey(field)];
+    return model === null ? [] : [`${FIELD_LABELS[field]}: ${model}`];
+  });
+}
+
+export function credentialRemovals(saved: WorkspaceAiSettings): string[] {
   const removals: string[] = [];
   for (const pair of ENDPOINT_PAIRS) {
     if (savesUrl(saved, pair)) removals.push(pair.urlLabel);

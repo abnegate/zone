@@ -66,6 +66,7 @@ const ownerAccess: SettingsAccess = {
   organizationRole: 'owner',
   workspace: true,
   workspaceRole: 'admin',
+  installsModels: true,
 };
 
 function renderNav(access: SettingsAccess, entry = '/settings/workspace/general') {
@@ -143,6 +144,7 @@ describe('SettingsNav', () => {
       organizationRole: 'admin',
       workspace: false,
       workspaceRole: undefined,
+      installsModels: true,
     });
 
     expect(screen.queryByRole('group', { name: 'Workspace' })).not.toBeInTheDocument();

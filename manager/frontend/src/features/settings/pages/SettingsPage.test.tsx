@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { useEffect } from 'react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { PERMISSIONS } from '../../../shared/types/permissions';
 import { chooseSelect } from '../../../test/select';
 import type { Organization, OrgRole, Workspace, WorkspaceRole } from '../../../types';
 import { COMPACT_QUERY, type SettingsAccess } from '../navigation/sections';
@@ -30,11 +31,17 @@ const workspaceContext: PageContext = {
 
 const workspaceRole: WorkspaceRoleState = { role: undefined, resolving: false };
 
+let permissions: string[] = [];
+
 const contentMounts: string[] = [];
 const contentAccess: SettingsAccess[] = [];
 
 mock.module('../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: () => workspaceContext,
+}));
+
+mock.module('../../auth/context', () => ({
+  useAuth: () => ({ hasPermission: (permission: string) => permissions.includes(permission) }),
 }));
 
 mock.module('../navigation/useWorkspaceRole', () => ({
@@ -102,7 +109,12 @@ const workspace = (id: string, name: string): Workspace => ({
 const alpha = workspace('workspace-alpha', 'Alpha');
 const beta = workspace('workspace-beta', 'Beta');
 
-function signInAs(organizationRole: OrgRole | undefined, role: WorkspaceRole | null) {
+function signInAs(
+  organizationRole: OrgRole | undefined,
+  role: WorkspaceRole | null,
+  granted: string[] = [PERMISSIONS.MODELS.READ]
+) {
+  permissions = granted;
   workspaceContext.currentOrganization = organization(organizationRole);
   workspaceContext.currentWorkspace = role === null ? null : alpha;
   workspaceContext.workspaces = role === null ? [] : [alpha];
@@ -184,7 +196,7 @@ describe('SettingsPage', () => {
 
       expect(linkLabels('Workspace')).toEqual(['General', 'AI', 'Folders', 'Members']);
       expect(linkLabels('Organization')).toEqual(['Members']);
-      expect(linkLabels('This server')).toEqual(['Connect a device']);
+      expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
     });
 
@@ -205,17 +217,18 @@ describe('SettingsPage', () => {
       expect(linkLabels('You')).toEqual(['Sessions']);
     });
 
-    it('sends an organization member deep-linking to Features to the first visible section', () => {
-      signInAs('member', 'member');
+    it('sends a user who cannot install models deep-linking to Features to the first visible section', () => {
+      signInAs('owner', 'admin', []);
 
       renderAt('/settings/server/features');
 
       expect(location()).toBe('/settings/workspace/general');
       expect(screen.getByTestId('settings-content').textContent).toBe('workspace/general');
+      expect(linkLabels('This server')).toEqual(['Connect a device']);
     });
 
-    it('shows Features when the server never says the organization role', () => {
-      signInAs(undefined, 'member');
+    it('shows Features to an organization member who can install models, like the Models page', () => {
+      signInAs('member', 'member');
 
       renderAt('/settings/server/features');
 
@@ -262,6 +275,7 @@ describe('SettingsPage', () => {
         organizationRole: 'owner',
         workspace: true,
         workspaceRole: 'admin',
+        installsModels: true,
       });
     });
 
@@ -399,8 +413,8 @@ describe('SettingsPage', () => {
       expect(location()).toBe('/settings/workspace/general');
     });
 
-    it('sends an organization member on the old features tab to the first visible section', () => {
-      signInAs('member', 'viewer');
+    it('sends a user who cannot install models on the old features tab to the first visible section', () => {
+      signInAs('owner', 'admin', []);
 
       renderAt('/settings?tab=features&x=1#y');
 
