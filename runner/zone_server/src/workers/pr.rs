@@ -22,6 +22,7 @@ use crate::db::{projects, tasks};
 use crate::services::backend;
 use crate::services::checkout::{self, Baseline, Repository};
 use crate::services::endpoint::{Endpoint, Error as EndpointError};
+use crate::services::github_app::Error as GitHubError;
 use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
@@ -42,6 +43,11 @@ const REPAIR_TOKENS: u32 = 8_192;
 
 const NO_REPAIR_BACKEND: &str =
     "Conflict repair needs zone's own tool loop, which a coding agent CLI backend does not provide";
+
+const NO_REPOSITORY: &str = "No GitHub repository configured";
+
+const DISCONNECTED: &str =
+    "The project's GitHub connection was removed or suspended. Reconnect GitHub.";
 
 /// Temperature for a subject: naming a finished change is a classification,
 /// not a draft.
@@ -205,7 +211,7 @@ impl Publication<'_> {
             .await
             .map_err(|_| "Cannot verify publication identity")?
             .ok_or("Task not found")?;
-        let repository = Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
+        let repository = Repository::resolve(self.state.db(), self.state.github(), &task)
             .await?
             .ok_or("Task repository changed during execution")?;
         if repository.url != baseline.repository
@@ -265,7 +271,7 @@ impl Publication<'_> {
             return Ok(PrCreationResult::Sandbox);
         }
         if self.baseline.is_none()
-            && Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
+            && Repository::resolve(self.state.db(), self.state.github(), &task)
                 .await?
                 .is_none()
         {
@@ -297,7 +303,7 @@ impl Publication<'_> {
             self.identity(baseline).await?;
             return Ok(PrCreationResult::NoChanges);
         }
-        let repository = Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
+        let repository = Repository::resolve(self.state.db(), self.state.github(), &task)
             .await?
             .ok_or("Task repository changed during execution")?;
         let token = repository
@@ -581,12 +587,21 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         Err(error) => return RepairOutcome::Failed(format!("Failed to get project: {}", error)),
     };
 
-    let (Some(repo_url), Some(stored_token)) =
-        (&project.github_repo_url, &project.github_access_token)
-    else {
-        return RepairOutcome::Failed("No GitHub repository configured".to_string());
+    let Some(repo_url) = &project.github_repo_url else {
+        return RepairOutcome::Failed(NO_REPOSITORY.to_string());
     };
-    let access_token = SecretValue::new(crate::crypto::open(state.encryption_key(), stored_token));
+    let access_token = match state.github().project(state.db(), &project).await {
+        Ok(Some(credential)) => credential.into_secret(),
+        Ok(None) => return RepairOutcome::Failed(NO_REPOSITORY.to_string()),
+        Err(GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected) => {
+            return RepairOutcome::Failed(DISCONNECTED.to_string());
+        }
+        Err(error) => {
+            return RepairOutcome::Failed(format!(
+                "Failed to resolve the project's GitHub credential: {error}"
+            ));
+        }
+    };
 
     let pull_requests = match state.config().pull_requests() {
         Ok(service) => service,
@@ -812,16 +827,20 @@ async fn repair_model(
     Ok(model)
 }
 
-/// The first linked project's repository token, opened from how it is stored.
+/// The credential of the first linked project that resolves one.
 pub(crate) async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Option<SecretValue> {
     for project_id in &task.project_ids {
-        if let Ok(Some(project)) = projects::get_project(state.db(), *project_id).await
-            && let Some(token) = project.github_access_token
-        {
-            return Some(SecretValue::new(crate::crypto::open(
-                state.encryption_key(),
-                &token,
-            )));
+        let Ok(Some(project)) = projects::get_project(state.db(), *project_id).await else {
+            continue;
+        };
+        match state.github().project(state.db(), &project).await {
+            Ok(Some(credential)) => return Some(credential.into_secret()),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                project = %project.id,
+                %error,
+                "Could not resolve a project's GitHub credential"
+            ),
         }
     }
     None
@@ -1104,7 +1123,7 @@ mod tests {
     pub(super) struct Fixture {
         pub(super) state: AppState,
         pub(super) execution: tasks::Execution,
-        organization: Uuid,
+        pub(super) organization: Uuid,
         user: Uuid,
         pub(super) workspace: Uuid,
         pub(super) path: PathBuf,
@@ -1191,9 +1210,12 @@ mod tests {
             };
             let mut sandbox = task.clone();
             sandbox.project_ids.clear();
-            let key: [u8; 32] = rand::random();
+            let github = crate::services::github_app::Provider::new(
+                &crate::state::test_config(),
+                rand::random(),
+            );
             let checkout =
-                crate::services::checkout::Checkout::prepare(&pool, &key, &sandbox, execution)
+                crate::services::checkout::Checkout::prepare(&pool, &github, &sandbox, execution)
                     .await
                     .unwrap();
             let path = checkout.path().to_path_buf();
@@ -1846,6 +1868,84 @@ mod publication_tests {
         );
     }
 
+    const GITHUB_INSTALLATION: u64 = 31_415_926;
+
+    /// Moves the fixture's project from its stored token onto an installation
+    /// that mints `token` `mints` times, and answers the installation's id.
+    async fn installed_only(
+        fixture: &Fixture,
+        server: &MockServer,
+        token: &str,
+        mints: u64,
+    ) -> uuid::Uuid {
+        use crate::services::github_app::testing::{installed, issuing, provider};
+
+        issuing(server, GITHUB_INSTALLATION, token, mints).await;
+        fixture
+            .state
+            .install_github(provider(server, *fixture.state.encryption_key()));
+        let installation = installed(
+            fixture.state.db(),
+            fixture.state.github(),
+            fixture.organization,
+            GITHUB_INSTALLATION,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE projects SET github_access_token=NULL, github_installation_id=$2 WHERE workspace_id=$1",
+        )
+        .bind(fixture.workspace)
+        .bind(installation)
+        .execute(fixture.state.db())
+        .await
+        .unwrap();
+        installation
+    }
+
+    #[tokio::test]
+    async fn an_installation_only_project_gives_its_minted_token() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        installed_only(&fixture, &server, "ghs_receptiontoken", 1).await;
+        let task = tasks::get_task(fixture.state.db(), fixture.execution.task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let token = access_token(&fixture.state, &task).await;
+
+        fixture.cleanup().await;
+        assert_eq!(
+            token.as_ref().map(SecretValue::expose),
+            Some("ghs_receptiontoken")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revoked_installation_gives_no_token_and_no_repair() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let installation = installed_only(&fixture, &server, "ghs_unused", 0).await;
+        crate::db::github_installations::mark_revoked(fixture.state.db(), installation)
+            .await
+            .unwrap();
+        let task = tasks::get_task(fixture.state.db(), fixture.execution.task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let token = access_token(&fixture.state, &task).await;
+        let repair = repair_conflicts_for_task(&fixture.state, task.id).await;
+
+        fixture.cleanup().await;
+        assert!(token.is_none(), "a revoked installation has no fallback");
+        assert!(
+            matches!(&repair, RepairOutcome::Failed(reason) if reason == DISCONNECTED),
+            "{repair:?}"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn publication_resumes_previous_attempt_after_title_change() {
         let mut fixture = Fixture::new().await;
@@ -2273,7 +2373,7 @@ mod publication_tests {
             std::fs::remove_dir_all(&fixture.path).unwrap();
             let checkout = crate::services::checkout::Checkout::prepare(
                 fixture.state.db(),
-                fixture.state.encryption_key(),
+                fixture.state.github(),
                 &task,
                 fixture.execution,
             )

@@ -41,6 +41,7 @@ use crate::db::{
     projects,
     tasks::{self, TaskRow},
 };
+use crate::services::github_app::{Credential, Provider};
 
 const ROOT: &str = "zone-checkouts-v1";
 
@@ -101,11 +102,13 @@ pub struct Repository {
 }
 
 impl Repository {
-    /// The repository a task works in, its token opened from how the project
-    /// stores it (encrypted at rest, or plain from before it was).
+    /// The repository a task works in, with the credential the provider
+    /// resolves for the project that holds it. A project whose GitHub
+    /// connection was removed or suspended fails the resolution rather than
+    /// running without a credential.
     pub async fn resolve(
         pool: &PgPool,
-        encryption_key: &[u8],
+        github: &Provider,
         task: &TaskRow,
     ) -> Result<Option<Self>, String> {
         let requested = task
@@ -114,7 +117,7 @@ impl Repository {
             .map(GitService::repository_url)
             .transpose()
             .map_err(|error| error.to_string())?;
-        let mut repositories = Vec::new();
+        let mut candidates = Vec::new();
         for id in &task.project_ids {
             let project = projects::get_project(pool, *id)
                 .await
@@ -123,38 +126,47 @@ impl Repository {
             if project.workspace_id != Some(task.workspace_id) {
                 return Err("Task project belongs to another workspace".to_string());
             }
-            if let Some(url) = project.github_repo_url {
-                let url = GitService::repository_url(&url).map_err(|error| error.to_string())?;
-                repositories.push(Self {
-                    url,
-                    token: project.github_access_token.map(|stored| {
-                        SecretValue::new(crate::crypto::open(encryption_key, &stored))
-                    }),
-                });
+            if let Some(url) = &project.github_repo_url {
+                let url = GitService::repository_url(url).map_err(|error| error.to_string())?;
+                candidates.push((url, project));
             }
         }
-        Self::select(requested, repositories)
+        let Some((url, holder)) = Self::select(requested, candidates)? else {
+            return Ok(None);
+        };
+        let token = match holder {
+            Some(project) => github
+                .project(pool, &project)
+                .await
+                .map_err(|error| error.to_string())?
+                .map(Credential::into_secret),
+            None => None,
+        };
+        Ok(Some(Self { url, token }))
     }
 
-    fn select(
+    /// The repository a task works in, and the candidate holding it whose
+    /// credential may reach it. A requested repository no candidate holds
+    /// has no holder, so no credential is ever used for another repository.
+    fn select<T>(
         requested: Option<RepositoryUrl>,
-        repositories: Vec<Self>,
-    ) -> Result<Option<Self>, String> {
+        candidates: Vec<(RepositoryUrl, T)>,
+    ) -> Result<Option<(RepositoryUrl, Option<T>)>, String> {
         if let Some(url) = requested {
-            let token = repositories
+            let holder = candidates
                 .into_iter()
-                .find(|repository| repository.url == url)
-                .and_then(|repository| repository.token);
-            return Ok(Some(Self { url, token }));
+                .find(|(candidate, _)| *candidate == url)
+                .map(|(_, holder)| holder);
+            return Ok(Some((url, holder)));
         }
-        let mut repositories = repositories.into_iter();
-        let selected = repositories.next();
-        if let Some(selected) = &selected
-            && repositories.any(|repository| repository.url != selected.url)
+        let mut candidates = candidates.into_iter();
+        let selected = candidates.next();
+        if let Some((url, _)) = &selected
+            && candidates.any(|(candidate, _)| candidate != *url)
         {
             return Err("Task has multiple repositories; select one explicitly".to_string());
         }
-        Ok(selected)
+        Ok(selected.map(|(url, holder)| (url, Some(holder))))
     }
 }
 
@@ -232,12 +244,12 @@ pub struct Checkout {
 impl Checkout {
     pub async fn prepare(
         pool: &PgPool,
-        encryption_key: &[u8],
+        github: &Provider,
         task: &TaskRow,
         execution: tasks::Execution,
     ) -> Result<Self, String> {
         let tasks::Execution { run, owner, .. } = execution;
-        let repository = Repository::resolve(pool, encryption_key, task).await?;
+        let repository = Repository::resolve(pool, github, task).await?;
         if !execution
             .authorized(pool, false)
             .await
@@ -1652,7 +1664,7 @@ mod tests {
         let key: [u8; 32] = rand::random();
         let checkout = Checkout::prepare(
             &pool,
-            &key,
+            &Provider::new(&crate::state::test_config(), key),
             &task,
             tasks::Execution {
                 task: task.id,
@@ -1803,16 +1815,14 @@ mod tests {
 
     #[test]
     fn credentials_are_never_used_for_another_repository() {
-        let repository = Repository::select(
+        let (selected, holder) = Repository::select(
             Some(url("https://github.com/owner/requested.git")),
-            vec![Repository {
-                url: url("https://github.com/owner/other.git"),
-                token: Some(SecretValue::new("secret")),
-            }],
+            vec![(url("https://github.com/owner/other.git"), "other project")],
         )
         .unwrap()
         .unwrap();
-        assert!(repository.token.is_none());
+        assert_eq!(selected, url("https://github.com/owner/requested.git"));
+        assert!(holder.is_none());
     }
 
     #[test]
@@ -1821,17 +1831,104 @@ mod tests {
             Repository::select(
                 None,
                 vec![
-                    Repository {
-                        url: url("https://github.com/owner/first.git"),
-                        token: None
-                    },
-                    Repository {
-                        url: url("https://github.com/owner/second.git"),
-                        token: None
-                    }
+                    (url("https://github.com/owner/first.git"), "first project"),
+                    (url("https://github.com/owner/second.git"), "second project"),
                 ]
             )
             .is_err()
+        );
+    }
+
+    const GITHUB_INSTALLATION: u64 = 23_571_113;
+
+    struct Connected {
+        pool: PgPool,
+        github: Provider,
+        installation: Uuid,
+        task: TaskRow,
+        _server: wiremock::MockServer,
+    }
+
+    async fn connected(token: &str, mints: u64) -> Connected {
+        use crate::db::github_apps::tests::{pool, seed_organization, seed_workspace};
+        use crate::services::github_app::testing::{installed, issuing, provider};
+
+        let server = wiremock::MockServer::start().await;
+        issuing(&server, GITHUB_INSTALLATION, token, mints).await;
+        let pool = pool().await;
+        let github = provider(&server, rand::random());
+        let organization = seed_organization(&pool).await;
+        let workspace = seed_workspace(&pool, organization).await;
+        let installation = installed(&pool, &github, organization, GITHUB_INSTALLATION).await;
+        let project = projects::create_project(&pool, "Installed", None, Some(workspace))
+            .await
+            .unwrap();
+        projects::link_github(
+            &pool,
+            project.id,
+            "https://github.com/owner/installed.git",
+            None,
+            Some(installation),
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace,
+            &[project.id],
+            "Installed",
+            "Resolve through the installation",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        Connected {
+            pool,
+            github,
+            installation,
+            task,
+            _server: server,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_installation_project_resolves_with_a_minted_token() {
+        let connected = connected("ghs_checkouttoken", 1).await;
+
+        let repository = Repository::resolve(&connected.pool, &connected.github, &connected.task)
+            .await
+            .unwrap()
+            .expect("the project names a repository");
+
+        assert_eq!(
+            repository.url,
+            url("https://github.com/owner/installed.git")
+        );
+        assert_eq!(
+            repository.token.as_ref().map(SecretValue::expose),
+            Some("ghs_checkouttoken")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revoked_installation_project_fails_closed() {
+        let connected = connected("ghs_unused", 0).await;
+        crate::db::github_installations::mark_revoked(&connected.pool, connected.installation)
+            .await
+            .unwrap();
+
+        let error =
+            match Repository::resolve(&connected.pool, &connected.github, &connected.task).await {
+                Err(error) => error,
+                Ok(_) => panic!("a revoked installation must not resolve a repository"),
+            };
+
+        assert_eq!(
+            error,
+            crate::services::github_app::Error::Revoked.to_string()
         );
     }
 }
