@@ -22,6 +22,8 @@ const CONCURRENCY: usize = 10;
 const CONTEXT_LIMIT_CHARACTERS: usize = 1000;
 const LONG_TEXT_CHARACTERS: usize = 5000;
 const LONG_BODY_CHARACTERS: usize = 500;
+const INPUTS_PER_REQUEST: usize = 64;
+const LARGE_BATCH: usize = INPUTS_PER_REQUEST * 2 + 5;
 const OPENAI_CONTEXT_LENGTH: &str = r#"{"error":{"message":"This model's maximum context length is 512 tokens, however you requested 2250 tokens. Please reduce your prompt.","type":"invalid_request_error","param":null,"code":null}}"#;
 
 fn adapter(config: OllamaEmbeddingConfig) -> EmbeddingAdapter {
@@ -493,6 +495,34 @@ async fn an_openai_compatible_batch_past_the_context_falls_back_per_text() {
     let mut singles: Vec<usize> = inputs[1..].iter().flatten().copied().collect();
     singles.sort_unstable();
     assert_eq!(singles, [5, 384, 768]);
+}
+
+#[tokio::test]
+async fn a_large_openai_compatible_batch_is_posted_in_requests_of_64() {
+    let (server, provider) = openai_compatible(OpenAiCompatibleResponder {
+        width: 768,
+        context_limit: None,
+    })
+    .await;
+    let owned: Vec<String> = (1..=LARGE_BATCH).map(|length| "a".repeat(length)).collect();
+    let texts: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let vectors = provider.embed_batch(&texts).await.unwrap();
+    let expected: Vec<Vec<f32>> = (1..=LARGE_BATCH)
+        .map(|length| vec![length as f32; 768])
+        .collect();
+    assert_eq!(vectors, expected);
+    let mut sizes: Vec<usize> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            body["input"].as_array().unwrap().len()
+        })
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [5, INPUTS_PER_REQUEST, INPUTS_PER_REQUEST]);
 }
 
 #[tokio::test]

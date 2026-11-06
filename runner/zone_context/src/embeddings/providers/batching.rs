@@ -9,11 +9,13 @@ pub enum Batching {
         /// Texts in flight at once.
         concurrency: usize,
     },
-    /// The whole batch in one request, each text cut to the character budget.
-    /// A context-length refusal does not say which text caused it, so the
-    /// batch is then embedded as [`Batching::PerText`] at `concurrency`.
+    /// The batch in requests of up to 64 texts, `concurrency` requests in
+    /// flight, each text cut to the character budget. A context-length
+    /// refusal does not say which text caused it, so that request's texts are
+    /// then embedded as [`Batching::PerText`] at `concurrency`.
     Batched {
-        /// Texts in flight at once after a context-length refusal.
+        /// Requests in flight at once, and texts in flight at once within a
+        /// request refused for its context length.
         concurrency: usize,
     },
     /// The whole batch in one call to an in-process model, whose tokenizer

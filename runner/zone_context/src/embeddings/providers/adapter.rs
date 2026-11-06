@@ -15,6 +15,7 @@ const SHORT_TEXT_ATTEMPTS: usize = 2;
 const LONG_TEXT_ATTEMPTS: usize = 3;
 const HALVING_DIVISOR: usize = 2;
 const UNKNOWN_DIMENSIONS: usize = 0;
+const INPUTS_PER_REQUEST: usize = 64;
 
 /// Zone's [`EmbeddingService`] over any `abnegate-llm` embedding provider.
 ///
@@ -119,6 +120,19 @@ impl EmbeddingAdapter {
     }
 
     async fn embed_together(&self, texts: &[&str], concurrency: usize) -> Result<Vec<Vec<f32>>> {
+        let requests: Vec<Vec<Vec<f32>>> =
+            stream::iter((0..texts.len()).step_by(INPUTS_PER_REQUEST))
+                .map(|start| {
+                    let end = texts.len().min(start + INPUTS_PER_REQUEST);
+                    self.embed_request(&texts[start..end], concurrency)
+                })
+                .buffered(concurrency.max(1))
+                .try_collect()
+                .await?;
+        Ok(requests.into_iter().flatten().collect())
+    }
+
+    async fn embed_request(&self, texts: &[&str], concurrency: usize) -> Result<Vec<Vec<f32>>> {
         let budget = self.character_budget();
         let prompts: Vec<String> = texts
             .iter()
@@ -130,7 +144,7 @@ impl EmbeddingAdapter {
                 tracing::warn!(
                     model = %self.model(),
                     texts = texts.len(),
-                    "embedding the batch one text at a time after context-length error"
+                    "embedding the request one text at a time after context-length error"
                 );
                 self.embed_each(texts, concurrency).await
             }
@@ -516,7 +530,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_batched_provider_gets_the_whole_batch_cut_to_the_budget() {
+    async fn a_small_batch_is_one_request_cut_to_the_budget() {
         let (adapter, stub) = adapter(Stub::new(), batched());
         let long = long_text();
         let vectors = adapter.embed_batch(&["a", &long]).await.unwrap();
@@ -553,6 +567,57 @@ mod tests {
             .collect();
         lengths.sort_unstable();
         assert_eq!(lengths, [5, 750, 1500, 3000]);
+    }
+
+    #[tokio::test]
+    async fn a_large_batch_is_split_into_requests_and_keeps_its_order() {
+        let (adapter, stub) = adapter(Stub::new(), batched());
+        let owned: Vec<String> = (1..=INPUTS_PER_REQUEST * 2 + 5)
+            .map(|length| "a".repeat(length))
+            .collect();
+        let texts: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let vectors = adapter.embed_batch(&texts).await.unwrap();
+        let expected: Vec<Vec<f32>> = texts.iter().map(|text| stub.vector(text)).collect();
+        assert_eq!(vectors, expected);
+        let calls = stub.calls();
+        let mut sizes: Vec<usize> = calls.batches.iter().map(Vec::len).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, [5, INPUTS_PER_REQUEST, INPUTS_PER_REQUEST]);
+        assert!(calls.singles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_context_length_refusal_falls_back_only_for_its_request() {
+        let (adapter, stub) = adapter(
+            Stub {
+                maximum_input_tokens: 8192,
+                context_limit: Some(CONTEXT_LIMIT_CHARACTERS),
+                ..Stub::new()
+            },
+            batched(),
+        );
+        let long = long_text();
+        let mut texts = vec!["short"; INPUTS_PER_REQUEST + 3];
+        texts[INPUTS_PER_REQUEST + 1] = &long;
+        let vectors = adapter.embed_batch(&texts).await.unwrap();
+        assert_eq!(vectors.len(), texts.len());
+        for (index, vector) in vectors.iter().enumerate() {
+            let expected = if index == INPUTS_PER_REQUEST + 1 {
+                stub.vector(&"a".repeat(750))
+            } else {
+                stub.vector("short")
+            };
+            assert_eq!(vector, &expected, "{index}");
+        }
+        let calls = stub.calls();
+        assert_eq!(calls.batches.len(), 2);
+        let mut lengths: Vec<usize> = calls
+            .singles
+            .iter()
+            .map(|prompt| prompt.chars().count())
+            .collect();
+        lengths.sort_unstable();
+        assert_eq!(lengths, [5, 5, 750, 1500, 3000]);
     }
 
     #[tokio::test]
