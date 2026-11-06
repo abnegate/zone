@@ -466,7 +466,7 @@ impl Agent {
                         .filter(|argument| !argument.is_empty())
                         .map(str::to_string)
                         .collect(),
-                    prompt: read("prompt"),
+                    prompt: zone_core::llm::provider::prompt(&read("prompt")),
                     directory: PathBuf::from(read("directory").trim_end()),
                     home: PathBuf::from(read("home")),
                     token: read("token"),

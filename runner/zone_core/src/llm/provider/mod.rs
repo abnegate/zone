@@ -33,6 +33,8 @@ mod observer;
 mod occupancy;
 mod output;
 mod parser;
+#[cfg(any(test, feature = "test-support"))]
+mod recorded;
 mod rollout;
 mod session;
 mod settings;
@@ -46,6 +48,8 @@ pub use observer::Observer;
 pub use occupancy::Occupancy;
 pub use output::Output;
 pub use parser::claude::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
+#[cfg(any(test, feature = "test-support"))]
+pub use recorded::prompt;
 pub use session::Session;
 pub use settings::{
     BuiltinTools, CliSettings, CodexSandbox, DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT,

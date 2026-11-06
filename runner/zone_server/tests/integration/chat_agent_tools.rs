@@ -477,7 +477,9 @@ async fn a_project_chats_agent_runs_in_the_directory_its_prompt_names() {
     let turn = harness.turn("Where are you?").await;
     harness.agent.spawned().await;
     let ran_in = std::fs::read_to_string(&harness.agent.directory).expect("the agent's directory");
-    let prompt = std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt");
+    let prompt = zone_core::llm::provider::prompt(
+        &std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt"),
+    );
     harness.agent.finish();
     turn.await.expect("the turn ends");
 
@@ -548,7 +550,9 @@ async fn a_cli_turn_serves_its_tools_for_the_life_of_the_turn_and_no_longer() {
     // Over MCP a question or a wait returns at once, parking nothing, and the
     // turn would read that as an answer nobody gave. So the agent is neither
     // served one nor told of one, and asks the reader in its reply instead.
-    let prompt = std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt");
+    let prompt = zone_core::llm::provider::prompt(
+        &std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt"),
+    );
     for tool in [ASK_USER, WAIT_FOR] {
         assert!(!prompt.contains(tool), "the prompt teaches {tool}");
         assert!(!names.contains(&tool), "{tool} was listed: {names:?}");
@@ -976,7 +980,9 @@ async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_
             "sandboxed {sandboxed}: {names:?}"
         );
 
-        let prompt = std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt");
+        let prompt = zone_core::llm::provider::prompt(
+            &std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt"),
+        );
         assert!(
             prompt.contains(&format!("then calling {qualified} so Zone can track it")),
             "sandboxed {sandboxed}: {prompt}"
