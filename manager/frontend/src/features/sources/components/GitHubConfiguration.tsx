@@ -1,5 +1,5 @@
 import { Button } from '@zone/ui';
-import { type KeyboardEvent, type ReactNode, useId } from 'react';
+import { type ReactNode, useId } from 'react';
 import { canManageOrganization } from '../../../shared/components/ProtectedRoute';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { BranchSelect, type GitHubRepository, RepositoryPicker } from '../../github';
@@ -13,12 +13,6 @@ interface GitHubConfigurationProps {
   branch: string;
   onBranchChange: (branch: string) => void;
   children: ReactNode;
-}
-
-function keepHandledEscapeInside(event: KeyboardEvent<HTMLDivElement>) {
-  if (event.key === 'Escape' && event.nativeEvent.defaultPrevented) {
-    event.stopPropagation();
-  }
 }
 
 export function GitHubConfiguration({
@@ -37,8 +31,7 @@ export function GitHubConfiguration({
   const tokenMode = mode === GitHubConnectionMode.Token;
 
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: stops an Escape the picker already handled from reaching the dialog's document listener; adds no interaction
-    <div className="github-configuration" onKeyDown={keepHandledEscapeInside}>
+    <div className="github-configuration">
       {!tokenMode && (
         <>
           <RepositoryPicker

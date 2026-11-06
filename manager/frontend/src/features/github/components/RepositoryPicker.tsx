@@ -18,6 +18,7 @@ import type {
   GitHubRepositoryInstallation,
   GitHubRepositoryInstallationError,
 } from '../types';
+import { LockIcon } from './LockIcon';
 import './RepositoryPicker.css';
 
 type RepositoryPickerProps = {
@@ -25,6 +26,10 @@ type RepositoryPickerProps = {
   canManage: boolean;
   value: GitHubRepository | null;
   onChange: (repository: GitHubRepository | null) => void;
+};
+
+type FailingInstallation = GitHubRepositoryInstallation & {
+  error: GitHubRepositoryInstallationError;
 };
 
 type RepositoryGroup = {
@@ -61,6 +66,18 @@ function groupByAccount(
   return Array.from(groups, ([login, members]) => ({ login, repositories: members }));
 }
 
+function unresolvedFailures(installations: GitHubRepositoryInstallation[]): FailingInstallation[] {
+  const healthy = new Set(
+    installations
+      .filter((installation) => installation.error === null)
+      .map((installation) => installation.account_login)
+  );
+  return installations.filter(
+    (installation): installation is FailingInstallation =>
+      installation.error !== null && !healthy.has(installation.account_login)
+  );
+}
+
 function repositoryKey(repository: GitHubRepository): string {
   return `${repository.installation_id}-${repository.id}`;
 }
@@ -74,17 +91,6 @@ function isSameRepository(
 
 function keepInputFocused(event: MouseEvent) {
   event.preventDefault();
-}
-
-function LockIcon() {
-  return (
-    <span className="repository-picker-lock" role="img" aria-label="Private">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-        <rect x="5" y="11" width="14" height="10" rx="2" />
-        <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-      </svg>
-    </span>
-  );
 }
 
 export function RepositoryPicker({
@@ -134,12 +140,14 @@ export function RepositoryPicker({
     [groups]
   );
   const reachable = installations.filter((installation) => installation.error === null);
+  const failing = unresolvedFailures(installations);
 
   const optionId = (repository: GitHubRepository) => `${listboxId}-${repositoryKey(repository)}`;
   const active = activeIndex >= 0 ? selectable[activeIndex] : undefined;
   const showNoResults = !loading && error === null && repositories.length === 0;
   const expanded = open && (repositories.length > 0 || showNoResults || hasMore);
   const activeId = expanded && active ? optionId(active) : undefined;
+  const listboxShown = expanded && repositories.length > 0;
 
   useEffect(() => {
     if (activeId !== undefined) {
@@ -197,6 +205,7 @@ export function RepositoryPicker({
     }
     onChange(repository);
     setText(repository.full_name);
+    setQuery('');
     close();
   }
 
@@ -245,10 +254,11 @@ export function RepositoryPicker({
         }
         break;
       case 'Escape':
-        if (open) {
+        if (expanded) {
           event.preventDefault();
-          close();
+          event.stopPropagation();
         }
+        close();
         break;
     }
   }
@@ -275,7 +285,7 @@ export function RepositoryPicker({
           role="combobox"
           aria-autocomplete="list"
           aria-expanded={expanded}
-          aria-controls={listboxId}
+          aria-controls={listboxShown ? listboxId : undefined}
           aria-activedescendant={activeId}
           placeholder="Search repositories"
           autoComplete="off"
@@ -288,7 +298,7 @@ export function RepositoryPicker({
         />
         {expanded && (
           <div className="repository-picker-popup">
-            {repositories.length > 0 && (
+            {listboxShown && (
               <div
                 id={listboxId}
                 role="listbox"
@@ -348,11 +358,9 @@ export function RepositoryPicker({
           </div>
         )}
       </div>
-      {loading && (
-        <p role="status" className="form-hint">
-          Loading repositories…
-        </p>
-      )}
+      <p role="status" className="form-hint repository-picker-live">
+        {loading ? 'Loading repositories…' : ''}
+      </p>
       {error !== null && (
         <div className="repository-picker-error">
           <span>Couldn't load repositories.</span>
@@ -361,15 +369,14 @@ export function RepositoryPicker({
           </Button>
         </div>
       )}
-      {installations.map(
-        (installation) =>
-          installation.error !== null && (
-            <p key={installation.id} className="form-hint repository-picker-warning">
-              {INSTALLATION_ERROR_MESSAGES[installation.error](installation.account_login)}
-            </p>
-          )
-      )}
-      {refreshFailed && <p className="field-error">Couldn't refresh repositories.</p>}
+      {failing.map((installation) => (
+        <p key={installation.id} className="form-hint repository-picker-warning">
+          {INSTALLATION_ERROR_MESSAGES[installation.error](installation.account_login)}
+        </p>
+      ))}
+      <p role="alert" className="field-error repository-picker-live">
+        {refreshFailed ? "Couldn't refresh repositories." : ''}
+      </p>
       {!loading && error === null && (
         <div className="repository-picker-footer">
           <span>Can't find a repo?</span>
