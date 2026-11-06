@@ -50,7 +50,10 @@ mock.module('../../../shared/context/WorkspaceContext', () => ({
   }),
 }));
 
+const router = { ...(await import('react-router-dom')) };
+
 mock.module('react-router-dom', () => ({
+  ...router,
   useNavigate: () => mockNavigate,
 }));
 
