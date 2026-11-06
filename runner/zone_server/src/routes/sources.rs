@@ -19,7 +19,7 @@ use crate::auth::AuthUser;
 use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
 use crate::db::sources::{self, GITHUB, SourceChanges, UpdateError};
 use crate::error::ServerError;
-use crate::services::github_app;
+use crate::services::github_app::{self, Failure};
 use crate::state::AppState;
 
 /// Maximum name length
@@ -122,11 +122,17 @@ async fn validate_reachable(
     state
         .github()
         .retrying(state.db(), credential, |token| async move {
-            service.get_default_branch(repository, &token).await
+            service
+                .get_default_branch(repository, &token)
+                .await
+                .map_err(Failure::Call)
         })
         .await
         .map(|_| ())
-        .map_err(|error| repository_refusal(installation, error))
+        .map_err(|failure| match failure {
+            Failure::Call(error) => repository_refusal(installation, error),
+            Failure::Connection(error) => installation_refusal(installation, error),
+        })
 }
 
 fn configured_repository(config: &serde_json::Value) -> Result<Repository, PullRequestError> {

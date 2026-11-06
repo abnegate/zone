@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::auth::OrgMember;
 use crate::db::github_installations::{self, InstallationRow, InstallationStatus};
 use crate::error::ServerError;
-use crate::services::github_app;
+use crate::services::github_app::{self, Failure};
 use crate::state::AppState;
 
 const DEFAULT_PER_PAGE: u32 = 50;
@@ -321,6 +321,7 @@ pub async fn branches(
             service
                 .list_branches(repository, &token, page, github_app::PAGE_SIZE)
                 .await
+                .map_err(Failure::Call)
         })
         .await
         .map_err(|error| branch_refusal(path.id, error))?;
@@ -354,16 +355,19 @@ fn credential_refusal(installation: Uuid, error: github_app::Error) -> ServerErr
     }
 }
 
-fn branch_refusal(installation: Uuid, error: PullRequestError) -> ServerError {
-    match error {
-        PullRequestError::NotFound
-        | PullRequestError::Forbidden
-        | PullRequestError::InvalidRepositoryName => repository_not_found(),
-        PullRequestError::Http(error) => {
+fn branch_refusal(installation: Uuid, failure: Failure<PullRequestError>) -> ServerError {
+    match failure {
+        Failure::Connection(error) => credential_refusal(installation, error),
+        Failure::Call(
+            PullRequestError::NotFound
+            | PullRequestError::Forbidden
+            | PullRequestError::InvalidRepositoryName,
+        ) => repository_not_found(),
+        Failure::Call(PullRequestError::Http(error)) => {
             tracing::warn!(installation = %installation, error = %error.without_url(), "GitHub could not be reached to list branches");
             unavailable()
         }
-        error => {
+        Failure::Call(error) => {
             tracing::warn!(installation = %installation, error = %error, "GitHub could not list branches");
             unavailable()
         }

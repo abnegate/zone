@@ -1,5 +1,6 @@
 mod failure;
 
+use abnegate_secret::SecretValue;
 use abnegate_vcs::pull_request::{AccountType, InstallationId, RegisteredApplication};
 use axum::extract::{Query, State};
 use axum::http::header::{ALLOW, CACHE_CONTROL, LOCATION, REFERRER_POLICY};
@@ -30,15 +31,15 @@ const GET: HeaderValue = HeaderValue::from_static("GET");
 
 #[derive(Debug, Default, Deserialize)]
 struct ManifestParameters {
-    code: Option<String>,
-    state: Option<String>,
+    code: Option<SecretValue>,
+    state: Option<SecretValue>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct SetupParameters {
     installation_id: Option<String>,
     setup_action: Option<SetupAction>,
-    state: Option<String>,
+    state: Option<SecretValue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -68,7 +69,7 @@ pub async fn refuse() -> Response {
 pub async fn manifest(State(state): State<AppState>, uri: Uri) -> Response {
     let parameters: ManifestParameters = received(&uri);
     let base = &state.config().app_base_url;
-    let consumed = match consume(&state, parameters.state.as_deref(), Purpose::Registration).await {
+    let consumed = match consume(&state, parameters.state.as_ref(), Purpose::Registration).await {
         Ok(Some(consumed)) => consumed,
         Ok(None) => return redirect(&location(base, Outcome::Expired, None)),
         Err(error) => {
@@ -78,7 +79,7 @@ pub async fn manifest(State(state): State<AppState>, uri: Uri) -> Response {
     };
     let failed = location(base, Outcome::Failed, Some(consumed.organization_id));
 
-    let application = match convert(&state, &consumed, parameters.code.as_deref()).await {
+    let application = match convert(&state, &consumed, parameters.code.as_ref()).await {
         Ok(application) => application,
         Err(failure) => {
             tracing::warn!(
@@ -108,7 +109,7 @@ pub async fn manifest(State(state): State<AppState>, uri: Uri) -> Response {
 pub async fn setup(State(state): State<AppState>, uri: Uri) -> Response {
     let parameters: SetupParameters = received(&uri);
     let base = &state.config().app_base_url;
-    let consumed = match consume(&state, parameters.state.as_deref(), Purpose::Installation).await {
+    let consumed = match consume(&state, parameters.state.as_ref(), Purpose::Installation).await {
         Ok(consumed) => consumed,
         Err(error) => {
             tracing::error!(%error, "The GitHub setup callback could not read its state");
@@ -148,11 +149,11 @@ fn received<T: DeserializeOwned + Default>(uri: &Uri) -> T {
 
 async fn consume(
     state: &AppState,
-    value: Option<&str>,
+    value: Option<&SecretValue>,
     purpose: Purpose,
 ) -> Result<Option<ConsumedState>, sqlx::Error> {
     match value.filter(|value| !value.is_empty()) {
-        Some(value) => github_connection_states::consume(state.db(), value, purpose).await,
+        Some(value) => github_connection_states::consume(state.db(), value.expose(), purpose).await,
         None => Ok(None),
     }
 }
@@ -160,7 +161,7 @@ async fn consume(
 async fn convert(
     state: &AppState,
     consumed: &ConsumedState,
-    code: Option<&str>,
+    code: Option<&SecretValue>,
 ) -> Result<RegisteredApplication, Failure> {
     let code = code
         .filter(|code| !code.is_empty())
@@ -170,7 +171,7 @@ async fn convert(
     Ok(state
         .github()
         .applications()?
-        .convert_manifest(code)
+        .convert_manifest(code.expose())
         .await
         .map_err(GitHubError::from)?)
 }
@@ -371,7 +372,10 @@ mod tests {
             received(&uri("installation_id=42&setup_action=install&state=a%2Bb"));
         assert_eq!(parameters.installation_id.as_deref(), Some("42"));
         assert_eq!(parameters.setup_action, Some(SetupAction::Install));
-        assert_eq!(parameters.state.as_deref(), Some("a+b"));
+        assert_eq!(
+            parameters.state.as_ref().map(SecretValue::expose),
+            Some("a+b")
+        );
 
         let requested: SetupParameters = received(&uri("setup_action=request"));
         assert_eq!(requested.setup_action, Some(SetupAction::Request));
@@ -386,6 +390,38 @@ mod tests {
         let parameters: ManifestParameters = received(&uri("state=one&state=two&code=x"));
         assert_eq!(parameters.state, None);
         assert_eq!(parameters.code, None);
+    }
+
+    #[test]
+    fn manifest_parameters_read_what_github_sends() {
+        let parameters: ManifestParameters = received(&uri("code=a%2Bb&state=c%2Fd"));
+        assert_eq!(
+            parameters.code.as_ref().map(SecretValue::expose),
+            Some("a+b")
+        );
+        assert_eq!(
+            parameters.state.as_ref().map(SecretValue::expose),
+            Some("c/d")
+        );
+    }
+
+    #[test]
+    fn debug_never_shows_the_manifest_code_or_state() {
+        let parameters: ManifestParameters =
+            received(&uri("code=plaintext-code&state=plaintext-state"));
+        let rendered = format!("{parameters:?}");
+        assert!(!rendered.contains("plaintext-code"), "{rendered}");
+        assert!(!rendered.contains("plaintext-state"), "{rendered}");
+    }
+
+    #[test]
+    fn debug_never_shows_the_setup_state() {
+        let parameters: SetupParameters = received(&uri(
+            "installation_id=42&setup_action=install&state=plaintext-state",
+        ));
+        let rendered = format!("{parameters:?}");
+        assert!(!rendered.contains("plaintext-state"), "{rendered}");
+        assert!(rendered.contains("42"), "{rendered}");
     }
 
     #[test]

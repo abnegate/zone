@@ -3,6 +3,8 @@
 use abnegate_vcs::PullRequestError;
 use abnegate_vcs::pull_request::ApplicationError;
 
+use super::error::Error;
+
 const UNAUTHORIZED: u16 = 401;
 
 /// A failure that may mean the credential was refused, so a freshly minted
@@ -20,6 +22,12 @@ impl Unauthenticated for PullRequestError {
 impl Unauthenticated for ApplicationError {
     fn unauthenticated(&self) -> bool {
         matches!(self, Self::Status(UNAUTHORIZED))
+    }
+}
+
+impl Unauthenticated for Error {
+    fn unauthenticated(&self) -> bool {
+        matches!(self, Self::Application(error) if error.unauthenticated())
     }
 }
 
@@ -56,6 +64,21 @@ mod tests {
             ApplicationError::Transport("connection refused".to_string()),
             ApplicationError::Response,
             ApplicationError::InvalidCode,
+        ] {
+            assert!(!error.unauthenticated(), "{error}");
+        }
+    }
+
+    #[test]
+    fn only_a_401_counts_as_an_unauthenticated_provider_failure() {
+        assert!(Error::from(ApplicationError::Status(401)).unauthenticated());
+
+        for error in [
+            Error::from(ApplicationError::Status(403)),
+            Error::Revoked,
+            Error::Suspended,
+            Error::NotConnected,
+            Error::Credential,
         ] {
             assert!(!error.unauthenticated(), "{error}");
         }

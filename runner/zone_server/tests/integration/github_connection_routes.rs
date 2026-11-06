@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::common::github_app::{self, APP_ID, ApplicationJwt, Seeded, TEST_PRIVATE_KEY};
 use crate::common::{self, TestClient, TestResponse, test_email, test_password};
@@ -21,6 +22,7 @@ use zone_server::db::github_installations::{
     self, AccountType, InstallationRow, InstallationUpsert, RepositorySelection,
 };
 use zone_server::db::organization_members::{self, OrgRole};
+use zone_server::services::github_app::catalog::MINIMUM_REFRESH_AGE;
 use zone_server::services::github_app::manifest::{MANIFEST_CALLBACK_PATH, SETUP_CALLBACK_PATH};
 use zone_server::state::AppState;
 
@@ -234,12 +236,7 @@ fn minted_token(installation_id: i64) -> String {
 }
 
 /// GitHub mints [`minted_token`] for App `app_id`'s installation `installation_id`.
-async fn routes_minting(
-    server: &MockServer,
-    app_id: i64,
-    installation_id: i64,
-    times: impl Into<Times>,
-) {
+fn routes_mint(app_id: i64, installation_id: i64) -> Mock {
     let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
     Mock::given(method("POST"))
         .and(path(format!(
@@ -250,7 +247,25 @@ async fn routes_minting(
             "token": minted_token(installation_id),
             "expires_at": expires_at,
         })))
+}
+
+async fn routes_minting(
+    server: &MockServer,
+    app_id: i64,
+    installation_id: i64,
+    times: impl Into<Times>,
+) {
+    routes_mint(app_id, installation_id)
         .expect(times)
+        .mount(server)
+        .await;
+}
+
+/// GitHub mints once, then leaves later mints to whatever is mounted after.
+async fn routes_minting_once(server: &MockServer, app_id: i64, installation_id: i64) {
+    routes_mint(app_id, installation_id)
+        .up_to_n_times(1)
+        .expect(1)
         .mount(server)
         .await;
 }
@@ -645,6 +660,17 @@ impl Harness {
         github_connection_states::consume(self.pool(), state, purpose)
             .await
             .expect("the state is readable")
+    }
+
+    fn age_catalog(&self, tenant: &Tenant, seeded: &Seeded) {
+        let catalog = self.state().github().catalog();
+        let listing = catalog
+            .get(tenant.organization, seeded.installation, Instant::now())
+            .expect("the listing is cached");
+        let listed_at = Instant::now()
+            .checked_sub(MINIMUM_REFRESH_AGE)
+            .expect("the clock has run longer than the minimum refresh age");
+        catalog.insert(tenant.organization, seeded.installation, listing, listed_at);
     }
 
     async fn github_requests(&self) -> usize {
@@ -2458,6 +2484,40 @@ async fn repositories_report_an_installation_github_uninstalled_as_revoked() {
 }
 
 #[tokio::test]
+async fn repositories_report_an_installation_uninstalled_while_its_token_was_held_as_revoked() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let seeded = harness.installation(&tenant).await;
+    routes_minting_once(&harness.github, APP_ID, seeded.installation_id).await;
+    routes_refusing_mint(&harness.github, APP_ID, seeded.installation_id, 404).await;
+    github_app::uninstalled(&harness.github, seeded.installation_id).await;
+    routes_listing_repositories(
+        &harness.github,
+        seeded.installation_id,
+        ResponseTemplate::new(401),
+        1,
+    )
+    .await;
+
+    let catalog = harness.catalog(&tenant, "").await;
+
+    assert!(catalog.repositories.is_empty());
+    assert_eq!(
+        catalog.installation(seeded.installation).error,
+        Some(Unlisted::Revoked)
+    );
+    assert!(
+        harness
+            .stored_installation(tenant.organization, seeded.installation)
+            .await
+            .is_some_and(|installation| installation.revoked_at.is_some()),
+        "the installation is marked revoked"
+    );
+
+    harness.discard().await;
+}
+
+#[tokio::test]
 async fn repositories_are_cached_until_refreshed() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
@@ -2473,10 +2533,17 @@ async fn repositories_are_cached_until_refreshed() {
 
     let fetched = harness.catalog(&tenant, "").await;
     let cached = harness.catalog(&tenant, "?query=wid").await;
+    let early = harness.catalog(&tenant, "?refresh=true").await;
     assert_eq!(fetched.full_names(), ["acme/widgets"]);
     assert_eq!(cached.full_names(), ["acme/widgets"]);
+    assert_eq!(
+        early.full_names(),
+        ["acme/widgets"],
+        "a refresh of a listing younger than the minimum age is served from the cache"
+    );
     harness.github.verify().await;
     harness.github.reset().await;
+    harness.age_catalog(&tenant, &seeded);
 
     routes_minting(&harness.github, APP_ID, seeded.installation_id, 0..).await;
     routes_listing_repositories(
@@ -2680,6 +2747,39 @@ async fn branches_of_a_revoked_or_suspended_installation_are_not_found() {
             .await
             .assert_status(StatusCode::NOT_FOUND);
     }
+
+    harness.discard().await;
+}
+
+#[tokio::test]
+async fn branches_of_an_installation_uninstalled_while_its_token_was_held_are_not_found() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let seeded = harness.installation(&tenant).await;
+    routes_minting_once(&harness.github, APP_ID, seeded.installation_id).await;
+    routes_refusing_mint(&harness.github, APP_ID, seeded.installation_id, 404).await;
+    github_app::uninstalled(&harness.github, seeded.installation_id).await;
+    routes_listing_branches(
+        &harness.github,
+        seeded.installation_id,
+        1,
+        ResponseTemplate::new(401).set_body_json(json!({ "message": "Bad credentials" })),
+    )
+    .await;
+
+    assert_refused(
+        &harness
+            .branches(&tenant, seeded.installation, "?page=1")
+            .await,
+        StatusCode::NOT_FOUND,
+    );
+    assert!(
+        harness
+            .stored_installation(tenant.organization, seeded.installation)
+            .await
+            .is_some_and(|installation| installation.revoked_at.is_some()),
+        "the installation is marked revoked"
+    );
 
     harness.discard().await;
 }

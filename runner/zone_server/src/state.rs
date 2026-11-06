@@ -489,10 +489,11 @@ mod tests {
     use super::*;
     use crate::secret::Unseal;
     use crate::secret::fixture;
-    use crate::services::github_app::testing::{TEST_PRIVATE_KEY, issuing, provider};
+    use crate::services::github_app::testing::{TEST_PRIVATE_KEY, provider};
     use abnegate_notify::MockMailer;
     use abnegate_secret::SecretValue;
-    use abnegate_vcs::pull_request::{ApplicationId, InstallationId};
+    use abnegate_vcs::pull_request::ApplicationId;
+    use std::num::{NonZeroU8, NonZeroU32};
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
     use zone_core::llm::AgentKind;
@@ -524,21 +525,30 @@ mod tests {
     #[tokio::test]
     async fn an_installed_github_provider_replaces_the_configured_one() {
         let server = wiremock::MockServer::start().await;
-        issuing(&server, 4242, "ghs_installedprovider", 1).await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/app/installations"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(Vec::<()>::new()))
+            .expect(1)
+            .mount(&server)
+            .await;
         let state = AppState::for_tests();
 
         state.install_github(provider(&server, Arc::clone(state.master_key())));
 
-        let sealed = state
-            .github()
+        let github = state.github();
+        let sealed = github
             .seal(&SecretValue::new(TEST_PRIVATE_KEY))
             .expect("seal");
-        let token = state
-            .github()
-            .mint(ApplicationId::new(1), &sealed, InstallationId::new(4242))
+        let jwt = github
+            .application_jwt(ApplicationId::new(1), &sealed)
+            .expect("sign");
+        let listed = github
+            .applications()
+            .expect("the installed provider has a usable origin")
+            .list_installations(&jwt, NonZeroU32::MIN, NonZeroU8::MIN)
             .await
-            .expect("the installed provider mints from the stand-in");
-        assert_eq!(token.expose(), "ghs_installedprovider");
+            .expect("the installed provider asks the stand-in");
+        assert!(listed.items.is_empty());
     }
 
     #[tokio::test]

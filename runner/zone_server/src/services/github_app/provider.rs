@@ -1,7 +1,7 @@
 use std::fmt;
 use std::future::Future;
 use std::num::{NonZeroU8, NonZeroU32};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
 use abnegate_secret::{MasterKey, SecretValue, decrypt_value, encrypt_value, is_encrypted};
@@ -63,6 +63,7 @@ enum Standing {
 pub struct Provider {
     github: Result<GitHub, ApplicationError>,
     cache: TokenCache,
+    exchange: Mutex<()>,
     flights: Flights<InstallationId, Mint>,
     catalog: Catalog,
     master_key: Arc<MasterKey>,
@@ -81,6 +82,7 @@ impl Provider {
         Self {
             github,
             cache: TokenCache::new(),
+            exchange: Mutex::default(),
             flights: Flights::default(),
             catalog: Catalog::default(),
             master_key,
@@ -128,9 +130,8 @@ impl Provider {
             .organization_installation(db, organization_id, installation)
             .await?;
         let applications = self.applications()?;
-        Ok(self
-            .retrying(db, credential, |token| Catalog::listed(applications, token))
-            .await?)
+        self.retrying(db, credential, |token| Catalog::listed(applications, token))
+            .await
     }
 
     pub fn seal(&self, secret: &SecretValue) -> Result<String, Error> {
@@ -160,23 +161,6 @@ impl Provider {
         self.application_jwt(Self::application_of(app.app_id)?, &app.private_key)
     }
 
-    pub async fn mint(
-        &self,
-        application: ApplicationId,
-        sealed_key: &str,
-        installation: InstallationId,
-    ) -> Result<SecretValue, Error> {
-        let issuer = &self.github()?.issuer;
-        if let Some(secret) = self.cached(installation) {
-            return Ok(secret);
-        }
-
-        self.flights
-            .board(installation)
-            .minted(|| self.issued(issuer, application, sealed_key, installation))
-            .await
-    }
-
     async fn issued(
         &self,
         issuer: &InstallationIssuer,
@@ -191,9 +175,24 @@ impl Provider {
         let jwt = self.application_jwt(application, sealed_key)?;
         let token = issuer.issue(&jwt, installation).await?;
         let secret = token.secret().clone();
+        let _exchange = self.exchange();
         self.cache.insert(installation, token);
 
         Ok(secret)
+    }
+
+    fn exchange(&self) -> MutexGuard<'_, ()> {
+        self.exchange.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn discard(&self, installation: InstallationId, refused: &SecretValue) {
+        let _exchange = self.exchange();
+        if self
+            .cached(installation)
+            .is_some_and(|held| held == *refused)
+        {
+            self.cache.forget(installation);
+        }
     }
 
     fn cached(&self, installation: InstallationId) -> Option<SecretValue> {
@@ -312,19 +311,20 @@ impl Provider {
     where
         F: Fn(SecretValue) -> Fut,
         Fut: Future<Output = Result<T, E>>,
-        E: Unauthenticated,
+        E: Unauthenticated + From<Error>,
     {
-        let scope = credential.scope();
-        let refused = match call(credential.into_secret()).await {
+        let Some(scope) = credential.scope() else {
+            return call(credential.into_secret()).await;
+        };
+        let presented = credential.into_secret();
+        let refused = match call(presented.clone()).await {
             Err(error) if error.unauthenticated() => error,
             answered => return answered,
         };
-        let Some(scope) = scope else {
-            return Err(refused);
-        };
 
-        match self.refreshed(db, scope).await {
+        match self.refreshed(db, scope, &presented).await {
             Ok(fresh) => call(fresh.into_secret()).await,
+            Err(error) if error.disconnects() => Err(E::from(error)),
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -336,9 +336,14 @@ impl Provider {
         }
     }
 
-    async fn refreshed(&self, db: &PgPool, scope: Scope) -> Result<Credential, Error> {
+    async fn refreshed(
+        &self,
+        db: &PgPool,
+        scope: Scope,
+        refused: &SecretValue,
+    ) -> Result<Credential, Error> {
         let row = Self::connected(db, scope).await?;
-        self.invalidate(Self::installation_of(&row)?);
+        self.discard(Self::installation_of(&row)?, refused);
         self.minted(db, scope, &row).await
     }
 
@@ -501,6 +506,7 @@ mod tests {
     use abnegate_vcs::{BranchName, PullRequestError, PullRequestService, Repository};
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use futures::future::join_all;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{LazyLock, Mutex};
@@ -511,12 +517,12 @@ mod tests {
     use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
     use crate::secret::fixture::seal;
     use crate::secret::fixture::seal_legacy;
+    use crate::services::github_app::Failure;
     use crate::services::github_app::testing::{
         TEST_PRIVATE_KEY, installation_number, installed, issuing, provider, uninstalled,
     };
 
     const APPLICATION: ApplicationId = ApplicationId::new(12345);
-    const INSTALLATION: InstallationId = InstallationId::new(67890);
 
     fn key() -> Arc<MasterKey> {
         static KEY: LazyLock<Arc<MasterKey>> =
@@ -532,125 +538,6 @@ mod tests {
         provider
             .seal(&SecretValue::new(TEST_PRIVATE_KEY))
             .expect("seal")
-    }
-
-    #[tokio::test]
-    async fn an_installation_token_is_minted_once_and_reused() {
-        let server = MockServer::start().await;
-        issuing(&server, INSTALLATION.get(), "ghs_installationtokenvalue", 1).await;
-        let provider = provider(&server, key());
-        let sealed = sealed_key(&provider);
-
-        for _ in 0..5 {
-            let token = provider
-                .mint(APPLICATION, &sealed, INSTALLATION)
-                .await
-                .expect("mint");
-            assert_eq!(token.expose(), "ghs_installationtokenvalue");
-        }
-    }
-
-    #[tokio::test]
-    async fn invalidating_an_installation_mints_a_new_token() {
-        let server = MockServer::start().await;
-        issuing(&server, INSTALLATION.get(), "ghs_installationtokenvalue", 2).await;
-        let provider = provider(&server, key());
-        let sealed = sealed_key(&provider);
-
-        provider
-            .mint(APPLICATION, &sealed, INSTALLATION)
-            .await
-            .expect("mint");
-        provider.invalidate(INSTALLATION);
-        provider
-            .mint(APPLICATION, &sealed, INSTALLATION)
-            .await
-            .expect("mint");
-    }
-
-    #[tokio::test]
-    async fn each_installation_gets_its_own_token() {
-        let server = MockServer::start().await;
-        issuing(&server, 1, "ghs_first", 1).await;
-        issuing(&server, 2, "ghs_second", 1).await;
-        let provider = provider(&server, key());
-        let sealed = sealed_key(&provider);
-
-        let first = provider
-            .mint(APPLICATION, &sealed, InstallationId::new(1))
-            .await
-            .expect("mint");
-        let second = provider
-            .mint(APPLICATION, &sealed, InstallationId::new(2))
-            .await
-            .expect("mint");
-
-        assert_eq!(first.expose(), "ghs_first");
-        assert_eq!(second.expose(), "ghs_second");
-    }
-
-    #[tokio::test]
-    async fn a_refused_exchange_surfaces_without_the_url() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(403))
-            .mount(&server)
-            .await;
-        let provider = provider(&server, key());
-
-        let error = provider
-            .mint(APPLICATION, &sealed_key(&provider), INSTALLATION)
-            .await
-            .expect_err("a 403 is a failure");
-
-        let rendered = error.to_string();
-        assert!(matches!(
-            error,
-            Error::Application(ApplicationError::Status(403))
-        ));
-        assert!(!rendered.contains(&server.uri()), "{rendered}");
-        assert!(!rendered.contains("access_tokens"), "{rendered}");
-    }
-
-    #[tokio::test]
-    async fn a_plain_http_origin_cannot_mint_unless_the_operator_allowed_it() {
-        let server = MockServer::start().await;
-        issuing(&server, INSTALLATION.get(), "ghs_installationtokenvalue", 0).await;
-        let config = Config {
-            github_api_url: server.uri(),
-            ..crate::state::test_config()
-        };
-        let provider = Provider::new(&config, key());
-
-        let error = provider
-            .mint(APPLICATION, &sealed_key(&provider), INSTALLATION)
-            .await
-            .expect_err("an http origin the operator did not allow cannot mint");
-
-        assert!(matches!(
-            error,
-            Error::Application(ApplicationError::InvalidOrigin)
-        ));
-        assert!(!error.to_string().contains(&server.uri()), "{error}");
-    }
-
-    #[tokio::test]
-    async fn an_allowed_plain_http_origin_on_a_private_host_mints() {
-        let server = MockServer::start().await;
-        issuing(&server, INSTALLATION.get(), "ghs_installationtokenvalue", 1).await;
-        let config = Config {
-            github_api_url: server.uri(),
-            github_api_allows_http: true,
-            ..crate::state::test_config()
-        };
-        let provider = Provider::new(&config, key());
-
-        let token = provider
-            .mint(APPLICATION, &sealed_key(&provider), INSTALLATION)
-            .await
-            .expect("a loopback origin the operator allowed mints");
-
-        assert_eq!(token.expose(), "ghs_installationtokenvalue");
     }
 
     #[test]
@@ -799,38 +686,6 @@ mod tests {
         assert_eq!(credential.secret().expose(), "ghp_personalaccesstoken");
     }
 
-    #[tokio::test]
-    async fn nothing_the_provider_renders_carries_a_credential() {
-        let server = MockServer::start().await;
-        issuing(&server, INSTALLATION.get(), "ghs_installationtokenvalue", 1).await;
-        let provider = provider(&server, key());
-        let sealed = sealed_key(&provider);
-
-        let token = provider
-            .mint(APPLICATION, &sealed, INSTALLATION)
-            .await
-            .expect("mint");
-        let credential = provider
-            .stored_project(Some("ghp_legacyplaintext"))
-            .expect("open")
-            .expect("credential");
-
-        for rendered in [
-            format!("{provider:?}"),
-            format!("{token:?}"),
-            format!("{credential:?}"),
-        ] {
-            assert!(
-                !rendered.contains("ghs_installationtokenvalue"),
-                "{rendered}"
-            );
-            assert!(!rendered.contains("ghp_legacyplaintext"), "{rendered}");
-            assert!(!rendered.contains("PRIVATE KEY"), "{rendered}");
-            assert!(!rendered.contains(&sealed), "{rendered}");
-            assert!(rendered.contains("[REDACTED]"), "{rendered}");
-        }
-    }
-
     const OWNER: &str = "acme";
     const REPOSITORY: &str = "widgets";
 
@@ -893,8 +748,11 @@ mod tests {
 
     impl Connected {
         async fn new(server: &MockServer) -> Self {
+            Self::serving(provider(server, key())).await
+        }
+
+        async fn serving(provider: Provider) -> Self {
             let pool = pool().await;
-            let provider = provider(server, key());
             let organization = seed_organization(&pool).await;
             let workspace = seed_workspace(&pool, organization).await;
             let number = installation_number();
@@ -944,12 +802,15 @@ mod tests {
             })
         }
 
-        async fn status(&self) -> InstallationStatus {
+        async fn row(&self) -> InstallationCredential {
             github_installations::credential(&self.pool, self.workspace, self.installation)
                 .await
                 .expect("read the installation")
                 .expect("the installation still exists")
-                .status()
+        }
+
+        async fn status(&self) -> InstallationStatus {
+            self.row().await.status()
         }
     }
 
@@ -1031,9 +892,12 @@ mod tests {
         credential: Credential,
         service: &PullRequestService,
         repository: &Repository,
-    ) -> Result<BranchName, PullRequestError> {
+    ) -> Result<BranchName, Failure<PullRequestError>> {
         assert_send(provider.retrying(db, credential, |token| async move {
-            service.get_default_branch(repository, &token).await
+            service
+                .get_default_branch(repository, &token)
+                .await
+                .map_err(Failure::Call)
         }))
         .await
     }
@@ -1044,12 +908,155 @@ mod tests {
         credential: Credential,
         service: &PullRequestService,
         repository: &Repository,
-    ) -> Result<(BranchName, SecretValue), PullRequestError> {
+    ) -> Result<(BranchName, SecretValue), Failure<PullRequestError>> {
         assert_send(provider.retrying(db, credential, |token| async move {
-            let branch = service.get_default_branch(repository, &token).await?;
+            let branch = service
+                .get_default_branch(repository, &token)
+                .await
+                .map_err(Failure::Call)?;
             Ok((branch, token))
         }))
         .await
+    }
+
+    #[tokio::test]
+    async fn an_installation_token_is_minted_once_and_reused() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_installationtokenvalue", 1).await;
+
+        for _ in 0..5 {
+            let credential = connected.resolve().await.expect("mint");
+            assert_eq!(credential.secret().expose(), "ghs_installationtokenvalue");
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidating_an_installation_mints_a_new_token() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_installationtokenvalue", 2).await;
+
+        connected.resolve().await.expect("mint");
+        connected
+            .provider
+            .invalidate(InstallationId::new(connected.number));
+        connected.resolve().await.expect("mint");
+    }
+
+    #[tokio::test]
+    async fn each_installation_gets_its_own_token() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        let other_number = installation_number();
+        let other = installed(
+            &connected.pool,
+            &connected.provider,
+            connected.organization,
+            other_number,
+        )
+        .await;
+        issuing(&server, connected.number, "ghs_first", 1).await;
+        issuing(&server, other_number, "ghs_second", 1).await;
+
+        let first = connected.resolve().await.expect("mint");
+        let second = connected
+            .provider
+            .installation(&connected.pool, connected.workspace, other)
+            .await
+            .expect("mint");
+
+        assert_eq!(first.secret().expose(), "ghs_first");
+        assert_eq!(second.secret().expose(), "ghs_second");
+    }
+
+    #[tokio::test]
+    async fn a_refused_exchange_surfaces_without_the_url() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        refusing(&server, connected.number, 403, 1).await;
+        confirming(&server, connected.number, ResponseTemplate::new(403), 1).await;
+
+        let error = connected.resolve().await.expect_err("a 403 is a failure");
+
+        let rendered = error.to_string();
+        assert!(
+            matches!(error, Error::Application(ApplicationError::Status(403))),
+            "{error:?}"
+        );
+        assert!(!rendered.contains(&server.uri()), "{rendered}");
+        assert!(!rendered.contains("access_tokens"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn a_plain_http_origin_cannot_mint_unless_the_operator_allowed_it() {
+        let server = MockServer::start().await;
+        let config = Config {
+            github_api_url: server.uri(),
+            ..crate::state::test_config()
+        };
+        let connected = Connected::serving(Provider::new(&config, key())).await;
+        issuing(&server, connected.number, "ghs_installationtokenvalue", 0).await;
+
+        let error = connected
+            .resolve()
+            .await
+            .expect_err("an http origin the operator did not allow cannot mint");
+
+        assert!(
+            matches!(error, Error::Application(ApplicationError::InvalidOrigin)),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains(&server.uri()), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_allowed_plain_http_origin_on_a_private_host_mints() {
+        let server = MockServer::start().await;
+        let config = Config {
+            github_api_url: server.uri(),
+            github_api_allows_http: true,
+            ..crate::state::test_config()
+        };
+        let connected = Connected::serving(Provider::new(&config, key())).await;
+        issuing(&server, connected.number, "ghs_installationtokenvalue", 1).await;
+
+        let credential = connected
+            .resolve()
+            .await
+            .expect("a loopback origin the operator allowed mints");
+
+        assert_eq!(credential.secret().expose(), "ghs_installationtokenvalue");
+    }
+
+    #[tokio::test]
+    async fn nothing_the_provider_renders_carries_a_credential() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_installationtokenvalue", 1).await;
+
+        let minted = connected.resolve().await.expect("mint");
+        let sealed = connected.row().await.private_key;
+        let stored = connected
+            .provider
+            .stored_project(Some("ghp_legacyplaintext"))
+            .expect("open")
+            .expect("credential");
+
+        for rendered in [
+            format!("{:?}", connected.provider),
+            format!("{minted:?}"),
+            format!("{stored:?}"),
+        ] {
+            assert!(
+                !rendered.contains("ghs_installationtokenvalue"),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("ghp_legacyplaintext"), "{rendered}");
+            assert!(!rendered.contains("PRIVATE KEY"), "{rendered}");
+            assert!(!rendered.contains(&sealed), "{rendered}");
+            assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        }
     }
 
     #[tokio::test]
@@ -1528,12 +1535,15 @@ mod tests {
         let error = provider
             .retrying(&pool, credential, |_token| async {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(PullRequestError::AuthenticationFailed)
+                Err::<(), _>(Failure::Call(PullRequestError::AuthenticationFailed))
             })
             .await
             .expect_err("the stored token was refused");
 
-        assert!(matches!(error, PullRequestError::AuthenticationFailed));
+        assert!(matches!(
+            error,
+            Failure::Call(PullRequestError::AuthenticationFailed)
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1549,12 +1559,12 @@ mod tests {
             .provider
             .retrying(&connected.pool, credential, |_token| async {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(PullRequestError::NotFound)
+                Err::<(), _>(Failure::Call(PullRequestError::NotFound))
             })
             .await
             .expect_err("the repository is missing");
 
-        assert!(matches!(error, PullRequestError::NotFound));
+        assert!(matches!(error, Failure::Call(PullRequestError::NotFound)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1571,17 +1581,20 @@ mod tests {
             .provider
             .retrying(&connected.pool, credential, |_token| async {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err::<(), _>(PullRequestError::AuthenticationFailed)
+                Err::<(), _>(Failure::Call(PullRequestError::AuthenticationFailed))
             })
             .await
             .expect_err("the token was refused and no fresh one could be minted");
 
-        assert!(matches!(error, PullRequestError::AuthenticationFailed));
+        assert!(matches!(
+            error,
+            Failure::Call(PullRequestError::AuthenticationFailed)
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn a_remint_refused_by_a_revocation_returns_the_original_error() {
+    async fn a_remint_refused_by_a_revocation_surfaces_the_revocation() {
         let server = MockServer::start().await;
         let connected = Connected::new(&server).await;
         issuing_once(&server, connected.number, "ghs_first").await;
@@ -1592,13 +1605,96 @@ mod tests {
         let error = connected
             .provider
             .retrying(&connected.pool, credential, |_token| async {
-                Err::<(), _>(PullRequestError::AuthenticationFailed)
+                Err::<(), _>(Failure::Call(PullRequestError::AuthenticationFailed))
             })
             .await
             .expect_err("the installation was removed");
 
-        assert!(matches!(error, PullRequestError::AuthenticationFailed));
+        assert!(
+            matches!(error, Failure::Connection(Error::Revoked)),
+            "{error:?}"
+        );
         assert_eq!(connected.status().await, InstallationStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn a_remint_of_an_installation_suspended_meanwhile_surfaces_the_suspension() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_first", 1).await;
+        let credential = connected.resolve().await.expect("mint");
+        github_installations::mark_suspended(&connected.pool, connected.installation)
+            .await
+            .expect("suspend");
+
+        let error = connected
+            .provider
+            .retrying(&connected.pool, credential, |_token| async {
+                Err::<(), _>(Error::Application(ApplicationError::Status(401)))
+            })
+            .await
+            .expect_err("the installation was suspended");
+
+        assert!(matches!(error, Error::Suspended), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_remint_of_an_installation_removed_meanwhile_surfaces_not_connected() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_first", 1).await;
+        let credential = connected.resolve().await.expect("mint");
+        github_installations::delete(
+            &connected.pool,
+            connected.organization,
+            connected.installation,
+        )
+        .await
+        .expect("remove the installation");
+
+        let error = connected
+            .provider
+            .retrying(&connected.pool, credential, |_token| async {
+                Err::<(), _>(Failure::Call(PullRequestError::AuthenticationFailed))
+            })
+            .await
+            .expect_err("the installation is gone");
+
+        assert!(
+            matches!(error, Failure::Connection(Error::NotConnected)),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_refusals_of_one_token_remint_once() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing_once(&server, connected.number, "ghs_first").await;
+        issuing(&server, connected.number, "ghs_second", 1).await;
+        let credential = connected.resolve().await.expect("mint");
+
+        let retried = join_all((0..4u64).map(|position| {
+            let credential = credential.clone();
+            let connected = &connected;
+            async move {
+                connected
+                    .provider
+                    .retrying(&connected.pool, credential, move |token| async move {
+                        if token.expose() == "ghs_first" {
+                            tokio::time::sleep(Duration::from_millis(100 * position)).await;
+                            return Err(Error::Application(ApplicationError::Status(401)));
+                        }
+                        Ok(token)
+                    })
+                    .await
+            }
+        }))
+        .await;
+
+        for outcome in retried {
+            assert_eq!(outcome.expect("retried").expose(), "ghs_second");
+        }
     }
 
     fn app_row(provider: &Provider, app_id: i64) -> AppRow {
@@ -1737,7 +1833,7 @@ mod tests {
                     let mut seen = tokens.lock().expect("tokens");
                     seen.push(token.expose().to_string());
                     match seen.len() {
-                        1 => Err(ApplicationError::Status(401)),
+                        1 => Err(Error::Application(ApplicationError::Status(401))),
                         _ => Ok(token),
                     }
                 }

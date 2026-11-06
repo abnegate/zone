@@ -1,3 +1,6 @@
+use std::fmt;
+
+use abnegate_secret::SecretValue;
 use abnegate_vcs::pull_request::InstallationId;
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
@@ -100,11 +103,22 @@ pub struct RegistrationRequest {
     owner: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+/// The action URL carries the state too, so it stays out of the rendering.
+#[derive(Serialize)]
 pub struct Registration {
     action: String,
     manifest: String,
-    state: String,
+    state: SecretValue,
+}
+
+impl fmt::Debug for Registration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Registration")
+            .field("manifest", &self.manifest)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -203,16 +217,15 @@ pub async fn register(
     )
     .await?;
     let config = state.config();
-    let registration_state = issued.state.expose();
 
     Ok(Json(Registration {
         action: manifest::registration_url(
             &config.github_web_url,
             owner.as_ref(),
-            registration_state,
+            issued.state.expose(),
         ),
         manifest: Manifest::new(&config.app_base_url, &organization.slug).to_json(),
-        state: registration_state.to_string(),
+        state: issued.state,
     }))
 }
 
@@ -398,6 +411,27 @@ mod tests {
             DateTime::parse_from_rfc3339(stamp).unwrap(),
             revoked.fixed_offset()
         );
+    }
+
+    fn registration() -> Registration {
+        Registration {
+            action: "https://github.com/settings/apps/new?state=plaintext-state".to_string(),
+            manifest: "{}".to_string(),
+            state: SecretValue::new("plaintext-state"),
+        }
+    }
+
+    #[test]
+    fn debug_never_shows_the_registration_state() {
+        let rendered = format!("{:?}", registration());
+        assert!(!rendered.contains("plaintext-state"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+    }
+
+    #[test]
+    fn a_registration_still_hands_the_browser_its_state() {
+        let rendered = serde_json::to_value(registration()).unwrap();
+        assert_eq!(rendered["state"], "plaintext-state");
     }
 
     #[test]
