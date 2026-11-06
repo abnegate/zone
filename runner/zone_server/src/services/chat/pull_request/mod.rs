@@ -290,8 +290,8 @@ async fn threads(
     if reading == Reading::Change {
         return None;
     }
-    match service.fetch_review_threads(reference, token).await {
-        Ok(records) => Some(Threads::from(records.as_slice())),
+    match service.fetch_review_thread_counts(reference, token).await {
+        Ok(count) => Threads::counted(count),
         Err(error) => {
             tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's review threads");
             None
