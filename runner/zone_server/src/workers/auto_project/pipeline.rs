@@ -2201,6 +2201,7 @@ mod tests {
                     repository: Some(PlannedRepository {
                         url: "https://github.com/acme/shop",
                         token: Some("token"),
+                        github_installation_id: None,
                     }),
                     brief: &json!({}),
                     tasks: &[PlannedTask {

@@ -3941,25 +3941,31 @@ mod tests {
         .unwrap();
         let source = sources::create_source(
             &pool,
-            workspace.id,
-            "Invalid configured source",
-            "github",
-            json!({}),
-            None,
-            None,
-            None,
+            sources::NewSource {
+                workspace_id: workspace.id,
+                name: "Invalid configured source",
+                source_type: "github",
+                config: json!({}),
+                description: None,
+                url: None,
+                credentials_encrypted: None,
+                github_installation_id: None,
+            },
         )
         .await
         .unwrap();
         let other = sources::create_source(
             &pool,
-            foreign.id,
-            "Foreign source",
-            "github",
-            json!({}),
-            None,
-            None,
-            None,
+            sources::NewSource {
+                workspace_id: foreign.id,
+                name: "Foreign source",
+                source_type: "github",
+                config: json!({}),
+                description: None,
+                url: None,
+                credentials_encrypted: None,
+                github_installation_id: None,
+            },
         )
         .await
         .unwrap();

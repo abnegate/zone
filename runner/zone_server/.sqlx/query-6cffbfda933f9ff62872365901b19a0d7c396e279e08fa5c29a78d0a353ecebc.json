@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, workspace_id, source_id, name, description, status,\n               github_repo_url, github_access_token, created_at, updated_at\n        FROM projects\n        WHERE id = $1\n        ",
+  "query": "\n        UPDATE projects\n        SET name = COALESCE($2, name),\n            description = COALESCE($3, description),\n            status = COALESCE($4, status),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, workspace_id, source_id, name, description, status,\n                  github_repo_url, github_access_token, created_at, updated_at,\n                  github_installation_id\n        ",
   "describe": {
     "columns": [
       {
@@ -112,11 +112,25 @@
             "name": "updated_at"
           }
         }
+      },
+      {
+        "ordinal": 10,
+        "name": "github_installation_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "projects",
+            "name": "github_installation_id"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
       ]
     },
     "nullable": [
@@ -129,8 +143,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "45a0f2b871c11467225e83ce8cfc8a6826b0b94a2f6e5626e3b16a6f4779366e"
+  "hash": "6cffbfda933f9ff62872365901b19a0d7c396e279e08fa5c29a78d0a353ecebc"
 }

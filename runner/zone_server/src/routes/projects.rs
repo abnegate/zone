@@ -525,7 +525,7 @@ pub async fn link_github(
         })?;
     respond(
         &state,
-        projects::link_github(state.db(), id, &req.repo_url, sealed.as_deref()).await?,
+        projects::link_github(state.db(), id, &req.repo_url, sealed.as_deref(), None).await?,
     )
     .await
 }

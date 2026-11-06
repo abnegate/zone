@@ -583,6 +583,7 @@ impl Tool for FinalizeProjectTool {
             repository: url.as_deref().map(|url| PlannedRepository {
                 url,
                 token: token.as_deref(),
+                github_installation_id: None,
             }),
             brief: &blueprint.spec,
             tasks: &planned,

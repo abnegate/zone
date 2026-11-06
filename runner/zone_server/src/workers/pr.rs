@@ -1160,6 +1160,7 @@ mod tests {
                 project.id,
                 "https://github.com/owner/repository.git",
                 Some("fixture-token"),
+                None,
             )
             .await
             .unwrap();

@@ -3451,6 +3451,7 @@ async fn connected(github: &MockServer) -> (common::TestClient, String, String) 
         Uuid::parse_str(&project).unwrap(),
         "http://127.0.0.1/acme/project",
         Some(&encrypted),
+        None,
     )
     .await
     .unwrap();
