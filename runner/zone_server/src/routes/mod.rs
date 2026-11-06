@@ -14,6 +14,7 @@ pub mod connect;
 pub mod context;
 pub mod devices;
 pub mod error;
+pub mod github;
 pub mod health;
 pub mod host_mounts;
 pub mod invitations;
