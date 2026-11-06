@@ -953,7 +953,7 @@ async fn chats_start_out_used_when_a_member_last_typed_in_them() {
 
 #[tokio::test]
 async fn tasks_nobody_typed_for_are_backfilled_with_their_origin() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     database.through(19).await;
     let (workspace, owner) = database.workspace().await;
     let project: Uuid = sqlx::query_scalar(
