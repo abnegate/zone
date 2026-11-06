@@ -13,6 +13,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { BrowserRouter } from 'react-router-dom';
 import { chooseMenuItem } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
+import { RESPONDING } from '../components/Generation';
 import type {
   Chat,
   ChatProviderOffer,
@@ -1772,7 +1773,7 @@ describe('ChatsPage', () => {
 
     it('keeps pending feedback and blocks another send until the response ends', async () => {
       const input = await sendPrompt();
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
       fireEvent.change(input, { target: { value: 'another prompt' } });
@@ -1783,7 +1784,7 @@ describe('ChatsPage', () => {
       act(() => socket.emit({ type: 'status', message: 'Generating image…' }));
       expect(screen.getByRole('status')).toHaveTextContent('Generating image…');
       act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       act(() => socket.emit({ type: 'message_end', message_id: 'reply', content: 'Done' }));
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
@@ -1803,7 +1804,7 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
       await waitFor(() => expect(mockWsSend).toHaveBeenCalledTimes(2));
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
     });
 
     it('shows a terminal stream failure and keeps the interrupted reply visible after retry', async () => {
@@ -3158,7 +3159,7 @@ describe('ChatsPage', () => {
       sendTurn();
 
       await waitFor(() => expect(mockWsSend).toHaveBeenCalled());
-      expect(await screen.findByRole('status')).toHaveTextContent('Generating response…');
+      expect(await screen.findByRole('status')).toHaveTextContent(RESPONDING);
       await waitFor(() => expect(mockGetChatProviders).toHaveBeenCalledTimes(2));
     });
 
@@ -3220,7 +3221,7 @@ describe('ChatsPage', () => {
 
       await screen.findByTestId('chat-providers-error');
       expect(mockWsSend).toHaveBeenCalled();
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
     });
 

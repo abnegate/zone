@@ -1637,10 +1637,7 @@ export default function ChatsPage() {
                     </div>
                   ) : null}
                   {streaming || chatStatus ? (
-                    <Generation
-                      key={selectedChatId}
-                      status={chatStatus || 'Generating response…'}
-                    />
+                    <Generation key={selectedChatId} status={chatStatus} />
                   ) : null}
                   <div ref={messagesEndRef} />
                 </div>

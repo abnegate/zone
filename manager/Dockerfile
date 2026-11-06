@@ -328,6 +328,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libncurses-dev libpython3-dev libxml2-dev uuid-dev tzdata \
     && rm -rf /var/lib/apt/lists/*
 
+# Chromium, Firefox and WebKit as Playwright ships them link against these.
+# Listed by hand rather than run through `playwright install-deps`, which needs
+# Playwright at build time and adds Xvfb and fonts for headed runs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgtk-4-1 libgraphene-1.0-0 libepoxy0 \
+        libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+        libgstreamer-plugins-bad1.0-0 libgstreamer-gl1.0-0 \
+        libharfbuzz-icu0 libwebpdemux2 libmanette-0.2-0 libgles2 \
+        libenchant-2-2 libhyphen0 libsecret-1-0 \
+        libatk1.0-0t64 libatk-bridge2.0-0t64 libgtk-3-0t64 libxcomposite1 \
+        libnss3 libnspr4 libxslt1.1 libevent-2.1-7t64 libavif16 \
+    && rm -rf /var/lib/apt/lists/*
+
+# A package that installs but stops delivering one of these libraries would
+# otherwise ship browsers that die at launch, so fail the build naming it.
+RUN set -eu; \
+    missing=''; \
+    for library in \
+        libgstreamer-1.0.so.0 libgtk-4.so.1 libgraphene-1.0.so.0 \
+        libgstallocators-1.0.so.0 libgstapp-1.0.so.0 libgstbase-1.0.so.0 \
+        libgstpbutils-1.0.so.0 libgstaudio-1.0.so.0 libgsttag-1.0.so.0 \
+        libgstvideo-1.0.so.0 libgstgl-1.0.so.0 libgstcodecparsers-1.0.so.0 \
+        libgstfft-1.0.so.0 libwebpdemux.so.2 libharfbuzz-icu.so.0 \
+        libepoxy.so.0 libmanette-0.2.so.0 libenchant-2.so.2 libhyphen.so.0 \
+        libsecret-1.so.0 libatk-1.0.so.0 libatk-bridge-2.0.so.0 libGLESv2.so.2 \
+        libgtk-3.so.0 libgdk-3.so.0 libXcomposite.so.1 libnss3.so \
+        libnssutil3.so libsmime3.so libssl3.so libnspr4.so libplc4.so \
+        libplds4.so libxslt.so.1 libevent-2.1.so.7 libavif.so.16 \
+    ; do \
+        ldconfig -p | grep -qF "$library" || missing="$missing $library"; \
+    done; \
+    if [ -n "$missing" ]; then \
+        echo "Playwright browsers need these, and the packages above did not deliver them:$missing" >&2; \
+        exit 1; \
+    fi
+
 COPY --from=rust-toolchain /opt/rust /opt/rust
 COPY --from=go-toolchain /usr/local/go /usr/local/go
 COPY --from=jvm /opt/jvm /opt/jvm
