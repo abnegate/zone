@@ -4839,10 +4839,11 @@ mod tests {
             threads["pageInfo"] = json!({"hasNextPage": true, "endCursor": cursor});
             payload
         };
+        let cycles = THREAD_PAGE_LIMIT as u64 / 2;
         for (after, response, asked) in [
-            (Value::Null, page(1, "A"), 1..=1),
-            (json!("A"), page(2, "B"), 1..=THREAD_PAGE_LIMIT as u64),
-            (json!("B"), page(1, "A"), 1..=THREAD_PAGE_LIMIT as u64),
+            (Value::Null, page(1, "A"), 1),
+            (json!("A"), page(2, "B"), cycles),
+            (json!("B"), page(1, "A"), cycles - 1),
         ] {
             Mock::given(method("POST"))
                 .and(path("/graphql"))
@@ -4874,8 +4875,9 @@ mod tests {
             "the repeated page is not read twice"
         );
         assert_eq!(read["next_after"], Value::Null);
-        assert!(
-            server.received_requests().await.unwrap().len() <= THREAD_PAGE_LIMIT,
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            THREAD_PAGE_LIMIT,
             "a cycling cursor is followed no further than the page limit"
         );
     }
