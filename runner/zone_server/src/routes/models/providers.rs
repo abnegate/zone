@@ -111,6 +111,68 @@ pub(super) async fn huggingface_details(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_llm::catalog::HuggingFaceProvider;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    const ADAPTER_FILTER: &str = "base_model:adapter:";
+    const BASE: &str = "Qwen/Qwen-Image-Edit";
+
+    /// Whether the crate's `search_with_adapters` asked the catalogue for
+    /// adapters while browsing `options`.
+    async fn crate_lists_adapters(options: BrowseQuery<'_>) -> bool {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&upstream)
+            .await;
+        let provider =
+            HuggingFaceProvider::new(format!("{}/api/models", upstream.uri())).expect("a provider");
+        let _ = provider
+            .search_with_adapters(options, &[BASE.to_string()])
+            .await;
+        upstream
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .any(|(key, value)| key == "filter" && value.starts_with(ADAPTER_FILTER))
+            })
+    }
+
+    #[tokio::test]
+    async fn zone_lists_adapters_exactly_when_the_crate_does() {
+        let cases: [(ModelMediumFilter, Option<&str>, Option<&str>); 10] = [
+            (ModelMediumFilter::ImageGeneration, None, None),
+            (
+                ModelMediumFilter::ImageGeneration,
+                Some("flux"),
+                Some("next"),
+            ),
+            (ModelMediumFilter::All, Some("flux"), None),
+            (ModelMediumFilter::All, Some("flux"), Some("next")),
+            (ModelMediumFilter::All, None, None),
+            (ModelMediumFilter::All, Some("   "), None),
+            (ModelMediumFilter::Text, Some("flux"), None),
+            (ModelMediumFilter::Image, Some("flux"), None),
+            (ModelMediumFilter::Embeddings, None, None),
+            (ModelMediumFilter::Tools, Some("flux"), Some("next")),
+        ];
+        for (medium, query, cursor) in cases {
+            let mut options = BrowseQuery::default();
+            options.medium = medium;
+            options.query = query;
+            options.cursor = cursor;
+            assert_eq!(
+                lists_adapters(&options),
+                crate_lists_adapters(options).await,
+                "{medium:?} query {query:?} cursor {cursor:?}"
+            );
+        }
+    }
 
     #[test]
     fn adapters_are_listed_only_where_the_crate_would_list_them() {
