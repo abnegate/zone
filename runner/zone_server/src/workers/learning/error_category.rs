@@ -478,6 +478,33 @@ mod tests {
     }
 
     #[test]
+    fn exemplars_of_one_category_do_not_compete_with_each_other() {
+        let build = direction(ErrorCategory::Build);
+        let references = ReferenceEmbeddings::new(vec![
+            CategoryReference {
+                category: ErrorCategory::Build,
+                exemplars: vec![basis(build), basis(build)],
+            },
+            CategoryReference {
+                category: ErrorCategory::TestFailure,
+                exemplars: vec![basis(direction(ErrorCategory::TestFailure))],
+            },
+        ]);
+
+        let assigned = categorize(&basis(build), &references, &CategorizationPolicy::default());
+        assert_eq!(
+            assigned.category,
+            ErrorCategory::Build,
+            "two exemplars of one category are not a tie between categories"
+        );
+        assert!(
+            (assigned.margin - 1.0).abs() < 1e-6,
+            "the margin is measured against test_failure, not a second build exemplar, got {}",
+            assigned.margin
+        );
+    }
+
+    #[test]
     fn the_margin_bar_can_be_relaxed_deliberately() {
         let references = references();
         let ambiguous = blend(
