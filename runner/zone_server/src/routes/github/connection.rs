@@ -428,4 +428,46 @@ mod tests {
             "https://github.com/settings/apps/zone%20app"
         );
     }
+
+    #[test]
+    fn a_connection_serializes_as_the_shared_fixture() {
+        let at = DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut organization_app = app("acme", OwnerType::Organization);
+        organization_app.id = Uuid::from_u128(1);
+        organization_app.created_at = at;
+        let mut personal_app = app("octocat", OwnerType::User);
+        personal_app.id = Uuid::from_u128(2);
+        personal_app.app_id = 43;
+        personal_app.slug = "zone-octocat-p4q9".to_string();
+        personal_app.name = "Zone octocat p4q9".to_string();
+        personal_app.html_url = "https://github.com/apps/zone-octocat-p4q9".to_string();
+        personal_app.created_at = at;
+        let mut active = installation(None);
+        active.id = Uuid::from_u128(3);
+        active.github_app_id = organization_app.id;
+        active.repository_selection = RepositorySelection::All;
+        active.account_type = AccountType::Organization;
+        active.created_at = at;
+        let mut revoked = installation(Some(at));
+        revoked.id = Uuid::from_u128(4);
+        revoked.github_app_id = personal_app.id;
+        revoked.installation_id = 8;
+        revoked.account_login = "octocat".to_string();
+        revoked.account_type = AccountType::User;
+        revoked.html_url = "https://github.com/settings/installations/8".to_string();
+        revoked.suspended_at = Some(at);
+        revoked.created_at = at;
+        let connection = Connection {
+            apps: vec![App::of(organization_app, WEB), App::of(personal_app, WEB)],
+            installations: vec![Installation::from(active), Installation::from(revoked)],
+        };
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/github-connection.json"
+        ))
+        .unwrap();
+
+        assert_eq!(serde_json::to_value(connection).unwrap(), expected);
+    }
 }

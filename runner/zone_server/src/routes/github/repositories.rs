@@ -563,4 +563,51 @@ mod tests {
             Unlisted::Unavailable
         );
     }
+
+    #[test]
+    fn a_listing_and_its_branches_serialize_as_the_shared_fixtures() {
+        let listing = Listing {
+            repositories: vec![Repository::of(INSTALLATION, &installed())],
+            installations: vec![
+                ListedInstallation {
+                    id: INSTALLATION,
+                    account_login: "acme".to_string(),
+                    html_url: "https://github.com/organizations/acme/settings/installations/7"
+                        .to_string(),
+                    error: None,
+                },
+                ListedInstallation {
+                    id: Uuid::from_u128(8),
+                    account_login: "octocat".to_string(),
+                    html_url: "https://github.com/settings/installations/8".to_string(),
+                    error: Some(Unlisted::Suspended),
+                },
+            ],
+            total: 51,
+            next_page: Some(page(2)),
+        };
+        let branches = Branches {
+            branches: vec![
+                Branch {
+                    name: "main".to_string(),
+                    protected: true,
+                },
+                Branch {
+                    name: "feature/widgets".to_string(),
+                    protected: false,
+                },
+            ],
+            next_page: None,
+        };
+        let expected_listing: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/github-repositories.json"
+        ))
+        .unwrap();
+        let expected_branches: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/github-branches.json"))
+                .unwrap();
+
+        assert_eq!(serde_json::to_value(listing).unwrap(), expected_listing);
+        assert_eq!(serde_json::to_value(branches).unwrap(), expected_branches);
+    }
 }
