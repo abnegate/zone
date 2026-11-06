@@ -301,6 +301,30 @@ describe('ModelsPage', () => {
       expect(screen.queryByRole('button', { name: 'Delete Model' })).not.toBeInTheDocument();
     });
 
+    it('closes an open delete confirmation when the remove grant is lost', async () => {
+      const deleteModelMock = mock(() => Promise.resolve(true));
+      mockUseModels.mockReturnValue({
+        ...defaultModelsHook,
+        models: installed,
+        deleteModel: deleteModelMock,
+      });
+      const { rerender } = renderModelsPage();
+      fireEvent.click(screen.getByTitle('Delete model'));
+      expect(await screen.findByText(/Are you sure you want to delete/)).toBeInTheDocument();
+      access.canRemove = false;
+      rerender(
+        <QueryClientProvider client={new QueryClient()}>
+          <BrowserRouter>
+            <ModelsPage />
+          </BrowserRouter>
+        </QueryClientProvider>
+      );
+      await waitFor(() =>
+        expect(screen.queryByText(/Are you sure you want to delete/)).not.toBeInTheDocument()
+      );
+      expect(deleteModelMock).not.toHaveBeenCalled();
+    });
+
     it('keeps delete for a user who can remove but not install', () => {
       access.canInstall = false;
       mockUseModels.mockReturnValue({ ...defaultModelsHook, models: installed });

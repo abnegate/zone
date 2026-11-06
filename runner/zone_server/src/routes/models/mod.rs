@@ -1040,7 +1040,7 @@ pub async fn append_train_upload(
 /// DELETE /api/models/train/uploads/{id}
 pub async fn delete_train_upload(
     State(state): State<AppState>,
-    ModelInstaller(auth): ModelInstaller,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let user_id = match train_user_id(&auth) {

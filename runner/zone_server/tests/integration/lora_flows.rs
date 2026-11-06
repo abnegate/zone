@@ -41,6 +41,12 @@ async fn token(pool: &PgPool, secret: &str) -> String {
 }
 
 async fn token_with(pool: &PgPool, secret: &str, permissions: &[Permission]) -> String {
+    tokens_for_one_user(pool, secret, &[permissions])
+        .await
+        .remove(0)
+}
+
+async fn tokens_for_one_user(pool: &PgPool, secret: &str, grants: &[&[Permission]]) -> Vec<String> {
     let user = users::create_user(
         pool,
         &common::test_email(),
@@ -62,20 +68,25 @@ async fn token_with(pool: &PgPool, secret: &str, permissions: &[Permission]) -> 
     .await
     .unwrap();
 
-    create_session_access_token(
-        user.id,
-        "lora@example.com",
-        vec![],
-        permissions
-            .iter()
-            .map(|permission| permission.name().to_string())
-            .collect(),
-        false,
-        session.id,
-        secret,
-        chrono::Duration::hours(1),
-    )
-    .unwrap()
+    grants
+        .iter()
+        .map(|permissions| {
+            create_session_access_token(
+                user.id,
+                "lora@example.com",
+                vec![],
+                permissions
+                    .iter()
+                    .map(|permission| permission.name().to_string())
+                    .collect(),
+                false,
+                session.id,
+                secret,
+                chrono::Duration::hours(1),
+            )
+            .unwrap()
+        })
+        .collect()
 }
 
 /// A one-pixel PNG, which is what the dataset writer expects an upload to be.
@@ -2208,7 +2219,6 @@ async fn training_writes_are_refused_to_a_user_who_cannot_install_models() {
         ("DELETE", "/api/models/train"),
         ("POST", "/api/models/train/uploads"),
         ("POST", upload.as_str()),
-        ("DELETE", upload.as_str()),
         ("POST", "/api/models/train/captions"),
         ("POST", "/api/models/train/frames"),
     ] {
@@ -2276,6 +2286,53 @@ async fn a_refused_caller_never_waits_for_or_takes_a_training_permit() {
         StatusCode::NO_CONTENT,
         "reading the job never needs the training permit"
     );
+}
+
+#[tokio::test]
+async fn an_owner_can_still_discard_a_staged_upload_after_losing_the_install_grant() {
+    let models_directory = tempfile::tempdir().unwrap();
+    let mut config = common::test_config_with_ollama_host(common::REFUSED_URL);
+    config.comfyui.models_directory = models_directory.path().to_path_buf();
+    let pool = common::create_test_pool().await;
+    let owner = tokens_for_one_user(
+        &pool,
+        config.jwt_secret(),
+        &[&[Permission::ModelsCreate], &[]],
+    )
+    .await;
+    let stranger = token_with(&pool, config.jwt_secret(), &[]).await;
+    let router = common::create_test_router(common::create_test_state(config, pool));
+
+    let (status, staged) = send(
+        router.clone(),
+        &owner[0],
+        "POST",
+        "/api/models/train/uploads",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+    let upload = format!(
+        "/api/models/train/uploads/{}",
+        staged["id"].as_str().unwrap()
+    );
+
+    let (status, body) = delete_json(router.clone(), &stranger, &upload).await;
+    assert_ne!(status, StatusCode::NO_CONTENT, "{body}");
+    let staged_directory = fs::read_dir(models_directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .flat_map(|root| fs::read_dir(root).unwrap())
+        .map(|entry| entry.unwrap().path())
+        .next()
+        .expect("the upload is staged on disk");
+    assert!(
+        staged_directory.exists(),
+        "another user cannot discard the upload"
+    );
+
+    let (status, body) = delete_json(router, &owner[1], &upload).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(!staged_directory.exists());
 }
 
 #[tokio::test]

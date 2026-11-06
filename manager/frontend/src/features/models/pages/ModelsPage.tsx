@@ -102,6 +102,7 @@ export default function ModelsPage() {
   };
 
   const handleDelete = async (name: string) => {
+    if (!canRemove) return;
     setDeleting(name);
     await deleteModel(name);
     setDeleting(null);
@@ -554,7 +555,7 @@ export default function ModelsPage() {
       </div>
 
       <Modal
-        isOpen={deleteConfirm !== null}
+        isOpen={canRemove && deleteConfirm !== null}
         onClose={() => setDeleteConfirm(null)}
         title="Delete Model"
         size="sm"

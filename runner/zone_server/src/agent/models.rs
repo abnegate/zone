@@ -929,7 +929,7 @@ mod tests {
         );
     }
 
-    async fn member_with_role(role: &str) -> WorkspaceScope {
+    async fn member_with_role(role: &str, ollama_host: &str) -> WorkspaceScope {
         use crate::db::{organizations, users, workspaces};
         let pool =
             sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("a migrated DATABASE_URL"))
@@ -966,7 +966,7 @@ mod tests {
             .await
             .unwrap();
         let mut config = test_config();
-        config.ollama_host = "http://127.0.0.1:1".into();
+        config.ollama_host = ollama_host.to_string();
         WorkspaceScope {
             state: AppState::new(config, pool, None),
             workspace_id: workspace.id,
@@ -989,7 +989,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_workspace_member_without_model_permissions_cannot_change_server_models() {
-        let scope = member_with_role("user").await;
+        let scope = member_with_role("user", "http://127.0.0.1:1").await;
         for (name, params, permission) in [
             (
                 "install_model",
@@ -1021,12 +1021,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_workspace_member_with_the_admin_role_reaches_the_model_backend() {
-        let scope = member_with_role("admin").await;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let ollama = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/delete"))
+            .and(body_json(json!({"name": "llama3.2:3b"})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&ollama)
+            .await;
+        let scope = member_with_role("admin", &ollama.uri()).await;
         let result = run(&scope, "delete_model", json!({"name": "llama3.2:3b"})).await;
-        assert_ne!(
-            result.error.as_deref(),
-            Some(Permission::ModelsDelete.refusal().as_str())
-        );
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.output.as_deref(), Some("Deleted llama3.2:3b."));
     }
 
     #[test]

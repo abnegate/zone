@@ -441,9 +441,9 @@ async fn post_auth(router: &Router, uri: &str, body: Value) -> Value {
 }
 
 /// Registers through the API, grants a seeded global role, and signs in again
-/// so the access token carries the permissions that role holds and no more:
-/// the first account on a fresh database is made an instance admin, which
-/// this undoes.
+/// so the access token carries that role's permissions and no more: the
+/// registration role and the instance admin flag the first account on a fresh
+/// database gets are both removed.
 pub async fn sign_in_with_role(router: &Router, role: &str) -> String {
     let email = test_email();
     let credentials = serde_json::json!({
@@ -457,6 +457,11 @@ pub async fn sign_in_with_role(router: &Router, role: &str) -> String {
         .unwrap()
         .expect("the registered user exists");
     sqlx::query("UPDATE users SET is_admin = false WHERE id = $1")
+        .bind(user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
         .bind(user.id)
         .execute(&pool)
         .await
