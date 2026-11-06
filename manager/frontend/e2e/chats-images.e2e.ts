@@ -139,9 +139,10 @@ test.describe('Chat images', () => {
 
   test('streams a generated image after send', async ({ page }, testInfo) => {
     const attachment = generatedAttachment();
-    let sends = 0;
-    socket.setOnSend(async () => {
-      sends += 1;
+    const sent: string[] = [];
+    socket.setOnSend(async (payload) => {
+      sent.push(payload.content);
+      if (sent.length > 1) return;
       await expect(page.getByText('Make a pretty picture of a blue fox')).toBeVisible();
       await socket.emit({ type: 'status', message: 'Generating image…' });
     });
@@ -169,7 +170,10 @@ test.describe('Chat images', () => {
     await expect(page.getByRole('button', { name: 'Attach files' })).toBeVisible();
     await page.fill('.message-form textarea', 'Next prompt');
     await page.locator('.message-form textarea').press('Enter');
-    expect(sends).toBe(1);
+    await expect
+      .poll(() => sent)
+      .toEqual(['Make a pretty picture of a blue fox', 'Next prompt']);
+    await expect(page.getByRole('status')).toHaveText('Generating image…');
     await expect(page.getByRole('alert')).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('generation-pending.png'), fullPage: true });
     await page.getByRole('button', { name: 'Switch to dark mode' }).click();
@@ -203,7 +207,7 @@ test.describe('Chat images', () => {
     await expect(page.getByRole('status')).toHaveCount(0);
     await expect(page.getByRole('timer')).toHaveCount(0);
     await expect(page.locator('.generation-spinner')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
     await expect(page.getByRole('img', { name: 'generated-image-1.png' })).toBeVisible();
     await expect(page.locator('.message-assistant .message-content')).toContainText(

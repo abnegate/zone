@@ -17,7 +17,7 @@ export const generatedAttachment = (url = MOCK_PNG_DATA_URL) => ({
 });
 
 export type ChatSocketFrame = Record<string, unknown>;
-export type ChatSendPayload = { type: 'send'; content: string; metadata?: unknown };
+export type ChatSendPayload = { type: 'send'; id?: string; content: string; metadata?: unknown };
 
 export type ChatSocketController = {
   setOnSend: (handler: (payload: ChatSendPayload) => Promise<void> | void) => void;

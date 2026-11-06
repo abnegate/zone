@@ -52,6 +52,7 @@ pub enum Interrupted {
 struct Current {
     message: Queued,
     turn: Uuid,
+    drained: bool,
     cancelled: bool,
 }
 
@@ -76,14 +77,17 @@ impl Queue {
             return None;
         }
         self.held = false;
-        self.start()
+        self.start(false)
     }
 
     /// The turn this queue started has ended. A turn the user stopped holds
     /// what is left, so Stop does not immediately start the next message. A
-    /// turn cancelled before its message was saved goes back in the queue.
+    /// turn the queue started on its own and that was cancelled before its
+    /// message was saved goes back in the queue: the cancel was meant for the
+    /// turn before it. One the user sent and stopped is dropped, as it always was.
     pub fn finish(&mut self, saved: bool) -> Finished {
         if let Some(current) = self.current.take()
+            && current.drained
             && current.cancelled
             && !saved
         {
@@ -99,7 +103,7 @@ impl Queue {
                 Finished::Idle
             };
         }
-        self.start().map_or(Finished::Idle, Finished::Next)
+        self.start(true).map_or(Finished::Idle, Finished::Next)
     }
 
     /// A turn this queue did not start has ended. While one it did start is
@@ -130,7 +134,7 @@ impl Queue {
         self.held = false;
         if self.current.is_none() && !busy {
             return self
-                .start()
+                .start(false)
                 .map_or(Interrupted::Missing, Interrupted::Start);
         }
         if let Some(current) = self.current.as_mut() {
@@ -167,12 +171,13 @@ impl Queue {
         self.held
     }
 
-    fn start(&mut self) -> Option<Started> {
+    fn start(&mut self, drained: bool) -> Option<Started> {
         let message = self.messages.pop_front()?;
         let turn = Uuid::new_v4();
         self.current = Some(Current {
             message: message.clone(),
             turn,
+            drained,
             cancelled: false,
         });
         self.stopping = false;
@@ -402,13 +407,24 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_stopped_before_its_message_was_saved_is_held_rather_than_lost() {
+    fn a_drained_turn_stopped_before_its_message_was_saved_is_held_rather_than_lost() {
         let mut queue = Queue::default();
         queue.submit(queued("first"), false);
         queue.submit(queued("second"), false);
+        queue.submit(queued("third"), false);
+        assert_eq!(next(queue.finish(true)), "second");
         queue.stop(false);
         assert_eq!(queue.finish(false), Finished::Held);
-        assert_eq!(contents(&queue), ["first", "second"]);
+        assert_eq!(contents(&queue), ["second", "third"]);
+    }
+
+    #[test]
+    fn a_message_sent_and_stopped_before_it_was_saved_is_dropped() {
+        let mut queue = Queue::default();
+        queue.submit(queued("first"), false);
+        queue.stop(false);
+        assert_eq!(queue.finish(false), Finished::Idle);
+        assert!(queue.messages().is_empty());
     }
 
     #[test]
@@ -434,15 +450,17 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_interrupted_before_saving_goes_back_behind_the_interrupting_message() {
+    fn a_drained_turn_interrupted_before_saving_goes_back_behind_the_interrupting_message() {
         let mut queue = Queue::default();
         queue.submit(queued("first"), false);
-        let second = queued("second");
-        queue.submit(second.clone(), false);
+        queue.submit(queued("second"), false);
+        let third = queued("third");
+        queue.submit(third.clone(), false);
+        assert_eq!(next(queue.finish(true)), "second");
 
-        assert_eq!(queue.interrupt(second.id, false), Interrupted::Cancel);
-        assert_eq!(next(queue.finish(false)), "second");
-        assert_eq!(contents(&queue), ["first"]);
+        assert_eq!(queue.interrupt(third.id, false), Interrupted::Cancel);
+        assert_eq!(next(queue.finish(false)), "third");
+        assert_eq!(contents(&queue), ["second"]);
     }
 
     #[test]

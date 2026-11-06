@@ -1461,7 +1461,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                         .submit(message, generating(chat_id))
                                         .map(|started| begin(chat_id, started))
                                 });
-                                announce(&stream, started.as_ref().map(|(message, _)| message.clone())).await;
+                                // A message that starts at once never showed in the
+                                // queue, so there is no change for anyone to hear.
+                                let immediate = started.as_ref().is_some_and(|(message, _)| message.id == id);
+                                if !immediate {
+                                    announce(&stream, started.as_ref().map(|(message, _)| message.clone())).await;
+                                }
                                 if let Some(started) = started {
                                     drive(state.clone(), stream.clone(), chat_id, workspace_id, started);
                                 }
