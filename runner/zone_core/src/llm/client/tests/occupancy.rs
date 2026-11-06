@@ -9,6 +9,9 @@ const ROLLOUT: &str = include_str!("../fixtures/codex/rollout.jsonl");
 const CATALOGUE: &str = include_str!("../fixtures/codex/models_cache.json");
 const THREAD: &str = "019b2c41-0000-7000-8000-000000000001";
 
+/// How long a test waits after a cancel for a report that must not come.
+const SETTLING: Duration = Duration::from_millis(500);
+
 /// Where Codex keeps a rollout, under its home.
 const SESSIONS: &str = "sessions/2026/11/05";
 
@@ -192,4 +195,73 @@ async fn a_buffered_turn_records_the_occupancy_each_agent_reports() {
 
         assert_eq!(client.occupancy(), reported, "{agent}");
     }
+}
+
+/// A turn the reader dropped stops the agent before it exits by itself, so
+/// no rollout is read for it.
+#[tokio::test]
+async fn a_cancelled_codex_turn_reports_no_occupancy() {
+    let home = TempDir::new().expect("a codex home");
+    let stand_in = codex(
+        ROLLOUT,
+        Some(CATALOGUE),
+        r#"echo '{"type":"thread.started","thread_id":"019b2c41-0000-7000-8000-000000000001"}'
+echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"OK"}}'
+exec sleep 300"#,
+    );
+    let client = homed(&stand_in, &home);
+    let mut stream = client
+        .chat_stream_with_options(
+            model(AgentKind::Codex),
+            &[Message::user("What does a.rs do?")],
+            None,
+            RequestOptions::new(512),
+        )
+        .await
+        .expect("a running agent");
+
+    let first = tokio::time::timeout(PATIENCE, async {
+        loop {
+            let chunk = stream
+                .next()
+                .await
+                .expect("a chunk before the cancel")
+                .expect("a turn under way");
+            if !spoken(std::slice::from_ref(&chunk)).is_empty() {
+                return chunk;
+            }
+        }
+    })
+    .await
+    .expect("the agent to speak");
+    assert_eq!(spoken(&[first]), "OK");
+    drop(stream);
+    tokio::time::sleep(SETTLING).await;
+
+    assert_eq!(client.occupancy(), None);
+}
+
+/// A Codex turn that fails by itself has still run in its window, which its
+/// rollout reports after the failure.
+#[tokio::test]
+async fn a_failed_codex_turn_still_reports_its_occupancy() {
+    const WORDS: &str = "the model is overloaded";
+    let home = TempDir::new().expect("a codex home");
+    let stand_in = codex(
+        ROLLOUT,
+        None,
+        &format!(
+            r#"echo '{{"type":"thread.started","thread_id":"{THREAD}"}}'
+echo '{{"type":"turn.failed","error":{{"message":"{WORDS}"}}}}'
+exit 1"#
+        ),
+    );
+    let client = homed(&stand_in, &home);
+
+    let (delivered, failure) = asked(&client, AgentKind::Codex).await;
+
+    let failure = failure.expect("the turn to fail");
+    assert!(failure.to_string().contains(WORDS), "{failure}");
+    assert!(reasons(&delivered).is_empty(), "a failed turn finished");
+    assert_eq!(client.occupancy(), rolled_out());
 }

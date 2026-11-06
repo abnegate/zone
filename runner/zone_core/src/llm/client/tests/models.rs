@@ -70,3 +70,78 @@ async fn codex_effort_is_quoted_and_precedes_the_model() {
         .unwrap_or_else(|| panic!("no model in {arguments:?}"));
     assert!(effort < model, "{arguments:?}");
 }
+
+/// Every argument that sets the agent's reasoning effort.
+fn efforts(arguments: &[String]) -> Vec<&str> {
+    arguments
+        .iter()
+        .map(String::as_str)
+        .filter(|argument| {
+            *argument == "--effort" || argument.starts_with("model_reasoning_effort=")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn claude_effort_is_sent_and_precedes_the_model() {
+    let claude = on(AgentKind::Claude, "sonnet", |settings| {
+        settings.with_effort(ReasoningEffort::High)
+    })
+    .await;
+
+    let arguments = claude.arguments();
+    let effort = arguments
+        .windows(2)
+        .position(|pair| pair == ["--effort", "high"])
+        .unwrap_or_else(|| panic!("no effort in {arguments:?}"));
+    let model = arguments
+        .windows(2)
+        .position(|pair| pair == ["--model", "sonnet"])
+        .unwrap_or_else(|| panic!("no model in {arguments:?}"));
+    assert!(effort < model, "{arguments:?}");
+    assert_eq!(efforts(&arguments), ["--effort"], "{arguments:?}");
+}
+
+#[tokio::test]
+async fn an_effort_the_model_does_not_take_is_not_sent() {
+    for (agent, model, effort) in [
+        (AgentKind::Claude, "haiku", ReasoningEffort::High),
+        (AgentKind::Claude, "sonnet", ReasoningEffort::Ultra),
+        (AgentKind::Codex, "gpt-5.5", ReasoningEffort::Max),
+        (AgentKind::Claude, "auto", ReasoningEffort::Ultra),
+        (AgentKind::Codex, "auto", ReasoningEffort::Max),
+    ] {
+        let stand_in = on(agent, model, |settings| settings.with_effort(effort)).await;
+
+        let arguments = stand_in.arguments();
+        assert!(
+            efforts(&arguments).is_empty(),
+            "{agent} on {model:?} was sent {effort:?}: {arguments:?}"
+        );
+    }
+}
+
+/// A model the agent does not know is left to the agent, which then runs
+/// its default model, so the effort is judged against that model's.
+#[tokio::test]
+async fn an_unknown_model_given_an_effort_runs_the_agents_default_at_that_effort() {
+    for (agent, sent) in [
+        (AgentKind::Claude, ["--effort", "high"]),
+        (AgentKind::Codex, ["-c", r#"model_reasoning_effort="high""#]),
+    ] {
+        let stand_in = on(agent, "auto", |settings| {
+            settings.with_effort(ReasoningEffort::High)
+        })
+        .await;
+
+        let arguments = stand_in.arguments();
+        assert!(
+            arguments.windows(2).any(|pair| pair == sent),
+            "{agent}: {arguments:?}"
+        );
+        assert!(
+            !arguments.iter().any(|argument| argument == "--model"),
+            "{agent}: {arguments:?}"
+        );
+    }
+}
