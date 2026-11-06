@@ -2,8 +2,8 @@ import type { CollisionDetection, KeyboardCoordinateGetter, UniqueIdentifier } f
 
 const KEY_STEPS: Record<string, number> = { ArrowUp: -1, ArrowDown: 1 };
 
-/** The box under the pointer, or under the middle of the box being moved by keyboard, else the nearest. */
-export const nearestBox: CollisionDetection = ({
+/** The slot under the pointer, or under the middle of the item being moved by keyboard, else the nearest. */
+export const nearestSlot: CollisionDetection = ({
   collisionRect,
   droppableRects,
   droppableContainers,
@@ -27,8 +27,8 @@ export const nearestBox: CollisionDetection = ({
     : [];
 };
 
-/** Moves a box picked up by keyboard one place up or down the list with each arrow key. */
-export function boxSteps(ids: () => readonly UniqueIdentifier[]): KeyboardCoordinateGetter {
+/** Moves an item picked up by keyboard one place up or down a vertical list with each arrow key. */
+export function slotSteps(ids: () => readonly UniqueIdentifier[]): KeyboardCoordinateGetter {
   return (event, { active, currentCoordinates, context }) => {
     const step = KEY_STEPS[event.code];
     if (!step) return undefined;
