@@ -358,6 +358,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_subagents_duration_is_stored_in_milliseconds() {
+        const RUN: Duration = Duration::from_micros(61_000_999);
+        const STORED: i64 = 61_000;
+        let turn = Turn::new().await;
+        let (tracker, mut announced) = turn.track();
+
+        tracker.track(&Subagent::new("toolu_01Agent").with_duration(RUN));
+        let (running, _) = next(&mut announced).await;
+        tracker.track(&finished("toolu_01Agent").with_duration(Duration::MAX));
+        let (ended, _) = next(&mut announced).await;
+        drop(tracker);
+
+        assert_eq!(running.duration_ms, Some(STORED));
+        assert_eq!(
+            ended.duration_ms,
+            Some(i64::MAX),
+            "a duration past what the column holds is stored as its most"
+        );
+        let stored = chat_subagents::list(turn.state.db(), turn.chat_id)
+            .await
+            .expect("the chat's subagents");
+        assert_eq!(
+            stored.iter().map(|row| row.duration_ms).collect::<Vec<_>>(),
+            [Some(i64::MAX)]
+        );
+        assert_eq!(rest(announced).await, []);
+    }
+
+    #[tokio::test]
     async fn subagents_reported_together_are_announced_once_each() {
         let turn = Turn::new().await;
         let (tracker, announced, hold) = turn.held();
