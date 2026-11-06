@@ -229,10 +229,6 @@ fn assert_refused(response: &TestResponse, status: StatusCode) {
     );
 }
 
-fn login(prefix: &str) -> String {
-    format!("{prefix}-{}", &Uuid::new_v4().simple().to_string()[..12])
-}
-
 fn application_id() -> i64 {
     rand::random_range(1..1_000_000_000)
 }
@@ -572,7 +568,7 @@ impl Harness {
             tenant,
             AppSpecification {
                 app_id: application_id(),
-                owner_login: login("acme"),
+                owner_login: github_app::login("acme"),
                 owner_type: OwnerType::Organization,
                 created_by: Some(tenant.owner.user),
             },
@@ -585,7 +581,7 @@ impl Harness {
             tenant,
             AppSpecification {
                 app_id: application_id(),
-                owner_login: login("octo"),
+                owner_login: github_app::login("octo"),
                 owner_type: OwnerType::User,
                 created_by: Some(created_by),
             },
@@ -1141,7 +1137,7 @@ async fn connection_register_without_owner_field_is_personal() {
 async fn connection_register_organization_app_targets_the_organization() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
-    let owner = login("Acme-Corp");
+    let owner = github_app::login("Acme-Corp");
 
     let registration: Registration = parsed(
         &harness.register(&tenant, &json!({ "owner": owner })).await,
@@ -1556,7 +1552,7 @@ async fn installations_sync_revokes_missing_revives_and_records_listed() {
         .await
         .expect("the installation is marked revoked");
     let fresh = github_app::installation_id();
-    let fresh_account = login("fresh");
+    let fresh_account = github_app::login("fresh");
     routes_listing_app_installations(
         &harness.github,
         app.app_id,
