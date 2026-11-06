@@ -1,5 +1,5 @@
 use abnegate_llm::ProviderError;
-use http::StatusCode;
+use reqwest::StatusCode;
 
 use crate::error::ContextError;
 
@@ -59,14 +59,10 @@ mod tests {
     const CONTEXT_LENGTH_MESSAGE: &str = "the input length exceeds the context length";
     const UNKNOWN_STATUS: u16 = 599;
 
-    fn mapped(error: ProviderError) -> ContextError {
-        context_error(error)
-    }
-
     #[test]
     fn a_rejected_key_is_a_fatal_auth_failure() {
         for (status, line) in [(401, "401 Unauthorized"), (403, "403 Forbidden")] {
-            let error = mapped(ProviderError::api(status, "invalid api key"));
+            let error = context_error(ProviderError::api(status, "invalid api key"));
             assert!(
                 matches!(&error, ContextError::Auth(message)
                     if message == &format!("Authentication failed ({line}): invalid api key")),
@@ -79,7 +75,7 @@ mod tests {
 
     #[test]
     fn a_throttle_is_a_fatal_rate_limit() {
-        let error = mapped(ProviderError::api(429, "slow down"));
+        let error = context_error(ProviderError::api(429, "slow down"));
         assert!(matches!(
             error,
             ContextError::RateLimited {
@@ -91,7 +87,7 @@ mod tests {
 
     #[test]
     fn a_usage_limit_is_a_fatal_rate_limit() {
-        let error = mapped(ProviderError::limited("ollama", Limit::new("usage limit")));
+        let error = context_error(ProviderError::limited("ollama", Limit::new("usage limit")));
         assert!(matches!(
             error,
             ContextError::RateLimited {
@@ -103,7 +99,7 @@ mod tests {
 
     #[test]
     fn a_context_length_refusal_keeps_its_wording() {
-        let error = mapped(ProviderError::api(500, CONTEXT_LENGTH_MESSAGE));
+        let error = context_error(ProviderError::api(500, CONTEXT_LENGTH_MESSAGE));
         assert_eq!(
             error.to_string(),
             format!(
@@ -116,7 +112,7 @@ mod tests {
 
     #[test]
     fn an_unknown_status_is_rendered_as_its_number() {
-        let error = mapped(ProviderError::api(UNKNOWN_STATUS, "odd"));
+        let error = context_error(ProviderError::api(UNKNOWN_STATUS, "odd"));
         assert!(
             matches!(&error, ContextError::Embedding(message)
                 if message.starts_with(&format!("API returned error {UNKNOWN_STATUS}"))),
@@ -140,7 +136,7 @@ mod tests {
                 "Local inference failed: session failed",
             ),
         ] {
-            let error = mapped(error);
+            let error = context_error(error);
             assert!(
                 matches!(&error, ContextError::Embedding(message) if message == expected),
                 "{error:?}"
@@ -151,7 +147,7 @@ mod tests {
 
     #[test]
     fn a_configuration_failure_is_an_invalid_source_config() {
-        let error = mapped(ProviderError::config("invalid base URL ftp://host"));
+        let error = context_error(ProviderError::config("invalid base URL ftp://host"));
         assert!(
             matches!(&error, ContextError::InvalidSourceConfig(detail) if detail == "invalid base URL ftp://host"),
             "{error:?}"
@@ -160,7 +156,7 @@ mod tests {
 
     #[test]
     fn any_other_failure_is_an_embedding_failure_with_its_own_wording() {
-        let error = mapped(ProviderError::unsupported("batch embeddings"));
+        let error = context_error(ProviderError::unsupported("batch embeddings"));
         assert!(
             matches!(&error, ContextError::Embedding(message) if message == "unsupported operation: batch embeddings"),
             "{error:?}"
