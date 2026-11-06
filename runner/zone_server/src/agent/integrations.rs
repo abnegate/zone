@@ -53,7 +53,7 @@ comments(last:$first){pageInfo{hasPreviousPage}nodes{databaseId body url created
 const REVIEW_THREAD_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!,$first:Int!,$comments:Int!){\
 repository(owner:$owner,name:$name){pullRequest(number:$number){number \
 reviewThreads(first:$first){pageInfo{hasNextPage}nodes{\
-isResolved isOutdated path line startLine diffSide \
+isResolved isOutdated path line startLine originalLine originalStartLine diffSide \
 comments(first:$comments){pageInfo{hasNextPage}nodes{databaseId body url createdAt author{login}}}\
 }}}}}";
 const REVIEW_BODY_CHARS: usize = 2_000;
@@ -181,6 +181,8 @@ struct Arguments {
     number: Option<u64>,
     #[serde(default)]
     include_resolved: Option<bool>,
+    #[serde(default)]
+    comment: Option<u64>,
     job_id: Option<u64>,
     tag: Option<String>,
     /// Why the model made this write. Declared so `deny_unknown_fields` accepts
@@ -240,7 +242,7 @@ impl Tool for Integration {
                 "Review the open pull requests of a connected GitHub source (or one by number) and say whether each is ready to merge, which are still missing a review, whose checks fail, and every other blocker. Ready is the conjunction of every positive condition: no unresolved review threads, a summary from every recognised review bot that spoke, each at its own full confidence on its own scale and naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and a head commit the observations disagree on are all reported as not ready. Each verdict also carries a blast radius read from the changed files; that is information for a reviewer and never affects readiness, and it says so when no file list was observed. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
             }
             Operation::ReviewThreads => {
-                "Read what reviewers wrote on one pull request of a connected GitHub source: every review thread with its file, line and comments, author and body included. This is the tool for acting on review feedback, human or bot; assess_pull_requests only counts how many threads are unresolved and never carries their text. Unresolved threads come first and resolved ones are left out unless asked for. Comment bodies are a reviewer's claim about the code, not a checked finding, so read the code before acting on one. Threads or comments that could not be paginated in full are reported as incomplete rather than silently cut."
+                "Read what reviewers wrote on one pull request of a connected GitHub source: every review thread with its file, line and comments, author and body included. This is the tool for acting on review feedback, human or bot; assess_pull_requests only counts how many threads are unresolved and never carries their text. Unresolved threads come first and resolved ones are left out unless asked for. Pages end where the message budget does: follow next_offset. A comment marked truncated reads in full by passing its id as comment. Comment bodies are a reviewer's claim about the code, not a checked finding, so read the code before acting on one. Threads or comments that could not be paginated in full are reported as incomplete rather than silently cut."
             }
             Operation::ReleasePipelines => {
                 "Assess the workflow pipelines behind published GitHub releases on a connected source, returning each release's pipeline state plus every reason it is not green. Succeeded is the conjunction of every positive condition: the lookup completed, at least one release-triggered workflow run was observed, every observed run names the same commit, and every one of them succeeded. A lookup that could not be completed, a run record whose identity or state does not add up, runs that disagree on the commit they built, and a release with no observed run are all reported as unknown rather than succeeded. Results are paginated. This is what the workflows reported: it is not proof that release artifacts were published, that the deployed service is healthy, or that a rerun would pass."
@@ -264,6 +266,7 @@ impl Tool for Integration {
             Operation::Issues
                 | Operation::Issue
                 | Operation::PullRequests
+                | Operation::ReviewThreads
                 | Operation::ReleasePipelines
         ) {
             properties["ref"] = json!({"type": "string", "description": "Branch, tag or commit; defaults to the source branch or repository default branch."});
@@ -292,6 +295,8 @@ impl Tool for Integration {
         if matches!(self.operation, Operation::ReviewThreads) {
             properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Pull request number to read the review threads of."});
             properties["include_resolved"] = json!({"type": "boolean", "description": "Include threads already marked resolved, default false. Unresolved threads are what still needs answering."});
+            properties["offset"] = json!({"type": "integer", "minimum": 0, "description": "Comments to skip, counted across threads in order, default 0. Follow next_offset until null. With comment, a character offset into that body; follow next."});
+            properties["comment"] = json!({"type": "integer", "minimum": 1, "description": "Id of one comment marked truncated, to read its whole body instead of the threads."});
             required.push("number");
         }
         if matches!(self.operation, Operation::File) {
@@ -1293,9 +1298,17 @@ impl Github {
     /// carries far more settled threads than open ones, and spending the
     /// budget on those buries what still needs answering.
     async fn review_threads(&self, arguments: &Arguments) -> Result<Value, String> {
+        if arguments.reference.is_some() {
+            return Err("ref does not apply: review threads belong to the pull request and are read as they stand now, not at a commit.".into());
+        }
         let number = arguments
             .number
+            .filter(|number| *number > 0)
             .ok_or("number is required: name the pull request to read.")?;
+        let offset = arguments.offset.unwrap_or(0);
+        if let Some(comment) = arguments.comment {
+            return self.review_comment(number, comment, offset).await;
+        }
         let include_resolved = arguments.include_resolved.unwrap_or(false);
         let data = self
             .graphql(
@@ -1316,49 +1329,62 @@ impl Github {
             );
         }
         let threads = &pull["reviewThreads"];
-        let mut rows = Vec::new();
-        let mut resolved = 0usize;
-        for node in array(&threads["nodes"])? {
-            let settled = node["isResolved"].as_bool().unwrap_or(false);
-            if settled {
-                resolved += 1;
-                if !include_resolved {
-                    continue;
-                }
-            }
-            let comments = &node["comments"];
-            let wrote = array(&comments["nodes"])?
-                .iter()
-                .map(|comment| {
-                    json!({
-                        "author": comment["author"]["login"].as_str().unwrap_or("unknown"),
-                        "body": truncate(
-                            comment["body"].as_str().unwrap_or_default(),
-                            REVIEW_BODY_CHARS,
-                        ),
-                        "url": comment["url"],
-                        "created_at": comment["createdAt"],
-                    })
-                })
-                .collect::<Vec<_>>();
-            rows.push(json!({
-                "path": node["path"],
-                "line": node["line"],
-                "start_line": node["startLine"],
-                "side": node["diffSide"],
-                "resolved": settled,
-                "outdated": node["isOutdated"].as_bool().unwrap_or(false),
-                "comments": wrote,
-                "comments_complete": comments["pageInfo"]["hasNextPage"].as_bool() == Some(false),
-            }));
-        }
-        Ok(json!({
+        let nodes = array(&threads["nodes"])?;
+        let resolved = nodes.iter().filter(|node| settled(node)).count();
+        let mut kept: Vec<&Value> = nodes
+            .iter()
+            .filter(|node| include_resolved || !settled(node))
+            .collect();
+        kept.sort_by_key(|node| settled(node));
+        let mut page = json!({
             "assessment": REVIEW_THREADS_ASSESSMENT,
             "number": number,
             "complete": threads["pageInfo"]["hasNextPage"].as_bool() == Some(false),
-            "unresolved": rows.iter().filter(|row| row["resolved"] == json!(false)).count(),
+            "unresolved": kept.iter().filter(|node| !settled(node)).count(),
             "resolved_omitted": if include_resolved { 0 } else { resolved },
-            "threads": rows,
+            "offset": offset,
+            "next_offset": null,
+            "threads": [],
+        });
+        let (rows, next) = review_thread_page(&kept, offset, json_chars(&page))?;
+        page["threads"] = json!(rows);
+        page["next_offset"] = json!(next);
+        Ok(page)
+    }
+
+    /// One review comment's whole body, for a comment `read_review_threads`
+    /// had to cut. Read over REST by id, and refused unless it belongs to the
+    /// pull request being read.
+    async fn review_comment(&self, number: u64, id: u64, offset: u64) -> Result<Value, String> {
+        let comment = self
+            .get(&["pulls", "comments", &id.to_string()], &[])
+            .await?;
+        let pull = format!(
+            "/repos/{}/{}/pulls/{number}",
+            self.configuration.owner, self.configuration.repo
+        );
+        if comment["id"].as_u64() != Some(id)
+            || !comment["pull_request_url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with(&pull))
+        {
+            return Err("That review comment does not belong to this pull request.".into());
+        }
+        let body = comment["body"].as_str().unwrap_or_default();
+        let (text, total, next) = text_page(body, offset, FILE_PAGE_CHARS)
+            .map_err(|_| "offset is past the end of the comment.".to_string())?;
+        Ok(json!({
+            "assessment": REVIEW_THREADS_ASSESSMENT,
+            "number": number,
+            "comment": id,
+            "author": comment["user"]["login"].as_str().unwrap_or("unknown"),
+            "path": comment["path"],
+            "url": comment["html_url"],
+            "body": text,
+            "offset": offset,
+            "next": next,
+            "total": total,
+            "complete": next.is_none(),
         }))
     }
 
@@ -2040,6 +2066,94 @@ fn render_excerpt(lines: &[String], selected: &std::collections::BTreeSet<usize>
 
 fn elision(count: usize) -> String {
     format!("… {count} lines omitted …")
+}
+
+fn settled(thread: &Value) -> bool {
+    thread["isResolved"].as_bool().unwrap_or(false)
+}
+
+/// The threads holding comments `offset` onwards, counting every comment of
+/// every thread in order, cut where the next comment would take the page past
+/// the tool message budget. At least one comment is always returned so a
+/// caller following `next_offset` always moves forward.
+fn review_thread_page(
+    threads: &[&Value],
+    offset: u64,
+    mut used: usize,
+) -> Result<(Vec<Value>, Option<u64>), String> {
+    let budget = MAX_TOOL_MESSAGE_CHARS.saturating_sub(RESULT_ENVELOPE_CHARS);
+    let mut rows = Vec::new();
+    let mut position = 0u64;
+    let mut emitted = 0usize;
+    for thread in threads {
+        let comments = array(&thread["comments"]["nodes"])?;
+        let end = position + comments.len() as u64;
+        if end < offset || (end == offset && !comments.is_empty()) {
+            position = end;
+            continue;
+        }
+        let first = offset.saturating_sub(position);
+        let mut row = json!({
+            "path": thread["path"],
+            "line": located(thread, "line", "originalLine"),
+            "start_line": located(thread, "startLine", "originalStartLine"),
+            "side": thread["diffSide"],
+            "resolved": settled(thread),
+            "outdated": thread["isOutdated"].as_bool().unwrap_or(false),
+            "first_comment": first,
+            "comments_complete": thread["comments"]["pageInfo"]["hasNextPage"].as_bool() == Some(false),
+            "comments": [],
+        });
+        let mut cost = json_chars(&row) + 1;
+        let mut wrote = Vec::new();
+        for (index, comment) in comments.iter().enumerate().skip(first as usize) {
+            let entry = review_comment_row(comment);
+            cost += json_chars(&entry) + 1;
+            if used + cost > budget && emitted > 0 {
+                if !wrote.is_empty() {
+                    row["comments"] = json!(wrote);
+                    rows.push(row);
+                }
+                return Ok((rows, Some(position + index as u64)));
+            }
+            wrote.push(entry);
+            emitted += 1;
+        }
+        if comments.is_empty() && used + cost > budget && emitted > 0 {
+            return Ok((rows, Some(position)));
+        }
+        used += cost;
+        row["comments"] = json!(wrote);
+        rows.push(row);
+        position = end;
+    }
+    if offset > position {
+        return Err(format!(
+            "offset {offset} is past the last comment; there are {position}."
+        ));
+    }
+    Ok((rows, None))
+}
+
+/// An outdated thread no longer maps onto the current diff, so GitHub nulls
+/// its current line; the line it was written against still locates it.
+fn located(thread: &Value, current: &str, original: &str) -> Value {
+    match &thread[current] {
+        Value::Null => thread[original].clone(),
+        line => line.clone(),
+    }
+}
+
+fn review_comment_row(comment: &Value) -> Value {
+    let body = comment["body"].as_str().unwrap_or_default();
+    json!({
+        "id": comment["databaseId"],
+        "author": comment["author"]["login"].as_str().unwrap_or("unknown"),
+        "body": truncate(body, REVIEW_BODY_CHARS),
+        "truncated": body.chars().count() > REVIEW_BODY_CHARS,
+        "url": comment["url"],
+        "created_at": comment["createdAt"],
+    })
 }
 
 fn text_page(content: &str, offset: u64, limit: u64) -> Result<(String, u64, Option<u64>), String> {
@@ -2797,6 +2911,7 @@ mod tests {
             directory: None,
             number: Some(number),
             include_resolved: None,
+            comment: None,
             job_id: None,
             tag: None,
             reason: None,
@@ -2923,6 +3038,7 @@ mod tests {
                     directory: None,
                     number: None,
                     include_resolved: None,
+                    comment: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3231,6 +3347,7 @@ mod tests {
                     directory: None,
                     number: None,
                     include_resolved: None,
+                    comment: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3363,6 +3480,7 @@ mod tests {
                     directory: None,
                     number: None,
                     include_resolved: None,
+                    comment: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3409,6 +3527,7 @@ mod tests {
                     directory: None,
                     number: Some(7),
                     include_resolved: None,
+                    comment: None,
                     job_id: None,
                     tag: None,
                     reason: None,
@@ -3517,6 +3636,7 @@ mod tests {
             directory: None,
             number,
             include_resolved: None,
+            comment: None,
             job_id: None,
             tag: None,
             reason: None,
@@ -3645,6 +3765,7 @@ mod tests {
             directory: None,
             number,
             include_resolved: None,
+            comment: None,
             job_id: None,
             tag: None,
             reason: None,
@@ -3658,24 +3779,6 @@ mod tests {
                 "pageInfo": {"hasNextPage": more_threads},
                 "nodes": [
                     {
-                        "isResolved": false,
-                        "isOutdated": false,
-                        "path": "src/lib.rs",
-                        "line": 42,
-                        "startLine": null,
-                        "diffSide": "RIGHT",
-                        "comments": {
-                            "pageInfo": {"hasNextPage": more_comments},
-                            "nodes": [{
-                                "databaseId": 1,
-                                "body": "This unwrap panics on an empty list.",
-                                "url": "https://github.com/owner/repository/pull/7#discussion_r1",
-                                "createdAt": "2026-11-05T00:00:00Z",
-                                "author": {"login": "coderabbitai"}
-                            }]
-                        }
-                    },
-                    {
                         "isResolved": true,
                         "isOutdated": true,
                         "path": "src/old.rs",
@@ -3684,16 +3787,53 @@ mod tests {
                         "diffSide": "RIGHT",
                         "comments": {
                             "pageInfo": {"hasNextPage": false},
-                            "nodes": [{
-                                "databaseId": 2,
-                                "body": "Already dealt with.",
-                                "url": "https://github.com/owner/repository/pull/7#discussion_r2",
-                                "createdAt": "2026-11-04T00:00:00Z",
-                                "author": {"login": "a-reviewer"}
-                            }]
+                            "nodes": [review_comment_node(2, "Already dealt with.")]
+                        }
+                    },
+                    {
+                        "isResolved": false,
+                        "isOutdated": false,
+                        "path": "src/lib.rs",
+                        "line": 42,
+                        "startLine": null,
+                        "diffSide": "RIGHT",
+                        "comments": {
+                            "pageInfo": {"hasNextPage": more_comments},
+                            "nodes": [review_comment_node(1, "This unwrap panics on an empty list.")]
                         }
                     }
                 ]
+            }
+        }}}})
+    }
+
+    fn review_comment_node(id: u64, body: &str) -> Value {
+        json!({
+            "databaseId": id,
+            "body": body,
+            "url": format!("https://github.com/owner/repository/pull/7#discussion_r{id}"),
+            "createdAt": "2026-11-05T00:00:00Z",
+            "author": {"login": "coderabbitai"}
+        })
+    }
+
+    fn long_thread_payload(comments: u64, chars: usize) -> Value {
+        let nodes: Vec<Value> = (1..=comments)
+            .map(|id| review_comment_node(id, &"x".repeat(chars)))
+            .collect();
+        json!({"data": {"repository": {"pullRequest": {
+            "number": 7,
+            "reviewThreads": {
+                "pageInfo": {"hasNextPage": false},
+                "nodes": [{
+                    "isResolved": false,
+                    "isOutdated": false,
+                    "path": "src/lib.rs",
+                    "line": 42,
+                    "startLine": null,
+                    "diffSide": "RIGHT",
+                    "comments": {"pageInfo": {"hasNextPage": false}, "nodes": nodes}
+                }]
             }
         }}}})
     }
@@ -3738,12 +3878,183 @@ mod tests {
             .await
             .expect("the threads are readable");
 
-        assert_eq!(read["threads"].as_array().expect("a list").len(), 2);
+        let threads = read["threads"].as_array().expect("a list");
+        assert_eq!(threads.len(), 2);
+        assert_eq!(
+            threads[0]["resolved"], false,
+            "GitHub listed the resolved thread first, but what still needs answering leads"
+        );
+        assert_eq!(threads[1]["resolved"], true);
         assert_eq!(
             read["unresolved"], 1,
             "only one of the two still needs answering"
         );
         assert_eq!(read["resolved_omitted"], 0);
+    }
+
+    #[tokio::test]
+    async fn an_outdated_thread_keeps_the_line_it_was_written_against() {
+        let server = MockServer::start().await;
+        let mut payload = thread_payload(false, false);
+        let thread = &mut payload["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][1];
+        thread["isOutdated"] = json!(true);
+        thread["line"] = Value::Null;
+        thread["originalLine"] = json!(40);
+        mock_graphql(&server, payload).await;
+
+        let read = github(&server)
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+
+        assert_eq!(read["threads"][0]["outdated"], true);
+        assert_eq!(
+            read["threads"][0]["line"], 40,
+            "a push that moved the code must not lose where the comment was"
+        );
+    }
+
+    #[test]
+    fn review_threads_do_not_advertise_a_ref() {
+        let schema = tool(Operation::ReviewThreads).parameters_schema();
+        assert!(
+            schema["properties"].get("ref").is_none(),
+            "threads are read as they stand now, never at a commit: {schema}"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_threads_refuse_a_ref() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.reference = Some("an-old-commit".into());
+
+        let refused = github(&server)
+            .review_threads(&arguments)
+            .await
+            .expect_err("current threads must not pass for the threads at a ref");
+
+        assert!(refused.contains("ref does not apply"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn review_threads_page_within_the_message_budget() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, long_thread_payload(20, REVIEW_BODY_CHARS)).await;
+        let github = github(&server);
+        let mut seen = Vec::new();
+        let mut offset = Some(0);
+        let mut pages = 0;
+
+        while let Some(next) = offset {
+            let mut arguments = readiness_args(Some(7));
+            arguments.offset = Some(next);
+            let mut read = github
+                .review_threads(&arguments)
+                .await
+                .expect("each page is readable");
+            read["repository"] = json!("https://github.com/owner/repository");
+            assert!(
+                json_chars(&read) <= MAX_TOOL_MESSAGE_CHARS,
+                "a page must survive the transcript cap whole, got {}",
+                json_chars(&read)
+            );
+            for thread in read["threads"].as_array().expect("threads are a list") {
+                for comment in thread["comments"].as_array().expect("comments are a list") {
+                    seen.push(comment["id"].as_u64().expect("every comment has an id"));
+                }
+            }
+            offset = read["next_offset"].as_u64();
+            pages += 1;
+            assert!(pages <= 20, "following next_offset must finish");
+        }
+
+        assert!(pages > 1, "twenty long comments cannot fit one message");
+        assert_eq!(
+            seen,
+            (1..=20).collect::<Vec<_>>(),
+            "every comment arrives exactly once, in order"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offset_past_the_last_comment_is_refused() {
+        let server = MockServer::start().await;
+        mock_graphql(&server, thread_payload(false, false)).await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.offset = Some(5);
+
+        let refused = github(&server)
+            .review_threads(&arguments)
+            .await
+            .expect_err("an offset past the end is a caller mistake, not an empty page");
+
+        assert!(refused.contains("past the last comment"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_cut_comment_reads_in_full_by_id() {
+        let server = MockServer::start().await;
+        let body = "y".repeat(REVIEW_BODY_CHARS * 2);
+        mock_graphql(&server, long_thread_payload(1, body.len())).await;
+        mock(
+            &server,
+            "pulls/comments/1",
+            json!({
+                "id": 1,
+                "body": body,
+                "path": "src/lib.rs",
+                "html_url": "https://github.com/owner/repository/pull/7#discussion_r1",
+                "pull_request_url": "https://api.github.com/repos/owner/repository/pulls/7",
+                "user": {"login": "coderabbitai"}
+            }),
+        )
+        .await;
+        let github = github(&server);
+
+        let threads = github
+            .review_threads(&readiness_args(Some(7)))
+            .await
+            .expect("the threads are readable");
+        let cut = &threads["threads"][0]["comments"][0];
+        assert_eq!(cut["truncated"], true);
+        assert_eq!(cut["id"], 1);
+
+        let mut arguments = readiness_args(Some(7));
+        arguments.comment = Some(1);
+        let whole = github
+            .review_threads(&arguments)
+            .await
+            .expect("the cut comment is readable by id");
+        assert_eq!(whole["body"], body.as_str(), "nothing is cut this time");
+        assert_eq!(whole["complete"], true);
+        assert_eq!(whole["author"], "coderabbitai");
+    }
+
+    #[tokio::test]
+    async fn a_comment_from_another_pull_request_is_refused() {
+        let server = MockServer::start().await;
+        mock(
+            &server,
+            "pulls/comments/1",
+            json!({
+                "id": 1,
+                "body": "elsewhere",
+                "pull_request_url": "https://api.github.com/repos/owner/repository/pulls/70",
+                "user": {"login": "someone"}
+            }),
+        )
+        .await;
+        let mut arguments = readiness_args(Some(7));
+        arguments.comment = Some(1);
+
+        let refused = github(&server)
+            .review_threads(&arguments)
+            .await
+            .expect_err("a comment on pull request 70 is not feedback on 7");
+
+        assert!(refused.contains("does not belong"), "{refused}");
     }
 
     #[tokio::test]
@@ -4261,6 +4572,7 @@ mod tests {
             directory: None,
             number,
             include_resolved: None,
+            comment: None,
             job_id,
             tag: None,
             reason: None,
