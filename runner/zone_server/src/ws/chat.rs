@@ -3368,6 +3368,7 @@ async fn handle_chat_generation(
                     user: Some(user_id),
                     approval: generation.approvals.clone(),
                     calls: budget.max_tool_calls,
+                    builtin: builtin_tools(sandboxed),
                 },
                 &crate::mcp::local_endpoint(state.config()),
             )
