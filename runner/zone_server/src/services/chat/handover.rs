@@ -163,9 +163,8 @@ impl Handover {
             }
         };
         let config = state.config();
-        let carried = chosen.agent == from.agent
-            && sessions::portable(chosen.agent)
-            && session.is_some_and(|id| {
+        let carried = match session {
+            Some(id) if chosen.agent == from.agent && sessions::portable(chosen.agent) => {
                 carry(
                     config,
                     self.organization,
@@ -174,7 +173,10 @@ impl Handover {
                     self.directory.as_deref(),
                     id,
                 )
-            });
+                .await
+            }
+            _ => false,
+        };
         let session = match session.filter(|_| carried) {
             Some(id) => Some(Session {
                 id: id.to_string(),
@@ -251,7 +253,8 @@ pub async fn opening(
             (left, to.id),
             directory,
             &previous.id,
-        );
+        )
+        .await;
     if carried {
         resolved.backend = resumed(
             std::mem::replace(&mut resolved.backend, LlmBackend::Http),
@@ -320,8 +323,9 @@ fn instruction() -> Entry {
 
 /// Moves the session `resolved` is about to resume to where its agent will look for it from the
 /// directory it runs in, since the chat may have started somewhere else before. One that cannot
-/// be moved is left for the agent to refuse, and the turn then replays the chat.
-pub fn settle(config: &Config, organization: Uuid, resolved: &Resolved) {
+/// be moved is left for the agent to refuse, and the turn then replays the chat. The move runs on
+/// a blocking thread, off the runtime.
+pub async fn settle(config: &Config, organization: Uuid, resolved: &Resolved) {
     let (Some(login), LlmBackend::Cli { agent, settings }) = (&resolved.login, &resolved.backend)
     else {
         return;
@@ -332,17 +336,29 @@ pub fn settle(config: &Config, organization: Uuid, resolved: &Resolved) {
     if !session.resume {
         return;
     }
+    let Some(kind) = bridged(*agent) else {
+        tracing::warn!(%agent, "The agent's sessions cannot be moved");
+        return;
+    };
     let home = config.agents.login_home(organization, *agent, login.id);
-    if let Err(error) = sessions::relocate(&home, *agent, work, &session.id) {
-        tracing::info!(%error, "The agent session cannot be moved to the chat's directory");
+    let work = work.clone();
+    let session = abnegate_agent_cli::Session::resumed(session.id.clone());
+    match tokio::task::spawn_blocking(move || session.relocate(kind, &home, &work)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::info!(%error, "The agent session cannot be moved to the chat's directory");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Moving the agent session to the chat's directory did not finish");
+        }
     }
 }
 
 /// Copies session `id`'s file from login `from`'s home into login `to`'s, both `agent`'s logins
 /// of `organization`, to where `agent` looks for it from `directory`, or from the organization's
-/// working directory when the chat has none of its own. False when it cannot, and the turn
-/// replays instead.
-fn carry(
+/// working directory when the chat has none of its own. False when it cannot, whatever the
+/// reason, and the turn replays instead. The copy runs on a blocking thread, off the runtime.
+async fn carry(
     config: &Config,
     organization: Uuid,
     agent: AgentKind,
@@ -350,32 +366,43 @@ fn carry(
     directory: Option<&Path>,
     id: &str,
 ) -> bool {
-    let home = match config.agents.create_login_home(organization, agent, to) {
-        Ok(home) => home,
-        Err(error) => {
-            tracing::warn!(login = %to, %error, "Could not prepare the login's home for a carried session");
-            return false;
-        }
+    let Some(kind) = bridged(agent) else {
+        tracing::warn!(%agent, "The agent's sessions cannot be carried; replaying the chat instead");
+        return false;
     };
-    match sessions::carry(
-        &config.agents.login_home(organization, agent, from),
-        &home,
-        agent,
-        &directory.map_or_else(
-            || config.agents.work(organization, agent),
-            Path::to_path_buf,
-        ),
-        id,
-    ) {
-        Ok(carried) => {
+    let agents = config.agents.clone();
+    let work = directory.map_or_else(|| agents.work(organization, agent), Path::to_path_buf);
+    let left = agents.login_home(organization, agent, from);
+    let session = abnegate_agent_cli::Session::resumed(id);
+    let copied = tokio::task::spawn_blocking(move || {
+        agents
+            .create_login_home(organization, agent, to)
+            .map(|home| session.carry(kind, &left, &home, &work))
+    })
+    .await;
+    match copied {
+        Ok(Ok(Ok(carried))) => {
             tracing::debug!(path = %carried.path.display(), bytes = carried.bytes, "Carried the agent session to the next login");
             true
         }
-        Err(error) => {
+        Ok(Ok(Err(error))) => {
             tracing::info!(%error, "The agent session cannot be carried; replaying the chat instead");
             false
         }
+        Ok(Err(error)) => {
+            tracing::warn!(login = %to, %error, "Could not prepare the login's home for a carried session");
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Carrying the agent session did not finish; replaying the chat instead");
+            false
+        }
     }
+}
+
+/// `agent` as abnegate-agent-cli names it.
+fn bridged(agent: AgentKind) -> Option<abnegate_agent_cli::AgentKind> {
+    abnegate_agent_cli::AgentKind::named(agent.as_str())
 }
 
 /// `backend` resuming `session` in place of the one it was given.
@@ -429,8 +456,11 @@ fn standing(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
+    use abnegate_agent_cli::SessionError;
     use abnegate_agent_cli::login::claude::Tokens;
     use abnegate_llm::Limit;
     use abnegate_secret::SecretValue;
@@ -457,6 +487,10 @@ mod tests {
     const TRANSCRIPT: &[u8] = b"{\"type\":\"user\",\"message\":\"Name three rivers.\"}\n";
     const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
     const CODEX_HOME: &str = "CODEX_HOME";
+    const ESCAPE: &str = "../escape";
+    const STAGING: &str = ".carrying-";
+    const READ_ONLY: u32 = 0o500;
+    const PRIVATE: u32 = 0o700;
 
     fn whole() -> RunContext {
         RunContext::from_messages(vec![
@@ -488,6 +522,46 @@ mod tests {
             agent,
             label: label.to_string(),
         }
+    }
+
+    /// A config whose agent homes live under `state`, for tests that need no database.
+    fn configured(state: &Path) -> Config {
+        Config {
+            agents: AgentConfig {
+                state: state.to_path_buf(),
+                ..crate::state::test_agents()
+            },
+            ..crate::state::test_config()
+        }
+    }
+
+    /// Writes claude session `id`'s file into `home`, in the folder claude keeps for turns run in
+    /// `work`.
+    fn transcript(home: &Path, work: &Path, id: &str) -> PathBuf {
+        let path = home
+            .join("projects")
+            .join(abnegate_agent_cli::Session::project(work))
+            .join(format!("{id}.jsonl"));
+        fs::create_dir_all(path.parent().expect("a project folder")).expect("the folder");
+        fs::write(&path, TRANSCRIPT).expect("the session file");
+        path
+    }
+
+    /// Every file under `root` a carry stages a session in before it takes its place.
+    fn staged(root: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(root) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .flat_map(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => staged(&entry.path()),
+                _ if entry.file_name().to_string_lossy().starts_with(STAGING) => {
+                    vec![entry.path()]
+                }
+                _ => Vec::new(),
+            })
+            .collect()
     }
 
     fn cli(backend: &LlmBackend) -> (AgentKind, &CliSettings) {
@@ -782,7 +856,7 @@ mod tests {
             let directory = fs::canonicalize(directory).expect("the directory");
             let path = home
                 .join("projects")
-                .join(sessions::sanitized(&directory))
+                .join(abnegate_agent_cli::Session::project(&directory))
                 .join(format!("{id}.jsonl"));
             fs::create_dir_all(path.parent().expect("a project folder")).expect("the folder");
             fs::write(&path, b"{}\n").expect("the session file");
@@ -799,14 +873,20 @@ mod tests {
             let work = fs::canonicalize(self.work(login.agent)).expect("the working directory");
             let path = home
                 .join("projects")
-                .join(sessions::sanitized(&work))
+                .join(abnegate_agent_cli::Session::project(&work))
                 .join(format!("{id}.jsonl"));
             fs::create_dir_all(path.parent().expect("a project folder")).expect("the folder");
             fs::write(path, TRANSCRIPT).expect("the session file");
         }
 
         fn carried(&self, login: &LoginIdentity, id: &str) -> bool {
-            sessions::locate(&self.home(login), login.agent, &self.work(login.agent), id).is_some()
+            abnegate_agent_cli::Session::resumed(id)
+                .locate(
+                    bridged(login.agent).expect("an agent abnegate-agent-cli runs"),
+                    &self.home(login),
+                    &self.work(login.agent),
+                )
+                .is_some()
         }
 
         async fn exhausted_until(&self, login: &LoginIdentity) -> Option<DateTime<Utc>> {
@@ -1011,12 +1091,13 @@ mod tests {
         let fixture = Fixture::new().await;
         let login = fixture.claude("a@example.com").await;
         fixture.session(&login, SESSION);
-        let left = fixture
-            .home(&login)
-            .join("projects")
-            .join(sessions::sanitized(
-                &fs::canonicalize(fixture.work(AgentKind::Claude)).expect("the working directory"),
-            ));
+        let left =
+            fixture
+                .home(&login)
+                .join("projects")
+                .join(abnegate_agent_cli::Session::project(
+                    &fixture.work(AgentKind::Claude),
+                ));
         let project = TempDir::new().expect("a project folder");
         let chosen: Chosen = router::pick(
             &fixture.state,
@@ -1041,17 +1122,167 @@ mod tests {
         .expect("a backend");
         resolved.backend = backend::in_directory(resolved.backend, project.path());
 
-        settle(fixture.state.config(), fixture.organization, &resolved);
-        let found = sessions::locate(
+        settle(fixture.state.config(), fixture.organization, &resolved).await;
+        let found = abnegate_agent_cli::Session::resumed(SESSION).locate(
+            abnegate_agent_cli::AgentKind::Claude,
             &fixture.home(&login),
-            AgentKind::Claude,
             project.path(),
-            SESSION,
         );
         fixture.remove().await;
 
         assert!(found.is_some(), "the agent would not find its session");
         assert!(!left.join(format!("{SESSION}.jsonl")).exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn settling_a_handover_relocates_off_the_runtime() {
+        let agents = TempDir::new().expect("an agent state root");
+        let config = configured(agents.path());
+        let organization = Uuid::new_v4();
+        let login = identity(AgentKind::Claude, "a@example.com");
+        let home = config
+            .agents
+            .create_login_home(organization, AgentKind::Claude, login.id)
+            .expect("the login's home");
+        let left = transcript(
+            &home,
+            &config.agents.work(organization, AgentKind::Claude),
+            SESSION,
+        );
+        let project = TempDir::new().expect("a project folder");
+        let resolved = Resolved {
+            backend: LlmBackend::cli(
+                AgentKind::Claude,
+                CliSettings::default()
+                    .with_working_directory(project.path())
+                    .with_session(Session {
+                        id: SESSION.into(),
+                        resume: true,
+                    }),
+            ),
+            login: Some(login),
+        };
+        let elsewhere = AtomicBool::new(false);
+
+        let (overlapped, ()) = tokio::join!(
+            async {
+                settle(&config, organization, &resolved).await;
+                elsewhere.load(Ordering::SeqCst)
+            },
+            async { elsewhere.store(true, Ordering::SeqCst) },
+        );
+
+        assert!(
+            overlapped,
+            "the runtime's only thread was held while the session moved"
+        );
+        assert!(
+            abnegate_agent_cli::Session::resumed(SESSION)
+                .locate(abnegate_agent_cli::AgentKind::Claude, &home, project.path())
+                .is_some(),
+            "the agent would not find its session"
+        );
+        assert!(!left.exists(), "one session stays in one place");
+    }
+
+    #[tokio::test]
+    async fn a_carry_leaves_no_staging_file_behind() {
+        let agents = TempDir::new().expect("an agent state root");
+        let config = configured(agents.path());
+        let organization = Uuid::new_v4();
+        let from = Uuid::new_v4();
+        let work = config.agents.work(organization, AgentKind::Claude);
+        let home = config
+            .agents
+            .create_login_home(organization, AgentKind::Claude, from)
+            .expect("the login's home");
+        transcript(&home, &work, SESSION);
+        let folder = |login: Uuid| {
+            config
+                .agents
+                .create_login_home(organization, AgentKind::Claude, login)
+                .expect("the login's home")
+                .join("projects")
+                .join(abnegate_agent_cli::Session::project(&work))
+        };
+        let (landed, sealed, occupied) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let read_only = folder(sealed);
+        fs::create_dir_all(&read_only).expect("the read-only folder");
+        fs::set_permissions(&read_only, fs::Permissions::from_mode(READ_ONLY))
+            .expect("the folder made read-only");
+        fs::create_dir_all(
+            folder(occupied)
+                .join(format!("{SESSION}.jsonl"))
+                .join("held"),
+        )
+        .expect("a directory where the session goes");
+        let into = |to: Uuid| {
+            carry(
+                &config,
+                organization,
+                AgentKind::Claude,
+                (from, to),
+                None,
+                SESSION,
+            )
+        };
+
+        let carried = into(landed).await;
+        let refused = into(sealed).await;
+        let blocked = into(occupied).await;
+        fs::set_permissions(&read_only, fs::Permissions::from_mode(PRIVATE))
+            .expect("the folder writable again");
+
+        assert!(carried, "the session was not carried");
+        assert!(!refused, "a session was carried into a read-only folder");
+        assert!(!blocked, "a session replaced a directory");
+        assert_eq!(
+            staged(agents.path()),
+            Vec::<PathBuf>::new(),
+            "a carry left its staging file behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_session_id_starts_the_chat_fresh() {
+        let fixture = Fixture::new().await;
+        let from = fixture.claude("a@example.com").await;
+        let to = fixture.claude("b@example.com").await;
+        fixture.session(&from, SESSION);
+        let projects = fixture.home(&from).join("projects");
+        fs::write(projects.join("escape.jsonl"), TRANSCRIPT).expect("a file the id names");
+        let refused = abnegate_agent_cli::Session::resumed(ESCAPE).carry(
+            abnegate_agent_cli::AgentKind::Claude,
+            &fixture.home(&from),
+            &fixture.home(&to),
+            &fixture.work(AgentKind::Claude),
+        );
+        let mut handover = fixture.handover(&from);
+
+        let switch = handover
+            .next(&fixture.state, &limit(false), Some(ESCAPE), TIMEOUT)
+            .await;
+        let escaped = fixture
+            .home(&to)
+            .join("projects")
+            .join("escape.jsonl")
+            .exists();
+        fixture.remove().await;
+
+        assert!(
+            matches!(&refused, Err(SessionError::Invalid { id, .. }) if id == ESCAPE),
+            "{refused:?}"
+        );
+        let switch = switch.expect("the other claude login takes the turn over");
+        assert_eq!(switch.to, to);
+        assert!(!switch.carried);
+        assert!(
+            !escaped,
+            "the id carried a file outside the session folders"
+        );
+        let fresh = switch.session().expect("claude is pinned to a fresh id");
+        assert!(!fresh.resume);
+        assert_ne!(fresh.id, ESCAPE);
     }
 
     #[tokio::test]

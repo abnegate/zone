@@ -3299,7 +3299,7 @@ async fn prepare_chat(
         None => None,
     };
     if let Some(organization) = organization {
-        handover::settle(state.config(), organization, &resolved);
+        handover::settle(state.config(), organization, &resolved).await;
     }
     let current = resolved.login.clone();
     let chosen = route.chosen().is_some();
@@ -5925,7 +5925,7 @@ cat 'DIR/reply.jsonl'
                 fn transcript(&self, directory: &std::path::Path, id: &str) -> std::path::PathBuf {
                     self.home()
                         .join("projects")
-                        .join(crate::services::agent::sessions::sanitized(directory))
+                        .join(abnegate_agent_cli::Session::project(directory))
                         .join(format!("{id}.jsonl"))
                 }
 
