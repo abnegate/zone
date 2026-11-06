@@ -68,12 +68,13 @@ dependencies = [
 
 [[package]]
 name = "abnegate-http"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4d6865595b212641758029d3dd971b7752a279ddd48984cffbd4fd90d188cbb"
+checksum = "528c5a149eda5cc0c9b410db3ebf405d73822a6e4cba746838c5f3188f18d65d"
 dependencies = [
  "async-trait",
  "dashmap",
+ "httpdate",
  "rand 0.10.2",
  "reqwest 0.13.5",
  "serde",
