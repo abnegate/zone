@@ -1,0 +1,231 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "description": "The latest series of Code-Specific Qwen models, with significant improvements in code generation, code reasoning, and code fixing.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.5B–32B"
+          },
+          "downloads": 7400000,
+          "name": "qwen2.5-coder",
+          "size": 4683088942,
+          "sizes": [
+            {
+              "label": "0.5B",
+              "name": "qwen2.5-coder:0.5b",
+              "size": 397809546
+            },
+            {
+              "label": "1.5B",
+              "name": "qwen2.5-coder:1.5b"
+            },
+            {
+              "label": "3B",
+              "name": "qwen2.5-coder:3b"
+            },
+            {
+              "label": "7B",
+              "name": "qwen2.5-coder:7b",
+              "size": 4683088942
+            },
+            {
+              "label": "14B",
+              "name": "qwen2.5-coder:14b"
+            },
+            {
+              "label": "32B",
+              "name": "qwen2.5-coder:32b",
+              "size": 19851337866
+            }
+          ],
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/library/qwen2.5-coder",
+          "use_cases": [
+            "Tool use",
+            "Reasoning",
+            "Coding"
+          ]
+        },
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "description": "A 7B coding assistant tuned for completion and refactoring.",
+          "details": {
+            "format": "gguf",
+            "parameter_size": "7B"
+          },
+          "downloads": 12300,
+          "name": "jmorgan/coder",
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/jmorgan/coder",
+          "use_cases": [
+            "Tool use",
+            "Coding"
+          ]
+        },
+        {
+          "description": "A large language model that can use text prompts to generate and discuss code.",
+          "details": {
+            "family": "codellama",
+            "format": "gguf",
+            "parameter_size": "7B–70B"
+          },
+          "downloads": 3400000,
+          "name": "codellama",
+          "size": 3825818860,
+          "sizes": [
+            {
+              "label": "7B",
+              "name": "codellama:7b",
+              "size": 3825818860
+            },
+            {
+              "label": "13B",
+              "name": "codellama:13b",
+              "size": 7365972755
+            },
+            {
+              "label": "34B",
+              "name": "codellama:34b"
+            },
+            {
+              "label": "70B",
+              "name": "codellama:70b"
+            }
+          ],
+          "url": "https://ollama.com/library/codellama",
+          "use_cases": [
+            "Coding"
+          ]
+        }
+      ],
+      "next_cursor": null
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "description": "The latest series of Code-Specific Qwen models, with significant improvements in code generation, code reasoning, and code fixing.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.5B–32B"
+          },
+          "downloads": 7400000,
+          "name": "qwen2.5-coder",
+          "size": 4683088942,
+          "sizes": [
+            {
+              "label": "0.5B",
+              "name": "qwen2.5-coder:0.5b",
+              "size": 397809546
+            },
+            {
+              "label": "1.5B",
+              "name": "qwen2.5-coder:1.5b"
+            },
+            {
+              "label": "3B",
+              "name": "qwen2.5-coder:3b"
+            },
+            {
+              "label": "7B",
+              "name": "qwen2.5-coder:7b",
+              "size": 4683088942
+            },
+            {
+              "label": "14B",
+              "name": "qwen2.5-coder:14b"
+            },
+            {
+              "label": "32B",
+              "name": "qwen2.5-coder:32b",
+              "size": 19851337866
+            }
+          ],
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/library/qwen2.5-coder",
+          "use_cases": [
+            "Tool use",
+            "Reasoning",
+            "Coding"
+          ]
+        },
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "description": "A 7B coding assistant tuned for completion and refactoring.",
+          "details": {
+            "format": "gguf",
+            "parameter_size": "7B"
+          },
+          "downloads": 12300,
+          "name": "jmorgan/coder",
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/jmorgan/coder",
+          "use_cases": [
+            "Tool use",
+            "Coding"
+          ]
+        },
+        {
+          "description": "A large language model that can use text prompts to generate and discuss code.",
+          "details": {
+            "family": "codellama",
+            "format": "gguf",
+            "parameter_size": "7B–70B"
+          },
+          "downloads": 3400000,
+          "name": "codellama",
+          "size": 3825818860,
+          "sizes": [
+            {
+              "label": "7B",
+              "name": "codellama:7b",
+              "size": 3825818860
+            },
+            {
+              "label": "13B",
+              "name": "codellama:13b",
+              "size": 7365972755
+            },
+            {
+              "label": "34B",
+              "name": "codellama:34b"
+            },
+            {
+              "label": "70B",
+              "name": "codellama:70b"
+            }
+          ],
+          "url": "https://ollama.com/library/codellama",
+          "use_cases": [
+            "Coding"
+          ]
+        }
+      ],
+      "next_cursor": null
+    },
+    "status": 200
+  }
+}

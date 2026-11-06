@@ -1,0 +1,119 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "author": "TheBloke",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by TheBloke. Llama architecture with 4K context.",
+          "details": {
+            "context_length": 4096,
+            "family": "llama",
+            "format": "gguf",
+            "license": "llama2",
+            "parameter_size": "7B"
+          },
+          "digest": "00000000000000000000000030afb18dfd117a16",
+          "downloads": 152004,
+          "likes": 466,
+          "modified_at": "2023-10-14T21:36:33.000Z",
+          "name": "TheBloke/Llama-2-7B-Chat-GGUF",
+          "size": 3825807040,
+          "sizes": [
+            {
+              "label": "Q4_0",
+              "name": "TheBloke/Llama-2-7B-Chat-GGUF:Q4_0",
+              "size": 3825807040
+            },
+            {
+              "label": "Q5_K_M",
+              "name": "TheBloke/Llama-2-7B-Chat-GGUF:Q5_K_M",
+              "size": 4783156928
+            },
+            {
+              "label": "Q8_0",
+              "name": "TheBloke/Llama-2-7B-Chat-GGUF:Q8_0",
+              "size": 7161089728
+            }
+          ],
+          "tags": [
+            "gguf",
+            "llama",
+            "facebook",
+            "meta",
+            "pytorch",
+            "llama-2",
+            "text-generation",
+            "en"
+          ],
+          "url": "https://huggingface.co/TheBloke/Llama-2-7B-Chat-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": null
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "author": "TheBloke",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by TheBloke. Llama architecture with 4K context.",
+          "details": {
+            "context_length": 4096,
+            "family": "llama",
+            "format": "gguf",
+            "license": "llama2",
+            "parameter_size": "7B"
+          },
+          "digest": "00000000000000000000000030afb18dfd117a16",
+          "downloads": 152004,
+          "likes": 466,
+          "modified_at": "2023-10-14T21:36:33.000Z",
+          "name": "TheBloke/Llama-2-7B-Chat-GGUF",
+          "size": 3825807040,
+          "sizes": [
+            {
+              "label": "Q4_0",
+              "name": "TheBloke/Llama-2-7B-Chat-GGUF:Q4_0",
+              "size": 3825807040
+            },
+            {
+              "label": "Q5_K_M",
+              "name": "TheBloke/Llama-2-7B-Chat-GGUF:Q5_K_M",
+              "size": 4783156928
+            },
+            {
+              "label": "Q8_0",
+              "name": "TheBloke/Llama-2-7B-Chat-GGUF:Q8_0",
+              "size": 7161089728
+            }
+          ],
+          "tags": [
+            "gguf",
+            "llama",
+            "facebook",
+            "meta",
+            "pytorch",
+            "llama-2",
+            "text-generation",
+            "en"
+          ],
+          "url": "https://huggingface.co/TheBloke/Llama-2-7B-Chat-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": null
+    },
+    "status": 200
+  }
+}

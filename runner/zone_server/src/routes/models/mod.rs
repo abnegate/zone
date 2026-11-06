@@ -2,9 +2,12 @@
 //!
 //! Handles listing, pulling, and deleting models from various sources.
 
+mod catalog_endpoints;
 mod method;
 mod providers;
 mod setup;
+#[cfg(test)]
+mod snapshots;
 mod subject;
 mod train_base;
 mod train_form;

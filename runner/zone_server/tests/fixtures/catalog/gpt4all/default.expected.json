@@ -1,0 +1,263 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "description": "Fast responses Chat based model Accepts system prompts in Llama 3 format Trained by Meta License: Meta Llama 3 Community License",
+          "details": {
+            "family": "LLaMA3",
+            "format": "gguf",
+            "parameter_size": "8B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 8
+          },
+          "name": "Llama 3 8B Instruct",
+          "size": 4661724384,
+          "url": "https://gpt4all.io/models/gguf/Meta-Llama-3-8B-Instruct.Q4_0.gguf",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Good overall fast chat model Fast responses Chat based model Accepts system prompts in ChatML format Trained by Mistral AI Finetuned by Nous Research on the OpenHermes-2.5 dataset Licensed for commercial use",
+          "details": {
+            "family": "Mistral",
+            "format": "gguf",
+            "parameter_size": "7B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 8
+          },
+          "name": "Nous Hermes 2 Mistral DPO",
+          "size": 4108928000,
+          "url": "https://huggingface.co/NousResearch/Nous-Hermes-2-Mistral-7B-DPO-GGUF/resolve/main/Nous-Hermes-2-Mistral-7B-DPO.Q4_0.gguf",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Strong overall fast chat model Fast responses Chat based model",
+          "details": {
+            "family": "Mistral",
+            "format": "gguf",
+            "parameter_size": "7B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 8
+          },
+          "name": "Mistral OpenOrca",
+          "size": 4108928128,
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Fast responses Instruct model Multilingual dialogue use",
+          "details": {
+            "family": "LLaMA3",
+            "format": "gguf",
+            "parameter_size": "1B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 2
+          },
+          "name": "Llama 3.2 1B Instruct",
+          "size": 773025920,
+          "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_0.gguf",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Instruction based Trained by Microsoft Cannot be used commercially",
+          "details": {
+            "family": "LLaMA2",
+            "format": "gguf",
+            "parameter_size": "13B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 16
+          },
+          "name": "Orca 2 (Medium)",
+          "size": 7365834624,
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Very fast responses Chat based model Trained by Microsoft",
+          "details": {
+            "family": "Phi-3",
+            "format": "gguf",
+            "parameter_size": "4B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 4
+          },
+          "name": "Phi-3 Mini Instruct",
+          "size": 2176181568,
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "LocalDocs text embeddings model For use with LocalDocs feature Used for retrieval augmented generation (RAG)",
+          "details": {
+            "family": "Bert",
+            "format": "gguf",
+            "parameter_size": "40 million",
+            "quantization_level": "F16",
+            "ram_required_gb": 1
+          },
+          "name": "SBert",
+          "size": 45949216,
+          "use_cases": [
+            "Embeddings"
+          ]
+        },
+        {
+          "description": "Tool use Long context",
+          "details": {
+            "family": "LLaMA3",
+            "format": "gguf",
+            "parameter_size": "70B",
+            "quantization_level": "Q4_0"
+          },
+          "name": "Llama 3.1 70B Instruct",
+          "size": 40122000000,
+          "use_cases": [
+            "Tool use",
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": null
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "description": "Fast responses Chat based model Accepts system prompts in Llama 3 format Trained by Meta License: Meta Llama 3 Community License",
+          "details": {
+            "family": "LLaMA3",
+            "format": "gguf",
+            "parameter_size": "8B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 8
+          },
+          "name": "Llama 3 8B Instruct",
+          "size": 4661724384,
+          "url": "https://gpt4all.io/models/gguf/Meta-Llama-3-8B-Instruct.Q4_0.gguf",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Good overall fast chat model Fast responses Chat based model Accepts system prompts in ChatML format Trained by Mistral AI Finetuned by Nous Research on the OpenHermes-2.5 dataset Licensed for commercial use",
+          "details": {
+            "family": "Mistral",
+            "format": "gguf",
+            "parameter_size": "7B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 8
+          },
+          "name": "Nous Hermes 2 Mistral DPO",
+          "size": 4108928000,
+          "url": "https://huggingface.co/NousResearch/Nous-Hermes-2-Mistral-7B-DPO-GGUF/resolve/main/Nous-Hermes-2-Mistral-7B-DPO.Q4_0.gguf",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Strong overall fast chat model Fast responses Chat based model",
+          "details": {
+            "family": "Mistral",
+            "format": "gguf",
+            "parameter_size": "7B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 8
+          },
+          "name": "Mistral OpenOrca",
+          "size": 4108928128,
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Fast responses Instruct model Multilingual dialogue use",
+          "details": {
+            "family": "LLaMA3",
+            "format": "gguf",
+            "parameter_size": "1B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 2
+          },
+          "name": "Llama 3.2 1B Instruct",
+          "size": 773025920,
+          "url": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_0.gguf",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Instruction based Trained by Microsoft Cannot be used commercially",
+          "details": {
+            "family": "LLaMA2",
+            "format": "gguf",
+            "parameter_size": "13B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 16
+          },
+          "name": "Orca 2 (Medium)",
+          "size": 7365834624,
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Very fast responses Chat based model Trained by Microsoft",
+          "details": {
+            "family": "Phi-3",
+            "format": "gguf",
+            "parameter_size": "4B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 4
+          },
+          "name": "Phi-3 Mini Instruct",
+          "size": 2176181568,
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "LocalDocs text embeddings model For use with LocalDocs feature Used for retrieval augmented generation (RAG)",
+          "details": {
+            "family": "Bert",
+            "format": "gguf",
+            "parameter_size": "40 million",
+            "quantization_level": "F16",
+            "ram_required_gb": 1
+          },
+          "name": "SBert",
+          "size": 45949216,
+          "use_cases": [
+            "Embeddings"
+          ]
+        },
+        {
+          "description": "Tool use Long context",
+          "details": {
+            "family": "LLaMA3",
+            "format": "gguf",
+            "parameter_size": "70B",
+            "quantization_level": "Q4_0"
+          },
+          "name": "Llama 3.1 70B Instruct",
+          "size": 40122000000,
+          "use_cases": [
+            "Tool use",
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": null
+    },
+    "status": 200
+  }
+}

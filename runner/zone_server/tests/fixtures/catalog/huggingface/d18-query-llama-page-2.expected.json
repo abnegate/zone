@@ -1,0 +1,455 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "author": "XLabs-AI",
+          "capabilities": [
+            "image_generation",
+            "image_input"
+          ],
+          "description": "Text To Image GGUF model by XLabs-AI.",
+          "details": {
+            "format": "lora",
+            "license": "other"
+          },
+          "digest": "0000000000000000000000004670ef961b8ff3fc",
+          "downloads": 18220,
+          "likes": 1103,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "XLabs-AI/flux-RealismLora",
+          "size": 22417000,
+          "sizes": [
+            {
+              "label": "lora.safetensors",
+              "name": "XLabs-AI/flux-RealismLora:lora.safetensors",
+              "size": 22416552
+            },
+            {
+              "label": "lora_comfy.safetensors",
+              "name": "XLabs-AI/flux-RealismLora:lora_comfy.safetensors",
+              "size": 22417000
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "lora",
+            "Stable Diffusion",
+            "image-generation",
+            "Flux",
+            "text-to-image",
+            "en"
+          ],
+          "url": "https://huggingface.co/XLabs-AI/flux-RealismLora",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        },
+        {
+          "author": "Shakker-Labs",
+          "capabilities": [
+            "text",
+            "image_generation"
+          ],
+          "description": "Text To Image GGUF model by Shakker-Labs.",
+          "details": {
+            "format": "lora",
+            "license": "other"
+          },
+          "digest": "00000000000000000000000056855bc0ede7010c",
+          "downloads": 9870,
+          "likes": 412,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur",
+          "size": 685290000,
+          "sizes": [
+            {
+              "label": "FLUX-dev-lora-AntiBlur.safetensors",
+              "name": "Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur:FLUX-dev-lora-AntiBlur.safetensors",
+              "size": 685290000
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "text-to-image",
+            "stable-diffusion",
+            "image-generation",
+            "flux",
+            "safetensors",
+            "en"
+          ],
+          "url": "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        },
+        {
+          "author": "hugovntr",
+          "capabilities": [
+            "image_generation",
+            "image_input"
+          ],
+          "description": "Text To Image GGUF model by hugovntr.",
+          "details": {
+            "format": "lora",
+            "license": "apache-2.0"
+          },
+          "digest": "0000000000000000000000005d79e5a57f81c3b9",
+          "downloads": 2260,
+          "likes": 46,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "hugovntr/flux-schnell-realism",
+          "size": 171969408,
+          "sizes": [
+            {
+              "label": "schnell-realism_v2.3.safetensors",
+              "name": "hugovntr/flux-schnell-realism:schnell-realism_v2.3.safetensors",
+              "size": 171969408
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "flux",
+            "text-to-image",
+            "lora"
+          ],
+          "url": "https://huggingface.co/hugovntr/flux-schnell-realism",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        },
+        {
+          "author": "TheBloke",
+          "description": "GGUF model by TheBloke. Llama architecture with 2K context.",
+          "details": {
+            "context_length": 2048,
+            "family": "llama",
+            "format": "gguf",
+            "license": "apache-2.0",
+            "parameter_size": "1.1B"
+          },
+          "digest": "0000000000000000000000005e5fdc6cd51304bf",
+          "downloads": 61277,
+          "likes": 177,
+          "modified_at": "2023-12-31T13:00:00.000Z",
+          "name": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "size": 668788096,
+          "tags": [
+            "gguf",
+            "llama",
+            "en",
+            "dataset:cerebras/SlimPajama-627B"
+          ],
+          "url": "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "author": "microsoft",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by microsoft. Phi3 architecture with 4K context.",
+          "details": {
+            "context_length": 4096,
+            "family": "phi3",
+            "format": "gguf",
+            "license": "mit"
+          },
+          "digest": "0000000000000000000000001a3ec27c73a63054",
+          "downloads": 54210,
+          "likes": 495,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "microsoft/Phi-3-mini-4k-instruct-gguf",
+          "size": 2393231072,
+          "sizes": [
+            {
+              "label": "Phi-3-mini-4k-instruct-fp16",
+              "name": "microsoft/Phi-3-mini-4k-instruct-gguf:Phi-3-mini-4k-instruct-fp16",
+              "size": 7643295936
+            },
+            {
+              "label": "Phi-3-mini-4k-instruct-q4",
+              "name": "microsoft/Phi-3-mini-4k-instruct-gguf:Phi-3-mini-4k-instruct-q4",
+              "size": 2393231072
+            }
+          ],
+          "tags": [
+            "gguf",
+            "nlp",
+            "code",
+            "text-generation",
+            "en",
+            "conversational"
+          ],
+          "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf",
+          "use_cases": [
+            "Chat",
+            "Coding"
+          ]
+        },
+        {
+          "author": "google",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by google. Gemma2 architecture with 8K context.",
+          "details": {
+            "context_length": 8192,
+            "family": "gemma2",
+            "format": "gguf",
+            "license": "gemma",
+            "parameter_size": "2B"
+          },
+          "digest": "0000000000000000000000007ba8a34be191c3bb",
+          "downloads": 33005,
+          "likes": 140,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "google/gemma-2-2b-it-GGUF",
+          "size": 2778000000,
+          "tags": [
+            "gguf",
+            "conversational",
+            "text-generation"
+          ],
+          "url": "https://huggingface.co/google/gemma-2-2b-it-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": "catalog-page-3"
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "author": "XLabs-AI",
+          "capabilities": [
+            "image_generation",
+            "image_input"
+          ],
+          "description": "Text To Image GGUF model by XLabs-AI.",
+          "details": {
+            "format": "lora",
+            "license": "other"
+          },
+          "digest": "0000000000000000000000004670ef961b8ff3fc",
+          "downloads": 18220,
+          "likes": 1103,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "XLabs-AI/flux-RealismLora",
+          "size": 22417000,
+          "sizes": [
+            {
+              "label": "lora.safetensors",
+              "name": "XLabs-AI/flux-RealismLora:lora.safetensors",
+              "size": 22416552
+            },
+            {
+              "label": "lora_comfy.safetensors",
+              "name": "XLabs-AI/flux-RealismLora:lora_comfy.safetensors",
+              "size": 22417000
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "lora",
+            "Stable Diffusion",
+            "image-generation",
+            "Flux",
+            "text-to-image",
+            "en"
+          ],
+          "url": "https://huggingface.co/XLabs-AI/flux-RealismLora",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        },
+        {
+          "author": "Shakker-Labs",
+          "capabilities": [
+            "text",
+            "image_generation"
+          ],
+          "description": "Text To Image GGUF model by Shakker-Labs.",
+          "details": {
+            "format": "lora",
+            "license": "other"
+          },
+          "digest": "00000000000000000000000056855bc0ede7010c",
+          "downloads": 9870,
+          "likes": 412,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur",
+          "size": 685290000,
+          "sizes": [
+            {
+              "label": "FLUX-dev-lora-AntiBlur.safetensors",
+              "name": "Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur:FLUX-dev-lora-AntiBlur.safetensors",
+              "size": 685290000
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "text-to-image",
+            "stable-diffusion",
+            "image-generation",
+            "flux",
+            "safetensors",
+            "en"
+          ],
+          "url": "https://huggingface.co/Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        },
+        {
+          "author": "hugovntr",
+          "capabilities": [
+            "image_generation",
+            "image_input"
+          ],
+          "description": "Text To Image GGUF model by hugovntr.",
+          "details": {
+            "format": "lora",
+            "license": "apache-2.0"
+          },
+          "digest": "0000000000000000000000005d79e5a57f81c3b9",
+          "downloads": 2260,
+          "likes": 46,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "hugovntr/flux-schnell-realism",
+          "size": 171969408,
+          "sizes": [
+            {
+              "label": "schnell-realism_v2.3.safetensors",
+              "name": "hugovntr/flux-schnell-realism:schnell-realism_v2.3.safetensors",
+              "size": 171969408
+            }
+          ],
+          "tags": [
+            "diffusers",
+            "flux",
+            "text-to-image",
+            "lora"
+          ],
+          "url": "https://huggingface.co/hugovntr/flux-schnell-realism",
+          "use_cases": [
+            "Image generation",
+            "Vision"
+          ]
+        },
+        {
+          "author": "TheBloke",
+          "description": "GGUF model by TheBloke. Llama architecture with 2K context.",
+          "details": {
+            "context_length": 2048,
+            "family": "llama",
+            "format": "gguf",
+            "license": "apache-2.0",
+            "parameter_size": "1.1B"
+          },
+          "digest": "0000000000000000000000005e5fdc6cd51304bf",
+          "downloads": 61277,
+          "likes": 177,
+          "modified_at": "2023-12-31T13:00:00.000Z",
+          "name": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "size": 668788096,
+          "tags": [
+            "gguf",
+            "llama",
+            "en",
+            "dataset:cerebras/SlimPajama-627B"
+          ],
+          "url": "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "author": "microsoft",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by microsoft. Phi3 architecture with 4K context.",
+          "details": {
+            "context_length": 4096,
+            "family": "phi3",
+            "format": "gguf",
+            "license": "mit"
+          },
+          "digest": "0000000000000000000000001a3ec27c73a63054",
+          "downloads": 54210,
+          "likes": 495,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "microsoft/Phi-3-mini-4k-instruct-gguf",
+          "size": 2393231072,
+          "sizes": [
+            {
+              "label": "Phi-3-mini-4k-instruct-fp16",
+              "name": "microsoft/Phi-3-mini-4k-instruct-gguf:Phi-3-mini-4k-instruct-fp16",
+              "size": 7643295936
+            },
+            {
+              "label": "Phi-3-mini-4k-instruct-q4",
+              "name": "microsoft/Phi-3-mini-4k-instruct-gguf:Phi-3-mini-4k-instruct-q4",
+              "size": 2393231072
+            }
+          ],
+          "tags": [
+            "gguf",
+            "nlp",
+            "code",
+            "text-generation",
+            "en",
+            "conversational"
+          ],
+          "url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf",
+          "use_cases": [
+            "Chat",
+            "Coding"
+          ]
+        },
+        {
+          "author": "google",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by google. Gemma2 architecture with 8K context.",
+          "details": {
+            "context_length": 8192,
+            "family": "gemma2",
+            "format": "gguf",
+            "license": "gemma",
+            "parameter_size": "2B"
+          },
+          "digest": "0000000000000000000000007ba8a34be191c3bb",
+          "downloads": 33005,
+          "likes": 140,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "google/gemma-2-2b-it-GGUF",
+          "size": 2778000000,
+          "tags": [
+            "gguf",
+            "conversational",
+            "text-generation"
+          ],
+          "url": "https://huggingface.co/google/gemma-2-2b-it-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": "catalog-page-3"
+    },
+    "status": 200
+  }
+}

@@ -1,0 +1,751 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.6B–235B"
+          },
+          "downloads": 5200000,
+          "name": "qwen3",
+          "size": 5225389443,
+          "sizes": [
+            {
+              "label": "0.6B",
+              "name": "qwen3:0.6b",
+              "size": 522655498
+            },
+            {
+              "label": "1.7B",
+              "name": "qwen3:1.7b",
+              "size": 1359284234
+            },
+            {
+              "label": "4B",
+              "name": "qwen3:4b",
+              "size": 2497283178
+            },
+            {
+              "label": "8B",
+              "name": "qwen3:8b",
+              "size": 5225378105
+            },
+            {
+              "label": "14B",
+              "name": "qwen3:14b",
+              "size": 9276192778
+            },
+            {
+              "label": "30B",
+              "name": "qwen3:30b"
+            },
+            {
+              "label": "32B",
+              "name": "qwen3:32b",
+              "size": 20201255946
+            },
+            {
+              "label": "235B",
+              "name": "qwen3:235b"
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking"
+          ],
+          "url": "https://ollama.com/library/qwen3",
+          "use_cases": [
+            "Tool use",
+            "Reasoning"
+          ]
+        },
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "description": "Meta's Llama 3.2 goes small with 1B and 3B models.",
+          "details": {
+            "family": "llama",
+            "format": "gguf",
+            "parameter_size": "1B · 3B"
+          },
+          "downloads": 31400000,
+          "name": "llama3.2",
+          "size": 2019392532,
+          "sizes": [
+            {
+              "label": "1B",
+              "name": "llama3.2:1b",
+              "size": 1321091828
+            },
+            {
+              "label": "3B",
+              "name": "llama3.2:3b",
+              "size": 2019386516
+            }
+          ],
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/library/llama3.2",
+          "use_cases": [
+            "Tool use"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "The current, most capable model that runs on a single GPU.",
+          "details": {
+            "family": "gemma",
+            "format": "gguf",
+            "parameter_size": "1B–27B"
+          },
+          "downloads": 12900000,
+          "name": "gemma3",
+          "size": 3338810594,
+          "sizes": [
+            {
+              "label": "1B",
+              "name": "gemma3:1b",
+              "size": 815310790
+            },
+            {
+              "label": "4B",
+              "name": "gemma3:4b",
+              "size": 3338802162
+            },
+            {
+              "label": "12B",
+              "name": "gemma3:12b",
+              "size": 8149190611
+            },
+            {
+              "label": "27B",
+              "name": "gemma3:27b",
+              "size": 17396937299
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/gemma3",
+          "use_cases": [
+            "Vision"
+          ]
+        },
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "DeepSeek-R1 is a family of open reasoning models with performance approaching that of leading models.",
+          "details": {
+            "family": "deepseek",
+            "format": "gguf",
+            "parameter_size": "1.5B–671B"
+          },
+          "downloads": 61300000,
+          "name": "deepseek-r1",
+          "size": 5225376109,
+          "sizes": [
+            {
+              "label": "1.5B",
+              "name": "deepseek-r1:1.5b",
+              "size": 1117321123
+            },
+            {
+              "label": "7B",
+              "name": "deepseek-r1:7b",
+              "size": 4683073571
+            },
+            {
+              "label": "8B",
+              "name": "deepseek-r1:8b",
+              "size": 5225375044
+            },
+            {
+              "label": "14B",
+              "name": "deepseek-r1:14b"
+            },
+            {
+              "label": "32B",
+              "name": "deepseek-r1:32b"
+            },
+            {
+              "label": "70B",
+              "name": "deepseek-r1:70b",
+              "size": 42520395971
+            },
+            {
+              "label": "671B",
+              "name": "deepseek-r1:671b"
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking"
+          ],
+          "url": "https://ollama.com/library/deepseek-r1",
+          "use_cases": [
+            "Tool use",
+            "Reasoning"
+          ]
+        },
+        {
+          "capabilities": [
+            "embeddings"
+          ],
+          "description": "A high-performing open embedding model with a large token context window.",
+          "details": {
+            "family": "nomic",
+            "format": "gguf"
+          },
+          "downloads": 40100000,
+          "name": "nomic-embed-text",
+          "size": 274302030,
+          "tags": [
+            "embedding"
+          ],
+          "url": "https://ollama.com/library/nomic-embed-text",
+          "use_cases": [
+            "Embeddings"
+          ]
+        },
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "details": {
+            "family": "mistral",
+            "format": "gguf",
+            "parameter_size": "7B"
+          },
+          "downloads": 17600000,
+          "name": "mistral",
+          "size": 4372842801,
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/library/mistral",
+          "use_cases": [
+            "Tool use"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "Flagship vision-language model of Qwen and also a significant leap from the previous Qwen2-VL.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "3B–72B"
+          },
+          "downloads": 1000000,
+          "name": "qwen2.5vl",
+          "size": 5969251872,
+          "sizes": [
+            {
+              "label": "3B",
+              "name": "qwen2.5vl:3b"
+            },
+            {
+              "label": "7B",
+              "name": "qwen2.5vl:7b",
+              "size": 5969251872
+            },
+            {
+              "label": "32B",
+              "name": "qwen2.5vl:32b"
+            },
+            {
+              "label": "72B",
+              "name": "qwen2.5vl:72b",
+              "size": 48920006016
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/qwen2.5vl",
+          "use_cases": [
+            "Vision"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "LLaVA is a novel end-to-end trained large multimodal model that combines a vision encoder and Vicuna for general-purpose visual and language understanding.",
+          "details": {
+            "format": "gguf",
+            "parameter_size": "7B · 13B · 34B"
+          },
+          "downloads": 9600000,
+          "name": "llava",
+          "size": 4733350819,
+          "sizes": [
+            {
+              "label": "7B",
+              "name": "llava:7b",
+              "size": 4733350819
+            },
+            {
+              "label": "13B",
+              "name": "llava:13b",
+              "size": 8010961034
+            },
+            {
+              "label": "34B",
+              "name": "llava:34b",
+              "size": 19699000099
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/llava",
+          "use_cases": [
+            "Vision",
+            "Multimodal",
+            "Coding"
+          ]
+        },
+        {
+          "description": "Phi-4 is a 14B parameter, state-of-the-art open model from Microsoft.",
+          "details": {
+            "family": "phi",
+            "format": "gguf",
+            "parameter_size": "14B"
+          },
+          "downloads": 5800000,
+          "name": "phi4",
+          "size": 9053115548,
+          "url": "https://ollama.com/library/phi4"
+        },
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "OpenAI's open-weight models designed for powerful reasoning, agentic tasks, and versatile developer use cases.",
+          "details": {
+            "format": "gguf",
+            "parameter_size": "20B · 120B"
+          },
+          "downloads": 3100000,
+          "name": "gpt-oss",
+          "size": 13780162353,
+          "sizes": [
+            {
+              "label": "20B",
+              "name": "gpt-oss:20b",
+              "size": 13780162353
+            },
+            {
+              "label": "120B",
+              "name": "gpt-oss:120b",
+              "size": 65369826670
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking",
+            "cloud"
+          ],
+          "url": "https://ollama.com/library/gpt-oss",
+          "use_cases": [
+            "Tool use",
+            "Reasoning",
+            "Agents"
+          ]
+        }
+      ],
+      "next_cursor": null
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "Qwen3 is the latest generation of large language models in Qwen series, offering a comprehensive suite of dense and mixture-of-experts (MoE) models.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "0.6B–235B"
+          },
+          "downloads": 5200000,
+          "name": "qwen3",
+          "size": 5225389443,
+          "sizes": [
+            {
+              "label": "0.6B",
+              "name": "qwen3:0.6b",
+              "size": 522655498
+            },
+            {
+              "label": "1.7B",
+              "name": "qwen3:1.7b",
+              "size": 1359284234
+            },
+            {
+              "label": "4B",
+              "name": "qwen3:4b",
+              "size": 2497283178
+            },
+            {
+              "label": "8B",
+              "name": "qwen3:8b",
+              "size": 5225378105
+            },
+            {
+              "label": "14B",
+              "name": "qwen3:14b",
+              "size": 9276192778
+            },
+            {
+              "label": "30B",
+              "name": "qwen3:30b"
+            },
+            {
+              "label": "32B",
+              "name": "qwen3:32b",
+              "size": 20201255946
+            },
+            {
+              "label": "235B",
+              "name": "qwen3:235b"
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking"
+          ],
+          "url": "https://ollama.com/library/qwen3",
+          "use_cases": [
+            "Tool use",
+            "Reasoning"
+          ]
+        },
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "description": "Meta's Llama 3.2 goes small with 1B and 3B models.",
+          "details": {
+            "family": "llama",
+            "format": "gguf",
+            "parameter_size": "1B · 3B"
+          },
+          "downloads": 31400000,
+          "name": "llama3.2",
+          "size": 2019392532,
+          "sizes": [
+            {
+              "label": "1B",
+              "name": "llama3.2:1b",
+              "size": 1321091828
+            },
+            {
+              "label": "3B",
+              "name": "llama3.2:3b",
+              "size": 2019386516
+            }
+          ],
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/library/llama3.2",
+          "use_cases": [
+            "Tool use"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "The current, most capable model that runs on a single GPU.",
+          "details": {
+            "family": "gemma",
+            "format": "gguf",
+            "parameter_size": "1B–27B"
+          },
+          "downloads": 12900000,
+          "name": "gemma3",
+          "size": 3338810594,
+          "sizes": [
+            {
+              "label": "1B",
+              "name": "gemma3:1b",
+              "size": 815310790
+            },
+            {
+              "label": "4B",
+              "name": "gemma3:4b",
+              "size": 3338802162
+            },
+            {
+              "label": "12B",
+              "name": "gemma3:12b",
+              "size": 8149190611
+            },
+            {
+              "label": "27B",
+              "name": "gemma3:27b",
+              "size": 17396937299
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/gemma3",
+          "use_cases": [
+            "Vision"
+          ]
+        },
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "DeepSeek-R1 is a family of open reasoning models with performance approaching that of leading models.",
+          "details": {
+            "family": "deepseek",
+            "format": "gguf",
+            "parameter_size": "1.5B–671B"
+          },
+          "downloads": 61300000,
+          "name": "deepseek-r1",
+          "size": 5225376109,
+          "sizes": [
+            {
+              "label": "1.5B",
+              "name": "deepseek-r1:1.5b",
+              "size": 1117321123
+            },
+            {
+              "label": "7B",
+              "name": "deepseek-r1:7b",
+              "size": 4683073571
+            },
+            {
+              "label": "8B",
+              "name": "deepseek-r1:8b",
+              "size": 5225375044
+            },
+            {
+              "label": "14B",
+              "name": "deepseek-r1:14b"
+            },
+            {
+              "label": "32B",
+              "name": "deepseek-r1:32b"
+            },
+            {
+              "label": "70B",
+              "name": "deepseek-r1:70b",
+              "size": 42520395971
+            },
+            {
+              "label": "671B",
+              "name": "deepseek-r1:671b"
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking"
+          ],
+          "url": "https://ollama.com/library/deepseek-r1",
+          "use_cases": [
+            "Tool use",
+            "Reasoning"
+          ]
+        },
+        {
+          "capabilities": [
+            "embeddings"
+          ],
+          "description": "A high-performing open embedding model with a large token context window.",
+          "details": {
+            "family": "nomic",
+            "format": "gguf"
+          },
+          "downloads": 40100000,
+          "name": "nomic-embed-text",
+          "size": 274302030,
+          "tags": [
+            "embedding"
+          ],
+          "url": "https://ollama.com/library/nomic-embed-text",
+          "use_cases": [
+            "Embeddings"
+          ]
+        },
+        {
+          "capabilities": [
+            "tools"
+          ],
+          "details": {
+            "family": "mistral",
+            "format": "gguf",
+            "parameter_size": "7B"
+          },
+          "downloads": 17600000,
+          "name": "mistral",
+          "size": 4372842801,
+          "tags": [
+            "tools"
+          ],
+          "url": "https://ollama.com/library/mistral",
+          "use_cases": [
+            "Tool use"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "Flagship vision-language model of Qwen and also a significant leap from the previous Qwen2-VL.",
+          "details": {
+            "family": "qwen",
+            "format": "gguf",
+            "parameter_size": "3B–72B"
+          },
+          "downloads": 1000000,
+          "name": "qwen2.5vl",
+          "size": 5969251872,
+          "sizes": [
+            {
+              "label": "3B",
+              "name": "qwen2.5vl:3b"
+            },
+            {
+              "label": "7B",
+              "name": "qwen2.5vl:7b",
+              "size": 5969251872
+            },
+            {
+              "label": "32B",
+              "name": "qwen2.5vl:32b"
+            },
+            {
+              "label": "72B",
+              "name": "qwen2.5vl:72b",
+              "size": 48920006016
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/qwen2.5vl",
+          "use_cases": [
+            "Vision"
+          ]
+        },
+        {
+          "capabilities": [
+            "image_input"
+          ],
+          "description": "LLaVA is a novel end-to-end trained large multimodal model that combines a vision encoder and Vicuna for general-purpose visual and language understanding.",
+          "details": {
+            "format": "gguf",
+            "parameter_size": "7B · 13B · 34B"
+          },
+          "downloads": 9600000,
+          "name": "llava",
+          "size": 4733350819,
+          "sizes": [
+            {
+              "label": "7B",
+              "name": "llava:7b",
+              "size": 4733350819
+            },
+            {
+              "label": "13B",
+              "name": "llava:13b",
+              "size": 8010961034
+            },
+            {
+              "label": "34B",
+              "name": "llava:34b",
+              "size": 19699000099
+            }
+          ],
+          "tags": [
+            "vision"
+          ],
+          "url": "https://ollama.com/library/llava",
+          "use_cases": [
+            "Vision",
+            "Multimodal",
+            "Coding"
+          ]
+        },
+        {
+          "description": "Phi-4 is a 14B parameter, state-of-the-art open model from Microsoft.",
+          "details": {
+            "family": "phi",
+            "format": "gguf",
+            "parameter_size": "14B"
+          },
+          "downloads": 5800000,
+          "name": "phi4",
+          "size": 9053115548,
+          "url": "https://ollama.com/library/phi4"
+        },
+        {
+          "capabilities": [
+            "tools",
+            "reasoning"
+          ],
+          "description": "OpenAI's open-weight models designed for powerful reasoning, agentic tasks, and versatile developer use cases.",
+          "details": {
+            "format": "gguf",
+            "parameter_size": "20B · 120B"
+          },
+          "downloads": 3100000,
+          "name": "gpt-oss",
+          "size": 13780162353,
+          "sizes": [
+            {
+              "label": "20B",
+              "name": "gpt-oss:20b",
+              "size": 13780162353
+            },
+            {
+              "label": "120B",
+              "name": "gpt-oss:120b",
+              "size": 65369826670
+            }
+          ],
+          "tags": [
+            "tools",
+            "thinking",
+            "cloud"
+          ],
+          "url": "https://ollama.com/library/gpt-oss",
+          "use_cases": [
+            "Tool use",
+            "Reasoning",
+            "Agents"
+          ]
+        }
+      ],
+      "next_cursor": null
+    },
+    "status": 200
+  }
+}

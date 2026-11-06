@@ -1,0 +1,231 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "author": "Qwen",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by Qwen. Qwen2 architecture with 32K context.",
+          "details": {
+            "context_length": 32768,
+            "family": "qwen2",
+            "format": "gguf",
+            "license": "apache-2.0",
+            "parameter_size": "0.5B"
+          },
+          "digest": "00000000000000000000000076cde359bc2f5649",
+          "downloads": 412331,
+          "likes": 132,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "size": 491400032,
+          "sizes": [
+            {
+              "label": "qwen2.5-0.5b-instruct",
+              "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct",
+              "size": 491400032
+            },
+            {
+              "label": "qwen2.5-0.5b-instruct-full-precision",
+              "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct-full-precision",
+              "size": 1265620000
+            }
+          ],
+          "tags": [
+            "gguf",
+            "chat",
+            "text-generation",
+            "en",
+            "conversational"
+          ],
+          "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "author": "bartowski",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by bartowski. Llama architecture with 128K context.",
+          "details": {
+            "context_length": 131072,
+            "family": "llama",
+            "format": "gguf",
+            "license": "llama3.1",
+            "parameter_size": "8B"
+          },
+          "digest": "00000000000000000000000014da5c36b9451717",
+          "downloads": 268004,
+          "likes": 289,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+          "size": 4920739232,
+          "tags": [
+            "gguf",
+            "facebook",
+            "meta",
+            "pytorch",
+            "llama",
+            "llama-3",
+            "text-generation",
+            "en"
+          ],
+          "url": "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "author": "TheBloke",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by TheBloke. Llama architecture with 32K context.",
+          "details": {
+            "context_length": 32768,
+            "family": "llama",
+            "format": "gguf",
+            "license": "apache-2.0",
+            "parameter_size": "7B"
+          },
+          "digest": "00000000000000000000000060238d98a2f82339",
+          "downloads": 98310,
+          "likes": 452,
+          "modified_at": "2023-12-11T22:23:01.000Z",
+          "name": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+          "size": 4368439584,
+          "tags": [
+            "gguf",
+            "mistral",
+            "finetuned",
+            "text-generation"
+          ],
+          "url": "https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": "catalog-page-2"
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "author": "Qwen",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by Qwen. Qwen2 architecture with 32K context.",
+          "details": {
+            "context_length": 32768,
+            "family": "qwen2",
+            "format": "gguf",
+            "license": "apache-2.0",
+            "parameter_size": "0.5B"
+          },
+          "digest": "00000000000000000000000076cde359bc2f5649",
+          "downloads": 412331,
+          "likes": 132,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "size": 491400032,
+          "sizes": [
+            {
+              "label": "qwen2.5-0.5b-instruct",
+              "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct",
+              "size": 491400032
+            },
+            {
+              "label": "qwen2.5-0.5b-instruct-full-precision",
+              "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct-full-precision",
+              "size": 1265620000
+            }
+          ],
+          "tags": [
+            "gguf",
+            "chat",
+            "text-generation",
+            "en",
+            "conversational"
+          ],
+          "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "author": "bartowski",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by bartowski. Llama architecture with 128K context.",
+          "details": {
+            "context_length": 131072,
+            "family": "llama",
+            "format": "gguf",
+            "license": "llama3.1",
+            "parameter_size": "8B"
+          },
+          "digest": "00000000000000000000000014da5c36b9451717",
+          "downloads": 268004,
+          "likes": 289,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+          "size": 4920739232,
+          "tags": [
+            "gguf",
+            "facebook",
+            "meta",
+            "pytorch",
+            "llama",
+            "llama-3",
+            "text-generation",
+            "en"
+          ],
+          "url": "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "author": "TheBloke",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by TheBloke. Llama architecture with 32K context.",
+          "details": {
+            "context_length": 32768,
+            "family": "llama",
+            "format": "gguf",
+            "license": "apache-2.0",
+            "parameter_size": "7B"
+          },
+          "digest": "00000000000000000000000060238d98a2f82339",
+          "downloads": 98310,
+          "likes": 452,
+          "modified_at": "2023-12-11T22:23:01.000Z",
+          "name": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+          "size": 4368439584,
+          "tags": [
+            "gguf",
+            "mistral",
+            "finetuned",
+            "text-generation"
+          ],
+          "url": "https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": "catalog-page-2"
+    },
+    "status": 200
+  }
+}

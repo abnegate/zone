@@ -1,0 +1,79 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "description": "Fast responses Chat based model Accepts system prompts in Llama 3 format Trained by Meta License: Meta Llama 3 Community License",
+          "details": {
+            "family": "LLaMA3",
+            "format": "gguf",
+            "parameter_size": "8B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 8
+          },
+          "name": "Llama 3 8B Instruct",
+          "size": 4661724384,
+          "url": "https://gpt4all.io/models/gguf/Meta-Llama-3-8B-Instruct.Q4_0.gguf",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Instruction based Trained by Microsoft Cannot be used commercially",
+          "details": {
+            "family": "LLaMA2",
+            "format": "gguf",
+            "parameter_size": "13B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 16
+          },
+          "name": "Orca 2 (Medium)",
+          "size": 7365834624,
+          "use_cases": [
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": null
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "description": "Fast responses Chat based model Accepts system prompts in Llama 3 format Trained by Meta License: Meta Llama 3 Community License",
+          "details": {
+            "family": "LLaMA3",
+            "format": "gguf",
+            "parameter_size": "8B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 8
+          },
+          "name": "Llama 3 8B Instruct",
+          "size": 4661724384,
+          "url": "https://gpt4all.io/models/gguf/Meta-Llama-3-8B-Instruct.Q4_0.gguf",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "description": "Instruction based Trained by Microsoft Cannot be used commercially",
+          "details": {
+            "family": "LLaMA2",
+            "format": "gguf",
+            "parameter_size": "13B",
+            "quantization_level": "Q4_0",
+            "ram_required_gb": 16
+          },
+          "name": "Orca 2 (Medium)",
+          "size": 7365834624,
+          "use_cases": [
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": null
+    },
+    "status": 200
+  }
+}

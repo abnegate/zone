@@ -1,0 +1,15 @@
+{
+  "browse": {
+    "ok": {
+      "models": [],
+      "next_cursor": "offset:0"
+    }
+  },
+  "list": {
+    "body": {
+      "models": [],
+      "next_cursor": "offset:0"
+    },
+    "status": 200
+  }
+}

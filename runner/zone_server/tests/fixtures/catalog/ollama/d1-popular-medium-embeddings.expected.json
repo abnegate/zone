@@ -1,0 +1,15 @@
+{
+  "browse": {
+    "ok": {
+      "models": [],
+      "next_cursor": null
+    }
+  },
+  "list": {
+    "body": {
+      "models": [],
+      "next_cursor": null
+    },
+    "status": 200
+  }
+}

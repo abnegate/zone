@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::config::{DEFAULT_GPT4ALL_MODELS_URL, DEFAULT_HUGGINGFACE_MODELS_URL};
 
+use super::catalog_endpoints;
 use super::types::{
     BrowseQuery, BrowseResponse, ErrorResponse, HuggingFaceModelInfo, ModelCapability,
     ModelDetails, ModelMediumFilter, ModelResponse, ModelSize, ModelSizeFilter, ModelSort,
@@ -21,9 +22,6 @@ const HTTP_TIMEOUT_SECS: u64 = 30;
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 5;
 const POOL_MAX_IDLE_PER_HOST: usize = 10;
 const POOL_IDLE_TIMEOUT_SECS: u64 = 90;
-/// Ollama publishes exact blob sizes in its registry manifests; the library
-/// listing page carries no size at all, so each browsed model needs one lookup.
-const OLLAMA_REGISTRY_URL: &str = "https://registry.ollama.ai/v2/library";
 const OLLAMA_SIZE_LOOKUP_CONCURRENCY: usize = 8;
 
 static PARAM_SIZE_RE: Lazy<Regex> = Lazy::new(|| {
@@ -235,13 +233,11 @@ fn ollama_search_url(
         terms.push(family);
     }
 
+    let search = catalog_endpoints::current().ollama_search;
     let mut url = if terms.is_empty() {
-        "https://ollama.com/search".to_string()
+        search
     } else {
-        format!(
-            "https://ollama.com/search?q={}",
-            urlencoding::encode(&terms.join(" "))
-        )
+        format!("{search}?q={}", urlencoding::encode(&terms.join(" ")))
     };
 
     if let Some(category) = ollama_medium_category(medium) {
@@ -277,7 +273,8 @@ fn ollama_manifest_ref(name: &str) -> (&str, &str) {
 /// Sum the layer sizes in a model's manifest to get its download size.
 async fn fetch_ollama_manifest_size(name: &str, client: &Client) -> Option<u64> {
     let (repo, tag) = ollama_manifest_ref(name);
-    let url = format!("{}/{}/manifests/{}", OLLAMA_REGISTRY_URL, repo, tag);
+    let registry = catalog_endpoints::current().ollama_registry;
+    let url = format!("{registry}/library/{repo}/manifests/{tag}");
 
     let response = client
         .get(&url)
@@ -1597,8 +1594,6 @@ pub struct OpenRouterProvider {
     client: Client,
 }
 
-const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
-
 impl OpenRouterProvider {
     pub fn new() -> Self {
         Self::with_proxy(None).expect("Failed to build OpenRouter model catalog client")
@@ -1626,7 +1621,11 @@ impl ModelProvider for OpenRouterProvider {
     async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
         let offset = parse_cursor_offset(opts.cursor)?;
 
-        let response = self.client.get(OPENROUTER_MODELS_URL).send().await?;
+        let response = self
+            .client
+            .get(catalog_endpoints::current().openrouter)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             return Err(ProviderError::Unavailable(format!(
