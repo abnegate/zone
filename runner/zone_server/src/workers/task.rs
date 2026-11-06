@@ -676,7 +676,7 @@ fn classify(message: &str) -> Failure {
         || contains_standalone_status(&lowered, StatusCode::TOO_MANY_REQUESTS.as_u16())
     {
         return Failure::RateLimited {
-            retry_after: RetryAfter::from_text(&lowered),
+            retry_after: hint(&lowered),
         };
     }
     if TERMINAL_MARKERS
@@ -689,6 +689,12 @@ fn classify(message: &str) -> Failure {
         return Failure::Terminal;
     }
     Failure::Transient
+}
+
+/// The wait `text` asks for. A zero wait is still a rate limit, so it takes
+/// the rate-limit curve rather than retrying at once.
+fn hint(text: &str) -> Option<Duration> {
+    RetryAfter::from_text(text).filter(|delay| !delay.is_zero())
 }
 
 /// [`classify`] for a coding agent's own words, where a failure no retry
@@ -705,7 +711,7 @@ fn classify_agent(words: &str) -> Failure {
     }
     if Limit::worded(words) {
         return Failure::RateLimited {
-            retry_after: RetryAfter::from_text(words),
+            retry_after: hint(words),
         };
     }
     classify(words)
@@ -4784,16 +4790,42 @@ mod retry_tests {
     }
 
     #[test]
-    fn a_positive_hint_too_small_to_hold_retries_at_once() {
+    fn a_hint_too_small_to_hold_takes_the_rate_limit_curve() {
         let policy = RetryPolicy::default();
-        let underflowing = classify(&format!("rate limited, retry in 0.{}1", "0".repeat(400)));
-        assert_eq!(
-            underflowing,
-            Failure::RateLimited {
-                retry_after: Some(Duration::ZERO),
-            }
-        );
-        assert_eq!(retry_delay(&policy, 1, underflowing, 0.0), Duration::ZERO);
+        let unhinted = Failure::RateLimited { retry_after: None };
+        let hints = [
+            (
+                "underflowing",
+                classify(&format!("rate limited, retry in 0.{}1", "0".repeat(400))),
+            ),
+            (
+                "sub-nanosecond",
+                classify("rate limited, retry in 0.0000000001"),
+            ),
+            (
+                "an agent's sub-nanosecond",
+                classify_agent(&format!("{SESSION_LIMIT} · retry in 0.0000000001")),
+            ),
+        ];
+        let held: Vec<_> = hints
+            .iter()
+            .filter(|(_, failure)| *failure != unhinted)
+            .collect();
+        assert!(held.is_empty(), "zero hints held the retry: {held:?}");
+        for (hint, failure) in hints {
+            assert_eq!(
+                retry_delay(&policy, 1, failure, 0.0),
+                policy.rate_limit.base,
+                "{hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_undelayed_fault_still_retries_at_once() {
+        let policy = RetryPolicy::default();
+        let fault = Fault::reported("rate limited, retry in 0.0000000001".to_string()).undelayed();
+        assert_eq!(retry_delay(&policy, 1, fault.failure, 0.0), Duration::ZERO);
     }
 
     #[test]
