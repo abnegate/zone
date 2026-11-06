@@ -1132,26 +1132,18 @@ esac"#
         .expect("how the sign-in ended to be recorded");
     }
 
+    /// The defaults an agent's turn runs with, such as its MCP tool timeouts, are no business of a
+    /// sign-in command: Claude's gets the one that stops it updating itself, and codex's nothing
+    /// beyond what any child that is not an agent inherits.
     #[test]
-    fn every_sign_in_command_runs_with_no_agents_home_and_claude_never_updates_itself() {
-        for &agent in AgentKind::ALL {
-            let variables = variables(agent);
+    fn claude_login_clis_do_not_update_themselves() {
+        const NO_UPDATES: (&str, &str) = ("DISABLE_AUTOUPDATER", "1");
+        let inherited = cli::inherited();
+        let mut claude = inherited.clone();
+        claude.insert(NO_UPDATES.0.to_string(), NO_UPDATES.1.to_string());
 
-            assert_eq!(
-                variables.get(AUTOUPDATER).map(String::as_str),
-                (agent == AgentKind::Claude).then_some(DISABLED),
-                "{agent}"
-            );
-            for home in AgentKind::ALL
-                .iter()
-                .filter_map(|&agent| home::variable(agent))
-            {
-                assert!(
-                    !variables.contains_key(home),
-                    "{home} would point {agent}'s host sign-in check at another home"
-                );
-            }
-        }
+        assert_eq!(variables(AgentKind::Claude), claude);
+        assert_eq!(variables(AgentKind::Codex), inherited);
     }
 
     #[tokio::test]

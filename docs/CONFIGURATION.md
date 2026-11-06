@@ -339,8 +339,10 @@ account that pays:
 `None` under `Instance`. The line comes from `zone_core`, so a `RUST_LOG` that
 keeps only `zone_server`, such as `warn,zone_server=info`, hides it; add
 `zone_core=info`. `abnegate-agent-cli` logs the same turn once more, at info:
-"the turn runs on usage credits past the plan's window", with `window` and
-`directory` but not `sign_in`; `abnegate_agent_cli=info` keeps it.
+"the turn runs on usage credits past the plan's window", with `agent`,
+`window` and `directory` but not `sign_in`, and with the server's own working
+directory as `directory` when the turn names none; `abnegate_agent_cli=info`
+keeps it.
 
 The account's owner stops this by turning usage credits off, or bounds it by
 setting a monthly cap, at claude.ai/settings/usage.
@@ -440,8 +442,10 @@ setting a monthly cap, at claude.ai/settings/usage.
   `.env`, where an empty value keeps the default.
 - **Note**: Must be an absolute `http` or `https` URL with a host, carrying no
   credentials, query or fragment. Anything else is refused at boot. A
-  link-local or cloud metadata address fails the sign-in. Zone reaches it
-  through the proxy described under *Signing in*.
+  link-local or cloud metadata address passes that check but fails every
+  sign-in as it starts, and every renewal; so does a name that resolves only
+  to such addresses, once Zone sends it a request. Zone reaches it through the
+  proxy described under *Signing in*.
 
 ### `ZONE_AGENT_USAGE_TTL_SECONDS`
 - **Default**: `60`. Compose passes `60` unless `.env` says otherwise, and the
@@ -612,11 +616,12 @@ setting a monthly cap, at claude.ai/settings/usage.
     Bedrock, Google Vertex AI and Microsoft Foundry, such as
     `CLAUDE_CODE_USE_BEDROCK`, `AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
     `AWS_REGION`, `GOOGLE_APPLICATION_CREDENTIALS` and `AZURE_CLIENT_SECRET`;
-  - `ZONE_MCP_TOKEN`, and, for the CLIs, claude's refresh token,
+  - `ZONE_MCP_TOKEN`, and claude's refresh token,
     `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`.
 - **Base URLs**: `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` named here still
-  reaches the CLI. Zone reads it from the server's environment and sets it on
-  each turn itself, as a setting rather than an inherited value, so it is not
+  reaches the CLI of every turn, claude's and codex's alike, when the server
+  has it set. Zone reads it from the server's environment and sets it on each
+  turn itself, as a setting rather than an inherited value, so it is not
   scrubbed.
 - **Scrubbed**: every value a CLI inherits through this list, and every proxy
   URL, is treated as a secret. The crate removes it, as written, JSON-escaped
@@ -628,11 +633,12 @@ setting a monthly cap, at claude.ai/settings/usage.
 - **Other processes**: the `rg` that `search_code` runs, the `git` a
   background job runs to find its checkout, and the `claude auth status`,
   `codex login`, `codex login status` and `codex logout` Zone runs start from
-  the same allowlist, the proxy variables and the names listed here, less what
-  either CLI signs in with, the cloud sign-ins and `ZONE_MCP_TOKEN`; a base
-  URL named here does not reach them. claude also gets
-  `DISABLE_AUTOUPDATER=1` there. `ffmpeg` and `ffprobe` also start from an
-  allowlist rather than the server's environment.
+  the same allowlist, the proxy variables and the names listed here, less
+  everything under *Never passed*; a base URL named here does not reach them,
+  and what they print is not scrubbed of the values named here. claude also
+  gets `DISABLE_AUTOUPDATER=1` there, and none of the other variables a turn
+  sets. `ffmpeg` and `ffprobe` also start from an allowlist rather than the
+  server's environment.
 - **Behaviour change**: A CLI used to inherit the server's whole environment
   apart from the provider API keys. A setup that relied on that, such as an
   `ANTHROPIC_BASE_URL` in the server's environment, now has to name the

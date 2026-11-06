@@ -381,6 +381,7 @@ mod name {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use abnegate_secret::SecretValue;
@@ -389,7 +390,7 @@ mod tests {
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use tempfile::TempDir;
-    use zone_core::llm::window;
+    use zone_core::llm::{cli, window};
 
     use abnegate_llm::Window;
 
@@ -775,6 +776,122 @@ mod tests {
             let missing = Cli::new(MISSING_CLI).with_environment(environment());
 
             assert_eq!(signed_in(agent, &missing).await, None, "{agent}");
+        }
+    }
+
+    /// Set on the copy of this test binary that runs the sign-in commands, which starts from only
+    /// the variables below, so nothing here calls `set_var` on a process whose other tests start
+    /// children.
+    const COPY: &str = "ZONE_LOGIN_ENVIRONMENT_COPY";
+
+    /// What the copy's sign-in commands inherit: the allowlist, the proxy, the POSIX locale
+    /// categories, and a variable the operator passed through.
+    const REACHES: [(&str, &str); 5] = [
+        ("PATH", "/usr/bin:/bin"),
+        ("HOME", "/home/zone"),
+        ("HTTPS_PROXY", "http://proxy.internal:3128"),
+        ("LC_TIME", "en_GB.UTF-8"),
+        ("CORPORATE_CA", "/etc/zone/corporate-ca.pem"),
+    ];
+
+    /// What they never inherit, the passed-through sign-ins among them: the server's own secrets,
+    /// the host's agent homes, a sign-in that would bill another account, the turn's MCP token,
+    /// and a name riding along on the locale prefix.
+    const STAYS: [(&str, &str); 10] = [
+        ("DATABASE_URL", "postgres://zone:notreal@db.internal/zone"),
+        ("CLAUDE_CONFIG_DIR", "/home/zone/.claude-elsewhere"),
+        ("CODEX_HOME", "/home/zone/.codex-elsewhere"),
+        ("ANTHROPIC_API_KEY", "sk-ant-notrealkey"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.internal"),
+        ("OPENAI_API_KEY", "sk-notrealkey"),
+        ("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "sk-ant-ort01-notreal"),
+        ("AWS_ACCESS_KEY_ID", "AKIANOTREAL"),
+        ("ZONE_MCP_TOKEN", "zone-turn-notrealtoken"),
+        ("LC_SNEAKY", "notreal-locale"),
+    ];
+
+    const PASSED_THROUGH: &str = "CORPORATE_CA,ANTHROPIC_API_KEY,ANTHROPIC_BASE_URL,\
+                                  CLAUDE_CODE_OAUTH_REFRESH_TOKEN,AWS_ACCESS_KEY_ID,ZONE_MCP_TOKEN";
+
+    /// Copied from this process to the copy so it can run and be measured, none of them a name a
+    /// sign-in command inherits.
+    const RUNNER: [&str; 2] = ["LLVM_PROFILE_FILE", "RUST_BACKTRACE"];
+
+    #[tokio::test]
+    async fn login_clis_start_from_the_allowlist_and_the_passthrough() {
+        let path = concat!(
+            module_path!(),
+            "::login_clis_start_from_the_allowlist_and_the_passthrough"
+        );
+        let (_, name) = path.split_once("::").expect("a path inside the crate");
+        if std::env::var(COPY).as_deref() == Ok(name) {
+            return host_sign_in_commands_inherit_only_what_reaches_them().await;
+        }
+
+        let mut copy = tokio::process::Command::new(std::env::current_exe().expect("this binary"));
+        copy.args(["--exact", name, "--nocapture", "--test-threads", "1"])
+            .env_clear()
+            .env(COPY, name)
+            .env(cli::PASSTHROUGH, PASSED_THROUGH)
+            .envs(REACHES)
+            .envs(STAYS);
+        for variable in RUNNER {
+            if let Some(value) = std::env::var_os(variable) {
+                copy.env(variable, value);
+            }
+        }
+        let output = copy.output().await.expect("a copy of this test binary");
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && printed.contains("1 passed"),
+            "{printed}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Asks each host CLI for its sign-in the way a status does, and reads back what it was given.
+    async fn host_sign_in_commands_inherit_only_what_reaches_them() {
+        for (agent, arguments, stdout, stderr, extra) in [
+            (
+                AgentKind::Claude,
+                "auth status",
+                CLAUDE_SIGNED_IN,
+                &b""[..],
+                Some(("DISABLE_AUTOUPDATER", "1")),
+            ),
+            (
+                AgentKind::Codex,
+                "login status",
+                &b""[..],
+                CODEX_CHATGPT,
+                None,
+            ),
+        ] {
+            let directory = TempDir::new().expect("a temporary directory");
+            let record = directory.path().join("environment");
+            let printed = capture(&directory, "stdout", stdout);
+            let said = capture(&directory, "stderr", stderr);
+            let executable = fake(
+                &directory,
+                arguments,
+                &format!(
+                    "env > '{}'\ncat '{printed}'\ncat '{said}' >&2\nexit 0",
+                    record.display()
+                ),
+            );
+
+            let answer = ask(agent, executable).await;
+
+            assert!(
+                answer.is_some_and(|status| status.signed_in),
+                "{agent} {arguments} was not asked"
+            );
+            let expected: BTreeMap<String, String> = REACHES
+                .into_iter()
+                .chain(extra)
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect();
+            assert_eq!(recorded(&record), expected, "{agent}");
         }
     }
 

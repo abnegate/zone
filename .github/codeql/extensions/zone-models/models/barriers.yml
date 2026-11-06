@@ -36,6 +36,7 @@ extensions:
       - ["zone_server::config::agent_work", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::config::agent_login_home", "ReturnValue", "path-injection", "manual"]
       - ["<zone_server::config::AgentConfig>::login_home", "ReturnValue", "path-injection", "manual"]
+      - ["abnegate_agent_cli::login::claude::endpoints::checked", "ReturnValue", "request-url", "manual"]
       - ["<zone_server::pull::comfy_reference::ComfyReference>::parse", "ReturnValue", "path-injection", "manual"]
       - ["<zone_server::pull::comfy_reference::ComfyReference>::parse", "ReturnValue", "request-url", "manual"]
       - ["zone_server::setup::confined_relative", "ReturnValue", "path-injection", "manual"]
