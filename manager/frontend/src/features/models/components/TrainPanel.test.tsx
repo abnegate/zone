@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import type { TrainJob } from '../../../api/models';
 import { clientModule } from '../../../test/client';
@@ -227,7 +227,19 @@ describe('TrainPanel', () => {
     fireEvent.change(screen.getByLabelText('Video'), {
       target: { files: [new File(['clip'], 'subject.mp4', { type: 'video/mp4' })] },
     });
-    expect(field.contains(await screen.findByText('Reading subject.mp4…'))).toBe(true);
+    const uploading = await screen.findByRole('group', { name: 'subject.mp4: 0%' });
+    expect(field.contains(uploading)).toBe(true);
+    const onProgress = mockFrames.mock.calls[0]?.[0].onProgress;
+    act(() => onProgress?.({ loaded: 40, total: 100 }));
+    expect(screen.getByRole('progressbar', { name: 'Uploading subject.mp4' })).toHaveAttribute(
+      'aria-valuenow',
+      '40'
+    );
+    act(() => onProgress?.({ loaded: 100, total: 100 }));
+    expect(
+      screen.getByRole('group', { name: 'subject.mp4: Extracting frames…' })
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
     expect(screen.getByLabelText('Video')).toBeEnabled();
 
     pending.resolve({
@@ -253,7 +265,7 @@ describe('TrainPanel', () => {
     const receipt = await screen.findByText(/32 frames read at 8\.0\/s, 2 kept/);
     expect(receipt).toHaveTextContent('subject.mp4: 32 frames read at 8.0/s, 2 kept');
     expect(field.contains(receipt)).toBe(true);
-    expect(screen.queryByText('Reading subject.mp4…')).toBeNull();
+    expect(screen.queryByTestId('transfer-chip')).toBeNull();
     expect(screen.getAllByRole('group', { name: /target pair/i })).toHaveLength(2);
     const mirror = screen.getByLabelText('Mirror half the frames of each second');
     expect(mirror.compareDocumentPosition(receipt) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
@@ -800,6 +812,40 @@ describe('TrainPanel', () => {
     expect(mockFrames.mock.calls[0]?.[0].blob).toBeInstanceOf(Blob);
   });
 
+  it('keeps a failed clip with its reason so it can be retried or removed', async () => {
+    mockFrames.mockImplementationOnce(() => Promise.reject(new Error('ffmpeg is not installed')));
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectBase('FLUX.1 Schnell');
+    fireEvent.change(screen.getByLabelText('Video'), {
+      target: { files: [new File(['clip'], 'walk.mp4', { type: 'video/mp4' })] },
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('ffmpeg is not installed');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry walk.mp4' }));
+
+    const receipt = await screen.findByText(/32 frames read at 8\.0\/s, 2 kept/);
+    expect(receipt).toHaveTextContent('walk.mp4: 32 frames read at 8.0/s, 2 kept');
+    expect(mockFrames).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId('transfer-chip')).toBeNull();
+  });
+
+  it('cancels a clip mid-upload and aborts its request', async () => {
+    mockFrames.mockImplementationOnce(() => new Promise(() => {}));
+    render(<TrainPanel onTrained={() => {}} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
+    await selectBase('FLUX.1 Schnell');
+    fireEvent.change(screen.getByLabelText('Video'), {
+      target: { files: [new File(['clip'], 'walk.mp4', { type: 'video/mp4' })] },
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel walk.mp4' }));
+
+    expect(mockFrames.mock.calls[0]?.[0].signal.aborted).toBe(true);
+    expect(screen.queryByTestId('transfer-chip')).toBeNull();
+    expect(screen.queryByText(/frames read at/)).toBeNull();
+  });
+
   it('extracts several clips at once and leaves the video zone enabled', async () => {
     const first = deferred<Awaited<ReturnType<typeof mockFrames>>>();
     const second = deferred<Awaited<ReturnType<typeof mockFrames>>>();
@@ -817,7 +863,7 @@ describe('TrainPanel', () => {
         ],
       },
     });
-    expect(await screen.findByText('Reading 2 clips…')).toBeInTheDocument();
+    expect(await screen.findAllByTestId('transfer-chip')).toHaveLength(2);
     expect(screen.getByLabelText('Video')).toBeEnabled();
     await waitFor(() => expect(mockFrames).toHaveBeenCalledTimes(2));
 
@@ -839,7 +885,7 @@ describe('TrainPanel', () => {
     const clips = await screen.findByLabelText('Accepted clips');
     expect(clips).toHaveTextContent('one.mp4: 8 frames read at 4.0/s, 1 kept');
     expect(clips).toHaveTextContent('two.mp4: 8 frames read at 4.0/s, 1 kept');
-    expect(screen.queryByText(/Reading/)).toBeNull();
+    expect(screen.queryByTestId('transfer-chip')).toBeNull();
     expect(screen.getAllByRole('group', { name: /target pair/i })).toHaveLength(2);
   });
 

@@ -16,7 +16,9 @@ import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import SubNav from '../../../shared/components/SubNav/SubNav';
+import TransferChip from '../../../shared/components/TransferChip/TransferChip';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import { useTransfers } from '../../../shared/hooks/useTransfers';
 import { useModels } from '../../models';
 import { useProjects } from '../../projects/hooks';
 import type { AiProvider } from '../../settings/workspace/types';
@@ -68,6 +70,7 @@ import {
   AUTO_MODEL,
   arrangeChats,
   asksModelName,
+  attachmentId,
   attachmentMetadata,
   audioAttachments,
   automated,
@@ -180,6 +183,16 @@ export default function ChatsPage() {
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
+
+  const attaching = useTransfers<Attachment>({
+    run: (file, { signal, onProgress }) => readAttachment(file, { signal, onProgress }),
+    identify: attachmentId,
+    onDone: (attachment) => {
+      setAttachments((prev) =>
+        prev.some((item) => item.id === attachment.id) ? prev : [...prev, attachment]
+      );
+    },
+  });
 
   const addStartingImage = (image: { name: string; mime: string; url: string }) => {
     const next = sourceAttachment(image);
@@ -767,12 +780,8 @@ export default function ChatsPage() {
       }
       leftover.push(file);
     }
-    if (leftover.length === 0) return;
-    const read = await Promise.all(leftover.map(readAttachment));
-    setAttachments((prev) => {
-      const seen = new Set(prev.map((a) => a.id));
-      return [...prev, ...read.filter((a) => !seen.has(a.id))];
-    });
+    const attached = new Set(attachments.map((attachment) => attachment.id));
+    attaching.start(leftover.filter((file) => !attached.has(attachmentId(file))));
   };
 
   const handleSaveCharacter = async (event: FormEvent) => {
@@ -858,6 +867,7 @@ export default function ChatsPage() {
     e.preventDefault();
     const sendable = attachments.filter(isSendable);
     if (!isAuthenticated || !displayedChat || sending || streaming) return;
+    if (attaching.pending > 0) return;
     if (!messageInput.trim() && sendable.length === 0) return;
 
     const chatId = displayedChat.id;
@@ -1657,8 +1667,16 @@ export default function ChatsPage() {
                       void handleIncomingFiles(e.dataTransfer.files);
                     }}
                   >
-                    {attachments.length > 0 && (
+                    {attachments.length + attaching.transfers.length > 0 && (
                       <div className="message-attachments">
+                        {attaching.transfers.map((transfer) => (
+                          <TransferChip
+                            key={transfer.id}
+                            transfer={transfer}
+                            onCancel={attaching.cancel}
+                            onRetry={attaching.retry}
+                          />
+                        ))}
                         {attachments.map((attachment) => (
                           <span
                             key={attachment.id}
@@ -1703,6 +1721,13 @@ export default function ChatsPage() {
                         ))}
                       </div>
                     )}
+                    {attaching.pending > 0 ? (
+                      <p className="message-form-hint" role="status">
+                        {attaching.pending === 1
+                          ? 'Send is ready once the file finishes attaching.'
+                          : `Send is ready once ${attaching.pending} files finish attaching.`}
+                      </p>
+                    ) : null}
                     {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
                       <p className="message-form-hint">
                         Ask to generate, edit, remove an object, change the setting, or animate and
@@ -1775,7 +1800,15 @@ export default function ChatsPage() {
                           variant="primary"
                           size="sm"
                           loading={sending}
-                          disabled={!messageInput.trim() && !attachments.some(isSendable)}
+                          disabled={
+                            attaching.pending > 0 ||
+                            (!messageInput.trim() && !attachments.some(isSendable))
+                          }
+                          title={
+                            attaching.pending > 0
+                              ? 'Wait for attachments to finish before sending'
+                              : undefined
+                          }
                         >
                           Send
                         </Button>

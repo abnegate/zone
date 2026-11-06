@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import {
-  blobFromBase64,
-  captionBatches,
-  poolMap,
-  shouldRecompress,
-  TRAIN_EDGE,
-} from './trainMedia';
+import { blobFromBase64, captionBatches, shouldRecompress, TRAIN_EDGE } from './trainMedia';
 
 describe('trainMedia', () => {
   it('turns frame base64 into a blob without keeping the string', () => {
@@ -47,15 +41,5 @@ describe('trainMedia', () => {
     expect(shouldRecompress({ type: 'image/jpeg', width: 1536, height: 1024, size: 400_000 })).toBe(
       true
     );
-  });
-
-  it('runs a bounded worker pool in source order', async () => {
-    const seen: number[] = [];
-    const results = await poolMap([10, 20, 30, 40], 2, async (item, index) => {
-      seen.push(index);
-      return item + 1;
-    });
-    expect(results).toEqual([11, 21, 31, 41]);
-    expect(seen).toHaveLength(4);
   });
 });
