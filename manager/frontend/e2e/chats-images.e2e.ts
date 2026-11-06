@@ -8,6 +8,7 @@ import {
   installChatSocketMock,
   type ChatSocketController,
 } from './helpers/chatSocket';
+import { RESPONDING } from '../src/features/chats/components/Generation';
 import { blockServiceWorker, CHAT_PROVIDERS, routeApi } from './test-utils';
 
 const mockChat = {
@@ -191,7 +192,7 @@ test.describe('Chat images', () => {
     });
 
     await socket.emit({ type: 'message_start', message_id: 'msg-generated', role: 'assistant' });
-    await expect(page.getByRole('status')).toHaveText('Generating response…');
+    await expect(page.getByRole('status')).toHaveText(RESPONDING);
     await socket.emit({
       type: 'image',
       message_id: 'msg-generated',
@@ -310,7 +311,7 @@ test.describe('Chat images', () => {
     await page.fill('.message-form textarea', 'Generate another image');
     await page.locator('.message-form textarea').press('Enter');
 
-    await expect(page.getByRole('status')).toHaveText('Generating response…');
+    await expect(page.getByRole('status')).toHaveText(RESPONDING);
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
     await expect.poll(() => cancellations).toBe(1);
     await expect(page.getByRole('status')).toBeVisible();
@@ -322,7 +323,7 @@ test.describe('Chat images', () => {
     await page.fill('.message-form textarea', 'New request');
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
     await page.getByRole('button', { name: 'Send', exact: true }).click();
-    await expect(page.getByRole('status')).toHaveText('Generating response…');
+    await expect(page.getByRole('status')).toHaveText(RESPONDING);
   });
 
   test('sends an attached image as the image-to-image source', async ({ page }) => {

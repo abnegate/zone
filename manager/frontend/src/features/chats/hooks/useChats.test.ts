@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { createElement } from 'react';
 import type { Chat } from '../types';
@@ -278,5 +278,22 @@ describe('useChats', () => {
     await waitFor(() => {
       expect(result.current.chats).toEqual(updatedChats);
     });
+  });
+
+  it('keeps the listed chats when a background refresh fails', async () => {
+    mockGetChats.mockResolvedValue(mockChats);
+
+    const { result } = renderHook(() => useChats(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.chats).toEqual(mockChats);
+    });
+
+    mockGetChats.mockRejectedValue(new Error('Network error'));
+    await act(() => result.current.refresh());
+
+    expect(mockGetChats).toHaveBeenCalledTimes(2);
+    expect(result.current.error).toBeNull();
+    expect(result.current.chats).toEqual(mockChats);
   });
 });
