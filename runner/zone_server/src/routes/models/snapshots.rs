@@ -40,6 +40,7 @@ use crate::state::AppState;
 use crate::state::test_config;
 
 const RECORD_ENVIRONMENT: &str = "ZONE_RECORD_CATALOG_SNAPSHOTS";
+const CI_ENVIRONMENT: &str = "CI";
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/catalog");
 const LAZY_DATABASE: &str = "postgres://localhost/test";
 const NEXT_CURSOR: &str = "{next_cursor}";
@@ -432,13 +433,38 @@ async fn run(scenario: &Scenario) -> Value {
     snapshot
 }
 
+/// Whether this run records snapshots instead of checking them. CI only ever
+/// checks, so a recording run there fails rather than passing on whatever
+/// the code now answers.
+fn records(is_set: impl Fn(&str) -> bool) -> bool {
+    let recording = is_set(RECORD_ENVIRONMENT);
+    assert!(
+        !(recording && is_set(CI_ENVIRONMENT)),
+        "{RECORD_ENVIRONMENT} is set under {CI_ENVIRONMENT}; record snapshots locally"
+    );
+    recording
+}
+
+#[test]
+fn snapshots_are_recorded_only_outside_ci() {
+    assert!(!records(|_| false));
+    assert!(records(|name| name == RECORD_ENVIRONMENT));
+    assert!(!records(|name| name == CI_ENVIRONMENT));
+}
+
+#[test]
+#[should_panic(expected = "record snapshots locally")]
+fn recording_under_ci_fails() {
+    records(|_| true);
+}
+
 async fn check(scenario: Scenario) {
     let actual = run(&scenario).await;
     let path = scenario
         .source
         .directory()
         .join(format!("{}.expected.json", scenario.name));
-    if std::env::var_os(RECORD_ENVIRONMENT).is_some() {
+    if records(|name| std::env::var_os(name).is_some()) {
         let pretty = serde_json::to_string_pretty(&actual).expect("a snapshot");
         std::fs::write(&path, format!("{pretty}\n")).expect("a recorded snapshot");
         return;
