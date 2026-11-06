@@ -145,15 +145,14 @@ manager image ships both CLIs: claude 2.1.278 and codex 0.156.1.
 
 ### Choosing a provider
 
-Organization admins and owners choose the provider under **Organization
-Settings > AI Settings**, where *Claude Code (Claude subscription)* and *Codex
-(ChatGPT subscription)* sit beside Self-Hosted, OpenAI, Anthropic and AWS
+Organization admins and owners choose the provider under **Settings →
+Organization → AI defaults**, where *Claude Code (Claude subscription)* and
+*Codex (ChatGPT subscription)* sit beside Self-Hosted, OpenAI, Anthropic and AWS
 Bedrock (`claude_code` and `codex` in the API). A workspace admin can choose
-one for a single workspace under **Workspace Settings > AI Settings**, with
-**Override organization AI settings** on; the workspace then runs on its
-organization's sign-ins for that agent. Organizations and workspaces that choose
-neither a CLI nor a saved endpoint follow `ZONE_LLM_BACKEND`, the instance-wide
-default.
+one for a single workspace under **Settings → Workspace → AI** by overriding
+the provider; the workspace then runs on its organization's sign-ins for that
+agent. Organizations and workspaces that choose neither a CLI nor a saved
+endpoint follow `ZONE_LLM_BACKEND`, the instance-wide default.
 
 No instance-wide setting turns these providers off: any organization admin can
 select them. Read *Security* below before using them on an instance shared by
@@ -704,7 +703,7 @@ their absolute paths as before.
 - **Default**: empty. Compose then bind-mounts `./.zone/host-empty` at
   `/host` so the container always has that path.
 - **Description**: Absolute host directory mounted at `/host` in the manager.
-  Setup and **Workspace Settings → Folders** store host paths under this
+  Setup and **Settings → Workspace → Folders** store host paths under this
   root; the server maps them to `/host/...` when `ZONE_IN_CONTAINER` is set
   (compose always sets it). Recreate the manager after changing this value.
   A typical value is `$HOME` or a parent such as `~/Local`.
@@ -721,8 +720,8 @@ their absolute paths as before.
 ### Signing in
 
 An organization signs in to each agent in the panel that appears under the
-provider on **Organization Settings > AI Settings**; a workspace's AI override
-shows the same panel. It can sign in to several accounts per agent: once one
+provider on **Settings → Organization → AI defaults**; overriding a workspace's
+provider shows the same panel. It can sign in to several accounts per agent: once one
 is signed in, the panel lists each account with its plan, its state, and
 meters for its five-hour and weekly windows saying when each resets, and
 offers **Add another Claude account** or **Add another ChatGPT account** to

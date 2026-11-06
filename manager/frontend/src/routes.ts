@@ -9,15 +9,13 @@ export const loaders = {
   chats: () => import('./features/chats/pages/ChatsPage'),
   layout: () => import('./shared/components/Layout/Layout'),
   models: () => import('./features/models/pages/ModelsPage'),
-  orgSettings: () => import('./features/settings/organization/pages/OrgSettingsPage'),
   projects: () => import('./features/projects/pages/ProjectsPage'),
-  sessions: () => import('./features/auth/pages/SessionsPage'),
+  settings: () => import('./features/settings/pages/SettingsPage'),
   setup: () => import('./features/models/pages/SetupPage'),
   setupGate: () => import('./features/models/components/SetupGate'),
   sources: () => import('./features/sources/pages/SourcesPage'),
   tasks: () => import('./features/tasks/pages/TasksPage'),
   wiki: () => import('./features/knowledge/pages/WikiPage'),
-  workspaceSettings: () => import('./features/settings/workspace/pages/WorkspaceSettingsPage'),
 };
 
 const SHELL = [loaders.authenticatedProviders, loaders.setupGate, loaders.layout];
@@ -27,15 +25,23 @@ const SIGNED_IN_ROUTES: Record<string, Loader[]> = {
   '/agent-sign-in': [loaders.authenticatedProviders, loaders.agentSignIn],
   '/chats': [...SHELL, loaders.chats],
   '/models': [...SHELL, loaders.models],
-  '/org-settings': [...SHELL, loaders.orgSettings],
+  '/org-settings': [...SHELL, loaders.settings],
   '/projects': [...SHELL, loaders.projects],
-  '/sessions': [...SHELL, loaders.sessions],
-  '/settings': [...SHELL, loaders.workspaceSettings],
+  '/sessions': [...SHELL, loaders.settings],
+  '/settings': [...SHELL, loaders.settings],
   '/setup': [loaders.authenticatedProviders, loaders.setup],
   '/sources': [...SHELL, loaders.sources],
   '/tasks': [...SHELL, loaders.tasks],
   '/wiki': [...SHELL, loaders.wiki],
 };
+
+const NESTED_ROUTES = new Set(['/settings']);
+
+function routeKey(pathname: string): string {
+  const path = pathname.replace(/\/+$/, '') || '/';
+  const root = path.match(/^\/[^/]*/)?.[0] ?? path;
+  return NESTED_ROUTES.has(root) ? root : path;
+}
 
 const modules = new Map<Loader, unknown>();
 
@@ -58,8 +64,7 @@ export function preloadRoute(
   pathname: string,
   storage: Pick<Storage, 'getItem'> = localStorage
 ): Promise<unknown> {
-  const path = pathname.replace(/\/+$/, '') || '/';
-  return run((hasStoredSession(storage) && SIGNED_IN_ROUTES[path]) || []);
+  return run((hasStoredSession(storage) && SIGNED_IN_ROUTES[routeKey(pathname)]) || []);
 }
 
 export function preloadSignedInRoutes(

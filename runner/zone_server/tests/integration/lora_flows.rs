@@ -1917,10 +1917,7 @@ async fn runpod_training_without_a_saved_key_is_refused() {
     });
     let (status, response) = post_json(router.clone(), &token, "/api/models/train", body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    assert_eq!(
-        response["error"],
-        "Save a Runpod API key in Workspace Settings."
-    );
+    assert_eq!(response["error"], "Save a Runpod API key in Settings → AI.");
     let (status, body) = get_json(router, &token, "/api/models/train").await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     let _ = fs::remove_dir_all(models_directory);

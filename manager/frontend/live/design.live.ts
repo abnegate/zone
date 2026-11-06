@@ -16,9 +16,9 @@ const ROUTES = [
   '/sources',
   '/models',
   '/wiki',
-  '/org-settings',
-  '/settings',
-  '/sessions',
+  '/settings/organization/ai',
+  '/settings/workspace/general',
+  '/settings/you/sessions',
 ];
 
 type Clipped = { text: string; bottom: number };
@@ -243,12 +243,12 @@ test('the settings save footer stays on the pane edge at both ends of the scroll
 }) => {
   await signIn(page);
 
-  for (const [route, tab] of [
-    ['/org-settings', 'AI Settings'],
-    ['/settings', 'Theme'],
+  for (const [route, heading] of [
+    ['/settings/organization/ai', 'AI Provider Configuration'],
+    ['/settings/workspace/general', 'Theme Configuration'],
   ] as const) {
     await page.goto(route);
-    await page.getByRole('tab', { name: tab }).click();
+    await expect(page.getByRole('heading', { name: heading })).toBeVisible();
     const footer = page.locator('.settings-actions');
     await expect(footer).toBeVisible();
 

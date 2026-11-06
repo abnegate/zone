@@ -166,8 +166,8 @@ test.describe('compose stack', () => {
       '/search',
       '/models',
       '/wiki',
-      '/org-settings',
-      '/settings',
+      '/settings/organization/ai',
+      '/settings/workspace/general',
     ]) {
       await page.goto(`${CONSOLE}${path}`);
       await page.waitForTimeout(1_500);

@@ -45,7 +45,17 @@ for (const width of [390, 1280]) {
     await page.getByText(chat.title, { exact: true }).click();
     await expect(page.getByRole('heading', { name: chat.title })).toBeVisible();
     const row = page.locator('.chat-item');
-    if (width < 768) await page.getByRole('button', { name: 'Back to chats' }).click();
+    if (width < 768) {
+      // At this width the sidebar holding the row is display:none until the
+      // page stops being `has-chat`, so a back-click that does not land leaves
+      // the row unhoverable for the whole timeout rather than failing on the
+      // navigation that actually went wrong. Click until the class clears.
+      await expect(async () => {
+        await page.getByRole('button', { name: 'Back to chats' }).click();
+        await expect(page.locator('.chats-page')).not.toHaveClass(/has-chat/);
+      }).toPass({ timeout: 15_000 });
+    }
+    await expect(row).toBeVisible();
     await row.hover();
     const actions = row.getByRole('button', { name: `Actions for ${chat.title}` });
     await actions.click();

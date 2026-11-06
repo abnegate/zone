@@ -3,9 +3,14 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { clientModule } from '../../../test/client';
 
+let currentPathname = '/';
+
+const matchesPath = (path: string) =>
+  currentPathname === path || currentPathname.startsWith(`${path}/`);
+
 mock.module('react-router-dom', () => ({
   BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  useLocation: () => ({ pathname: '/' }),
+  useLocation: () => ({ pathname: currentPathname }),
   useNavigate: () => mock(),
   useSearchParams: () => [new URLSearchParams(), mock()],
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
@@ -25,7 +30,7 @@ mock.module('react-router-dom', () => ({
     title?: string;
   }) => {
     const resolvedClassName =
-      typeof className === 'function' ? className({ isActive: false }) : className;
+      typeof className === 'function' ? className({ isActive: matchesPath(to) }) : className;
     return (
       <a href={to} onClick={onClick} className={resolvedClassName} title={title}>
         {children}
@@ -42,7 +47,6 @@ mock.module('../../../api/client', () =>
   })
 );
 
-// Mock auth context
 mock.module('../../../features/auth/context', () => ({
   useAuth: () => ({
     isAuthenticated: true,
@@ -58,7 +62,6 @@ mock.module('../../../features/auth/context', () => ({
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-// Mock workspace context
 mock.module('../../context/WorkspaceContext', () => ({
   useWorkspace: () => ({
     currentWorkspace: { id: 'test-ws', name: 'Test Workspace' },
@@ -75,7 +78,6 @@ mock.module('../../context/WorkspaceContext', () => ({
   WorkspaceProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-// Mock theme context - reads theme from localStorage to support dynamic testing
 mock.module('../../context/ThemeContext', () => ({
   useTheme: () => ({
     theme: localStorage.getItem('manager_theme') || 'light',
@@ -125,6 +127,7 @@ const renderSidebar = () => {
 describe('Sidebar', () => {
   beforeEach(() => {
     globalThis.fetch = mock(async () => new Response(null, { status: 404 })) as typeof fetch;
+    currentPathname = '/';
     localStorage.clear();
     localStorage.setItem('manager_theme', 'light');
     document.documentElement.removeAttribute('data-sidebar-collapsed');
@@ -272,8 +275,7 @@ describe('Sidebar', () => {
       expect(screen.getByText('Sources')).toBeInTheDocument();
       expect(screen.getByText('Models')).toBeInTheDocument();
       expect(screen.getByText('Wiki')).toBeInTheDocument();
-      expect(screen.getByText('Organization')).toBeInTheDocument();
-      expect(screen.getByText('Workspace')).toBeInTheDocument();
+      expect(screen.getByText('Settings')).toBeInTheDocument();
     });
 
     it('renders theme toggle button', () => {
@@ -329,11 +331,34 @@ describe('Sidebar', () => {
       expect(screen.getByText('Sources').closest('a')).toHaveAttribute('href', '/sources');
       expect(screen.getByText('Models').closest('a')).toHaveAttribute('href', '/models');
       expect(screen.getByText('Wiki').closest('a')).toHaveAttribute('href', '/wiki');
-      expect(screen.getByText('Organization').closest('a')).toHaveAttribute(
-        'href',
-        '/org-settings'
-      );
-      expect(screen.getByText('Workspace').closest('a')).toHaveAttribute('href', '/settings');
+    });
+
+    it('offers one Settings link in place of Organization and Workspace', () => {
+      renderSidebar();
+
+      const settingsLinks = screen.getAllByRole('link', { name: 'Settings' });
+      expect(settingsLinks).toHaveLength(1);
+      expect(settingsLinks[0]).toHaveAttribute('href', '/settings');
+      expect(screen.queryByRole('link', { name: 'Organization' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: 'Workspace' })).not.toBeInTheDocument();
+    });
+
+    it.each(['/settings/workspace/ai', '/settings/organization/billing'])(
+      'marks Settings active at %s',
+      (pathname) => {
+        currentPathname = pathname;
+        renderSidebar();
+
+        expect(screen.getByRole('link', { name: 'Settings' })).toHaveClass('active');
+      }
+    );
+
+    it('leaves Settings inactive at /chats', () => {
+      currentPathname = '/chats';
+      renderSidebar();
+
+      expect(screen.getByRole('link', { name: 'Settings' })).not.toHaveClass('active');
+      expect(screen.getByRole('link', { name: 'Chats' })).toHaveClass('active');
     });
   });
 
@@ -414,7 +439,6 @@ describe('Sidebar', () => {
       fireEvent.click(screen.getByLabelText('Collapse sidebar'));
 
       await waitFor(() => {
-        // Logo should be hidden
         expect(screen.queryByText('Zone')).not.toBeInTheDocument();
       });
     });
@@ -494,7 +518,6 @@ describe('Sidebar', () => {
       const overlay = screen.getByRole('button', { name: 'Close menu' });
       fireEvent.keyDown(overlay, { key: 'Enter' });
 
-      // Should still be open
       expect(screen.getByRole('button', { name: 'Close menu' })).toBeInTheDocument();
     });
   });
@@ -506,7 +529,6 @@ describe('Sidebar', () => {
       const logoutButton = screen.getByText('Logout');
       expect(logoutButton).toBeInTheDocument();
 
-      // Just verify the button is clickable - actual logout behavior tested in AuthContext
       fireEvent.click(logoutButton);
     });
   });

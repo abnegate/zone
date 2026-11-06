@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { test as base, expect, type Page } from '@playwright/test';
+import { test as base, expect, type Locator, type Page } from '@playwright/test';
 
 /**
  * The live suite talks to a real server. Nothing here mocks a route, forges a
@@ -146,6 +146,13 @@ export async function sendAndSettle(page: Page, message: string, timeout = 240_0
   // going is what says the turn is finished rather than still streaming.
   await expect(assistant).toHaveCount(before + 1, { timeout });
   await expect(page.locator('.message-status')).toHaveCount(0, { timeout });
+}
+
+export async function chooseOption(trigger: Locator, value: string): Promise<void> {
+  await trigger.click();
+  const listbox = trigger.page().getByRole('listbox');
+  await listbox.locator(`[role="option"][data-value="${value}"]`).click();
+  await expect(listbox).toHaveCount(0);
 }
 
 /** Every test asserts a clean console, so a broken render cannot pass as a pass. */

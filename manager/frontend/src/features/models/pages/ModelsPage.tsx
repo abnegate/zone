@@ -4,6 +4,7 @@ import { type FormEvent, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { modelsApi } from '../../../api/models';
 import PageBar from '../../../shared/components/PageBar/PageBar';
+import { SettingsGroup, SettingsSection, settingsPath } from '../../settings/navigation/sections';
 import Capabilities from '../components/Capabilities';
 import DownloadOptions from '../components/DownloadOptions';
 import ModelAccessNotice from '../components/ModelAccessNotice';
@@ -74,7 +75,6 @@ export default function ModelsPage() {
   const [selectedSize, setSelectedSize] = useState('');
   const [browseInitialized, setBrowseInitialized] = useState(false);
 
-  // Initial browse load - when switching to browse tab
   useEffect(() => {
     if (activeTab === 'browse' && !browseInitialized) {
       browse.search();
@@ -141,8 +141,6 @@ export default function ModelsPage() {
     setModelSize(null);
     setSelectedSize(isInstalledModel(model) ? '' : defaultDownloadName(model));
 
-    // Load model info for remote sources (HuggingFace only - has README content)
-    // Check the model's source when in "all" mode, otherwise check browse.source
     const modelSource = !isInstalledModel(model) && model.source ? model.source : browse.source;
     if (!isInstalledModel(model) && modelSource === 'huggingface') {
       setModelCardLoading(true);
@@ -335,10 +333,14 @@ export default function ModelsPage() {
                     </svg>
                   }
                   title="No models installed"
-                  description="Pick the product features in workspace settings, or browse the catalog."
+                  description="Pick the product features in Settings, or browse the catalog."
                   action={
                     canInstall ? (
-                      <Button onClick={() => navigate('/settings?tab=features')}>
+                      <Button
+                        onClick={() =>
+                          navigate(settingsPath(SettingsGroup.Server, SettingsSection.Features))
+                        }
+                      >
                         Install features
                       </Button>
                     ) : undefined

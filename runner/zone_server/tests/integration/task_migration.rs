@@ -1061,6 +1061,8 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             "015_task_chat.sql",
             "017_chat_used_at.sql",
             "018_project_position.sql",
+            "020_chat_pull_request_auto_fix.sql",
+            "021_chat_pull_request_auto_fix_validation.sql",
         ],
         "the set of table-altering migrations changed; a new one needs its own lock bound"
     );
