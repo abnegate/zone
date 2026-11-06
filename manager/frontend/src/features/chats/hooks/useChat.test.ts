@@ -1672,6 +1672,31 @@ describe('useChat', () => {
       expect(result.current.streaming).toBe(false);
     });
 
+    it('goes back to idle when a send right after Stop is held by the server', async () => {
+      const { result } = await running();
+      act(() => lastSocket?.emit({ type: 'cancelled', message_id: 'a-first' }));
+      expect(result.current.streaming).toBe(false);
+
+      await act(async () => {
+        await result.current.sendMessage({ content: 'right after stop' });
+      });
+      expect(result.current.streaming).toBe(true);
+      const { id } = sent().at(-1);
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id, content: 'right after stop' }],
+          held: true,
+        })
+      );
+
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.held).toBe(true);
+      expect(result.current.chat?.messages.map((message) => message.content)).not.toContain(
+        'right after stop'
+      );
+    });
+
     it('forgets the queue when the socket reconnects, until the server replays it', async () => {
       const { result } = await running();
       act(() =>

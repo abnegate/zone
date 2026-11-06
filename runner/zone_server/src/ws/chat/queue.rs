@@ -67,17 +67,24 @@ pub struct Queue {
 
 impl Queue {
     /// Queue a message and start it if nothing is running. `busy` is a turn
-    /// this queue did not start, such as an automation's.
+    /// this queue did not start, such as an automation's. Sending releases a
+    /// hold, including one a Stop is about to leave once its turn winds down.
     pub fn submit(&mut self, mut message: Queued, busy: bool) -> Option<Started> {
         if self.contains(message.id) {
             message.id = Uuid::new_v4();
         }
+        let id = message.id;
         self.messages.push_back(message);
+        self.held = false;
+        self.stopping = false;
         if self.current.is_some() || busy {
             return None;
         }
-        self.held = false;
-        self.start(false)
+        let started = self.start(false)?;
+        if let Some(current) = self.current.as_mut() {
+            current.drained = started.message.id != id;
+        }
+        Some(started)
     }
 
     /// The turn this queue started has ended. A turn the user stopped holds
@@ -425,6 +432,45 @@ mod tests {
         queue.stop(false);
         assert_eq!(queue.finish(false), Finished::Idle);
         assert!(queue.messages().is_empty());
+    }
+
+    #[test]
+    fn a_send_while_a_stopped_turn_winds_down_is_not_held() {
+        let mut queue = Queue::default();
+        queue.submit(queued("first"), false);
+        queue.stop(false);
+        queue.submit(queued("second"), false);
+        assert_eq!(next(queue.finish(true)), "second");
+    }
+
+    #[test]
+    fn a_send_behind_someone_elses_turn_releases_the_hold() {
+        let mut queue = Queue::default();
+        queue.submit(queued("first"), false);
+        queue.submit(queued("held"), false);
+        queue.stop(false);
+        assert_eq!(queue.finish(true), Finished::Held);
+
+        assert_eq!(queue.submit(queued("typed"), true), None);
+        assert_eq!(next(queue.release()), "held");
+        assert_eq!(next(queue.finish(true)), "typed");
+    }
+
+    #[test]
+    fn a_held_message_another_send_started_is_kept_if_stopped_unsaved() {
+        let mut queue = Queue::default();
+        queue.submit(queued("first"), false);
+        queue.submit(queued("held"), false);
+        queue.stop(false);
+        queue.finish(true);
+
+        let Some(started) = queue.submit(queued("typed"), false) else {
+            panic!("an idle queue starts its front");
+        };
+        assert_eq!(started.message.content, "held");
+        queue.stop(false);
+        assert_eq!(queue.finish(false), Finished::Held);
+        assert_eq!(contents(&queue), ["held", "typed"]);
     }
 
     #[test]

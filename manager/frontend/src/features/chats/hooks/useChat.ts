@@ -739,7 +739,7 @@ export function useChat(
 
     // Frames can beat the chat they belong to onto the wire, and every
     // case below writes to a chat that is not there yet, so hold them.
-    const held: ServerMessage[] = [];
+    const buffered: ServerMessage[] = [];
     let overflowed = false;
     const loaded = () => loadedChat.current === chatId;
 
@@ -994,12 +994,15 @@ export function useChat(
           setQueue(payload.messages);
           setHeld(payload.held);
           // Sent while this window thought the chat idle, but the server was
-          // busy and queued it, so the pending row would show it twice, and
-          // the turn it waits on must be free to end the stream.
+          // busy and queued it, so the pending row would show it twice. The
+          // window goes back to idle: a turn that really is running says so
+          // with its own message_start.
           const sent = pendingSendIdRef.current;
           if (sent && payload.messages.some((message) => message.id === sent)) {
             withdrawPending();
             sendInFlightRef.current = false;
+            activeGenerationRef.current = false;
+            setStreaming(false);
           }
           if (payload.started) beginQueued(payload.started);
           break;
@@ -1027,20 +1030,20 @@ export function useChat(
         return;
       }
       if (overflowed) return;
-      if (held.length >= MAX_HELD_FRAMES) {
+      if (buffered.length >= MAX_HELD_FRAMES) {
         // A reply this long with no chat to put it in cannot be
         // reassembled; message_end still carries the finished turn.
         overflowed = true;
-        held.length = 0;
+        buffered.length = 0;
         return;
       }
-      held.push(payload);
+      buffered.push(payload);
     };
 
     drainFrames.current = () => {
       if (!loaded()) return;
       overflowed = false;
-      for (const payload of held.splice(0)) apply(payload);
+      for (const payload of buffered.splice(0)) apply(payload);
     };
 
     const openSocket = () => {
@@ -1056,7 +1059,7 @@ export function useChat(
 
     const bindSocket = (socket: WebSocket) => {
       socketRef.current = socket;
-      held.length = 0;
+      buffered.length = 0;
       overflowed = false;
       // Joining replays the queue if it has anything in it, so whatever this
       // window last saw of it may be stale.

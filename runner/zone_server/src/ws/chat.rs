@@ -389,8 +389,10 @@ fn drive(
     chat_id: Uuid,
     workspace_id: Uuid,
     first: (Queued, Generation),
+    told: bool,
 ) {
     let announcer = stream.clone();
+    let started = told.then(|| first.0.clone());
     let turn = move |(message, generation): (Queued, Generation)| {
         let state = state.clone();
         let stream = stream.clone();
@@ -410,15 +412,26 @@ fn drive(
         }
     };
     let running = turn(first);
-    tokio::spawn(queue::drain(
-        chat_id,
-        running,
-        move |started| turn(begin(chat_id, started)),
-        move |started| {
-            let stream = announcer.clone();
-            async move { announce(&stream, started).await }
-        },
-    ));
+    let teller = announcer.clone();
+    tokio::spawn(async move {
+        if started.is_some() {
+            announce(&announcer, started).await;
+        }
+        let draining = queue::drain(
+            chat_id,
+            running,
+            move |started| turn(begin(chat_id, started)),
+            move |started| {
+                let stream = teller.clone();
+                async move { announce(&stream, started).await }
+            },
+        );
+        let drained =
+            futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(draining)).await;
+        if drained.is_err() {
+            announce(&announcer, None).await;
+        }
+    });
 }
 
 /// Send frames the caller already holds to one connection.
@@ -1397,8 +1410,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                     // the turn from the top instead of rendering a gap.
                     Err(broadcast::error::RecvError::Lagged(frames)) => {
                         tracing::warn!(%chat_id, frames, "Chat connection fell behind, replaying");
-                        let (resume, receiver) = stream.join().await;
+                        let (mut resume, receiver) = stream.join().await;
                         events = receiver;
+                        // The queue changes it missed may have emptied it, which
+                        // a join alone says nothing about.
+                        if !resume.iter().any(|frame| matches!(frame, ServerMessage::Queue { .. })) {
+                            resume.push(ServerMessage::Queue {
+                                messages: Vec::new(),
+                                held: false,
+                                started: None,
+                            });
+                        }
                         if !forward(&sender, resume).await {
                             break;
                         }
@@ -1461,14 +1483,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                         .submit(message, generating(chat_id))
                                         .map(|started| begin(chat_id, started))
                                 });
-                                // A message that starts at once never showed in the
-                                // queue, so there is no change for anyone to hear.
-                                let immediate = started.as_ref().is_some_and(|(message, _)| message.id == id);
-                                if !immediate {
-                                    announce(&stream, started.as_ref().map(|(message, _)| message.clone())).await;
-                                }
-                                if let Some(started) = started {
-                                    drive(state.clone(), stream.clone(), chat_id, workspace_id, started);
+                                match started {
+                                    // A message that starts at once never showed in the
+                                    // queue, so there is no change for anyone to hear.
+                                    Some(started) => {
+                                        let told = started.0.id != id;
+                                        drive(state.clone(), stream.clone(), chat_id, workspace_id, started, told);
+                                    }
+                                    None => announce(&stream, None).await,
                                 }
                             }
                             Ok(ClientMessage::Cancel) => {
@@ -1488,9 +1510,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                         Interrupted::Missing => None,
                                     }
                                 });
-                                announce(&stream, started.as_ref().map(|(message, _)| message.clone())).await;
-                                if let Some(started) = started {
-                                    drive(state.clone(), stream.clone(), chat_id, workspace_id, started);
+                                match started {
+                                    Some(started) => {
+                                        drive(state.clone(), stream.clone(), chat_id, workspace_id, started, true);
+                                    }
+                                    None => announce(&stream, None).await,
                                 }
                             }
                             Ok(ClientMessage::EditQueued { id, content }) => {
@@ -2849,10 +2873,7 @@ pub(crate) async fn run_turn(
         Finished::Idle => None,
     });
     match released {
-        Some(Some(started)) => {
-            announce(&stream, Some(started.0.clone())).await;
-            drive(state.clone(), stream, chat_id, workspace_id, started);
-        }
+        Some(Some(started)) => drive(state.clone(), stream, chat_id, workspace_id, started, true),
         Some(None) => announce(&stream, None).await,
         None => {}
     }
