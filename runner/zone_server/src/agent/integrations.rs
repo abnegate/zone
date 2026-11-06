@@ -32,8 +32,7 @@ use abnegate_vcs::WorkflowJob;
 use abnegate_vcs::WorkflowRun;
 use abnegate_vcs::WorkflowRunFilter;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use reqwest::{Client, StatusCode, Url};
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::num::NonZeroU8;
@@ -65,10 +64,8 @@ use crate::services::prioritisation::{
 };
 use crate::services::project_directory::{self, Origin, Start};
 
-const ORIGIN: &str = "https://api.github.com/";
 const API_VERSION: &str = "2026-03-10";
 const PER_PAGE: NonZeroU8 = NonZeroU8::new(100).expect("a page holds rows");
-const PAGE_SIZE: usize = PER_PAGE.get() as usize;
 const FILE_PAGE_CHARS: u64 = 8_000;
 const ISSUE_BODY_CHARS: usize = 1_500;
 const BUILD_RECORD_CAP: usize = 20;
@@ -180,8 +177,11 @@ const JOB_WITHOUT_COMMIT: &str = "GitHub returned a job without a commit SHA.";
 const FOREIGN_JOB: &str =
     "That job does not belong to the pull request or commit being asked about.";
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
-const RETRY_AFTER_HEADER: &str = "Retry-After";
-const RATE_LIMIT_REMAINING_HEADER: &str = "X-RateLimit-Remaining";
+const UNAUTHORIZED: u16 = 401;
+const FORBIDDEN: u16 = 403;
+const NOT_FOUND: u16 = 404;
+const UNPROCESSABLE_ENTITY: u16 = 422;
+const TOO_MANY_REQUESTS: u16 = 429;
 
 /// Compiling the path vocabulary is the expensive part, so the prioritiser
 /// behind a blast radius is built once and shared by every assessment.
@@ -561,7 +561,7 @@ impl Integration {
         let existing = github
             .already_open(&head, &base)
             .await
-            .ok_or_else(|| status_error(StatusCode::UNPROCESSABLE_ENTITY))?;
+            .ok_or_else(|| status_error(UNPROCESSABLE_ENTITY))?;
         Ok(json!({
             "repository": repository,
             "pull_request": existing,
@@ -669,8 +669,6 @@ enum Creation {
 }
 
 pub struct Github {
-    client: Client,
-    origin: Url,
     service: PullRequestService,
     repository: Repository,
     token: SecretValue,
@@ -687,9 +685,7 @@ impl Github {
             PullRequestError::InvalidOrigin => INVALID_ORIGIN.to_string(),
             _ => CLIENT_UNAVAILABLE.to_string(),
         })?;
-        let mut github = Self::serving(configuration, service)?;
-        github.origin = config.github_rest_origin().ok_or(INVALID_ORIGIN)?;
-        Ok(github)
+        Self::serving(configuration, service)
     }
 
     fn serving(configuration: Configuration, service: PullRequestService) -> Result<Self, String> {
@@ -703,15 +699,7 @@ impl Github {
         let token = credential(configuration.token.clone());
         let repository = Repository::new(&configuration.owner, &configuration.repo)
             .map_err(|_| INVALID_REPOSITORY.to_string())?;
-        let client = Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(30))
-            .user_agent("Zone-workspace-tools")
-            .build()
-            .map_err(|_| CLIENT_UNAVAILABLE.to_string())?;
         Ok(Self {
-            client,
-            origin: Url::parse(ORIGIN).expect("constant GitHub origin"),
             service: service
                 .with_anonymous_reads()
                 .with_retry_after(MAX_RETRY_AFTER)
@@ -739,102 +727,6 @@ impl Github {
         format!("{}/{}", self.configuration.owner, self.configuration.repo)
     }
 
-    fn url(&self, parts: &[&str]) -> Url {
-        let mut url = self.origin.clone();
-        let mut segments = url
-            .path_segments_mut()
-            .expect("HTTP origin supports path segments");
-        segments.pop_if_empty().extend([
-            "repos",
-            &self.configuration.owner,
-            &self.configuration.repo,
-        ]);
-        segments.extend(parts.iter().copied());
-        drop(segments);
-        url
-    }
-
-    async fn response(
-        &self,
-        method: reqwest::Method,
-        parts: &[&str],
-        query: &[(&str, String)],
-        raw: bool,
-        body: Option<&Value>,
-    ) -> Result<reqwest::Response, String> {
-        let mut url = self.url(parts);
-        url.query_pairs_mut()
-            .extend_pairs(query.iter().map(|(key, value)| (*key, value.as_str())));
-        self.dispatch(method, url, raw, body).await
-    }
-
-    async fn dispatch(
-        &self,
-        method: reqwest::Method,
-        url: Url,
-        raw: bool,
-        body: Option<&Value>,
-    ) -> Result<reqwest::Response, String> {
-        let response = self.send(&method, &url, raw, body).await?;
-        let response = match rate_limit(&response, Utc::now()) {
-            Some(RateLimit::Exhausted) => return Err(RATE_LIMIT_EXHAUSTED.to_string()),
-            // Honoured once, never in a loop: a caller polling every
-            // CHECK_POLL_INTERVAL comes back on its own schedule, and a second
-            // sleep here would hold its round open for a limit it cannot see.
-            Some(RateLimit::RetryAfter(delay)) => {
-                tokio::time::sleep(delay).await;
-                self.send(&method, &url, raw, body).await?
-            }
-            None => response,
-        };
-        if !response.status().is_success() {
-            if matches!(
-                rate_limit(&response, Utc::now()),
-                Some(RateLimit::Exhausted)
-            ) {
-                return Err(RATE_LIMIT_EXHAUSTED.to_string());
-            }
-            return Err(status_error(response.status()));
-        }
-        Ok(response)
-    }
-
-    async fn send(
-        &self,
-        method: &reqwest::Method,
-        url: &Url,
-        raw: bool,
-        body: Option<&Value>,
-    ) -> Result<reqwest::Response, String> {
-        let mut request = self
-            .client
-            .request(method.clone(), url.clone())
-            .header(
-                "Accept",
-                if raw {
-                    "application/vnd.github.raw+json"
-                } else {
-                    "application/vnd.github+json"
-                },
-            )
-            .header("X-GitHub-Api-Version", API_VERSION);
-        if let Some(token) = &self.configuration.token {
-            request = request.bearer_auth(token);
-        }
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        request.send().await.map_err(|_| REQUEST_FAILED.to_string())
-    }
-
-    async fn get(&self, parts: &[&str], query: &[(&str, String)]) -> Result<Value, String> {
-        self.response(reqwest::Method::GET, parts, query, false, None)
-            .await?
-            .json()
-            .await
-            .map_err(|_| INVALID_RESPONSE.to_string())
-    }
-
     async fn write(&self, operation: Operation, arguments: &Arguments) -> Result<Value, String> {
         let repository = format!(
             "https://github.com/{}/{}",
@@ -846,7 +738,7 @@ impl Github {
                     "repository": repository,
                     "pull_request": created,
                 })),
-                Creation::Refused { .. } => Err(status_error(StatusCode::UNPROCESSABLE_ENTITY)),
+                Creation::Refused { .. } => Err(status_error(UNPROCESSABLE_ENTITY)),
             },
             Operation::Comment => {
                 let reference = self.issue_reference(arguments.number.ok_or(NUMBER_REQUIRED)?)?;
@@ -2238,65 +2130,6 @@ fn validate_path(path: &str, root: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-fn array(value: &Value) -> Result<&Vec<Value>, String> {
-    value
-        .as_array()
-        .ok_or_else(|| "GitHub returned an invalid record list.".to_string())
-}
-
-enum RateLimit {
-    Exhausted,
-    RetryAfter(Duration),
-}
-
-/// GitHub answers its primary and its secondary limits alike with 403 or 429,
-/// and only an exhausted quota is hopeless — it lasts until the window rolls
-/// over, so it is reported rather than slept on.
-fn rate_limit(response: &reqwest::Response, now: DateTime<Utc>) -> Option<RateLimit> {
-    if !matches!(
-        response.status(),
-        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
-    ) {
-        return None;
-    }
-    if header(response, RATE_LIMIT_REMAINING_HEADER)
-        .and_then(|value| value.trim().parse::<i64>().ok())
-        == Some(0)
-    {
-        return Some(RateLimit::Exhausted);
-    }
-    header(response, RETRY_AFTER_HEADER)
-        .and_then(|value| retry_after(value, now))
-        .map(RateLimit::RetryAfter)
-}
-
-fn header<'a>(response: &'a reqwest::Response, name: &str) -> Option<&'a str> {
-    response.headers().get(name)?.to_str().ok()
-}
-
-/// `Retry-After` carries either delta-seconds or an HTTP-date (RFC 9110
-/// 10.2.3). A delay past the cap is refused rather than waited out: the caller
-/// owns its own schedule, and a request that cannot be served for minutes is
-/// better reported now than slept through.
-fn retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
-    let value = value.trim();
-    let delay = match value.parse::<u64>() {
-        Ok(seconds) => Duration::from_secs(seconds),
-        Err(_) => {
-            let at = DateTime::parse_from_rfc2822(value)
-                .ok()?
-                .with_timezone(&Utc);
-            // Whole seconds would round the wait down past the instant the date
-            // names, retrying before the moment the server asked us to wait for.
-            (at - now).to_std().unwrap_or(Duration::ZERO)
-        }
-    };
-    if delay > MAX_RETRY_AFTER {
-        return None;
-    }
-    Some(delay)
-}
-
 fn forked(head: &str) -> (Option<&str>, &str) {
     match head.split_once(':') {
         Some((owner, branch)) => (Some(owner), branch),
@@ -2381,16 +2214,14 @@ fn described(error: PullRequestError) -> String {
     match error {
         PullRequestError::QuotaExhausted { .. } => RATE_LIMIT_EXHAUSTED.to_string(),
         PullRequestError::AuthenticationFailed | PullRequestError::AuthenticationRequired => {
-            status_error(StatusCode::UNAUTHORIZED)
+            status_error(UNAUTHORIZED)
         }
-        PullRequestError::Forbidden => status_error(StatusCode::FORBIDDEN),
+        PullRequestError::Forbidden => status_error(FORBIDDEN),
         PullRequestError::NotFound
         | PullRequestError::RepositoryNotFound
-        | PullRequestError::PullRequestNotFound => status_error(StatusCode::NOT_FOUND),
-        PullRequestError::RateLimited => status_error(StatusCode::TOO_MANY_REQUESTS),
-        PullRequestError::PullRequestAlreadyExists(_) => {
-            status_error(StatusCode::UNPROCESSABLE_ENTITY)
-        }
+        | PullRequestError::PullRequestNotFound => status_error(NOT_FOUND),
+        PullRequestError::RateLimited => status_error(TOO_MANY_REQUESTS),
+        PullRequestError::PullRequestAlreadyExists(_) => status_error(UNPROCESSABLE_ENTITY),
         PullRequestError::Http(_) => REQUEST_FAILED.to_string(),
         PullRequestError::JobLog(failure) => match failure {
             JobLogError::Undirected => LOG_UNDIRECTED.to_string(),
@@ -2412,10 +2243,9 @@ fn described(error: PullRequestError) -> String {
     }
 }
 
-fn status_error(status: StatusCode) -> String {
+fn status_error(status: u16) -> String {
     format!(
-        "GitHub returned HTTP {}. Check source access, permissions, rate limits and the requested resource.",
-        status.as_u16()
+        "GitHub returned HTTP {status}. Check source access, permissions, rate limits and the requested resource."
     )
 }
 
@@ -2529,36 +2359,12 @@ fn run_evidence(run: &WorkflowRun) -> RunEvidence {
     }
 }
 
-fn next_page(length: usize, page: u32) -> Result<Option<u32>, String> {
-    next_page_of(length, page, PAGE_SIZE)
-}
-
-fn next_page_of(length: usize, page: u32, size: usize) -> Result<Option<u32>, String> {
-    if length < size {
-        Ok(None)
-    } else {
-        page.checked_add(1)
-            .map(Some)
-            .ok_or_else(|| "GitHub pagination overflowed.".into())
-    }
-}
-
 fn text(value: &Value, key: &str) -> String {
     value
         .get(key)
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
-}
-
-fn project(value: &Value, keys: &[&str]) -> Value {
-    let mut result = serde_json::Map::new();
-    for key in keys {
-        if let Some(value) = value.get(key) {
-            result.insert((*key).into(), value.clone());
-        }
-    }
-    Value::Object(result)
 }
 
 /// What a commit's checks add up to, in one word a wait can act on.
@@ -2892,10 +2698,16 @@ fn readiness_citation(record: &Value, observed_at: &str) -> Value {
 mod tests {
     use super::*;
     use crate::state::AppState;
+    use abnegate_vcs::RateLimit;
+    use chrono::DateTime;
     use std::time::Instant;
     use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use zone_core::tools::REASON_DESCRIPTION;
+
+    const PAGE_SIZE: usize = PER_PAGE.get() as usize;
+    const RETRY_AFTER_HEADER: &str = "Retry-After";
+    const RATE_LIMIT_REMAINING_HEADER: &str = "X-RateLimit-Remaining";
 
     #[test]
     fn heads_may_be_slashed_branch_names() {
@@ -2944,13 +2756,11 @@ mod tests {
     }
 
     fn github_serving(server: &MockServer, configuration: Configuration) -> Github {
-        let mut github = Github::serving(
+        Github::serving(
             configuration,
             PullRequestService::standing_in_for("github.com", &server.uri()).unwrap(),
         )
-        .unwrap();
-        github.origin = Url::parse(&format!("{}/", server.uri())).unwrap();
-        github
+        .unwrap()
     }
 
     fn github_with_token(server: &MockServer, token: Option<&str>) -> Github {
@@ -3492,7 +3302,7 @@ mod tests {
             .mount(&server)
             .await;
         let error = unbranched(&server).resolve(None).await.unwrap_err();
-        assert_eq!(error, status_error(StatusCode::FORBIDDEN));
+        assert_eq!(error, status_error(FORBIDDEN));
         assert!(!error.contains("test-secret"));
     }
 
@@ -3533,7 +3343,7 @@ mod tests {
         let cases = [
             (
                 PullRequestError::quota_exhausted(
-                    abnegate_vcs::RateLimit::default()
+                    RateLimit::default()
                         .with_limit(5000)
                         .with_remaining(0)
                         .with_resource("core"),
@@ -3541,40 +3351,34 @@ mod tests {
                 RATE_LIMIT_EXHAUSTED.to_string(),
             ),
             (
-                PullRequestError::quota_exhausted(abnegate_vcs::RateLimit::default()),
+                PullRequestError::quota_exhausted(RateLimit::default()),
                 RATE_LIMIT_EXHAUSTED.to_string(),
             ),
             (
                 PullRequestError::AuthenticationFailed,
-                status_error(StatusCode::UNAUTHORIZED),
+                status_error(UNAUTHORIZED),
             ),
             (
                 PullRequestError::AuthenticationRequired,
-                status_error(StatusCode::UNAUTHORIZED),
+                status_error(UNAUTHORIZED),
             ),
-            (
-                PullRequestError::Forbidden,
-                status_error(StatusCode::FORBIDDEN),
-            ),
-            (
-                PullRequestError::NotFound,
-                status_error(StatusCode::NOT_FOUND),
-            ),
+            (PullRequestError::Forbidden, status_error(FORBIDDEN)),
+            (PullRequestError::NotFound, status_error(NOT_FOUND)),
             (
                 PullRequestError::RepositoryNotFound,
-                status_error(StatusCode::NOT_FOUND),
+                status_error(NOT_FOUND),
             ),
             (
                 PullRequestError::PullRequestNotFound,
-                status_error(StatusCode::NOT_FOUND),
+                status_error(NOT_FOUND),
             ),
             (
                 PullRequestError::RateLimited,
-                status_error(StatusCode::TOO_MANY_REQUESTS),
+                status_error(TOO_MANY_REQUESTS),
             ),
             (
                 PullRequestError::PullRequestAlreadyExists(BranchName::parse("feature").unwrap()),
-                status_error(StatusCode::UNPROCESSABLE_ENTITY),
+                status_error(UNPROCESSABLE_ENTITY),
             ),
             (
                 PullRequestError::JobLog(JobLogError::Undirected),
@@ -4134,7 +3938,7 @@ mod tests {
             .open_pull(&github(&server), &pull_args("feature", Some("main"), None))
             .await
             .expect_err("a closed pull request is not the one GitHub says is open");
-        assert_eq!(refused, status_error(StatusCode::UNPROCESSABLE_ENTITY));
+        assert_eq!(refused, status_error(UNPROCESSABLE_ENTITY));
 
         server.reset().await;
         refuse_duplicate(&server).await;
@@ -5588,13 +5392,6 @@ mod tests {
         .await;
         mock_answering(
             server,
-            &format!("commits/{COMMIT}/statuses"),
-            json!([]),
-            authorization,
-        )
-        .await;
-        mock_answering(
-            server,
             &format!("commits/{COMMIT}/status"),
             json!({"statuses": [], "total_count": 0}),
             authorization,
@@ -5647,7 +5444,7 @@ mod tests {
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
             .await
             .unwrap_err();
-        assert_eq!(error, status_error(StatusCode::UNAUTHORIZED));
+        assert_eq!(error, status_error(UNAUTHORIZED));
         assert!(
             server
                 .received_requests()
@@ -6084,16 +5881,6 @@ mod tests {
             ci_priority(&json!({"status": "completed", "conclusion": "failure"})),
             0
         );
-    }
-
-    #[test]
-    fn short_pages_end_pagination_and_full_pages_continue() {
-        let size = usize::from(PULL_PAGE_SIZE.get());
-        assert_eq!(next_page_of(9, 1, size).unwrap(), None);
-        assert_eq!(next_page_of(size, 1, size).unwrap(), Some(2));
-        assert!(next_page_of(size, u32::MAX, size).is_err());
-        assert_eq!(next_page(PAGE_SIZE - 1, 1).unwrap(), None);
-        assert_eq!(next_page(PAGE_SIZE, 1).unwrap(), Some(2));
     }
 
     #[test]
@@ -7467,7 +7254,7 @@ mod tests {
             let (resolved, requests) = retried(&value).await;
             assert_eq!(
                 resolved.unwrap_err(),
-                status_error(StatusCode::TOO_MANY_REQUESTS),
+                status_error(TOO_MANY_REQUESTS),
                 "{value:?}"
             );
             assert_eq!(requests, 1, "{value:?} was waited on");
@@ -7486,35 +7273,5 @@ mod tests {
             assert_eq!(resolved.unwrap().1, COMMIT, "{value:?}");
             assert_eq!(requests, 2, "{value:?} was not retried exactly once");
         }
-    }
-
-    #[test]
-    fn retry_after_reads_delta_seconds_and_http_dates() {
-        let now = DateTime::parse_from_rfc3339("1994-11-06T08:49:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        assert_eq!(retry_after("3", now), Some(Duration::from_secs(3)));
-        assert_eq!(retry_after(" 30 ", now), Some(Duration::from_secs(30)));
-        assert_eq!(
-            retry_after("Sun, 06 Nov 1994 08:49:37 GMT", now),
-            Some(Duration::from_secs(37))
-        );
-        assert_eq!(
-            retry_after("Sun, 06 Nov 1994 08:48:00 GMT", now),
-            Some(Duration::ZERO),
-            "a date already past is retried at once"
-        );
-        assert_eq!(retry_after("soon", now), None);
-        assert_eq!(retry_after("", now), None);
-        assert_eq!(
-            retry_after(&(MAX_RETRY_AFTER.as_secs() + 1).to_string(), now),
-            None,
-            "a delay past the cap is not honoured"
-        );
-        assert_eq!(
-            retry_after("Sun, 06 Nov 1994 09:49:37 GMT", now),
-            None,
-            "a date past the cap is not honoured"
-        );
     }
 }
