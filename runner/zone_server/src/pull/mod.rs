@@ -7,7 +7,7 @@
 mod comfy_reference;
 
 use abnegate_llm::download::{self, Checksum, DownloadError, DownloadProgress};
-use comfy_reference::{ComfyReference, is_hub_character};
+use comfy_reference::ComfyReference;
 use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -415,39 +415,12 @@ async fn run_job(request: PullStart, job: Arc<Job>) {
     }
 }
 
-fn parse_comfy_ref(model: &str) -> Result<ComfyReference, String> {
-    let trimmed = model.trim();
-    let (repository, filename) = trimmed
-        .rsplit_once(':')
-        .ok_or_else(|| "Image weights need owner/repo:filename.safetensors".to_string())?;
-    if repository.is_empty()
-        || filename.is_empty()
-        || filename.contains('/')
-        || filename.contains('\\')
-        || filename.contains("..")
-        || repository.contains("..")
-        || repository.contains('\\')
-        || !filename.ends_with(".safetensors")
-        || filename.chars().any(char::is_control)
-    {
-        return Err("Invalid image weight filename".to_string());
-    }
-    if repository.split('/').count() != 2
-        || repository.split('/').any(|part| {
-            part.is_empty() || part == "." || part == ".." || !part.chars().all(is_hub_character)
-        })
-    {
-        return Err("Image weights need an owner/repo HuggingFace id".to_string());
-    }
-    Ok(ComfyReference::new(repository, filename))
-}
-
 async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
     if let Some(manifest) = &comfy.manifest {
         download_manifest(&comfy.models_directory, manifest, job).await;
         return;
     }
-    let reference = match parse_comfy_ref(model) {
+    let reference = match ComfyReference::parse(model) {
         Ok(reference) => reference,
         Err(message) => {
             job.publish(Event::Error { message });
@@ -749,8 +722,8 @@ fn process(job: &Job, line: &[u8]) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALREADY_DOWNLOADING, CANCELLED, CHECKSUM_MISMATCH, ComfyPull, ComfyReference, Event,
-        ManifestFile, PullRegistry, PullStart, describe, retryable,
+        ALREADY_DOWNLOADING, CANCELLED, CHECKSUM_MISMATCH, ComfyPull, Event, ManifestFile,
+        PullRegistry, PullStart, describe, retryable,
     };
     use abnegate_llm::download::{Checksum, DownloadError};
     use axum::{
@@ -891,107 +864,6 @@ mod tests {
 
     async fn requests_to(server: &MockServer) -> Vec<wiremock::Request> {
         server.received_requests().await.unwrap_or_default()
-    }
-
-    #[test]
-    fn parses_owner_repo_safetensors_refs() {
-        let reference = super::parse_comfy_ref(
-            "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora:qwen-image-edit-plus-nsfw-lora.safetensors",
-        )
-        .unwrap();
-        assert_eq!(
-            reference,
-            ComfyReference::new(
-                "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora",
-                "qwen-image-edit-plus-nsfw-lora.safetensors"
-            )
-        );
-        assert_eq!(
-            reference.url("https://huggingface.co/").unwrap().as_str(),
-            "https://huggingface.co/ScottzillaSystems/qwen-image-edit-plus-nsfw-lora/resolve/main/qwen-image-edit-plus-nsfw-lora.safetensors"
-        );
-        assert!(super::parse_comfy_ref("llama3.2:3b").is_err());
-        assert!(super::parse_comfy_ref("../evil:model.safetensors").is_err());
-        assert!(super::parse_comfy_ref("owner/repo:../model.safetensors").is_err());
-        assert!(super::parse_comfy_ref("owner/repo/extra:model.safetensors").is_err());
-    }
-
-    #[test]
-    fn a_reference_keeps_the_hub_origins_path_and_ends_in_its_file() {
-        let reference =
-            super::parse_comfy_ref(" Owner-1/style_v2.0:style_v2.0-fp8.safetensors ").unwrap();
-        assert_eq!(
-            reference.url("https://mirror.example/hf").unwrap().as_str(),
-            "https://mirror.example/hf/Owner-1/style_v2.0/resolve/main/style_v2.0-fp8.safetensors"
-        );
-        assert_eq!(reference.url("not a url"), None);
-        assert_eq!(reference.url("mailto:hub@example.com"), None);
-    }
-
-    #[test]
-    fn an_owner_or_repository_outside_huggingface_id_characters_is_refused() {
-        const REPOSITORY: &str = "Image weights need an owner/repo HuggingFace id";
-        for character in [
-            '?', '#', '%', ' ', '\t', '\n', '&', '=', '+', ';', '@', '~', 'é',
-        ] {
-            assert_eq!(
-                super::parse_comfy_ref(&format!("own{character}er/repo:style.safetensors")),
-                Err(REPOSITORY.to_string()),
-                "{character:?} in the owner"
-            );
-            assert_eq!(
-                super::parse_comfy_ref(&format!("owner/re{character}po:style.safetensors")),
-                Err(REPOSITORY.to_string()),
-                "{character:?} in the repository"
-            );
-        }
-        assert_eq!(
-            super::parse_comfy_ref("own:er/repo:style.safetensors"),
-            Err(REPOSITORY.to_string())
-        );
-        assert_eq!(
-            super::parse_comfy_ref("owner//repo:style.safetensors"),
-            Err(REPOSITORY.to_string())
-        );
-        assert_eq!(
-            super::parse_comfy_ref("./repo:style.safetensors"),
-            Err(REPOSITORY.to_string())
-        );
-    }
-
-    #[test]
-    fn a_filename_with_a_control_character_is_refused() {
-        const FILENAME: &str = "Invalid image weight filename";
-        for character in ['\n', '\t', '\r', '\0', '\u{7f}', '\u{85}'] {
-            assert_eq!(
-                super::parse_comfy_ref(&format!("owner/repo:evil{character}.safetensors")),
-                Err(FILENAME.to_string()),
-                "{character:?} in the filename"
-            );
-        }
-    }
-
-    #[test]
-    fn a_printable_filename_is_kept_and_percent_encoded_in_its_url() {
-        const ORIGIN: &str = "https://huggingface.co/";
-        const PREFIX: &str = "https://huggingface.co/owner/repo/resolve/main/";
-        for (filename, encoded) in [
-            ("evil#.safetensors", "evil%23.safetensors"),
-            ("evil?.safetensors", "evil%3F.safetensors"),
-            ("100%.safetensors", "100%25.safetensors"),
-            ("My Lora (v2).safetensors", "My%20Lora%20(v2).safetensors"),
-            ("style+detail.safetensors", "style+detail.safetensors"),
-            ("estilo-é.safetensors", "estilo-%C3%A9.safetensors"),
-        ] {
-            let reference = super::parse_comfy_ref(&format!("owner/repo:{filename}"))
-                .unwrap_or_else(|message| panic!("{filename:?} was refused: {message}"));
-            assert_eq!(reference.filename(), filename);
-            assert_eq!(
-                reference.url(ORIGIN).unwrap().as_str(),
-                format!("{PREFIX}{encoded}"),
-                "{filename:?}"
-            );
-        }
     }
 
     #[test]
