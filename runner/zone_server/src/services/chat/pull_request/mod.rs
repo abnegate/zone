@@ -291,7 +291,7 @@ async fn observed(
     state
         .github()
         .retrying(state.db(), credential, |token| async move {
-            Ok(observe(service, reference, &token, row, Reading::Listing).await?)
+            observe(service, reference, &token, row, Reading::Listing).await
         })
         .await
 }
