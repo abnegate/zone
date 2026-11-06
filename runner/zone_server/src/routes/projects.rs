@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::projects::{self, NewProject, ProjectRow};
+use crate::db::projects::{self, NewProject, ProjectRow, Reorder};
 use crate::db::{auto_projects, chats, sources, sync_config, workspace_members};
 use crate::error::ServerError;
 use crate::services::model::Model;
@@ -153,6 +153,10 @@ pub struct ProjectData {
     description: Option<String>,
     status: String,
     github_repo_url: Option<String>,
+    /// Where the workspace placed the project in its own order, lowest first.
+    position: i32,
+    /// When a member last typed in the project's chats or added it a task.
+    last_used_at: Option<String>,
     /// Whether the project runs itself, and why it stopped or when it finished.
     auto: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,6 +201,8 @@ impl From<ProjectRow> for ProjectData {
             description: row.description,
             status: row.status,
             github_repo_url: row.github_repo_url,
+            position: row.position,
+            last_used_at: row.last_used_at.map(|at| at.and_utc().to_rfc3339()),
             auto: false,
             auto_paused_reason: None,
             auto_completed_at: None,
@@ -231,6 +237,12 @@ pub struct UpdateProjectRequest {
     /// Turn automation on or off: on, every agentic task of the project is
     /// run, reviewed and merged without anyone in the loop.
     auto: Option<bool>,
+}
+
+/// The workspace's projects, or some of them, in the order they should take
+#[derive(Debug, Deserialize)]
+pub struct ReorderProjectsRequest {
+    project_ids: Vec<Uuid>,
 }
 
 /// Link source request
@@ -365,6 +377,33 @@ pub async fn list(
             .collect(),
     })
     .into_response())
+}
+
+/// PUT /api/workspaces/{workspace_id}/projects/order
+///
+/// The projects named take the places they held between them, in the order
+/// given; the rest stay where they are.
+pub async fn reorder(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(workspace_id): Path<Uuid>,
+    Json(req): Json<ReorderProjectsRequest>,
+) -> Result<Response, ServerError> {
+    let user_id = user_id(&auth)?;
+    if !workspace_members::is_member(state.db(), user_id, workspace_id).await? {
+        return Err(ServerError::NotFound("Workspace not found".to_string()));
+    }
+    if !workspace_members::can_write(state.db(), workspace_id, user_id).await? {
+        return Err(ServerError::Forbidden(
+            "Workspace write access required".to_string(),
+        ));
+    }
+    match projects::reorder(state.db(), workspace_id, &req.project_ids).await? {
+        Reorder::Reordered => Ok(StatusCode::NO_CONTENT.into_response()),
+        Reorder::Unknown => Err(ServerError::BadRequest(
+            "The order must name each of the workspace's projects at most once".to_string(),
+        )),
+    }
 }
 
 /// POST /api/projects

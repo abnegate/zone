@@ -81,6 +81,7 @@ mod organization_members;
 mod password_reset;
 mod plans;
 mod pr_reception_status;
+mod project_order;
 mod prompt_assembly;
 mod pull_ws;
 mod reminder_time_zone;
