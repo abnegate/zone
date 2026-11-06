@@ -23,8 +23,6 @@ pub enum Error {
     Suspended,
     #[error("The GitHub connection this was using no longer exists. Reconnect GitHub.")]
     NotConnected,
-    #[error("GitHub App installations need an HTTPS GitHub API origin.")]
-    Unavailable,
     #[error("The GitHub connection could not be read: {0}")]
     Database(#[from] sqlx::Error),
 }

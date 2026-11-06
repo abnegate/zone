@@ -3,6 +3,7 @@
 use std::fmt;
 
 use abnegate_secret::SecretValue;
+use uuid::Uuid;
 
 /// A bearer credential, whatever minted it.
 ///
@@ -13,11 +14,26 @@ use abnegate_secret::SecretValue;
 #[derive(Clone)]
 pub struct Credential {
     secret: SecretValue,
+    installation: Option<Uuid>,
 }
 
 impl Credential {
     pub(crate) fn stored(secret: SecretValue) -> Self {
-        Self { secret }
+        Self {
+            secret,
+            installation: None,
+        }
+    }
+
+    pub(crate) fn installed(secret: SecretValue, installation: Uuid) -> Self {
+        Self {
+            secret,
+            installation: Some(installation),
+        }
+    }
+
+    pub(super) fn installation(&self) -> Option<Uuid> {
+        self.installation
     }
 
     pub fn secret(&self) -> &SecretValue {
@@ -45,7 +61,8 @@ mod tests {
     #[test]
     fn two_credentials_render_identically() {
         let personal = Credential::stored(SecretValue::new("ghp_personalaccesstoken"));
-        let installation = Credential::stored(SecretValue::new("ghs_installationtoken"));
+        let installation =
+            Credential::installed(SecretValue::new("ghs_installationtoken"), Uuid::new_v4());
 
         assert_eq!(
             format!("{personal:?}"),
@@ -61,6 +78,21 @@ mod tests {
 
         assert!(!rendered.contains("ghp_personalaccesstoken"));
         assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn only_a_minted_credential_names_its_installation() {
+        let installation = Uuid::new_v4();
+
+        assert_eq!(
+            Credential::installed(SecretValue::new("ghs_installationtoken"), installation)
+                .installation(),
+            Some(installation)
+        );
+        assert_eq!(
+            Credential::stored(SecretValue::new("ghp_personalaccesstoken")).installation(),
+            None
+        );
     }
 
     #[test]
