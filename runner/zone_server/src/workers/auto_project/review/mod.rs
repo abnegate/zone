@@ -42,10 +42,10 @@ const REVIEW_TIMEOUT: Duration = Duration::from_secs(600);
 const REVIEW_TOKENS: u32 = 4_096;
 /// A review is a judgement, not a draft.
 const REVIEW_TEMPERATURE: f32 = 0.0;
-/// How zone_core begins a coding agent's refusal of a model or a context the
-/// signed-in account cannot spend usage credits on, which every tick meets
-/// again.
-const UNFUNDED_MARKERS: [&str; 2] = [CREDITS_REQUIRED, LONG_CONTEXT_CREDITS_REQUIRED];
+/// How abnegate-agent-cli begins a coding agent's refusal of a model or a
+/// context the signed-in account cannot spend usage credits on, which every
+/// tick meets again.
+const CREDITS_MARKERS: [&str; 2] = [CREDITS_REQUIRED, LONG_CONTEXT_CREDITS_REQUIRED];
 
 #[derive(Debug, Error)]
 pub enum ReviewError {
@@ -74,7 +74,7 @@ impl ReviewError {
         let credits = matches!(&error, abnegate_llm::Error::Limited { limit, .. } if limit.credits);
         let unfunded = credits
             || matches!(backend, LlmBackend::Cli { .. })
-                && UNFUNDED_MARKERS.iter().any(|marker| words.contains(marker));
+                && CREDITS_MARKERS.iter().any(|marker| words.contains(marker));
         if unfunded {
             return Self::Unfunded {
                 reviewer: reviewer.to_string(),
@@ -471,6 +471,72 @@ mod tests {
             )),
             "the task pauses with claude's words rather than asking every tick"
         );
+    }
+
+    /// abnegate-agent-cli reads a refusal for usage credits only from the
+    /// `api_error` claude types it with: a Fable refusal in claude's words
+    /// alone is a failed round, where Zone's own provider paused the task on
+    /// those words. A context the account cannot fund pauses it as a model
+    /// does.
+    #[tokio::test]
+    async fn a_reviewer_is_unfunded_only_by_claudes_typed_refusal() {
+        const LONG_CONTEXT: &str = "API Error: Usage credits required for 1M context";
+        let task = task();
+        let pull = pull();
+        let review = |words: &'static str, kind: Option<&'static str>| {
+            let task = &task;
+            let pull = &pull;
+            async move {
+                let directory = TempDir::new().expect("a temporary directory");
+                let prompt = directory.path().join("prompt");
+                let config = claude(refusing(&directory, &prompt, words, kind));
+                run(
+                    &Endpoint::instance(&config),
+                    backend::instance(&config),
+                    github(),
+                    request(task, pull, "fable"),
+                )
+                .await
+                .expect_err("a refused review")
+            }
+        };
+
+        let worded = review(REFUSAL, None).await;
+        assert!(matches!(worded, ReviewError::Model(_)), "{worded:?}");
+        assert_eq!(
+            worded.stalled(),
+            None,
+            "the next tick asks another reviewer"
+        );
+
+        let long_context = review(LONG_CONTEXT, Some("long_context_credits_required")).await;
+        let ReviewError::Unfunded { reason, .. } = &long_context else {
+            panic!("expected an unfunded reviewer, got {long_context:?}");
+        };
+        assert_eq!(
+            reason,
+            &format!("claude: {LONG_CONTEXT_CREDITS_REQUIRED}: {LONG_CONTEXT}")
+        );
+    }
+
+    /// Each refusal for usage credits abnegate-agent-cli words is unfunded
+    /// however the failure reaches the review, even with no credits limit
+    /// beside it.
+    #[test]
+    fn credits_markers_are_the_crates() {
+        let agent = LlmBackend::cli(AgentKind::Claude, zone_core::llm::cli::settings());
+        assert_eq!(
+            CREDITS_MARKERS,
+            [CREDITS_REQUIRED, LONG_CONTEXT_CREDITS_REQUIRED]
+        );
+        for marker in CREDITS_MARKERS {
+            let error = ReviewError::model(
+                &agent,
+                "fable",
+                abnegate_llm::Error::Agent(format!("claude: {marker}: {REFUSAL}")),
+            );
+            assert!(matches!(error, ReviewError::Unfunded { .. }), "{error:?}");
+        }
     }
 
     /// A model that fails for any other reason is a failed round, and the next

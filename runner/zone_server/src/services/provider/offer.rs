@@ -635,4 +635,35 @@ mod tests {
         }
         fixture.cleanup().await;
     }
+
+    /// A chat that names no model leaves the choice to the agent, so it is offered the efforts
+    /// of the model the agent picks. abnegate-agent-cli reads a blank model the same way, where
+    /// Zone's own provider offered a blank model no effort at all.
+    #[test]
+    fn a_blank_model_offers_the_agents_default_efforts() {
+        for &agent in AgentKind::ALL {
+            let provider = Provider::ALL
+                .into_iter()
+                .find(|provider| provider.agent() == Some(agent))
+                .expect("every agent is a provider");
+            let offer = Offer::new(provider, Availability::Usable, None, &Catalog::default());
+
+            let defaults = match agent {
+                AgentKind::Claude => json!(CLAUDE),
+                _ => json!(CODEX),
+            };
+            assert_eq!(
+                serde_json::to_value(offer.efforts).expect("serialise"),
+                defaults,
+                "{agent} offers no effort to a chat that names no model"
+            );
+            for blank in ["", "   "] {
+                assert_eq!(
+                    agent.efforts(Some(blank)),
+                    offer.efforts,
+                    "{agent} with {blank:?} for a model"
+                );
+            }
+        }
+    }
 }

@@ -625,8 +625,8 @@ const RATE_LIMIT_MARKERS: &[&str] = &[
     "too many requests",
 ];
 
-/// How zone_core words a coding agent's failure that a retry of the same
-/// prompt meets again: an answer past the output cap, and a model or a
+/// How abnegate-agent-cli begins a coding agent's failure that a retry of the
+/// same prompt meets again: prose past the output limit, and a model or a
 /// context the signed-in account cannot spend usage credits on.
 const AGENT_TERMINAL_MARKERS: &[&str] = &[
     PROSE_EXCEEDED,
@@ -4021,7 +4021,9 @@ mod tests {
 #[cfg(test)]
 mod retry_tests {
     use super::*;
-    use abnegate_agent_cli::{AgentEvent, AgentKind, CREDITS_UNCONFIRMED, STDERR_HEADING};
+    use abnegate_agent_cli::{
+        AgentEvent, AgentKind, CREDITS_UNCONFIRMED, DEFAULT_OUTPUT_LIMIT, STDERR_HEADING,
+    };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
     use zone_core::llm::SignIn;
@@ -4136,7 +4138,8 @@ mod retry_tests {
     /// from an endpoint are judged the way an endpoint's always were.
     #[test]
     fn only_a_coding_agent_stopped_at_the_output_cap_is_not_retried() {
-        let stopped = format!("Stream error: claude: {PROSE_EXCEEDED} 4194304 bytes");
+        let stopped =
+            format!("Stream error: claude: {PROSE_EXCEEDED} {DEFAULT_OUTPUT_LIMIT} bytes");
 
         assert_eq!(
             Fault::agent(
@@ -4376,6 +4379,136 @@ mod retry_tests {
         assert_eq!(fault.status, before.status);
     }
 
+    /// Prose small enough for a test to pass the output limit with.
+    const OUTPUT_LIMIT: usize = 64;
+
+    /// claude refusing its turn in `words`, typed as a refusal for usage
+    /// credits when `api_error` names one.
+    fn refusal(words: &str, api_error: Option<&str>) -> [serde_json::Value; 2] {
+        let mut assistant = serde_json::json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": words}]}, "parent_tool_use_id": null, "is_api_error_message": true});
+        if let Some(api_error) = api_error {
+            assistant["api_error"] = api_error.into();
+        }
+        [
+            assistant,
+            serde_json::json!({"type": "result", "subtype": "success", "is_error": true, "api_error_status": 400, "result": words}),
+        ]
+    }
+
+    /// A failure no retry gets past is read on the words abnegate-agent-cli
+    /// begins it with, as the crate itself reports each one.
+    #[tokio::test]
+    async fn agent_terminal_markers_are_the_crates() {
+        assert_eq!(
+            AGENT_TERMINAL_MARKERS,
+            [
+                PROSE_EXCEEDED,
+                CREDITS_REQUIRED,
+                LONG_CONTEXT_CREDITS_REQUIRED
+            ]
+        );
+
+        let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
+        let outgrown = replaying(
+            &directory,
+            &[
+                serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "a".repeat(OUTPUT_LIMIT * 2)}]}, "parent_tool_use_id": null}),
+            ],
+        )
+        .configured(|settings| settings.with_output_limit(OUTPUT_LIMIT));
+        let Halt::Failed(message) = halt(&outgrown).await else {
+            panic!("prose past the output limit was expected to fail the turn");
+        };
+        assert!(message.contains(PROSE_EXCEEDED), "{message}");
+        assert_eq!(
+            Fault::agent(&outgrown, message.clone()).failure,
+            Failure::Terminal,
+            "{message}"
+        );
+
+        for (api_error, words) in [
+            ("model_requires_usage_credits", FABLE_REFUSAL),
+            ("long_context_credits_required", LONG_CONTEXT_REFUSAL),
+        ] {
+            let mut turn = AgentKind::Claude.turn();
+            let mut events = Vec::new();
+            for line in refusal(words, Some(api_error)) {
+                turn.interpret(&line.to_string(), &mut events);
+            }
+            let refused = events
+                .iter()
+                .find_map(|event| match event {
+                    AgentEvent::Failed(message)
+                    | AgentEvent::Limited(abnegate_llm::Limit { message, .. }) => Some(message),
+                    _ => None,
+                })
+                .expect("the refusal fails the turn");
+
+            let fault = Fault::agent(
+                &agent(AgentKind::Claude, SignIn::Organization),
+                format!("Stream error: claude: {refused}"),
+            );
+
+            assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+        }
+    }
+
+    /// abnegate-agent-cli knows a refusal for usage credits only by the
+    /// `api_error` claude types it with. A Fable refusal in claude's words
+    /// alone is a failure the next attempt may get past, where Zone's own
+    /// provider read those words as a refusal no retry survives.
+    #[tokio::test]
+    async fn a_fable_refusal_without_its_api_error_is_retried() {
+        let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
+        let worded = replaying(&directory, &refusal(FABLE_REFUSAL, None));
+        let Halt::Failed(message) = halt(&worded).await else {
+            panic!("an untyped refusal was expected to fail the turn in its words");
+        };
+        assert!(!message.contains(CREDITS_REQUIRED), "{message}");
+        assert!(message.ends_with(FABLE_REFUSAL), "{message}");
+        assert_eq!(
+            Fault::agent(&worded, message.clone()).failure,
+            Failure::Transient,
+            "{message}"
+        );
+
+        let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
+        let typed = replaying(
+            &directory,
+            &refusal(FABLE_REFUSAL, Some("model_requires_usage_credits")),
+        );
+        let Halt::Limited(limit) = halt(&typed).await else {
+            panic!("a typed refusal was expected to halt the turn as a credits limit");
+        };
+        let fault = Fault::limited(&typed, limit);
+        assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+        assert_eq!(
+            fault.message,
+            format!("Stream error: claude: {CREDITS_REQUIRED}: {FABLE_REFUSAL}")
+        );
+    }
+
+    /// abnegate-agent-cli words a context the account cannot fund as "usage
+    /// credits required for this context length", and a context length is
+    /// what an endpoint's failure is terminal for. No endpoint words its
+    /// failure so, and a coding agent's refusal is terminal as it always was,
+    /// so the one judgement that moved is this synthetic one, from transient.
+    #[test]
+    fn an_endpoint_failure_in_the_crates_long_context_words_is_terminal_for_naming_a_context_length()
+     {
+        let fault = Fault::agent(&LlmBackend::Http, LONG_CONTEXT_CREDITS_REQUIRED.to_string());
+
+        assert_eq!(fault.failure, Failure::Terminal);
+        assert_eq!(
+            classify(LONG_CONTEXT_CREDITS_REQUIRED),
+            classify("the request exceeds the model's context length")
+        );
+        assert_eq!(
+            classify_agent(LONG_CONTEXT_CREDITS_REQUIRED),
+            Failure::Terminal
+        );
+    }
+
     /// A model the signed-in account cannot spend usage credits on refuses
     /// every retry alike, so a credits limit ends the run as the unfunded
     /// failure did.
@@ -4425,7 +4558,6 @@ mod retry_tests {
             ),
             ("400 Bad Request: credits_required", Failure::Terminal),
             (CREDITS_REQUIRED, Failure::Transient),
-            (LONG_CONTEXT_CREDITS_REQUIRED, Failure::Terminal),
             (SESSION_LIMIT, Failure::Transient),
         ] {
             let fault = Fault::agent(&LlmBackend::Http, message.to_string());

@@ -1,6 +1,5 @@
 //! Application state
 
-use abnegate_agent_cli::CliSettings;
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use abnegate_secret::MasterKey;
 use dashmap::DashMap;
@@ -14,7 +13,7 @@ use zone_context::adapters::{
 };
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
-use zone_core::llm::LlmBackend;
+use zone_core::llm::{LlmBackend, cli};
 use zone_core::mcp::McpHub;
 
 use crate::cache::Cache;
@@ -69,8 +68,8 @@ pub fn llm_backend(config: &Config) -> LlmBackend {
         ModelBackend::Cli { agent, executable } => LlmBackend::cli(
             *agent,
             match executable {
-                Some(executable) => CliSettings::default().with_executable(executable),
-                None => CliSettings::default(),
+                Some(executable) => cli::settings().with_executable(executable),
+                None => cli::settings(),
             },
         ),
     }
