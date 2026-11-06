@@ -63,6 +63,7 @@ mod invitations_routes;
 mod knowledge;
 mod knowledge_recovery;
 mod knowledge_url;
+mod knowledge_vector_search;
 mod layout;
 mod learning_thresholds;
 mod lora_flows;
