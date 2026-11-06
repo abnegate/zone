@@ -107,21 +107,25 @@ impl Paragraphs {
 /// A call of zone's own tools has none: it arrives at zone over MCP, and the
 /// turn shows it as zone's own card, so it would otherwise be shown twice.
 pub fn activity(call: &ToolCall) -> Option<String> {
-    listed(
-        &call.function.name,
-        subject(&call.function.arguments).as_deref(),
-    )
+    let name = &call.function.name;
+    listable(name).then(|| line(name, subject(&call.function.arguments).as_deref()))
 }
 
 /// [`activity`]'s line for a tool `name` used on `subject`.
 pub(super) fn listed(name: &str, subject: Option<&str>) -> Option<String> {
-    if name.starts_with(&Toolset::qualified(Toolset::SERVER, "")) {
-        return None;
-    }
-    Some(match subject {
+    listable(name).then(|| line(name, subject))
+}
+
+/// Whether a call of tool `name` is listed: one of zone's own is not.
+fn listable(name: &str) -> bool {
+    !name.starts_with(&Toolset::qualified(Toolset::SERVER, ""))
+}
+
+fn line(name: &str, subject: Option<&str>) -> String {
+    match subject {
         Some(subject) => format!("- {name} {}\n", code_span(subject)),
         None => format!("- {name}\n"),
-    })
+    }
 }
 
 /// The first line of what a call is about, cut short once it is clean: a token
