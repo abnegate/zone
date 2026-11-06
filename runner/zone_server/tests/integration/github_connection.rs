@@ -31,9 +31,7 @@ use crate::common::github_app::{
 };
 use crate::common::{TestClient, TestResponse, test_email, test_password};
 
-const SETTINGS_PATH: &str = "/org-settings";
-const TAB_PARAMETER: &str = "tab";
-const TAB: &str = "github";
+const SETTINGS_PATH: &str = "/settings/organization/github";
 const OUTCOME_PARAMETER: &str = "github";
 const ORGANIZATION_PARAMETER: &str = "organization";
 const STATE_PARAMETER: &str = "state";
@@ -308,20 +306,20 @@ impl Harness {
 
         let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
         assert_eq!(
-            pairs.first(),
-            Some(&(TAB_PARAMETER.to_string(), TAB.to_string())),
-            "the settings path constant opens the GitHub tab first: {url}"
+            pairs.first().map(|(name, _)| name.as_str()),
+            Some(OUTCOME_PARAMETER),
+            "the outcome opens the query: {url}"
         );
         let mut expected =
             BTreeMap::from([(OUTCOME_PARAMETER.to_string(), outcome.as_str().to_string())]);
         if let Some(organization) = organization {
             expected.insert(ORGANIZATION_PARAMETER.to_string(), organization.to_string());
         }
-        let rest: BTreeMap<String, String> = pairs.iter().skip(1).cloned().collect();
-        assert_eq!(rest, expected, "{url}");
+        let received: BTreeMap<String, String> = pairs.iter().cloned().collect();
+        assert_eq!(received, expected, "{url}");
         assert_eq!(
             pairs.len(),
-            expected.len() + 1,
+            expected.len(),
             "no parameter appears twice: {url}"
         );
     }
@@ -1430,8 +1428,7 @@ async fn security_location_never_carries_secrets() {
         match url.origin() == zone {
             true => assert!(
                 names.iter().all(
-                    |name| [TAB_PARAMETER, OUTCOME_PARAMETER, ORGANIZATION_PARAMETER]
-                        .contains(&name.as_str())
+                    |name| [OUTCOME_PARAMETER, ORGANIZATION_PARAMETER].contains(&name.as_str())
                 ),
                 "a redirect back to Zone carries only the outcome: {rendered}"
             ),

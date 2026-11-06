@@ -3,7 +3,7 @@
 
 use uuid::Uuid;
 
-pub const SETTINGS_PATH: &str = "/org-settings?tab=github";
+pub const SETTINGS_PATH: &str = "/settings/organization/github";
 
 const OUTCOME_PARAMETER: &str = "github";
 const ORGANIZATION_PARAMETER: &str = "organization";
@@ -36,9 +36,9 @@ pub fn location(app_base_url: &str, outcome: Outcome, organization: Option<Uuid>
     let outcome = outcome.as_str();
     match organization {
         Some(organization) => format!(
-            "{base}{SETTINGS_PATH}&{OUTCOME_PARAMETER}={outcome}&{ORGANIZATION_PARAMETER}={organization}"
+            "{base}{SETTINGS_PATH}?{OUTCOME_PARAMETER}={outcome}&{ORGANIZATION_PARAMETER}={organization}"
         ),
-        None => format!("{base}{SETTINGS_PATH}&{OUTCOME_PARAMETER}={outcome}"),
+        None => format!("{base}{SETTINGS_PATH}?{OUTCOME_PARAMETER}={outcome}"),
     }
 }
 
@@ -51,12 +51,29 @@ mod tests {
     const BASE: &str = "https://zone.example.com";
 
     #[test]
-    fn the_settings_path_is_a_page_of_zone_opening_the_github_tab() {
+    fn the_settings_path_is_the_organization_github_page_of_zone() {
         let url = Url::parse(&format!("{BASE}{SETTINGS_PATH}")).unwrap();
         assert_eq!(url.origin(), Url::parse(BASE).unwrap().origin());
-        assert!(url.path().len() > 1 && !url.path().ends_with('/'), "{url}");
+        assert_eq!(
+            url.path_segments().unwrap().collect::<Vec<_>>(),
+            ["settings", "organization", "github"]
+        );
+        assert_eq!(url.query(), None);
+    }
+
+    #[test]
+    fn the_outcome_opens_the_query() {
+        let organization = Uuid::new_v4();
+        let url = Url::parse(&location(BASE, Outcome::Installed, Some(organization))).unwrap();
+        assert_eq!(url.path(), SETTINGS_PATH);
         let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
-        assert_eq!(pairs, [("tab".to_string(), "github".to_string())]);
+        assert_eq!(
+            pairs,
+            [
+                ("github".to_string(), "installed".to_string()),
+                ("organization".to_string(), organization.to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -71,7 +88,7 @@ mod tests {
             assert_eq!(outcome.as_str(), spelled);
             assert_eq!(
                 location(BASE, outcome, None),
-                format!("{BASE}{SETTINGS_PATH}&github={spelled}")
+                format!("{BASE}{SETTINGS_PATH}?github={spelled}")
             );
         }
     }
@@ -80,7 +97,7 @@ mod tests {
     fn a_trailing_slash_on_the_base_url_is_dropped() {
         assert_eq!(
             location(" http://192.168.1.5:3000/ ", Outcome::Sync, None),
-            format!("http://192.168.1.5:3000{SETTINGS_PATH}&github=sync")
+            format!("http://192.168.1.5:3000{SETTINGS_PATH}?github=sync")
         );
     }
 
@@ -89,7 +106,7 @@ mod tests {
         let organization = Uuid::new_v4();
         assert_eq!(
             location(BASE, Outcome::Installed, Some(organization)),
-            format!("{BASE}{SETTINGS_PATH}&github=installed&organization={organization}")
+            format!("{BASE}{SETTINGS_PATH}?github=installed&organization={organization}")
         );
         assert!(!location(BASE, Outcome::Expired, None).contains("organization"));
     }
