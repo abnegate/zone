@@ -3,7 +3,7 @@
 //! the sign-in; it never exchanges a code itself.
 
 mod limits;
-mod page;
+pub mod page;
 
 use std::env;
 use std::path::Path;

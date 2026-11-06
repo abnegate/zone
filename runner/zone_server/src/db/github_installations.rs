@@ -224,6 +224,22 @@ pub async fn list(pool: &PgPool, organization_id: Uuid) -> DbResult<Vec<Installa
     .await
 }
 
+pub async fn list_for_app(
+    pool: &PgPool,
+    organization_id: Uuid,
+    github_app_id: Uuid,
+) -> DbResult<Vec<InstallationRow>> {
+    sqlx::query_as::<_, InstallationRow>(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM github_installations \
+         WHERE organization_id = $1 AND github_app_id = $2 \
+         ORDER BY lower(account_login), installation_id"
+    )))
+    .bind(organization_id)
+    .bind(github_app_id)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn get(
     pool: &PgPool,
     organization_id: Uuid,
@@ -578,6 +594,37 @@ mod tests {
 
         assert!(!mark_revoked(&pool, Uuid::new_v4()).await.unwrap());
         assert!(!mark_suspended(&pool, Uuid::new_v4()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn list_for_app_returns_only_that_apps_installations_in_its_organization() {
+        let pool = pool().await;
+        let organization = seed_organization(&pool).await;
+        let stranger = seed_organization(&pool).await;
+        let app = seed_app(&pool, organization, "acme").await;
+        let neighbour = seed_app(&pool, organization, "globex").await;
+        let first = seeded(&pool, &app).await;
+        let second = seeded(&pool, &app).await;
+        mark_revoked(&pool, second.id).await.unwrap();
+        seeded(&pool, &neighbour).await;
+
+        let mut ordered = [first, second];
+        ordered.sort_by_key(|row| row.installation_id);
+        let expected: Vec<Uuid> = ordered.iter().map(|row| row.id).collect();
+        let listed: Vec<Uuid> = list_for_app(&pool, organization, app.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(listed, expected);
+        assert!(
+            list_for_app(&pool, stranger, app.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "another organization never sees the App's installations"
+        );
     }
 
     #[tokio::test]

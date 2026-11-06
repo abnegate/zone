@@ -1,5 +1,3 @@
-//! Files an installation GitHub described under the organization's App.
-
 use abnegate_vcs::pull_request::{self, Installation};
 use chrono::{DateTime, Utc};
 use reqwest::Url;
@@ -15,11 +13,6 @@ use super::unrecorded::Unrecorded;
 
 const SCHEMES: [&str; 2] = ["http", "https"];
 
-/// Records `installation` under `app`, reviving it if it was revoked.
-///
-/// Refuses an installation of another App, one GitHub gave no http(s) address
-/// for, and an account type or repository selection Zone does not know,
-/// writing nothing.
 pub async fn record(
     db: &PgPool,
     app: &AppRow,

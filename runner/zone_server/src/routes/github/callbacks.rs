@@ -1,8 +1,3 @@
-//! The two public pages GitHub sends an admin's browser back to: after it
-//! registers an App from Zone's manifest, and after the App is installed.
-//! Neither is behind a session; the single-use state each carries names the
-//! organization and admin that started it.
-
 mod failure;
 
 use abnegate_vcs::pull_request::{AccountType, InstallationId, RegisteredApplication};
@@ -16,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::connection::AuditedApp;
 use super::outcome::{Outcome, location};
 use crate::db::audit::{actions, resources};
 use crate::db::github_apps::{self, AppRow, NewApp, OwnerType};
@@ -26,11 +22,10 @@ use crate::routes::common::{AuditEvent, audit};
 use crate::services::github_app::error::Error as GitHubError;
 use crate::services::github_app::installations;
 use crate::services::github_app::manifest;
+use crate::services::login::callback::page::{NO_REFERRER, NO_STORE};
 use crate::state::AppState;
 use failure::Failure;
 
-const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
-const NO_REFERRER: HeaderValue = HeaderValue::from_static("no-referrer");
 const GET: HeaderValue = HeaderValue::from_static("GET");
 const SCHEMES: [&str; 2] = ["http", "https"];
 
@@ -58,12 +53,6 @@ enum SetupAction {
 }
 
 #[derive(Debug, Serialize)]
-struct RegisteredApp<'a> {
-    owner_login: &'a str,
-    slug: &'a str,
-}
-
-#[derive(Debug, Serialize)]
 struct ConnectedInstallation<'a> {
     account_login: &'a str,
     installation_id: i64,
@@ -88,20 +77,31 @@ pub async fn manifest(State(state): State<AppState>, uri: Uri) -> Response {
             return redirect(&location(base, Outcome::Failed, None));
         }
     };
+    let failed = location(base, Outcome::Failed, Some(consumed.organization_id));
 
-    match register(&state, &consumed, parameters.code.as_deref()).await {
-        Ok(installation) => redirect(&installation),
+    let application = match convert(&state, &consumed, parameters.code.as_deref()).await {
+        Ok(application) => application,
         Err(failure) => {
             tracing::warn!(
                 organization = %consumed.organization_id,
                 error = %failure,
-                "The GitHub App Zone registered from its manifest could not be connected"
+                "GitHub could not register an App from Zone's manifest"
             );
-            redirect(&location(
-                base,
-                Outcome::Failed,
-                Some(consumed.organization_id),
-            ))
+            return redirect(&failed);
+        }
+    };
+
+    match register(&state, &consumed, &application).await {
+        Ok(installation) => redirect(&installation),
+        Err(failure) => {
+            tracing::warn!(
+                organization = %consumed.organization_id,
+                slug = %application.slug,
+                html_url = %application.html_url,
+                error = %failure,
+                "GitHub registered an App Zone could not connect, so it stays on GitHub until deleted there"
+            );
+            redirect(&failed)
         }
     }
 }
@@ -158,36 +158,37 @@ async fn consume(
     }
 }
 
-/// Converts the manifest code into an App, stores it with its secrets sealed,
-/// and returns the App's installation page carrying a fresh installation state.
-async fn register(
+async fn convert(
     state: &AppState,
     consumed: &ConsumedState,
     code: Option<&str>,
-) -> Result<String, Failure> {
+) -> Result<RegisteredApplication, Failure> {
     let code = code
         .filter(|code| !code.is_empty())
         .ok_or(Failure::MissingCode)?;
     administering(state, consumed).await?;
 
-    let provider = state.github();
-    let application = provider
+    Ok(state
+        .github()
         .applications()?
         .convert_manifest(code)
         .await
-        .map_err(GitHubError::from)?;
-    let app = store(state, consumed, &application).await?;
+        .map_err(GitHubError::from)?)
+}
+
+async fn register(
+    state: &AppState,
+    consumed: &ConsumedState,
+    application: &RegisteredApplication,
+) -> Result<String, Failure> {
+    let app = store(state, consumed, application).await?;
     recorded(
         state,
         consumed,
         actions::GITHUB_APP_REGISTERED,
         resources::GITHUB_APP,
         app.id,
-        serde_json::to_value(RegisteredApp {
-            owner_login: &app.owner_login,
-            slug: &app.slug,
-        })
-        .ok(),
+        serde_json::to_value(AuditedApp::from(&app)).ok(),
     )
     .await;
 
@@ -246,8 +247,6 @@ async fn store(
     .await?)
 }
 
-/// Fetches the installation GitHub named with the App's JWT and files it under
-/// the App the state was issued for.
 async fn install(
     state: &AppState,
     consumed: &ConsumedState,
@@ -359,8 +358,8 @@ fn redirect(target: &str) -> Response {
 fn uncached(status: StatusCode) -> Response {
     let mut response = status.into_response();
     let headers = response.headers_mut();
-    headers.insert(CACHE_CONTROL, NO_STORE);
-    headers.insert(REFERRER_POLICY, NO_REFERRER);
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static(NO_STORE));
+    headers.insert(REFERRER_POLICY, HeaderValue::from_static(NO_REFERRER));
     response
 }
 
@@ -424,8 +423,8 @@ mod tests {
             redirect("https://zone.example.com/\n"),
             uncached(StatusCode::METHOD_NOT_ALLOWED),
         ] {
-            assert_eq!(response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
-            assert_eq!(response.headers().get(REFERRER_POLICY), Some(&NO_REFERRER));
+            assert_eq!(response.headers()[CACHE_CONTROL], NO_STORE);
+            assert_eq!(response.headers()[REFERRER_POLICY], NO_REFERRER);
         }
     }
 
