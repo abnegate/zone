@@ -2,31 +2,19 @@
 //! through abnegate-llm's providers.
 
 use abnegate_comfy::recipe::RecipeCatalog;
-use abnegate_llm::catalog::BrowseQuery;
-use abnegate_llm::catalog::DEFAULT_PAGE_SIZE;
-use abnegate_llm::catalog::Gpt4AllProvider;
-use abnegate_llm::catalog::HuggingFaceProvider;
-use abnegate_llm::catalog::MAXIMUM_PAGE_SIZE;
-use abnegate_llm::catalog::ModelPage;
-use abnegate_llm::catalog::ModelProvider;
-use abnegate_llm::catalog::OllamaProvider;
-use abnegate_llm::catalog::OpenRouterProvider;
-use abnegate_llm::catalog::huggingface_repository_downloads;
-use abnegate_llm::catalog::huggingface_repository_id;
+use abnegate_llm::catalog::{
+    BrowseQuery, CatalogError, DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider,
+    MAXIMUM_PAGE_SIZE, ModelPage, ModelProvider, OllamaProvider, OpenRouterProvider,
+    huggingface_repository_downloads, huggingface_repository_id,
+};
 
 use super::catalog_endpoints;
 use super::catalog_failure::CatalogFailure;
+use super::catalog_source::CatalogSource;
 use super::popular;
 use super::recipe_catalog;
-use super::types::BrowseResponse;
-use super::types::HuggingFaceModelInfo;
-use super::types::ListModelsQuery;
+use super::types::{BrowseResponse, HuggingFaceModelInfo, ListModelsQuery};
 use crate::state::AppState;
-
-const GPT4ALL: &str = "gpt4all";
-const HUGGINGFACE: &str = "huggingface";
-const OLLAMA: &str = "ollama";
-const OPENROUTER: &str = "openrouter";
 
 /// One page of the catalogue named `source`, as `query` asks for it.
 pub(super) async fn browse(
@@ -34,49 +22,51 @@ pub(super) async fn browse(
     source: &str,
     query: &ListModelsQuery,
 ) -> Result<BrowseResponse, CatalogFailure> {
+    let source = CatalogSource::parse(source)
+        .ok_or_else(|| CatalogFailure::UnknownSource(source.to_string()))?;
     let limit = query
         .limit
         .unwrap_or(DEFAULT_PAGE_SIZE)
         .min(MAXIMUM_PAGE_SIZE);
-    let page = search(state, source, query.to_browse_query(limit)).await?;
+    let page = search(state, source, query.to_browse_query(limit))
+        .await
+        .map_err(|error| CatalogFailure::catalog(source, error))?;
     Ok(BrowseResponse::from(page))
 }
 
 async fn search(
     state: &AppState,
-    source: &str,
+    source: CatalogSource,
     options: BrowseQuery<'_>,
-) -> Result<ModelPage, CatalogFailure> {
+) -> Result<ModelPage, CatalogError> {
     let config = state.config();
     let proxy = config.model_search_proxy_url.as_deref();
     let endpoints = catalog_endpoints::current();
-    let page = match source {
-        OLLAMA => {
+    match source {
+        CatalogSource::Ollama => {
             let provider = OllamaProvider::with_catalog(
                 endpoints.ollama_search,
                 endpoints.ollama_registry.as_str(),
                 proxy,
             )?;
-            popular::search(&provider, &endpoints.ollama_registry, proxy, options).await?
+            popular::search(&provider, &endpoints.ollama_registry, proxy, options).await
         }
-        HUGGINGFACE => {
+        CatalogSource::HuggingFace => {
             HuggingFaceProvider::with_proxy(config.huggingface_models_url.as_str(), proxy)?
                 .search_with_adapters(options, &adapter_bases(state))
-                .await?
+                .await
         }
-        GPT4ALL => {
+        CatalogSource::Gpt4All => {
             Gpt4AllProvider::with_proxy(config.gpt4all_models_url.as_str(), proxy)?
                 .search(options)
-                .await?
+                .await
         }
-        OPENROUTER => {
+        CatalogSource::OpenRouter => {
             OpenRouterProvider::with_proxy(endpoints.openrouter, proxy)?
                 .search(options)
-                .await?
+                .await
         }
-        other => return Err(CatalogFailure::UnknownSource(other.to_string())),
-    };
-    Ok(page)
+    }
 }
 
 /// The base models whose HuggingFace adapters Browse lists beside a search.

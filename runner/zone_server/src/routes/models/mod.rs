@@ -4,6 +4,7 @@
 
 mod catalog_endpoints;
 mod catalog_failure;
+mod catalog_source;
 mod method;
 mod popular;
 mod providers;
