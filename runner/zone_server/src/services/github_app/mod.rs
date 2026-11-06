@@ -24,6 +24,7 @@ pub mod login;
 pub mod manifest;
 pub mod permissions;
 pub mod provider;
+pub mod unauthenticated;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -31,3 +32,4 @@ pub(crate) mod testing;
 pub use credential::Credential;
 pub use error::Error;
 pub use provider::Provider;
+pub use unauthenticated::Unauthenticated;
