@@ -3,6 +3,8 @@ use abnegate_vcs::pull_request::ApplicationError;
 
 use crate::services::github_app::{self, Unauthenticated};
 
+const TOO_MANY_REQUESTS: u16 = 429;
+
 /// Why a pull request could not be read or changed on GitHub.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -40,16 +42,26 @@ impl From<PullRequestError> for Error {
 
 impl From<github_app::Error> for Error {
     fn from(error: github_app::Error) -> Self {
-        match error {
+        match &error {
             github_app::Error::Revoked
             | github_app::Error::Suspended
             | github_app::Error::NotConnected => Self::Disconnected,
             github_app::Error::Credential => Self::Uncredentialed,
-            github_app::Error::Database(_) => Self::Storage,
             github_app::Error::Application(
-                ApplicationError::Transport(_) | ApplicationError::Status(500..=599),
+                ApplicationError::Transport(_)
+                | ApplicationError::Response
+                | ApplicationError::Status(TOO_MANY_REQUESTS | 500..=599),
             ) => Self::Unreachable,
-            error => Self::Refused(error.to_string()),
+            github_app::Error::Application(
+                ApplicationError::Status(_) | ApplicationError::InvalidCode,
+            ) => Self::Refused(error.to_string()),
+            github_app::Error::Database(_)
+            | github_app::Error::Sealing
+            | github_app::Error::Unsealing
+            | github_app::Error::Application(_) => {
+                tracing::error!(%error, "a pull request's GitHub credential could not be resolved");
+                Self::Storage
+            }
         }
     }
 }
@@ -97,16 +109,28 @@ mod tests {
 
     #[test]
     fn provider_failures_keep_their_kind() {
-        assert_eq!(
-            Error::from(github_app::Error::from(sqlx::Error::RowNotFound)),
-            Error::Storage
-        );
-        assert_eq!(
-            Error::from(github_app::Error::from(ApplicationError::Transport(
-                "connection refused".to_string()
-            ))),
-            Error::Unreachable
-        );
+        for error in [
+            github_app::Error::from(sqlx::Error::RowNotFound),
+            github_app::Error::Sealing,
+            github_app::Error::Unsealing,
+            github_app::Error::from(ApplicationError::PrivateKey),
+            github_app::Error::from(ApplicationError::Signing),
+            github_app::Error::from(ApplicationError::InvalidOrigin),
+            github_app::Error::from(ApplicationError::Client),
+        ] {
+            let rendered = error.to_string();
+            assert_eq!(Error::from(error), Error::Storage, "{rendered}");
+        }
+        for error in [
+            github_app::Error::from(ApplicationError::Transport(
+                "connection refused".to_string(),
+            )),
+            github_app::Error::from(ApplicationError::Response),
+            github_app::Error::from(ApplicationError::Status(429)),
+        ] {
+            let rendered = error.to_string();
+            assert_eq!(Error::from(error), Error::Unreachable, "{rendered}");
+        }
         assert_eq!(
             Error::from(github_app::Error::Credential),
             Error::Uncredentialed
