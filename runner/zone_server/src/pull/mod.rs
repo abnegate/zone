@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::task::Poll;
 use std::time::Duration;
@@ -28,6 +28,7 @@ const CHECKSUM_MISMATCH: &str = "Image weight checksum mismatch";
 const INVALID_DIGEST: &str = "Image weight manifest has an invalid SHA-256 digest";
 const WAITING_FOR_RELEASE: &str = "waiting for another download of these image weights";
 const ALREADY_DOWNLOADING: &str = "These image weights are already downloading";
+const STAGED_SUFFIX: &str = ".download";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const RELEASE_WAITS: [Duration; 4] = [
     Duration::from_millis(100),
@@ -508,9 +509,10 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
         });
         return;
     }
+    let staged = staged(&target);
     if let Err(message) = fetch_weights(
         &manifest.url,
-        &target,
+        &staged,
         Some(checksum),
         Some(manifest.size_bytes),
         job,
@@ -520,21 +522,9 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
         job.publish(Event::Error { message });
         return;
     }
-    match std::fs::metadata(&target) {
-        Ok(metadata) if metadata.len() == manifest.size_bytes => {}
-        Ok(metadata) => {
-            let _ = std::fs::remove_file(&target);
-            job.publish(Event::Error {
-                message: size_mismatch(metadata.len(), manifest.size_bytes),
-            });
-            return;
-        }
-        Err(error) => {
-            job.publish(Event::Error {
-                message: format!("{STORE_FAILED}: {error}"),
-            });
-            return;
-        }
+    if let Err(message) = install(&staged, &target, manifest.size_bytes) {
+        job.publish(Event::Error { message });
+        return;
     }
     job.publish(Event::Complete {
         success: true,
@@ -542,9 +532,28 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
     });
 }
 
+/// Where a manifest weight is downloaded before it is checked, so a weight
+/// of the wrong size never replaces the one already at `target`.
+fn staged(target: &Path) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(STAGED_SUFFIX);
+    PathBuf::from(name)
+}
+
+fn install(staged: &Path, target: &Path, size: u64) -> Result<(), String> {
+    let length = std::fs::metadata(staged)
+        .map_err(|error| format!("{STORE_FAILED}: {error}"))?
+        .len();
+    if length != size {
+        let _ = std::fs::remove_file(staged);
+        return Err(size_mismatch(length, size));
+    }
+    std::fs::rename(staged, target).map_err(|error| format!("{STORE_FAILED}: {error}"))
+}
+
 /// Transfer `url` to `target`, waiting a while for another transfer of the
-/// same weight to let go of it. A known `size` ends the transfer, before
-/// anything is installed, as soon as the server announces a different one.
+/// same weight to let go of it. A known `size` ends the transfer as soon as
+/// the server announces a different one, rather than downloading all of it.
 async fn fetch_weights(
     url: &str,
     target: &Path,
@@ -761,7 +770,8 @@ fn process(job: &Job, line: &[u8]) -> Result<bool, String> {
 mod tests {
     use super::{
         ALREADY_DOWNLOADING, CANCELLED, CHECKSUM_MISMATCH, ComfyPull, Event, INVALID_DIGEST,
-        ManifestFile, PullRegistry, PullStart, WAITING_FOR_RELEASE, describe, retryable,
+        ManifestFile, PullRegistry, PullStart, STAGED_SUFFIX, WAITING_FOR_RELEASE, describe,
+        retryable,
     };
     use abnegate_llm::download::{Checksum, DownloadError};
     use axum::{
@@ -820,8 +830,12 @@ mod tests {
         manifest_pull(directory, url, BODY.len() as u64, sha256(BODY))
     }
 
+    fn staged(directory: &Path) -> PathBuf {
+        directory.join(format!("{RELATIVE_PATH}{STAGED_SUFFIX}"))
+    }
+
     fn part(directory: &Path) -> PathBuf {
-        directory.join(format!("{RELATIVE_PATH}.part"))
+        directory.join(format!("{RELATIVE_PATH}{STAGED_SUFFIX}.part"))
     }
 
     async fn terminal(registry: &PullRegistry, model: &str) -> Event {
@@ -1042,6 +1056,7 @@ mod tests {
         let stored = std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap();
         assert_eq!(stored, BODY);
         assert!(!part(directory.path()).exists());
+        assert!(!staged(directory.path()).exists());
     }
 
     #[tokio::test]
@@ -1258,6 +1273,39 @@ mod tests {
             )
         );
         assert!(!directory.path().join(RELATIVE_PATH).exists());
+        assert!(!staged(directory.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn an_unannounced_size_mismatch_keeps_the_installed_weight() {
+        const INSTALLED: &[u8] = b"the weight installed before the manifest changed";
+        let origin = serve(Router::new().route(
+            "/file.bin",
+            get(|| async {
+                Body::from_stream(futures::stream::once(async {
+                    Ok::<_, std::io::Error>(Bytes::from_static(BODY))
+                }))
+            }),
+        ))
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join(RELATIVE_PATH);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, INSTALLED).unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(manifest_pull(
+            directory.path(),
+            format!("{origin}/file.bin"),
+            BODY.len() as u64 + 1,
+            sha256(BODY),
+        ));
+        let message = assert_error(&registry, "tiny").await;
+        assert!(
+            message.starts_with("Image weight size mismatch: "),
+            "{message}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), INSTALLED);
+        assert!(!staged(directory.path()).exists());
     }
 
     #[tokio::test]
@@ -1552,6 +1600,8 @@ mod tests {
             ".part".to_string(),
             ".part.validator".to_string(),
             format!(".part{TRANSFER_LOCK_SUFFIX}"),
+            STAGED_SUFFIX.to_string(),
+            format!("{STAGED_SUFFIX}.part"),
         ] {
             std::fs::write(checkpoints.join(format!("{weight}{suffix}")), b"partial").unwrap();
         }
