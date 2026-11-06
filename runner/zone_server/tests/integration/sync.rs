@@ -731,10 +731,14 @@ async fn a_github_webhook_verifies_only_against_a_sealed_secret() {
         .expect("Failed to serialize payload");
     let signature = format!("sha256={}", signature_for(&webhook_secret, &body));
 
-    for (stored, expected) in [
-        (sealed.clone(), StatusCode::OK),
-        (legacy_body(&sealed), StatusCode::OK),
-        (webhook_secret.clone(), StatusCode::INTERNAL_SERVER_ERROR),
+    for (shape, stored, expected) in [
+        ("an envelope", sealed.clone(), StatusCode::OK),
+        ("a pre-envelope body", legacy_body(&sealed), StatusCode::OK),
+        (
+            "plaintext",
+            webhook_secret.clone(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
     ] {
         let project =
             projects::create_project(state.db(), "Sealed Webhook Secret Project", None, None)
@@ -764,7 +768,7 @@ async fn a_github_webhook_verifies_only_against_a_sealed_secret() {
         .await;
 
         cleanup_project(state.db(), project.id).await;
-        assert_eq!(status, expected, "a secret stored as {stored}");
+        assert_eq!(status, expected, "a secret stored as {shape}");
     }
 }
 
