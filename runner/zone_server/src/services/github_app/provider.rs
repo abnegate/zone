@@ -160,23 +160,6 @@ impl Provider {
         self.application_jwt(Self::application_of(app.app_id)?, &app.private_key)
     }
 
-    pub async fn mint(
-        &self,
-        application: ApplicationId,
-        sealed_key: &str,
-        installation: InstallationId,
-    ) -> Result<SecretValue, Error> {
-        let issuer = &self.github()?.issuer;
-        if let Some(secret) = self.cached(installation) {
-            return Ok(secret);
-        }
-
-        self.flights
-            .board(installation)
-            .minted(|| self.issued(issuer, application, sealed_key, installation))
-            .await
-    }
-
     async fn issued(
         &self,
         issuer: &InstallationIssuer,
@@ -516,7 +499,6 @@ mod tests {
     };
 
     const APPLICATION: ApplicationId = ApplicationId::new(12345);
-    const INSTALLATION: InstallationId = InstallationId::new(67890);
 
     fn key() -> Arc<MasterKey> {
         static KEY: LazyLock<Arc<MasterKey>> =
@@ -532,125 +514,6 @@ mod tests {
         provider
             .seal(&SecretValue::new(TEST_PRIVATE_KEY))
             .expect("seal")
-    }
-
-    #[tokio::test]
-    async fn an_installation_token_is_minted_once_and_reused() {
-        let server = MockServer::start().await;
-        issuing(&server, INSTALLATION.get(), "ghs_installationtokenvalue", 1).await;
-        let provider = provider(&server, key());
-        let sealed = sealed_key(&provider);
-
-        for _ in 0..5 {
-            let token = provider
-                .mint(APPLICATION, &sealed, INSTALLATION)
-                .await
-                .expect("mint");
-            assert_eq!(token.expose(), "ghs_installationtokenvalue");
-        }
-    }
-
-    #[tokio::test]
-    async fn invalidating_an_installation_mints_a_new_token() {
-        let server = MockServer::start().await;
-        issuing(&server, INSTALLATION.get(), "ghs_installationtokenvalue", 2).await;
-        let provider = provider(&server, key());
-        let sealed = sealed_key(&provider);
-
-        provider
-            .mint(APPLICATION, &sealed, INSTALLATION)
-            .await
-            .expect("mint");
-        provider.invalidate(INSTALLATION);
-        provider
-            .mint(APPLICATION, &sealed, INSTALLATION)
-            .await
-            .expect("mint");
-    }
-
-    #[tokio::test]
-    async fn each_installation_gets_its_own_token() {
-        let server = MockServer::start().await;
-        issuing(&server, 1, "ghs_first", 1).await;
-        issuing(&server, 2, "ghs_second", 1).await;
-        let provider = provider(&server, key());
-        let sealed = sealed_key(&provider);
-
-        let first = provider
-            .mint(APPLICATION, &sealed, InstallationId::new(1))
-            .await
-            .expect("mint");
-        let second = provider
-            .mint(APPLICATION, &sealed, InstallationId::new(2))
-            .await
-            .expect("mint");
-
-        assert_eq!(first.expose(), "ghs_first");
-        assert_eq!(second.expose(), "ghs_second");
-    }
-
-    #[tokio::test]
-    async fn a_refused_exchange_surfaces_without_the_url() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(403))
-            .mount(&server)
-            .await;
-        let provider = provider(&server, key());
-
-        let error = provider
-            .mint(APPLICATION, &sealed_key(&provider), INSTALLATION)
-            .await
-            .expect_err("a 403 is a failure");
-
-        let rendered = error.to_string();
-        assert!(matches!(
-            error,
-            Error::Application(ApplicationError::Status(403))
-        ));
-        assert!(!rendered.contains(&server.uri()), "{rendered}");
-        assert!(!rendered.contains("access_tokens"), "{rendered}");
-    }
-
-    #[tokio::test]
-    async fn a_plain_http_origin_cannot_mint_unless_the_operator_allowed_it() {
-        let server = MockServer::start().await;
-        issuing(&server, INSTALLATION.get(), "ghs_installationtokenvalue", 0).await;
-        let config = Config {
-            github_api_url: server.uri(),
-            ..crate::state::test_config()
-        };
-        let provider = Provider::new(&config, key());
-
-        let error = provider
-            .mint(APPLICATION, &sealed_key(&provider), INSTALLATION)
-            .await
-            .expect_err("an http origin the operator did not allow cannot mint");
-
-        assert!(matches!(
-            error,
-            Error::Application(ApplicationError::InvalidOrigin)
-        ));
-        assert!(!error.to_string().contains(&server.uri()), "{error}");
-    }
-
-    #[tokio::test]
-    async fn an_allowed_plain_http_origin_on_a_private_host_mints() {
-        let server = MockServer::start().await;
-        issuing(&server, INSTALLATION.get(), "ghs_installationtokenvalue", 1).await;
-        let config = Config {
-            github_api_url: server.uri(),
-            github_api_allows_http: true,
-            ..crate::state::test_config()
-        };
-        let provider = Provider::new(&config, key());
-
-        let token = provider
-            .mint(APPLICATION, &sealed_key(&provider), INSTALLATION)
-            .await
-            .expect("a loopback origin the operator allowed mints");
-
-        assert_eq!(token.expose(), "ghs_installationtokenvalue");
     }
 
     #[test]
@@ -799,38 +662,6 @@ mod tests {
         assert_eq!(credential.secret().expose(), "ghp_personalaccesstoken");
     }
 
-    #[tokio::test]
-    async fn nothing_the_provider_renders_carries_a_credential() {
-        let server = MockServer::start().await;
-        issuing(&server, INSTALLATION.get(), "ghs_installationtokenvalue", 1).await;
-        let provider = provider(&server, key());
-        let sealed = sealed_key(&provider);
-
-        let token = provider
-            .mint(APPLICATION, &sealed, INSTALLATION)
-            .await
-            .expect("mint");
-        let credential = provider
-            .stored_project(Some("ghp_legacyplaintext"))
-            .expect("open")
-            .expect("credential");
-
-        for rendered in [
-            format!("{provider:?}"),
-            format!("{token:?}"),
-            format!("{credential:?}"),
-        ] {
-            assert!(
-                !rendered.contains("ghs_installationtokenvalue"),
-                "{rendered}"
-            );
-            assert!(!rendered.contains("ghp_legacyplaintext"), "{rendered}");
-            assert!(!rendered.contains("PRIVATE KEY"), "{rendered}");
-            assert!(!rendered.contains(&sealed), "{rendered}");
-            assert!(rendered.contains("[REDACTED]"), "{rendered}");
-        }
-    }
-
     const OWNER: &str = "acme";
     const REPOSITORY: &str = "widgets";
 
@@ -893,8 +724,11 @@ mod tests {
 
     impl Connected {
         async fn new(server: &MockServer) -> Self {
+            Self::serving(provider(server, key())).await
+        }
+
+        async fn serving(provider: Provider) -> Self {
             let pool = pool().await;
-            let provider = provider(server, key());
             let organization = seed_organization(&pool).await;
             let workspace = seed_workspace(&pool, organization).await;
             let number = installation_number();
@@ -944,12 +778,15 @@ mod tests {
             })
         }
 
-        async fn status(&self) -> InstallationStatus {
+        async fn row(&self) -> InstallationCredential {
             github_installations::credential(&self.pool, self.workspace, self.installation)
                 .await
                 .expect("read the installation")
                 .expect("the installation still exists")
-                .status()
+        }
+
+        async fn status(&self) -> InstallationStatus {
+            self.row().await.status()
         }
     }
 
@@ -1050,6 +887,146 @@ mod tests {
             Ok((branch, token))
         }))
         .await
+    }
+
+    #[tokio::test]
+    async fn an_installation_token_is_minted_once_and_reused() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_installationtokenvalue", 1).await;
+
+        for _ in 0..5 {
+            let credential = connected.resolve().await.expect("mint");
+            assert_eq!(credential.secret().expose(), "ghs_installationtokenvalue");
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidating_an_installation_mints_a_new_token() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_installationtokenvalue", 2).await;
+
+        connected.resolve().await.expect("mint");
+        connected
+            .provider
+            .invalidate(InstallationId::new(connected.number));
+        connected.resolve().await.expect("mint");
+    }
+
+    #[tokio::test]
+    async fn each_installation_gets_its_own_token() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        let other_number = installation_number();
+        let other = installed(
+            &connected.pool,
+            &connected.provider,
+            connected.organization,
+            other_number,
+        )
+        .await;
+        issuing(&server, connected.number, "ghs_first", 1).await;
+        issuing(&server, other_number, "ghs_second", 1).await;
+
+        let first = connected.resolve().await.expect("mint");
+        let second = connected
+            .provider
+            .installation(&connected.pool, connected.workspace, other)
+            .await
+            .expect("mint");
+
+        assert_eq!(first.secret().expose(), "ghs_first");
+        assert_eq!(second.secret().expose(), "ghs_second");
+    }
+
+    #[tokio::test]
+    async fn a_refused_exchange_surfaces_without_the_url() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        refusing(&server, connected.number, 403, 1).await;
+        confirming(&server, connected.number, ResponseTemplate::new(403), 1).await;
+
+        let error = connected.resolve().await.expect_err("a 403 is a failure");
+
+        let rendered = error.to_string();
+        assert!(
+            matches!(error, Error::Application(ApplicationError::Status(403))),
+            "{error:?}"
+        );
+        assert!(!rendered.contains(&server.uri()), "{rendered}");
+        assert!(!rendered.contains("access_tokens"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn a_plain_http_origin_cannot_mint_unless_the_operator_allowed_it() {
+        let server = MockServer::start().await;
+        let config = Config {
+            github_api_url: server.uri(),
+            ..crate::state::test_config()
+        };
+        let connected = Connected::serving(Provider::new(&config, key())).await;
+        issuing(&server, connected.number, "ghs_installationtokenvalue", 0).await;
+
+        let error = connected
+            .resolve()
+            .await
+            .expect_err("an http origin the operator did not allow cannot mint");
+
+        assert!(
+            matches!(error, Error::Application(ApplicationError::InvalidOrigin)),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains(&server.uri()), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_allowed_plain_http_origin_on_a_private_host_mints() {
+        let server = MockServer::start().await;
+        let config = Config {
+            github_api_url: server.uri(),
+            github_api_allows_http: true,
+            ..crate::state::test_config()
+        };
+        let connected = Connected::serving(Provider::new(&config, key())).await;
+        issuing(&server, connected.number, "ghs_installationtokenvalue", 1).await;
+
+        let credential = connected
+            .resolve()
+            .await
+            .expect("a loopback origin the operator allowed mints");
+
+        assert_eq!(credential.secret().expose(), "ghs_installationtokenvalue");
+    }
+
+    #[tokio::test]
+    async fn nothing_the_provider_renders_carries_a_credential() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing(&server, connected.number, "ghs_installationtokenvalue", 1).await;
+
+        let minted = connected.resolve().await.expect("mint");
+        let sealed = connected.row().await.private_key;
+        let stored = connected
+            .provider
+            .stored_project(Some("ghp_legacyplaintext"))
+            .expect("open")
+            .expect("credential");
+
+        for rendered in [
+            format!("{:?}", connected.provider),
+            format!("{minted:?}"),
+            format!("{stored:?}"),
+        ] {
+            assert!(
+                !rendered.contains("ghs_installationtokenvalue"),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("ghp_legacyplaintext"), "{rendered}");
+            assert!(!rendered.contains("PRIVATE KEY"), "{rendered}");
+            assert!(!rendered.contains(&sealed), "{rendered}");
+            assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        }
     }
 
     #[tokio::test]
