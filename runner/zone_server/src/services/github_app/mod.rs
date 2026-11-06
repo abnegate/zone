@@ -1,44 +1,29 @@
 //! GitHub App authentication.
 //!
 //! A personal access token carries one human's whole account into every
-//! request a workspace makes. An App install carries only what the install was
-//! granted, on its own rate limit, and survives that human leaving. This module
-//! is the second half of that: the credential path, not the setup flow.
+//! request a workspace makes. An App installation carries only what it was
+//! granted, on its own rate limit, and survives that human leaving.
 //!
-//! Authenticating is two steps. A JWT signed with the App's private key proves
-//! we are the App; GitHub trades that JWT for an access token scoped to one
-//! installation, good for an hour. The JWT and the token are both bearer
-//! credentials, so both are [`SecretValue`]s from the moment they exist —
-//! neither can reach a log line, an error string or a `Debug` output.
+//! Authenticating is two steps, both done by `abnegate_vcs`: a JWT signed with
+//! the App's private key proves Zone is the App, and GitHub trades that JWT
+//! for an access token scoped to one installation, good for an hour. Both are
+//! bearer credentials, so both are [`SecretValue`]s from the moment they
+//! exist, and no [`Error`] carries either, the private key, or a URL.
 //!
-//! [`Provider`] is the entry point. It answers "what credential should this
-//! source's requests carry", minting and caching installation tokens for
-//! sources configured with an App and decrypting the stored personal access
-//! token for those that are not. Which of the two a caller received is not
-//! visible to it.
+//! [`Provider`] is the entry point. It seals and opens App private keys at
+//! rest, mints and caches installation tokens, and opens the personal access
+//! token stored against a source or project. Every path hands back a
+//! [`Credential`], so a caller cannot tell which origin it received.
 //!
 //! [`SecretValue`]: abnegate_secret::SecretValue
 
-pub mod cache;
-pub mod claims;
-pub mod configuration;
 pub mod credential;
 pub mod error;
-pub mod identifier;
-pub mod issuer;
-pub mod jwt;
 pub mod provider;
-pub mod token;
 
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
-pub use cache::TokenCache;
-pub use claims::{CLOCK_SKEW, Claims, LIFETIME};
-pub use configuration::{AppConfiguration, CONFIGURATION_KEY, StoredConfiguration};
 pub use credential::Credential;
-pub use error::GithubAppError;
-pub use identifier::{ApplicationId, InstallationId};
-pub use issuer::{GITHUB_API_ORIGIN, Issuer};
+pub use error::Error;
 pub use provider::Provider;
-pub use token::{InstallationToken, SAFETY_MARGIN};

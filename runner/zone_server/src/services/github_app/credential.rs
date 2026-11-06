@@ -1,31 +1,40 @@
-//! What a caller receives when it asks for a source's credentials.
+//! What a caller receives when it asks for a source's or project's credential.
+
+use std::fmt;
 
 use abnegate_secret::SecretValue;
 
-/// A bearer credential for one source, whatever minted it.
+/// A bearer credential, whatever minted it.
 ///
 /// A personal access token read from the database and an installation token
-/// minted seconds ago are the same thing to the caller: a string to put in an
-/// `Authorization` header. Nothing on this type says which one it holds, so no
-/// caller can grow a branch on the answer and no caller has to change when a
-/// source moves from one to the other.
-#[derive(Debug, Clone)]
+/// minted seconds ago are the same thing to the caller: a secret to put in an
+/// `Authorization` header. Nothing a caller can read says which one it holds,
+/// so no caller can grow a branch on the answer.
+#[derive(Clone)]
 pub struct Credential {
-    token: SecretValue,
+    secret: SecretValue,
 }
 
 impl Credential {
-    pub fn new(token: SecretValue) -> Self {
-        Self { token }
+    pub(crate) fn stored(secret: SecretValue) -> Self {
+        Self { secret }
     }
 
-    /// Read the credential. Call this at the point of use and nowhere else.
-    pub fn expose(&self) -> &str {
-        self.token.expose()
+    pub fn secret(&self) -> &SecretValue {
+        &self.secret
     }
 
     pub fn into_secret(self) -> SecretValue {
-        self.token
+        self.secret
+    }
+}
+
+impl fmt::Debug for Credential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Credential")
+            .field("secret", &self.secret)
+            .finish()
     }
 }
 
@@ -34,12 +43,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_personal_access_token_and_an_installation_token_are_the_same_type() {
-        let personal = Credential::new(SecretValue::new("ghp_personalaccesstoken"));
-        let installation = Credential::new(SecretValue::new("ghs_installationtoken"));
+    fn two_credentials_render_identically() {
+        let personal = Credential::stored(SecretValue::new("ghp_personalaccesstoken"));
+        let installation = Credential::stored(SecretValue::new("ghs_installationtoken"));
 
-        assert_eq!(personal.expose(), "ghp_personalaccesstoken");
-        assert_eq!(installation.expose(), "ghs_installationtoken");
         assert_eq!(
             format!("{personal:?}"),
             format!("{installation:?}"),
@@ -49,7 +56,7 @@ mod tests {
 
     #[test]
     fn the_credential_never_renders_itself() {
-        let credential = Credential::new(SecretValue::new("ghp_personalaccesstoken"));
+        let credential = Credential::stored(SecretValue::new("ghp_personalaccesstoken"));
         let rendered = format!("{credential:?}");
 
         assert!(!rendered.contains("ghp_personalaccesstoken"));
@@ -57,8 +64,10 @@ mod tests {
     }
 
     #[test]
-    fn the_secret_survives_being_taken_out() {
-        let credential = Credential::new(SecretValue::new("ghs_installationtoken"));
+    fn the_secret_survives_being_read_and_taken_out() {
+        let credential = Credential::stored(SecretValue::new("ghs_installationtoken"));
+
+        assert_eq!(credential.secret().expose(), "ghs_installationtoken");
         assert_eq!(credential.into_secret().expose(), "ghs_installationtoken");
     }
 }
