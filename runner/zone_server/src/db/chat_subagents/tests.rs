@@ -9,6 +9,31 @@ async fn pool() -> PgPool {
         .expect("the test database accepts connections")
 }
 
+const TURN_COMPLETED: &str = "completed";
+
+/// A turn of `chat_id` in `status`, as the chat's store leaves it.
+async fn turn(pool: &PgPool, chat_id: Uuid, status: &str) -> Uuid {
+    let message = Uuid::new_v4();
+    let turn = Uuid::new_v4();
+    sqlx::query("INSERT INTO messages (id, chat_id, role, content) VALUES ($1, $2, 'user', 'Go')")
+        .bind(message)
+        .bind(chat_id)
+        .execute(pool)
+        .await
+        .expect("a user message");
+    sqlx::query(
+        "INSERT INTO chat_turns (id, chat_id, user_message_id, fence, status) VALUES ($1, $2, $3, 1, $4)",
+    )
+    .bind(turn)
+    .bind(chat_id)
+    .bind(message)
+    .bind(status)
+    .execute(pool)
+    .await
+    .expect("a turn");
+    turn
+}
+
 async fn chat(pool: &PgPool) -> Uuid {
     create_chat(pool, None, "Subagents", "sonnet", false, true)
         .await
@@ -656,7 +681,7 @@ async fn starting_a_turn_stops_the_running_subagents_of_every_other_turn() {
     let pool = pool().await;
     let chat_id = chat(&pool).await;
     let other = chat(&pool).await;
-    let turn = Uuid::new_v4();
+    let turn = turn(&pool, chat_id, TURN_RUNNING).await;
     let earlier = Uuid::new_v4();
     let mine = running(&pool, chat_id, "mine", Some(turn)).await;
     let left = running(&pool, chat_id, "earlier", Some(earlier)).await;
@@ -712,6 +737,176 @@ async fn starting_a_turn_stops_the_running_subagents_of_every_other_turn() {
     assert_eq!(
         statuses(&pool, other).await,
         [("elsewhere".to_string(), "running".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn a_turn_that_no_longer_runs_stops_no_other_turns_subagents() {
+    let pool = pool().await;
+    let chat_id = chat(&pool).await;
+    let ended = turn(&pool, chat_id, TURN_COMPLETED).await;
+    let newer = turn(&pool, chat_id, TURN_RUNNING).await;
+    let subagent = running(&pool, chat_id, "newer", Some(newer)).await;
+    record_steps(&pool, subagent, &[step("open", StepStatus::Running)])
+        .await
+        .expect("a running step");
+
+    let stopped = stop_others(&pool, chat_id, ended).await.expect("the sweep");
+
+    assert_eq!(stopped, []);
+    assert_eq!(
+        statuses(&pool, chat_id).await,
+        [("newer".to_string(), "running".to_string())]
+    );
+    assert_eq!(
+        stored(&pool, chat_id, subagent).await,
+        [step("open", StepStatus::Running)],
+        "a newer turn's steps run on"
+    );
+}
+
+#[tokio::test]
+async fn another_turn_reporting_a_finished_subagent_running_starts_a_new_run_of_it() {
+    let pool = pool().await;
+    let chat_id = chat(&pool).await;
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    for (external_id, outcome) in [
+        ("thread-completed", SubagentStatus::Completed),
+        ("thread-failed", SubagentStatus::Failed),
+        ("thread-stopped", SubagentStatus::Stopped),
+    ] {
+        running(&pool, chat_id, external_id, Some(first)).await;
+        let finished = record(
+            &pool,
+            &SubagentChange {
+                message_id: Some(first),
+                status: Some(outcome),
+                summary: Some("Looks good"),
+                error: Some("exit 1"),
+                tool_uses: Some(4),
+                ..named(chat_id, external_id)
+            },
+        )
+        .await
+        .expect("the first run's outcome");
+
+        let resumed = record(
+            &pool,
+            &SubagentChange {
+                message_id: Some(second),
+                status: Some(SubagentStatus::Running),
+                ..named(chat_id, external_id)
+            },
+        )
+        .await
+        .expect("the second run");
+
+        assert_eq!(resumed.id, finished.id, "{outcome:?}");
+        assert_eq!(resumed.message_id, Some(second), "{outcome:?}");
+        assert_eq!(
+            resumed.status,
+            SubagentStatus::Running.as_str(),
+            "{outcome:?}"
+        );
+        assert_eq!(resumed.finished_at, None, "{outcome:?}");
+        assert!(resumed.started_at > finished.started_at, "{outcome:?}");
+        assert_eq!(
+            (resumed.summary, resumed.error, resumed.tool_uses),
+            (None, None, None),
+            "{outcome:?}"
+        );
+
+        let late = record(
+            &pool,
+            &SubagentChange {
+                message_id: Some(first),
+                status: Some(SubagentStatus::Running),
+                ..named(chat_id, external_id)
+            },
+        )
+        .await
+        .expect("a late update of the first run");
+        assert_eq!(late.message_id, Some(second), "{outcome:?}");
+        assert_eq!(late.status, SubagentStatus::Running.as_str(), "{outcome:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_turn_that_ran_a_finished_subagent_never_runs_it_again() {
+    let pool = pool().await;
+    let chat_id = chat(&pool).await;
+    let first = Uuid::new_v4();
+    running(&pool, chat_id, "thread-1", Some(first)).await;
+    let completed = record(
+        &pool,
+        &SubagentChange {
+            message_id: Some(first),
+            status: Some(SubagentStatus::Completed),
+            summary: Some("Looks good"),
+            ..named(chat_id, "thread-1")
+        },
+    )
+    .await
+    .expect("its completion");
+
+    let late = record(
+        &pool,
+        &SubagentChange {
+            message_id: Some(first),
+            status: Some(SubagentStatus::Running),
+            ..named(chat_id, "thread-1")
+        },
+    )
+    .await
+    .expect("a late update");
+
+    assert_eq!(late.status, SubagentStatus::Completed.as_str());
+    assert_eq!(late.finished_at, completed.finished_at);
+    assert_eq!(late.summary.as_deref(), Some("Looks good"));
+}
+
+#[tokio::test]
+async fn failing_a_finished_subagents_running_steps_returns_them_in_order() {
+    let pool = pool().await;
+    let chat_id = chat(&pool).await;
+    let subagent = running(&pool, chat_id, "toolu_01Agent", None).await;
+    record_steps(
+        &pool,
+        subagent,
+        &[
+            step("second", StepStatus::Running),
+            step("done", StepStatus::Succeeded),
+            step("third", StepStatus::Running),
+        ],
+    )
+    .await
+    .expect("its steps");
+
+    let failed = fail_running_steps(&pool, subagent)
+        .await
+        .expect("the failure");
+
+    assert_eq!(
+        failed,
+        [
+            step("second", StepStatus::Failed),
+            step("third", StepStatus::Failed),
+        ]
+    );
+    assert_eq!(
+        stored(&pool, chat_id, subagent).await,
+        [
+            step("second", StepStatus::Failed),
+            step("done", StepStatus::Succeeded),
+            step("third", StepStatus::Failed),
+        ]
+    );
+    assert_eq!(
+        fail_running_steps(&pool, subagent)
+            .await
+            .expect("a second failure"),
+        []
     );
 }
 
