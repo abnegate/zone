@@ -101,11 +101,9 @@ export function GitHubSection({ organizationId, canManage }: GitHubSectionProps)
     }
     if (outcome !== GitHubOutcome.Sync) {
       setNotice(OUTCOME_NOTICES[outcome]);
-      void refresh();
       return;
     }
     if (!canManage) {
-      void refresh();
       return;
     }
     syncInstallations().then(
