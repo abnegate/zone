@@ -31,7 +31,7 @@ const CHECKSUM_MISMATCH: &str = "Image weight checksum mismatch";
 const INVALID_DIGEST: &str = "Image weight manifest has an invalid SHA-256 digest";
 const WAITING_FOR_RELEASE: &str = "waiting for another download of these image weights";
 const ALREADY_DOWNLOADING: &str = "These image weights are already downloading";
-const STAGED_SUFFIX: &str = ".download";
+const STAGING_SUFFIX: &str = ".download";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const RELEASE_WAITS: [Duration; 4] = [
     Duration::from_millis(100),
@@ -512,14 +512,14 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
         });
         return;
     }
-    let staged = staged(&target);
+    let staged = staging(&target);
     if let Err(error) = Partial::of(&target).move_to(&Partial::of(&staged)) {
         tracing::warn!(
             "Could not carry an interrupted download of {} over: {error}",
             target.display()
         );
     }
-    if let Err(message) = fetch_weights(
+    let installed = match fetch_weights(
         &manifest.url,
         &staged,
         Some(checksum),
@@ -528,41 +528,44 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
     )
     .await
     {
-        job.publish(Event::Error { message });
-        return;
+        Ok(()) => install(&staged, &target, manifest.size_bytes),
+        Err(message) => Err(message),
+    };
+    match installed {
+        Ok(()) => job.publish(Event::Complete {
+            success: true,
+            message: "Model installed successfully",
+        }),
+        Err(message) => job.publish(Event::Error { message }),
     }
-    if let Err(message) = install(&staged, &target, manifest.size_bytes) {
-        job.publish(Event::Error { message });
-        return;
-    }
-    job.publish(Event::Complete {
-        success: true,
-        message: "Model installed successfully",
-    });
 }
 
-/// Where a manifest weight is downloaded before it is checked, so a weight
-/// of the wrong size never replaces the one already at `target`.
-fn staged(target: &Path) -> PathBuf {
+/// Where a manifest weight downloads to, so a file of the wrong length is
+/// caught before it replaces the weight installed at `target`.
+fn staging(target: &Path) -> PathBuf {
     let mut name = target.as_os_str().to_owned();
-    name.push(STAGED_SUFFIX);
+    name.push(STAGING_SUFFIX);
     PathBuf::from(name)
 }
 
 fn install(staged: &Path, target: &Path, size: u64) -> Result<(), String> {
-    let length = std::fs::metadata(staged)
-        .map_err(|error| format!("{STORE_FAILED}: {error}"))?
-        .len();
-    if length != size {
+    let installed = std::fs::metadata(staged)
+        .map_err(|error| format!("{STORE_FAILED}: {error}"))
+        .and_then(|metadata| match metadata.len() {
+            length if length == size => {
+                std::fs::rename(staged, target).map_err(|error| format!("{STORE_FAILED}: {error}"))
+            }
+            length => Err(size_mismatch(length, size)),
+        });
+    if installed.is_err() {
         let _ = std::fs::remove_file(staged);
-        return Err(size_mismatch(length, size));
     }
-    std::fs::rename(staged, target).map_err(|error| format!("{STORE_FAILED}: {error}"))
+    installed
 }
 
 /// Transfer `url` to `target`, waiting a while for another transfer of the
-/// same weight to let go of it. A known `size` ends the transfer as soon as
-/// the server announces a different one, rather than downloading all of it.
+/// same weight to let go of it. A known `size` ends the transfer, before
+/// anything is installed, as soon as the server announces a different one.
 async fn fetch_weights(
     url: &str,
     target: &Path,
@@ -779,7 +782,7 @@ fn process(job: &Job, line: &[u8]) -> Result<bool, String> {
 mod tests {
     use super::{
         ALREADY_DOWNLOADING, CANCELLED, CHECKSUM_MISMATCH, ComfyPull, Event, INVALID_DIGEST,
-        ManifestFile, PullRegistry, PullStart, STAGED_SUFFIX, WAITING_FOR_RELEASE, describe,
+        ManifestFile, PullRegistry, PullStart, STAGING_SUFFIX, WAITING_FOR_RELEASE, describe,
         retryable,
     };
     use abnegate_llm::download::{Checksum, DownloadError};
@@ -839,12 +842,8 @@ mod tests {
         manifest_pull(directory, url, BODY.len() as u64, sha256(BODY))
     }
 
-    fn staged(directory: &Path) -> PathBuf {
-        directory.join(format!("{RELATIVE_PATH}{STAGED_SUFFIX}"))
-    }
-
     fn part(directory: &Path) -> PathBuf {
-        directory.join(format!("{RELATIVE_PATH}{STAGED_SUFFIX}.part"))
+        directory.join(format!("{RELATIVE_PATH}{STAGING_SUFFIX}.part"))
     }
 
     async fn terminal(registry: &PullRegistry, model: &str) -> Event {
@@ -1125,7 +1124,6 @@ mod tests {
         let stored = std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap();
         assert_eq!(stored, BODY);
         assert!(!part(directory.path()).exists());
-        assert!(!staged(directory.path()).exists());
     }
 
     #[tokio::test]
@@ -1315,37 +1313,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unannounced_size_mismatch_removes_the_weight() {
-        let origin = serve(Router::new().route(
-            "/file.bin",
-            get(|| async {
-                Body::from_stream(futures::stream::once(async {
-                    Ok::<_, std::io::Error>(Bytes::from_static(BODY))
-                }))
-            }),
-        ))
-        .await;
-        let directory = tempfile::tempdir().unwrap();
-        let registry = PullRegistry::new();
-        let expected = BODY.len() as u64 + 1;
-        let _subscription = registry.start(manifest_pull(
-            directory.path(),
-            format!("{origin}/file.bin"),
-            expected,
-            sha256(BODY),
-        ));
-        assert_eq!(
-            assert_error(&registry, "tiny").await,
-            format!(
-                "Image weight size mismatch: got {} bytes, expected {expected}",
-                BODY.len()
-            )
-        );
-        assert!(!directory.path().join(RELATIVE_PATH).exists());
-        assert!(!staged(directory.path()).exists());
-    }
-
-    #[tokio::test]
     async fn an_unannounced_size_mismatch_keeps_the_installed_weight() {
         const INSTALLED: &[u8] = b"the weight installed before the manifest changed";
         let origin = serve(Router::new().route(
@@ -1362,19 +1329,27 @@ mod tests {
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&target, INSTALLED).unwrap();
         let registry = PullRegistry::new();
+        let expected = BODY.len() as u64 + 1;
         let _subscription = registry.start(manifest_pull(
             directory.path(),
             format!("{origin}/file.bin"),
-            BODY.len() as u64 + 1,
+            expected,
             sha256(BODY),
         ));
-        let message = assert_error(&registry, "tiny").await;
-        assert!(
-            message.starts_with("Image weight size mismatch: "),
-            "{message}"
+        assert_eq!(
+            assert_error(&registry, "tiny").await,
+            format!(
+                "Image weight size mismatch: got {} bytes, expected {expected}",
+                BODY.len()
+            )
         );
         assert_eq!(std::fs::read(&target).unwrap(), INSTALLED);
-        assert!(!staged(directory.path()).exists());
+        assert!(
+            !directory
+                .path()
+                .join(format!("{RELATIVE_PATH}{STAGING_SUFFIX}"))
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -1747,8 +1722,10 @@ mod tests {
             ".part".to_string(),
             ".part.validator".to_string(),
             format!(".part{TRANSFER_LOCK_SUFFIX}"),
-            STAGED_SUFFIX.to_string(),
-            format!("{STAGED_SUFFIX}.part"),
+            STAGING_SUFFIX.to_string(),
+            format!("{STAGING_SUFFIX}.part"),
+            format!("{STAGING_SUFFIX}.part.validator"),
+            format!("{STAGING_SUFFIX}.part{TRANSFER_LOCK_SUFFIX}"),
         ] {
             std::fs::write(checkpoints.join(format!("{weight}{suffix}")), b"partial").unwrap();
         }
