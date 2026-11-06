@@ -79,7 +79,7 @@ async fn main() {
     tracing::info!("Migrations complete");
 
     match zone_server::db::chat_subagents::abandon(&db).await {
-        Ok(abandoned) => tracing::info!("Stopped {abandoned} subagents whose turns ended"),
+        Ok(abandoned) => tracing::info!("Stopped {} subagents whose turns ended", abandoned.len()),
         Err(error) => tracing::warn!("Failed to stop abandoned subagents: {error}"),
     }
 

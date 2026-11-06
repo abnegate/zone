@@ -356,6 +356,18 @@ impl Announcer for SubagentFrames {
     }
 }
 
+/// Tells every connection to each subagent's chat that a sweep stopped it.
+pub(crate) async fn announce_stopped_subagents(stopped: Vec<db::chat_subagents::Stopped>) {
+    for db::chat_subagents::Stopped { subagent, failed } in stopped {
+        let frames = SubagentFrames {
+            stream: ChatStream::of(subagent.chat_id),
+        };
+        frames
+            .announce(ChatSubagent::from(subagent), failed.0)
+            .await;
+    }
+}
+
 /// Tells every connection to `chat_id` that deleting a message removed these
 /// subagents.
 pub(crate) async fn announce_removed_subagents(chat_id: Uuid, ids: Vec<Uuid>) {

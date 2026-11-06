@@ -2,7 +2,8 @@
 //! started, their steps read one subagent at a time, out of reach of anyone
 //! outside the chat's workspace, removed with the message that started them,
 //! stopped with the turn that started them when it is interrupted, and stopped
-//! at boot once the turn that started them is gone.
+//! by the boot and periodic sweeps once the turn that started them no longer
+//! runs.
 
 use crate::common::{
     Database, TestClient, create_test_router, create_test_state, test_config, test_email,
@@ -565,6 +566,21 @@ async fn turn(pool: &PgPool, chat: Uuid, status: &str) -> Uuid {
     turn
 }
 
+/// Gives `chat`'s lease to generation `fence` until `seconds` from now, or
+/// since that long ago when negative.
+async fn lease(pool: &PgPool, chat: Uuid, fence: i64, seconds: i64) {
+    sqlx::query(
+        "INSERT INTO chat_leases (chat_id, owner, fence, expires_at)
+         VALUES ($1, gen_random_uuid(), $2, clock_timestamp() + $3 * interval '1 second')",
+    )
+    .bind(chat)
+    .bind(fence)
+    .bind(seconds)
+    .execute(pool)
+    .await
+    .expect("a lease");
+}
+
 async fn started(pool: &PgPool, chat: Uuid, name: &str, turn: Option<Uuid>) {
     chat_subagents::record(
         pool,
@@ -580,7 +596,7 @@ async fn started(pool: &PgPool, chat: Uuid, name: &str, turn: Option<Uuid>) {
 }
 
 #[tokio::test]
-async fn boot_stops_the_subagents_of_every_turn_that_is_not_still_running() {
+async fn the_sweep_stops_the_subagents_of_every_turn_that_no_longer_runs() {
     let database = Database::new("chat_subagents").await;
     sqlx::migrate!("./migrations")
         .run(&database.pool)
@@ -594,6 +610,21 @@ async fn boot_stops_the_subagents_of_every_turn_that_is_not_still_running() {
     let completed = turn(pool, chat, TURN_COMPLETED).await;
     let interrupted = turn(pool, chat, TURN_INTERRUPTED).await;
     let running = turn(pool, chat, TURN_RUNNING).await;
+    lease(pool, chat, 1, 60).await;
+    let lapsed_chat = create_chat(pool, None, "Lapsed", "sonnet", false, true)
+        .await
+        .expect("a chat whose server died")
+        .id;
+    let lapsed = turn(pool, lapsed_chat, TURN_RUNNING).await;
+    lease(pool, lapsed_chat, 1, -1).await;
+    started(pool, lapsed_chat, "lapsed", Some(lapsed)).await;
+    let taken_chat = create_chat(pool, None, "Taken", "sonnet", false, true)
+        .await
+        .expect("a chat another generation took")
+        .id;
+    let superseded = turn(pool, taken_chat, TURN_RUNNING).await;
+    lease(pool, taken_chat, 2, 60).await;
+    started(pool, taken_chat, "superseded", Some(superseded)).await;
     started(pool, chat, "completed", Some(completed)).await;
     started(pool, chat, "interrupted", Some(interrupted)).await;
     started(pool, chat, "missing", Some(Uuid::new_v4())).await;
@@ -631,7 +662,31 @@ async fn boot_stops_the_subagents_of_every_turn_that_is_not_still_running() {
 
     let stopped = chat_subagents::abandon(pool).await.expect("the sweep");
 
-    assert_eq!(stopped, 4);
+    let mut names: Vec<&str> = stopped
+        .iter()
+        .map(|stopped| stopped.subagent.external_id.as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "completed",
+            "interrupted",
+            "lapsed",
+            "missing",
+            "superseded",
+            "unnamed"
+        ]
+    );
+    let failed: Vec<&[SubagentStep]> = stopped
+        .iter()
+        .filter(|stopped| stopped.subagent.id == interrupted_subagent)
+        .map(|stopped| stopped.failed.0.as_slice())
+        .collect();
+    assert_eq!(
+        failed,
+        [[step("toolu_open", StepStatus::Failed)].as_slice()]
+    );
     let mut statuses: Vec<(String, String, bool)> = chat_subagents::list(pool, chat)
         .await
         .expect("the list")
@@ -661,7 +716,7 @@ async fn boot_stops_the_subagents_of_every_turn_that_is_not_still_running() {
     );
     assert_eq!(
         chat_subagents::abandon(pool).await.expect("a second sweep"),
-        0
+        []
     );
     database.cleanup().await;
 }

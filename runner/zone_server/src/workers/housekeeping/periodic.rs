@@ -29,7 +29,7 @@ use crate::workers::regression::RegressionSettings;
 use crate::workers::reports::{Ledger, ReportSettings};
 use crate::workers::{
     analytics, knowledge_refresh, learning, notify, promotion, reception, regression, reports,
-    source_resync,
+    source_resync, subagents,
 };
 
 /// One named sweep on the server's schedule.
@@ -43,11 +43,12 @@ pub enum Periodic {
     RegressionWatch,
     ScheduledReports,
     ReceptionSync,
+    SubagentRecovery,
 }
 
 impl Periodic {
     /// Every sweep, in the order the server used to spawn them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::KnowledgeRefresh,
         Self::SourceResync,
         Self::AnswerPromotion,
@@ -56,6 +57,7 @@ impl Periodic {
         Self::RegressionWatch,
         Self::ScheduledReports,
         Self::ReceptionSync,
+        Self::SubagentRecovery,
     ];
 
     pub fn name(self) -> &'static str {
@@ -68,6 +70,7 @@ impl Periodic {
             Self::RegressionWatch => "regression-watch",
             Self::ScheduledReports => "scheduled-reports",
             Self::ReceptionSync => "reception-sync",
+            Self::SubagentRecovery => "subagent-recovery",
         }
     }
 
@@ -83,6 +86,7 @@ impl Periodic {
             Self::RegressionWatch => regression::worker::REGRESSION_INTERVAL_SECONDS,
             Self::ScheduledReports => reports::worker::REPORT_TICK_SECONDS,
             Self::ReceptionSync => reception::SYNC_INTERVAL_SECONDS,
+            Self::SubagentRecovery => subagents::SWEEP_INTERVAL_SECONDS,
         };
         Duration::from_secs(seconds)
     }
@@ -97,6 +101,8 @@ impl Periodic {
             | Self::AgentAnalytics
             | Self::RegressionWatch
             | Self::ReceptionSync => Warmup::Period,
+            // The server stopped every abandoned subagent it could as it booted.
+            Self::SubagentRecovery => Warmup::Period,
             // Long enough to be out of the way of start-up, short enough that a
             // server coming back up picks up files whose embeddings failed.
             Self::SourceResync => Warmup::After(source_resync::FIRST_POLL_DELAY),
@@ -127,7 +133,8 @@ impl Periodic {
             | Self::AgentAnalytics
             | Self::RegressionWatch
             | Self::ScheduledReports
-            | Self::ReceptionSync => Catchup::Skip,
+            | Self::ReceptionSync
+            | Self::SubagentRecovery => Catchup::Skip,
             // These two never ticked on a grid at all. Both were `sleep` loops,
             // so the wait has always been measured from the end of the previous
             // pass rather than from a fixed alignment, and both queue work
@@ -179,6 +186,7 @@ pub fn periodic(state: AppState) -> Registry {
                 Arc::clone(&fanout),
             ),
             Periodic::ReceptionSync => sync_reception(schedule, state.clone()),
+            Periodic::SubagentRecovery => recover_subagents(schedule, state.clone()),
         };
         registry.register(Arc::new(sweep));
     }
@@ -314,6 +322,22 @@ fn sync_reception(schedule: Schedule, state: AppState) -> Sweep {
     })
 }
 
+fn recover_subagents(schedule: Schedule, state: AppState) -> Sweep {
+    Sweep::new(Periodic::SubagentRecovery.name(), schedule, move || {
+        let state = state.clone();
+        async move {
+            match subagents::run_cycle(&state).await {
+                Ok(0) => Ok(()),
+                Ok(stopped) => {
+                    tracing::info!("Stopped {} subagent(s) whose turns ended", stopped);
+                    Ok(())
+                }
+                Err(error) => Err(Failure::new(error)),
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -337,6 +361,7 @@ mod tests {
                 "regression-watch",
                 "scheduled-reports",
                 "reception-sync",
+                "subagent-recovery",
             ],
             "main.rs spawned nine workers; eight of them are periodic sweeps and the ninth, \
              reminders, is a dispatch loop that stayed where it was. Dropping one here would \
@@ -364,6 +389,7 @@ mod tests {
             (Periodic::RegressionWatch, 60 * 60),
             (Periodic::ScheduledReports, 15 * 60),
             (Periodic::ReceptionSync, 30 * 60),
+            (Periodic::SubagentRecovery, 60),
         ] {
             assert_eq!(
                 periodic.period(&sources),

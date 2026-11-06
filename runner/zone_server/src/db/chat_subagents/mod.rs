@@ -117,17 +117,14 @@ const ABANDON: &str = concat!(
     running!(),
     "
             AND NOT EXISTS (
-                SELECT 1 FROM chat_turns t
-                 WHERE t.chat_id = s.chat_id AND t.id = s.message_id AND t.status = $2::text)
-         RETURNING s.id
-     ),
-     failed AS (
-         UPDATE chat_subagent_steps p
-            SET status = $3::text
-           FROM stopped
-          WHERE p.subagent_id = stopped.id AND p.status = $4::text
-     )
-     SELECT count(*) FROM stopped"
+                SELECT 1
+                  FROM chat_turns t
+                  JOIN chat_leases l ON l.chat_id = t.chat_id AND l.fence = t.fence
+                 WHERE t.chat_id = s.chat_id AND t.id = s.message_id AND t.status = $2::text
+                   AND l.expires_at > clock_timestamp())
+         RETURNING s.*
+     ), ",
+    fail_stopped_steps!("$3", "$4")
 );
 
 /// A settled subagent that is running again, as it is only when a turn other
@@ -509,20 +506,21 @@ where
         .await
 }
 
-/// Stops every subagent left running by a turn that is no longer running,
-/// fails their running steps, and returns how many subagents it stopped. The
-/// server calls it once as it boots, when no turn of its own can still be
-/// reporting on them.
-pub async fn abandon<'e, E>(executor: E) -> DbResult<i64>
+/// Stops every subagent left running by a turn that no longer runs, fails
+/// their running steps, and returns them, oldest first. A turn runs while it
+/// is `running` and the chat's lease is still the one it began under, so a
+/// turn whose server died is let go of once its lease expires, whether or not
+/// the chat ever runs another.
+pub async fn abandon<'e, E>(executor: E) -> DbResult<Vec<Stopped>>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query_scalar(ABANDON)
+    sqlx::query_as(ABANDON)
         .bind(SubagentStatus::Stopped.as_str())
         .bind(TURN_RUNNING)
         .bind(StepStatus::Failed.as_str())
         .bind(StepStatus::Running.as_str())
-        .fetch_one(executor)
+        .fetch_all(executor)
         .await
 }
 
