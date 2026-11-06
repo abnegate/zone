@@ -110,7 +110,6 @@ mod tests {
     use std::sync::LazyLock;
 
     use abnegate_secret::SecretValue;
-    use abnegate_secret::encrypt_value;
 
     use super::*;
     use chrono::{Duration, SecondsFormat};
@@ -118,11 +117,11 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    use crate::secret::fixture::seal;
+    use crate::secret::fixture::seal_legacy;
     use crate::services::github_app::identifier::{ApplicationId, InstallationId};
     use crate::services::github_app::testing::TEST_PRIVATE_KEY;
 
-    const ENVELOPE_PREFIX: &str = "ENC[v1:";
-    const ENVELOPE_SUFFIX: &str = "]";
     const PERSONAL_TOKEN: &str = "ghp_personalaccesstoken";
 
     /// One arbitrary key per run. Seal and open must agree; the value itself
@@ -153,7 +152,7 @@ mod tests {
     }
 
     fn personal_source(master_key: &MasterKey, token: &str) -> SourceCredentialRow {
-        stored_source(encrypt_value(&SecretValue::new(token), master_key).expect("encrypt"))
+        stored_source(seal(token, master_key))
     }
 
     fn stored_source(credentials_encrypted: String) -> SourceCredentialRow {
@@ -161,16 +160,6 @@ mod tests {
             config: json!({ "owner": "zone-dev", "repo": "zone" }),
             credentials_encrypted: Some(credentials_encrypted),
         }
-    }
-
-    /// `token` sealed the way Zone sealed credentials before the envelope existed.
-    fn legacy(master_key: &MasterKey, token: &str) -> String {
-        encrypt_value(&SecretValue::new(token), master_key)
-            .expect("encrypt")
-            .strip_prefix(ENVELOPE_PREFIX)
-            .and_then(|sealed| sealed.strip_suffix(ENVELOPE_SUFFIX))
-            .expect("an envelope")
-            .to_string()
     }
 
     async fn issuing(server: &MockServer, token: &str, calls: u64) {
@@ -224,7 +213,7 @@ mod tests {
         let server = MockServer::start().await;
 
         let credential = provider(&server)
-            .credential(&stored_source(legacy(&key(), PERSONAL_TOKEN)))
+            .credential(&stored_source(seal_legacy(PERSONAL_TOKEN, &key())))
             .await
             .expect("resolve")
             .expect("a configured source has a credential");
