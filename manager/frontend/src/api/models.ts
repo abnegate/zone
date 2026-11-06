@@ -32,6 +32,7 @@ import { parse } from '../validation';
 import { ApiError } from './ApiError';
 import { client } from './client';
 import { deviceHeaders } from './device';
+import { type UploadProgress, upload } from './upload';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
@@ -486,16 +487,19 @@ export const modelsApi = {
     blob: Blob;
     fps?: number;
     mirror?: boolean;
+    signal?: AbortSignal;
+    onProgress?: (progress: UploadProgress) => void;
   }): Promise<TrainClip> {
     const form = new FormData();
     form.append('filename', body.filename);
     form.append('video', body.blob, body.filename);
     if (body.fps != null) form.append('fps', String(body.fps));
     if (body.mirror != null) form.append('mirror', String(body.mirror));
-    const response = await fetch(`${API_BASE}/api/models/train/frames`, {
-      method: 'POST',
+    const response = await upload(`${API_BASE}/api/models/train/frames`, {
       headers: bearerHeaders(),
       body: form,
+      signal: body.signal,
+      onProgress: body.onProgress,
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({ error: 'Frame extraction failed' }));

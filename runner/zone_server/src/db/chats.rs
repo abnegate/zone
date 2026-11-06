@@ -2,6 +2,7 @@
 
 pub mod occupancy;
 pub mod provider;
+pub mod recent;
 mod session;
 
 use abnegate_llm::ReasoningEffort;
@@ -20,6 +21,12 @@ pub use session::ChatSession;
 
 fn effort(value: &str) -> ReasoningEffort {
     value.parse().unwrap_or_default()
+}
+
+/// Whether a member typed the message, rather than a reminder, project or
+/// other automation posting it under the member's role.
+pub(crate) fn typed(role: &str, metadata: Option<&serde_json::Value>) -> bool {
+    role == "user" && metadata.is_none_or(|metadata| metadata.get("source").is_none())
 }
 
 /// Chat row from database
@@ -317,6 +324,16 @@ pub async fn update_chat(
             .execute(&mut *transaction)
             .await?;
     }
+    let configured = model_name.is_some()
+        || agent_enabled.is_some()
+        || reasoning_effort.is_some()
+        || context_tokens.is_some();
+    if configured {
+        sqlx::query("UPDATE chats SET used_at = NOW() WHERE id = $1")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
     let row = sqlx::query!(
         r#"
         UPDATE chats
@@ -486,10 +503,13 @@ pub async fn create_message_with_id(
     let mut transaction = pool.begin().await?;
     // The row lock serializes first-user-message ownership with every insertion
     // and explicit rename, including requests served by different processes.
-    sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
-        .bind(chat_id)
-        .execute(&mut *transaction)
-        .await?;
+    sqlx::query(
+        "UPDATE chats SET updated_at = NOW(), used_at = CASE WHEN $2 THEN NOW() ELSE used_at END WHERE id = $1",
+    )
+    .bind(chat_id)
+    .bind(typed(role, metadata.as_ref()))
+    .execute(&mut *transaction)
+    .await?;
 
     let title_claimed = if role == "user" {
         sqlx::query(

@@ -62,7 +62,7 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let updated = sqlx::query(
-        "UPDATE chats SET provider = $2, provider_model = $3, updated_at = NOW() WHERE id = $1",
+        "UPDATE chats SET provider = $2, provider_model = $3, updated_at = NOW(), used_at = NOW() WHERE id = $1",
     )
     .bind(chat_id)
     .bind(choice.map(|choice| choice.provider.as_str()))

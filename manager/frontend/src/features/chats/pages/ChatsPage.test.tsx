@@ -1995,6 +1995,125 @@ describe('ChatsPage', () => {
     });
   });
 
+  describe('attaching files', () => {
+    class HeldReader {
+      static readers: HeldReader[] = [];
+      onprogress:
+        | ((event: { lengthComputable: boolean; loaded: number; total: number }) => void)
+        | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      result: string | null = null;
+      error: Error | null = null;
+
+      readAsText() {
+        HeldReader.readers.push(this);
+      }
+
+      readAsDataURL() {
+        HeldReader.readers.push(this);
+      }
+
+      abort() {
+        this.onabort?.();
+      }
+
+      progress(loaded: number, total: number) {
+        this.onprogress?.({ lengthComputable: true, loaded, total });
+      }
+
+      finish(result: string) {
+        this.result = result;
+        this.onload?.();
+      }
+    }
+
+    const original = globalThis.FileReader;
+
+    beforeEach(() => {
+      HeldReader.readers = [];
+      globalThis.FileReader = HeldReader as unknown as typeof FileReader;
+    });
+
+    afterEach(() => {
+      globalThis.FileReader = original;
+    });
+
+    async function openComposer() {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      return screen.findByPlaceholderText('Type a message, or drop a file...');
+    }
+
+    function drop(...files: File[]) {
+      fireEvent.drop(document.querySelector('.message-form') as Element, {
+        dataTransfer: { files, types: ['Files'] },
+      });
+    }
+
+    it('shows a dropped file at once with its progress and holds Send until it is read', async () => {
+      const composer = await openComposer();
+      fireEvent.change(composer, { target: { value: 'Look at this' } });
+
+      drop(new File(['# notes'], 'notes.md', { type: 'text/markdown' }));
+
+      expect(await screen.findByRole('group', { name: 'notes.md: 0%' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+      expect(
+        screen.getByText('Send is ready once the file finishes attaching.')
+      ).toBeInTheDocument();
+      expect(composer).toBeEnabled();
+
+      act(() => HeldReader.readers[0].progress(3, 4));
+      expect(screen.getByRole('progressbar', { name: 'notes.md progress' })).toHaveAttribute(
+        'aria-valuenow',
+        '75'
+      );
+
+      fireEvent.keyDown(composer, { key: 'Enter' });
+      expect(mockWsSend).not.toHaveBeenCalledWith(expect.stringContaining('Look at this'));
+
+      act(() => HeldReader.readers[0].finish('# notes'));
+
+      await waitFor(() => expect(screen.queryByTestId('transfer-chip')).toBeNull());
+      expect(screen.getByRole('button', { name: 'Remove notes.md' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+      expect(screen.queryByText(/Send is ready once/)).toBeNull();
+    });
+
+    it('tracks each of several dropped files on its own', async () => {
+      await openComposer();
+
+      drop(
+        new File(['a'], 'one.txt', { type: 'text/plain' }),
+        new File(['b'], 'two.txt', { type: 'text/plain' })
+      );
+
+      expect(await screen.findAllByTestId('transfer-chip')).toHaveLength(2);
+      expect(screen.getByText('Send is ready once 2 files finish attaching.')).toBeInTheDocument();
+
+      act(() => HeldReader.readers[1].finish('b'));
+
+      await waitFor(() => expect(screen.getAllByTestId('transfer-chip')).toHaveLength(1));
+      expect(screen.getByRole('group', { name: 'one.txt: 0%' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Remove two.txt' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    });
+
+    it('cancels a file that is still being read and frees Send', async () => {
+      const composer = await openComposer();
+      fireEvent.change(composer, { target: { value: 'Never mind the file' } });
+
+      drop(new File(['big'], 'big.log', { type: 'text/plain' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel big.log' }));
+
+      expect(screen.queryByTestId('transfer-chip')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Remove big.log' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+    });
+  });
+
   describe('archive/unarchive chat', () => {
     it('archives chat when archive button clicked', async () => {
       const archivedChat: Chat = {
