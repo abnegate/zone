@@ -4177,8 +4177,11 @@ describe('ChatsPage', () => {
     });
 
     it('offers agent models and efforts on an agent default and saves a model change', async () => {
+      listedModels = [
+        { name: 'sonnet', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
       mockGetChatProviders.mockResolvedValue(chatProviders({ default: claudeOffer }));
-      await openChat({ model_name: 'auto', reasoning_effort: 'auto' });
+      await openChat({ model_name: 'auto', reasoning_effort: 'auto', context_tokens: 32768 });
       await screen.findByTestId('chat-provider-model');
       expect(optionNames('chat-provider-model')).toEqual(['Automatic', 'Sonnet', 'Haiku']);
       expect(optionNames('reasoning-effort')).toEqual([
@@ -4202,6 +4205,252 @@ describe('ChatsPage', () => {
         expect(mockGetChatProviders.mock.calls.length).toBeGreaterThan(providerLoads);
         expect(mockClient.getChat.mock.calls.length).toBeGreaterThan(chatLoads);
       });
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('fits the context to a smaller model chosen on a self-hosted default', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const served = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+      await openChat({ model_name: 'llama2', context_tokens: 32768, reasoning_effort: 'high' });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockClient.updateChat.mockImplementation(async (_id: string, update: UpdateChatRequest) => ({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        reasoning_effort: 'high',
+        context_tokens: update.context_tokens ?? 32768,
+      }));
+
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        reasoning_effort: 'high',
+        context_tokens: 4096,
+      });
+
+      chooseSelectOption('chat-provider-model', 'tinyllama');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 4096 })
+      );
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { model_name: 'tinyllama' });
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(2);
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('4K'));
+      expect(screen.queryByTestId('chat-operation-error')).not.toBeInTheDocument();
+    });
+
+    it('shows a saved context larger than the model window as the window', async () => {
+      listedModels = [
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const served = providerOffer({
+        models: [{ name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS }],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+
+      await openChat({ model_name: 'tinyllama', context_tokens: 32768 });
+
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('4K'));
+    });
+
+    it('fits a context larger than the default to the full window of the model it moves to', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 262144 } },
+        { name: 'qwen3', size: 1, modified_at: '', details: { context_length: 131072 } },
+      ];
+      const local = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'qwen3', label: 'qwen3', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ default: local, selected: selection(local, 'llama2') })
+      );
+      await openChat({
+        model_name: 'qwen3',
+        provider: 'self_hosted',
+        provider_model: 'llama2',
+        context_tokens: 262144,
+      });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toBeInTheDocument());
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen3',
+        context_tokens: 262144,
+      });
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen3',
+        context_tokens: 131072,
+      });
+
+      chooseSelectOption('chat-provider', 'Default (Self-Hosted)');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 131072 })
+      );
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('fits the context to the model a chat returns to on its self-hosted default', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const local = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ default: local, selected: selection(local, 'llama2') })
+      );
+      await openChat({
+        model_name: 'tinyllama',
+        provider: 'self_hosted',
+        provider_model: 'llama2',
+        context_tokens: 32768,
+      });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        context_tokens: 32768,
+      });
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        context_tokens: 4096,
+      });
+
+      chooseSelectOption('chat-provider', 'Default (Self-Hosted)');
+
+      await waitFor(() =>
+        expect(mockSetChatProvider).toHaveBeenCalledWith('chat-1', { provider: null, model: null })
+      );
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 4096 })
+      );
+    });
+
+    it('fits the context to a smaller model chosen on a Self-Hosted provider', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const local = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS },
+        ],
+      });
+      const chosen = { provider: 'self_hosted' as const, provider_model: 'llama2' };
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(local, 'llama2') })
+      );
+      await openChat({ ...chosen, context_tokens: 32768, reasoning_effort: 'high' });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        ...chosen,
+        provider_model: 'tinyllama',
+        context_tokens: 32768,
+      });
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        ...chosen,
+        provider_model: 'tinyllama',
+        context_tokens: 4096,
+      });
+
+      chooseSelectOption('chat-provider-model', 'tinyllama');
+
+      await waitFor(() =>
+        expect(mockSetChatProvider).toHaveBeenCalledWith('chat-1', {
+          provider: 'self_hosted',
+          model: 'tinyllama',
+        })
+      );
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 4096 })
+      );
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports every fix-up that fails after a model change', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const served = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: ['off', 'low'] },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+      await openChat({ model_name: 'llama2', context_tokens: 32768, reasoning_effort: 'high' });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockClient.updateChat.mockImplementation(async (_id: string, update: UpdateChatRequest) => {
+        if (update.reasoning_effort) throw new Error('Effort refused');
+        if (update.context_tokens) throw new Error('Context refused');
+        return { ...mockChatWithMessages, model_name: 'tinyllama' };
+      });
+
+      chooseSelectOption('chat-provider-model', 'tinyllama');
+
+      const error = await screen.findByTestId('chat-operation-error');
+      expect(error).toHaveTextContent(
+        'Model changed, but its reasoning effort could not be reset: Effort refused'
+      );
+      expect(error).toHaveTextContent(
+        'Model changed, but its context size could not be fitted to it: Context refused'
+      );
+    });
+
+    it('changes the model of a chat on a self-hosted default mid-chat', async () => {
+      const served = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'qwen2.5:7b-instruct', label: 'qwen2.5:7b-instruct', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+      await openChat({ model_name: 'llama2', reasoning_effort: 'high' });
+      await screen.findByTestId('chat-provider-model');
+      expect(optionNames('chat-provider-model')).toEqual([
+        'Automatic',
+        'llama2',
+        'qwen2.5:7b-instruct',
+      ]);
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen2.5:7b-instruct',
+      });
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen2.5:7b-instruct',
+      });
+
+      chooseSelectOption('chat-provider-model', 'qwen2.5:7b-instruct');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', {
+          model_name: 'qwen2.5:7b-instruct',
+        })
+      );
+      await waitFor(() => expect(badge()).toHaveTextContent('qwen2.5:7b-instruct'));
+      expect(mockSetChatProvider).not.toHaveBeenCalled();
       expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
     });
 
@@ -5175,6 +5424,101 @@ describe('ChatsPage', () => {
 
       expect(await screen.findByText('Hi there!')).toBeInTheDocument();
       expect(mockGetChat).toHaveBeenCalledWith('chat-1');
+    });
+  });
+
+  describe('turn order', () => {
+    const traceOf = (answer: Element | null | undefined): string[] =>
+      Array.from(answer?.children ?? []).map((part) =>
+        part.matches('[data-testid="activity"]')
+          ? `tools:${part.textContent?.includes('Read a file') ? 'read' : 'listed'}`
+          : `text:${part.textContent?.trim()}`
+      );
+
+    const call = (id: string, name: string, at: number) => ({
+      id,
+      name,
+      arguments: '{}',
+      success: true,
+      detail: 'ok',
+      duration_ms: 1,
+      at,
+    });
+
+    it('streams each tool call after the text written before it', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      const input = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+        'Type a message, or drop a file...'
+      );
+      fireEvent.change(input, { target: { value: 'Look into it' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => expect(input.value).toBe(''));
+
+      act(() => {
+        socket.emit({
+          type: 'message_start',
+          message_id: 'ordered',
+          role: 'assistant',
+        });
+        socket.emit({ type: 'chunk', content: 'Let me look. ', index: 0 });
+        socket.emit({
+          type: 'tool_call',
+          message_id: 'ordered',
+          tool_call_id: 'call-1',
+          name: 'read_file',
+          arguments: '{}',
+          at: Array.from('Let me look. ').length,
+        });
+        socket.emit({ type: 'chunk', content: 'Found it. ', index: 1 });
+        socket.emit({
+          type: 'tool_call',
+          message_id: 'ordered',
+          tool_call_id: 'call-2',
+          name: 'list_files',
+          arguments: '{}',
+          at: Array.from('Let me look. Found it. ').length,
+        });
+        socket.emit({ type: 'chunk', content: 'All done.', index: 2 });
+      });
+
+      await waitFor(() => expect(screen.getByText('All done.')).toBeInTheDocument());
+      const answer = screen.getByText('All done.').closest('.message-content');
+      expect(traceOf(answer)).toEqual([
+        'text:Let me look.',
+        'tools:read',
+        'text:Found it.',
+        'tools:listed',
+        'text:All done.',
+      ]);
+    });
+
+    it('rebuilds the same order from the stored reply on reload', async () => {
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          {
+            ...mockChatWithMessages.messages[1],
+            content: 'Let me look. Found it. All done.',
+            metadata: {
+              tool_calls: [call('call-1', 'read_file', 13), call('call-2', 'list_files', 23)],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      await waitFor(() => expect(screen.getByText('All done.')).toBeInTheDocument());
+      const answer = screen.getByText('All done.').closest('.message-content');
+      expect(traceOf(answer)).toEqual([
+        'text:Let me look.',
+        'tools:read',
+        'text:Found it.',
+        'tools:listed',
+        'text:All done.',
+      ]);
     });
   });
 

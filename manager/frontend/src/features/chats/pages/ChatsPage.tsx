@@ -125,7 +125,7 @@ import {
   selectedContextTokens,
   shortModelName,
   sourceAttachment,
-  splitAtHandovers,
+  splitTurn,
   toPlainText,
   videoAttachments,
   writeChatGroupBy,
@@ -139,6 +139,7 @@ const NEW_CHAT_MODEL_REQUIRED = 'Choose a model for this provider.';
 const PROVIDER_EFFORT_RESET_FAILED =
   'AI provider changed, but its reasoning effort could not be reset';
 const MODEL_EFFORT_RESET_FAILED = 'Model changed, but its reasoning effort could not be reset';
+const MODEL_CONTEXT_RESET_FAILED = 'Model changed, but its context size could not be fitted to it';
 
 const failure = (prefix: string, error: unknown): string =>
   error instanceof Error ? `${prefix}: ${error.message}` : prefix;
@@ -651,6 +652,10 @@ export default function ChatsPage() {
     if (latestSelectedChatId.current === chatId) setChatOperationError(message);
   };
 
+  const reportAll = (chatId: string, problems: string[]) => {
+    if (problems.length > 0) reportForChat(chatId, problems.join('. '));
+  };
+
   const handleToggleAgent = async () => {
     if (!isAuthenticated || !displayedChat) return;
     const chatId = displayedChat.id;
@@ -725,6 +730,7 @@ export default function ChatsPage() {
     if (!isAuthenticated || !displayedChat) return false;
     const chatId = displayedChat.id;
     const modelName = displayedChat.model_name;
+    const contextTokens = displayedChat.context_tokens;
     setChatOperationError(null);
     markChanging(chatId, true);
     try {
@@ -737,24 +743,46 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return false;
     }
+    const runs = provider === null ? modelName : model;
+    const problems: string[] = [];
     try {
       const offer = offerFor(provider);
-      if (offer) await settleEffort(effortsFor(offer, provider === null ? modelName : model));
+      if (offer) await settleEffort(effortsFor(offer, runs));
     } catch (error) {
-      reportForChat(chatId, failure(PROVIDER_EFFORT_RESET_FAILED, error));
+      problems.push(failure(PROVIDER_EFFORT_RESET_FAILED, error));
+    }
+    try {
+      await fitContext(provider ?? chatDefaultProvider, contextTokens, runs ?? AUTO_MODEL);
+    } catch (error) {
+      problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
-      await Promise.all([
-        refreshChats(),
-        latestSelectedChatId.current === chatId ? refreshChat() : undefined,
-      ]);
-      markChanging(chatId, false);
+      reportAll(chatId, problems);
+      try {
+        await Promise.all([
+          refreshChats(),
+          latestSelectedChatId.current === chatId ? refreshChat() : undefined,
+        ]);
+      } finally {
+        markChanging(chatId, false);
+      }
     }
     return true;
+  };
+
+  const fitContext = async (
+    provider: AiProvider | null,
+    tokens: number | null | undefined,
+    model: string
+  ) => {
+    if (!offersContextOn(provider, chatDefaultProvider, models, model)) return;
+    const native = findInstalledModel(models, model)?.details?.context_length;
+    if (tokens && native && tokens > native) await setContextTokensFn(native);
   };
 
   const handleProviderModel = async (name: string) => {
     if (!isAuthenticated || !displayedChat || !chatProviders) return;
     const chatId = displayedChat.id;
+    const contextTokens = displayedChat.context_tokens;
     setChatOperationError(null);
     markChanging(chatId, true);
     try {
@@ -764,11 +792,18 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return;
     }
+    const problems: string[] = [];
     try {
       await settleEffort(effortsFor(chatProviders.default, name));
     } catch (error) {
-      reportForChat(chatId, failure(MODEL_EFFORT_RESET_FAILED, error));
+      problems.push(failure(MODEL_EFFORT_RESET_FAILED, error));
+    }
+    try {
+      await fitContext(chatDefaultProvider, contextTokens, name);
+    } catch (error) {
+      problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
+      reportAll(chatId, problems);
       try {
         await Promise.all([
           refreshChats(),
@@ -1554,6 +1589,17 @@ export default function ChatsPage() {
                       const live = streaming && message.id === displayedChat.messages.at(-1)?.id;
                       const body = message.content.trim();
                       const awaitingAnswer = /^\[waiting for your answer\]$/i.test(body);
+                      const parts = splitTurn(
+                        awaitingAnswer ? '' : message.content,
+                        toolCalls,
+                        handovers,
+                        message.metadata?.reasoning
+                          ? {
+                              text: message.metadata.reasoning,
+                              at: message.metadata.reasoning_at,
+                            }
+                          : undefined
+                      );
                       return (
                         <div
                           key={message.id}
@@ -1628,23 +1674,36 @@ export default function ChatsPage() {
                               ))}
                             </div>
                           )}
-                          <Activity
-                            reasoning={message.metadata?.reasoning}
-                            calls={toolCalls}
-                            live={live}
-                            answered={index < lastUserIndex}
-                            onDecide={approveTool}
-                            onAnswer={handleAnswerQuestions}
-                          />
-                          <SubagentChips
-                            subagents={subagents.byMessage.get(message.id) ?? []}
-                            onShow={showSubagent}
-                          />
-                          {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
-                          {(body || handovers.length > 0) && !awaitingAnswer ? (
+                          {parts.length > 0 ? (
                             <div className="message-content">
-                              {splitAtHandovers(message.content, handovers).map((part) =>
-                                part.kind === 'text' ? (
+                              {parts.map((part, position) => {
+                                if (part.kind === 'calls') {
+                                  return (
+                                    <Activity
+                                      key={
+                                        part.calls[0]
+                                          ? `calls-${part.calls[0].id}`
+                                          : `thinking-${position}`
+                                      }
+                                      reasoning={part.reasoning}
+                                      calls={part.calls}
+                                      live={live}
+                                      answered={index < lastUserIndex}
+                                      onDecide={approveTool}
+                                      onAnswer={handleAnswerQuestions}
+                                    />
+                                  );
+                                }
+                                if (part.kind === 'handover') {
+                                  return (
+                                    <HandoverNotice
+                                      key={`handover-${part.handover.at}-${part.handover.to}`}
+                                      handover={part.handover}
+                                      agentChanged={part.agentChanged}
+                                    />
+                                  );
+                                }
+                                return (
                                   <MessageContent
                                     key={`text-${part.offset}`}
                                     content={part.text}
@@ -1658,16 +1717,15 @@ export default function ChatsPage() {
                                       })
                                     }
                                   />
-                                ) : (
-                                  <HandoverNotice
-                                    key={`handover-${part.handover.at}-${part.handover.to}`}
-                                    handover={part.handover}
-                                    agentChanged={part.agentChanged}
-                                  />
-                                )
-                              )}
+                                );
+                              })}
                             </div>
                           ) : null}
+                          <SubagentChips
+                            subagents={subagents.byMessage.get(message.id) ?? []}
+                            onShow={showSubagent}
+                          />
+                          {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                           {cited && (
                             <SourcesButton
                               count={cited.length}

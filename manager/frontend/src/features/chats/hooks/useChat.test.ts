@@ -2991,6 +2991,80 @@ describe('context freshness', () => {
     unmount();
   });
 
+  it("keeps a stopped turn's calls ahead of its placeholder rather than inside it", async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'blank', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: '\n\n', index: 0 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'blank',
+        tool_call_id: 'tool',
+        name: 'read_file',
+        arguments: '{}',
+        at: 2,
+      });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'blank' });
+    });
+    const stopped = result.current.chat?.messages.find((message) => message.id === 'blank');
+    expect(stopped?.content).toBe('[Stopped before answering]');
+    expect(stopped?.metadata?.tool_calls?.[0]?.at).toBe(0);
+    unmount();
+  });
+
+  it("keeps a stopped turn's thinking ahead of its placeholder rather than inside it", async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'blank', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: '\n\n', index: 0 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'blank',
+        tool_call_id: 'tool',
+        name: 'read_file',
+        arguments: '{}',
+        at: 2,
+      });
+      lastSocket?.emit({ type: 'reasoning', content: 'Next, the tests.' });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'blank' });
+    });
+    const stopped = result.current.chat?.messages.find((message) => message.id === 'blank');
+    expect(stopped?.content).toBe('[Stopped before answering]');
+    expect(stopped?.metadata?.reasoning_at).toBe(0);
+    unmount();
+  });
+
+  it('moves the thinking of the login being left onto its handover', async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'moved', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: 'Hello', index: 0 });
+      lastSocket?.emit({ type: 'reasoning', content: 'Out of room.' });
+      lastSocket?.emit({
+        type: 'handover',
+        message_id: 'moved',
+        from: 'a@example.com',
+        to: 'c@example.com',
+        from_agent: 'claude',
+        agent: 'codex',
+        reason: 'limit',
+        carried: false,
+        at: 5,
+        calls: 0,
+        reasoning: 'Out of room.',
+      });
+      lastSocket?.emit({ type: 'reasoning', content: 'Fresh start.' });
+    });
+    const moved = result.current.chat?.messages.find((message) => message.id === 'moved');
+    expect(moved?.metadata?.handovers?.[0]?.reasoning).toBe('Out of room.');
+    expect(moved?.metadata?.reasoning).toBe('Fresh start.');
+    expect(moved?.metadata?.reasoning_at).toBe(5);
+    unmount();
+  });
+
   it('reuses the pending user row when a send fails before it is saved', async () => {
     const { result, unmount } = renderHook(() => useChat('context'), { wrapper: createWrapper() });
     await waitFor(() => {
