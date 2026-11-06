@@ -1,5 +1,6 @@
 //! Source endpoints
 
+use abnegate_vcs::pull_request::{ApplicationError, PullRequestError, Repository};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -39,6 +40,10 @@ const INSTALLATION_REQUIRES_GITHUB: &str = "Only GitHub sources can use a GitHub
 const CONNECTION_LOST: &str = "The GitHub connection was removed or suspended. Reconnect GitHub.";
 
 const CREDENTIALS_UNREADABLE: &str = "The source's credentials could not be read.";
+
+const UNREACHABLE: &str = "Zone can't reach this repository through that GitHub connection.";
+
+const GITHUB_UNAVAILABLE: &str = "GitHub could not be reached.";
 
 fn internal() -> ServerError {
     ServerError::Internal(INTERNAL_ERROR.to_string())
@@ -81,6 +86,103 @@ async fn validate_installation(
         Err(error) => {
             tracing::error!(workspace_id = %workspace_id, installation = %installation, error = %error, "Database error checking GitHub installation");
             Err(internal())
+        }
+    }
+}
+
+/// Refuses an installation whose token cannot read the repository `config` names.
+async fn validate_reachable(
+    state: &AppState,
+    installation: Uuid,
+    config: &serde_json::Value,
+) -> Result<(), ServerError> {
+    let repository =
+        configured_repository(config).map_err(|error| repository_refusal(installation, error))?;
+    let service = state.config().pull_requests().map_err(|error| {
+        tracing::error!(error = %error, "The GitHub API origin is not usable");
+        internal()
+    })?;
+    let credential = state
+        .github()
+        .installation(state.db(), installation)
+        .await
+        .map_err(|error| installation_refusal(installation, error))?;
+
+    let service = &service;
+    let repository = &repository;
+    state
+        .github()
+        .retrying(state.db(), credential, |token| async move {
+            service.get_default_branch(repository, &token).await
+        })
+        .await
+        .map(|_| ())
+        .map_err(|error| repository_refusal(installation, error))
+}
+
+fn configured_repository(config: &serde_json::Value) -> Result<Repository, PullRequestError> {
+    let field = |name: &str| {
+        config
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    };
+    Repository::new(field("owner"), field("repo"))
+}
+
+fn unreachable() -> ServerError {
+    ServerError::BadRequest(UNREACHABLE.to_string())
+}
+
+fn unavailable() -> ServerError {
+    ServerError::BadGateway(GITHUB_UNAVAILABLE.to_string())
+}
+
+fn refused_by_github(status: u16) -> bool {
+    StatusCode::from_u16(status)
+        .is_ok_and(|status| status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS)
+}
+
+fn installation_refusal(installation: Uuid, error: github_app::Error) -> ServerError {
+    match error {
+        github_app::Error::Revoked
+        | github_app::Error::Suspended
+        | github_app::Error::NotConnected => {
+            ServerError::BadRequest(github_installations::UNATTACHABLE.to_string())
+        }
+        github_app::Error::Application(ApplicationError::Status(status))
+            if refused_by_github(status) =>
+        {
+            unreachable()
+        }
+        github_app::Error::Application(
+            error @ (ApplicationError::Status(_)
+            | ApplicationError::Transport(_)
+            | ApplicationError::Response),
+        ) => {
+            tracing::warn!(installation = %installation, error = %error, "GitHub could not mint an installation token");
+            unavailable()
+        }
+        error => {
+            tracing::error!(installation = %installation, error = %error, "An installation token could not be minted");
+            internal()
+        }
+    }
+}
+
+fn repository_refusal(installation: Uuid, error: PullRequestError) -> ServerError {
+    match error {
+        PullRequestError::NotFound
+        | PullRequestError::Forbidden
+        | PullRequestError::AuthenticationFailed
+        | PullRequestError::InvalidRepositoryName => unreachable(),
+        PullRequestError::Http(error) => {
+            tracing::warn!(installation = %installation, error = %error.without_url(), "GitHub could not be reached to read a repository");
+            unavailable()
+        }
+        error => {
+            tracing::warn!(installation = %installation, error = %error, "GitHub could not read a repository");
+            unavailable()
         }
     }
 }
@@ -636,6 +738,12 @@ pub async fn update(
             request.credentials.is_some(),
         )
         .await?;
+        validate_reachable(
+            &state,
+            installation,
+            request.config.as_ref().unwrap_or(&previous.config),
+        )
+        .await?;
     }
 
     let credentials_encrypted = request
@@ -1102,7 +1210,14 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::UpdateSourceRequest;
+    use super::{
+        GITHUB_UNAVAILABLE, UNREACHABLE, UpdateSourceRequest, configured_repository,
+        installation_refusal, repository_refusal,
+    };
+    use crate::db::github_installations::UNATTACHABLE;
+    use crate::error::ServerError;
+    use crate::services::github_app;
+    use abnegate_vcs::pull_request::{ApplicationError, PullRequestError};
 
     fn installation_of(body: serde_json::Value) -> Option<Option<Uuid>> {
         serde_json::from_value::<UpdateSourceRequest>(body)
@@ -1157,5 +1272,113 @@ mod tests {
             rendered.contains(&installation.to_string()),
             "installation missing: {rendered}"
         );
+    }
+
+    fn refused(message: &str) -> ServerError {
+        ServerError::BadRequest(message.to_string())
+    }
+
+    fn unavailable() -> ServerError {
+        ServerError::BadGateway(GITHUB_UNAVAILABLE.to_string())
+    }
+
+    fn assert_maps(actual: ServerError, expected: ServerError) {
+        assert_eq!(actual.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn github_refusing_the_repository_is_unreachable() {
+        for error in [
+            PullRequestError::NotFound,
+            PullRequestError::Forbidden,
+            PullRequestError::AuthenticationFailed,
+            PullRequestError::InvalidRepositoryName,
+        ] {
+            assert_maps(
+                repository_refusal(Uuid::new_v4(), error),
+                refused(UNREACHABLE),
+            );
+        }
+    }
+
+    #[test]
+    fn github_failing_to_answer_for_the_repository_is_a_bad_gateway() {
+        for error in [
+            PullRequestError::RateLimited,
+            PullRequestError::GitHubApi("GitHub API returned 502 Bad Gateway".to_string()),
+        ] {
+            assert_maps(repository_refusal(Uuid::new_v4(), error), unavailable());
+        }
+    }
+
+    #[test]
+    fn an_installation_zone_may_not_use_is_unattachable() {
+        for error in [
+            github_app::Error::Revoked,
+            github_app::Error::Suspended,
+            github_app::Error::NotConnected,
+        ] {
+            assert_maps(
+                installation_refusal(Uuid::new_v4(), error),
+                refused(UNATTACHABLE),
+            );
+        }
+    }
+
+    #[test]
+    fn github_refusing_the_mint_is_unreachable() {
+        for status in [401, 422] {
+            assert_maps(
+                installation_refusal(
+                    Uuid::new_v4(),
+                    github_app::Error::Application(ApplicationError::Status(status)),
+                ),
+                refused(UNREACHABLE),
+            );
+        }
+    }
+
+    #[test]
+    fn github_failing_to_mint_is_a_bad_gateway() {
+        for error in [
+            ApplicationError::Status(429),
+            ApplicationError::Status(502),
+            ApplicationError::Transport("connection refused".to_string()),
+            ApplicationError::Response,
+        ] {
+            assert_maps(
+                installation_refusal(Uuid::new_v4(), github_app::Error::Application(error)),
+                unavailable(),
+            );
+        }
+    }
+
+    #[test]
+    fn a_broken_app_key_is_an_internal_error() {
+        assert!(matches!(
+            installation_refusal(
+                Uuid::new_v4(),
+                github_app::Error::Application(ApplicationError::PrivateKey),
+            ),
+            ServerError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn a_config_without_an_owner_and_repo_names_no_repository() {
+        for config in [
+            json!({}),
+            json!({ "owner": "acme" }),
+            json!({ "owner": "acme", "repo": "../widgets" }),
+            json!("acme/widgets"),
+        ] {
+            assert!(
+                configured_repository(&config).is_err(),
+                "{config} must not name a repository"
+            );
+        }
+        let repository = configured_repository(&json!({ "owner": "acme", "repo": "widgets" }))
+            .expect("owner and repo name a repository");
+        assert_eq!(repository.to_string(), "acme/widgets");
     }
 }
