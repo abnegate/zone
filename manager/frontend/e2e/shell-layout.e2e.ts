@@ -57,7 +57,7 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
         anthropic_base_url: null,
         has_runpod_api_key: false,
         bedrock_region: null,
-        bedrock_use_iam_role: false,
+        bedrock_use_iam_role: null,
         has_bedrock_credentials: false,
         model_fast: 'llama3.1:8b',
         model_reasoning: 'deepseek-r1:7b',

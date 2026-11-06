@@ -82,7 +82,7 @@ async function prepare(
         anthropic_base_url: null,
         has_runpod_api_key: false,
         bedrock_region: null,
-        bedrock_use_iam_role: false,
+        bedrock_use_iam_role: null,
         has_bedrock_credentials: false,
         model_fast: 'gpt-4o-mini',
         model_reasoning: 'gpt-4o',
