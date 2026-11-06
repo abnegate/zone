@@ -3,6 +3,7 @@
 //! Creates pull requests when a task completes with code changes.
 //! Called by the task worker after successful task execution.
 
+use std::fmt;
 use std::time::Duration;
 
 use abnegate_llm::Message;
@@ -10,9 +11,8 @@ use abnegate_secret::SecretValue;
 use abnegate_vcs::Checkout as GitCheckout;
 use abnegate_vcs::git::GitResult;
 use abnegate_vcs::{
-    BranchName, CommitSha, Description, GitError, GitService, PullRequestError,
-    PullRequestReception, PullRequestReference, PullRequestService, PullRequestState,
-    RepositoryUrl, Subject,
+    BranchName, CommitSha, Description, GitError, GitService, PullRequestReception,
+    PullRequestReference, PullRequestService, PullRequestState, RepositoryUrl, Subject,
 };
 use uuid::Uuid;
 
@@ -23,7 +23,7 @@ use crate::db::{projects, tasks};
 use crate::services::backend;
 use crate::services::checkout::{self, Baseline, Repository};
 use crate::services::endpoint::{Endpoint, Error as EndpointError};
-use crate::services::github_app::{Credential, Error as GitHubError, Failure};
+use crate::services::github_app::{Credential, Error as GitHubError, Failure, Unauthenticated};
 use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
@@ -31,6 +31,10 @@ use crate::workers::conflict::agent::ModelRepairAgent;
 use crate::workers::conflict::{self, RepairOutcome, RepairRequest, repair};
 use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
 use zone_core::llm::LlmBackend;
+
+mod rejection;
+
+use rejection::Rejection;
 
 /// Times a publication step meets a repository configuration a run wrote,
 /// restores it, and tries again before the publication fails.
@@ -191,6 +195,58 @@ impl Publication<'_> {
         }
     }
 
+    /// Run `call` with `credential`'s token, minted again and run once more
+    /// if GitHub refuses it, and answer the credential renewed with the token
+    /// the call succeeded with, so the next step presents a token GitHub
+    /// accepted.
+    async fn authenticated<T, E, Call, Answer>(
+        &self,
+        credential: &Credential,
+        call: Call,
+    ) -> Result<(T, Credential), String>
+    where
+        Call: Fn(SecretValue) -> Answer,
+        Answer: Future<Output = Result<(T, SecretValue), Failure<E>>>,
+        E: Unauthenticated + fmt::Display,
+    {
+        let (value, token) = self
+            .state
+            .github()
+            .retrying(self.state.db(), credential.clone(), call)
+            .await
+            .map_err(publication_failure)?;
+        Ok((value, credential.renewed(token)))
+    }
+
+    /// Push the run's branch with `token`. A push that fails while GitHub's
+    /// API refuses the same token failed for the token, so a freshly minted
+    /// one could succeed where it did not.
+    async fn pushed(
+        &self,
+        baseline: &Baseline,
+        target: &abnegate_vcs::Repository,
+        token: SecretValue,
+    ) -> Result<(CommitSha, SecretValue), Failure<Rejection>> {
+        let worktree = &baseline.worktree;
+        match self
+            .retried(baseline, || {
+                self.remote
+                    .push(worktree, &baseline.branch, &baseline.repository, &token)
+            })
+            .await
+        {
+            Ok(commit) => Ok((commit, token)),
+            Err(reason) => Err(Failure::Call(Rejection {
+                reason,
+                unauthenticated: self
+                    .service
+                    .get_default_branch(target, &token)
+                    .await
+                    .is_err_and(|error| error.unauthenticated()),
+            })),
+        }
+    }
+
     async fn authorized(&self) -> Result<(), String> {
         match self.execution.authorized(self.state.db(), true).await {
             Ok(true) => Ok(()),
@@ -322,29 +378,25 @@ impl Publication<'_> {
             .map_err(|error| error.to_string())?;
         let (service, target) = (&self.service, &target);
         self.authorized().await?;
-        let base = self
-            .state
-            .github()
-            .retrying(self.state.db(), credential.clone(), |token| async move {
-                service
+        let (base, credential) = self
+            .authenticated(&credential, |token| async move {
+                let base = service
                     .get_default_branch(target, &token)
                     .await
-                    .map_err(Failure::Call)
+                    .map_err(Failure::Call)?;
+                Ok((base, token))
             })
-            .await
-            .map_err(publication_failure)?;
+            .await?;
         self.authorized().await?;
-        let existing = self
-            .state
-            .github()
-            .retrying(self.state.db(), credential.clone(), |token| async move {
-                service
+        let (existing, credential) = self
+            .authenticated(&credential, |token| async move {
+                let existing = service
                     .pull_request_exists_for_branch(target, &token, branch)
                     .await
-                    .map_err(Failure::Call)
+                    .map_err(Failure::Call)?;
+                Ok((existing, token))
             })
-            .await
-            .map_err(publication_failure)?;
+            .await?;
         self.identity(baseline).await?;
         let subject = subject(self.state, &task, self.report).await;
         if dirty {
@@ -365,11 +417,8 @@ impl Publication<'_> {
             })
             .await?;
         self.authorized().await?;
-        let commit = self
-            .retried(baseline, || {
-                self.remote
-                    .push(worktree, branch, &baseline.repository, credential.secret())
-            })
+        let (commit, credential) = self
+            .authenticated(&credential, |token| self.pushed(baseline, target, token))
             .await?;
         // The push is the fact, and it is recorded the moment it succeeded,
         // under the run's lease: whatever publication does after this, the
@@ -763,7 +812,7 @@ async fn report_repair(state: &AppState, task_id: Uuid) {
 
 /// A publication call GitHub refused, or whose connection was lost while a
 /// refused token was being minted again.
-fn publication_failure(failure: Failure<PullRequestError>) -> String {
+fn publication_failure<E: fmt::Display>(failure: Failure<E>) -> String {
     match failure {
         Failure::Call(error) => error.to_string(),
         Failure::Connection(_) => DISCONNECTED.to_string(),
@@ -1982,12 +2031,18 @@ mod publication_tests {
         token: &str,
         mints: u64,
     ) -> uuid::Uuid {
-        use crate::services::github_app::testing::{
-            installation_number, installed, issuing, provider,
-        };
+        use crate::services::github_app::testing::{installation_number, issuing};
 
         let number = installation_number();
         issuing(server, number, token, mints).await;
+        moved_onto(fixture, server, number).await
+    }
+
+    /// Moves the fixture's project from its stored token onto installation
+    /// `number`, minted for by `server`, and answers the installation's id.
+    async fn moved_onto(fixture: &Fixture, server: &MockServer, number: u64) -> uuid::Uuid {
+        use crate::services::github_app::testing::{installed, provider};
+
         fixture.state.install_github(provider(
             server,
             std::sync::Arc::clone(fixture.state.master_key()),
@@ -2008,6 +2063,180 @@ mod publication_tests {
         .await
         .unwrap();
         installation
+    }
+
+    /// GitHub mints `token` for installation `number` the next time it is
+    /// asked, and only then.
+    async fn minting_once(server: &MockServer, number: u64, token: &str) {
+        Mock::given(method("POST"))
+            .and(path(format!("/app/installations/{number}/access_tokens")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "token": token,
+                "expires_at": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            })))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    /// Moves the fixture's project onto an installation GitHub mints `first`
+    /// for and then, asked again, `reminted`.
+    async fn reminting(fixture: &Fixture, server: &MockServer, first: &str, reminted: &str) {
+        let number = crate::services::github_app::testing::installation_number();
+        minting_once(server, number, first).await;
+        minting_once(server, number, reminted).await;
+        moved_onto(fixture, server, number).await;
+    }
+
+    fn by(token: &str) -> wiremock::matchers::HeaderExactMatcher {
+        header("authorization", format!("Bearer {token}"))
+    }
+
+    async fn default_branch(server: &MockServer, token: &str, answer: ResponseTemplate) {
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repository"))
+            .and(by(token))
+            .respond_with(answer)
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    fn named_main() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({"default_branch": "main"}))
+    }
+
+    async fn no_pull_request(server: &MockServer, token: &str) {
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repository/pulls"))
+            .and(by(token))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    async fn opening(server: &MockServer, token: &str) {
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repository/pulls"))
+            .and(by(token))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1,
+                "number": 1,
+                "html_url": "https://github.com/owner/repository/pull/1",
+                "state": "open",
+                "title": "Task",
+                "body": null,
+                "head": {"ref": "task", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"},
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    /// A remote that takes a push only with the token it accepts, as GitHub
+    /// does, and keeps every token it was handed.
+    struct Guarded {
+        remote: LocalRemote,
+        accepted: &'static str,
+        presented: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Guarded {
+        fn new(fixture: &Fixture, accepted: &'static str) -> Self {
+            Self {
+                remote: LocalRemote::new(fixture),
+                accepted,
+                presented: std::sync::Mutex::default(),
+            }
+        }
+
+        fn presented(&self) -> Vec<String> {
+            self.presented.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Remote for Guarded {
+        async fn push(
+            &self,
+            worktree: &GitCheckout,
+            branch: &BranchName,
+            url: &RepositoryUrl,
+            token: &SecretValue,
+        ) -> GitResult<CommitSha> {
+            self.presented
+                .lock()
+                .unwrap()
+                .push(token.expose().to_string());
+            if token.expose() != self.accepted {
+                return Err(GitError::CommandFailed(
+                    "Git push failed; verify repository access".to_string(),
+                ));
+            }
+            self.remote.push(worktree, branch, url, token).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_publication_whose_token_github_refuses_pushes_and_opens_with_the_reminted_one() {
+        const REFUSED: &str = "ghs_refusedinstallationtoken";
+        const REMINTED: &str = "ghs_remintedinstallationtoken";
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        reminting(&fixture, &server, REFUSED, REMINTED).await;
+        default_branch(&server, REFUSED, ResponseTemplate::new(401)).await;
+        default_branch(&server, REMINTED, named_main()).await;
+        no_pull_request(&server, REMINTED).await;
+        opening(&server, REMINTED).await;
+        let remote = Guarded::new(&fixture, REMINTED);
+
+        let result = publish(&fixture, &remote, &server).await;
+
+        fixture.cleanup().await;
+        assert!(
+            matches!(result, PrCreationResult::Created { .. }),
+            "{result:?}"
+        );
+        assert_eq!(
+            remote.presented(),
+            [REMINTED],
+            "the push presents the token GitHub accepted, never the one it refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_push_github_refuses_the_token_for_is_pushed_again_with_a_reminted_one() {
+        const EXPIRED: &str = "ghs_expiredinstallationtoken";
+        const REMINTED: &str = "ghs_remintedinstallationtoken";
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        reminting(&fixture, &server, EXPIRED, REMINTED).await;
+        default_branch(&server, EXPIRED, named_main()).await;
+        no_pull_request(&server, EXPIRED).await;
+        default_branch(&server, EXPIRED, ResponseTemplate::new(401)).await;
+        opening(&server, REMINTED).await;
+        let remote = Guarded::new(&fixture, REMINTED);
+
+        let result = publish(&fixture, &remote, &server).await;
+
+        fixture.cleanup().await;
+        assert!(
+            matches!(result, PrCreationResult::Created { .. }),
+            "{result:?}"
+        );
+        assert_eq!(remote.presented(), [EXPIRED, REMINTED]);
+        let branch = checkout::git()
+            .generate_branch_name(fixture.execution.task, "Publication")
+            .unwrap();
+        assert_eq!(
+            git(&remote.remote.0, &["show", &format!("{branch}:sentinel")]),
+            "changed",
+            "the reminted push reached the remote"
+        );
     }
 
     #[tokio::test]
