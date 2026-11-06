@@ -233,10 +233,10 @@ impl CliProvider {
                         }
                         continue;
                     }
-                    if let AgentEvent::Subagent(subagent) = &event {
-                        if let Some(observer) = &observer {
-                            observer.track(subagent);
-                        }
+                    if let AgentEvent::Subagent(subagent) = &event
+                        && let Some(observer) = &observer
+                    {
+                        observer.track(subagent);
                         continue;
                     }
                     let event = paragraphs.separated(event);
@@ -288,8 +288,7 @@ impl CliProvider {
                 AgentEvent::Tool(call) => {
                     tracing::debug!(provider = %self.name, tool = %call.function.name, "agent tool call");
                 }
-                AgentEvent::Output(_) => {}
-                AgentEvent::Subagent(_) => {}
+                AgentEvent::Output(_) | AgentEvent::Subagent(_) => {}
                 AgentEvent::Window(window) => {
                     tracing::debug!(provider = %self.name, window = %window.name, used_percent = ?window.used_percent, "agent usage window");
                 }
@@ -503,22 +502,23 @@ fn interpret(
 }
 
 /// The bytes of `event` that whoever reads the stream keeps. A tool call is
-/// kept as its line of [`activity`]; the rest of what it was made with reaches
-/// no reader.
+/// kept as its line of [`activity`], and a subagent's as its own; the rest of
+/// what either was made with reaches no reader.
 fn retained(event: &AgentEvent) -> usize {
-    match event {
+    let line = match event {
         AgentEvent::Text(text)
         | AgentEvent::Failed(text)
-        | AgentEvent::Limited(Limit { message: text, .. }) => text.len(),
-        AgentEvent::Tool(call) => activity(call).map_or(0, |line| line.len()),
+        | AgentEvent::Limited(Limit { message: text, .. }) => return text.len(),
+        AgentEvent::Tool(call) => activity(call),
+        AgentEvent::Subagent(subagent) => subagent.activity(),
         AgentEvent::Output(_)
         | AgentEvent::Usage(_)
         | AgentEvent::Window(_)
         | AgentEvent::Session(_)
         | AgentEvent::Occupancy(_)
-        | AgentEvent::Subagent(_)
-        | AgentEvent::Finished { .. } => 0,
-    }
+        | AgentEvent::Finished { .. } => None,
+    };
+    line.map_or(0, |line| line.len())
 }
 
 /// `message`, then [`STDERR_HEADING`] and the last whole lines of
@@ -576,7 +576,9 @@ fn is_continuation(byte: u8) -> bool {
 mod tests {
     use super::*;
     use crate::llm::provider::settings::{DEFAULT_LINE_LIMIT, DEFAULT_OUTPUT_LIMIT, SignIn};
-    use crate::llm::provider::{Observer, Output, Subagent, SubagentStatus};
+    use crate::llm::provider::{
+        Observer, Output, StepStatus, Subagent, SubagentStatus, SubagentStep,
+    };
     use crate::llm::provider::{Occupancy, UNFUNDED, UNFUNDED_CONTEXT};
     use crate::tools::test_support::captured_logs;
     use abnegate_llm::{Credential, RequestOptions};
@@ -1408,14 +1410,56 @@ echo '{"type":"turn.completed","usage":{"input_tokens":40,"output_tokens":8}}'
     }
 
     #[test]
-    fn news_of_a_subagent_counts_nothing_toward_the_answer() {
+    fn news_of_a_subagent_counts_only_the_line_of_a_call_it_just_made() {
         let subagent = Subagent {
             description: Some("x".repeat(DEFAULT_OUTPUT_LIMIT)),
             summary: Some("x".repeat(DEFAULT_OUTPUT_LIMIT)),
             ..Subagent::new("toolu_01Agent")
         };
-
         assert_eq!(retained(&AgentEvent::Subagent(subagent)), 0);
+
+        let mut called = Subagent {
+            step: Some(SubagentStep {
+                id: "toolu_02Grep".to_string(),
+                name: "Grep".to_string(),
+                subject: Some("pub mod".to_string()),
+                status: StepStatus::Running,
+            }),
+            ..Subagent::new("toolu_01Agent")
+        };
+        assert_eq!(
+            retained(&AgentEvent::Subagent(called.clone())),
+            "- Grep `pub mod`\n".len()
+        );
+
+        if let Some(step) = called.step.as_mut() {
+            step.status = StepStatus::Succeeded;
+        }
+        assert_eq!(retained(&AgentEvent::Subagent(called)), 0);
+    }
+
+    /// A turn nothing observes, such as a task's, is handed every update so
+    /// that the reader can list a subagent's calls.
+    #[tokio::test]
+    async fn news_of_a_subagent_reaches_the_reader_when_nothing_observes_the_turn() {
+        const STREAM: &str = include_str!("parser/fixtures/claude/subagents.jsonl");
+        let directory = TempDir::new().expect("a temporary directory");
+        let provider = CliProvider::agent(AgentKind::Claude, replayed(&directory, STREAM));
+
+        let (events, failure, _) = streamed(&provider).await;
+
+        assert!(failure.is_none(), "{failure:?}");
+        let lines: String = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Subagent(subagent) => subagent.activity(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            "- Grep `pub mod`\n- Read `/w/src/missing.rs`\n- Bash `cargo test -p zone_core`\n"
+        );
     }
 
     #[test]

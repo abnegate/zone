@@ -12,6 +12,8 @@ pub use status::SubagentStatus;
 pub use step::SubagentStep;
 pub use step_status::StepStatus;
 
+use super::event::listed;
+
 /// What one line of an agent's output said about one of its own subagents.
 /// Only `id` is always set; any other field left `None` did not change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,6 +41,17 @@ impl Subagent {
             id: id.into(),
             ..Self::default()
         }
+    }
+
+    /// The line a reader nothing observes the turn for is shown when this
+    /// update is of a call the subagent just made, listed as the main
+    /// agent's own calls are.
+    pub fn activity(&self) -> Option<String> {
+        let step = self
+            .step
+            .as_ref()
+            .filter(|step| step.status == StepStatus::Running)?;
+        listed(&step.name, step.subject.as_deref())
     }
 }
 
