@@ -1,9 +1,15 @@
 //! Fixtures shared by this module's tests.
 
-use chrono::{DateTime, Utc};
+use abnegate_vcs::pull_request::InstallationIssuer;
+use chrono::{Duration, SecondsFormat, Utc};
+use serde_json::json;
+use wiremock::matchers::{header_exists, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use super::Provider;
 
 /// A throwaway RSA key, generated for these tests and used nowhere else.
-pub const TEST_PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
+pub(crate) const TEST_PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAu5dqhjvoHZtbdSz9bGJAMp3r+1bqzy/9lhjVz5crI2yWhz7I
 z3M0H74MQPCHhlOn8nyeOs1cclBLRt7iX7/wgkaP9mGGpvCzLXYdLH4JrrMZj7r5
 Pjt0KHrrouTvYXjuCTu2F6QnBcIe+Esz5Vs/+V2fa73I+M1C0sHdX22YNIazcAcB
@@ -31,19 +37,26 @@ snLljJnOKrZGf+JfNkPul+la0f9cJo9Ka/oCy6X243y8VmzRG6/BX6eEfnWEJ+NB
 +ehfHUDVhe3oJRr15Rw1gt7CrSORoe46YkbnxO3H80of1gn9Vyw=
 -----END RSA PRIVATE KEY-----";
 
-/// The public half of [`TEST_PRIVATE_KEY`], standing in for the key GitHub
-/// holds to verify the App's JWT.
-pub const TEST_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu5dqhjvoHZtbdSz9bGJA
-Mp3r+1bqzy/9lhjVz5crI2yWhz7Iz3M0H74MQPCHhlOn8nyeOs1cclBLRt7iX7/w
-gkaP9mGGpvCzLXYdLH4JrrMZj7r5Pjt0KHrrouTvYXjuCTu2F6QnBcIe+Esz5Vs/
-+V2fa73I+M1C0sHdX22YNIazcAcBI9gnaEeS+gINe8LUZDf72lJQc4z+gmVb7dd2
-R9YEAc90NPpkoeGl7pFwrVHRFlsYAbJAz6pKc1dVkfTU/yFuw/0d0117InbS1RxT
-VFEunMWqDJLFwl01THIuVzLDtX938cmeMZMcys+n74ZNoA9W6Pv9P2GVQsbnnZV4
-3QIDAQAB
------END PUBLIC KEY-----";
+pub(crate) fn provider(server: &MockServer, encryption_key: [u8; 32]) -> Provider {
+    Provider::with_issuer(
+        InstallationIssuer::standing_in_for(&server.uri()).expect("stand-in issuer"),
+        encryption_key,
+    )
+}
 
-/// A fixed instant, so a test asserting on `iat` and `exp` cannot flake.
-pub fn at(timestamp: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp(timestamp, 0).expect("timestamp in range")
+pub(crate) async fn issuing(server: &MockServer, installation_id: u64, token: &str, calls: u64) {
+    let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/app/installations/{installation_id}/access_tokens"
+        )))
+        .and(header_exists("authorization"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "token": token,
+            "expires_at": expires_at,
+        })))
+        .expect(calls)
+        .mount(server)
+        .await;
 }
