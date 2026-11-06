@@ -25,6 +25,12 @@ const STORE_FAILED: &str = "Could not store image weights";
 const CHECKSUM_MISMATCH: &str = "Image weight checksum mismatch";
 const ALREADY_DOWNLOADING: &str = "These image weights are already downloading";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+const RELEASE_WAITS: [Duration; 4] = [
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+];
 const JOB_TTL: Duration = Duration::from_secs(60);
 const EVENT_CAPACITY: usize = 128;
 const MAX_RETRIES: usize = 5;
@@ -562,6 +568,31 @@ async fn fetch_weights(
     checksum: Option<Checksum>,
     job: &Job,
 ) -> Result<(), String> {
+    for wait in RELEASE_WAITS {
+        match transfer_weights(url, target, checksum, job).await {
+            None => return Err(CANCELLED.to_string()),
+            Some(Err(DownloadError::InProgress)) => {
+                tokio::select! {
+                    () = tokio::time::sleep(wait) => {}
+                    () = job.cancelled() => return Err(CANCELLED.to_string()),
+                }
+            }
+            Some(outcome) => return outcome.map_err(describe),
+        }
+    }
+    match transfer_weights(url, target, checksum, job).await {
+        None => Err(CANCELLED.to_string()),
+        Some(outcome) => outcome.map_err(describe),
+    }
+}
+
+/// One transfer of `url` to `target`, or `None` once the job is cancelled.
+async fn transfer_weights(
+    url: &str,
+    target: &Path,
+    checksum: Option<Checksum>,
+    job: &Job,
+) -> Option<Result<(), DownloadError>> {
     let progress = Arc::new(DownloadProgress::new());
     let transfer = download::fetch(url, target, checksum, Arc::clone(&progress));
     tokio::pin!(transfer);
@@ -572,9 +603,9 @@ async fn fetch_weights(
         tokio::select! {
             outcome = &mut transfer => {
                 report_progress(job, &progress, &mut reported);
-                return outcome.map_err(describe);
+                return Some(outcome);
             }
-            () = job.cancelled() => return Err(CANCELLED.to_string()),
+            () = job.cancelled() => return None,
             _ = pump.tick() => report_progress(job, &progress, &mut reported),
         }
     }
@@ -731,6 +762,7 @@ mod tests {
     };
     use futures::StreamExt;
     use sha2::{Digest, Sha256};
+    use std::fs::File;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -1297,6 +1329,59 @@ mod tests {
             ALREADY_DOWNLOADING
         );
         assert!(registry.cancel("tiny"));
+    }
+
+    #[tokio::test]
+    async fn a_transfer_waits_for_a_cancelled_one_to_release_the_weight() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let partial = part(directory.path());
+        std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+        let draining = File::create(format!("{}.lock", partial.display())).unwrap();
+        draining.lock().unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(body_pull(
+            directory.path(),
+            format!("{}/file.bin", server.uri()),
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            registry
+                .status("tiny")
+                .is_some_and(|view| view.terminal.is_none()),
+            "a held weight ended the pull before it was released"
+        );
+
+        drop(draining);
+
+        assert_complete(&registry, "tiny").await;
+        assert_eq!(
+            std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap(),
+            BODY
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_while_waiting_for_a_held_weight_ends_the_pull() {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = part(directory.path());
+        std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+        let held = File::create(format!("{}.lock", partial.display())).unwrap();
+        held.lock().unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(body_pull(
+            directory.path(),
+            "http://127.0.0.1:1/file.bin".into(),
+        ));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(registry.cancel("tiny"));
+
+        assert_eq!(assert_error(&registry, "tiny").await, CANCELLED);
     }
 
     #[tokio::test]
