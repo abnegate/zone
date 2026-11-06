@@ -17,36 +17,10 @@ use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 use zone_core::llm::Toolset;
-use zone_core::tools::ToolResult;
+use zone_core::tools::{PERMISSION_TOOL, ToolResult};
 
 use super::scope::Scope;
 use crate::agent::{AgentEvent, ChatTools};
-use zone_core::tools::PERMISSION_TOOL;
-
-/// What the agent asks about one of its own tools.
-#[derive(serde::Deserialize)]
-struct Question {
-    tool_name: String,
-    #[serde(default)]
-    input: serde_json::Value,
-}
-
-const UNREADABLE: &str = "Zone could not read that permission request.";
-const UNATTENDED: &str = "Nobody is listening to this chat to answer for it.";
-const REFUSED: &str = "The reader refused it.";
-
-/// The answer, in the shape the agent reads it in.
-///
-/// Always a successful result: the question was answered either way, and
-/// returning an error would read to the agent as zone failing to answer
-/// rather than as a refusal it should respect.
-fn verdict(allowed: Option<&serde_json::Value>, refusal: &str) -> CallToolResult {
-    let body = match allowed {
-        Some(input) => serde_json::json!({"behavior": "allow", "updatedInput": input}),
-        None => serde_json::json!({"behavior": "deny", "message": refusal}),
-    };
-    CallToolResult::success(vec![ContentBlock::text(body.to_string())])
-}
 use crate::utils::crypto::{generate_token, hash_token};
 
 /// What a call past the turn's budget is told instead of being run.
@@ -60,6 +34,16 @@ const EXHAUSTED: &str = "The configured tool-call budget was reached.";
 /// What a call is told when the reader did not allow it. The same words a
 /// chat's own denied call is told, because it is the same decision.
 const DENIED: &str = "The user denied this tool call.";
+
+/// What the agent is told when zone could not read its permission question.
+const UNREADABLE: &str = "Zone could not read that permission request.";
+
+/// What the agent is told when no console is open to answer its question.
+const UNATTENDED: &str = "Nobody is listening to this chat to answer for it.";
+
+/// What the console shows on a permission card the reader allowed. The agent
+/// runs the tool itself, so zone never sees it finish.
+const ALLOWED: &str = "Allowed";
 
 /// Distinguishes a call the agent made over MCP from the chat's own ids in the
 /// console trace and in the approval gate.
@@ -116,6 +100,12 @@ impl Turn {
         self.tools.has(name) && !self.tools.ends_turn(name)
     }
 
+    /// Whether a call to `name` is answered here: a tool this turn serves, or
+    /// the question an agent asks before running one of its own.
+    pub(crate) fn answers(&self, name: &str) -> bool {
+        name == PERMISSION_TOOL || self.serves(name)
+    }
+
     pub(crate) fn find(token: &str) -> Option<Arc<Self>> {
         LIVE.get(&hash_token(token)).map(|entry| Arc::clone(&entry))
     }
@@ -151,12 +141,18 @@ impl Turn {
             return verdict(None, UNREADABLE);
         };
         let approval = &self.scope.approval;
-        if approval.is_auto() {
-            return verdict(Some(&asked.input), "");
-        }
         let id = format!("{CALL_PREFIX}{}", Uuid::new_v4().simple());
         let pending = approval.expect_decision(&id);
+        if pending.is_none() {
+            return verdict(Some(&asked.input), "");
+        }
         let stated = asked.input.to_string();
+        self.publish(AgentEvent::ToolCallStarted {
+            id: id.clone(),
+            name: asked.tool_name.clone(),
+            arguments: stated.clone(),
+        });
+        let started = Instant::now();
         let raised = self.publish(AgentEvent::ToolApprovalRequired {
             id: id.clone(),
             name: asked.tool_name.clone(),
@@ -170,9 +166,19 @@ impl Turn {
             approval.decide(&id, false);
             return verdict(None, UNATTENDED);
         }
-        match approval.awaited_decision(&id, pending).await {
+        let allowed = approval.awaited_decision(&id, pending).await;
+        self.publish(AgentEvent::ToolCallCompleted {
+            id,
+            name: asked.tool_name,
+            success: allowed,
+            detail: if allowed { ALLOWED } else { DENIED }.to_string(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            citations: Vec::new(),
+            receipt: None,
+        });
+        match allowed {
             true => verdict(Some(&asked.input), ""),
-            false => verdict(None, REFUSED),
+            false => verdict(None, DENIED),
         }
     }
 
@@ -263,6 +269,26 @@ impl Turn {
     fn publish(&self, event: AgentEvent) -> bool {
         self.events.send(event).is_ok()
     }
+}
+
+/// What the agent asks about one of its own tools.
+#[derive(serde::Deserialize)]
+struct Question {
+    tool_name: String,
+    input: serde_json::Value,
+}
+
+/// The answer, in the shape the agent reads it in.
+///
+/// Always a successful result: the question was answered either way, and
+/// returning an error would read to the agent as zone failing to answer
+/// rather than as a refusal it should respect.
+fn verdict(allowed: Option<&serde_json::Value>, refusal: &str) -> CallToolResult {
+    let body = match allowed {
+        Some(input) => serde_json::json!({"behavior": "allow", "updatedInput": input}),
+        None => serde_json::json!({"behavior": "deny", "message": refusal}),
+    };
+    CallToolResult::success(vec![ContentBlock::text(body.to_string())])
 }
 
 /// A live turn's registration. Dropping it revokes the token.
@@ -378,6 +404,61 @@ mod permission_tests {
         let answer = asking.await.expect("the question is answered");
         assert_eq!(answer.is_error, Some(false));
         assert_eq!(body(&answer)["behavior"], "deny", "{:?}", answer.content);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_question_is_denied_even_when_the_chat_auto_approves() {
+        let opened = open(ApprovalPolicy::auto()).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+
+        for unreadable in [
+            json!({"tool_name": "Bash"}).to_string(),
+            json!({"input": {"command": "ls"}}).to_string(),
+            "not json".to_string(),
+        ] {
+            let answer = turn.run(PERMISSION_TOOL, &unreadable).await;
+            assert_eq!(
+                body(&answer)["behavior"],
+                "deny",
+                "{unreadable}: {:?}",
+                answer.content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_decided_card_is_settled_in_the_console() {
+        for approved in [true, false] {
+            let mut opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
+            let turn = Turn::find(&opened.token).expect("the turn");
+
+            let asking = tokio::spawn(async move { turn.run(PERMISSION_TOOL, &asked()).await });
+
+            let card = next_card(&mut opened.events).await;
+            assert!(opened.approval.decide(&card.id, approved));
+            asking.await.expect("the question is answered");
+
+            let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    match opened
+                        .events
+                        .recv()
+                        .await
+                        .expect("the console hears the turn")
+                    {
+                        AgentEvent::ToolCallCompleted { id, success, .. } => break (id, success),
+                        _ => continue,
+                    }
+                }
+            })
+            .await
+            .expect("the decided card is settled");
+            assert_eq!(
+                settled,
+                (card.id, approved),
+                "the card stops waiting once the reader has answered it"
+            );
+        }
     }
 
     #[tokio::test]
