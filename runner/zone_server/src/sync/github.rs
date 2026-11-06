@@ -1244,10 +1244,11 @@ mod tests {
     #[test]
     fn an_empty_webhook_secret_refuses_every_delivery() {
         let body = serde_json::to_vec(&ping()).unwrap();
+        let secret = String::new();
         let result = GitHubSyncProvider::new(key()).parse_webhook(
-            &headers_signed(&signature("", &body), Some(PING_EVENT)),
+            &headers_signed(&signature(&secret, &body), Some(PING_EVENT)),
             &body,
-            "",
+            &secret,
         );
 
         assert!(
