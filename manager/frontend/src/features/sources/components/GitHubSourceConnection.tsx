@@ -1,9 +1,9 @@
 import { Button } from '@zone/ui';
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { githubApi } from '../../../api/github';
 import { GITHUB_SETTINGS_PATH } from '../../github/callback';
 import type { GitHubConfig, Source, UpdateSourceRequest } from '../types';
-import { GitHubSourceState, gitHubSourceState, reachableRepository } from '../utils';
+import { GitHubSourceState, reachableRepository, resolveGitHubSourceState } from '../utils';
 
 const REPOSITORY_SEARCH_LIMIT = 100;
 
@@ -14,6 +14,8 @@ const ConnectAction = {
 
 type ConnectAction = (typeof ConnectAction)[keyof typeof ConnectAction];
 
+const TOKEN_REMOVAL_HINT = 'Your access token will be removed.';
+
 interface GitHubSourceConnectionProps {
   source: Source;
   organizationId: string | null;
@@ -23,7 +25,7 @@ interface GitHubSourceConnectionProps {
   onError: (message: string | null) => void;
 }
 
-function describe(state: GitHubSourceState, login: string | null): string {
+function connectionSummary(state: GitHubSourceState, login: string | null): string {
   switch (state) {
     case GitHubSourceState.App:
       return login ? `Connected through GitHub App (${login})` : 'Connected through GitHub App';
@@ -49,6 +51,10 @@ function connectAction(state: GitHubSourceState): ConnectAction | null {
   }
 }
 
+function connectionHint(state: GitHubSourceState): string | null {
+  return state === GitHubSourceState.Token ? TOKEN_REMOVAL_HINT : null;
+}
+
 function repositoryFullName(source: Source): string {
   const { owner, repo } = source.config as GitHubConfig;
   return `${owner}/${repo}`;
@@ -64,9 +70,11 @@ export function GitHubSourceConnection({
 }: GitHubSourceConnectionProps) {
   const [connecting, setConnecting] = useState(false);
   const [unreachable, setUnreachable] = useState(false);
+  const hintId = useId();
 
-  const state = gitHubSourceState(source);
+  const state = resolveGitHubSourceState(source);
   const action = connectAction(state);
+  const hint = connectionHint(state);
   const fullName = repositoryFullName(source);
 
   const handleConnect = async () => {
@@ -89,8 +97,8 @@ export function GitHubSourceConnection({
       }
       await updateSource({ github_installation_id: repository.installation_id });
       await onSaved();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Failed to connect the source to GitHub');
+    } catch (error) {
+      onError(error instanceof Error ? error.message : 'Failed to connect the source to GitHub');
     } finally {
       setConnecting(false);
     }
@@ -99,23 +107,38 @@ export function GitHubSourceConnection({
   return (
     <section className="source-github-connection" aria-label="GitHub connection">
       <div className="source-github-connection-summary">
-        <p>{describe(state, source.github_account_login ?? null)}</p>
+        <p>{connectionSummary(state, source.github_account_login ?? null)}</p>
         {action && (
-          <Button variant="secondary" size="sm" onClick={handleConnect} loading={connecting}>
-            {action}
-          </Button>
+          <div className="source-github-connection-action">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleConnect}
+              loading={connecting}
+              aria-describedby={hint ? hintId : undefined}
+            >
+              {action}
+            </Button>
+            {hint && (
+              <span id={hintId} className="source-github-connection-hint">
+                {hint}
+              </span>
+            )}
+          </div>
         )}
       </div>
-      {unreachable && (
-        <div className="source-github-connection-unreachable" role="status">
-          <span>No connected GitHub account can reach {fullName}.</span>{' '}
-          {canManage ? (
-            <a href={GITHUB_SETTINGS_PATH}>Connect GitHub</a>
-          ) : (
-            <span>Ask an organization admin to connect GitHub.</span>
-          )}
-        </div>
-      )}
+      <div className="source-github-connection-unreachable" role="status">
+        {unreachable && (
+          <>
+            <span>No connected GitHub account can reach {fullName}.</span>{' '}
+            {canManage ? (
+              <a href={GITHUB_SETTINGS_PATH}>Connect GitHub</a>
+            ) : (
+              <span>Ask an organization admin to connect GitHub.</span>
+            )}
+          </>
+        )}
+      </div>
     </section>
   );
 }

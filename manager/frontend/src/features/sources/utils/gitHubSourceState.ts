@@ -19,7 +19,7 @@ export function isAppBacked(source: Pick<Source, 'github_installation_id'>): boo
   return source.github_installation_id !== null && source.github_installation_id !== undefined;
 }
 
-export function gitHubSourceState(source: GitHubSourceFields): GitHubSourceState {
+export function resolveGitHubSourceState(source: GitHubSourceFields): GitHubSourceState {
   if (isAppBacked(source)) {
     switch (source.github_installation_status) {
       case 'revoked':

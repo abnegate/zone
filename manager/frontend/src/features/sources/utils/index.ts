@@ -1,2 +1,2 @@
-export { GitHubSourceState, gitHubSourceState, isAppBacked } from './gitHubSourceState';
+export { GitHubSourceState, isAppBacked, resolveGitHubSourceState } from './gitHubSourceState';
 export { reachableRepository } from './reachableRepository';
