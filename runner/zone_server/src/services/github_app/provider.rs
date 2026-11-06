@@ -1,12 +1,13 @@
 use std::fmt;
 use std::future::Future;
 use std::num::{NonZeroU8, NonZeroU32};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use abnegate_secret::{MasterKey, SecretValue, decrypt_value, encrypt_value, is_encrypted};
 use abnegate_vcs::pull_request::{
     ApplicationClaims, ApplicationError, ApplicationId, ApplicationService, InstallationId,
-    InstallationIssuer, TokenCache,
+    InstallationIssuer, InstalledRepository, TokenCache,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -21,7 +22,8 @@ use crate::db::sources::SourceRow;
 use super::catalog::Catalog;
 use super::credential::Credential;
 use super::error::Error;
-use super::flight::Flights;
+use super::flights::Flights;
+use super::mint::Mint;
 use super::scope::Scope;
 use super::tenant::Tenant;
 use super::unauthenticated::Unauthenticated;
@@ -61,7 +63,7 @@ enum Standing {
 pub struct Provider {
     github: Result<GitHub, ApplicationError>,
     cache: TokenCache,
-    flights: Flights,
+    flights: Flights<InstallationId, Mint>,
     catalog: Catalog,
     master_key: MasterKey,
     encryption_key: [u8; 32],
@@ -102,6 +104,35 @@ impl Provider {
 
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
+    }
+
+    pub async fn repositories(
+        &self,
+        db: &PgPool,
+        organization_id: Uuid,
+        installation: Uuid,
+        refresh: bool,
+    ) -> Result<Arc<[InstalledRepository]>, Error> {
+        self.catalog
+            .repositories(organization_id, installation, refresh, || {
+                self.listing(db, organization_id, installation)
+            })
+            .await
+    }
+
+    async fn listing(
+        &self,
+        db: &PgPool,
+        organization_id: Uuid,
+        installation: Uuid,
+    ) -> Result<Vec<InstalledRepository>, Error> {
+        let credential = self
+            .organization_installation(db, organization_id, installation)
+            .await?;
+        let applications = self.applications()?;
+        Ok(self
+            .retrying(db, credential, |token| Catalog::listed(applications, token))
+            .await?)
     }
 
     pub fn seal(&self, secret: &SecretValue) -> Result<String, Error> {

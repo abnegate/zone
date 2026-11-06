@@ -223,7 +223,7 @@ pub fn create_router(state: AppState) -> Router {
             get(github::repositories::list),
         )
         .route(
-            "/api/organizations/{org_id}/github/installations/{id}/repositories/{owner}/{repo}/branches",
+            "/api/organizations/{org_id}/github/installations/{id}/repositories/{owner}/{repository}/branches",
             get(github::repositories::branches),
         )
         // Workspaces (nested under organizations)

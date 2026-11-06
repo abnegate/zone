@@ -1,33 +1,41 @@
-//! The repositories each installation reached when GitHub was last asked.
-
 mod entry;
+mod fetch;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use abnegate_secret::SecretValue;
 use abnegate_vcs::pull_request::{ApplicationError, ApplicationService, InstalledRepository};
-use sqlx::PgPool;
+use reqwest::Url;
 use uuid::Uuid;
 
 use entry::Entry;
+use fetch::Fetch;
 
 use super::error::Error;
-use super::provider::Provider;
+use super::flights::Flights;
+use super::scope::Scope;
+use super::tenant::Tenant;
 
 pub const TTL: Duration = Duration::from_secs(60);
 
 const PAGE_SIZE: NonZeroU8 = NonZeroU8::new(100).unwrap();
 
+const SCHEMES: [&str; 2] = ["http", "https"];
+
 #[derive(Default)]
-pub struct Catalog(Mutex<HashMap<Uuid, Entry>>);
+pub struct Catalog {
+    entries: Mutex<HashMap<Uuid, Entry>>,
+    flights: Flights<Scope, Fetch>,
+}
 
 impl Catalog {
     fn lock(&self) -> MutexGuard<'_, HashMap<Uuid, Entry>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn get(
@@ -65,40 +73,47 @@ impl Catalog {
         self.lock().remove(&installation);
     }
 
-    /// Every repository `installation` of `organization_id` reaches: the
-    /// cached list while it is fresh and `refresh` is not asked for, otherwise
-    /// every page GitHub lists now. A failure is never cached.
-    pub async fn repositories(
+    pub(super) async fn repositories<F, Listing>(
         &self,
-        provider: &Provider,
-        db: &PgPool,
-        organization_id: Uuid,
+        organization: Uuid,
         installation: Uuid,
         refresh: bool,
-    ) -> Result<Arc<[InstalledRepository]>, Error> {
-        if !refresh && let Some(cached) = self.get(organization_id, installation, Instant::now()) {
+        list: F,
+    ) -> Result<Arc<[InstalledRepository]>, Error>
+    where
+        F: FnOnce() -> Listing,
+        Listing: Future<Output = Result<Vec<InstalledRepository>, Error>>,
+    {
+        if !refresh && let Some(cached) = self.get(organization, installation, Instant::now()) {
             return Ok(cached);
         }
 
-        let credential = provider
-            .organization_installation(db, organization_id, installation)
-            .await?;
-        let applications = provider.applications()?;
-        let repositories: Arc<[InstalledRepository]> = provider
-            .retrying(db, credential, |token| Self::listed(applications, token))
-            .await?
-            .into();
-        self.insert(
-            organization_id,
+        let scope = Scope {
+            tenant: Tenant::Organization(organization),
             installation,
-            Arc::clone(&repositories),
-            Instant::now(),
-        );
+        };
+        self.flights
+            .board(scope)
+            .fetched(|| async move {
+                if !refresh
+                    && let Some(cached) = self.get(organization, installation, Instant::now())
+                {
+                    return Ok(cached);
+                }
 
-        Ok(repositories)
+                let repositories = Self::addressable(installation, list().await?);
+                self.insert(
+                    organization,
+                    installation,
+                    Arc::clone(&repositories),
+                    Instant::now(),
+                );
+                Ok(repositories)
+            })
+            .await
     }
 
-    async fn listed(
+    pub(super) async fn listed(
         applications: &ApplicationService,
         token: SecretValue,
     ) -> Result<Vec<InstalledRepository>, ApplicationError> {
@@ -113,6 +128,27 @@ impl Catalog {
         }
 
         Ok(repositories)
+    }
+
+    fn addressable(
+        installation: Uuid,
+        repositories: Vec<InstalledRepository>,
+    ) -> Arc<[InstalledRepository]> {
+        repositories
+            .into_iter()
+            .filter(|repository| {
+                let linkable = Url::parse(repository.html_url())
+                    .is_ok_and(|url| SCHEMES.contains(&url.scheme()));
+                if !linkable {
+                    tracing::warn!(
+                        installation = %installation,
+                        repository = repository.id(),
+                        "GitHub listed a repository without an absolute web address; it is left out"
+                    );
+                }
+                linkable
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -135,13 +171,16 @@ mod tests {
     use std::sync::LazyLock;
 
     use abnegate_vcs::{RemoteBranchName, Repository};
+    use futures::future::join_all;
     use serde_json::{Value, json};
+    use sqlx::PgPool;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate, Times};
 
     use super::*;
     use crate::db::github_apps::testing::{pool, seed_organization};
     use crate::db::github_installations;
+    use crate::services::github_app::provider::Provider;
     use crate::services::github_app::testing::{installation_number, installed, issuing, provider};
 
     const TOKEN: &str = "ghs_catalogtoken";
@@ -164,6 +203,44 @@ mod tests {
 
     fn names(repositories: &[InstalledRepository]) -> Vec<&str> {
         repositories.iter().map(InstalledRepository::name).collect()
+    }
+
+    fn linkable(html_url: &str) -> InstalledRepository {
+        InstalledRepository::new(
+            42,
+            Repository::new("acme", "widgets").expect("repository"),
+            RemoteBranchName::parse("main").expect("branch"),
+            html_url,
+        )
+    }
+
+    #[test]
+    fn an_absolute_web_address_over_http_or_https_is_kept() {
+        for html_url in [
+            "https://github.com/acme/widgets",
+            "http://10.0.0.5:8080/acme/widgets",
+        ] {
+            let kept = Catalog::addressable(Uuid::new_v4(), vec![linkable(html_url)]);
+
+            assert_eq!(kept.len(), 1, "{html_url}");
+            assert_eq!(kept[0].html_url(), html_url);
+        }
+    }
+
+    #[test]
+    fn a_repository_without_an_absolute_web_address_is_left_out() {
+        for html_url in [
+            "",
+            "acme/widgets",
+            "/acme/widgets",
+            "ftp://github.com/acme/widgets",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                Catalog::addressable(Uuid::new_v4(), vec![linkable(html_url)]).is_empty(),
+                "{html_url}"
+            );
+        }
     }
 
     #[test]
@@ -318,6 +395,10 @@ mod tests {
     }
 
     fn listed(id: u64, name: &str) -> Value {
+        linked(id, name, &format!("https://github.com/acme/{name}"))
+    }
+
+    fn linked(id: u64, name: &str, html_url: &str) -> Value {
         json!({
             "id": id,
             "name": name,
@@ -326,7 +407,7 @@ mod tests {
             "private": false,
             "archived": false,
             "default_branch": "main",
-            "html_url": format!("https://github.com/acme/{name}"),
+            "html_url": html_url,
         })
     }
 
@@ -382,15 +463,18 @@ mod tests {
 
         async fn fetch(&self, refresh: bool) -> Result<Arc<[InstalledRepository]>, Error> {
             self.provider
-                .catalog()
-                .repositories(
-                    &self.provider,
-                    &self.pool,
-                    self.organization,
-                    self.installation,
-                    refresh,
-                )
+                .repositories(&self.pool, self.organization, self.installation, refresh)
                 .await
+        }
+
+        fn cached(&self) -> Option<Arc<[InstalledRepository]>> {
+            self.provider
+                .catalog()
+                .get(self.organization, self.installation, Instant::now())
+        }
+
+        fn flights(&self) -> usize {
+            self.provider.catalog().flights.len()
         }
     }
 
@@ -418,11 +502,7 @@ mod tests {
         let refreshed = fetching.fetch(true).await.expect("listed again");
 
         assert!(!Arc::ptr_eq(&fetched, &refreshed));
-        let cached = fetching
-            .provider
-            .catalog()
-            .get(fetching.organization, fetching.installation, Instant::now())
-            .expect("the refreshed listing is cached");
+        let cached = fetching.cached().expect("the refreshed listing is cached");
         assert!(Arc::ptr_eq(&refreshed, &cached));
     }
 
@@ -459,13 +539,7 @@ mod tests {
             matches!(failed, Error::Application(ApplicationError::Status(500))),
             "{failed:?}"
         );
-        assert!(
-            fetching
-                .provider
-                .catalog()
-                .get(fetching.organization, fetching.installation, Instant::now())
-                .is_none()
-        );
+        assert!(fetching.cached().is_none());
 
         let fetched = fetching
             .fetch(false)
@@ -496,17 +570,148 @@ mod tests {
 
         let refused = fetching
             .provider
-            .catalog()
-            .repositories(
-                &fetching.provider,
-                &fetching.pool,
-                stranger,
-                fetching.installation,
-                false,
-            )
+            .repositories(&fetching.pool, stranger, fetching.installation, false)
             .await
             .expect_err("another organization's installation");
 
+        assert!(matches!(refused, Error::NotConnected), "{refused:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unaddressable_repository_is_left_out_of_the_cached_listing() {
+        let fetching = Fetching::new(1).await;
+        listing(
+            &fetching.server,
+            1,
+            page_of(&[listed(1, "widgets"), linked(2, "gadgets", "/acme/gadgets")]),
+            1,
+        )
+        .await;
+
+        let fetched = fetching.fetch(false).await.expect("listed");
+
+        assert_eq!(names(&fetched), ["widgets"]);
+        assert_eq!(names(&fetching.cached().expect("cached")), ["widgets"]);
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_fetches_share_one_listing() {
+        let fetching = Fetching::new(1).await;
+        listing(
+            &fetching.server,
+            1,
+            page_of(&[listed(1, "widgets")]).set_delay(Duration::from_millis(300)),
+            1,
+        )
+        .await;
+
+        let fetched = join_all((0..8).map(|_| fetching.fetch(false))).await;
+
+        let first = fetched[0].as_ref().expect("listed");
+        for outcome in &fetched {
+            let repositories = outcome.as_ref().expect("listed");
+            assert!(
+                Arc::ptr_eq(first, repositories),
+                "every caller shares one listing"
+            );
+        }
+        assert_eq!(fetching.flights(), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_share_one_listing() {
+        let fetching = Fetching::new(1).await;
+        listing(
+            &fetching.server,
+            1,
+            page_of(&[listed(1, "widgets")]).set_delay(Duration::from_millis(300)),
+            2,
+        )
+        .await;
+        let cached = fetching.fetch(false).await.expect("listed");
+
+        let refreshed = join_all((0..8).map(|_| fetching.fetch(true))).await;
+
+        let first = refreshed[0].as_ref().expect("listed again");
+        assert!(!Arc::ptr_eq(&cached, first));
+        for outcome in &refreshed {
+            let repositories = outcome.as_ref().expect("listed again");
+            assert!(
+                Arc::ptr_eq(first, repositories),
+                "every refresh shares one listing"
+            );
+        }
+        assert_eq!(fetching.flights(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_joins_a_cold_fetch_in_flight() {
+        let fetching = Fetching::new(1).await;
+        listing(
+            &fetching.server,
+            1,
+            page_of(&[listed(1, "widgets")]).set_delay(Duration::from_millis(300)),
+            1,
+        )
+        .await;
+
+        let (cold, refreshed) = tokio::join!(fetching.fetch(false), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            fetching.fetch(true).await
+        });
+
+        assert!(Arc::ptr_eq(
+            &cold.expect("listed"),
+            &refreshed.expect("joined")
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_fetches_share_one_failed_listing_and_cache_nothing() {
+        let fetching = Fetching::new(1).await;
+        listing(
+            &fetching.server,
+            1,
+            ResponseTemplate::new(500).set_delay(Duration::from_millis(300)),
+            1,
+        )
+        .await;
+
+        let fetched = join_all((0..4).map(|_| fetching.fetch(true))).await;
+
+        for outcome in fetched {
+            let failed = outcome.expect_err("GitHub failed");
+            assert!(
+                matches!(failed, Error::Application(ApplicationError::Status(500))),
+                "{failed:?}"
+            );
+        }
+        assert!(fetching.cached().is_none());
+        assert_eq!(fetching.flights(), 0);
+    }
+
+    #[tokio::test]
+    async fn another_organization_never_joins_an_owners_listing_in_flight() {
+        let fetching = Fetching::new(1).await;
+        listing(
+            &fetching.server,
+            1,
+            page_of(&[listed(1, "widgets")]).set_delay(Duration::from_millis(300)),
+            1,
+        )
+        .await;
+        let stranger = seed_organization(&fetching.pool).await;
+
+        let (owned, refused) = tokio::join!(fetching.fetch(false), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            fetching
+                .provider
+                .repositories(&fetching.pool, stranger, fetching.installation, true)
+                .await
+        });
+
+        assert_eq!(names(&owned.expect("the owner lists")), ["widgets"]);
+        let refused = refused.expect_err("another organization's installation");
         assert!(matches!(refused, Error::NotConnected), "{refused:?}");
     }
 }
